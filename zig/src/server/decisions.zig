@@ -1,6 +1,6 @@
 //! /v1/decisions checks a body the way 0.6.6 checks it, then scores through the engine hook when a family sets one.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const pyrepr = @import("pyrepr.zig");
@@ -359,7 +359,7 @@ fn scoreAll(srv: *Server, cx: *Cx, prepared: []const Prepared) errors.Refused![]
     for (prepared, scored) |item, *row| {
         const logits = try cx.a.alloc(f64, item.label_ids.len);
         @memset(logits, 0);
-        const logsumexp = srv.engine.score(item.prompt_ids, item.label_ids, logits) catch |e| switch (e) {
+        const logsumexp = srv.engine.score(item.prompt_ids, item.label_ids, logits, true) catch |e| switch (e) {
             error.Unsupported => return cx.refuse("decision scoring is not supported by this engine yet"),
             error.Failed => return cx.fail(.server, "decision scoring failed", .{}),
         };

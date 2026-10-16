@@ -71,6 +71,12 @@ export function useEngine(): EngineView {
   start()
   return useSyncExternalStore(subscribe, () => view)
 }
+/** A gated subscriber for loading feedback; other API/CLI providers do not start this mirror. */
+export function useEngineStatus(active: boolean): EngineStatus | null {
+  if (active) start()
+  const current = useSyncExternalStore(subscribe, () => view)
+  return active ? current.snapshot?.status ?? null : null
+}
 
 // The running engine's window for `model`, for the context meter. Only the built-in provider starts
 // the engine mirror; other providers just read null.

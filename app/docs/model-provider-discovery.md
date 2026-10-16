@@ -1,6 +1,6 @@
 # Model Provider Discovery
 
-TensorFold Studio treats model backends as OpenAI-compatible providers wherever possible. This keeps
+TensorFold treats model backends as OpenAI-compatible providers wherever possible. This keeps
 local and cloud models usable in the same composer, automations, tickets, and rooms.
 
 ## Local Providers
@@ -11,7 +11,7 @@ local and cloud models usable in the same composer, automations, tickets, and ro
   `http://127.0.0.1:11434/v1` for OpenAI-compatible chat.
 - **LM Studio** probes `http://127.0.0.1:1234/v1/models`, with
   `http://127.0.0.1:1234/api/v0/models` as a richer fallback. If LM Studio
-  requires authentication, TensorFold Studio keeps the provider card and asks the user to
+  requires authentication, TensorFold keeps the provider card and asks the user to
   paste the local token.
 
 Local discovery only returns redacted audit metadata: provider kind, base URL, model count,
@@ -20,7 +20,7 @@ and whether an API key exists. It must not log token values.
 ## OpenRouter
 
 OpenRouter is just another OpenAI-compatible provider at `https://openrouter.ai/api/v1`.
-TensorFold Studio's refresh path is OpenRouter-aware:
+TensorFold's refresh path is OpenRouter-aware:
 
 - Queries `/models?sort=pricing-low-to-high&supported_parameters=tools`.
 - Keeps router slugs near the top: `openrouter/free`, `openrouter/auto`, and `openrouter/fusion`.
@@ -30,7 +30,7 @@ TensorFold Studio's refresh path is OpenRouter-aware:
 
 ## Multi-Model Rooms
 
-Rooms already support multiple models at the TensorFold Studio layer: every seat stores a
+Rooms already support multiple models at the TensorFold layer: every seat stores a
 `providerId` and `model`. To make a mixed room, add one seat on OpenRouter Free,
 another on GLM/Nemotron/Qwen, and another on a local Ollama/LM Studio/oMLX model.
 The room engine handles the turn-taking, context compaction, and final gate.

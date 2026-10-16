@@ -1,8 +1,9 @@
+import { parseThreadMemoryPolicy, assertThreadMemoryTransport } from '../../../../shared/thread-memory-policy'
 import { api } from '../../ipc'
 import { modelDisplayName, resolveProviderModel } from '../../provider-accounts'
 import { addInflightAppAction, cancelThreadRunApi, createThreadForProject, deleteInflightAppAction, guideThreadRunApi, isInflightAppAction, isAppActionApplied, markAppActionApplied, startThreadRunApi } from '../shared/app-actions'
 import { remoteHostIdForThread, owningRemoteHostIdForTicket, remoteHostIdForProject } from '../shared/remote-host'
-import { mergeThreadLists, mergeThreadRecord } from '../shared/merge'
+import { mergeThreadLists, mergeThreadRecord, mergeThreadEventPatch } from '../shared/merge'
 import { applyProjectModel, projectDefaults, runErrorMessage, selectedAccountId } from '../shared/model-policy'
 import { clearPendingAgentEvents, drainPendingAgentEvents, projectedHostId, projectionOriginsMatch, quarantineProjectionCollision, queuePendingAgentEvent } from '../shared/proxy-state'
 import { BUSY_RUN, threadStatusFromRun } from '../types'
@@ -93,20 +94,17 @@ export const threadsSlice: Slice = (set, get) => ({
     return p
   },
 
-  async launch({ text, cwd, providerId, model, approvalMode, providerAccountId, projectId = null, workspace = null, attachments, sourceThreadKey, persistActiveModel = true, incognito = false }) {
+  async launch({ text, cwd, providerId, model, approvalMode, providerAccountId, projectId = null, workspace = null, attachments, sourceThreadKey, persistActiveModel = true, incognito = false, memoryPolicy }) {
     const s = get().settings
     const provider = s?.providers.find((p) => p.id === providerId)
     const accountId = selectedAccountId(provider, providerAccountId)
     const safeModel = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
-    if (s && persistActiveModel) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel, defaultCwd: cwd, approvalMode }, { silent: true })
     const project = projectId ? get().projects.find((candidate) => candidate.id === projectId) ?? null : null
     const remoteHostId = remoteHostIdForProject(get(), project)
-    const { thread: t } = await createThreadForProject(get, cwd, 'task', projectId)
-    if (incognito) {
-      // Memory-only thread: the host's saveThreads/spine seams skip it once flagged.
-      t.incognito = true
-      await api.patchThread(t.id, { incognito: true })
-    }
+    const requestedMemory = parseThreadMemoryPolicy(memoryPolicy)
+    assertThreadMemoryTransport({ memoryPolicy: requestedMemory, incognito, orchestratorHostId: remoteHostId }, provider)
+    if (s && persistActiveModel) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel, defaultCwd: cwd, approvalMode }, { silent: true })
+    const { thread: t } = await createThreadForProject(get, cwd, 'task', projectId, incognito)
     if (!remoteHostId) await api.configureThread(t.id, providerId, safeModel, accountId)
     if (!remoteHostId) {
       t.providerId = providerId
@@ -118,14 +116,18 @@ export const threadsSlice: Slice = (set, get) => ({
       if (!t.cwd && workspace.path) t.cwd = workspace.path
       await api.setThreadWorkspace(t.id, workspace, t.cwd || null)
     }
-    set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], view: { name: 'thread', id: t.id }, status: { ...st.status, [t.id]: 'thinking' } }))
+    if (!remoteHostId && memoryPolicy !== undefined) Object.assign(t, await api.setThreadMemoryPolicy(t.id, requestedMemory, t.memoryPolicyRevision ?? 0))
+    set((st) => ({ threads: [t, ...st.threads.filter((x) => x.id !== t.id)], status: { ...st.status, [t.id]: 'thinking' } }))
     // When this run was launched from a connector conversation, carry its threadKey so the
     // host can inject that source's per-channel ephemeral prompt for this run only.
     try {
       await startThreadRunApi(remoteHostId, { threadId: t.id, userText: text, attachments, sourceThreadKey })
+      set({ view: { name: 'thread', id: t.id } })
+      return { ok: true, threadId: t.id }
     } catch (e) {
       const message = runErrorMessage(e)
       set((st) => ({ status: { ...st.status, [t.id]: 'error' }, notice: { kind: 'error', message } }))
+      return { ok: false, threadId: t.id, error: message }
     }
   },
 
@@ -152,6 +154,11 @@ export const threadsSlice: Slice = (set, get) => ({
     if (v.name !== 'thread') return
     const id = v.id
     const st = get().status[id]
+    const owner = get().threads.find((thread) => thread.id === id)
+    if (owner) {
+      try { assertThreadMemoryTransport(owner, get().settings?.providers.find((provider) => provider.id === owner.providerId)) }
+      catch (error) { set({ notice: { kind: 'error', message: runErrorMessage(error) } }); return }
+    }
     const remoteHostId = remoteHostIdForThread(get(), id)
     if (st && BUSY_RUN.has(st)) {
       const result = await guideThreadRunApi(remoteHostId, { threadId: id, userText: text, attachments })
@@ -196,8 +203,8 @@ export const threadsSlice: Slice = (set, get) => ({
     const provider = get().settings?.providers.find((p) => p.id === providerId)
     const accountId = selectedAccountId(provider, providerAccountId)
     const safeModel = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
-    set((st) => ({ threads: st.threads.map((t) => (t.id === threadId ? { ...t, providerId, providerAccountId: accountId, model: safeModel } : t)) }))
     await api.configureThread(threadId, providerId, safeModel, accountId)
+    set((st) => ({ threads: st.threads.map((t) => (t.id === threadId ? { ...t, providerId, providerAccountId: accountId, model: safeModel } : t)) }))
     const s = get().settings
     if (s) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel }, { silent: true })
   },
@@ -316,7 +323,7 @@ export const threadsSlice: Slice = (set, get) => ({
           patchThread((t) => ({ ...t, timeline: t.timeline.map((i) => (i.id === e.id ? { ...i, ...(e.trace && !i.trace ? { trace: e.trace } : {}), ...e.patch } : i)) }))
           break
         case 'thread_update':
-          patchThread((t) => ({ ...t, ...e.patch, updatedAt: Date.now() }))
+          patchThread((t) => mergeThreadEventPatch(t, e.patch))
           break
         case 'title':
           patchThread((t) => ({ ...t, title: e.title }))

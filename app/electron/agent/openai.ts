@@ -8,6 +8,7 @@ import { streamGeminiCli } from './gemini-cli'
 import { createLocalProviderFetch, createProviderFetch } from './secure-fetch'
 import { engineRoute, recordEnginePerformance } from './engine/provider'
 import { readBoundedJsonResponse, readBoundedResponseText } from './bounded-response'
+import { credentialChunkStream, scrubProviderCredential, scrubProviderHeaders, scrubProviderFailure, scrubProviderErrorBody, scrubProviderResearchMetadata } from './provider-credential-privacy'
 import { needsPlanningGuard, planningGuard } from './planning-guard'
 import { classifyProvider } from '../../shared/provider-trust'
 import { readCortheonReport, readEngineTimings, type CortheonReply, type EngineReplyTimings } from './turn-stats'
@@ -15,6 +16,8 @@ import type { EngineSteeringChannel } from './steering'
 import type { ApiMessage, ApprovalMode, Provider, ToolCall } from './types'
 
 export interface ChatParams {
+  /** Host-owned admission; never supplied by model/tool arguments. */
+  assertRequestAllowed?: () => void
   provider?: Provider
   baseUrl?: string
   apiKey?: string
@@ -88,10 +91,10 @@ const PROVIDER_STREAM_OUTPUT_MAX_CHARS = 8 * 1024 * 1024
 const PROVIDER_MAX_TOOL_CALLS = 128
 
 /** A provider's error payload (string or `{ message }`) as one bounded line. */
-export function providerErrorText(error: unknown): string {
+export function providerErrorText(error: unknown, credential?: string): string {
   const raw = typeof error === 'string' ? error : (error as { message?: unknown } | null)?.message
   const text = typeof raw === 'string' && raw.trim() ? raw : JSON.stringify(error ?? null)
-  return text.replace(/\s+/g, ' ').slice(0, 400)
+  return scrubProviderCredential(text, credential).replace(/\s+/g, ' ').slice(0, 400)
 }
 
 function chatCompletionsReasoningEffort(value?: string | null, provider?: Provider | null, model?: string | null): string | null {
@@ -138,7 +141,6 @@ type NextOrTimer<T> =
   | { kind: 'error'; error: unknown }
 
 function nextOrTimer<T>(pending: Promise<IteratorResult<T>>, ms: number, signal?: AbortSignal): Promise<NextOrTimer<T>> {
-  if (signal?.aborted) return Promise.resolve({ kind: 'aborted' })
   return new Promise((resolve) => {
     let settled = false
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -150,12 +152,16 @@ function nextOrTimer<T>(pending: Promise<IteratorResult<T>>, ms: number, signal?
       resolve(value)
     }
     const onAbort = () => done({ kind: 'aborted' })
-    timer = setTimeout(() => done({ kind: 'timer' }), Math.max(0, ms))
-    signal?.addEventListener('abort', onAbort, { once: true })
+    // The caller has already started reader.read()/iterator.next(). Observe its
+    // rejection even if cancellation won before this wait began, otherwise Stop
+    // can leak an unhandled AbortError from an ongoing HTTP response.
     pending.then(
       (next) => done({ kind: 'next', next }),
       (error) => done({ kind: 'error', error }),
     )
+    if (signal?.aborted) { done({ kind: 'aborted' }); return }
+    timer = setTimeout(() => done({ kind: 'timer' }), Math.max(0, ms))
+    signal?.addEventListener('abort', onAbort, { once: true })
   })
 }
 
@@ -259,7 +265,19 @@ function normalizeToolCalls(value: unknown): ToolCall[] {
     .filter((call): call is ToolCall => !!call)
 }
 
-async function* streamJsonCompletion(res: Response): AsyncGenerator<StreamChunk> {
+function providerFinishReason(value: unknown, credential?: string): string | null {
+  if (value == null) return null
+  if (typeof value !== 'string') throw new Error('Provider returned an invalid finish reason.')
+  return scrubProviderCredential(value, credential)
+}
+
+function assertCredentialFreeToolIdentifiers(calls: ToolCall[], credential?: string): void {
+  if (calls.some((call) => scrubProviderCredential(call.id, credential) !== call.id || scrubProviderCredential(call.function.name, credential) !== call.function.name)) {
+    throw new Error('Provider returned credential-bearing tool identifiers; the calls were not emitted.')
+  }
+}
+
+async function* streamJsonCompletion(res: Response, credential?: string): AsyncGenerator<StreamChunk> {
   let json: any
   try {
     json = await readBoundedJsonResponse(res, 'Provider completion', PROVIDER_JSON_MAX_BYTES)
@@ -268,14 +286,17 @@ async function* streamJsonCompletion(res: Response): AsyncGenerator<StreamChunk>
     throw new Error('Provider returned a non-streaming response that was not valid bounded JSON.')
   }
   const choice = json?.choices?.[0] ?? {}
+  if (json?.error || choice.finish_reason === 'error' || json?.finish_reason === 'error') throw new Error(`Provider error: ${providerErrorText(json.error ?? choice.error ?? 'the response ended with finish_reason "error"', credential)}`)
   const message = choice.message ?? choice.delta ?? {}
   const reasoning = contentToText(message.reasoning_content ?? message.reasoning ?? choice.reasoning_content ?? choice.reasoning)
   const content = contentToText(message.content ?? choice.text ?? json.output_text)
   const toolCalls = normalizeToolCalls(message.tool_calls ?? choice.tool_calls)
-  if (reasoning) yield { type: 'reasoning', text: reasoning }
-  if (content) yield { type: 'content', text: content }
+  assertCredentialFreeToolIdentifiers(toolCalls, credential)
+  const finishReason = providerFinishReason(choice.finish_reason ?? json.finish_reason, credential)
+  const privacy = credentialChunkStream(credential)
+  for (const chunk of [...privacy.push('reasoning', reasoning), ...privacy.push('content', content), ...privacy.finish()]) yield { type: chunk.kind, text: chunk.text }
   if (toolCalls.length) yield { type: 'tool_calls', toolCalls }
-  yield { type: 'finish', reason: choice.finish_reason ?? json.finish_reason ?? 'stop' }
+  yield { type: 'finish', reason: finishReason ?? 'stop' }
 }
 
 // codex-app-server's chunk union carries an extra `resume_cursor` variant not in TensorFold's
@@ -368,12 +389,15 @@ export async function* translateOpenCodeChunks(
 // Streams an OpenAI-compatible /chat/completions response. Works against
 // OpenAI, Ollama, LM Studio, vLLM, z.ai GLM, and any compatible endpoint.
 export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
+  const assertRequestAllowed = p.assertRequestAllowed
+  assertRequestAllowed?.()
   // External providers plan only (no tools, redacted, confined); the built-in engine is trusted.
   const planned = planningGuard(p, streamChat)
   if (planned) { yield* planned; return }
   const engine = await engineRoute(p)
   try {
   if (engine) p = engine.params
+  assertRequestAllowed?.()
   if (p.provider?.transport === 'codex-cli') {
     // Prefer the resumable `codex app-server` session over the one-shot `codex exec`: it
     // keeps codex's own thread alive across turns (no re-flattening the whole conversation
@@ -551,7 +575,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
   }
 
   if (!p.baseUrl) throw new Error('Provider base URL is required.')
-  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider) : createLocalProviderFetch(p.baseUrl))
+  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider, undefined, assertRequestAllowed) : createLocalProviderFetch(p.baseUrl, undefined, assertRequestAllowed))
   const reasoningEffort = chatCompletionsReasoningEffort(p.reasoningEffort, p.provider, p.model)
   // Only trusted local servers (the built-in engine, loopback oMLX/Ollama/LM Studio) are asked for usage.
   const wantUsage = classifyProvider(p.provider, p.baseUrl) === 'trusted-local'
@@ -578,13 +602,15 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
     // Attach status + headers so the model router can honor a real Retry-After / X-RateLimit-Reset
     // window instead of falling back to a fixed cooldown.
-    const err = new Error(`HTTP ${res.status} ${res.statusText}${detail ? ` — ${detail.slice(0, 400)}` : ''}`) as Error & { status?: number; headers?: unknown }
+    const detailText = detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''
+    const httpMessage = `HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detailText}`
+    const err = new Error(httpMessage) as Error & { status?: number; headers?: unknown }
     err.status = res.status
-    err.headers = res.headers
+    err.headers = scrubProviderHeaders(res.headers, p.apiKey)
     throw err
   }
   if (!res.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
-    yield* streamJsonCompletion(res)
+    yield* streamJsonCompletion(res, p.apiKey)
     return
   }
   if (!res.body) throw new Error('Provider response did not include a stream body.')
@@ -631,10 +657,15 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
   const drainToolCalls = function* (): Generator<StreamChunk> {
     if (sawToolCalls && Object.keys(toolAcc).length) {
       const calls = Object.keys(toolAcc).sort((a, b) => +a - +b).map((k) => toolAcc[+k])
+      assertCredentialFreeToolIdentifiers(calls, p.apiKey)
       yield { type: 'tool_calls', toolCalls: calls }
     }
   }
 
+  const textPrivacy = credentialChunkStream(p.apiKey)
+  const flushPrivateText = function* (): Generator<StreamChunk> {
+    for (const chunk of textPrivacy.finish()) yield { type: chunk.kind, text: chunk.text }
+  }
   const parseEventData = function* (raw: string): Generator<StreamChunk> {
     const data = raw.trim()
     if (data === '[DONE]') { sawDone = true; return }
@@ -643,7 +674,8 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     try { json = JSON.parse(data) } catch { return }
     // vLLM-style servers report a mid-stream failure as an error frame with no choices;
     // dropping it would end the turn as a blank "success".
-    if (json?.error && !json.choices?.length) throw new Error(`Provider error: ${providerErrorText(json.error)}`)
+    const choice = json?.choices?.[0]
+    if (json?.error || choice?.finish_reason === 'error') throw new Error(`Provider error: ${providerErrorText(json.error ?? choice?.error ?? 'the stream ended with finish_reason "error"', p.apiKey)}`)
     if (json?.usage && typeof json.usage === 'object') {
       completionTokens = usageCount(json.usage.completion_tokens) ?? completionTokens
       promptTokens = usageCount(json.usage.prompt_tokens) ?? promptTokens
@@ -652,11 +684,11 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     // The built-in engine puts its reply timings on the finish chunk.
     engineTimings = readEngineTimings(json?.tensorfold) ?? engineTimings
     // With --cortheon the engine also reports its research for the reply.
-    cortheonReport = readCortheonReport(json?.cortheon) ?? cortheonReport
+    cortheonReport = readCortheonReport(scrubProviderResearchMetadata(json?.cortheon, p.apiKey)) ?? cortheonReport
     // Frames after finish_reason only carry usage.
     if (finished) return
-    const choice = json.choices?.[0]
     if (!choice) return
+    const finishReason = providerFinishReason(choice.finish_reason, p.apiKey)
     const delta = choice.delta ?? {}
 
     // Reasoning content (o-series, GLM, deepseek-style)
@@ -665,14 +697,14 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
       markToken()
       streamedOutputChars += reasoning.length
       if (streamedOutputChars > PROVIDER_STREAM_OUTPUT_MAX_CHARS) throw new Error('Provider streamed output exceeded the safety limit.')
-      yield { type: 'reasoning', text: reasoning }
+      for (const chunk of textPrivacy.push('reasoning', reasoning)) yield { type: chunk.kind, text: chunk.text }
     }
 
     if (typeof delta.content === 'string' && delta.content) {
       markToken()
       streamedOutputChars += delta.content.length
       if (streamedOutputChars > PROVIDER_STREAM_OUTPUT_MAX_CHARS) throw new Error('Provider streamed output exceeded the safety limit.')
-      yield { type: 'content', text: delta.content }
+      for (const chunk of textPrivacy.push('content', delta.content)) yield { type: chunk.kind, text: chunk.text }
     }
 
     if (Array.isArray(delta.tool_calls)) {
@@ -729,11 +761,11 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
       }
     }
 
-    if (choice.finish_reason === 'error') throw new Error(`Provider error: ${providerErrorText(json.error ?? choice.error ?? 'the stream ended with finish_reason "error"')}`)
     if (choice.finish_reason) {
-      lastFinishReason = choice.finish_reason
+      yield* flushPrivateText()
+      lastFinishReason = finishReason
       yield* drainToolCalls()
-      yield { type: 'finish', reason: choice.finish_reason }
+      yield { type: 'finish', reason: finishReason }
       finished = true
     }
   }
@@ -813,6 +845,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     // truthy finish_reason. Without this, accumulated tool calls would be silently dropped and the
     // loop would think the turn ended with no action. Emit them + a terminal finish exactly once.
     if (!finished) {
+      yield* flushPrivateText()
       yield* drainToolCalls()
       yield { type: 'finish', reason: lastFinishReason ?? 'stop' }
     }
@@ -823,15 +856,18 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     if (!completed) await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
-  } finally { engine?.release?.() }
+  } catch (error) { throw scrubProviderFailure(error, p.apiKey) } finally { engine?.release?.() }
 }
 
 // Quick non-streaming completion used to auto-title threads. External providers take the
 // streamChat path so the planning guard redacts the request.
 export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<string> {
+  const assertRequestAllowed = p.assertRequestAllowed
+  assertRequestAllowed?.()
   const engine = await engineRoute(p, { start: false })
   try {
   if (engine) p = engine.params
+  assertRequestAllowed?.()
   if (p.provider?.transport === 'codex-cli' || p.provider?.transport === 'claude-cli' || p.provider?.transport === 'pi-cli' || p.provider?.transport === 'cursor-cli' || p.provider?.transport === 'gemini-cli' || isOpenCodeProtocol(p.provider?.transport) || needsPlanningGuard(p)) {
     let out = ''
     for await (const ch of streamChat(p)) {
@@ -840,15 +876,31 @@ export async function quickComplete(p: Omit<ChatParams, 'tools'>): Promise<strin
     return out.trim()
   }
   if (!p.baseUrl) throw new Error('Provider base URL is required.')
-  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider) : createLocalProviderFetch(p.baseUrl))
+  const providerFetch = engine?.fetch ?? (p.provider ? createProviderFetch(p.provider, undefined, assertRequestAllowed) : createLocalProviderFetch(p.baseUrl, undefined, assertRequestAllowed))
   const res = await providerFetch(joinUrl(p.baseUrl, '/chat/completions'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...(p.apiKey ? { Authorization: `Bearer ${p.apiKey}` } : {}) },
     body: JSON.stringify({ model: p.model, messages: p.messages, stream: false, temperature: 0.3, max_tokens: 24 }),
     signal: p.signal,
   })
-  if (!res.ok) throw new Error(`HTTP ${res.status}`)
-  const json: any = await readBoundedJsonResponse(res, 'Provider quick completion', PROVIDER_JSON_MAX_BYTES)
-  return (json.choices?.[0]?.message?.content ?? '').trim()
-  } finally { engine?.release?.() }
+  if (!res.ok) {
+    const detail = await readBoundedResponseText(res, 'Provider error', PROVIDER_ERROR_MAX_BYTES).catch(() => '')
+    const detailText = detail ? `: ${providerErrorText(scrubProviderErrorBody(detail, p.apiKey), p.apiKey)}` : ''
+    const httpMessage = `HTTP ${res.status} ${providerErrorText(res.statusText, p.apiKey)}${detailText}`
+    const error = new Error(httpMessage) as Error & { status?: number; headers?: unknown }
+    error.status = res.status; error.headers = scrubProviderHeaders(res.headers, p.apiKey)
+    throw error
+  }
+  let json: any
+  try {
+    json = await readBoundedJsonResponse(res, 'Provider quick completion', PROVIDER_JSON_MAX_BYTES)
+  } catch (error) {
+    // JSON.parse previews can truncate an echoed credential before exact-value scrubbing.
+    if (error instanceof SyntaxError) throw new Error('Provider returned a quick completion that was not valid bounded JSON.')
+    throw error
+  }
+  const choice = json?.choices?.[0]
+  if (json?.error || choice?.finish_reason === 'error' || json?.finish_reason === 'error') throw new Error(`Provider error: ${providerErrorText(json.error ?? choice?.error ?? 'the response ended with finish_reason "error"', p.apiKey)}`)
+  return scrubProviderCredential(choice?.message?.content ?? '', p.apiKey).trim()
+  } catch (error) { throw scrubProviderFailure(error, p.apiKey) } finally { engine?.release?.() }
 }

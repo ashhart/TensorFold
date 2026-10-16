@@ -21,6 +21,21 @@ function luminance({ r, g, b }: RGB): number {
 const BLACK: RGB = { r: 13, g: 13, b: 13 }
 const WHITE: RGB = { r: 255, g: 255, b: 255 }
 
+function readableTextAlpha(fg: RGB, surfaces: RGB[]): number {
+  const renderedSurfaces = surfaces.map((surface) => ({ r: clamp(surface.r), g: clamp(surface.g), b: clamp(surface.b) }))
+  const contrast = (a: RGB, b: RGB) => {
+    const first = luminance(a), second = luminance(b)
+    return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05)
+  }
+  let low = 0, high = 1
+  for (let i = 0; i < 16; i++) {
+    const alpha = (low + high) / 2
+    if (renderedSurfaces.every((surface) => contrast(mix(surface, fg, alpha), surface) >= 4.5)) high = alpha
+    else low = alpha
+  }
+  return Math.min(1, Math.ceil(high * 1000) / 1000)
+}
+
 // Derive the full token set from a palette. Surfaces are mixed from the
 // background toward the foreground; separation + border weight scale with contrast.
 export function buildThemeVars(p: ThemePalette, isDark: boolean): string {
@@ -53,9 +68,13 @@ export function buildThemeVars(p: ThemePalette, isDark: boolean): string {
   const accentSoft = toHex(mix(accent, bg, isDark ? 0.84 : 0.88))
   // --info carries toggles, links and focus; primaries use the palette's accent.
   const info = p.info ?? p.accent
+  const mutedAlpha = readableTextAlpha(fg, [canvas, card, card2, chrome])
 
   return [
     `--ink:${fg.r} ${fg.g} ${fg.b}`,
+    `--ink-2-alpha:${Math.min(1, mutedAlpha + 0.20).toFixed(3)}`,
+    `--ink-3-alpha:${Math.min(1, mutedAlpha + 0.08).toFixed(3)}`,
+    `--ink-4-alpha:${mutedAlpha.toFixed(3)}`,
     `--accent:${p.accent}`,
     `--accent-strong:${accentStrong}`,
     `--accent-ink:${accentInk}`,

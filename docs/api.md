@@ -37,14 +37,16 @@ valid file returns. Request logs and `tensorfold:requests_total` use labels, nev
 Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
 underscores or hyphens; choose non-secret labels.
 
-`tensorfold service install MODEL --api-key-file PATH` forwards the file to its server.
-For the control room, `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key.
+In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH`
+forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a
+bearer key. The native binary has neither command.
 Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
 
 | Route | Behavior |
 | --- | --- |
 | `GET /v1/models` | Served model ID and any configured aliases (both servers) |
-| `GET /health` | Server health and available status information |
+| `GET /health` | Liveness, the served model, the queue and live rates; open with keys (see [Health](#health)) |
+| `GET /memory`, `GET /v1/memory` | Native read-only memory snapshot ([memory diagnostics](memory-diagnostics.md)) |
 | `GET /metrics`, `GET /v1/metrics` | Prometheus text: requests, KV occupancy, drafts and latency (both servers) |
 | `GET /dashboard` | Native live dashboard page when `--dashboard` is enabled |
 | `GET /stats` | Native JSON dashboard snapshot when `--dashboard` is enabled |
@@ -57,6 +59,9 @@ Prefer a restricted file over command-line keys, which can appear in the operati
 | `POST /v1/responses` | OpenAI's Responses API, run as the equivalent chat completion; streamed or non-streamed |
 | `GET /v1/responses/{id}`, `DELETE /v1/responses/{id}` | A stored response, or remove it |
 | `POST /v1/decisions` | Choice, score, and yes/no probabilities from the next-token logits; no text is generated |
+| `POST /v1/imprint/resume` | How much of a chat body's conversation resumes, and from where ([on disk](#conversations-on-disk)) |
+| `POST /v1/imprint/load` | A chat body's conversation state read from disk into RAM now |
+| `DELETE /v1/imprint` | This model's conversation states on disk forgotten |
 
 On MLX, a completions body containing a nonempty `messages` list uses chat handling. CUDA completions
 take a string `prompt` (`add_special_tokens`, default false) or a list of token IDs, run as given.
@@ -65,10 +70,14 @@ take a string `prompt` (`add_special_tokens`, default false) or a list of token 
 chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_kwargs`) and `add_generation_prompt`
 (default true). It returns `count`, `max_model_len` (the context window; null when none is set on MLX) and
 `tokens`, and `token_strs` with `return_token_strs: true`. The IDs are the ones the chat route runs for the same
-request, images expanded. `/detokenize` takes `tokens` and returns `prompt`.
-With `--vision`, supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts alongside text in user
-messages and in tool results (`role: "tool"`), such as an agent's screenshots.
+request, images and videos expanded. `/detokenize` takes `tokens` and returns `prompt`.
+In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
+alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native
+server reads images for GLM-5.3-Flash and Qwen3.8-27B on Metal, with data URLs, and public HTTPS URLs under
+`--vision-urls` ([image input](vision.md#the-native-server)); for GLM-5.3-Flash it also takes `video_url` parts in
+user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
+The native binary refuses `--vision` for other models and answers their image parts with HTTP 400.
 Unsupported image input, audio, video and non-text output requests receive HTTP 400.
 
 ## Decisions
@@ -84,6 +93,23 @@ question id, and `usage.completion_tokens` 0. `probabilities` are a softmax over
 `temperature`. A request the tokenizer or the context window cannot score returns HTTP 400.
 For decisions, `chat_template_kwargs` may be omitted, null, or an object containing only
 `enable_thinking: false`; other types, keys, or thinking values return HTTP 400.
+
+## Living Weights
+
+With `--slide`, the native server learns facts into the served weights. [Living Weights](living-weights.md) explains
+each route and its events.
+
+| Route | What it does |
+| --- | --- |
+| `POST /v1/slide/learn` | `{"text": "..."}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events |
+| `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
+| `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
+| `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
+
+A delete's last event, `forgot`, says `"deleted": true` only when both the shards and the graph file hold the delete,
+and its `state` is the fact's state in the graph file; a fact left `deleting` is settled by sending the delete again.
+A server without `--slide` answers the learn and delete routes with HTTP 501. A delete sent while a learn or another
+delete runs gets 503, an id that is not a number 400, and an id the graph does not hold 404.
 
 ## Request fields
 
@@ -153,12 +179,15 @@ On MLX, `--parallel auto` is the default: requests share rounds within the confi
 budget. Every admitted prompt prefills a chunk at a time beside the others. Each chunk goes to a foreground prompt
 before a background one, then to the prompt with the fewest tokens left, and a prompt passed over for 8 chunks takes
 the next one: a short request starts at the next chunk, and a long prompt still finishes. Running replies take rounds
-between chunks for `--decode-share` of each chunk's time (default 0.25). `--decode-share 0` prefills each prompt whole
+between chunks for `--decode-share` of each chunk's time (default 0.25). That flag is the Python 0.6.6 engine's, and the
+native binary refuses it. In that engine, `--decode-share 0` prefills each prompt whole
 first, in arrival order, as 0.3.6.2 did. Background work waits behind foreground requests. An active background
 request yields when a foreground request needs its lane or memory, then restarts with already-delivered tokens
 suppressed.
 Session-title requests are also treated as background work.
 
+The native CUDA build serves Nemotron, and its concurrent requests share each round. The rest of this paragraph
+describes the Python 0.6.6 engine's CUDA families.
 On CUDA, `--parallel auto` serves one request at a time. An explicit `--parallel N` above one shares rounds
 for Qwen3.8-27B on one or two ranks and for Flash Next and Qwen3.6 on one rank; GLM and Nemotron stay serialized.
 When a client disconnects, its CUDA request stops at the next round, and a request still waiting behind
@@ -214,6 +243,8 @@ decodes on from the reply. The model writes the arguments; a malformed call retu
 
 ## Structured output
 
+This paragraph describes the Python 0.6.6 engine, where @philip-pentatonic wrote structured output in
+[#80](https://github.com/ashhart/TensorFold/pull/80); the next paragraph covers the native server.
 Every model on both backends enforces `response_format` (`{"type": "json_schema", "json_schema": {"schema": ...}}`
 or `{"type": "json_object"}`) and vLLM's `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar` (EBNF) and
 `structured_outputs` (`json`, `json_object`, `regex`, `choice` or `grammar`): on the Mac, and on CUDA with one or two
@@ -267,8 +298,9 @@ token budget. With thinking off, GLM-5.3's prompt is its thinking-off template's
 empty think block. GLM-5.3 keeps every earlier assistant turn's reasoning in the prompt, as zai-org's template does by
 default (`clear_thinking` false), also on checkpoints whose template still clears it before the last user message, so
 a new user message leaves the earlier turns' tokens, and their kept prompt states, as they were. A request's
-`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat (on CUDA; on a Mac,
-`TF_GLM_CLEAR_THINKING=1` sets it for the server).
+`chat_template_kwargs.clear_thinking: true` drops it, as the model card advises for plain chat. In the Python 0.6.6
+engine that works on CUDA, and on a Mac `TF_GLM_CLEAR_THINKING=1` sets it for the server, from @MiaAI-Lab's
+[#236](https://github.com/ashhart/TensorFold/pull/236); the native binary does not read that variable.
 
 A tool call written before the think block closes is the reply's tool call when the reply ends inside the block,
 on both backends; the reasoning stops where the call starts, and streamed reasoning never carries the call's markup.
@@ -308,7 +340,8 @@ When the request omits the reply limit, the server still caps its configured def
 CUDA returns HTTP 400 before generation when the chat template rejects the request or
 `chat_template_kwargs` is neither an object nor null. A generation error returns HTTP 500 for a
 non-streamed request; after a stream opens, both backends send an error event of type `server_error`,
-then `[DONE]`. On two CUDA ranks such an error can leave the ranks out of step, so restart both: the 27B's
+then `[DONE]`. On two CUDA ranks, which only the Python 0.6.6 engine runs, such an error can leave the ranks out
+of step, so restart both: the 27B's
 `--parallel` decoder refuses every later request until then, and the other two-rank engines don't detect it.
 MLX also checks projected memory before prefill. CUDA checks its allocated cache capacity and model window.
 A startup capacity estimate is not a measured release capacity.
@@ -355,12 +388,14 @@ The native server's finish log names the client reply ID. Completed requests rep
 `refused <id>` and its message, while a submitted request that ends before a reply reports `ended <id>` with
 `reason=client-left` or an error plus `prompt`, `tokens`, and elapsed time.
 
-On CUDA, `GET /health` also carries counters a poller can difference into rates: `busy`, `requests_running`,
-`requests_total`, `completion_tokens_total` (the running replies' tokens included as they stream), and totals that
-move when a request ends, taken from the engine's own statistics: `prompt_tokens_total`, `cached_tokens_total`,
-`prefill_seconds_total`, `decode_seconds_total`, `rounds_total`, and `drafted_total` and `accepted_total` where the
-engine reports them. A `--parallel` server adds `streams` (decoding, prefilling and the maximum), and
-`context_length` is the served window. The first sample is a baseline, not a rate.
+On the Python 0.6.6 CUDA server, `GET /health` (`{"ok": true, "backend": "tensorfold", ...}`) also carries counters
+a poller can difference into rates: `busy`, `requests_running`, `requests_total`, `completion_tokens_total` (the
+running replies' tokens included as they stream), and totals that move when a request ends, taken from the engine's
+own statistics: `prompt_tokens_total`, `cached_tokens_total`, `prefill_seconds_total`, `decode_seconds_total`,
+`rounds_total`, and `drafted_total` and `accepted_total` where the engine reports them. A `--parallel` server adds
+`streams` (decoding, prefilling and the maximum), and `context_length` is the served window. The first sample is a
+baseline, not a rate. The native server's `/health` carries none of these counters ([Health](#health) lists its
+fields); its request, token, round and draft counters are in [Metrics](#metrics).
 
 For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed and sampling settings
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
@@ -398,15 +433,96 @@ An engine that keeps no prompt states leaves all three out.
 The native `--dashboard` flag adds a self-contained `/dashboard` page and its `/stats` JSON snapshot; both routes
 return 404 when the flag is off, and the page polls once per second without adding access-log noise.
 
+## Conversations on disk
+
+`--learn-conversations` (it implies `--learn`) writes every prompt state the server keeps in RAM to disk as well: a
+conversation's history, the end of each reply, the next turn's background prefill and the shared prefixes, all in one
+store for each model and build. That store takes the place of `--learn`'s store of shared prefixes: a server started
+with the flag neither reads nor writes the prefix files a plain `--learn` server keeps, and they stay on disk until the
+cap below needs their room. After a restart, a crash or an eviction from RAM, the next turn reads the latest state back
+instead of reading the conversation again from its first token. Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash on
+one Mac and Nemotron on CUDA keep them; other engines refuse the flag at startup.
+
+States go to disk while the engine is idle, a 16 MiB piece at a time, so a request that arrives meanwhile waits for one
+piece. A planned stop (SIGTERM or SIGINT) finishes what is waiting, within 20 seconds; a killed server loses only what
+its last turn had not written yet. Rows a stored state already holds for the same tokens are written once, so ten
+conversations that share a long system prompt and tools store those rows once. A state is read back only when reading
+it takes less time than prefilling the tokens it covers, measured on this machine. Every piece read is checked against
+its hash; a damaged file is deleted, with the states that need it, and the turn prefills instead. A read-back state
+gives the same reply, token for token, as the state it was written from and as a fresh prompt pass.
+
+States are kept per checkpoint, kernel build, OS build and chip: a macOS update or a new release that computes other
+bits starts a new set, and the old set is the first to go when the disk cap needs room. `--learn-gib` caps the disk
+they take with `--learn`'s shared prefixes, every model together (32 GiB by default); past it, other models' and
+builds' sets go first, then the states worth least: the fewest tokens saved per byte only they hold, the least recently
+used. `--learn-min-free-gib` keeps free disk (4 GiB by default), and `--learn-daily-gib` caps what they write a day
+(32 GiB by default); past either, a state stays in RAM only, with a log line, and no reply changes.
+
+Three routes let a client such as the Mac app ask about a conversation. Each takes the body of a chat completion
+(`messages`, `tools`, `chat_template_kwargs`), renders it as that request would be rendered, and answers on the engine's
+thread between rounds. A server started without `--learn-conversations` answers each with 404 and the error message
+"saved conversations are off: start the server with --learn-conversations"; an engine that keeps no prompt states
+answers 501.
+
+- `POST /v1/imprint/resume` answers how much of the conversation's next request would resume, and from where:
+  `tokens` (the rendered prompt), `ram_tokens` and `disk_tokens` (the longest kept state in RAM and on disk),
+  `disk_bytes` (what reading that state takes), `resume_from` (`ram`, `disk` or `none`), `wait_seconds` (the estimated
+  wait before the first token: the read, then prefilling the rest) and `disk` (whether this server keeps states on
+  disk).
+- `POST /v1/imprint/load` reads the conversation's disk state into RAM now, so opening an old chat makes its next send
+  fast. It answers as `/v1/imprint/resume` does after the read, with `loaded_tokens` and `load_seconds` added (0 when
+  RAM already held as much, or a prompt pass would be quicker than the read).
+- `DELETE /v1/imprint` forgets every conversation state this server's model and build keep on disk: it deletes the
+  store's state and row files and answers `freed_bytes`. What stays holds no conversation data: the store's folder with
+  its `used` stamp, and the `written` and `clock` files at the top of the `--learn-dir` folder (the bytes written today,
+  and the order the stores were last opened in). States in RAM stay until they are evicted.
+
+What stays on disk: under the `--learn-dir` folder (`~/.cache/tensorfold/learned` by default), directories readable by
+their owner only (0700) hold files readable by their owner only (0600). They contain token ids and the model's own
+prompt states (attention keys and values, recurrent and convolution states), never text, and nothing in them leaves the
+machine. Token ids decode back to the conversation's text with the model's tokenizer, so treat the folder as you treat
+the conversations. `DELETE /v1/imprint` clears one model's states; deleting the folder while no server runs clears all.
+
+## Health
+
+The native server answers `GET /health` (and `GET /`) from one handler on Metal and CUDA, without a key. With keys
+configured the body is only `{"status": "ok"}`. Without keys it has these fields, in this order:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `status` | string | Always `"ok"` |
+| `model` | string | The served name (`--name`) |
+| `model_ids` | list of strings | The served name, then each `--alias`, as `/v1/models` lists them |
+| `max_batch_size` | integer | The lanes the engine serves at once |
+| `policy` | string | The engine's policy line; absent when the engine reports none |
+| `warming` | boolean | Always `false` on the native engines |
+| `memory` | object | CUDA: `active`, `cache` and `peak` in bytes (`cache` is 0). Metal: `{}` |
+| `live` | object | `connections`, `waiting`, `decode_tokens_per_second`, `prefill_tokens_per_second` |
+| `version` | string | The release this server was built from |
+| `backend` | string | The backend built in: `metal`, `cuda`, `hip` or `xpu`; absent from a build without one |
+| `device` | string | The GPU the server opened, by the driver's name; absent when it cannot read one |
+
+`live.connections` counts running and waiting requests, and `live.waiting` the waiting ones.
+`decode_tokens_per_second` is the tokens decoded in the last 2 s, divided by 2. `prefill_tokens_per_second` is the
+last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
+rounded to one decimal. `?reset_peak=1` starts a new CUDA peak at the current `active`; `/memory`'s `device.peak_bytes`
+is the same peak. With keys configured, `reset_peak` is ignored.
+
+The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
+server sends the counters described under [Responses](#responses). For memory figures on a Mac, use
+[`/memory`](memory-diagnostics.md) (it needs a key when keys are configured) or `/metrics`'
+`tensorfold:process_footprint_bytes`.
+
 ## The Responses API
 
 `POST /v1/responses` takes OpenAI's Responses request and runs it as the equivalent chat completion, through the
 same handler and engine path. A response has that chat completion's prompt and tokens (the `tensorfold` block's
 `token_sha` matches), drafts, and equals its `"draft": false` run and its solo run.
 
-- `input` is a string or a list of items: messages (`input_text`, and `input_image` with `--vision`),
-  `function_call`, `function_call_output` (its `output` text, or `input_text` and `input_image` parts with
-  `--vision`), and `reasoning` items with their `content` text, which the template gets
+- `input` is a string or a list of items: messages (`input_text`, and `input_image` on a server started with
+  `--vision` for a model that reads images), `function_call`, `function_call_output` (its
+  `output` text, or `input_text` and `input_image` parts, the images again only with `--vision`), and `reasoning`
+  items with their `content` text, which the template gets
   back as the next assistant message's `reasoning_content`. `instructions` becomes the system message and is not
   carried to a later turn.
 - `tools` takes function tools; `tool_choice` takes `none`, `auto`, `required`, a function or `allowed_tools`;
@@ -451,11 +567,15 @@ strings, is refused.
 The Messages routes reuse the same chat handler and engine on MLX and CUDA. They accept `system`, text/image
 blocks (including mid-conversation system text), `tool_use`/`tool_result`, custom tools and `tool_choice`, sampling, `stop_sequences`, `thinking`
 (disabled, enabled with `budget_tokens`, or adaptive), and `output_config` effort/JSON schema. Image support
-requires a vision-capable model served with `--vision`. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an empty signature;
+requires a vision-capable model served with `--vision` (natively GLM-5.3-Flash and Qwen3.8-27B on a Mac); other
+models answer image blocks with HTTP 400. Thinking is off unless enabled or adaptive. It round-trips as plaintext with an
+empty signature;
 `display` does not suppress it. Claude Code's `context_management` keep-all thinking directive is accepted. Mid-conversation system text stays
 in place with its system role; the model's chat template must support later system messages. Turn-scoped
 system messages, per-message output configuration and inline tool changes are unsupported.
 JSON schema output, including Claude Code title requests, requires `pip install 'tensorfold[grammar]'`.
+That install is the Python 0.6.6 engine's; the native server uses `libtfgrammar` from the release archive instead
+([structured output](#structured-output)).
 
 Usage separates uncached `input_tokens` from `cache_read_input_tokens` and reports `output_tokens_details.thinking_tokens`
 when the backend counts them. Prefix caching remains automatic,

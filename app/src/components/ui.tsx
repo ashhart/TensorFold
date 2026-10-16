@@ -80,7 +80,12 @@ export function Menu({
       if (ref.current?.contains(target) || menuRef.current?.contains(target)) return
       setOpen(false)
     }
-    const onEsc = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false)
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      e.preventDefault()
+      setOpen(false)
+      ref.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onEsc)
     return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onEsc) }
@@ -105,9 +110,10 @@ export function Menu({
           ? 'bottom'
           : (menuH > below && above > below ? 'top' : 'bottom')
       const maxHeight = Math.max(96, Math.floor((side === 'top' ? above : below) || menuH))
-      const rawLeft = align === 'end' ? t.right - width : t.left
-      const left = Math.max(edge, Math.min(rawLeft, window.innerWidth - width - edge))
-      const style: React.CSSProperties = { position: 'fixed', width, maxHeight, left }
+      const menuWidth = Math.min(width, Math.max(0, window.innerWidth - edge * 2))
+      const rawLeft = align === 'end' ? t.right - menuWidth : t.left
+      const left = Math.max(edge, Math.min(rawLeft, window.innerWidth - menuWidth - edge))
+      const style: React.CSSProperties = { position: 'fixed', width: menuWidth, maxHeight, left }
       if (side === 'bottom') style.top = t.bottom + gap
       else style.bottom = window.innerHeight - t.top + gap
       setMenuStyle(style)

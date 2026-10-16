@@ -29,7 +29,14 @@ export interface SessionSearchResult {
 
 export interface SessionReadOptions {
   threadId: string
+  /** Host-bound recipient identity; never take it from model tool arguments. */
+  currentThreadId?: string | null
   maxMessages?: number
+}
+
+/** Phone context must stay in its original guarded chat rather than lose its privacy marker. */
+export function canRecallThread(thread: Thread, currentThreadId?: string | null): boolean {
+  return !thread.incognito && (!thread.phoneLocalOnly || thread.id === currentThreadId)
 }
 
 export interface SessionReadMessage {
@@ -51,6 +58,7 @@ export function searchSessionThreads(threads: Thread[], options: SessionSearchOp
   if (!terms.length) return { query, matches: [], omitted: 0 }
 
   const candidates = threads.filter((thread) => {
+    if (!canRecallThread(thread, options.currentThreadId)) return false
     if (!options.includeCurrent && options.currentThreadId && thread.id === options.currentThreadId) return false
     if (!options.includeArchived && thread.archivedAt) return false
     if (options.projectId && thread.projectId !== options.projectId) return false
@@ -66,7 +74,7 @@ export function searchSessionThreads(threads: Thread[], options: SessionSearchOp
 
 export function readSessionThread(threads: Thread[], options: SessionReadOptions): SessionReadResult {
   const threadId = String(options.threadId ?? '').trim()
-  const thread = threads.find((item) => item.id === threadId) ?? null
+  const thread = threads.find((item) => item.id === threadId && canRecallThread(item, options.currentThreadId)) ?? null
   if (!thread) return { thread: null, messages: [], omittedBefore: 0 }
 
   const allMessages = (thread.apiMessages ?? [])

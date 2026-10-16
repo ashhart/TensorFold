@@ -1,10 +1,12 @@
+import { assertCortheonReleaseAllowed } from '../../../../shared/release-feature-policy'
+import { BrowserWindow, dialog } from 'electron'
 import type { EngineService } from '../../../agent/engine/service'
 import { isRepoId, isRevision } from '../../../agent/engine/paths'
 import { auditEvent, requireSecurityRole } from '../audit'
 import { handle } from '../ipc'
 
 // Built-in engine channels for the Models page, the composer picker and onboarding. The renderer
-// supplies only repo ids, revisions and search text; every path and URL is derived here.
+// supplies only repo/library IDs, revisions and search text. A native chooser admits model folders.
 
 export function engineRepo(value: unknown): string {
   if (!isRepoId(value)) throw new Error('Expected a Hugging Face repo id like owner/name.')
@@ -24,7 +26,20 @@ export function engineSearchText(value: unknown): string {
   return text
 }
 
-export function registerEngineIpc(engine: () => EngineService | null, options: { reserveOperation?: () => { release(): void } } = {}) {
+export function engineLibraryFolderId(value: unknown): string {
+  if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('Choose a saved model folder.')
+  return value
+}
+
+export function engineLibraryScanOptions(value: unknown): { includeHuggingFace?: boolean } {
+  if (value == null) return {}
+  if (typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => key !== 'includeHuggingFace')) throw new Error('Expected local model scan options.')
+  const enabled = (value as { includeHuggingFace?: unknown }).includeHuggingFace
+  if (enabled !== undefined && typeof enabled !== 'boolean') throw new Error('Hugging Face cache scanning must be on or off.')
+  return enabled === undefined ? {} : { includeHuggingFace: enabled }
+}
+
+export function registerEngineIpc(engine: () => EngineService | null, options: { reserveOperation?: () => { release(): void }; assertCanEnableCortheon?: () => void } = {}) {
   const operation = async <T>(run: () => Promise<T>): Promise<T> => {
     const lease = options.reserveOperation?.()
     try { return await run() } finally { lease?.release() }
@@ -85,7 +100,39 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
   handle('engine:setCortheon', async (_e, enabled: unknown) => {
     requireSecurityRole('operator', 'change Cortheon mode')
     if (typeof enabled !== 'boolean') throw new Error('Cortheon mode must be on or off.')
-    return operation(async () => { await auditEvent('engine.cortheon', { enabled }); return svc().setCortheon(enabled) })
+    assertCortheonReleaseAllowed(enabled)
+    return operation(async () => { await auditEvent('engine.cortheon', { enabled }); if (enabled) options.assertCanEnableCortheon?.(); return svc().setCortheon(enabled) })
+  })
+
+  handle('engine:learning', async () => {
+    requireSecurityRole('operator', 'read the Living Weights graph')
+    return svc().learningSnapshot()
+  })
+
+  handle('engine:setLearning', async (_e, input: { enabled?: unknown; model?: unknown }) => {
+    requireSecurityRole('operator', 'change Living Weights mode')
+    if (typeof input?.enabled !== 'boolean') throw new Error('Living Weights mode must be on or off.')
+    const model = input.model == null ? undefined : engineRepo(input.model)
+    return operation(async () => {
+      const snapshot = await svc().setLearning(input.enabled as boolean, model)
+      await auditEvent('engine.learning', { enabled: input.enabled, model: snapshot.model })
+      return snapshot
+    })
+  })
+
+  handle('engine:teach', async (_e, text: unknown) => {
+    requireSecurityRole('operator', 'teach the private Living Weights model')
+    if (typeof text !== 'string' || !text.trim() || Buffer.byteLength(text, 'utf8') > 8192) throw new Error('Teach a short fact or a few sentences, up to 8 KB.')
+    return operation(async () => {
+      const snapshot = await svc().teach(text)
+      await auditEvent('engine.teach', { model: snapshot.model, jobId: snapshot.job?.id })
+      return snapshot
+    })
+  })
+
+  handle('engine:cancelTeach', async () => {
+    requireSecurityRole('operator', 'stop a Living Weights lesson')
+    return svc().cancelTeach()
   })
 
   handle('engine:unload', async () => {
@@ -101,5 +148,39 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
       await auditEvent('engine.delete', { repo: model })
       return installed
     })
+  })
+
+  handle('engine:library', async () => {
+    requireSecurityRole('operator', 'read the local model library')
+    return svc().librarySnapshot()
+  })
+
+  handle('engine:scanLibrary', async (_e, input: unknown) => {
+    requireSecurityRole('operator', 'scan configured model folders')
+    const options = engineLibraryScanOptions(input)
+    return operation(() => svc().scanLibrary(options))
+  })
+
+  handle('engine:addLibraryFolder', async (event) => {
+    requireSecurityRole('operator', 'choose a local model folder')
+    return operation(async () => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      const options = { title: 'Choose a folder containing local models', properties: ['openDirectory'] as ('openDirectory')[] }
+      const result = parent ? await dialog.showOpenDialog(parent, options) : await dialog.showOpenDialog(options)
+      if (result.canceled || result.filePaths.length !== 1) return null
+      // This path comes only from the OS picker, never from renderer arguments or audit logs.
+      return svc().addLibraryFolder(result.filePaths[0])
+    })
+  })
+
+  handle('engine:removeLibraryFolder', async (_e, id: unknown) => {
+    requireSecurityRole('operator', 'unlink a local model search folder')
+    const folder = engineLibraryFolderId(id)
+    return operation(() => svc().removeLibraryFolder(folder))
+  })
+
+  handle('engine:cancelLibraryScan', async () => {
+    requireSecurityRole('operator', 'stop a local model scan')
+    return svc().cancelLibraryScan()
   })
 }

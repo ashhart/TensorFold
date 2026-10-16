@@ -76,6 +76,7 @@ export function approvalPolicyScope(scope: 'tool' | 'connector', toolOrAction: s
   if (key === 'browser_automation') return browserAutomationPolicyScope(key, normalized)
   if (key === 'controller_action') return controllerActionPolicyScope(key, normalized)
   if (key === 'computer_use') return computerUsePolicyScope(key, normalized)
+  if (key === 'phone_control') return { scope: 'connector', key: `phone:${shortHash(normalized)}`, label: `Phone ${cleanString(normalized.action) || 'action'}`, classification: 'phone-control', explanation: 'Allows this exact action on the current phone screen only; each new phone action needs review.' }
   if (key === 'launch_subagent') return subAgentPolicyScope(key, normalized)
   if (key === 'web_fetch') return webFetchPolicyScope(key, normalized)
   if (key.startsWith('mcp__')) return hashedPolicyScope(key, normalized, 'MCP tool call')
@@ -87,6 +88,7 @@ export function requiresSavedApprovalPolicy(policy: ApprovalPolicyScope): boolea
 }
 
 const FRESH_CONNECTOR_APPROVAL_CLASSES = new Set([
+  'phone-control',
   'send',
   'reply',
   'calendar-create',
@@ -277,6 +279,8 @@ export function externalEffectApprovalReason(tool: string, args: Record<string, 
       return 'controlling apps on this Mac requires approval'
     case 'computer_use':
       return 'operating another app on this Mac requires approval'
+    case 'phone_control':
+      return 'changing a connected phone requires approval for this action on its current screen'
     case 'browser_automation': {
       const klass = browserAutomationClass(cleanString(args.action) || 'automation')
       // Inspection/screenshot are read-ish; interaction/navigate/tab change external state.

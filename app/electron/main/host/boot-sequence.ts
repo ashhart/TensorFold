@@ -86,6 +86,8 @@ export interface BootStateDeps {
   reconcileStuckJobs(): void
   installSessionHardening(): unknown
   createWindow(): unknown
+  initializeDesktopMode?(): void
+  showDesktopWindow?(): void
   applyTheme(): void
   applyPowerSettings(): void
   startScheduler(): void
@@ -311,6 +313,7 @@ export async function bootAppState(deps: BootStateDeps): Promise<void> {
   applyPowerSettings()
   if (!HEADLESS_MODE) {
     installSessionHardening()
+    deps.initializeDesktopMode?.()
     createWindow()
   }
   void mcpHost.connectEnabled()
@@ -353,5 +356,9 @@ export async function bootAppState(deps: BootStateDeps): Promise<void> {
   startUpdateChecks()
   startBotControlPolling()
   void resumeAutoJobsAfterRestart()
-  app.on('activate', () => { if (!HEADLESS_MODE && BrowserWindow.getAllWindows().length === 0) createWindow() })
+  app.on('activate', () => {
+    if (HEADLESS_MODE) return
+    if (deps.showDesktopWindow) deps.showDesktopWindow()
+    else if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  })
 }

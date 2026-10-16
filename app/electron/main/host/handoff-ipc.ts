@@ -1,3 +1,4 @@
+import { captureThreadMemoryPolicy, assertThreadMemoryTransport } from '../../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import { classifyProvider } from '../../../shared/provider-trust'
 import { latestPlanText, runPlanPrompt } from '../../agent/planning-guard'
@@ -12,7 +13,7 @@ import { auditEvent, requireSecurityRole } from './audit'
 import { handle } from './ipc'
 import { threadTurnNumber } from './checkpoint-runtime'
 import { assertSshThreadTransportSupported } from './thread-runtime'
-import { selectedProviderAccountId } from './provider-runtime'
+import { runtimeProvider, selectedProviderAccountId } from './provider-runtime'
 
 interface RemoteServerLike {
   publish(event: { kind: string; data: unknown }): void
@@ -41,16 +42,22 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
     const source = store.threads.find((t) => t.id === String(input?.threadId ?? ''))
     if (!source) throw new Error('The source thread no longer exists.')
     if (source.archivedAt) throw new Error('Restore the archived source thread before handing it off.')
+    if (source.bot !== undefined) throw new Error('Bot conversations keep their captured model and permissions. Edit the bot and start a new chat instead of handing this conversation to another engine.')
     const sourceProject = source.projectId ? store.projects.find((project) => project.id === source.projectId) ?? null : null
     if (source.projectId && (!sourceProject || sourceProject.archivedAt)) throw new Error('Restore or choose an active source project before handing this thread off.')
     const toProvider = store.settings.providers.find((p) => p.id === String(input?.toProviderId ?? ''))
     if (!toProvider) throw new Error('Choose a target engine for the handoff.')
     if (toProvider.id === source.providerId) throw new Error('Handoff requires a different target engine.')
+    const accountId = selectedProviderAccountId(toProvider as Provider, store.settings.activeProviderAccountId ?? undefined)
+    const targetProvider = runtimeProvider(toProvider as Provider, accountId)
+    if (source.phoneLocalOnly && (source.orchestratorHostId || classifyProvider(targetProvider) !== 'trusted-local')) throw new Error('Phone conversations can only hand off to an API model running on this Mac; external, remote and CLI engines cannot receive their copied context.')
+    assertThreadMemoryTransport({ ...source, engine: 'native' }, toProvider)
     const runPlan = input?.intent === 'run-plan'
     if (runPlan && classifyProvider(toProvider) !== 'trusted-local') throw new Error('A plan can only run on the TensorFold engine or another local provider on this Mac.')
     const plan = runPlan ? latestPlanText(source.apiMessages) : ''
     if (runPlan && !plan) throw new Error('There is no plan in this thread to run yet.')
     const sourceWorkspace = source.workspace ?? sourceProject?.workspace ?? null
+    if (source.phoneLocalOnly && sourceWorkspace?.kind === 'ssh') throw new Error('Phone conversations cannot hand off to an SSH workspace.')
     // Delegated engines run as local processes. Reject an SSH/local-lookalike handoff before a
     // new thread is persisted, even when autoStart is false, so the saved configuration is honest.
     assertSshThreadTransportSupported(sourceWorkspace, toProvider as Provider)
@@ -63,7 +70,6 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
       conversation: { apiMessages: (source.apiMessages ?? []) as never, timeline: (source.timeline ?? []) as never },
     })
     const now = Date.now()
-    const accountId = selectedProviderAccountId(toProvider as Provider, store.settings.activeProviderAccountId ?? undefined)
     // Strong-form handoff (VST-049): seed the new thread's apiMessages with the
     // structured transcript (preserving role structure) instead of one flattened
     // user message. The structured transcript keeps system/user/assistant/tool
@@ -82,6 +88,9 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
       id: randomUUID(),
       title: `${source.title} → ${toProvider.name || toProvider.id}`,
       kind: source.kind,
+      memoryPolicy: { ...captureThreadMemoryPolicy(source) },
+      memoryPolicyRevision: 0,
+      ...(source.phoneLocalOnly ? { phoneLocalOnly: true } : {}),
       projectId: source.projectId ?? null,
       cwd: source.cwd,
       workspace: sourceWorkspace,

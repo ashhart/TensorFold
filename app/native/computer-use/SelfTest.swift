@@ -208,6 +208,42 @@ func miscChecks(_ c: Checks) {
     c.expect(error["id"] is NSNull && error["ok"] as? Bool == false && error["code"] as? String == "bad_json", "error replies carry code and null id")
 }
 
+func phoneChecks(_ c: Checks) {
+    let token = "12345678-1234-1234-1234-123456789ABC"
+    c.expect(parsedCommand(#"{"id":1,"cmd":"phone_status"}"#) == .phoneStatus, "phone status parses without permission prompts")
+    c.expect(parsedCommand(#"{"id":1,"cmd":"phone_connect","bundleId":"com.example.other"}"#) == .phoneConnect, "phone connect has a fixed native target")
+    let observe = "{\"id\":1,\"cmd\":\"phone_observe\",\"token\":\"\(token)\"}"
+    c.expect(parsedCommand(observe) == .phoneObserve(token), "phone observe requires connection token")
+    let tap = "{\"id\":1,\"cmd\":\"phone_input\",\"token\":\"\(token)\",\"action\":\"tap\",\"x\":10,\"y\":20,\"width\":300,\"height\":600}"
+    c.expect(parsedCommand(tap) == .phoneInput(token, .tap(CGPoint(x: 10, y: 20), CGSize(width: 300, height: 600))), "phone tap uses bounded relative coordinates")
+    for line in [tap.replacingOccurrences(of: "\"x\":10", with: "\"x\":300"), tap.replacingOccurrences(of: "\"x\":10", with: "\"x\":-1"), tap.replacingOccurrences(of: "\"width\":300", with: "\"width\":0"), tap.replacingOccurrences(of: "\"tap\"", with: "\"key\""), tap.replacingOccurrences(of: token, with: "wrong"), #"{"id":1,"cmd":"phone_observe"}"#] {
+        c.expect(failureCode(line) == "bad_request", "phone invalid coordinates, token and arbitrary keys refused")
+    }
+    let size = CGSize(width: 300, height: 600)
+    c.expect(phoneLocalPoint(CGPoint(x: 0, y: 0), size: size), "phone origin is inside")
+    c.expect(!phoneLocalPoint(CGPoint(x: 300, y: 0), size: size), "phone right boundary is excluded")
+    c.expect(!phoneLocalPoint(CGPoint(x: 1, y: CGFloat.nan), size: size), "phone NaN point refused")
+    c.expect(phoneContentRect(CGRect(x: 100, y: 200, width: 320, height: 700)) == CGRect(x: 110, y: 248, width: 300, height: 642), "phone image and input exclude window controls")
+    c.expect(phoneContentRect(CGRect(x: 0, y: 0, width: 50, height: 50)) == nil, "phone cannot target tiny toolbar windows")
+    let global = try? phoneGlobalPoint(CGPoint(x: 150, y: 300), size: size, frame: CGRect(x: 100, y: 200, width: 320, height: 700))
+    c.expect(global == CGPoint(x: 260, y: 569), "phone coordinates map only into clipped window content")
+    c.expect(phoneTypeAllowed("Hello\n世界\t😀"), "phone unicode and explicit line break typing supported")
+    c.expect(!phoneTypeAllowed("\u{E03D}") && !phoneTypeAllowed("\u{1B}"), "phone private key codes and escape refused")
+    c.expect(phoneProtectedText("Enter your passcode") && phoneProtectedText("iPhone in use") && phoneProtectedText("Apple Account password"), "phone lock, authentication and disconnected states are refused")
+    c.expect(!phoneProtectedText("Synthetic sample home screen"), "ordinary phone screen text accepted")
+    let windowBounds: [String: Any] = ["X": 0, "Y": 0, "Width": 300, "Height": 600]
+    let backWindow: [String: Any] = [kCGWindowBounds as String: windowBounds, kCGWindowNumber as String: 11, kCGWindowAlpha as String: 1]
+    let frontWindow: [String: Any] = [kCGWindowBounds as String: windowBounds, kCGWindowNumber as String: 22, kCGWindowAlpha as String: 1]
+    c.expect(phoneFirstWindow(at: CGPoint(x: 40, y: 60), windows: [frontWindow, backWindow]) == 22, "phone input checks exact top window id, not just its process")
+    var invisible = frontWindow
+    invisible[kCGWindowAlpha as String] = 0
+    c.expect(phoneFirstWindow(at: CGPoint(x: 40, y: 60), windows: [invisible, backWindow]) == 11, "phone ignores an invisible window overlay")
+    c.expect(phoneFirstWindow(at: CGPoint(x: 400, y: 60), windows: [frontWindow, backWindow]) == nil, "phone input cannot target outside pinned windows")
+    do { _ = try requirePhone(token); c.expect(false, "phone token absent should fail") }
+    catch let error as HelperError { c.expect(error.code == "phone_disconnected", "revoked phone token fails before any desktop access") }
+    catch { c.expect(false, "phone absent token threw unexpected error") }
+}
+
 func runSelfTest() -> Int32 {
     let checks = Checks()
     keyChecks(checks)
@@ -216,6 +252,7 @@ func runSelfTest() -> Int32 {
     filterChecks(checks)
     textChecks(checks)
     miscChecks(checks)
+    phoneChecks(checks)
     if checks.failures.isEmpty {
         writeLine(["ok": true, "checks": checks.count])
         return 0

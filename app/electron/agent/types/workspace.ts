@@ -538,8 +538,13 @@ export interface Automation {
   // schedule
   scheduleKind: AutomationSchedule
   everyMinutes: number // interval cadence
-  atHour: number // daily — local hour 0-23
-  atMinute: number // daily — local minute 0-59
+  atHour: number // daily wall-clock hour 0-23
+  atMinute: number // daily wall-clock minute 0-59
+  // Explicit IANA timezone for new daily schedules. Absent only for legacy host-local
+  // schedules, whose interpretation must be labelled rather than silently migrated.
+  timeZone?: string
+  // Host-owned scheduling diagnostic. An invalid persisted timezone prevents dispatch.
+  scheduleError?: string | null
   // execution — pin to a specific provider+model (local or cloud)
   providerId: string | null
   providerAccountId?: string | null

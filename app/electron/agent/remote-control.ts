@@ -43,7 +43,7 @@ import type {
 // authenticated local peer.
 const MAX_BODY_BYTES = 20 * 1024 * 1024
 const MISSION_STATUSES = new Set<MissionStatus>(['draft', 'queued', 'running', 'waiting_approval', 'paused', 'stalled', 'completed', 'failed', 'cancelled'])
-const REMOTE_WEB_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+const REMOTE_WEB_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 const SECURITY_ROLE_RANK: Record<SecurityRole, number> = { viewer: 0, operator: 1, owner: 2 }
 
 interface PairingAttemptState {
@@ -125,6 +125,8 @@ export interface RemoteControlServerDeps {
   getPairedSnapshot?: () => RemoteControlSnapshot | Promise<RemoteControlSnapshot>
   getPairedArchives: () => ArchiveSnapshot | Promise<ArchiveSnapshot>
   redactPairedEvent?: (event: Pick<RemoteControlEvent, 'kind' | 'data'>) => Pick<RemoteControlEvent, 'kind' | 'data'>
+  /** Host-owned privacy gate, before live delivery, observers and replay buffering. */
+  isPublishVisible?: (event: Pick<RemoteControlEvent, 'kind' | 'data'>) => boolean
   getDoctor: () => RemoteControlDoctorSnapshot | Promise<RemoteControlDoctorSnapshot>
   getDeviceEngine?: () => Promise<{ status: EngineStatus | null; performance: EnginePerformance | null }>
   createThread: (input: { cwd?: string; kind?: 'task' | 'chat'; projectId?: string | null }, scope?: RemoteWorkspaceScope) => Promise<Thread>
@@ -728,6 +730,9 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
 
   const snapshotFor = (owner: boolean) => owner || !deps.getPairedSnapshot ? deps.getSnapshot() : deps.getPairedSnapshot()
   const archivesFor = (owner: boolean) => owner ? deps.getArchives() : deps.getPairedArchives()
+  const publishVisible = (event: Pick<RemoteControlEvent, 'kind' | 'data'>): boolean => {
+    try { return deps.isPublishVisible?.(event) !== false } catch { return false }
+  }
   const eventFor = (event: RemoteControlEvent, owner: boolean): RemoteControlEvent => {
     if (owner || !deps.redactPairedEvent) return event
     return { ...event, ...deps.redactPairedEvent(event) }
@@ -1069,7 +1074,7 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
       const oldestBuffered = recent.length ? Number(recent[0].id) : seq + 1
       const canReplay = Number.isFinite(lastSeen) && lastSeen <= seq && oldestBuffered <= lastSeen + 1
       if (canReplay) {
-        for (const ev of recent) if (Number(ev.id) > lastSeen) deliverClient(res, state, eventFor(ev, ownerAuthed))
+        for (const ev of recent) if (Number(ev.id) > lastSeen && publishVisible(ev)) deliverClient(res, state, eventFor(ev, ownerAuthed))
       } else {
         // Fresh client, or the gap is larger than the buffer: send a snapshot baselined at the current
         // seq so the client's subsequent Last-Event-ID lines up with the live stream.
@@ -1439,6 +1444,7 @@ export function createRemoteControlServer(deps: RemoteControlServerDeps): Remote
   }
 
   function publish(event: Omit<RemoteControlEvent, 'id' | 'createdAt'>): void {
+    if (!publishVisible(event)) return
     try { deps.observePublish?.(event.kind) } catch { /* observers are fail-open */ }
     // Buffer even with no clients connected, so a client that reconnects can still replay the gap.
     const full: RemoteControlEvent = { id: String(++seq), createdAt: Date.now(), ...event }

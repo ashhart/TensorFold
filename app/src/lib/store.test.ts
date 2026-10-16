@@ -323,6 +323,13 @@ await (async () => {
   assert.deepEqual(configured[0], { id: 'thread-assistant-launch', providerId: 'local', model: 'assistant-m', providerAccountId: null })
   assert.equal(useStore.getState().settings?.activeModel, 'm')
   ok('launch({ persistActiveModel:false }) isolates Assistant model selection from global settings')
+  useStore.setState({ view: { name: 'assistant' } })
+  api.startRun = (async () => { throw new Error('Example model startup failed') }) as typeof api.startRun
+  const rejected: any = await useStore.getState().launch({ text: 'Preserve this unsent draft', cwd: '/example/project', providerId: 'local', model: 'assistant-m', approvalMode: 'suggest', persistActiveModel: false })
+  assert.equal(rejected?.ok, false, 'the composer must know when run admission failed')
+  assert.match(rejected.error, /startup failed/)
+  assert.deepEqual(useStore.getState().view, { name: 'assistant' }, 'failed startup must not unmount the assistant and discard its unsent draft')
+  ok('launch rejects startup without navigating away from the draft')
 })()
 
 await (async () => {

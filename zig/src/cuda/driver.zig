@@ -81,4 +81,13 @@ pub const Driver = struct {
         try self.check(self.api.cuDeviceGetAttribute(&minor, .compute_capability_minor, dev), "cuDeviceGetAttribute");
         return @intCast(10 * major + minor);
     }
+
+    /// Device `ordinal`'s name ("NVIDIA GB10"), read without making a context.
+    pub fn deviceName(self: *const Driver, ordinal: c_int, buf: []u8) Error![]const u8 {
+        if (buf.len < 2) return error.Invalid;
+        var dev: abi.Device = 0;
+        try self.check(self.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
+        try self.check(self.api.cuDeviceGetName(buf.ptr, @intCast(buf.len), dev), "cuDeviceGetName");
+        return std.mem.sliceTo(buf, 0);
+    }
 };
