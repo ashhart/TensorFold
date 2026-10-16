@@ -370,6 +370,7 @@ test {
     _ = native;
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_config.zig");
+    _ = @import("cuda_projection_load.zig");
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
 }

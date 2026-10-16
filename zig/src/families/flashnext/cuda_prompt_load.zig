@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const embed = @import("cuda_embed.zig");
 const gdn = @import("cuda_gdn.zig");
 const wt = @import("cuda_prompt_wt.zig");
+const projections = @import("cuda_projection_load.zig");
 
 const layers_n = wt.layers_n;
 const dims = wt.dims;
@@ -24,10 +25,8 @@ const Q4 = wt.Q4;
 const HcW = wt.HcW;
 const linearLayer = wt.linearLayer;
 const asF32 = wt.asF32;
-const uploadQ4 = wt.uploadQ4;
 const join3 = wt.join3;
 const loadHc = wt.loadHc;
-const stitch = wt.stitch;
 
 const OwnedFace = struct {
     face: Face,
@@ -217,14 +216,20 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     const gate_copy = try gpa.alloc(u8, gate.bytes.len);
     defer gpa.free(gate_copy);
     @memcpy(gate_copy, gate.bytes);
-    const sg = try join3(gpa, store, &buf, mlp_root, ".shared_expert_gate");
-    defer gpa.free(sg.w);
-    defer gpa.free(sg.s);
-    defer gpa.free(sg.b);
     const router = try gpa.alloc(u16, (experts_n + 1) * dims);
     defer gpa.free(router);
     @memcpy(std.mem.sliceAsBytes(router[0 .. experts_n * dims]), gate_copy);
-    try embed.dequant(sg.w, sg.s, sg.b, dims, 0, router[experts_n * dims ..][0..dims]);
+    const sg_tensor = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.shared_expert_gate.weight", .{mlp_root}));
+    if (sg_tensor.dtype == .bf16) {
+        if (!sg_tensor.is(.bf16, &.{ 1, dims }) or sg_tensor.bytes.len != dims * 2) return error.UnexpectedTensor;
+        @memcpy(std.mem.sliceAsBytes(router[experts_n * dims ..]), sg_tensor.bytes);
+    } else {
+        const sg = try join3(gpa, store, &buf, mlp_root, ".shared_expert_gate");
+        defer gpa.free(sg.w);
+        defer gpa.free(sg.s);
+        defer gpa.free(sg.b);
+        try embed.dequant(sg.w, sg.s, sg.b, dims, 0, router[experts_n * dims ..][0..dims]);
+    }
     var router_b = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(router));
     errdefer router_b.free();
 
@@ -242,6 +247,8 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
     var iks_b = deadBuf(driver);
     var key_q = Q4.empty(driver);
     var val_q = Q4.empty(driver);
+    errdefer key_q.free();
+    errdefer val_q.free();
     var nk_b = deadBuf(driver);
     var nq_b = deadBuf(driver);
     var nc_b = deadBuf(driver);
@@ -264,17 +271,8 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         @memcpy(pre_buf[0..pre.len], pre);
         const lp = pre_buf[0..pre.len];
         const parts = [_][]const u8{ ".in_proj_qkv", ".in_proj_z", ".in_proj_b", ".in_proj_a" };
-        const stitched = try stitch(gpa, store, lp, &parts);
-        defer gpa.free(stitched.w);
-        defer gpa.free(stitched.s);
-        defer gpa.free(stitched.b);
-        if (stitched.w.len != gdn.proj_width * (dims / 8) * 4) return error.UnexpectedTensor;
-        proj_q = try uploadQ4(gpa, driver, stitched.w, stitched.s, stitched.b, gdn.proj_width, dims / 8);
-        const out = try join3(gpa, store, &buf, lp, ".out_proj");
-        defer gpa.free(out.w);
-        defer gpa.free(out.s);
-        defer gpa.free(out.b);
-        out_q = try uploadQ4(gpa, driver, out.w, out.s, out.b, dims, gdn.value_dim / 8);
+        proj_q = try projections.loadStitched(gpa, driver, store, lp, &parts, gdn.proj_width, dims);
+        out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.out_proj", .{lp}), dims, gdn.value_dim);
         const conv = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.conv1d.weight", .{lp}));
         if (conv.bytes.len != gdn.conv_dim * gdn.taps * 2) return error.UnexpectedTensor;
         cw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
@@ -294,17 +292,8 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         @memcpy(pre_buf[0..pre.len], pre);
         const ap = pre_buf[0..pre.len];
         const parts = [_][]const u8{ ".q_proj", ".k_proj", ".v_proj", ".indexer.index_qk_proj" };
-        const stitched = try stitch(gpa, store, ap, &parts);
-        defer gpa.free(stitched.w);
-        defer gpa.free(stitched.s);
-        defer gpa.free(stitched.b);
-        if (stitched.w.len != proj_n * (dims / 8) * 4) return error.UnexpectedTensor;
-        proj_q = try uploadQ4(gpa, driver, stitched.w, stitched.s, stitched.b, proj_n, dims / 8);
-        const out = try join3(gpa, store, &buf, ap, ".o_proj");
-        defer gpa.free(out.w);
-        defer gpa.free(out.s);
-        defer gpa.free(out.b);
-        out_q = try uploadQ4(gpa, driver, out.w, out.s, out.b, dims, out_k / 8);
+        proj_q = try projections.loadStitched(gpa, driver, store, ap, &parts, proj_n, dims);
+        out_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.o_proj", .{ap}), dims, out_k);
         const qn = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.q_norm.weight", .{ap})));
         defer gpa.free(qn);
         const kn = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.k_norm.weight", .{ap})));
@@ -324,16 +313,8 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         var pre_buf: [96]u8 = undefined;
         @memcpy(pre_buf[0..pre.len], pre);
         const pp = pre_buf[0..pre.len];
-        const key = try join3(gpa, store, &buf, pp, ".key_proj");
-        defer gpa.free(key.w);
-        defer gpa.free(key.s);
-        defer gpa.free(key.b);
-        const val = try join3(gpa, store, &buf, pp, ".value_proj");
-        defer gpa.free(val.w);
-        defer gpa.free(val.s);
-        defer gpa.free(val.b);
-        key_q = try uploadQ4(gpa, driver, key.w, key.s, key.b, wide, dims / 8);
-        val_q = try uploadQ4(gpa, driver, val.w, val.s, val.b, dims, dims / 8);
+        key_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.key_proj", .{pp}), wide, dims);
+        val_q = try projections.load(gpa, driver, store, try std.fmt.bufPrint(&buf, "{s}.value_proj", .{pp}), dims, dims);
         const nk = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.norm_key.weight", .{pp})));
         defer gpa.free(nk);
         const nq = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.norm_query.weight", .{pp})));
@@ -348,8 +329,6 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         if (conv.bytes.len != wide * 4 * 2) return error.UnexpectedTensor;
         pcw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
     }
-    errdefer key_q.free();
-    errdefer val_q.free();
 
     var shared: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
     errdefer for (&shared) |*f| f.free(gpa);
