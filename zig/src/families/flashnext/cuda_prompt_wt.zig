@@ -183,6 +183,18 @@ pub const Store = struct {
         };
     }
 
+    /// Check the exact or compatibility name without mapping its shard.
+    pub fn has(self: *const Store, requested: []const u8) bool {
+        var mapped: [512]u8 = undefined;
+        _ = self.resolveKey(requested, &mapped) catch return false;
+        return true;
+    }
+
+    /// Checkpoint-reader adapter: the borrowed tensor stays mapped until release().
+    pub fn get(self: *Store, key: []const u8) !Tensor {
+        return self.hold(key);
+    }
+
     pub fn copyOf(self: *Store, key: []const u8) ![]u8 {
         const t = try self.tensor(key);
         const out = try self.gpa.alloc(u8, t.bytes.len);

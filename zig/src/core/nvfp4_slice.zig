@@ -78,7 +78,7 @@ pub fn slice(gpa: std.mem.Allocator, source: Source, rows: Span, inputs: Span) !
 }
 
 /// Read exact stored tensors, consuming optional calibration and refusing ambiguous plain/compressed scales.
-pub fn read(ck: *ckpt.Checkpoint, gpa: std.mem.Allocator, module: []const u8, rows: Span, inputs: Span) !Linear {
+pub fn read(ck: anytype, gpa: std.mem.Allocator, module: []const u8, rows: Span, inputs: Span) !Linear {
     var buf: [512]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
     const g = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale_2", .{module}));

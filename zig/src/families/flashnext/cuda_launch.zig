@@ -6,6 +6,7 @@ const aot = cuda.aot;
 
 pub const embed = @import("cuda_embed.zig");
 pub const projection = @import("cuda_projection.zig");
+pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
@@ -371,6 +372,7 @@ test {
     _ = @import("cuda_snap.zig");
     _ = @import("cuda_config.zig");
     _ = @import("cuda_projection_load.zig");
+    _ = @import("cuda_modelopt_experts.zig");
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
 }
