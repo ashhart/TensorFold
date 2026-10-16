@@ -66,6 +66,7 @@ const usage =
     \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
     \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
+    \\  flashnext-fidelity-single MODEL FIXTURE OUTPUT  single-rank reference isolation
     \\  flashnext-fidelity-rank MODEL RANK PORT FIXTURE OUTPUT  fixed-history full score rows
     \\  flashnext-window-rank MODEL RANK PORT IDS_FILE  two-rank serial/window and rollback parity
     \\  flashnext-model-rank MODEL RANK PORT IDS_FILE  explicit full-model replay experiment (no drafts)
@@ -163,6 +164,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "experts-rows")) return experts_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "route-rows")) return route_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-fidelity-single")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "flashnext-fidelity-rank")) return flashnext_fidelity_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "flashnext-window-rank")) return flashnext_window_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "flashnext-model-rank")) return flashnext_model_rank_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));

@@ -75,6 +75,43 @@ pub fn run(gpu: check.Gpu, model: []const u8, rank: usize, port: u16, fixture: [
     }
 }
 
+pub fn runSingle(gpu: check.Gpu, model: []const u8, fixture: []const u8, output: []const u8) !void {
+    const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, fixture, gpu.gpa, .limited(1 << 22));
+    defer gpu.gpa.free(text);
+    const parsed = try std.json.parseFromSlice([]const Case, gpu.gpa, text, .{});
+    defer parsed.deinit();
+    try validate(parsed.value);
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    var glue = try flash.Glue.load(gpu.d);
+    defer glue.deinit();
+    const tri: flash.Tri = .{ .s = stream, .own = &glue };
+    const e = try flash.prompt.Engine.init(gpu.gpa, gpu.io, @constCast(gpu.d), &stream, model);
+    defer e.deinit();
+    for (parsed.value) |case| {
+        var seq = try e.newSeq(context);
+        defer seq.deinit(gpu.gpa);
+        const row_bytes = flash.prompt.vocabulary * 2;
+        const rows = try gpu.gpa.alloc(u8, (case.continuation.len + 1) * row_bytes);
+        defer gpu.gpa.free(rows);
+        try e.forward(flash.Tri, tri, &seq, case.prompt, .{});
+        @memcpy(rows[0..row_bytes], seq.logits);
+        for (case.continuation, 0..) |token, i| {
+            try e.forward(flash.Tri, tri, &seq, &.{token}, .{});
+            @memcpy(rows[(i + 1) * row_bytes ..][0..row_bytes], seq.logits);
+        }
+        const name = try std.fmt.allocPrint(gpu.gpa, "{s}.bf16", .{case.id});
+        defer gpu.gpa.free(name);
+        const path = try std.fs.path.join(gpu.gpa, &.{ output, name });
+        defer gpu.gpa.free(path);
+        try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = path, .data = rows });
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(rows, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        check.pass("fixed history {s}: prompt={d} score-rows={d} sha256={s}", .{ case.id, case.prompt.len, case.continuation.len + 1, &hex });
+    }
+}
+
 test "fixed histories reject unsafe output identities and invalid token or context bounds" {
     const good: Case = .{ .id = "short-1", .prompt = &.{1}, .continuation = &.{2} };
     try validate(&.{good});
