@@ -148,6 +148,76 @@ __device__ __forceinline__ void gemm_bf16(const __nv_bfloat16* __restrict__ X, i
     }
 }
 
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
+    const uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" ::"r"(s), "l"(gmem));
+}
+
+__device__ __forceinline__ void ldmatrix_x4(uint32_t (&r)[4], const void* smem) {
+    const uint32_t s = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s));
+}
+
+// One row, bit-identical to gemm_bf16<1, 1, 0>: a warp's 8 weight rows stream through a padded cp.async ring.
+constexpr int GEMV_STAGES = 4;
+constexpr int GEMV_CHUNK = 64;
+constexpr int GEMV_ROW = GEMV_CHUNK * 2 + 16;
+constexpr int GEMV_STAGE = 8 * GEMV_ROW;
+
+__device__ __forceinline__ void gemv_bf16(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __restrict__ W,
+                                          int N, int K, __nv_bfloat16* __restrict__ Y) {
+    __shared__ __align__(16) unsigned char ring_all[WARPS * GEMV_STAGES * GEMV_STAGE];
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int col0 = (blockIdx.x * WARPS + warp) * 8;
+    if (col0 >= N) return;
+    unsigned char* ring = ring_all + warp * GEMV_STAGES * GEMV_STAGE;
+    const unsigned char* rows = reinterpret_cast<const unsigned char*>(W + static_cast<size_t>(col0) * K);
+    const int chunks = K / GEMV_CHUNK;
+    // copies: lane (row g, pieces 2t and 2t + 1 of the row's eight 16-byte pieces)
+    auto issue = [&](int c) {
+        unsigned char* dst = ring + (c % GEMV_STAGES) * GEMV_STAGE + g * GEMV_ROW + 32 * t;
+        const unsigned char* src = rows + static_cast<size_t>(g) * K * 2 + static_cast<size_t>(c) * GEMV_CHUNK * 2 + 32 * t;
+        cp_async16(dst, src);
+        cp_async16(dst + 16, src + 16);
+    };
+#pragma unroll
+    for (int c = 0; c < GEMV_STAGES - 1; ++c) {
+        if (c < chunks) issue(c);
+        asm volatile("cp.async.commit_group;\n");
+    }
+    const uint32_t* xw = reinterpret_cast<const uint32_t*>(X);
+    const bool live = g == 0;  // the single row is A's row 0; rows 1..15 are zero as in gemm_bf16
+    float acc[4] = {0.f, 0.f, 0.f, 0.f};
+    const unsigned char* row_at = ring + (lane & 7) * GEMV_ROW + (lane >> 3) * 16;  // ldmatrix: matrix lane / 8
+    for (int c = 0; c < chunks; ++c) {
+        if (c + GEMV_STAGES - 1 < chunks) issue(c + GEMV_STAGES - 1);
+        asm volatile("cp.async.commit_group;\n");
+        asm volatile("cp.async.wait_group %0;\n" ::"n"(GEMV_STAGES - 1));
+        __syncwarp();
+        const unsigned char* stage = row_at + (c % GEMV_STAGES) * GEMV_STAGE;
+#pragma unroll
+        for (int h = 0; h < GEMV_CHUNK / 32; ++h) {
+            uint32_t b[4];
+            ldmatrix_x4(b, stage + 64 * h);
+#pragma unroll
+            for (int s = 0; s < 2; ++s) {
+                const int lo = (c * GEMV_CHUNK + 32 * h + 16 * s) / 2 + t;
+                const uint32_t a0 = live ? __ldg(xw + lo) : 0u, a2 = live ? __ldg(xw + lo + 4) : 0u;
+                mma_bf16(acc, a0, 0u, a2, 0u, b[2 * s], b[2 * s + 1]);
+            }
+        }
+        __syncwarp();
+    }
+    if (!live) return;
+#pragma unroll
+    for (int q = 0; q < 2; ++q) {
+        const int n = col0 + 2 * t + q;
+        if (n < N) Y[n] = __float2bfloat16_rn(acc[q]);
+    }
+}
+
 // Routed experts over the experts.cu plan: per 128-k block acc += dot(a_q, w_q) * a_scale * w_scale, as fused_moe.
 template <int NT, int MODE>
 __device__ __forceinline__ void expert_fp8(const uint8_t* __restrict__ A, int a_div, const float* __restrict__ As,
@@ -234,6 +304,11 @@ DRAMA_GEMM(1, 1, 0)
 DRAMA_GEMM(2, 2, 0)
 DRAMA_GEMM(4, 2, 0)
 DRAMA_GEMM(1, 1, 2)  // the semantic head: the last row, bf16-rounded logits widened to fp32
+
+extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS)
+    drama_gemv_bf16_r1(const __nv_bfloat16* X, const __nv_bfloat16* W, int N, int K, __nv_bfloat16* Y) {
+    drama_gemm::gemv_bf16(X, W, N, K, Y);
+}
 
 #define DRAMA_EXPERT(NT, MODE)                                                                                      \
     extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS) drama_expert_fp8_n##NT##_m##MODE(          \
