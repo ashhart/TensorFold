@@ -13,6 +13,7 @@ const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
 const utility_k = @import("contract_utility.zig");
 const best_k = @import("contract_row_best.zig");
+const qsa_k = @import("contract_qsa_select.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -137,6 +138,11 @@ pub fn run(gpu: check.Gpu) !void {
     var best = best_k.Best{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best") };
     defer best.deinit();
     try kernels.append(a, best.kernel());
+    var selections: [2]qsa_k.Select = undefined;
+    for ([_]bool{ false, true }, &selections) |padded, *selection|
+        selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
+    defer for (&selections) |*selection| selection.deinit();
+    for (&selections) |*selection| try kernels.append(a, selection.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

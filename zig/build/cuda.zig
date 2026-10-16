@@ -288,6 +288,15 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }) }));
     step.dependOn(&row_best_contract.step);
     flash_contract.dependOn(&row_best_contract.step);
+    const qsa_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/contract_qsa_ref.zig"),
+        .target = host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{.{ .name = "core", .module = mods.core }},
+    }) }));
+    step.dependOn(&qsa_contract.step);
+    flash_contract.dependOn(&qsa_contract.step);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat);
     const native = native_modules.engines;
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
