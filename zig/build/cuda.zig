@@ -205,6 +205,9 @@ fn h3Library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
         .imports = &.{.{ .name = "cuda", .module = cuda }},
     }) });
     lib.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
+    // the rank-to-rank exchange of a sequence-parallel world: plain C over libibverbs (rdma-core)
+    lib.root_module.addCSourceFile(.{ .file = b.path("zig/src/families/h3/h3_xchg.c"), .flags = &.{ "-O2", "-std=gnu11" } });
+    lib.root_module.linkSystemLibrary("ibverbs", .{});
     step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }
 

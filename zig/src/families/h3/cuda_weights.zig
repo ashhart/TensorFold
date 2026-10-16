@@ -24,19 +24,35 @@ pub fn read(self: *Model, path: [*:0]const u8) !bool {
     const d = &self.driver;
     var staging = try cuda.HostBuffer.alloc(d, staging_bytes);
     defer staging.free();
-    var ck = try Checkpoint.open(path);
-    defer ck.deinit();
+    // a path that ends in .tf-int8 is the saved int8 copy alone: a rank that holds no checkpoint
+    const text = std.mem.span(path);
+    const cache_only = std.mem.endsWith(u8, text, ".tf-int8");
+    var ck: ?Checkpoint = null;
+    defer if (ck) |*c| c.deinit();
     var cache_path: [1024]u8 = undefined;
-    const cache: [*:0]const u8 = @ptrCast((try std.fmt.bufPrint(&cache_path, "{s}.tf-int8\x00", .{std.mem.span(path)})).ptr);
+    var cache: [*:0]const u8 = path;
     var name: [128]u8 = undefined;
-    const qkv0 = try ck.bf16("blocks.0.attn.qkv_proj.weight");
-    const fc2_0 = try ck.bf16("blocks.0.mlp.fc2.weight");
-    self.hidden = qkv0.cols;
-    self.inner = qkv0.rows / 3;
-    self.heads = self.inner / h3.head_dim;
-    self.mlp = fc2_0.cols;
     var layers: usize = 0;
-    while (std.mem.indexOf(u8, ck.header, try std.fmt.bufPrint(&name, "\"blocks.{d}.norm1.weight\"", .{layers})) != null) layers += 1;
+    var source_bytes: usize = 0;
+    if (cache_only) {
+        const found = try readHeader(path);
+        self.hidden = found.hidden;
+        self.inner = found.inner;
+        self.mlp = found.mlp;
+        layers = found.layers;
+        source_bytes = found.source_bytes;
+    } else {
+        ck = try Checkpoint.open(path);
+        cache = @ptrCast((try std.fmt.bufPrint(&cache_path, "{s}.tf-int8\x00", .{text})).ptr);
+        const qkv0 = try ck.?.bf16("blocks.0.attn.qkv_proj.weight");
+        const fc2_0 = try ck.?.bf16("blocks.0.mlp.fc2.weight");
+        self.hidden = qkv0.cols;
+        self.inner = qkv0.rows / 3;
+        self.mlp = fc2_0.cols;
+        while (std.mem.indexOf(u8, ck.?.header, try std.fmt.bufPrint(&name, "\"blocks.{d}.norm1.weight\"", .{layers})) != null) layers += 1;
+        source_bytes = ck.?.bytes.len;
+    }
+    self.heads = self.inner / h3.head_dim;
     const hidden = self.hidden;
     const inner = self.inner;
 
@@ -48,22 +64,24 @@ pub fn read(self: *Model, path: [*:0]const u8) !bool {
         b.fc2 = try quantAlloc(self, hidden, self.mlp);
         b.norms = try cuda.DeviceBuffer.alloc(d, (2 * hidden + 2 * h3.head_dim) * 2);
     }
-    if (readCache(self, &staging, cache, ck.bytes.len) catch false) return true;
+    if (readCache(self, &staging, cache, source_bytes) catch false) return true;
+    if (cache_only) return error.CannotRead;
+    const ckp = &ck.?;
     var scratch = try cuda.DeviceBuffer.alloc(d, 4 * inner * hidden * 2);
     defer scratch.free();
     for (self.blocks, 0..) |*b, i| {
-        try quantize(self, &staging, &scratch, try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.qkv_proj.weight", .{i})), b.qkvc, 0, 0);
-        try quantize(self, &staging, &scratch, try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.to_gate_compress.weight", .{i})), b.qkvc, 3 * inner, 0);
-        try quantize(self, &staging, &scratch, try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.out_proj.weight", .{i})), b.out, 0, 0);
+        try quantize(self, &staging, &scratch, try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.qkv_proj.weight", .{i})), b.qkvc, 0, 0);
+        try quantize(self, &staging, &scratch, try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.to_gate_compress.weight", .{i})), b.qkvc, 3 * inner, 0);
+        try quantize(self, &staging, &scratch, try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.out_proj.weight", .{i})), b.out, 0, 0);
         // The SwiGLU's first projection is stored [gate; value]; its rows are laid out value, gate, value, gate.
-        try quantize(self, &staging, &scratch, try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.mlp.fc1.weight", .{i})), b.fc1, 0, self.mlp);
-        try quantize(self, &staging, &scratch, try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.mlp.fc2.weight", .{i})), b.fc2, 0, 0);
-        try upload(&staging, b.norms, 0, (try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.norm1.weight", .{i}))).bytes);
-        try upload(&staging, b.norms, hidden * 2, (try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.norm2.weight", .{i}))).bytes);
-        try upload(&staging, b.norms, hidden * 4, (try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.q_norm.weight", .{i}))).bytes);
-        try upload(&staging, b.norms, hidden * 4 + h3.head_dim * 2, (try ck.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.k_norm.weight", .{i}))).bytes);
+        try quantize(self, &staging, &scratch, try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.mlp.fc1.weight", .{i})), b.fc1, 0, self.mlp);
+        try quantize(self, &staging, &scratch, try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.mlp.fc2.weight", .{i})), b.fc2, 0, 0);
+        try upload(&staging, b.norms, 0, (try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.norm1.weight", .{i}))).bytes);
+        try upload(&staging, b.norms, hidden * 2, (try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.norm2.weight", .{i}))).bytes);
+        try upload(&staging, b.norms, hidden * 4, (try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.q_norm.weight", .{i}))).bytes);
+        try upload(&staging, b.norms, hidden * 4 + h3.head_dim * 2, (try ckp.bf16(try std.fmt.bufPrint(&name, "blocks.{d}.attn.k_norm.weight", .{i}))).bytes);
     }
-    writeCache(self, cache, ck.bytes.len) catch |e| std.debug.print("tensorfold h3: the int8 copy was not saved ({t}); the next start converts again\n", .{e});
+    writeCache(self, cache, source_bytes) catch |e| std.debug.print("tensorfold h3: the int8 copy was not saved ({t}); the next start converts again\n", .{e});
     return false;
 }
 
@@ -94,6 +112,17 @@ pub fn set(self: *Model, block: usize, which: Projection, w: u64, rows: usize, c
     args.add(@as(c_int, @intCast(half)));
     try self.launch("h3_quant_weight", .{ .x = @intCast(rows) }, 128, 0, &args);
     try self.stream.synchronize();
+}
+
+/// The saved copy's header alone, for a rank that opens the int8 copy without the checkpoint.
+fn readHeader(path: [*:0]const u8) !CacheHeader {
+    const fd = open(path, 0);
+    if (fd < 0) return error.CannotOpen;
+    defer _ = close(fd);
+    var found: CacheHeader = undefined;
+    if (pread(fd, @ptrCast(&found), @sizeOf(CacheHeader), 0) != @sizeOf(CacheHeader)) return error.CannotRead;
+    if (!std.mem.eql(u8, &found.magic, &(CacheHeader{ .source_bytes = 0, .hidden = 0, .inner = 0, .mlp = 0, .layers = 0 }).magic)) return error.BadHeader;
+    return found;
 }
 
 fn quantAlloc(self: *Model, n: usize, k: usize) !h3.Quant {
