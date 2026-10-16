@@ -90,6 +90,28 @@ pub const Request = struct {
     prompt_logprobs: ?u8 = null,
 };
 
+/// Mono PCM written before a successful speech request's finished event.
+pub const SpeechResult = struct { samples: usize = 0 };
+
+/// The request and all its storage remain caller-owned until finished, including on cancellation.
+pub const SpeechRequest = struct {
+    prompt: []const u32,
+    pcm: []f32,
+    result: *SpeechResult,
+    seed: u64,
+    max_frames: u32 = 1024,
+    temperature: f32 = 1,
+    top_p: f32 = 0.9,
+    top_k: u32 = 30,
+};
+
+pub const SpeechInfo = struct {
+    sample_rate: u32,
+    frame_length: u32,
+    max_frames: u32,
+    max_prompt_tokens: u32,
+};
+
 pub const Reason = enum { stop, length, cancelled, failed };
 
 /// What a finished reply's rounds did, for its runtime fields and /metrics.
@@ -131,6 +153,9 @@ pub const Sink = struct {
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
     name: []const u8 = "lanes",
+    /// Speech-only models must not be offered through the text completion routes.
+    text_generation: bool = true,
+    speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
     context_window: u32 = 0,
@@ -259,7 +284,8 @@ pub const Status = struct {
     generation_tokens: u64 = 0,
 };
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans };
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Unsupported };
+pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
@@ -340,6 +366,8 @@ pub const Engine = struct {
         score: ?*const fn (ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
+        /// One synthesis; caller storage lives until finished. Null: this engine does not synthesize speech.
+        submit_speech: ?*const fn (ctx: *anyopaque, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void = null,
     };
 
     pub fn info(e: Engine) Info {
@@ -348,6 +376,10 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         return e.vtable.submit(e.ctx, id, request, sink);
+    }
+    pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
+        const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
         e.vtable.cancel(e.ctx, id);
