@@ -2,6 +2,7 @@ import { activeEngineModelSettings, engineProfileContextWindow, engineProfileWor
 import { estimateTokens, planCompaction } from './compaction'
 import { getModelContextWindow, recommendedCompactionThreshold } from './model-context-windows'
 import { engineContextWindow } from './engine/context'
+import { hostedContextWindow } from './hosted-context'
 import type {
   ApiMessage,
   ContextPressureAction,
@@ -270,6 +271,22 @@ function modelContextProfile(settings: Settings, provider: Provider, model: stri
       note: 'Context window reported by the running TensorFold engine.',
     }
   }
+  const hosted = hostedContextWindow(provider.id, model)
+  if (hosted != null) {
+    const working = recommendedCompactionThreshold(hosted)
+    return {
+      id: `${provider.id}:${model}`,
+      providerId: provider.id,
+      providerName: provider.name,
+      model,
+      kind: 'local',
+      nominalContextTokens: hosted,
+      recommendedWorkingTokens: working,
+      kvCacheTokens: Math.max(1_000, Math.floor(working * 0.25)),
+      source: 'endpoint',
+      note: 'Context window the provider listed for the model (vLLM max_model_len).',
+    }
+  }
   const known = KNOWN_LOCAL_MODELS.find((entry) => entry.match.test(model))
   const namedContext = getModelContextWindow(model) ?? inferContextFromModelName(model)
   const localLimit = settings.localContextLimit || DEFAULT_LOCAL_CONTEXT
@@ -297,6 +314,21 @@ function modelContextProfile(settings: Settings, provider: Provider, model: stri
 
 function cloudContextProfile(settings: Settings, provider: Provider, model: string | null): ModelContextProfile {
   const configuredLimit = settings.contextLimit || DEFAULT_CLOUD_CONTEXT
+  const hosted = hostedContextWindow(provider.id, model)
+  if (hosted != null) {
+    return {
+      id: `${provider.id}:${model || 'default'}`,
+      providerId: provider.id,
+      providerName: provider.name,
+      model: model || provider.models[0] || 'default',
+      kind: 'cloud',
+      nominalContextTokens: hosted,
+      recommendedWorkingTokens: recommendedCompactionThreshold(hosted),
+      kvCacheTokens: 0,
+      source: 'endpoint',
+      note: 'Context window the provider listed for the model (vLLM max_model_len).',
+    }
+  }
   const realWindow = getModelContextWindow(model)
   const nominalContextTokens = realWindow ?? configuredLimit
   const recommendedWorkingTokens = realWindow

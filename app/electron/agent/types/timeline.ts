@@ -772,7 +772,7 @@ export interface TokenUsageSnapshot {
 // ---- Local model context / KV pressure telemetry ----
 export type ContextPressureStatus = 'idle' | 'healthy' | 'warm' | 'pressured' | 'critical'
 export type ContextPressureAction = 'continue' | 'summarize_next' | 'compact_now' | 'reduce_pins' | 'split_thread'
-export type ContextRegistrySource = 'known' | 'model_name' | 'settings' | 'fallback' | 'engine'
+export type ContextRegistrySource = 'known' | 'model_name' | 'settings' | 'fallback' | 'engine' | 'endpoint'
 
 export interface ModelContextProfile {
   id: string

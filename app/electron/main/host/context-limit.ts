@@ -4,6 +4,7 @@ import { getModelContextWindow, recommendedCompactionThreshold } from '../../age
 import { store } from '../state'
 import { isEngineProvider } from '../../agent/engine/provider'
 import { engineContextWindow } from '../../agent/engine/context'
+import { hostedContextWindow } from '../../agent/hosted-context'
 
 export function parseJsonLoose(s: string): any {
   try { const m = s.match(/\{[\s\S]*\}/); return JSON.parse(m ? m[0] : s) } catch { return null }
@@ -48,6 +49,8 @@ export interface ContextLimitInputs {
  *    170k recommended trigger instead of an unreachable 256k.
  *  - Local providers: also folds in the local setting and the legacy name-based
  *    inference so a tiny 4k local model compacts early.
+ *  - Hosted providers: the window the provider's own /v1/models reported
+ *    (vLLM's `max_model_len`) replaces the name-based guesses, local or cloud.
  *
  * An explicit `override` is honoured verbatim but still clamped to the model's
  * recommended trigger so a user can never set a limit the model can't reach.
@@ -63,6 +66,12 @@ export function computeContextLimit(provider: Provider, model: string | null, in
   }
   if (engineWindow != null) {
     const trigger = recommendedCompactionThreshold(engineWindow)
+    return inputs.override && inputs.override > 0 ? Math.min(inputs.override, trigger) : trigger
+  }
+  // A hosted provider's models endpoint reported the window (vLLM's max_model_len); that beats the guesses too.
+  const hostedWindow = hostedContextWindow(provider.id, model)
+  if (hostedWindow != null) {
+    const trigger = recommendedCompactionThreshold(hostedWindow)
     return inputs.override && inputs.override > 0 ? Math.min(inputs.override, trigger) : trigger
   }
   const cloudLimit = inputs.cloudLimit || 128_000

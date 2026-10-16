@@ -14,6 +14,26 @@ function idsFromModelsPayload(json: any): string[] {
   return uniqueSorted(data.map((model) => (typeof model === 'string' ? model : model?.id ?? model?.name ?? model?.model)))
 }
 
+// A model entry's context window: vLLM's `max_model_len` (TensorFold's own server serves it too),
+// then the `context_length` some compatible hosts put in its place. Null when the entry has none.
+function entryContextTokens(entry: any): number | null {
+  if (typeof entry !== 'object' || entry === null) return null
+  const value = entry.max_model_len ?? entry.context_length
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : null
+}
+
+// Context windows by model id from an OpenAI-compatible /v1/models payload, vLLM's format.
+export function contextsFromModelsPayload(json: any): Record<string, number> {
+  const data: any[] = json?.data ?? json?.models ?? (Array.isArray(json) ? json : [])
+  const out: Record<string, number> = {}
+  for (const entry of data) {
+    const id = typeof entry === 'string' ? null : entry?.id ?? entry?.name ?? entry?.model
+    const tokens = entryContextTokens(entry)
+    if (typeof id === 'string' && id.trim() && tokens != null) out[id.trim()] = tokens
+  }
+  return out
+}
+
 async function fetchJson(url: string, apiKey = '', timeoutMs = LOCAL_TIMEOUT_MS, fetchImpl: typeof fetch = fetch): Promise<{ status: number; ok: boolean; json: any; statusText: string }> {
   try {
     const res = await fetchImpl(url, {
@@ -62,12 +82,16 @@ export async function fetchLmStudioModels(baseUrl = 'http://127.0.0.1:1234/v1', 
   throw new Error(`LM Studio HTTP ${compat.status || native.status}`)
 }
 
-export async function fetchOpenAiCompatibleModels(baseUrl: string, apiKey = '', timeoutMs = LOCAL_TIMEOUT_MS, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+export async function fetchOpenAiCompatibleModelsDetailed(baseUrl: string, apiKey = '', timeoutMs = LOCAL_TIMEOUT_MS, fetchImpl: typeof fetch = fetch): Promise<{ models: string[]; contextTokens: Record<string, number> }> {
   fetchImpl = createLocalProviderFetch(baseUrl, fetchImpl)
   const compat = await fetchJson(`${baseUrl.replace(/\/+$/, '')}/models`, apiKey, timeoutMs, fetchImpl)
-  if (compat.ok) return idsFromModelsPayload(compat.json)
+  if (compat.ok) return { models: idsFromModelsPayload(compat.json), contextTokens: contextsFromModelsPayload(compat.json) }
   if (!compat.status) throw new Error(`Couldn't reach ${baseUrl} — ${compat.statusText || 'connection refused'}.`)
   throw new Error(`Provider models HTTP ${compat.status || compat.statusText || 'unreachable'}`)
+}
+
+export async function fetchOpenAiCompatibleModels(baseUrl: string, apiKey = '', timeoutMs = LOCAL_TIMEOUT_MS, fetchImpl: typeof fetch = fetch): Promise<string[]> {
+  return (await fetchOpenAiCompatibleModelsDetailed(baseUrl, apiKey, timeoutMs, fetchImpl)).models
 }
 
 async function discoverOllama(): Promise<ProviderDiscovery> {
