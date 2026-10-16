@@ -155,6 +155,43 @@ try {
   const large = await lowMemory.scan()
   assert.equal(large.models.every((model) => !model.loadable), true)
 
+
+  // AppleDouble companions (._file) are resource forks, never checkpoint assets.
+  const adModels = path.join(root, 'AppleDouble Models')
+  const adSharded = path.join(adModels, 'sharded-checkpoint')
+  await fs.mkdir(adSharded, { recursive: true })
+  await fs.writeFile(path.join(adSharded, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }))
+  await fs.writeFile(path.join(adSharded, 'tokenizer.json'), JSON.stringify({ model: { type: 'BPE', vocab: {} } }))
+  await fs.writeFile(path.join(adSharded, 'model-00001-of-00002.safetensors'), weights())
+  await fs.writeFile(path.join(adSharded, 'model-00002-of-00002.safetensors'), weights())
+  // Stray invalid companions beside the real shards: not counted as shards, weights, or metadata.
+  await fs.writeFile(path.join(adSharded, '._model-00001-of-00002.safetensors'), Buffer.alloc(4096, 0xff))
+  await fs.writeFile(path.join(adSharded, '._model-00002-of-00002.safetensors'), Buffer.alloc(4096, 0xff))
+  const adLib = library({ appHome: path.join(root, 'appledouble-app') })
+  const adFound = await adLib.addFolder(adModels)
+  const adModel = adFound.models.find((model) => model.path === adSharded)!
+  assert.equal(adModel.complete, true, adModel.reason ?? '')
+  assert.equal(adModel.loadable, true)
+  assert.equal(adModel.weightsBytes, 2 * weights().length, 'companions add nothing to the weight total')
+  assert.equal(adModel.memoryFloorBytes, 2 * weights().length + 2 * 1024 ** 3)
+  assert.equal((await adLib.resolve(adModel.id)).path, adSharded)
+
+  // A stray companion in the selected parent must not stop discovery of the nested checkpoint below it.
+  const nested = path.join(adModels, 'nested', 'real-checkpoint')
+  await fs.mkdir(nested, { recursive: true })
+  await checkpoint(nested)
+  await fs.writeFile(path.join(adModels, '._old.safetensors'), Buffer.alloc(4096, 0xff))
+  const rediscovered = await library({ appHome: path.join(root, 'appledouble-nested-app') }).addFolder(adModels)
+  assert.equal(rediscovered.models.find((model) => model.path === nested)?.loadable, true, 'a stray parent companion does not block nested discovery')
+  assert.equal(rediscovered.models.some((model) => model.path === adModels), false, 'the parent is not mistaken for a checkpoint')
+
+  // A real corrupt shard still fails the checkpoint.
+  const corruptShard = path.join(adModels, 'corrupt-shard')
+  await checkpoint(corruptShard)
+  await fs.truncate(path.join(corruptShard, 'model.safetensors'), 12)
+  const corruptFound = await library({ appHome: path.join(root, 'appledouble-corrupt-app') }).addFolder(adModels)
+  assert.match(corruptFound.models.find((model) => model.path === corruptShard)!.reason!, /safetensors/)
+
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')
   await assert.rejects(() => library().snapshot(), /library is invalid/)
