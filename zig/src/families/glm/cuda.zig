@@ -3,6 +3,7 @@
 pub const experts = @import("cuda_experts.zig");
 pub const exl3 = @import("cuda_exl3.zig");
 pub const vision = @import("cuda_vision.zig");
+pub const mm = @import("cuda_mm.zig");
 pub const vision_config = @import("vision_config.zig");
 pub const image_core = @import("image_core.zig");
 /// An image's bytes to the tower's patches, as the Metal family prepares them (core's decoder).
@@ -33,6 +34,7 @@ test {
     _ = experts;
     _ = exl3;
     _ = vision;
+    _ = mm;
     _ = image_core;
     _ = glue;
     _ = kda;

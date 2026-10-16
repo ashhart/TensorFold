@@ -2,9 +2,10 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const mm_mod = @import("cuda_mm.zig");
 
 /// What the forward's kernels launch from: our glue's functions.
-pub const Set = struct { glue: *const Kernels };
+pub const Set = struct { glue: *const Kernels, mm: ?*const mm_mod.Kernels = null }; // mm: bf16 linears tiled at load
 
 /// Our glm_glue.cu's functions.
 pub const Kernels = struct {

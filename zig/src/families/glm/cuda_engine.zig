@@ -13,6 +13,7 @@ const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
 const images_mod = @import("cuda_images.zig");
+const prof_mod = @import("cuda_prof.zig");
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
@@ -70,6 +71,7 @@ pub const Engine = struct {
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
+    profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     settings: ranks.Settings,
     m: fw.Modules,
     stream: cuda.Stream,
@@ -140,6 +142,10 @@ pub const Engine = struct {
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
         e.w = try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp);
+        if (tiledLinears()) { // our bf16 linears (glm_mm) on their tiled weights; TF_GLM_MM=0 keeps the glue's
+            try weights.tileLinears(&e.w, &e.m.mm, stream, d);
+            e.m.tiled = true;
+        }
         errdefer e.w.deinit();
         try e.bind(0);
         errdefer {
@@ -160,6 +166,9 @@ pub const Engine = struct {
         errdefer e.pairs.free();
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world), "cuMemsetD8"); // each pair's padding stays zero
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
+        if (prof_mod.Prof.wanted()) for (&e.profs) |*p| {
+            p.* = try prof_mod.Prof.init(d, io);
+        };
         errdefer e.smp.deinit();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
         try e.stream.synchronize();
@@ -411,11 +420,19 @@ pub const Engine = struct {
     pub fn verify(e: *Engine, ids: []const u32, out: []u32) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
         var one: [1]fw.Rank = undefined;
-        const f = e.view(&e.bd, &one);
+        var f = e.view(&e.bd, &one);
         const at = e.cur.st.pos;
+        f.prof = e.profs[ids.len - 1];
+        if (f.prof) |p| try p.begin(e.stream, verifyLabel(ids.len));
         try f.run(@ptrCast(ids));
         e.cur.rows_at = e.bd.fnormed;
         try e.draw(e.bd.logits, ids.len, at + 1, out);
+        if (f.prof) |p| p.end();
+    }
+
+    fn verifyLabel(rows: usize) []const u8 {
+        const l = [_][]const u8{ "verify 1 row", "verify 2 rows", "verify 3 rows", "verify 4 rows", "verify 5 rows", "verify 6 rows", "verify 7 rows", "verify 8 rows" };
+        return l[@min(rows, l.len) - 1];
     }
 
     /// Several streams' windows in one forward: shared row ops, per-part attention and KDA.
@@ -513,6 +530,12 @@ pub const Engine = struct {
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
+    }
+
+    /// TF_GLM_MM=0 keeps the bf16 linears on the glue's b16 kernels (the weights stay as the checkpoint stores them).
+    fn tiledLinears() bool {
+        const v = std.c.getenv("TF_GLM_MM") orelse return true;
+        return !std.mem.eql(u8, std.mem.span(v), "0");
     }
 
     fn heatRoot() []const u8 {
