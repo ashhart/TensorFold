@@ -82,11 +82,13 @@ Valid incomplete or nonstandard submissions remain pending review, and invalid s
 
 ## Contributor profiles and leaderboards
 
-Click a contributor name on [the benchmark circuit](https://tensorfold.dev/benchmarks) to see their public benchmark history, model and hardware counts, personal best and earned milestones. Profiles include every approved receipt through pagination, not only the newest page. Profile links can be shared or opened directly. A contributor ID names an upload identity; self-chosen display names are not verified, and two identities with the same name remain separate.
+Click a contributor name on [the benchmark dashboard](https://tensorfold.dev/benchmarks) to see their public benchmark history, model and hardware counts, personal best and earned milestones. Profiles include every approved receipt through pagination, not only the newest page. Profile links can be shared or opened directly. A contributor ID names an upload identity; self-chosen display names are not verified, and two identities with the same name remain separate.
+
+The performance map plots the visible protocol-complete greedy-chat medians by first-text latency and stream-delivery speed. Each point opens its receipt, with keyboard access; the sample count describes only the loaded page, and loading more adds older results. Model and hardware filters update the map and standings.
 
 **Most benchmarks** ranks contributors by their number of approved receipts. **Fastest run** ranks each contributor by their best protocol-complete greedy-chat stream-delivery median, using the same five-repeat, 256-token workload as the run board. The model, platform and hardware filters apply to both rankings and community counters. Different models and hardware have different limits; filter the view before comparing setups. All results remain community-reported.
 
-Milestones are earned at 1, 5, 10 and 100 published runs, 3 distinct models and 3 hardware setups. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
+The profile achievement cabinet awards bronze, silver, gold and platinum trophies for published-run milestones at 1, 5, 10 and 100 runs, plus model and hardware exploration. Top contributor honours go to the highest global approved-run count; speed leader honours go to the highest global protocol-complete greedy-chat median. Awards use the unrounded global values, equal leaders share honours and missing speeds earn no speed trophy. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
 
 ## AMD (ROCm)
 
