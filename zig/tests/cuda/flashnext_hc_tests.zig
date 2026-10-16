@@ -97,7 +97,7 @@ fn writeback(r: *Rig, g: *const flash.Glue, mode: usize) !void {
             const branch = rbf(acc);
             for (0..streams) |s| {
                 const at = row * wide + s * dims + d;
-                const want = rbf(bf(h[at]) + rbf(branch * bf(inj[row * streams + s])));
+                const want = rbf(bf(h[at]) + branch * bf(inj[row * streams + s]));
                 try r.within(name, bf(hout[at]), want, ulps(want, 1));
             }
         }

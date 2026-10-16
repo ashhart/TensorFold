@@ -92,7 +92,7 @@ __device__ __forceinline__ void hc_writeback(const __nv_bfloat16* H, __nv_bfloat
         const long long at = static_cast<long long>(r) * S * D + static_cast<long long>(s) * D + d;
         float hv = bf(H[at]);
         if constexpr (MODE != 0) {
-            hv = rbf(__fadd_rn(hv, rbf(__fmul_rn(branch, bf(INJ[r * S + s])))));
+            hv = rbf(__fmaf_rn(branch, bf(INJ[r * S + s]), hv));
             HOUT[at] = __float2bfloat16_rn(hv);
         }
         const float ss = warp_sum(__fmul_rn(hv, hv));
