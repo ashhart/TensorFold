@@ -406,18 +406,18 @@ extern "C" __global__ void tf_train_relu2_back(const bf16* a, const float* da, f
     if (i < n) du[i] = da[i] * 2.0f * sqrtf(fmaxf(f32(a[i]), 0.0f));
 }
 
-// The routed pairs (slots below top_k) sorted by expert, stable: order (slot to pair), inv and offsets.
+// The routed pairs (slots below top_k) sorted by expert, stable: order (slot to pair), inv and offsets; 1024 experts.
 extern "C" __global__ void __launch_bounds__(256) tf_train_sort_pairs(const int* ids, int rows, int slots, int top_k, int experts,
                                                                      int* order, int* inv, int* offsets) {
-    __shared__ int count[256];
-    const int e = threadIdx.x;
-    int n = 0;
-    if (e < experts)
+    __shared__ int count[1024];
+    for (int e = threadIdx.x; e < experts; e += blockDim.x) {
+        int n = 0;
         for (int r = 0; r < rows; r++)
             for (int j = 0; j < top_k; j++) n += ids[r * slots + j] == e;
-    count[e] = n;
+        count[e] = n;
+    }
     __syncthreads();
-    if (e == 0) {
+    if (threadIdx.x == 0) {
         int at = 0;
         for (int x = 0; x < experts; x++) {
             const int c = count[x];
@@ -426,16 +426,17 @@ extern "C" __global__ void __launch_bounds__(256) tf_train_sort_pairs(const int*
         }
     }
     __syncthreads();
-    if (e >= experts) return;
-    int at = count[e];
-    offsets[e] = at;
-    for (int r = 0; r < rows; r++)
-        for (int j = 0; j < top_k; j++)
-            if (ids[r * slots + j] == e) {
-                order[at] = r * slots + j;
-                inv[r * top_k + j] = at;
-                at++;
-            }
+    for (int e = threadIdx.x; e < experts; e += blockDim.x) {
+        int at = count[e];
+        offsets[e] = at;
+        for (int r = 0; r < rows; r++)
+            for (int j = 0; j < top_k; j++)
+                if (ids[r * slots + j] == e) {
+                    order[at] = r * slots + j;
+                    inv[r * top_k + j] = at;
+                    at++;
+                }
+    }
 }
 
 // logits[r, e] = x[r] . gate[e] in fp32: the router's scores again, for the routing weights' gradient; a warp a (e, r).

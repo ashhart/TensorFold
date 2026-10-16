@@ -29,6 +29,17 @@ const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
+const experts_rows_tests = @import("experts_rows_tests.zig");
+const route_rows_tests = @import("route_rows_tests.zig");
+const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
+const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
+const gdn_back_tests = @import("gdn_back_tests.zig");
+const q4_back_tests = @import("q4_back_tests.zig");
+const moe_back_tests = @import("moe_back_tests.zig");
+const fn_moe_back_tests = @import("fn_moe_back_tests.zig");
+const attn_back_tests = @import("attn_back_tests.zig");
+const fn_hc_back_tests = @import("fn_hc_back_tests.zig");
+const fn_pocket_tests = @import("fn_pocket_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -50,6 +61,18 @@ const usage =
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
+    \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
+    \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
+    \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
+    \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
+    \\  gdn-back                  a Gated DeltaNet layer's input-gradient backward against float64 (synthetic)
+    \\  q4-back                   the loss through a 4-bit head: softmax rows and the split product against float64
+    \\  moe-back                  routed and shared SwiGLU experts and their router, MLX stacks and packed, against float64
+    \\  attn-back                 gated attention's input gradients against float64 at Flash Next's shapes
+    \\  fn-hc-back                Flash Next's hyper-connection backward against float64 (a block's, the final mixer's)
+    \\  fn-moe-back               moe-back with Flash Next's pocket neurons beside the shared expert
+    \\  fn-pocket [reps]          Flash Next's two pocket kernels against tf_fn_pocket_rows byte for byte; reps: times
+    \\  fn-back                   q4-back, moe-back, attn-back, gdn-back, fn-hc-back and fn-moe-back
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r <= 16) and as a prompt chunk (any r)
@@ -131,6 +154,25 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "experts-rows")) return experts_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "route-rows")) return route_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back")) return gdn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "q4-back")) return q4_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-back")) return moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "attn-back")) return attn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-hc-back")) return fn_hc_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-moe-back")) return fn_moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-pocket")) return fn_pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
+    if (std.mem.eql(u8, cmd, "fn-back")) {
+        try q4_back_tests.run(gpu);
+        try moe_back_tests.run(gpu);
+        try attn_back_tests.run(gpu);
+        try gdn_back_tests.run(gpu);
+        try fn_hc_back_tests.run(gpu);
+        return fn_moe_back_tests.run(gpu);
+    }
     if (std.mem.eql(u8, cmd, "pocket"))
         return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "window-profile")) return window_profile.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));

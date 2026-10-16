@@ -1,6 +1,8 @@
-//! The served model as the Sliding Weights view draws it: its layers, its pockets, and the shards that hold them.
+//! The served model as the Living Weights view draws it: layers, pockets and shards, named as its family names them.
 const std = @import("std");
 const json = @import("json.zig");
+const families = @import("living").families;
+const Family = @import("living").Family;
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
@@ -16,15 +18,20 @@ pub const Model = struct {
     shards: []const Shard = &.{},
 };
 
-const prefix = "backbone.layers.";
-const expert = "mixer.shared_experts.";
+/// The family a config names by its model_type; Nemotron's for one that names none (as configs before families did).
+fn familyOf(o: std.json.ObjectMap) ?Family {
+    const v = o.get("model_type") orelse return families.nemotron_h;
+    return if (v == .string) families.byModelType(v.string) else null;
+}
 
 /// The folder's config, shard headers and stats; the pocket's rows read where the shards hold one.
 pub fn scan(a: Allocator, io: Io, dir: []const u8) !Model {
     const config = try readJson(a, io, try std.fs.path.join(a, &.{ dir, "config.json" }));
     if (config != .object) return error.BadConfig;
-    const kinds = try kindsOf(a, config.object);
-    const pocket = intField(config.object, "tensorfold_learned_neurons") orelse 0;
+    const f = familyOf(config.object) orelse return error.UnknownFamily;
+    const keys = families.scoped(f, config.object) orelse return error.BadConfig; // text_config, or the top level
+    const kinds = try families.kinds(a, f, keys);
+    const pocket = intField(keys, f.keys.pocket) orelse 0;
     var moe: std.ArrayList(u16) = .empty;
     for (kinds, 0..) |k, l| if (k == 'E') try moe.append(a, @intCast(l));
     const used = try a.alloc(u16, moe.items.len);
@@ -39,7 +46,7 @@ pub fn scan(a: Allocator, io: Io, dir: []const u8) !Model {
         const path = try std.fs.path.join(a, &.{ dir, name });
         const stat = try Io.Dir.cwd().statFile(io, path, .{});
         var shard: Shard = .{ .name = name, .bytes = stat.size, .mtime = stat.mtime.toNanoseconds(), .inode = @intCast(stat.inode), .layers = &.{}, .expert_bytes = 0 };
-        readShard(a, io, path, &shard, pocket, moe.items, used) catch {};
+        readShard(a, io, path, f, &shard, pocket, moe.items, used) catch {};
         try shards.append(a, shard);
     }
     std.mem.sort(Shard, shards.items, {}, byName);
@@ -50,33 +57,13 @@ fn byName(_: void, x: Shard, y: Shard) bool {
     return std.mem.lessThan(u8, x.name, y.name);
 }
 
-/// The layer kinds as letters, from hybrid_override_pattern, else layers_block_type, else num_hidden_layers unknowns.
-fn kindsOf(a: Allocator, o: std.json.ObjectMap) ![]const u8 {
-    if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) return a.dupe(u8, v.string);
-    if (o.get("layers_block_type")) |v| if (v == .array) {
-        const out = try a.alloc(u8, v.array.items.len);
-        for (v.array.items, out) |b, *k| k.* = letter(if (b == .string) b.string else "");
-        return out;
-    };
-    const n = intField(o, "num_hidden_layers") orelse 0;
-    const out = try a.alloc(u8, n);
-    @memset(out, '?');
-    return out;
-}
-
-fn letter(name: []const u8) u8 {
-    const names = [_]struct { []const u8, u8 }{ .{ "mamba", 'M' }, .{ "moe", 'E' }, .{ "attention", '*' }, .{ "mlp", '-' } };
-    for (names) |n| if (std.mem.eql(u8, name, n[0])) return n[1];
-    return '?';
-}
-
 fn intField(o: std.json.ObjectMap, key: []const u8) ?usize {
     const v = o.get(key) orelse return null;
     return if (v == .integer and v.integer >= 0) @intCast(v.integer) else null;
 }
 
 /// The shard's header: the layers whose shared expert it holds and their bytes, and the pocket's neurons in use there.
-fn readShard(a: Allocator, io: Io, path: []const u8, shard: *Shard, pocket: usize, moe: []const u16, used: []u16) !void {
+fn readShard(a: Allocator, io: Io, path: []const u8, f: Family, shard: *Shard, pocket: usize, moe: []const u16, used: []u16) !void {
     var file = try Io.Dir.cwd().openFile(io, path, .{});
     defer file.close(io);
     var len: [8]u8 = undefined;
@@ -91,28 +78,24 @@ fn readShard(a: Allocator, io: Io, path: []const u8, shard: *Shard, pocket: usiz
     var it = header.object.iterator();
     while (it.next()) |kv| {
         const name = kv.key_ptr.*;
-        const at = std.mem.indexOf(u8, name, expert) orelse continue;
+        const expert = f.names.expert;
+        const at = std.mem.indexOf(u8, name, expert) orelse continue; // an MTP head's expert's bytes count too
         const range = offsets(kv.value_ptr.*) orelse continue;
         shard.expert_bytes += range[1] - range[0];
-        const layer = layerOf(name[0..at]) orelse continue;
+        const layer: u16 = @intCast(f.expertLayer(name) orelse continue);
         if (std.mem.indexOfScalar(u16, layers.items, layer) == null) try layers.append(a, layer);
         if (pocket == 0) continue;
+        // a row a neuron: the first input projection's scales or biases (up_proj, or a SwiGLU's gate_proj)
         const leaf = name[at + expert.len ..];
-        if (!std.mem.eql(u8, leaf, "up_proj.scales") and !std.mem.eql(u8, leaf, "up_proj.biases")) continue;
+        const proj = f.names.inputs[0];
+        if (!std.mem.startsWith(u8, leaf, proj) or leaf.len <= proj.len or leaf[proj.len] != '.') continue;
+        const part = leaf[proj.len + 1 ..];
+        if (!std.mem.eql(u8, part, "scales") and !std.mem.eql(u8, part, "biases")) continue;
         const slot = std.mem.indexOfScalar(u16, moe, layer) orelse continue;
         used[slot] = @max(used[slot], try inUse(a, io, file, 8 + n + range[0], kv.value_ptr.*, pocket));
     }
     std.mem.sort(u16, layers.items, {}, std.sort.asc(u16));
     shard.layers = layers.items;
-}
-
-/// A backbone layer's index from a name's start ("backbone.layers.13."), else null.
-fn layerOf(head: []const u8) ?u16 {
-    if (!std.mem.startsWith(u8, head, prefix)) return null;
-    const rest = std.mem.trimEnd(u8, head[prefix.len..], ".");
-    const dot = std.mem.indexOfScalar(u8, rest, '.') orelse rest.len;
-    if (dot != rest.len) return null;
-    return std.fmt.parseInt(u16, rest, 10) catch null;
 }
 
 fn offsets(entry: std.json.Value) ?[2]u64 {

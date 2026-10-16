@@ -171,32 +171,75 @@ fn gatedRms(r: *Rig, n: *const cuda.norms.Norms, heads: usize, dv: usize) !void 
     }
 }
 
-fn embed(r: *Rig, d: usize) !void {
+fn embed(r: *Rig, d: usize, group: usize, copies: usize) !void {
     var e = try cuda.embed_rows.EmbedRows.load(r.gpu.d);
     defer e.unload();
     const vocab = 300;
     const w = try r.a.alloc(u32, vocab * d / 8);
     for (w) |*x| x.* = r.rng.int(u32);
-    const sc = r.bfs(vocab * d / 64, 0.1);
-    const bi = r.bfs(vocab * d / 64, 0.5);
+    const sc = r.bfs(vocab * d / group, 0.1);
+    const bi = r.bfs(vocab * d / group, 0.5);
     const tab = r.bfs(vocab * d, 1);
     const ids = try r.a.alloc(i32, most);
     for (ids) |*x| x.* = @intCast(r.rng.uintLessThan(usize, vocab));
     const did = try r.dev(std.mem.sliceAsBytes(ids));
-    const o4 = try r.out(most * d * 2);
+    const o4 = try r.out(most * copies * d * 2);
     const o16 = try r.out(most * d * 2);
-    try e.affine4(r.s, did, try r.dev(std.mem.sliceAsBytes(w)), try r.dev(std.mem.sliceAsBytes(sc)), try r.dev(std.mem.sliceAsBytes(bi)), o4, most, d);
+    const dw = try r.dev(std.mem.sliceAsBytes(w));
+    const ds = try r.dev(std.mem.sliceAsBytes(sc));
+    const db = try r.dev(std.mem.sliceAsBytes(bi));
+    if (group == 64 and copies == 1) try e.affine4(r.s, did, dw, ds, db, o4, most, d) else try e.affine4Groups(r.s, did, dw, ds, db, o4, most, d, group, copies);
     try e.bf16(r.s, did, try r.dev(std.mem.sliceAsBytes(tab)), o16, most, d);
-    const g4 = try r.back(u16, o4, most * d);
+    const g4 = try r.back(u16, o4, most * copies * d);
     const g16 = try r.back(u16, o16, most * d);
     for (0..most) |row| {
         const t: usize = @intCast(ids[row]);
         for (0..d) |i| {
             const q: u4 = @truncate(w[t * d / 8 + i / 8] >> @intCast(4 * (i % 8)));
-            const want = aref.affine4(q, bf(sc[t * d / 64 + i / 64]), bf(bi[t * d / 64 + i / 64]));
-            try r.within("embed affine4", bf(g4[row * d + i]), want, nref.tolerance(want, .bf16));
+            const want = aref.affine4(q, bf(sc[t * d / group + i / group]), bf(bi[t * d / group + i / group]));
+            try r.within("embed affine4", bf(g4[row * copies * d + i]), want, nref.tolerance(want, .bf16));
         }
+        for (1..copies) |c| try check.sameBytes("embed affine4 copies", std.mem.sliceAsBytes(g4[(row * copies + c) * d ..][0..d]), std.mem.sliceAsBytes(g4[row * copies * d ..][0..d]));
         try check.sameBytes("embed bf16", std.mem.sliceAsBytes(g16[row * d ..][0..d]), std.mem.sliceAsBytes(tab[t * d ..][0..d]));
+    }
+}
+
+/// RMS rows `x_ld` apart with fp32 weights, and the stored outputs' sums of each `group`.
+fn rmsSums(r: *Rig, n: *const cuda.norms.Norms, width: usize, x_ld: usize, group: usize) !void {
+    const x = r.bfs(most * x_ld, 1);
+    const wf = r.weights(width);
+    const wvals = try r.a.alloc(f64, width);
+    for (wvals, wf) |*o, v| o.* = v;
+    const dx = try r.dev(std.mem.sliceAsBytes(x));
+    const dw = try r.dev(std.mem.sliceAsBytes(wf));
+    var ys: [counts.len]u64 = undefined;
+    var xss: [counts.len]u64 = undefined;
+    for (counts, 0..) |m, c| {
+        ys[c] = try r.out(m * width * 2);
+        xss[c] = try r.out(m * width / group * 4);
+        try n.rmsSums(r.s, dx, x_ld, dw, ys[c], xss[c], m, width, group, eps);
+    }
+    const y = try r.back(u16, ys[counts.len - 1], most * width);
+    const xs = try r.back(f32, xss[counts.len - 1], most * width / group);
+    const xv = try r.a.alloc(f64, width);
+    const want = try r.a.alloc(f64, width);
+    for (0..most) |row| {
+        for (xv, 0..) |*v, i| v.* = bf(x[row * x_ld + i]);
+        nref.rms(xv, wvals, eps, want);
+        for (want, 0..) |w, i| try r.within("rms sums", bf(y[row * width + i]), w, nref.tolerance(w, .bf16));
+        for (0..width / group) |j| {
+            var t: f64 = 0;
+            var abs: f64 = 0;
+            for (y[row * width + j * group ..][0..group]) |v| {
+                t += bf(v);
+                abs += @abs(bf(v));
+            }
+            try r.within("rms sums group sums", xs[row * (width / group) + j], t, abs * @as(f64, @floatFromInt(group)) * std.math.pow(f64, 2, -24) + 1e-30);
+        }
+    }
+    for (counts[0 .. counts.len - 1], 0..) |m, c| {
+        try check.sameBytes("rms sums", std.mem.sliceAsBytes(try r.back(u16, ys[c], m * width)), std.mem.sliceAsBytes(y[0 .. m * width]));
+        try check.sameBytes("rms sums group sums", std.mem.sliceAsBytes(try r.back(f32, xss[c], m * width / group)), std.mem.sliceAsBytes(xs[0 .. m * width / group]));
     }
 }
 
@@ -220,8 +263,12 @@ pub fn run(gpu: check.Gpu) !void {
     try gatedRms(&r, &n, 48, 128); // the 27B's GDN output
     try gatedRms(&r, &n, 5, 64);
     try gatedRms(&r, &n, 3, 256);
-    try embed(&r, 5120); // the 27B's hidden
-    try embed(&r, 2688);
-    try embed(&r, 192);
-    check.pass("norm rows: add_rms_h, gated rms, embed rows within float64 tolerance (worst {d:.3}), group sums of the stored outputs, every row count's bits equal", .{r.worst});
+    try embed(&r, 5120, 64, 1); // the 27B's hidden
+    try embed(&r, 2688, 64, 1);
+    try embed(&r, 192, 64, 1);
+    try embed(&r, 2560, 32, 4); // Flash Next: group 32, a copy a hyper-connection stream
+    try embed(&r, 96, 32, 1);
+    try rmsSums(&r, &n, 2560, 10240, 32); // Flash Next's MTP head: the embedding, its first stream of four
+    try rmsSums(&r, &n, 10240, 10240, 32); // and the four streams normed as one row
+    check.pass("norm rows: add_rms_h, gated rms, rms with group sums, embed rows within float64 tolerance (worst {d:.3}), group sums of the stored outputs, every row count's bits equal", .{r.worst});
 }
