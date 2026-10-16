@@ -1,7 +1,7 @@
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const auth = @import("auth.zig");
 const cli = @import("cli.zig");
 const log = @import("log.zig");
@@ -10,6 +10,7 @@ const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
 const routes = @import("routes.zig");
+const recall_routes = @import("recall_routes.zig");
 const Allocator = std.mem.Allocator;
 const posix = std.posix;
 
@@ -84,8 +85,14 @@ pub const Setup = struct {
     sampling: ?json.Value = null,
     environ: ?*const std.process.Environ.Map = null,
     started: i96 = 0,
+    /// The release, backend and GPU the open /health names.
+    identity: server_mod.Identity = .{},
+    /// A test build's TF_SLIDE_FORGET_FAIL: the fact whose check a delete fails (0: none, as in every release).
+    forget_fail: u32 = 0,
     /// Called once the socket listens, with its port (tests read it).
     on_listen: ?*const fn (port: u16) void = null,
+    /// Recall's record, attached to the engine already (--recall); null: off.
+    recall: ?*api.recall_store.Store = null,
     /// Run by `run` so the engine stops before the server is freed; null: the caller closes it after `run`.
     stop: ?EngineStop = null,
 };
@@ -149,6 +156,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .keep_warm_s = args.keep_warm,
         .default_sampling = s.sampling,
         .use_drafts = !args.no_drafts,
+        .vision_urls = args.vision_urls,
         .seed_salt = salt,
         .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
@@ -157,14 +165,18 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .compact_keep = args.compact_keep,
         .compact_memory = args.compact_memory,
         .slide_graph = args.slide_graph,
+        .slide_forget_fail = s.forget_fail,
         .cortheon = args.cortheon,
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
+        .saved_conversations = args.learn_conversations,
+        .identity = s.identity,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});
         return 1;
     };
     defer srv.deinit();
+    srv.recall = s.recall;
     if (args.loop_guard and !srv.info.loop_guard) {
         std.debug.print("tensorfold: --loop-guard is not supported by this native engine\n", .{});
         return 2;
@@ -194,6 +206,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         log.line("WARNING: default sampling is greedy (temperature <= 0) - a client that omits `temperature` decodes greedily, which on a long agentic turn can loop in reasoning and return empty content", .{});
     if (args.thinking and std.mem.indexOf(u8, s.text.templateSource(), "enable_thinking") != null)
         log.line("thinking on (the chat template's default): replies reason in reasoning_content before the answer in content, and max_tokens counts both. --no-thinking turns it off; a request can send chat_template_kwargs {{\"enable_thinking\": false}}", .{});
+    if (s.recall) |r| recall_routes.line(r);
     if (srv.cortheon) |c| log.line("cortheon on: chat requests get Cortheon's reasoning program, web research before building, and cortheon_search/cortheon_fetch run here ({s}); a request can send \"cortheon\": false", .{c.engine});
     live.columns_env = env(s, "COLUMNS");
     var ticker: live.Ticker = .{ .engine = s.engine };
@@ -208,6 +221,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     accept.join();
     lis.close();
     if (drawing) ticker.finish();
+    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the engine closes
     // the engine stops while nothing runs on it: no round meets a CUDA driver torn down by the exit
     if (s.stop) |st| st.close(st.ctx);
     var waited: u32 = 0;

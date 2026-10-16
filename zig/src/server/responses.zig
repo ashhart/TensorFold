@@ -1,6 +1,6 @@
 //! OpenAI's Responses API: each request runs as its chat completion, translated item by item and event by event.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const openai = @import("openai.zig");

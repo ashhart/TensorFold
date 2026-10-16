@@ -121,19 +121,7 @@ pub const Metal = struct {
     }
 
     pub fn backend(self: *Metal) be.Backend {
-        return .{ .ptr = self, .vtable = &.{
-            .prefill = prefillFn,
-            .first = firstFn,
-            .first_masked = grammar.firstMasked,
-            .queue = queueFn,
-            .read = readFn,
-            .verify = verifyFn,
-            .keep = keepFn,
-            .draft = draftFn,
-            .release = releaseFn,
-            .alternatives = alternativesFn,
-            .held = grammar.held,
-        } };
+        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = grammar.firstMasked, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .release = releaseFn, .alternatives = alternativesFn, .held = grammar.held, .reports_fill = true } };
     }
 
     /// The facts the round loop reads at setup (Python's NemotronH attributes), with this engine's own timings.
@@ -312,6 +300,7 @@ pub const Metal = struct {
             s.cached = @intCast(at);
             s.reuse_failed = at == 0;
         }
+        s.fill_at.store(@intCast(at), .monotonic); // a restored prefix is done the moment it is restored
         // a command buffer a chunk, each committed before the one ahead of it is waited on, so the GPU keeps a chunk queued
         var k: usize = 0;
         while (at < ids.len) {
@@ -324,6 +313,8 @@ pub const Metal = struct {
             try self.submit(.prefill, self.next, Chunks{ .n = ids.len, .c = c, .at = at, .rows = rows });
             while (self.flights.items.len > 1) try self.land();
             at += rows;
+            // landed tokens only: the newest chunk is still queued on the GPU
+            s.fill_at.store(@intCast(at - rows), .monotonic);
             if (s.reuse.hook) |hk| if (std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(at)) != null) hk.at(hk.ptr, s, @intCast(at));
         }
         if (self.trace and c.decide != lesson_route.none) try self.traceLessons(c);

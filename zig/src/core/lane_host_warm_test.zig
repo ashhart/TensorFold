@@ -144,6 +144,57 @@ test "a warm pass with no request after it runs once the engine has been quiet" 
     try std.testing.expectEqual(@as(usize, 3), chunks.n.load(.monotonic)); // every chunk ran
 }
 
+/// Status polls taken at each prompt chunk, the warm pass's apart from the request's.
+const FillPolls = struct {
+    engine: Engine = undefined,
+    warm: std.ArrayList(api.Status) = .empty,
+    real: std.ArrayList(api.Status) = .empty,
+    fn hook(ctx: *anyopaque, s: *lanes.Stream, _: usize) void {
+        const p: *@This() = @ptrCast(@alignCast(ctx));
+        var status: api.Status = .{};
+        p.engine.status(&status, &.{});
+        (if (s.max_new == 0) &p.warm else &p.real).append(std.testing.allocator, status) catch {};
+    }
+};
+
+test "a warm pass is no fill on the status page: its chunks leave the fill keys empty, a request's own are counted" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+    try host.start();
+    defer host.stop();
+    var polls: FillPolls = .{ .engine = host.engine() };
+    defer polls.warm.deinit(gpa);
+    defer polls.real.deinit(gpa);
+    target.prefill_hook = FillPolls.hook;
+    target.prefill_hook_ctx = &polls;
+    const prompt = [_]u32{ 2, 7, 1, 8 };
+    var warm: Box = .{};
+    var real: Box = .{};
+    const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true };
+    const request: Request = .{ .prompt = &prompt, .max_tokens = 4 };
+    try host.engine().submit(1, &warm_request, .{ .ctx = &warm, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, warm.wait());
+    try host.engine().submit(2, &request, .{ .ctx = &real, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, real.wait());
+    try std.testing.expectEqual(@as(usize, 3), polls.warm.items.len); // one poll a chunk
+    for (polls.warm.items) |s| {
+        try std.testing.expect(s.fill_prompt_tokens == null and s.fill_tokens_left == null);
+        try std.testing.expect(s.fill_run == 0 and !s.fill_unknown);
+    }
+    try std.testing.expectEqual(@as(usize, 3), polls.real.items.len);
+    for (polls.real.items) |s| {
+        try std.testing.expectEqual(@as(?u32, prompt.len), s.fill_prompt_tokens);
+        try std.testing.expect(s.fill_run != 0);
+    }
+}
+
 /// A paused turn on a warm host (bytes 64 + 4 a token, room for four 8-token states): the regenerate's cached tokens.
 fn pausedTurn(lookahead: u32) !struct { cached: ?u32, same: bool } {
     const gpa = std.testing.allocator;

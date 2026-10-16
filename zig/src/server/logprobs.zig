@@ -1,7 +1,7 @@
 //! OpenAI ``logprobs`` (who may ask, ``choices[0].logprobs`` from the engine's rows) and vLLM's ``prompt_logprobs``.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const reply_text = @import("reply_text.zig");
 const Server = @import("server.zig").Server;

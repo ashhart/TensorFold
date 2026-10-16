@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 pub const contract = @import("bf16_topk");
-const source = @import("bf16_topk_sources").text;
+pub const source = @import("bf16_topk_sources").text;
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
 /// Spans a wide row is split into (TF_TOPK_SPANS in the kernel) and the narrowest row split.
 const spans = 16;
