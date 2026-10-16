@@ -14,7 +14,7 @@ const E = 128;
 const top_k = 6;
 const NS = 8;
 const eps: f32 = 1e-5;
-const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 16 };
+const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 32 };
 const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
 
 fn mshape() glue.Shape {
@@ -132,7 +132,7 @@ fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize) !void {
     try r.same("top-k weights", f32, wtd, wt);
 }
 
-/// Two windows through conv and scan: the second replays three kept rows of the first, at the other parity.
+/// Windows through conv and scan, each replaying kept rows of the last at the other parity (51 steps: two stages).
 fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
     const base = try r.bfs(3 * cd, 1.0);
@@ -158,7 +158,7 @@ fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const ad = try r.dev(f32, a);
     const dskd = try r.dev(f32, dsk);
     const dtbd = try r.dev(f32, dtb);
-    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 } }) |w| {
+    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 }, .{ 1, 13, 32 }, .{ 0, 31, 20 } }) |w| {
         const parity = w[0];
         const pk = w[1];
         const rows = w[2];
@@ -333,7 +333,7 @@ const path_runs = [_][2]usize{ .{ 8, 0 }, .{ 8, 1 }, .{ 8, 2 }, .{ 8, 3 }, .{ 8,
 /// Each shape's window run alone (conv, scan) and as one stream of a shared window (Glue.mambaSegs): the same bytes.
 fn mambaPaths(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
-    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 } }; // parity, kept rows, window rows
+    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 }, .{ 0, 31, 32 } }; // parity, kept rows, window rows
     const cw = try r.dev(f32, try r.f32s(4 * cd, -0.5, 0.5));
     const cb = try r.dev(f32, try r.f32s(cd, -0.1, 0.1));
     const a = try r.dev(f32, try r.f32s(ms.heads, -2.0, -0.05));
