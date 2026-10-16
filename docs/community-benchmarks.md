@@ -80,6 +80,14 @@ Complete standard community-v1 submissions are approved and published immediatel
 
 Valid incomplete or nonstandard submissions remain pending review, and invalid submissions are rejected. Retries preserve the original submission status, so this policy does not automatically publish older pending or withdrawn results. The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported; automatic approval does not independently verify speed or hardware.
 
+## Contributor profiles and leaderboards
+
+Click a contributor name on [the benchmark circuit](https://tensorfold.dev/benchmarks) to see their public benchmark history, model and hardware counts, personal best and earned milestones. Profiles include every approved receipt through pagination, not only the newest page. Profile links can be shared or opened directly. A contributor ID names an upload identity; self-chosen display names are not verified, and two identities with the same name remain separate.
+
+**Most benchmarks** ranks contributors by their number of approved receipts. **Fastest run** ranks each contributor by their best protocol-complete greedy-chat stream-delivery median, using the same five-repeat, 256-token workload as the run board. The model, platform and hardware filters apply to both rankings and community counters. Different models and hardware have different limits; filter the view before comparing setups. All results remain community-reported.
+
+Milestones are earned at 1, 5, 10 and 100 published runs, 3 distinct models and 3 hardware setups. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
+
 ## AMD (ROCm)
 
 A ROCm build runs the same suite and saves its receipt locally, with backend `rocm` on platform `linux`. `--backend auto` picks `rocm` on that build; an attached run names it with `--backend rocm`. A managed ROCm run records the CPU and system memory, while GPU names and the driver version stay unknown. `inspect` shows a ROCm receipt as usual. The board accepts mlx and cuda receipts for now, so `--publish` with ROCm is refused before the run starts and `benchmark publish` refuses a ROCm receipt before any upload; publishing waits for the board to accept rocm.
