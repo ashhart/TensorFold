@@ -469,7 +469,7 @@ test "a lone stream handed to another driver between rounds and back replies as 
     const sets = [_]Set{
         .{ .cases = &.{ .{ .prompt = &p1, .drafts = false }, .{ .prompt = &p2, .max_new = 6 } }, .mtp = true },
         .{ .cases = &.{.{ .prompt = &p2 }}, .mtp = true },
-        .{ .cases = &.{.{ .prompt = &p2 }}, .mtp = false },
+        .{ .cases = &.{.{ .prompt = &p2, .max_new = 60 }}, .mtp = false },
     };
     for (sets) |set| {
         var cfg = try modelWith(set.mtp);
@@ -498,13 +498,19 @@ test "a lone stream handed to another driver between rounds and back replies as 
         };
         for (streams[0..set.cases.len]) |*s| try engine.addStream(s);
         var handed: usize = 0;
+        var settle = false; // a round runs on what the adopted round leaves before the next hand-back
         while (engine.activeCount() > 0) {
             try engine.step();
             if (engine.live.items.len != 1) continue;
+            if (settle) {
+                settle = false;
+                continue;
+            }
             const s = engine.live.items[0];
             if (!engine.detach(s)) continue;
             handed += 1;
             try engine.adopt(s);
+            settle = true;
         }
         try std.testing.expect(handed > 0);
         for (set.cases, streams[0..set.cases.len]) |c, *s| try expectDecode(c, s);
