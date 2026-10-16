@@ -125,7 +125,7 @@ fn encode(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: 
     const masks = try ops.vtable.mask_rows(ops.ptr, frame, hidden, 1, block - 1);
     try masks.check(block - 1, c.hidden, .bf16);
     const final = try norm(ops, frame, masks, g.norm, c.eps, 1, c.hidden);
-    const head = try ops.vtable.head(ops.ptr, frame, g.head, final);
+    const head = try ops.vtable.head(ops.ptr, frame, final);
     if (head.logits.handle == 0 or head.logits.rows != block - 1 or head.logits.dtype != .bf16 or head.logits.width == 0 or head.logits.width > c.vocab or head.logits.stride < head.logits.width) return error.DraftOperatorShape;
     if (head.token_ids) |mapping| try mapping.check(1, head.logits.width, .u32) else if (head.logits.width != c.vocab) return error.DraftCandidateId;
     const projected = try project(ops, frame, final, g.hidden_projection, preparation.mode);

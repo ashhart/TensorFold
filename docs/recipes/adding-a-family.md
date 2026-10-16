@@ -1,7 +1,8 @@
 # Adding an MLX family
 
-This guide covers the Python engine, frozen at 0.6.5. New families go on the Zig engine: see
-[adding a Zig family](adding-a-zig-family.md).
+This guide covers the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its paths are at that tag. New families go on the
+Zig engine: see [adding a Zig family](adding-a-zig-family.md).
 
 Create `src/tensorfold/families/<name>/`. The CLI discovers packages by `MODEL_TYPES`, matching
 `config.json` or its `text_config`. Keep backend imports inside the loader so discovery does not load a model.
@@ -33,7 +34,7 @@ the memory budget.
 ## Model interface
 
 `load` returns a model with `lane_family = True` and a tokenizer. The complete model protocol is in
-`src/tensorfold/engine/lane_family.py`.
+[`src/tensorfold/engine/lane_family.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/engine/lane_family.py).
 
 | Member | Contract |
 | --- | --- |
@@ -72,7 +73,9 @@ must be supplemented by the real model dimensions.
 
 ## Tests and measurements
 
-Use `tests/lane_fakes.py` and `tests/test_family_streams.py` for model-free engine cases. Add family tests
+Use [`tests/lane_fakes.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tests/lane_fakes.py) and
+[`tests/test_family_streams.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tests/test_family_streams.py) for
+model-free engine cases. Add family tests
 for forward correctness, row equality, shared streams, rollback, snapshots and context/memory admission.
 Exercise thinking on and off, tools, later instructions and templates that rewrite earlier turns.
 

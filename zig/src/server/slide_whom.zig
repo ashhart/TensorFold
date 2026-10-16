@@ -15,6 +15,26 @@ pub fn yesNo(question: []const u8) bool {
     return false;
 }
 
+/// I and my (and Polish first-person verbs) in Polish, German, French, Spanish, Italian, Portuguese and Dutch.
+pub const own_words = [_][]const u8{ "mój", "moja", "moje", "mojego", "mojej", "moim", "moją", "moi", "mnie", "nasz", "nasza", "nasze", "naszego", "jestem", "mam", "lubię", "mieszkam", "pracuję", "ich", "mein", "meine", "meinen", "meinem", "meiner", "mir", "mich", "wir", "unser", "unsere", "moi", "nous", "notre", "yo", "mis", "mío", "mía", "nosotros", "nuestro", "nuestra", "mio", "miei", "noi", "nostro", "nostra", "meu", "minha", "meus", "nós", "nosso", "nossa", "ik", "mijn", "mij", "wij" };
+
+/// Whether `word` is I, my or we in one of those languages.
+pub fn ownWord(word: []const u8) bool {
+    for (own_words) |f| if (std.ascii.eqlIgnoreCase(word, f)) return true;
+    return false;
+}
+
+/// I and we (and Polish first-person verbs) in English and those languages: the user doing what a phrase says.
+const user_words = [_][]const u8{ "i", "i'm", "i've", "i'd", "we", "we're", "we've", "ja", "jestem", "mam", "lubię", "mieszkam", "pracuję", "ich", "wir", "je", "nous", "yo", "nosotros", "io", "noi", "eu", "nós", "ik", "wij" };
+
+/// Whether a phrase opens with the user as its subject ("I live in Bristol"), not with something of theirs ("My dog").
+pub fn userOpens(phrase: []const u8) bool {
+    var it = std.mem.tokenizeAny(u8, phrase, delimiters);
+    const first = it.next() orelse return false;
+    for (user_words) |w| if (std.ascii.eqlIgnoreCase(first, w)) return true;
+    return false;
+}
+
 /// Whether a question is still the user's own: it says I or my, never your, and you only once ("Do you remember").
 pub fn firstPerson(question: []const u8) bool {
     var mine = false;
@@ -22,6 +42,7 @@ pub fn firstPerson(question: []const u8) bool {
     var it = std.mem.tokenizeAny(u8, question, delimiters);
     while (it.next()) |w| {
         for ([_][]const u8{ "i", "my", "me", "mine", "our", "we", "us", "i'm", "i've" }) |f| mine = mine or std.ascii.eqlIgnoreCase(w, f);
+        mine = mine or ownWord(w);
         for ([_][]const u8{ "your", "yours", "yourself", "you're", "you've" }) |f| if (std.ascii.eqlIgnoreCase(w, f)) return false;
         you += @intFromBool(std.ascii.eqlIgnoreCase(w, "you"));
     }
@@ -165,6 +186,15 @@ test "a rewritten question still asks about the user" {
     try std.testing.expect(firstPerson("Do you know my favourite colour?"));
     try std.testing.expect(!firstPerson("Do you know which colour you like?"));
     try std.testing.expect(!firstPerson("Do you remember which colour is your favourite?"));
+}
+
+test "a phrase opens with the user, or with something of theirs" {
+    try std.testing.expect(userOpens("I live in Bristol"));
+    try std.testing.expect(userOpens("I'm allergic to peanuts"));
+    try std.testing.expect(userOpens("Mieszkam w Gdańsku"));
+    try std.testing.expect(!userOpens("My sister"));
+    try std.testing.expect(!userOpens("Our company's warehouse robot"));
+    try std.testing.expect(!userOpens("Ines Calloway"));
 }
 
 test "a Japanese question is the user's own when it says I, never when it says your" {
