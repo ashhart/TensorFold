@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare (TF_Q35_RESUME: from a copy).
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare (TF_Q35_RESUME: from a copy; fp8: fp8 caches).
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !u8 {
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
     }
-    if (args.len != 5) {
+    if (args.len != 5 and !(args.len == 6 and std.mem.eql(u8, args[5], "fp8"))) {
         std.debug.print("{s}", .{usage});
         return 2;
     }
@@ -39,7 +39,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
     defer ctx.deinit();
-    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1]);
+    const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
     defer e.deinit();
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
     const prefill = try envCount("TF_Q35_PREFILL");

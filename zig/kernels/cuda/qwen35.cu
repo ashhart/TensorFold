@@ -5,7 +5,6 @@
 using namespace tf_q35;
 
 // P (device counts, one graph for every shape): chunks, width, rows, windows, recorded; rowpar/rowanc give the tree.
-__device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
 __device__ __forceinline__ bool past_windows(const int* P, int s) { return P != nullptr && s >= P[3]; }
 __device__ __forceinline__ bool recorded(const int* P) { return P != nullptr && P[4] != 0; }
 
@@ -317,60 +316,23 @@ extern "C" __global__ void __launch_bounds__(64) tf_q35_head_norm(const __nv_bfl
     }
 }
 
-// M-RoPE's interleaved sections (mrope_section 11, 11, 10): frequency i turns by the t, h or w position.
-__device__ __forceinline__ int mrope_axis(int i) { return (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0); }
-
-// RoPE on the first 64 of HD: pairs (i, i + 32) turned by pos[axis(i)] * theta^(-i / 32); text has one position.
-__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3]) {
-    if (d >= 64) return x[d];
-    const int i = d % 32;
-    const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
-    float sn, cs;
-    sincosf(angle, &sn, &cs);
-    const float a = bf(x[i]), b = bf(x[i + 32]);
-    return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
-}
-
-// A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
-__device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
-
-// A row's chunk width from its own logical keys alone, as its one-row step's: at most MAXCH chunks, 128-key multiples.
-__device__ __forceinline__ int chunk_keys(int keys) { return max(128, (keys + MAXCH * 128 - 1) / (MAXCH * 128) * 128); }
-
-// The window row holding a row's nth seen window key.
-__device__ __forceinline__ int seen_row(unsigned anc, int n) {
-    if (anc >> 31) return n;
-    for (int j = 0; j < n; j++) anc &= anc - 1;
-    return __ffs(anc) - 1;
-}
+// A key and value as bf16 rows in their cache slot (qwen35.cu's layout: a layer's keys then values, kvh blocks of cap).
+struct StoreBf16 {
+    int layer, kvh;
+    __device__ __forceinline__ void operator()(const Seg& sg, int h, int slot, int d, __nv_bfloat16 k, __nv_bfloat16 v) const {
+        __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * kvh * sg.cap * HD;
+        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
+        keys[dst] = k;
+        keys[(size_t)kvh * sg.cap * HD + dst] = v;
+    }
+};
 
 // Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
                                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
                                                                 const int* __restrict__ P, const int* __restrict__ M) {
-    const int QH = geo.qh, KVH = geo.kvh;
-    const int d = threadIdx.x;
-    if (past_rows(P, blockIdx.x)) return;
-    const size_t m = blockIdx.x;
-    const Seg sg = segs[rowseg[m]];
-    // an image prompt's chunk reads each row's t, h and w positions from M ([3][MAXR]); other rows are shifted text
-    const int text = sg.len + rows_seen(rowanc[m]) - 1 + sg.delta;
-    int pos[3] = {text, text, text};
-    if (M != nullptr)
-        for (int a = 0; a < 3; a++) pos[a] = M[a * MAXR + m];
-    const int slot = sg.len + (int)m - sg.row0;
-    __shared__ __nv_bfloat16 qs[MAXQ * HD];
-    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
-    __syncthreads();
-    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
-    __nv_bfloat16* keys = reinterpret_cast<__nv_bfloat16*>(sg.kv) + (size_t)layer * 2 * KVH * sg.cap * HD;
-    __nv_bfloat16* values = keys + (size_t)KVH * sg.cap * HD;
-    for (int h = 0; h < KVH; h++) {
-        const size_t dst = ((size_t)h * sg.cap + slot) * HD + d;
-        keys[dst] = rotate(Kn + (m * KVH + h) * HD, d, pos);
-        values[dst] = Vr[(m * KVH + h) * HD + d];
-    }
+    rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreBf16{layer, geo.kvh});
 }
 
 // Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).

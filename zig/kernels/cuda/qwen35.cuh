@@ -78,4 +78,61 @@ __device__ __forceinline__ float warp_sum(float x) {
     return x;
 }
 
+// P (device counts): the row past the forward's rows, as qwen35.cu's other counts read it.
+__device__ __forceinline__ bool past_rows(const int* P, int m) { return P != nullptr && m >= P[2]; }
+
+// M-RoPE's interleaved sections (mrope_section 11, 11, 10): frequency i turns by the t, h or w position.
+__device__ __forceinline__ int mrope_axis(int i) { return (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0); }
+
+// RoPE on the first 64 of HD: pairs (i, i + 32) turned by pos[axis(i)] * theta^(-i / 32); text has one position.
+__device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, const int pos[3]) {
+    if (d >= 64) return x[d];
+    const int i = d % 32;
+    const float angle = (float)pos[mrope_axis(i)] * powf(10000000.0f, -(float)i / 32.0f);
+    float sn, cs;
+    sincosf(angle, &sn, &cs);
+    const float a = bf(x[i]), b = bf(x[i + 32]);
+    return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
+}
+
+// A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
+__device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
+
+// A row's chunk width from its own logical keys alone, as its one-row step's: at most MAXCH chunks, 128-key multiples.
+__device__ __forceinline__ int chunk_keys(int keys) { return max(128, (keys + MAXCH * 128 - 1) / (MAXCH * 128) * 128); }
+
+// The window row holding a row's nth seen window key.
+__device__ __forceinline__ int seen_row(unsigned anc, int n) {
+    if (anc >> 31) return n;
+    for (int j = 0; j < n; j++) anc &= anc - 1;
+    return __ffs(anc) - 1;
+}
+
+// A row's t, h and w: an image prompt's chunk reads them from M ([3][MAXR]); other rows are text, shifted past images.
+__device__ __forceinline__ void row_positions(const Seg& sg, unsigned anc, size_t m, const int* M, int pos[3]) {
+    const int text = sg.len + rows_seen(anc) - 1 + sg.delta;
+    for (int a = 0; a < 3; a++) pos[a] = M != nullptr ? M[a * MAXR + m] : text;
+}
+
+// The rope kernels' body for either cache: queries rotated in place, each key head's rotated key and value stored.
+template <typename Store>
+__device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
+                                          const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
+                                          const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc,
+                                          const int* __restrict__ P, const int* __restrict__ M, Store store) {
+    const int QH = geo.qh, KVH = geo.kvh;
+    const int d = threadIdx.x;
+    if (past_rows(P, blockIdx.x)) return;
+    const size_t m = blockIdx.x;
+    const Seg sg = segs[rowseg[m]];
+    int pos[3];
+    row_positions(sg, rowanc[m], m, M, pos);
+    const int slot = sg.len + (int)m - sg.row0;
+    __shared__ __nv_bfloat16 qs[MAXQ * HD];
+    for (int h = 0; h < QH; h++) qs[h * HD + d] = Qn[(m * QH + h) * HD + d];
+    __syncthreads();
+    for (int h = 0; h < QH; h++) Qn[(m * QH + h) * HD + d] = rotate(qs + h * HD, d, pos);
+    for (int h = 0; h < KVH; h++) store(sg, h, slot, d, rotate(Kn + (m * KVH + h) * HD, d, pos), Vr[(m * KVH + h) * HD + d]);
+}
+
 }  // namespace tf_q35
