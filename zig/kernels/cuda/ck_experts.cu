@@ -181,8 +181,8 @@ struct PromptStage {
     uint32_t sb[2][64];
 };
 
-// What a prompt block writes: fp32 sums, or relu^2 rows quantized as tf_ck_quant4 quantizes them (codes, scales).
-enum PromptEpi : int { F32 = 0, RELU2_NVFP4 = 1 };
+// fp32 sums; relu^2 rows quantized as tf_ck_quant4 does; or an item's shares summed as tf_super_combine sums them.
+enum PromptEpi : int { F32 = 0, RELU2_NVFP4 = 1, SHARE_SUM = 2 };
 
 }  // namespace tf_ck4
 
@@ -193,14 +193,15 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                                                const uint8_t* __restrict__ ws, const float* __restrict__ alpha, int K,
                                                int N, const int* __restrict__ items, const int* __restrict__ counts,
                                                const int* __restrict__ members, void* __restrict__ out,
-                                               uint8_t* __restrict__ out_scales, float g_out) {
+                                               uint8_t* __restrict__ out_scales, float g_out, int shares, int experts) {
     using namespace tf_ck4;
     __shared__ __align__(128) PromptStage st[PSTAGES];
     __shared__ __align__(16) uint2 row_codes[PM][PN / 16];  // RELU2_NVFP4: the tile's rows, written out whole
     __shared__ uint8_t row_scales[PM][PN / 16];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
     const int wm = warp >> 2, wn = warp & 3;
-    const int NB = N / 64, NT = (NB + 1) / 2, KG = K / 64, units = __ldg(counts) * NT;
+    const int NB = N / 64, NT = (NB + 1) / 2, KG = K / 64, steps = shares * KG, units = __ldg(counts) / shares * NT;
+    const size_t share_w = static_cast<size_t>(experts) * NB * KG;  // share s: pair + s, expert s * experts + e
     // loader roles: A row tid / 2 (16-byte half tid % 2) and its scales; weight tile tid / 128, 16 bytes tid % 128
     const int arow = tid >> 1, half = tid & 1, bt = tid >> 7, bq = tid & 127;
     // ldmatrix rows: lane l gives row (l % 8) + 8 ((l / 8) % 2) of chunk l / 16
@@ -209,12 +210,13 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
     int u_e = 0, u_first = 0, u_cnt = 0, u_ct = 0;
     const uint8_t *a_src = nullptr, *sa_src = nullptr;
     const uint4 *b_src = nullptr, *sb_src = nullptr;
-    auto load = [&](int stage, int kg) {
+    auto load = [&](int stage, int step) {
+        const int s = step / KG, kg = step - s * KG;
         PromptStage& p = st[stage];
-        qmm_frag::cp16(&p.a[arow][mma4::chunk<mma4::A4>(arow, half)], a_src + kg * 32);
-        if (!half) qmm_frag::cp4(&p.sa[arow], sa_src + kg * 4);
-        qmm_frag::cp16(reinterpret_cast<uint4*>(p.b[bt]) + bq, b_src + kg * 128);
-        if (bq < 16) qmm_frag::cp16(reinterpret_cast<uint4*>(p.sb[bt]) + bq, sb_src + kg * 16);
+        qmm_frag::cp16(&p.a[arow][mma4::chunk<mma4::A4>(arow, half)], a_src + s * (K / 2) + kg * 32);
+        if (!half) qmm_frag::cp4(&p.sa[arow], sa_src + s * (K / 16) + kg * 4);
+        qmm_frag::cp16(reinterpret_cast<uint4*>(p.b[bt]) + bq, b_src + (s * share_w + kg) * 128);
+        if (bq < 16) qmm_frag::cp16(reinterpret_cast<uint4*>(p.sb[bt]) + bq, sb_src + (s * share_w + kg) * 16);
     };
     // a unit's item and sources, and its first steps in flight (always PSTAGES - 1 commit groups)
     auto stage_unit = [&](int unit) {
@@ -230,7 +232,7 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
         sb_src = reinterpret_cast<const uint4*>(ws) + tile * KG * 16 + bq;
 #pragma unroll
         for (int s = 0; s < PSTAGES - 1; ++s) {
-            if (s < KG) load(s, s);
+            if (s < steps) load(s, s);
             qmm_frag::commit();
         }
     };
@@ -238,14 +240,28 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
     for (int unit = blockIdx.x; unit < units; unit += gridDim.x) {
         const int e = u_e, first = u_first, cnt = u_cnt, ct = u_ct;
         const bool cols = ct * PN + wn * 32 < N;  // a warp's 32 columns are all in or all past N
-        float acc[4][4][4] = {};
-        for (int kg = 0; kg < KG; ++kg) {
+        float acc[4][4][4] = {}, sum[4][4][4];
+        auto fold = [&](int s) {  // share s's sums times its expert's alpha, added in share order
+            const float al = __ldg(alpha + s * experts + e);
+#pragma unroll
+            for (int i = 0; i < 4; ++i)
+#pragma unroll
+                for (int j = 0; j < 4; ++j)
+#pragma unroll
+                    for (int c = 0; c < 4; ++c) {
+                        const float v = acc[i][j][c] * al;
+                        sum[i][j][c] = s ? __fadd_rn(sum[i][j][c], v) : v;
+                        acc[i][j][c] = 0.0f;
+                    }
+        };
+        for (int step = 0; step < steps; ++step) {
             qmm_frag::wait<PSTAGES - 2>();
             __syncthreads();
-            if (kg + PSTAGES - 1 < KG) load((kg + PSTAGES - 1) % PSTAGES, kg + PSTAGES - 1);
+            if (step + PSTAGES - 1 < steps) load((step + PSTAGES - 1) % PSTAGES, step + PSTAGES - 1);
             qmm_frag::commit();
+            if (EPI == SHARE_SUM && step % KG == 0 && step > 0) fold(step / KG - 1);
             if (!cols) continue;
-            const PromptStage& p = st[kg % PSTAGES];
+            const PromptStage& p = st[step % PSTAGES];
             uint2 b[4];
             uint32_t sb[4];
 #pragma unroll
@@ -266,9 +282,9 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                 for (int j = 0; j < 4; ++j) mma4::mma_fp4(acc[i][j], a, b[j].x, b[j].y, sa, sb[j]);
             }
         }
+        fold(shares - 1);
         __syncthreads();  // every warp is past the last stage: the next unit's first steps load under this epilogue
         if (unit + gridDim.x < units) stage_unit(unit + gridDim.x);
-        const float al = __ldg(alpha + e);
         if constexpr (EPI == RELU2_NVFP4) {
             if (cols) {  // tf_ck_quant4's blocks of 16 inputs: two n8 tiles across a quad, four values a lane
 #pragma unroll
@@ -280,7 +296,7 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                             float f[4], amax = 0.0f;
 #pragma unroll
                             for (int c = 0; c < 4; ++c) {
-                                const float u = fmaxf(tf_ck4::bf(acc[i][2 * bk + c / 2][2 * h + c % 2] * al), 0.0f);
+                                const float u = fmaxf(tf_ck4::bf(sum[i][2 * bk + c / 2][2 * h + c % 2]), 0.0f);
                                 f[c] = tf_ck4::bf(u * u);
                                 amax = fmaxf(amax, fabsf(f[c]));
                             }
@@ -323,12 +339,16 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                 for (int h = 0; h < 2; ++h) {
                     const int r = wm * 64 + i * 16 + g + h * 8;
                     if (r >= cnt) continue;
-                    const size_t dst = static_cast<size_t>(__ldg(members + first + r)) * N;
+                    const size_t dst = static_cast<size_t>(__ldg(members + first + r)) / shares * N;
 #pragma unroll
                     for (int j = 0; j < 4; ++j) {
                         const int col = ct * PN + wn * 32 + j * 8 + 2 * t;
-                        *reinterpret_cast<float2*>(static_cast<float*>(out) + dst + col) =
-                            make_float2(acc[i][j][2 * h] * al, acc[i][j][2 * h + 1] * al);
+                        const float v0 = sum[i][j][2 * h], v1 = sum[i][j][2 * h + 1];
+                        if constexpr (EPI == F32)
+                            *reinterpret_cast<float2*>(static_cast<float*>(out) + dst + col) = make_float2(v0, v1);
+                        else
+                            *reinterpret_cast<__nv_bfloat162*>(static_cast<__nv_bfloat16*>(out) + dst + col) =
+                                __floats2bfloat162_rn(v0, v1);
                     }
                 }
             }
@@ -344,7 +364,7 @@ extern "C" __global__ void __launch_bounds__(256)
                            const int* __restrict__ counts, const int* __restrict__ members, uint8_t* __restrict__ out,
                            uint8_t* __restrict__ out_scales, float g) {
     grouped_prompt<tf_ck4::RELU2_NVFP4>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, out_scales,
-                                        g);
+                                        g, 1, 0);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
@@ -352,5 +372,17 @@ extern "C" __global__ void __launch_bounds__(256)
                            const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
                            const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
                            const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out) {
-    grouped_prompt<tf_ck4::F32>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, nullptr, 0.0f);
+    grouped_prompt<tf_ck4::F32>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, nullptr, 0.0f, 1,
+                                0);
+}
+
+// Prompt down over `shares` x `experts` share experts: each first-share item's pairs summed over shares, bf16 a row.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ck4_down_sum_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
+                           const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
+                           const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
+                           const int* __restrict__ counts, const int* __restrict__ members,
+                           __nv_bfloat16* __restrict__ out, int shares, int experts) {
+    grouped_prompt<tf_ck4::SHARE_SUM>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, nullptr, 0.0f,
+                                      shares, experts);
 }

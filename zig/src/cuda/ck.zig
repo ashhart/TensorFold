@@ -62,8 +62,8 @@ pub const Ck = struct {
     up_fns: [2]Function, // calls under prompt_tokens, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
     down_fns: [2]Function,
     resident: [2][2]usize, // blocks the up and down kernels fill, by up_fns' order: per SM times SMs
-    prompt_fns: [2]Function, // over prompt plans: relu^2 up to NVFP4 rows, fp32 down (256 threads)
-    prompt_resident: [2]usize,
+    prompt_fns: [3]Function, // over prompt plans: relu^2 up to NVFP4 rows, fp32 down, share-summed down (256 threads)
+    prompt_resident: [3]usize,
     clusters: bool,
 
     pub fn load(d: *const Driver, capability_major: u32, sms: usize) !Ck {
@@ -87,7 +87,7 @@ pub const Ck = struct {
             c.down_fns[i] = try experts_mod.function(names[1]);
             c.resident[i] = .{ @max(1, try c.up_fns[i].occupancy(128, 0)) * sms, @max(1, try c.down_fns[i].occupancy(128, 0)) * sms };
         }
-        for ([_][:0]const u8{ "tf_ck4_up_nvfp4_prompt", "tf_ck4_down_f32_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
+        for ([_][:0]const u8{ "tf_ck4_up_nvfp4_prompt", "tf_ck4_down_f32_prompt", "tf_ck4_down_sum_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
             f.* = try experts_mod.function(name);
             n.* = @max(1, try f.occupancy(256, 0)) * sms;
         }
@@ -219,6 +219,15 @@ pub const Ck = struct {
     pub fn promptDown(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize) !void {
         var a = args(rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out);
         try runPrompt(s, c.prompt_fns[1], c.prompt_resident[1], l.dims, items, &a);
+    }
+
+    /// `down` over a prompt plan, pair p + s on expert s * experts / shares + e: shares added in order, bf16 a pair p.
+    pub fn promptSum(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize, shares: usize) !void {
+        var a = args(rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out);
+        a.add(@as(i32, @intCast(shares)));
+        a.add(@as(i32, @intCast(l.experts / shares)));
+        // the first share's items alone: pair p + s mirrors pair p, so every share's experts plan the same items
+        try runPrompt(s, c.prompt_fns[2], c.prompt_resident[2], l.dims, items / shares, &a);
     }
 
     /// One grouped launch of `f` over a plan: NVFP4 rows at `rows` (`nrows` of `k`), `n` columns of `columns` a warp.

@@ -141,6 +141,43 @@ extern "C" __global__ void __launch_bounds__(256)
     Y[r * D + d] = __float2bfloat16_rn(__fadd_rn(bf(Y[r * D + d]), rbf(v)));
 }
 
+// tf_super_combine over share sums the prompt down kernels rounded already (bf16, a row a pick): 8 columns a thread.
+extern "C" __global__ void __launch_bounds__(128)
+    tf_super_combine_sums(const __nv_bfloat16* __restrict__ Q, const float* __restrict__ WT, int K,
+                          __nv_bfloat16* __restrict__ OUT, int L) {
+    const int64_t r = blockIdx.x;
+    const int d = (blockIdx.y * 128 + threadIdx.x) * 8;
+    if (d >= L) return;
+    float acc[8] = {};
+    for (int k = 0; k < K; ++k) {
+        const uint4 q = *reinterpret_cast<const uint4*>(Q + (r * K + k) * L + d);
+        const __nv_bfloat16* v = reinterpret_cast<const __nv_bfloat16*>(&q);
+        const float w = WT[r * K + k];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) acc[i] = __fmaf_rn(bf(v[i]), w, acc[i]);
+    }
+    uint4 o;
+    __nv_bfloat16* ov = reinterpret_cast<__nv_bfloat16*>(&o);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) ov[i] = __float2bfloat16_rn(acc[i]);
+    *reinterpret_cast<uint4*>(OUT + r * L + d) = o;
+}
+
+// tf_super_moe_out over the shared expert's share sums (bf16, rounded by the prompt down kernel): 8 columns a thread.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_super_moe_out_sums(__nv_bfloat16* __restrict__ Y, const __nv_bfloat16* __restrict__ SH, int D) {
+    const int64_t r = blockIdx.x;
+    const int d = (blockIdx.y * 256 + threadIdx.x) * 8;
+    if (d >= D) return;
+    uint4 y = *reinterpret_cast<const uint4*>(Y + r * D + d);
+    const uint4 s = *reinterpret_cast<const uint4*>(SH + r * D + d);
+    __nv_bfloat16* yv = reinterpret_cast<__nv_bfloat16*>(&y);
+    const __nv_bfloat16* sv = reinterpret_cast<const __nv_bfloat16*>(&s);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) yv[i] = __float2bfloat16_rn(__fadd_rn(bf(yv[i]), bf(sv[i])));
+    *reinterpret_cast<uint4*>(Y + r * D + d) = y;
+}
+
 // The shared expert's pair ids: pair i runs share i % S (every row's shares, in order).
 extern "C" __global__ void __launch_bounds__(256) tf_super_share_ids(int* __restrict__ IDX, int n, int S) {
     const int i = blockIdx.x * 256 + threadIdx.x;
