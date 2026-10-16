@@ -1,0 +1,19 @@
+{
+  "policy": "Replace user-specific filesystem paths; exclude ZIP metadata/resource forks; preserve result values and token hashes.",
+  "replacements_by_file": {
+    "build.log": 0,
+    "commit.txt": 0,
+    "concurrent.json": 0,
+    "concurrent.log": 0,
+    "format.log": 0,
+    "host-tests.log": 4,
+    "macos.txt": 0,
+    "metal-sampling.log": 0,
+    "python-tests.log": 0,
+    "served-sampling.json": 0,
+    "served-sampling.log": 0,
+    "standalone-greedy.log": 0,
+    "standalone-prompts.json": 0,
+    "standalone-sampled.log": 0
+  }
+}

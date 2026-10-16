@@ -31,7 +31,38 @@ pub const Ctx = struct {
     draft_vocab: u32 = 154880, // the MTP head's tokens: the vocabulary's first this many
     m_row: u32 = 0, // the MTP head's logits row in m_logits (a rank log keeps each depth's in its own row)
     segs: []const Seg = &.{}, // a shared window's streams in row order (empty: every row is `s`'s)
+    inject: ?*const Inject = null, // a prompt pass's image rows over its placeholder embeddings
+    draws: ?*const Draws = null, // the rows' draw rules in row order (null: every row draws greedily)
 };
+
+/// An image prompt's tower output: prompt rows [at, at + n) of each span embed as rows [row, row + n) of `rows`.
+pub const Inject = struct { rows: Ref, spans: []const Span };
+pub const Span = struct { at: u32, n: u32, row: u32 };
+
+/// The image rows among `rows` embedding rows (positions pos..) written over `out`; nothing without an injection.
+pub fn inject(x: *const Ctx, e: mtl.ComputeEncoder, out: Ref, rows: u32, pos: u32) void {
+    const inj = x.inject orelse return;
+    const D: usize = x.c.hidden;
+    for (inj.spans) |sp| {
+        const lo = @max(sp.at, pos);
+        const hi = @min(sp.at + sp.n, pos + rows);
+        if (lo >= hi) continue;
+        const n: usize = hi - lo;
+        e.setPipeline(x.k.copy_u32);
+        bind(e, 0, .{ inj.rows.at((sp.row + lo - sp.at) * D * 2), out.at((lo - pos) * D * 2) });
+        e.setValue(@as(u32, @intCast(n * D / 2)), 2);
+        e.dispatchThreads(size(n * D / 2, 1, 1), size(256, 1, 1));
+    }
+}
+
+// The draw rules live in draw_rule.zig (Metal-free: the host references and the tests use them uncoupled).
+pub const Draws = @import("draw_rule.zig").Draws;
+pub const Rule = @import("draw_rule.zig").Rule;
+pub const ruleOf = @import("draw_rule.zig").ruleOf;
+pub const rulesFor = @import("draw_rule.zig").rulesFor;
+pub const parseSampling = @import("draw_rule.zig").parseSampling;
+pub const envSampling = @import("draw_rule.zig").envSampling;
+pub const SamplingError = @import("draw_rule.zig").SamplingError;
 
 /// One stream's rows in a shared window: its caches, its first row, its rows and the position of the first.
 pub const Seg = struct { s: *st.State, row0: u32, rows: u32, pos: u32 };
@@ -136,11 +167,12 @@ pub fn scale(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, out: Ref, rows: u32,
     e.dispatchThreads(size(width, rows, 1), size(@min(width, 256), 1, 1));
 }
 
-/// The window's tokens (`ids`, u32) as embedding rows in all four streams.
-pub fn embed(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32) void {
+/// The window's tokens (`ids`, u32, at positions pos..) as embedding rows in all four streams, image rows injected.
+pub fn embed(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) void {
     const sc = x.sc;
     const D = x.c.hidden;
     embedRows(x, e, ids, sc.h, rows);
+    inject(x, e, sc.h, rows, pos);
     e.setPipeline(x.k.streams);
     bind(e, 0, .{ sc.h, sc.x[0] });
     e.setValue([2]u32{ D, rows }, 2);
@@ -438,7 +470,7 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     const c = x.c;
     const sc = x.sc;
     const k = x.skip;
-    if (k & Class.ends == 0) embed(x, e, ids, rows);
+    if (k & Class.ends == 0) embed(x, e, ids, rows, pos);
     const plane = @as(usize, rows) * c.hidden * 2;
     snap(x, e, sc.h, plane);
     var pending = false;
@@ -480,13 +512,13 @@ pub fn backbone(x: *Ctx, e: mtl.ComputeEncoder, ids: Ref, rows: u32, pos: u32) v
     snap(x, e, sc.hidden, plane);
 }
 
-/// LM head logits and argmax for `rows` rows of `in` into `logits` and `picks` (u32).
+/// LM head logits and draws for `rows` rows of `in` into `logits` and `picks` (u32): each row its rule's draw.
 pub fn head(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32) void {
-    headOver(x, e, in, logits, picks, rows, x.c.vocab);
+    headOver(x, e, in, logits, picks, rows, x.c.vocab, false);
 }
 
-/// `head` over the vocabulary's first `vocab` tokens (the MTP head's draft vocabulary: the most frequent BPE merges).
-pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32) void {
+/// `head` over the first `vocab` tokens; `greedy` forces the MTP draft head's argmax draws.
+pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, picks: Ref, rows: u32, vocab: u32, greedy: bool) void {
     if (x.skip & Class.head != 0) return;
     const part = x.c.vocabPart(); // TP2: this Mac's half, its picks merged with the peer's
     const n: u32 = if (vocab > part[0]) @min(vocab, part[1]) - part[0] else 0;
@@ -494,10 +526,9 @@ pub fn headOver(x: *const Ctx, e: mtl.ComputeEncoder, in: Ref, logits: Ref, pick
         var q = x.w.head;
         q.n = n;
         qmv(x, e, if (x.c.tp > 1) x.k.qmv_head_tp else x.k.qmv_head, in, q, logits, rows);
-        e.setPipeline(x.k.argmax);
-        bind(e, 0, .{ logits, picks });
-        e.setValue(n, 2);
-        e.dispatchGroups(size(rows, 1, 1), size(1024, 1, 1));
+        const payload = @import("draw_rule.zig").Payload.init(if (greedy) null else x.draws, rows, vocab);
+        // draw_dispatch splits the rows into runs of one mode: sampled tf_sample_full, else argmax.
+        @import("draw_dispatch.zig").encode(e, x.k.sample, x.k.argmax, logits.buf, logits.off, picks.buf, picks.off, &payload, n);
     }
     if (x.c.tp > 1) x.ep.?.argmax(e, logits, picks, n, part[0], rows);
 }

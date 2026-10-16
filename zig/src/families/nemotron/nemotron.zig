@@ -34,4 +34,5 @@ pub const Model = model.Model;
 
 test {
     _ = @import("train_check.zig");
+    _ = @import("model.zig");
 }

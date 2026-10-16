@@ -102,9 +102,9 @@ kernel void q27_embed(device const uint* ids [[buffer(0)]], device const uint* w
   q27_write(out, at.y * a.width + at.x, value, a.metadata);
 }
 
-struct Rope { uint width, heads, rows, rotary, activation; float theta; };
+struct Rope { uint width, heads, rows, rotary, activation; float theta; uint h_end, w_end, plane; };
 
-// Rotate paired halves at each row's absolute position; untouched dimensions copy their native bits.
+// Rotate paired halves at each row's position: pair d's axis plane under M-RoPE, plane 0 (t) otherwise.
 kernel void q27_rope(device const uchar* X [[buffer(0)]], device const int* positions [[buffer(1)]],
                      constant Rope& a [[buffer(2)]], device uchar* Y [[buffer(3)]],
                      uint3 at [[thread_position_in_grid]]) {
@@ -114,7 +114,8 @@ kernel void q27_rope(device const uchar* X [[buffer(0)]], device const int* posi
   if (at.x < a.rotary) {
     const bool second = at.x >= pairs;
     const uint d = second ? at.x - pairs : at.x;
-    const float angle = float(positions[at.z]) * pow(a.theta, -float(d) / float(pairs));
+    const uint axis = d % 3 == 1 && d < a.h_end ? 1u : (d % 3 == 2 && d < a.w_end ? 2u : 0u);
+    const float angle = float(positions[axis * a.plane + at.z]) * pow(a.theta, -float(d) / float(pairs));
     const float partner = q27_read(X, base + (second ? d : d + pairs), a.activation);
     value = second ? value * cos(angle) + partner * sin(angle) : value * cos(angle) - partner * sin(angle);
   }

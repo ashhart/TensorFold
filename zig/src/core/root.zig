@@ -3,6 +3,7 @@
 pub const safetensors = @import("safetensors.zig");
 pub const exl3_format = @import("exl3_format.zig");
 pub const exlr8 = @import("exlr8.zig");
+pub const eaq_container = @import("eaq_container.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
@@ -13,6 +14,7 @@ pub const ids_json = @import("ids_json.zig");
 pub const affine4_host = @import("affine4_host.zig");
 pub const affine4_fold = @import("affine4_fold.zig");
 pub const shard_edit = @import("shard_edit.zig");
+pub const lora_merge = @import("lora_merge_dir.zig");
 pub const quant = @import("quant/quant.zig");
 pub const nvfp4_csf = @import("nvfp4_csf.zig");
 pub const nvfp4_slice = @import("nvfp4_slice.zig");
@@ -20,12 +22,21 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+/// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
+pub const contract = @import("contract.zig");
+pub const nvfp4 = @import("nvfp4.zig");
+pub const modelopt = @import("modelopt.zig");
+/// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
+pub const picture = @import("picture/picture.zig");
+/// Qwen-VL image input every Qwen3.5-VL checkpoint shares: settings, geometry, M-RoPE positions, the tower's tables.
+pub const qwen_vl = @import("qwen_vl/qwen_vl.zig");
 
 test {
     _ = safetensors;
     _ = affine4_host;
     _ = affine4_fold;
     _ = shard_edit;
+    _ = lora_merge;
     _ = quant;
     _ = nvfp4_csf;
     _ = nvfp4_slice;
@@ -33,12 +44,20 @@ test {
     _ = tuning;
     _ = norms_ref;
     _ = act_ref;
+    _ = contract;
     _ = exl3_format;
     _ = exlr8;
+    _ = eaq_container;
+    _ = @import("eaq_container_test.zig");
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
+    _ = nvfp4;
+    _ = modelopt;
+    _ = picture;
+    _ = qwen_vl;
+    _ = @import("nvfp4_fixture_test.zig");
 }

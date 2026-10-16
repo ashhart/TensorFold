@@ -2,12 +2,13 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
+const mtl = @import("metal");
 
 pub const GiB: u64 = 1 << 30;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
-pub const SHARE_PERCENT = 70;
+pub const SHARE_PERCENT = mtl.ResidencySet.share_percent;
 /// Kept back from the cache for buffers that grow with long prompts.
-pub const MARGIN: u64 = 2 * GiB;
+pub const MARGIN: u64 = mtl.ResidencySet.margin;
 /// The default budget's most, so a server leaves the rest of the RAM to other apps; --prompt-cache-gib sets more.
 pub const DEFAULT_CEILING: u64 = 16 * GiB;
 
@@ -25,8 +26,11 @@ pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fi
 
 /// Whether `bytes` held at once and the margin stay inside the 70% share of `total` bytes of RAM (0: unknown, never).
 pub fn fitsLoadLimit(bytes: u64, total: u64) bool {
-    return bytes +| MARGIN <= total / 100 * SHARE_PERCENT;
+    return residentFits(0, bytes, total);
 }
+
+/// Whether a residency set holding `held` bytes may take `added` more inside the 70% limit (RAM null: never).
+pub const residentFits = mtl.ResidencySet.fits;
 
 /// This machine's RAM (null where the OS does not say).
 pub fn ram() ?u64 {
@@ -42,6 +46,28 @@ pub fn footprint() ?u64 {
     var info: [43]u64 = undefined;
     if (proc_pid_rusage(getpid(), 4, &info) != 0) return null;
     return info[9];
+}
+
+/// The Mac hosts' session peak: the footprint's high-water mark since the last `reset_peak`.
+var host_peak: std.atomic.Value(u64) = .init(0);
+
+/// The mark after a reading: a reset restarts it at the footprint now, else it climbs to the reading's most.
+fn peakAfter(mark: *std.atomic.Value(u64), reading: u64, reset_peak: bool) u64 {
+    if (reset_peak) mark.store(reading, .monotonic) else _ = mark.fetchMax(reading, .monotonic);
+    return mark.load(.monotonic);
+}
+
+/// A Mac host's memory counts from the process footprint; a zero limit means the family has none configured.
+pub fn hostMemory(limit_bytes: u64, reset_peak: bool) ?api.Memory {
+    const active = footprint() orelse return null;
+    const peak = peakAfter(&host_peak, active, reset_peak);
+    return .{
+        .active = active,
+        .cache = 0,
+        .peak = peak,
+        .pinned = 0,
+        .limit = if (limit_bytes > 0) limit_bytes else null,
+    };
 }
 
 /// The cache plan: `gib` if it fits (or `over`), else what 70% of RAM leaves up to 16 GiB (no reading: `spare` for it).
@@ -128,9 +154,54 @@ test "a load fits only while it and the margin stay inside 70% of RAM" {
     try std.testing.expect(fitsLoadLimit(16 * GiB + (5760 << 20), 48 * GiB));
 }
 
+test "a residency set takes more only while what it holds, what joins and the margin stay inside 70% of RAM" {
+    const ram256: u64 = 256 * GiB;
+    const edge = ram256 / 100 * 70 - MARGIN;
+    try std.testing.expect(residentFits(0, 172 * GiB, ram256)); // Flash Next 6-bit's set on a 256 GB Mac
+    try std.testing.expect(residentFits(172 * GiB, edge - 172 * GiB, ram256)); // kept states up to the edge
+    try std.testing.expect(!residentFits(172 * GiB, edge - 172 * GiB + 1, ram256)); // one byte past it
+    try std.testing.expect(!residentFits(172 * GiB, 3 << 30, 240 * GiB)); // 3 GiB more on a 240 GiB Mac
+    try std.testing.expect(!residentFits(0, 181 * GiB, ram256)); // GLM-5.3-Flash's 4-bit checkpoint, GLM_RESIDENCY
+    try std.testing.expect(!residentFits(0, 1, null)); // RAM that could not be read: nothing joins
+    try std.testing.expect(!residentFits(0, 1, 0));
+    try std.testing.expect(!residentFits(std.math.maxInt(u64), 1, ram256)); // sums saturate, never wrap
+    try std.testing.expect(residentFits(edge, 0, ram256));
+}
+
 test "the OS readings: RAM and this process's footprint" {
     if (builtin.os.tag != .macos) return error.SkipZigTest;
-    const r = ram() orelse return error.NoRam;
-    const p = footprint() orelse return error.NoFootprint;
+    const r = ram() orelse return error.SkipZigTest;
+    const p = footprint() orelse return error.SkipZigTest;
     try std.testing.expect(r >= 8 * GiB and p > 0 and p < r);
+}
+
+test "a host's memory counts keep the footprint, its measured peak and the limit apart" {
+    if (builtin.os.tag != .macos) return error.SkipZigTest;
+    const limit = 235 * GiB;
+    const m = hostMemory(limit, false) orelse return error.SkipZigTest;
+    try std.testing.expect(m.active > 0); // this test process's own footprint
+    try std.testing.expect(m.peak >= m.active); // the high-water mark covers now
+    try std.testing.expectEqual(limit, m.limit.?);
+    try std.testing.expectEqual(@as(u64, 0), m.cache);
+    try std.testing.expectEqual(@as(u64, 0), m.pinned);
+    const after_reset = hostMemory(limit, true).?; // a reset starts a new peak at the footprint now
+    try std.testing.expectEqual(after_reset.active, after_reset.peak); // the reset's own reading, not an older mark
+    const again = hostMemory(limit, false).?;
+    try std.testing.expect(again.peak >= again.active); // the mark covers the footprint now
+}
+
+test "the high-water mark rises, holds, resets and the next read climbs from the reset" {
+    var mark: std.atomic.Value(u64) = .init(0);
+    try std.testing.expectEqual(@as(u64, 100), peakAfter(&mark, 100, false)); // the first read is the mark
+    try std.testing.expectEqual(@as(u64, 100), peakAfter(&mark, 60, false)); // a lower reading leaves the mark
+    try std.testing.expectEqual(@as(u64, 120), peakAfter(&mark, 120, false)); // a higher one raises it
+    try std.testing.expectEqual(@as(u64, 40), peakAfter(&mark, 40, true)); // a reset starts the mark at the reading
+    try std.testing.expectEqual(@as(u64, 50), peakAfter(&mark, 50, false)); // the next read reports 50, not 120
+    try std.testing.expectEqual(@as(u64, 50), peakAfter(&mark, 45, false)); // and it holds against lower readings
+    try std.testing.expectEqual(@as(u64, 70), peakAfter(&mark, 70, false)); // then climbs again
+}
+
+test "a host without a footprint reading reports no memory rather than zeros" {
+    if (builtin.os.tag == .macos) return error.SkipZigTest; // on macOS the reading always works
+    try std.testing.expect(hostMemory(1 << 30, false) == null);
 }

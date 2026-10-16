@@ -23,6 +23,17 @@ projections and experts in groups of 32 or 64; unsupported formats are refused b
 and checked again at load. CUDA supports the named 4-bit/group-64 checkpoint. The native engine serves the named
 checkpoint on Metal and CUDA, and NVIDIA's NVFP4 export on CUDA.
 
+On Metal the native engine also serves MLX checkpoints at a width per module (2, 3, 4, 5, 6 or 8 bits, not 7, in groups
+of 32, 64 or 128), such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`, the three
+measured. A matrix at 4-bit in groups of 64 runs on the kernels above. Any other width runs on the shared row kernels in
+decode. In prompt chunks past 128 rows, dense matrices in groups of 64 run on tiled kernels and the routed experts on
+width-general gathers; dense matrices in other groups stay on the row kernels. These checkpoints carry no MTP head. Copy
+`mtp-4bit.safetensors` from the 4-bit checkpoint into the folder to draft; without it each round decodes one token. With
+the head on an M3 Ultra, greedy prose decodes at 162 tok/s with oQ4, 117 with oQ6 and 111 with oQ8, against 188 with the
+4-bit checkpoint, and prompts of 8,192 to 32,768 tokens read at 0.96x to 0.99x mlx_lm's rate on the same checkpoint; a
+server's first 2,048-token prompt after it starts reads at 0.78x to 0.90x. For MLX affine checkpoints, CUDA, the Intel
+GPU engine and `--slide` refuse widths other than 4-bit group 64 and name the first such module.
+
 ## MLX execution and exactness
 
 This section describes the Python 0.6.6 engine's MLX family.

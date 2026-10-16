@@ -1,6 +1,6 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const http_conn = @import("http_conn.zig");
 const http_body = @import("http_body.zig");
 const auth = @import("auth.zig");
@@ -9,20 +9,31 @@ const responses = @import("responses.zig");
 const anthropic = @import("anthropic.zig");
 const tokens = @import("tokens.zig");
 const decisions = @import("decisions.zig");
+const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
+const recall = @import("recall_routes.zig");
+const imprint = @import("imprint_routes.zig");
+const slide_forget = @import("slide_forget.zig");
 const Server = @import("server.zig").Server;
 const Conn = http_conn.Conn;
 const Allocator = std.mem.Allocator;
+
+/// DELETE's per-fact route: the fact's id follows it.
+const fact_path = "/v1/slide/fact/";
 
 pub fn dispatch(srv: *Server, conn: *Conn, a: Allocator) void {
     const m = conn.method;
     if (std.mem.eql(u8, m, "GET")) return get(srv, conn, a);
     if (std.mem.eql(u8, m, "POST")) return post(srv, conn, a);
     if (std.mem.eql(u8, m, "DELETE")) {
-        if (std.mem.eql(u8, auth.routePath(conn.path), "/v1/slide/graph")) return slide.forget(srv, conn, a);
-        return responses.delete(srv, conn, a, responses.route(auth.routePath(conn.path)));
+        const route = auth.routePath(conn.path);
+        if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.forget(srv, conn, a);
+        if (std.mem.startsWith(u8, route, fact_path)) return slide_forget.route(srv, conn, a, route[fact_path.len..]);
+        if (std.mem.eql(u8, route, recall.path)) return recall.empty(srv, conn, a);
+        if (std.mem.eql(u8, route, "/v1/imprint")) return imprint.forget(srv, conn, a);
+        return responses.delete(srv, conn, a, responses.route(route));
     }
     const message = std.fmt.allocPrint(a, "Unsupported method ({s})", .{http_conn.pyRepr(a, m) catch m}) catch return;
     conn.sendError(a, 501, message, null) catch {};
@@ -51,6 +62,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.eql(u8, route, "/slide")) return slide.view(srv, conn, a);
     if (std.mem.startsWith(u8, route, "/slide/")) return slide.script(srv, conn, a, route["/slide/".len..]);
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
+    if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
@@ -64,7 +76,10 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/imprint/resume")) return imprint.post(srv, conn, a, .where);
+    if (std.mem.eql(u8, route, "/v1/imprint/load")) return imprint.post(srv, conn, a, .load);
     if (std.mem.endsWith(u8, route, "/decisions")) return decisions.post(srv, conn, a);
+    if (std.mem.endsWith(u8, route, "/systemone")) return systemone.post(srv, conn, a);
     if (anthropic.route(conn.path)) return anthropic.post(srv, conn, a);
     if (responses.route(route)) |rid| if (rid.len == 0) return responses.post(srv, conn, a);
     for (tokens.paths) |r| if (std.mem.eql(u8, route, r)) return tokens.post(srv, conn, a, std.mem.endsWith(u8, route, "/detokenize"));
