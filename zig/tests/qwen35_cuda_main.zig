@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare; vision exits 1 off its bounds.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare (TF_Q35_RESUME: from a copy).
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -47,6 +47,11 @@ pub fn main(init: std.process.Init) !u8 {
     var cache = try E.Cache.init(init.gpa, e, 4096 + prefill);
     defer cache.deinit(init.gpa);
     try fill(e, &cache, ids.items, prefill);
+    // TF_Q35_DELTA=d: the rows after the prefill rotate at position + d, as an image prompt's reply does
+    if (std.c.getenv("TF_Q35_DELTA")) |v| cache.delta = try std.fmt.parseInt(i32, std.mem.span(v), 10);
+    // TF_Q35_RESUME=1: the stream goes on from a kept copy of its state, restored into another (poisoned) cache
+    const resume_at = try envCount("TF_Q35_RESUME");
+    if (resume_at > 0 and !std.mem.eql(u8, args[2], "prompt") and !std.mem.eql(u8, args[2], "mrope")) try resumeFrom(init.gpa, e, &cache);
     var other = try E.Cache.init(init.gpa, e, 4096 + beside);
     defer other.deinit(init.gpa);
     try fill(e, &other, ids.items, beside);
@@ -135,11 +140,27 @@ pub fn main(init: std.process.Init) !u8 {
                 try e.forward(&.{.{ .cache = &cache, .rows = n, .images = &part }}, ids.items[at..][0..n], .last);
             } else try e.forward(&.{.{ .cache = &cache, .rows = n }}, ids.items[at..][0..n], .last);
             at += n;
+            // TF_Q35_RESUME=K in prompt and mrope: the pass goes on from a kept copy at position K
+            if (resume_at > 0 and cache.len == resume_at) try resumeFrom(init.gpa, e, &cache);
         }
         try out.appendSlice(a, std.mem.sliceAsBytes(cache.logits));
     }
     try std.Io.Dir.cwd().writeFile(init.io, .{ .sub_path = args[4], .data = out.items });
     return 0;
+}
+
+/// `cache` replaced by a fresh one, poisoned, that takes a kept copy of its state (cuda_reuse.zig's save and restore).
+fn resumeFrom(gpa: std.mem.Allocator, e: *E.Engine, cache: *E.Cache) !void {
+    const copy = try q.reuse.saveCache(e, cache, cache.len, &.{});
+    defer q.reuse.dropCopy(e, copy);
+    var fresh = try E.Cache.init(gpa, e, cache.cap);
+    errdefer fresh.deinit(gpa);
+    try fresh.state.fill8(0x5a, e.stream.handle);
+    try fresh.kv.fill8(0x5a, e.stream.handle);
+    try q.reuse.restoreCache(e, &fresh, copy, &.{});
+    if (fresh.len != cache.len or fresh.delta != cache.delta) return error.ResumeMismatch;
+    cache.deinit(gpa);
+    cache.* = fresh;
 }
 
 /// One forward keeping logits: the stream's part first (its rows' logits come first), then the second stream's step.

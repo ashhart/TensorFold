@@ -7,6 +7,7 @@ const E = @import("cuda_engine.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
+const reuse = @import("cuda_reuse.zig");
 const be = lanes.backend;
 
 pub const model_type = "qwen3_5";
@@ -16,6 +17,14 @@ pub const max_segments: u32 = 1;
 pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads the DFlash2 draft model (openDrafter); the checkpoints have no head of their own.
 pub const takes_drafter = true;
+
+/// Kept prompt states for the shared cache (cuda_reuse.zig), in pinned host memory, on the zero-anchored chunk grid.
+pub const snap_bytes = reuse.bytes;
+pub const snap_save = reuse.save;
+pub const snap_restore = reuse.restore;
+pub const snap_drop = reuse.drop;
+pub const snap_host = true;
+pub const snap_lookahead: u32 = 0;
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
@@ -37,6 +46,8 @@ pub const Loaded = struct {
     reserve: *const fn (*anyopaque, u32) anyerror!void,
     /// --vision: the tower the server's image requests reach (native/cuda_vision_offer.zig).
     vision: ?*vision.Vision = null,
+    /// What the prompt cache's saves copy: the engine and the streams' caches.
+    target: *reuse.Target,
 };
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -48,7 +59,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v, .target = undefined };
+    l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
@@ -58,6 +70,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = release,
         .reserve = reserve,
         .vision = v,
+        .target = &l.target,
     };
 }
 
@@ -131,6 +144,32 @@ pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
     };
 }
 
+/// Where a prompt pass from `at` cuts its chunk: max_rows rows on, or the request's next chunk start before that.
+fn nextCut(len: usize, chunks: []const u32, at: usize) usize {
+    var end: usize = @min(len, at + E.max_rows);
+    for (chunks) |boundary| if (boundary > at) {
+        end = @min(end, boundary);
+        break;
+    };
+    return end;
+}
+
+/// Whether a cold pass over `len` rows (from 0) cuts a chunk at `pos`.
+fn coldCut(len: usize, chunks: []const u32, pos: usize) bool {
+    var at: usize = 0;
+    while (at < pos and at < len) at = nextCut(len, chunks, at);
+    return at == pos;
+}
+
+test "a pass resumes only where a cold pass cuts: every max_rows rows from 0 or from the request's chunk starts" {
+    try std.testing.expect(coldCut(1000, &.{}, E.max_rows * 3));
+    try std.testing.expect(!coldCut(1000, &.{}, E.max_rows * 3 + 1));
+    try std.testing.expect(coldCut(1000, &.{200}, 200));
+    try std.testing.expect(coldCut(1000, &.{200}, 200 + E.max_rows));
+    try std.testing.expect(!coldCut(1000, &.{200}, 2 * E.max_rows)); // cut at 200 instead, then 328
+    try std.testing.expectEqual(@as(usize, 200), nextCut(1000, &.{200}, E.max_rows));
+}
+
 fn release(p: *anyopaque) void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     l.deinit();
@@ -150,7 +189,10 @@ const Lanes = struct {
     capacity: usize,
     /// --vision's tower: an image prompt's images encoded at its prefill.
     vision: ?*vision.Vision = null,
+    target: reuse.Target,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
+    /// An image prompt's images as its kept states name them (cuda_reuse.zig), from its prefill to its release.
+    seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
 
@@ -158,6 +200,9 @@ const Lanes = struct {
         var it = self.caches.valueIterator();
         while (it.next()) |cache| self.drop(cache.*);
         self.caches.deinit(self.gpa);
+        var seen = self.seen.valueIterator();
+        while (seen.next()) |v| self.gpa.free(v.*);
+        self.seen.deinit(self.gpa);
         for (self.pool.items) |cache| self.drop(cache);
         self.pool.deinit(self.gpa);
         if (self.vision) |v| v.deinit();
@@ -229,21 +274,42 @@ const Lanes = struct {
         }
         defer if (media) |*m| m.deinit();
         const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
+        const seen = try self.seenOf(ids, stream.images);
+        self.seen.put(self.gpa, stream, seen) catch |err| {
+            self.gpa.free(seen);
+            return err;
+        };
+        errdefer if (self.seen.fetchRemove(stream)) |kv| self.gpa.free(kv.value);
         const cache = try self.take();
         errdefer self.give(cache);
+        // the stream's cache is found by a save at a mark (cuda_reuse.zig) while its pass runs
+        try self.caches.put(self.gpa, stream, cache);
+        errdefer _ = self.caches.remove(stream);
+        // a kept state resumes only where a cold pass cuts a chunk, so the chunks after it keep a cold pass's bits
         var at: usize = 0;
+        stream.cached = 0;
+        if (stream.reuse.saved) |saved| {
+            if (stream.reuse.at > 0 and stream.reuse.at < ids.len and coldCut(ids.len, stream.chunks, stream.reuse.at)) {
+                if (reuse.restoreCache(self.e, cache, saved, seen)) {
+                    at = stream.reuse.at;
+                    stream.cached = stream.reuse.at;
+                } else |_| {
+                    try cache.reset(self.e);
+                    stream.reuse_failed = true;
+                }
+            } else stream.reuse_failed = true;
+        }
         while (at < ids.len) {
-            var end: usize = @min(ids.len, at + E.max_rows);
-            for (stream.chunks) |boundary| if (boundary > at) {
-                end = @min(end, boundary);
-                break;
-            };
+            const end = nextCut(ids.len, stream.chunks, at);
             try self.e.forward(&.{.{ .cache = cache, .rows = end - at, .images = if (images) |*im| im else null }}, ids[at..end], .last);
             at = end;
+            // a mark the store asked for, where this pass cut anyway: the lane host copies the state here
+            if (end < ids.len and std.mem.indexOfScalar(u32, stream.reuse.marks, @intCast(end)) != null) {
+                if (stream.reuse.hook) |k| k.at(k.ptr, stream, @intCast(end));
+            }
         }
         // the reply's rows rotate past the image prompt's positions (rope_delta)
         if (media) |m| cache.delta = m.delta;
-        try self.caches.put(self.gpa, stream, cache);
     }
 
     fn firstFn(ptr: *anyopaque, stream: *lanes.Stream, position: u64) !u64 {
@@ -366,5 +432,18 @@ const Lanes = struct {
     fn releaseFn(ptr: *anyopaque, stream: *lanes.Stream) void {
         const self = cast(ptr);
         if (self.caches.fetchRemove(stream)) |entry| self.give(entry.value);
+        if (self.seen.fetchRemove(stream)) |entry| self.gpa.free(entry.value);
+    }
+
+    /// Each image's first placeholder row and digest: a kept state resumes only the same images.
+    fn seenOf(self: *Lanes, ids: []const u32, images: []const lanes.Image) ![]reuse.Seen {
+        if (images.len == 0) return self.gpa.alloc(reuse.Seen, 0);
+        const tower = self.tower orelse return error.QwenServedWithoutVision;
+        const runs = try self.gpa.alloc(vision_prompt.Run, images.len);
+        defer self.gpa.free(runs);
+        try vision_prompt.placeholders(tower.c, ids, images, runs);
+        const seen = try self.gpa.alloc(reuse.Seen, images.len);
+        for (seen, runs, images) |*s, r, im| s.* = .{ .at = @intCast(r.at), .digest = im.digest() };
+        return seen;
     }
 };
