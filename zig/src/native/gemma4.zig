@@ -153,7 +153,7 @@ fn holdResident(h: *Host) !void {
         try list.appendSlice(h.gpa, d.w.owned.items);
         try buffersOf(h.gpa, &list, d);
     }
-    if (m.vision) |v| try list.appendSlice(h.gpa, v.buffers());
+    if (m.vision) |v| try v.appendBuffers(h.gpa, &list);
     h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "gemma4") orelse return;
     h.warm = (&h.resident.?).target();
 }

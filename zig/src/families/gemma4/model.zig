@@ -36,12 +36,12 @@ pub const Tower = union(enum) {
         return if (t == .encoder) .patches else .merged;
     }
 
-    /// The working buffers a residency set holds.
-    pub fn buffers(t: Tower) []const mtl.Buffer {
-        return switch (t) {
-            .encoder => |v| &.{ v.scratch, v.patches, v.cos, v.sin },
-            .embedder => |v| &.{ v.scratch, v.patches },
-        };
+    /// The working buffers a residency set holds, appended to `list`.
+    pub fn appendBuffers(t: Tower, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+        switch (t) {
+            .encoder => |v| try list.appendSlice(gpa, &.{ v.scratch, v.patches, v.cos, v.sin }),
+            .embedder => |v| try list.appendSlice(gpa, &.{ v.scratch, v.patches }),
+        }
     }
 
     pub fn deinit(t: Tower) void {
