@@ -5,37 +5,16 @@ const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
+const common = @import("common.zig");
+
+pub const Options = common.Options;
+pub const Sampling = common.Sampling;
+pub const Probe = common.Probe;
+pub const nowNs = common.nowNs;
+const ms = common.ms;
 
 const H = cfg.hidden;
 const W = cfg.frame_width;
-
-pub const Options = struct {
-    max_ctx: usize = 4096, // positions (prompt rows + frames)
-    max_rows: usize = 1024, // prompt rows a chunk
-    attn_chunk: usize = 512, // query rows a prompt attention GEMM
-    max_frames: usize = 2048,
-    threads: usize = 16,
-    pdl: bool = true, // GEMVs launched with programmatic dependent launch
-    warmup: bool = true, // a short prompt and frame at open: cuBLAS heuristics and the frame graph ready
-    split: bool = true, // tower codes 2..9 on a second stream beside the next backbone row
-};
-
-pub const Sampling = struct {
-    temperature: f32 = 1.0,
-    top_k: i32 = 30,
-    top_p: f32 = 0.9,
-    seed: u64 = 1,
-
-    pub fn greedy(s: Sampling) bool {
-        return s.temperature <= 0 or s.top_k == 1;
-    }
-};
-
-/// Per-layer probe of a pass under the oracle's dump names, called with device rows [t, width] in bf16 or fp32.
-pub const Probe = struct {
-    ctx: *anyopaque,
-    f: *const fn (ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, width: usize, f32_: bool) anyerror!void,
-};
 
 const Buf = cuda.DeviceBuffer;
 pub const max_split_rows = 8; // decode rows the split-key attention takes
@@ -444,12 +423,14 @@ pub const Engine = struct {
     pub fn download(e: *Engine, src: u64, out: []u8) !void {
         return e.get(src, out);
     }
+
+    /// Device bytes for a tool (freed with the engine).
+    pub fn scratch(e: *Engine, bytes: usize) !u64 {
+        return e.alloc(bytes);
+    }
 };
 
-pub fn nowNs(io: std.Io) i128 {
-    return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
-}
-
-fn ms(a: i128, b: i128) f64 {
-    return @as(f64, @floatFromInt(b - a)) / 1e6;
+/// The device's peak allocation in bytes so far (the runtime's own count).
+pub fn peakBytes() u64 {
+    return cuda.usage(false).peak;
 }

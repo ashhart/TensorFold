@@ -1,6 +1,5 @@
-//! drama3-generate: Drama 3 text to WAV on one CUDA GPU, plus the codec's encode and the oracle checks (usage below).
+//! drama3-generate: Drama 3 text to WAV on one GPU (CUDA or Metal), plus the codec's encode and the oracle checks.
 const std = @import("std");
-const cuda = @import("cuda");
 const core = @import("core");
 const d3 = @import("drama3");
 const checks = @import("check.zig");
@@ -89,18 +88,13 @@ pub fn main(init: std.process.Init) !u8 {
     // audio file -> codes (the codec alone)
     if (a.encode_out) |out| {
         const wp = a.ref_audio orelse return error.RefAudioRequired;
-        var driver = try cuda.Driver.open();
-        var ctx = try cuda.Context.init(&driver, 0);
-        const stream = try cuda.Stream.init(&driver, true);
-        const k = try gpa.create(d3.kernels.Kernels);
-        k.* = try d3.kernels.Kernels.load(&driver, &ctx);
-        const c = try d3.codec.Codec.load(gpa, io, &driver, k, a.codec orelse return error.CodecRequired, .{});
-        defer c.destroy();
+        const c = try d3.tts.CodecOnly.open(gpa, io, a.codec orelse return error.CodecRequired);
+        defer c.close();
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, wp, gpa, .limited(1 << 30));
         const au = try d3.wav.parse(gpa, bytes);
         const x44 = try d3.wav.resample(gpa, au.samples, au.rate, d3.codec.sample_rate);
         const t0 = d3.engine.nowNs(io);
-        const codes = try c.encode(stream, x44);
+        const codes = try c.encode(x44);
         try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = std.mem.sliceAsBytes(codes) });
         std.debug.print("RESULT drama3 encode OK frames={d} seconds={d:.2} ms={d:.1} out={s}\n", .{ codes.len, @as(f64, @floatFromInt(au.samples.len)) / @as(f64, @floatFromInt(au.rate)), @as(f64, @floatFromInt(d3.engine.nowNs(io) - t0)) / 1e6, out });
         return 0;
@@ -256,8 +250,7 @@ fn runRequest(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *d3.Engine, tts: ?
     defer gpa.free(frames.ptr[0..frames.len]);
     if (q.frames_out) |p| try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = p, .data = std.mem.sliceAsBytes(frames) });
     const total_ms = @as(f64, @floatFromInt(d3.engine.nowNs(io) - t_req)) / 1e6;
-    const mu = cuda.usage(false);
-    std.debug.print("RESULT drama3 OK frames={d} eos={} audio_s={d:.2} prompt_rows={d} ref_frames={d} encode_ms={d:.1} prefill_ms={d:.1} first_audio_ms={d:.1} total_ms={d:.1} fps={d:.2} rtf={d:.2} device_peak_gb={d:.2}\n", .{ st.frames, st.eos, st.audio_s, rows.len, ref_frames, encode_ms, st.prefill_ms, st.first_audio_ms + encode_ms, total_ms, st.fps(), st.fps() / 21.533, @as(f64, @floatFromInt(mu.peak)) / 1e9 });
+    std.debug.print("RESULT drama3 OK frames={d} eos={} audio_s={d:.2} prompt_rows={d} ref_frames={d} encode_ms={d:.1} prefill_ms={d:.1} first_audio_ms={d:.1} total_ms={d:.1} fps={d:.2} rtf={d:.2} device_peak_gb={d:.2}\n", .{ st.frames, st.eos, st.audio_s, rows.len, ref_frames, encode_ms, st.prefill_ms, st.first_audio_ms + encode_ms, total_ms, st.fps(), st.fps() / 21.533, @as(f64, @floatFromInt(d3.engine.peakBytes())) / 1e9 });
 }
 
 /// Reference codes: raw int32 [frames, 10].

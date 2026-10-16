@@ -1,6 +1,5 @@
 //! drama3-generate's checks against the PyTorch oracle's dumps: prompt layers, teacher-forced frames and the codec.
 const std = @import("std");
-const cuda = @import("cuda");
 const core = @import("core");
 const d3 = @import("drama3");
 const gen = @import("generate.zig");
@@ -208,9 +207,7 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, a: Args, dir: []const u8) !u8 {
     var tf_worst: f64 = 1;
     {
         try e.prefill(rows, null);
-        const dev = try cuda.DeviceBuffer.alloc(&e.driver, 2 * W * 4);
-        var devb = dev;
-        defer devb.free();
+        const dev = try e.scratch(2 * W * 4);
         const hidden_ref = ref.get("decode.backbone_final_norm");
         const hbuf = try gpa.alloc(u16, H);
         defer gpa.free(hbuf);
@@ -236,12 +233,12 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, a: Args, dir: []const u8) !u8 {
             };
             var fr: [W]i32 = undefined;
             for (0..W) |j| fr[j] = @intCast(ov[fi * W + j]);
-            try devb.upload(0, std.mem.asBytes(&fr));
+            try e.put(dev, std.mem.asBytes(&fr));
             mg.frame = fi;
             mg.want = fr;
-            try e.frameForced(.{ .frame = dev.ptr, .picks = dev.ptr + W * 4 }, mg_probe);
+            try e.frameForced(.{ .frame = dev, .picks = dev + W * 4 }, mg_probe);
             var picks: [W]i32 = undefined;
-            try e.download(dev.ptr + W * 4, std.mem.asBytes(&picks));
+            try e.download(dev + W * 4, std.mem.asBytes(&picks));
             for (0..W) |j| tf_agree[j] += @intFromBool(picks[j] == fr[j]);
             tf_frames += 1;
         }
@@ -338,38 +335,31 @@ fn snrDb(ref: []const f32, got: []const f32) f64 {
 pub fn codecCheck(gpa: std.mem.Allocator, io: std.Io, a: Args, ref_path: []const u8) !u8 {
     var ref = try core.safetensors.File.open(gpa, io, ref_path);
     defer ref.close(io);
-    var driver = try cuda.Driver.open();
-    var ctx = try cuda.Context.init(&driver, 0);
-    var stream = try cuda.Stream.init(&driver, true);
-    const k = try gpa.create(d3.kernels.Kernels);
-    k.* = try d3.kernels.Kernels.load(&driver, &ctx);
     const t0 = d3.engine.nowNs(io);
-    const c = try d3.codec.Codec.load(gpa, io, &driver, k, a.codec orelse return error.CodecRequired, .{});
-    defer c.destroy();
-    std.debug.print("codec: {d:.2} GB of weights in {d:.1} s\n", .{ @as(f64, @floatFromInt(c.weight_bytes)) / 1e9, @as(f64, @floatFromInt(d3.engine.nowNs(io) - t0)) / 1e9 });
+    const c = try d3.tts.CodecOnly.open(gpa, io, a.codec orelse return error.CodecRequired);
+    defer c.close();
+    std.debug.print("codec: {d:.2} GB of weights in {d:.1} s\n", .{ @as(f64, @floatFromInt(c.weightBytes())) / 1e9, @as(f64, @floatFromInt(d3.engine.nowNs(io) - t0)) / 1e9 });
     var pass = true;
     if (a.frames) |fp| {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, fp, gpa, .limited(1 << 28));
         const nf = bytes.len / 44;
-        var fb = try cuda.DeviceBuffer.alloc(&driver, bytes.len);
-        defer fb.free();
-        try fb.upload(0, bytes);
-        var ab = try cuda.DeviceBuffer.alloc(&driver, nf * 2048 * 4);
-        defer ab.free();
+        const fb = try c.buffer(bytes.len);
+        try c.upload(fb, bytes);
+        const ab = try c.buffer(nf * 2048 * 4);
         for (0..2) |rep| {
-            try c.reset(stream);
-            try stream.synchronize();
+            try c.reset();
+            try c.sync();
             const s0 = d3.engine.nowNs(io);
             const first = @min(a.first_chunk, nf);
-            try c.decode(stream, fb.ptr, first, ab.ptr);
-            try stream.synchronize();
+            try c.decode(fb, first, ab);
+            try c.sync();
             const s1 = d3.engine.nowNs(io);
-            try c.decode(stream, fb.ptr + first * 44, nf - first, ab.ptr + first * 2048 * 4);
-            try stream.synchronize();
+            try c.decode(fb + first * 44, nf - first, ab + first * 2048 * 4);
+            try c.sync();
             const s2 = d3.engine.nowNs(io);
             const audio = try gpa.alloc(f32, nf * 2048);
             defer gpa.free(audio);
-            try ab.download(0, std.mem.sliceAsBytes(audio));
+            try c.download(ab, std.mem.sliceAsBytes(audio));
             const secs = @as(f64, @floatFromInt(nf * 2048)) / 44100.0;
             std.debug.print("decode run {d}: {d} frames ({d:.2} s): first chunk of {d} in {d:.1} ms, all in {d:.1} ms = {d:.0}x real time\n", .{ rep, nf, secs, first, @as(f64, @floatFromInt(s1 - s0)) / 1e6, @as(f64, @floatFromInt(s2 - s0)) / 1e6, secs / (@as(f64, @floatFromInt(s2 - s0)) / 1e9) });
             if (rep == 1) if (try refTensor(gpa, &ref, "dec.audio")) |r| {
@@ -395,22 +385,21 @@ pub fn codecCheck(gpa: std.mem.Allocator, io: std.Io, a: Args, ref_path: []const
         const P = struct {
             gpa: std.mem.Allocator,
             ref: *core.safetensors.File,
-            d: *const cuda.Driver,
+            c: *d3.tts.CodecOnly,
             fn f(pc: *anyopaque, name: []const u8, ptr: u64, rows: usize, cols: usize) anyerror!void {
                 const p: *@This() = @ptrCast(@alignCast(pc));
                 const r = (try refTensor(p.gpa, p.ref, name)) orelse return;
                 const mine = try p.gpa.alloc(f32, rows * cols);
-                var b: cuda.DeviceBuffer = .{ .d = p.d, .ptr = ptr, .len = rows * cols * 4, .borrowed = true };
-                try b.download(0, std.mem.sliceAsBytes(mine));
+                try p.c.download(ptr, std.mem.sliceAsBytes(mine));
                 const n = @min(r.len, mine.len);
                 std.debug.print("  {s}: {d} vs {d} values, SNR {d:.2} dB\n", .{ name, mine.len, r.len, snrDb(r[0..n], mine[0..n]) });
             }
         };
-        var pctx: P = .{ .gpa = gpa, .ref = &ref, .d = &driver };
-        c.probe = .{ .ctx = &pctx, .f = P.f };
+        var pctx: P = .{ .gpa = gpa, .ref = &ref, .c = c };
+        c.setProbe(.{ .ctx = &pctx, .f = P.f });
         const e0 = d3.engine.nowNs(io);
-        const codes = try c.encode(stream, x44);
-        c.probe = null;
+        const codes = try c.encode(x44);
+        c.setProbe(null);
         const e1 = d3.engine.nowNs(io);
         std.debug.print("encode: {d} frames in {d:.1} ms\n", .{ codes.len, @as(f64, @floatFromInt(e1 - e0)) / 1e6 });
         if (ref.get("enc.codes")) |rc| {
