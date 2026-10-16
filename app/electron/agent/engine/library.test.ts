@@ -189,8 +189,8 @@ try {
   const corruptShard = path.join(adModels, 'corrupt-shard')
   await checkpoint(corruptShard)
   await fs.truncate(path.join(corruptShard, 'model.safetensors'), 12)
-  const corruptFound = await library({ appHome: path.join(root, 'appledouble-corrupt-app') }).addFolder(adModels)
-  assert.match(corruptFound.models.find((model) => model.path === corruptShard)!.reason!, /safetensors/)
+  const corruptShardFound = await library({ appHome: path.join(root, 'appledouble-corrupt-app') }).addFolder(adModels)
+  assert.match(corruptShardFound.models.find((model) => model.path === corruptShard)!.reason!, /safetensors/)
 
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')
