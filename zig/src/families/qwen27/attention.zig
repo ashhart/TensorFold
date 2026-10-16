@@ -181,7 +181,8 @@ fn cacheBytes(cache: Cache, key: bool) usize {
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
 }
-pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64 };
+/// h_end and w_end above 0: an M-RoPE round, the h and w position planes `plane` rows past each other in `positions`.
+pub const Preprocess = struct { qg: Ref, key: Ref, q_gain: Ref, k_gain: Ref, norm_q: Ref, norm_k: Ref, query: Ref, rotated_key: Ref, positions: Ref, rows: u32, eps: f32, theta: f64, h_end: u32 = 0, w_end: u32 = 0, plane: u32 = 0 };
 pub const Attention = struct {
     profiler: ?*profile.Trace = null,
     prefix: [16]mtl.Pipeline,
@@ -226,9 +227,11 @@ pub const Attention = struct {
         try span(p.norm_k, @as(usize, p.rows) * 1024 * 2);
         try span(p.query, @as(usize, p.rows) * 6144 * 2);
         try span(p.rotated_key, @as(usize, p.rows) * 1024 * 2);
-        try spanAligned(p.positions, @as(usize, p.rows) * 4, 4);
+        if ((p.h_end > 0 or p.w_end > 0) and p.plane < p.rows) return error.TargetAttentionShape;
+        const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
+        try spanAligned(p.positions, plane_rows * 4, 4);
         const outputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.norm_q, .bytes = @as(usize, p.rows) * 6144 * 2 }, .{ .ref = p.norm_k, .bytes = @as(usize, p.rows) * 1024 * 2 }, .{ .ref = p.query, .bytes = @as(usize, p.rows) * 6144 * 2 }, .{ .ref = p.rotated_key, .bytes = @as(usize, p.rows) * 1024 * 2 } };
-        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = @as(usize, p.rows) * 12288 * 2 }, .{ .ref = p.key, .bytes = @as(usize, p.rows) * 1024 * 2 }, .{ .ref = p.q_gain, .bytes = 512 }, .{ .ref = p.k_gain, .bytes = 512 }, .{ .ref = p.positions, .bytes = @as(usize, p.rows) * 4 } };
+        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = @as(usize, p.rows) * 12288 * 2 }, .{ .ref = p.key, .bytes = @as(usize, p.rows) * 1024 * 2 }, .{ .ref = p.q_gain, .bytes = 512 }, .{ .ref = p.k_gain, .bytes = 512 }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
         for (outputs, 0..) |dst, i| {
             for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
             for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
@@ -247,7 +250,7 @@ pub const Attention = struct {
         for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = 24 }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = 4 } }) |r| {
             e.setPipeline(a.io[8]);
             bind(e, .{ r.x, p.positions });
-            e.setValue(glue.Rope{ .width = 256, .heads = r.heads, .rows = p.rows, .rotary = 64, .activation = .bf16, .theta = @floatCast(p.theta) }, 2);
+            e.setValue(glue.Rope{ .width = 256, .heads = r.heads, .rows = p.rows, .rotary = 64, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
             e.setBuffer(r.y.buffer, r.y.offset, 3);
             e.dispatchThreads(mtl.Size.of(256, r.heads, p.rows), mtl.Size.of(32, 1, 1));
         }

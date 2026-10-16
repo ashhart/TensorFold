@@ -175,7 +175,7 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
                                uint3 tg [[threadgroup_position_in_grid]]) {
   threadgroup float partial[4][32][16]; // each simdgroup's scores, by lane (every simdgroup's lanes hold the same cells)
   threadgroup int keyrow[BLOCK];
-  const int width = meta.x, key_length = meta.y;
+  const int width = meta.x, key_length = meta.y, pos = meta.z;
   const int row = int(tg.y), h0 = int(tg.x) * GROUP, d0 = int(s) * SLICE;
   const short2 home = frag_home(ushort(lane));
   frag<bfloat> q[8];
@@ -183,7 +183,8 @@ inline void sparse_clear(thread frag<float> (&acc)[4][2], thread float (&m)[2], 
   frag<float> acc[4][2];
   float m[2], l[2]; // the running max and sum of this lane's two heads
   sparse_clear(acc, m, l);
-  sparse_pass(acc, m, l, q, keys, indices + long(row) * width, 0, width, key_length, scale, partial, keyrow, s, lane, home, d0);
+  // a row at position p lists its keys within its first p + 1 entries
+  sparse_pass(acc, m, l, q, keys, indices + long(row) * width, 0, min(width, pos + row + 1), key_length, scale, partial, keyrow, s, lane, home, d0);
   device bfloat* obase = out + (long(row) * HEADS + h0) * RANK + d0;
   TF_UNROLL
   for (short c = 0; c < 4; c++) {

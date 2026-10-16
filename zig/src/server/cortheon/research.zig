@@ -1,6 +1,6 @@
 //! Research before building: the model names searches, the server runs them and reads the best pages, as hidden rounds.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const errors = @import("../errors.zig");
 const chat = @import("../chat.zig");
 const ids = @import("../ids.zig");
