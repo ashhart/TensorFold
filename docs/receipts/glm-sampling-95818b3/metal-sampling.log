@@ -1,0 +1,17 @@
+2026-10-15 10:13:30.350 tf-glm-sample-check[71400:73209333] Metal API Validation Enabled
+GLM sampling device: Apple M3 Ultra
+PASS min_p normalization: repeated, reordered, mixed, trailing and solo rows
+PASS arrival order: repeated, reordered, mixed, trailing and solo rows
+PASS large top_k: repeated, reordered, mixed, trailing and solo rows
+PASS large top_k unfiltered: repeated, reordered, mixed, trailing and solo rows
+PASS large nucleus: repeated, reordered, mixed, trailing and solo rows
+PASS tiny vocabulary: repeated, reordered, mixed, trailing and solo rows
+PASS top_k one: repeated, reordered, mixed, trailing and solo rows
+PASS small filtered top_k: repeated, reordered, mixed, trailing and solo rows
+PASS top_k 1024: repeated, reordered, mixed, trailing and solo rows
+PASS top_k 1025: repeated, reordered, mixed, trailing and solo rows
+PASS top_k at vocabulary: repeated, reordered, mixed, trailing and solo rows
+PASS top_k beyond vocabulary: repeated, reordered, mixed, trailing and solo rows
+PASS shuffled ties: repeated, reordered, mixed, trailing and solo rows
+PASS large vocabulary: repeated, reordered, mixed, trailing and solo rows
+PASS hot distribution: repeated, reordered, mixed, trailing and solo rows

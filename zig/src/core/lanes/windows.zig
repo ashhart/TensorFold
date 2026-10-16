@@ -30,14 +30,26 @@ pub const Plan = struct {
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
     grammar_from: u32 = 0, // the first row the grammar drafted itself (0: none)
+    recalled: bool = false, // the copy came from Recall's record
+    graft_recalled: []const bool = &.{}, // each row from branch_from: a Recall candidate grafted it
 
     pub fn count(p: Plan) usize {
         return p.held + p.tokens.len;
     }
+
+    /// Whether window row `r` (a graft) is Recall's.
+    pub fn recallRow(p: Plan, r: usize) bool {
+        if (p.branch_from == 0 or r < p.branch_from) return false;
+        const i = r - p.branch_from;
+        return i < p.graft_recalled.len and p.graft_recalled[i];
+    }
 };
 
+/// A copied continuation and its source: the stream's own context, or Recall's record.
+pub const Copy = struct { tokens: []const u32 = &.{}, recalled: bool = false };
+
 /// Forced tokens first, then a copied continuation, then the head's drafts (Python `_plan_window`).
-pub fn plan(e: *Engine, s: *Stream, copied: ?[]const u32) !Plan {
+pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     const a = e.arena.allocator();
     var p: Plan = .{ .stream = s, .position = s.cache_len, .kind = .none };
     const queued = s.next;
@@ -55,11 +67,12 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?[]const u32) !Plan {
         p.forced = forced;
         p.tokens = forced;
     } else {
-        var copy: []const u32 = &.{};
+        var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
-        if (copy.len > 0) {
+        if (copy.tokens.len > 0) {
             p.kind = .copy;
-            p.tokens = try a.dupe(u32, copy);
+            p.recalled = copy.recalled;
+            p.tokens = try a.dupe(u32, copy.tokens);
         } else if (s.drafts and queued != null) {
             const q = queued.?;
             if (q.tokens) |t| {
@@ -91,8 +104,8 @@ fn fillLanes(e: *Engine, s: *Stream, p: *Plan) !void {
     const first = p.count();
     const room = @min(@as(usize, e.cfg.fill_lanes) -| (1 + first), s.graft_room orelse std.math.maxInt(u32));
     if (room == 0) return;
-    const found = try fill.suffixCandidates(a, s.context.items, 16, e.cfg.fill_match, room, 8);
-    if (found.len == 0 or (s.graft_hit < e.cfg.fill_floor and s.rounds % 8 != 0)) return;
+    const found = try candidates(e, s, room, s.rounds % 8 == 0);
+    if (found.len == 0) return;
     // the trunk's lanes: the drafts in order for a chain, a tree's rank-0 path from the pending row
     var trunk_lanes: [shape.max_depth * shape.ranks * 4]usize = undefined;
     const levels = if (p.lanes) |l| shape.chainLanes(l.*, &trunk_lanes) else first;
@@ -114,8 +127,29 @@ fn fillLanes(e: *Engine, s: *Stream, p: *Plan) !void {
     p.tokens = if (p.held > 0) b.tokens else try std.mem.concat(a, u32, &.{ p.tokens, b.tokens });
     p.parents = parents;
     p.branch_from = @intCast(1 + first);
+    p.graft_recalled = b.recalled;
     if (p.kind == .none) p.kind = .fill;
 }
+
+/// Graft candidates: the context's while its rows land, then Recall's while its do (both on a probe round); own first.
+pub fn candidates(e: *Engine, s: *Stream, room: usize, probe_round: bool) ![]const fill.Proposal {
+    const a = e.arena.allocator();
+    const live = s.graft_hit >= e.cfg.fill_floor or probe_round;
+    const own: []const fill.Proposal = if (!live) &.{} else try fill.suffixCandidates(
+        a,
+        s.context.items,
+        longest_graft,
+        e.cfg.fill_match,
+        room,
+        8,
+    );
+    const r = s.recall orelse return own;
+    if (s.recall_hit < e.cfg.fill_floor and !probe_round) return own;
+    return fill.merge(a, own, try r.candidates(a, s.context.items, room, @max(2, 8 -| own.len), longest_graft));
+}
+
+/// The longest suffix a graft candidate's weight counts, for the context's matches and Recall's alike.
+const longest_graft = 16;
 
 /// The planned drafts' trunk of `levels` lanes: host drafts as they are, held ones with the head's ranks (null: unread).
 fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
@@ -133,23 +167,28 @@ fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
     return .{ .tokens = chain, .others = others };
 }
 
-/// Copied spans backed by `enter_match` matching tokens (Python `_copy_proposal`); the proposer owns them.
-pub fn copyProposal(e: *Engine, s: *Stream) ![]const u32 {
-    const p = s.proposer orelse return &.{};
-    if (e.cfg.max_copy == 0 or s.force.items.len > 0) return &.{};
-    if (e.alone and !e.cfg.lone_copies) return &.{};
-    if (p.vtable.priced) return p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{};
+/// A copy from the context backed by `enter_match` ids (Python `_copy_proposal`), else Recall's when it should pay.
+pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
+    if (e.cfg.max_copy == 0 or s.force.items.len > 0) return .{};
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
-    const copied = p.propose(s.context.items, @min(@as(i64, width), s.draftRoom() - 1)) catch return &.{};
-    if (copied.len < 2 or p.lastMatch() < e.cfg.enter_match) return &.{};
-    return copied;
+    const most = @min(@as(i64, width), s.draftRoom() - 1);
+    if (s.proposer) |p| if (!e.alone or e.cfg.lone_copies) {
+        // a priced proposer's drafts are as it gives them, its none too: no width, length or match gate, no Recall
+        if (p.vtable.priced) return .{ .tokens = p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{} };
+        const copied = p.propose(s.context.items, most) catch &.{};
+        if (copied.len >= 2 and p.lastMatch() >= e.cfg.enter_match) return .{ .tokens = copied };
+    };
+    const r = s.recall orelse return .{};
+    if (most < 2) return .{};
+    const got = r.propose(s.context.items, @intCast(most), s.rounds);
+    return if (got.len >= 2) .{ .tokens = got, .recalled = true } else .{};
 }
 
 pub fn copyAhead(ptr: *anyopaque, w: *const depth.Who) bool {
     const e: *Engine = @ptrCast(@alignCast(ptr));
     const s: *Stream = @ptrCast(@alignCast(w.stream.?));
     const copied = copyProposal(e, s) catch return false;
-    return copied.len > 0;
+    return copied.tokens.len > 0;
 }
 
 pub fn probe(e: *Engine) depth.Probe {
@@ -289,6 +328,11 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     if (p.branch_from > 0) {
         var below: u32 = 0;
         for (w.rows) |r| below += @intFromBool(r < p.branch_from);
+        if (p.graft_recalled.len > 0) { // the kept rows are in window order: the grafts' sources follow them
+            const flags = try a.alloc(bool, w.rows.len - below);
+            for (flags, w.rows[below..]) |*fl, r| fl.* = p.recallRow(r);
+            p.graft_recalled = flags;
+        }
         p.branch_from = below;
     }
     if (p.kind != .forced and w.rows.len == 1) p.kind = if (w.extra.len > 0) .grammar else .none;

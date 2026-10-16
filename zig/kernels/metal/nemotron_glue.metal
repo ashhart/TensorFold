@@ -19,6 +19,26 @@ kernel void tf_embed_q4(const device uint* ids [[buffer(0)]],
   out[size_t(r) * dims + 2 * b + 1] = bfloat(s * float(v >> 4) + z);
 }
 
+// Embedding rows of an affine table at any width (dims: row width, bits 2-8, group): scale * q + bias in bf16, as MLX.
+kernel void tf_embed_bits(const device uint* ids [[buffer(0)]],
+                          const device uint* words [[buffer(1)]],
+                          const device bfloat* scales [[buffer(2)]],
+                          const device bfloat* biases [[buffer(3)]],
+                          device bfloat* out [[buffer(4)]],
+                          constant uint4& dims [[buffer(5)]],
+                          uint2 pos [[thread_position_in_grid]]) {
+  const uint c = pos.x, r = pos.y, width = dims.x, bits = dims.y, group = dims.z;
+  if (c >= width) return;
+  const size_t id = ids[r];
+  const device uint* row = words + id * (size_t(width) * bits / 32);
+  const uint bit = c * bits, shift = bit % 32;
+  uint code = row[bit / 32] >> shift;
+  if (shift + bits > 32) code |= row[bit / 32 + 1] << (32 - shift);
+  code &= (1u << bits) - 1u;
+  const size_t g = id * (width / group) + c / group;
+  out[size_t(r) * width + c] = scales[g] * bfloat(float(code)) + biases[g];
+}
+
 // MLX's one-row RMS arithmetic: 4 squares a thread, two simd_sums, precise rsqrt, out = bf16(w * bf16(x * inv)).
 kernel void tf_rms_mlx(const device bfloat* x [[buffer(0)]],
                        const device bfloat* w [[buffer(1)]],

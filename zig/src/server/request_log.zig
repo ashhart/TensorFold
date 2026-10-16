@@ -1,6 +1,6 @@
 //! TENSORFOLD_REQUEST_LOG: each chat and completion body appended as one JSON line, images redacted, for replays.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
@@ -33,8 +33,30 @@ pub fn append(a: Allocator, path: []const u8, body: Value) void {
     if (body.strField("priority")) |p| if (std.mem.eql(u8, p, "background")) return;
     const line = json.stringify(a, redact(a, body) catch return, .{}) catch return;
     const pathz = a.dupeSentinel(u8, path, 0) catch return;
-    const fd = std.posix.openatZ(std.posix.AT.FDCWD, pathz, .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }, 0o644) catch return;
+    const fd = std.posix.openatZ(std.posix.AT.FDCWD, pathz, .{ .ACCMODE = .WRONLY, .APPEND = true, .CREAT = true }, 0o600) catch return;
     defer _ = std.posix.system.close(fd);
     const framed = std.mem.concat(a, u8, &.{ line, "\n" }) catch return;
     _ = std.posix.system.write(fd, framed.ptr, framed.len);
+}
+
+test "the request log is created owner-only and keeps image URLs out" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/requests.jsonl", .{tmp.sub_path});
+    const url = try json.newObject(a);
+    try url.put(a, "url", .{ .string = "https://example.test/private.png" });
+    const part = try json.newObject(a);
+    try part.put(a, "type", .{ .string = "image_url" });
+    try part.put(a, "image_url", .{ .object = url });
+    const body = try json.newObject(a);
+    try body.put(a, "messages", .{ .array = try a.dupe(Value, &.{.{ .object = part }}) });
+    append(a, path, .{ .object = body });
+    const st = try std.Io.Dir.cwd().statFile(std.testing.io, path, .{}); // Linux's libc has no stat for std.c
+    try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.permissions.toMode())) & 0o777);
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, path, a, .limited(1 << 16));
+    try std.testing.expect(std.mem.indexOf(u8, text, "<redacted>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "example.test") == null);
 }

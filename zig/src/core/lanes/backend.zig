@@ -100,6 +100,8 @@ pub const Backend = struct {
         held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
         /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
         prompt_rows: bool = false,
+        /// The backend stores `Stream.fill_at` as its pass runs: the status reader may count its fill totals.
+        reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
         /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.
