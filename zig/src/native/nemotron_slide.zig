@@ -41,7 +41,7 @@ pub fn Adapter(comptime slide: type) type {
             const a: *Self = @ptrCast(@alignCast(ctx));
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire, .forget = try retired(al, request.forget), .unforget = request.unforget });
             a.sink = sink;
             a.sent = null;
         }
@@ -56,7 +56,7 @@ pub fn Adapter(comptime slide: type) type {
                 .failed => |message| .{ .done = .{ .message = message } },
             });
             if (s.done and !failed) a.emit(.{ .done = .{} });
-            return .{ .done = s.done, .changed = s.changed };
+            return .{ .done = s.done, .changed = s.changed, .stale = s.stale };
         }
 
         fn abort(ctx: *anyopaque) void {

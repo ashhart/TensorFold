@@ -1,7 +1,7 @@
 //! tool_choice "required" or a named function as a grammar: calls in the template's markup, arguments in their schema.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");

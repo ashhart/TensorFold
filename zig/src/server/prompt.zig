@@ -1,7 +1,7 @@
 //! Prompt ids from a request, as ``prepare_prompt`` and ``render_prompt_ids`` make them.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
@@ -30,7 +30,7 @@ pub const isTitle = messages_mod.isTitleRequest;
 
 /// ``render_prompt_ids``: messages normalized for this template, rendered, and a dangling ``<think>`` closed.
 pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, thinking: bool, effort: ?[]const u8, generation: bool) errors.Refused![]const u32 {
-    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, if (srv.info.vision) |v| v.part_type else null));
+    const normalized = try messages_mod.toolArguments(cx, try messages_mod.normalizeWith(cx, messages, srv.late_system, srv.needs_user_after_tool, .of(srv.info.vision)));
     var problem: []const u8 = "";
     const options: model_text.RenderOptions = .{
         .tools = if (tools.len > 0) Value{ .array = @constCast(tools) } else null,
@@ -113,7 +113,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: chat.Input, thinking: bool, effort:
     if (history.len > 0 and history.len < prompt.len and std.mem.eql(u32, prompt[0..history.len], history)) history_len = history.len;
     if (history_len == 0 and prompt.len > 1 and std.mem.eql(u32, history, prompt)) history_len = prompt.len - 1; // a template with no generation suffix
     // --vision: placeholders expanded to image tokens before the window, chunks and cache see it; no rewind kept
-    if (try images.expand(srv.info.vision, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
+    if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, input.messages, prompt, history_len)) |x| return .{ .ids = x.ids, .history_len = x.history_len, .images = x.images, .cache_key = x.cache_key };
     const count = if (input.messages == .array) input.messages.array.len else 0;
     const rewind_len = if (srv.info.prompt_cache) rewindLen(srv, cx, input.messages, count, input.tools, prompt, thinking, effort) else 0; // one more render
     return .{ .ids = prompt, .history_len = history_len, .rewind_len = rewind_len };

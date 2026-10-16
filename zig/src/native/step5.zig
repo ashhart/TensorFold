@@ -9,10 +9,11 @@ const Resident = @import("resident.zig").Resident;
 
 const Host = struct {
     gpa: std.mem.Allocator,
+    io: std.Io,
     model: *s5.Model,
     metal: *s5.backend.Metal,
-    warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
-    resident: ?Resident = null, // weights and scratch, kept wired between requests by the ticker
+    warm: mtl.keepalive.Target = undefined, // the residency set's, or the bare queue's, for the lane host's idle ticker
+    resident: ?Resident = null, // weights and scratch kept wired between requests, when they fit the 70% limit
     config: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -70,6 +71,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
+    h.io = io;
     h.model = model;
     h.resident = null;
     h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
@@ -83,7 +85,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     var vis: ?api.Vision = null;
     if (o.vision) |v| {
         h.markers = .{ 128000, 128001, 128002, 128003, 128004, 128005 };
-        vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images };
+        vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = s5.image.decoderProblem };
     }
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = s5.state.prompt_rows, .structures = true, .logprobs = true, .vision = vis });
     h.cache = null;
@@ -99,13 +101,14 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     }
     errdefer if (h.cache) |*store| store.deinit();
     try holdResident(h);
-    errdefer h.resident.?.deinit();
+    errdefer if (h.resident) |*r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// Weights, routers, both scratches and the tower's buffers join one residency set the idle keepalive uses.
+/// Weights, routers, both scratches and the tower's buffers join one residency set the idle keepalive uses, if the
+/// 70% limit holds them all; otherwise the keepalive ticks the bare queue.
 fn holdResident(h: *Host) !void {
     var list: std.ArrayList(mtl.Buffer) = .empty;
     defer list.deinit(h.gpa);
@@ -117,8 +120,8 @@ fn holdResident(h: *Host) !void {
         try list.appendSlice(h.gpa, &sc.route);
     }
     if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.owned, v.scratch, v.patches.buf });
-    h.resident = try Resident.init(m.device, m.queue, list.items);
-    h.warm = (&h.resident.?).target();
+    h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "step5");
+    h.warm = if (h.resident) |*r| r.target() else .{ .queue = m.queue };
 }
 
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.
@@ -136,8 +139,9 @@ fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const
 }
 
 /// Info.vision's prepare: an image's bytes to the tower's pieces (families/step5/image.zig), on the HTTP thread.
-fn prepareImage(_: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
-    const p = try s5.image.prepare(a, bytes, .{}, max_tokens);
+fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    const p = try s5.image.prepare(h.io, a, bytes, .{}, max_tokens);
     const pieces = try a.alloc(api.Piece, p.pieces.len);
     for (p.pieces, pieces) |x, *y| y.* = .{ .pixels = x.pixels, .gh = x.gh, .gw = x.gw, .tokens = x.tokens, .before = x.before, .after = x.after };
     const last = p.pieces[p.pieces.len - 1];

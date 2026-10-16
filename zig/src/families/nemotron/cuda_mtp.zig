@@ -165,8 +165,8 @@ pub const Head = struct {
         const c = e.c;
         const m = e.w.mtp.?;
         const b = &e.b;
-        const o = e.ops();
         const f = e.forward(null);
+        const o = f.ops;
         const t = f.glue;
         const D: u64 = c.hidden;
         const qd: u64 = c.heads * c.head_dim;
@@ -198,8 +198,13 @@ pub const Head = struct {
             }
             try t.addRmsnorm(h.x, b.delta, m.moe_norm, h.h1, b.y, b.xs, spans.len, c.hidden, c.eps);
         }
-        try f.experts(m.moe, spans.len, false);
-        try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
+        if (m.moe.latent != null) {
+            try @import("cuda_latent.zig").run(&f, m.moe, spans.len);
+            try t.addRmsnorm(h.h1, b.delta, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps);
+        } else {
+            try f.experts(m.moe, spans.len, false);
+            try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
+        }
         try o.dense(h.row, h.rxs, e.w.draft_head.?, h.logits, spans.len);
     }
 

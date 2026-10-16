@@ -1,10 +1,13 @@
 //! Image input (--vision): image_url parts to the engine's tower input, the prompt's placeholders to image tokens.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const messages_mod = @import("messages.zig");
 const model_text = @import("model_text.zig");
+const media_fetch = @import("media_fetch.zig");
+const videos = @import("videos.zig");
+const image_key = @import("image_key.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -20,9 +23,9 @@ pub const Expanded = struct {
     cache_key: []const u32,
 };
 
-const Part = struct { url: []const u8, low: bool };
+const Part = struct { video: bool = false, url: []const u8, low: bool = false };
 
-/// The image parts of normalized `messages`, in the order the template meets them.
+/// The image and video parts of normalized `messages`, in the order the template meets them.
 fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
     var out: std.ArrayList(Part) = .empty;
     if (messages != .array) return out.items;
@@ -31,49 +34,90 @@ fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
         if (content != .array) continue;
         for (content.array) |p| {
             const kind = p.get("type") orelse continue;
-            if (kind != .string or (!std.mem.eql(u8, kind.string, "image_url") and !std.mem.eql(u8, kind.string, "image"))) continue;
-            if (p.get("image_url") == null) continue;
-            const iu = p.get("image_url").?;
-            const detail = iu.get("detail");
-            try out.append(cx.a, .{ .url = iu.get("url").?.string, .low = detail != null and std.mem.eql(u8, detail.?.string, "low") });
+            if (kind != .string) continue;
+            if (std.mem.eql(u8, kind.string, "image_url")) {
+                const iu = p.get("image_url").?;
+                const detail = iu.get("detail");
+                try out.append(cx.a, .{ .url = iu.get("url").?.string, .low = detail != null and std.mem.eql(u8, detail.?.string, "low") });
+            } else if (std.mem.eql(u8, kind.string, "video_url")) {
+                try out.append(cx.a, .{ .video = true, .url = p.get("video_url").?.get("url").?.string });
+            }
         }
     }
     return out.items;
 }
 
-/// A data URL's bytes (base64 or percent-encoded); remote URLs are refused (the native server fetches nothing).
+/// --vision-urls: how a public HTTPS image's bytes are fetched (media_fetch.zig, or a test's fixtures).
+pub const Fetch = struct {
+    ctx: ?*anyopaque = null,
+    io: std.Io,
+    get: *const fn (ctx: ?*anyopaque, a: std.mem.Allocator, io: std.Io, url: []const u8, max_bytes: usize, deadline: std.Io.Timestamp, media: []const []const u8, f: *media_fetch.Failure) media_fetch.Error![]const u8,
+
+    /// The network, as media_fetch checks it.
+    pub fn network(io: std.Io) Fetch {
+        return .{ .io = io, .get = struct {
+            fn get(_: ?*anyopaque, a: std.mem.Allocator, i: std.Io, url: []const u8, max_bytes: usize, deadline: std.Io.Timestamp, media: []const []const u8, f: *media_fetch.Failure) media_fetch.Error![]const u8 {
+                return (try media_fetch.fetch(a, i, url, max_bytes, deadline, media, f)).data;
+            }
+        }.get };
+    }
+};
+
+/// An image part's bytes, at most `limit`: a data URL's, or with --vision-urls a public HTTPS URL's before `deadline`.
+pub fn sourceBytes(cx: *Cx, fetch: ?Fetch, url: []const u8, limit: usize, deadline: std.Io.Timestamp) errors.Refused![]const u8 {
+    if (std.ascii.startsWithIgnoreCase(url, "data:")) {
+        const bytes = try dataBytes(cx, url);
+        if (bytes.len > limit) return cx.refuse("the request's images exceed 20 MB encoded");
+        return bytes;
+    }
+    if (!std.mem.startsWith(u8, url, "https://")) return cx.refuse("images require data URLs or public HTTPS URLs");
+    const f = fetch orelse return cx.refuse("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls");
+    if (url.len > media_fetch.max_url_chars) return cx.refuse("image URL is too long");
+    var failure: media_fetch.Failure = .{};
+    const bytes = f.get(f.ctx, cx.a, f.io, url, limit, media_fetch.within(f.io, deadline, media_fetch.timeout_s), &media_fetch.image_media, &failure) catch |e| switch (e) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.Media => return cx.refuse(failure.text),
+    };
+    if (bytes.len == 0) return cx.refuse("image is empty or exceeds the encoded byte limit");
+    return bytes;
+}
+
+/// A data URL's bytes (base64 or percent-encoded).
 pub fn dataBytes(cx: *Cx, url: []const u8) errors.Refused![]const u8 {
-    if (std.ascii.startsWithIgnoreCase(url, "http://") or std.ascii.startsWithIgnoreCase(url, "https://"))
-        return cx.refuse("image URLs are not fetched by this server; send the image inline as a data: URL (data:image/png;base64,...)");
-    if (!std.ascii.startsWithIgnoreCase(url, "data:")) return cx.refuse("invalid image data URL");
-    const comma = std.mem.indexOfScalar(u8, url, ',') orelse return cx.refuse("invalid image data URL");
+    return dataBytesOf(cx, url, max_image_bytes, "image");
+}
+
+/// A data URL's bytes, at most `max` of them; `noun` names the medium in the refusals.
+pub fn dataBytesOf(cx: *Cx, url: []const u8, max: usize, comptime noun: []const u8) errors.Refused![]const u8 {
+    if (!std.ascii.startsWithIgnoreCase(url, "data:")) return cx.refuse("invalid " ++ noun ++ " data URL");
+    const comma = std.mem.indexOfScalar(u8, url, ',') orelse return cx.refuse("invalid " ++ noun ++ " data URL");
     const header = url[5..comma];
     const payload = url[comma + 1 ..];
-    if (header.len > 256) return cx.refuse("invalid image data URL");
+    if (header.len > 256) return cx.refuse("invalid " ++ noun ++ " data URL");
     var it = std.mem.splitScalar(u8, header, ';');
     _ = it.next();
     const enc = it.next();
-    if (it.next() != null or (enc != null and !std.ascii.eqlIgnoreCase(enc.?, "base64"))) return cx.refuse("image data URL supports only optional base64 encoding");
+    if (it.next() != null or (enc != null and !std.ascii.eqlIgnoreCase(enc.?, "base64"))) return cx.refuse(noun ++ " data URL supports only optional base64 encoding");
     if (enc != null) {
-        if (payload.len > 4 * ((max_image_bytes + 2) / 3)) return cx.refuse("image data URL exceeds the encoded byte limit");
+        if (payload.len > 4 * ((max + 2) / 3)) return cx.refuse(noun ++ " data URL exceeds the encoded byte limit");
         const d = std.base64.standard.Decoder;
-        const n = d.calcSizeForSlice(payload) catch return cx.refuse("invalid image data URL encoding");
+        const n = d.calcSizeForSlice(payload) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
         const out = try cx.a.alloc(u8, n);
-        d.decode(out, payload) catch return cx.refuse("invalid image data URL encoding");
-        if (out.len == 0 or out.len > max_image_bytes) return cx.refuse("image is empty or exceeds the encoded byte limit");
+        d.decode(out, payload) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
+        if (out.len == 0 or out.len > max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
         return out;
     }
-    if (payload.len > max_image_bytes * 3) return cx.refuse("image data URL exceeds the encoded byte limit");
+    if (payload.len > max * 3) return cx.refuse(noun ++ " data URL exceeds the encoded byte limit");
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < payload.len) : (i += 1) {
         if (payload[i] == '%' and i + 2 < payload.len) {
-            const b = std.fmt.parseInt(u8, payload[i + 1 .. i + 3], 16) catch return cx.refuse("invalid image data URL encoding");
+            const b = std.fmt.parseInt(u8, payload[i + 1 .. i + 3], 16) catch return cx.refuse("invalid " ++ noun ++ " data URL encoding");
             try out.append(cx.a, b);
             i += 2;
         } else try out.append(cx.a, payload[i]);
     }
-    if (out.items.len == 0 or out.items.len > max_image_bytes) return cx.refuse("image is empty or exceeds the encoded byte limit");
+    if (out.items.len == 0 or out.items.len > max) return cx.refuse(noun ++ " is empty or exceeds the encoded byte limit");
     return out.items;
 }
 
@@ -88,10 +132,11 @@ pub fn sniff(bytes: []const u8) Format {
     return .other;
 }
 
-fn refusal(cx: *Cx, i: usize, err: anyerror) errors.Refused {
+fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
+    if (v.explain) |words| if (words(err)) |w| return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: {s}", .{ i + 1, w }));
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
-        error.ImageTooLarge => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
+        error.Oversized => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
         error.Animated => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: animated and multipage images are unsupported; send a single frame", .{i + 1})),
         error.ImageTooSmall => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the visual-token budget is too small for an image", .{i + 1})),
         else => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} could not be decoded; send PNG or JPEG", .{i + 1})),
@@ -174,87 +219,137 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
     return ids.items;
 }
 
-/// The tokens an image's placeholder expands to: its pieces' rows and the tokens around them, else its rows.
-fn span(img: api.PreparedImage) usize {
-    if (img.pieces.len == 0) return img.tokens;
-    var n: usize = 0;
-    for (img.pieces) |pc| n += pc.before.len + pc.tokens + pc.after.len;
-    return n;
-}
-
-/// The prompt with each image's placeholder expanded to its tokens, the images and the cache key; null without vision.
-pub fn expand(vision: ?api.Vision, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
+/// The prompt with image placeholders expanded to tokens and video ones to frame groups, its images and cache ids.
+pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
     const ps = try parts(cx, messages);
+    var n_images: usize = 0;
+    for (ps) |p| n_images += @intFromBool(!p.video);
+    const n_videos = ps.len - n_images;
+    const video_token: ?u32 = if (v.video) |o| o.video_token else null;
+    // the template's placeholders alone, one per part (text that spells a marker was shielded)
     var marks: usize = 0;
-    for (ids) |t| marks += @intFromBool(t == v.image_token);
-    if (marks != ps.len) return cx.fail(.server, "the chat template wrote {d} image placeholders for {d} image parts", .{ marks, ps.len });
+    var video_marks: usize = 0;
+    for (ids) |t| {
+        marks += @intFromBool(t == v.image_token);
+        video_marks += @intFromBool(video_token != null and t == video_token.?);
+    }
+    if (marks != n_images) return cx.fail(.server, "the chat template wrote {d} image placeholders for {d} image parts", .{ marks, n_images });
+    if (video_marks != n_videos) return cx.fail(.server, "the chat template wrote {d} video placeholders for {d} video parts", .{ video_marks, n_videos });
     if (ps.len == 0) return null;
-    if (ps.len > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, ps.len }));
-    const budget = v.image_tokens / @as(u32, @intCast(ps.len));
-    if (budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
-    const prepared = try cx.a.alloc(api.PreparedImage, ps.len);
+    if (n_images > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, n_images }));
+    if (n_videos > videos.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{videos.max_videos}));
+    const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
+    if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
+    const prepared = try cx.a.alloc(api.PreparedImage, n_images);
+    const clips = try cx.a.alloc(api.PreparedVideo, n_videos);
     var bytes_total: usize = 0;
-    var extra: usize = 0;
-    var runs: usize = 0; // tower inputs: an image's pieces, else the image
-    for (ps, prepared, 0..) |p, *out, i| {
-        const bytes = try dataBytes(cx, p.url);
+    // every URL's download inside one request's seconds (images.py total_timeout_seconds, videos.py's)
+    const deadline: std.Io.Timestamp = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(media_fetch.total_s)) else .{ .nanoseconds = 0 };
+    var video_budget: videos.Budget = .{ .deadline = if (fetch) |f| std.Io.Clock.awake.now(f.io).addDuration(.fromSeconds(videos.total_s)) else .{ .nanoseconds = 0 } };
+    var ii: usize = 0;
+    var vi: usize = 0;
+    for (ps) |p| {
+        if (p.video) {
+            const o = v.video.?;
+            clips[vi] = try videos.prepare(cx, o, v.ctx, fetch, p.url, vi, o.video_tokens / @as(u32, @intCast(n_videos)), &video_budget);
+            vi += 1;
+            continue;
+        }
+        const i = ii;
+        ii += 1;
+        const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
         bytes_total += bytes.len;
-        if (bytes_total > max_request_bytes) return cx.refuse("the request's images exceed 20 MB encoded");
         switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP), WebP not yet decoded here
             .png, .jpeg => {},
             .webp => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is WebP, which this server does not decode yet; send PNG or JPEG", .{i + 1})),
             .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG or JPEG; send one of those", .{i + 1})),
         }
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
-        out.* = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, i, e);
-        if (out.tokens == 0 or out.tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
-        extra += span(out.*) - 1;
-        runs += @max(out.pieces.len, 1);
+        prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
+        if (prepared[i].tokens == 0 or prepared[i].tokens > cap) return cx.refuse("the image processor exceeded the per-image visual-token budget");
     }
-    const n = ids.len + extra;
-    const out_ids = try cx.a.alloc(u32, n);
-    const key = try cx.a.alloc(u32, n);
-    const imgs = try cx.a.alloc(api.Image, runs);
+    var out_ids: std.ArrayList(u32) = .empty;
+    var key: std.ArrayList(u32) = .empty;
+    var imgs: std.ArrayList(api.Image) = .empty;
     var hist = history_len;
-    var at: usize = 0;
     var k: usize = 0;
-    var run: usize = 0;
+    var kv: usize = 0;
+    var close: ?u32 = null; // the cache word an image gives the marker right after its rows
     for (ids, 0..) |t, src| {
-        if (t != v.image_token) {
-            out_ids[at] = t;
-            key[at] = t;
-            at += 1;
-            continue;
+        const before = out_ids.items.len;
+        const after = close;
+        close = null;
+        if (t == v.image_token and prepared[k].pieces.len > 0) {
+            try placePieces(cx.a, &out_ids, &key, &imgs, t, prepared[k]);
+            k += 1;
+        } else if (t == v.image_token) {
+            const img = prepared[k];
+            k += 1;
+            if (v.wrap) |w| try both(cx.a, &out_ids, &key, w[0]);
+            try placeImage(cx.a, &out_ids, &key, &imgs, t, img, v.wrap != null or (src > 0 and image_key.isMarker(v, ids[src - 1])));
+            if (v.wrap) |w| { // the server's own wrapper closes the image: its word carries the identity's other half
+                try out_ids.append(cx.a, w[1]);
+                try key.append(cx.a, image_key.close(img.hash));
+            } else close = image_key.close(img.hash);
+        } else if (video_token != null and t == video_token.?) {
+            const o = v.video.?;
+            const clip = clips[kv];
+            kv += 1;
+            for (clip.groups, clip.times) |g, secs| {
+                try out_ids.append(cx.a, o.group_open);
+                try key.append(cx.a, o.group_open);
+                try placeImage(cx.a, &out_ids, &key, &imgs, v.image_token, g, true);
+                try out_ids.append(cx.a, o.group_close);
+                try key.append(cx.a, image_key.close(g.hash));
+                var buf: [64]u8 = undefined;
+                const words = videos.seconds(&buf, secs) catch unreachable; // a time within the hour's limit
+                const time = text.encodePlain(cx.a, words) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's time", .{});
+                try out_ids.appendSlice(cx.a, time);
+                try key.appendSlice(cx.a, time);
+            }
+        } else {
+            try out_ids.append(cx.a, t);
+            try key.append(cx.a, if (after != null and image_key.isMarker(v, t)) after.? else t);
         }
-        const img = prepared[k];
-        if (src < history_len) hist += span(img) - 1;
-        const one = [1]api.Piece{.{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .tokens = img.tokens }};
-        var row: usize = 0; // the image's rows so far, for the cache's ids
-        for (if (img.pieces.len > 0) img.pieces else &one) |pc| {
-            for (pc.before) |w| {
-                out_ids[at] = w;
-                key[at] = w;
-                at += 1;
-            }
-            imgs[run] = .{ .pixels = pc.pixels, .gh = pc.gh, .gw = pc.gw, .at = @intCast(at), .tokens = pc.tokens };
-            run += 1;
-            for (0..pc.tokens) |_| {
-                out_ids[at] = t;
-                // the cache's ids for this image's rows: past the vocabulary, by content and row
-                key[at] = 0x8000_0000 | @as(u32, @truncate(std.hash.Wyhash.hash(img.hash, std.mem.asBytes(&row)) & 0x7fff_ffff));
-                at += 1;
-                row += 1;
-            }
-            for (pc.after) |w| {
-                out_ids[at] = w;
-                key[at] = w;
-                at += 1;
-            }
-        }
-        k += 1;
+        if (src < history_len) hist += out_ids.items.len - before - 1;
     }
-    return .{ .ids = out_ids, .history_len = hist, .images = imgs, .cache_key = key };
+    return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items };
+}
+
+/// Appends a token to the prompt and its cache key alike.
+fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
+    try ids.append(a, t);
+    try key.append(a, t);
+}
+
+/// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
+fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage, named: bool) !void {
+    if (named) key.items[key.items.len - 1] = image_key.open(img.hash);
+    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens });
+    for (0..img.tokens) |j| {
+        try ids.append(a, token);
+        try key.append(a, image_key.row(img.hash, j));
+    }
+}
+
+/// Appends an image held as pieces (Step-5's crops, then its overview): each piece's tokens before, its rows and its
+/// tokens after. Rows are numbered across the image; its first word and its last carry the identity's two halves.
+fn placePieces(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage) !void {
+    const first = key.items.len;
+    var j: usize = 0;
+    for (img.pieces) |pc| {
+        for (pc.before) |w| try both(a, ids, key, w);
+        try imgs.append(a, .{ .pixels = pc.pixels, .gh = pc.gh, .gw = pc.gw, .at = @intCast(ids.items.len), .tokens = pc.tokens });
+        for (0..pc.tokens) |_| {
+            try ids.append(a, token);
+            try key.append(a, image_key.row(img.hash, j));
+            j += 1;
+        }
+        for (pc.after) |w| try both(a, ids, key, w);
+    }
+    key.items[first] = image_key.open(img.hash);
+    key.items[key.items.len - 1] = image_key.close(img.hash);
 }
 
 test "data URLs decode; remote URLs are refused" {
@@ -263,8 +358,16 @@ test "data URLs decode; remote URLs are refused" {
     var cx: Cx = .{ .a = arena.allocator() };
     try std.testing.expectEqualStrings("hi!", try dataBytes(&cx, "data:image/png;base64,aGkh"));
     try std.testing.expectEqualStrings("a b", try dataBytes(&cx, "data:text/plain,a%20b"));
-    try std.testing.expectError(error.Refused, dataBytes(&cx, "https://example.com/x.png"));
     try std.testing.expectError(error.Refused, dataBytes(&cx, "data:image/png;base64,***"));
+    // without --vision-urls an https URL is refused with the flag's name; other schemes always
+    const never: std.Io.Timestamp = .{ .nanoseconds = 0 };
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "https://example.com/x.png", max_image_bytes, never));
+    try std.testing.expectEqualStrings("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls", cx.message);
+    for ([_][]const u8{ "http://example.com/x.png", "ftp://example.com/x.png", "HTTPS://example.com/x.png", "file:///etc/passwd" }) |u| {
+        try std.testing.expectError(error.Refused, sourceBytes(&cx, null, u, max_image_bytes, never));
+        try std.testing.expectEqualStrings("images require data URLs or public HTTPS URLs", cx.message);
+    }
+    try std.testing.expectError(error.Refused, sourceBytes(&cx, null, "data:,abc", 2, never));
 }
 
 fn fakePrepare(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
@@ -291,7 +394,7 @@ test "placeholders expand to each image's tokens, the history and cache key with
         .err => return error.TestUnexpectedResult,
     };
     const ids = [_]u32{ 1, 9, 2, 3, 9, 4 };
-    const x = (try expand(v, &cx, msgs, &ids, 4)).?;
+    const x = (try expand(v, null, MarkText.text(), &cx, msgs, &ids, 4)).?;
     try std.testing.expectEqualSlices(u32, &.{ 1, 9, 9, 2, 3, 9, 9, 9, 4 }, x.ids);
     try std.testing.expectEqual(@as(usize, 5), x.history_len); // the first image is in the history, the second not
     try std.testing.expectEqual(@as(u32, 1), x.images[0].at);
@@ -299,13 +402,147 @@ test "placeholders expand to each image's tokens, the history and cache key with
     try std.testing.expect(x.cache_key[1] >= 0x8000_0000 and x.cache_key[1] != x.cache_key[2]);
     try std.testing.expectEqual(@as(u32, 2), x.cache_key[3]);
     // a placeholder the images do not account for is refused
-    try std.testing.expectError(error.Refused, expand(v, &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
+    try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 9, 9, 9 }, 0));
     _ = messages_mod;
 }
 
+test "a wrapped image: the server writes the wrapper around each image's rows, in the history count too" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .wrap = .{ 7, 8 }, .image_tokens = 64, .max_images = 4 };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]},
+        \\ {"role": "assistant", "content": "y"},
+        \\ {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFc"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 1, 9, 2, 9, 3 }, 3)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 7, 9, 9, 8, 2, 7, 9, 8, 3 }, x.ids);
+    try std.testing.expectEqual(@as(usize, 6), x.history_len); // the first image and its wrapper are history
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].at);
+    try std.testing.expectEqual(@as(u32, 7), x.images[1].at);
+    try std.testing.expectEqual(image_key.open('a'), x.cache_key[1]); // the wrapper's words carry the image's identity
+    try std.testing.expectEqual(image_key.close('a'), x.cache_key[4]);
+    try std.testing.expect(x.cache_key[2] >= 0x8000_0000);
+}
+
+fn piecedPrepare(_: *anyopaque, a: std.mem.Allocator, bytes: []const u8, _: u32) anyerror!api.PreparedImage {
+    const pieces = try a.alloc(api.Piece, 2); // a crop of two rows, then an overview of one
+    pieces[0] = .{ .pixels = &.{}, .gh = 1, .gw = 1, .tokens = 2, .before = &.{3}, .after = &.{4} };
+    pieces[1] = .{ .pixels = &.{}, .gh = 1, .gw = 1, .tokens = 1, .before = &.{5}, .after = &.{6} };
+    return .{ .pixels = &.{}, .gh = 1, .gw = 1, .tokens = 3, .hash = bytes[3], .pieces = pieces };
+}
+
+test "an image in pieces: each piece's own tokens around its rows, the identity on the first and last of them" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = piecedPrepare, .image_token = 9, .markers = &.{ 3, 9, 4, 5, 6 }, .image_tokens = 64, .max_images = 4 };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFa"}}]},
+        \\ {"role": "assistant", "content": "y"},
+        \\ {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFb"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, null, MarkText.text(), &cx, msgs, &[_]u32{ 1, 9, 2, 9 }, 3)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 3, 9, 9, 4, 5, 9, 6, 2, 3, 9, 9, 4, 5, 9, 6 }, x.ids);
+    try std.testing.expectEqual(@as(usize, 9), x.history_len);
+    try std.testing.expectEqual(@as(usize, 4), x.images.len);
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].at);
+    try std.testing.expectEqual(@as(u32, 6), x.images[1].at);
+    try std.testing.expectEqual(@as(u32, 1), x.images[1].tokens);
+    try std.testing.expectEqual(image_key.open('a'), x.cache_key[1]);
+    try std.testing.expectEqual(image_key.close('a'), x.cache_key[7]);
+    try std.testing.expectEqual(image_key.row('a', 2), x.cache_key[6]); // the overview's row follows the crop's two
+    try std.testing.expectEqual(@as(u32, 4), x.cache_key[4]);
+    try std.testing.expect(x.cache_key[10] != x.cache_key[2]); // another image, other rows
+}
+
+fn noLibrary(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+    return error.NoJpegLibrary;
+}
+
+fn libraryWords(err: anyerror) ?[]const u8 {
+    return if (err == error.NoJpegLibrary) "JPEG images need the decoder library" else null;
+}
+
+test "a prepare error the engine words is refused in the engine's words, others in the server's" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const msgs = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const worded: api.Vision = .{ .ctx = &dummy, .prepare = noLibrary, .image_token = 9, .image_tokens = 64, .max_images = 4, .explain = libraryWords };
+    try std.testing.expectError(error.Refused, expand(worded, null, MarkText.text(), &cx, msgs, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image 1: JPEG images need the decoder library", cx.message);
+    var plain = worded;
+    plain.explain = null;
+    try std.testing.expectError(error.Refused, expand(plain, null, MarkText.text(), &cx, msgs, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image 1 could not be decoded; send PNG or JPEG", cx.message);
+}
+
+test "--vision-urls: an https part's bytes come from the fetch, within what the request has left" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .image_tokens = 64, .max_images = 4 };
+    const Pages = struct {
+        var limits: [4]usize = undefined;
+        var n: usize = 0;
+        fn get(_: ?*anyopaque, al: std.mem.Allocator, _: std.Io, url: []const u8, max_bytes: usize, _: std.Io.Timestamp, _: []const []const u8, f: *media_fetch.Failure) media_fetch.Error![]const u8 {
+            limits[n] = max_bytes;
+            n += 1;
+            if (std.mem.eql(u8, url, "https://e.com/a.jpg")) return al.dupe(u8, "\xff\xd8\xffxyz");
+            f.text = "image download returned HTTP 404";
+            return error.Media;
+        }
+    };
+    const fetch: Fetch = .{ .io = std.testing.io, .get = Pages.get };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FFab"}},
+        \\  {"type": "image_url", "image_url": {"url": "https://e.com/a.jpg"}}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    const x = (try expand(v, fetch, MarkText.text(), &cx, msgs, &[_]u32{ 1, 9, 9, 2 }, 0)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 9, 9, 9, 9, 9, 2 }, x.ids); // 2 tokens, then the fetched image's 3
+    try std.testing.expectEqual(@as(u32, 3), x.images[1].at);
+    try std.testing.expectEqual(@as(usize, max_image_bytes), Pages.limits[0]); // 5 bytes used of 20 MB: 10 MB left
+    // the fetch's refusal is the request's; without the fetch the URL is refused by the flag's name
+    const missing = switch (try json.parseText(a, "[{\"role\": \"user\", \"content\": [{\"type\": \"image_url\", \"image_url\": {\"url\": \"https://e.com/gone.png\"}}]}]")) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectError(error.Refused, expand(v, fetch, MarkText.text(), &cx, missing, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image download returned HTTP 404", cx.message);
+    try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, missing, &[_]u32{9}, 0));
+    try std.testing.expectEqualStrings("image URLs are off on this server; send the image as a data URL, or start the server with --vision-urls", cx.message);
+}
+
 /// A test tokenizer: "<|image|>" is token 9 unless read plainly, every other byte its own id plus 100.
-const MarkText = struct {
-    fn text() model_text.Text {
+pub const MarkText = struct {
+    pub fn text() model_text.Text {
         return .{ .ctx = undefined, .vtable = &.{ .encode = encode, .decode = undefined, .token_id = undefined, .token_string = tokenString, .vocab_size = undefined, .eos_ids = undefined, .render = undefined, .template_source = undefined, .encode_plain = plain } };
     }
     fn encode(_: *anyopaque, a: std.mem.Allocator, s: []const u8, _: bool) model_text.Error![]u32 {
@@ -370,4 +607,42 @@ test "formats from their first bytes: WebP is refused by name" {
     try std.testing.expectEqual(Format.gif, sniff("GIF89a..."));
     try std.testing.expectEqual(Format.webp, sniff("RIFF\x10\x00\x00\x00WEBPVP8 "));
     try std.testing.expectEqual(Format.other, sniff("\x00\x00\x00\x18ftypheic"));
+}
+
+fn fakeVideo(ctx: *anyopaque, a: std.mem.Allocator, src: api.VideoSource, max_tokens: u32, max_frames: u32) anyerror!api.PreparedVideo {
+    _ = ctx;
+    _ = max_frames;
+    _ = max_tokens;
+    // the test's videos: one group a 10 frames, 2 tokens a group, each group 0.5 s after the last
+    const n: usize = @intCast(src.frames / 10);
+    const groups = try a.alloc(api.PreparedImage, n);
+    const times = try a.alloc(f64, n);
+    for (groups, times, 0..) |*g, *t, i| {
+        g.* = .{ .pixels = try a.alloc(f32, 0), .gh = 2, .gw = 4, .tokens = 2, .hash = 100 + i };
+        t.* = @as(f64, @floatFromInt(i)) * 0.5;
+    }
+    return .{ .groups = groups, .times = times };
+}
+
+test "video parts: counted from the request, refused past two, and the template's placeholders checked" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const offer: api.VideoOffer = .{ .prepare = fakeVideo, .video_token = 8, .group_open = 6, .group_close = 7, .video_tokens = 64, .max_videos = 2, .max_frames = 256 };
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = fakePrepare, .image_token = 9, .image_tokens = 64, .max_images = 4, .video = offer };
+    const three = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}},
+        \\  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}},
+        \\  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, three, &[_]u32{ 8, 8, 8 }, 0));
+    try std.testing.expectEqualStrings("a request supports at most 2 videos", cx.message);
+    // a template that wrote fewer video placeholders than the request has parts is the server's fault
+    try std.testing.expectError(error.Refused, expand(v, null, MarkText.text(), &cx, three, &[_]u32{8}, 0));
+    try std.testing.expectEqual(errors.Kind.server, cx.kind);
 }

@@ -1,9 +1,12 @@
 //! An image's bytes to Step-5's tower inputs as vLLM's Step3-VL processor makes them: crops of 504, then an overview.
 //! Checked against vLLM dd944845777b (vllm/transformers_utils/processors/step3_vl.py), the 728-pixel boundary included.
 const std = @import("std");
-const img = @import("../glm/image.zig");
+const picture = @import("../../core/picture/picture.zig");
+const resample = picture.resample;
 
-pub const Error = img.Error || error{TooManyTokens};
+pub const Error = picture.Error || error{TooManyTokens};
+/// The words for a decoder the server lacks (libjpeg-turbo for JPEG).
+pub const decoderProblem = picture.decoderProblem;
 
 /// The processor's constants: sides, tokens a piece, the CLIP mean and std, the longest side kept, and token ids.
 pub const overview = 728;
@@ -47,21 +50,21 @@ fn starts(gpa: std.mem.Allocator, side: u32, win: u32) Error![]u32 {
 }
 
 /// The image's bytes to its pieces (crops in row order, then the overview) with the tokens around each.
-pub fn prepare(gpa: std.mem.Allocator, bytes: []const u8, ids: Ids, max_tokens: u32) Error!Prepared {
-    var src = try img.decode(gpa, bytes);
+pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, ids: Ids, max_tokens: u32) Error!Prepared {
+    var src = try picture.decode(io, gpa, bytes);
     defer src.deinit(gpa);
-    var w = src.w;
-    var h = src.h;
+    var w: u32 = @intCast(src.width);
+    var h: u32 = @intCast(src.height);
     const ratio = @as(f64, @floatFromInt(w)) / @as(f64, @floatFromInt(h));
     var base = src;
-    var padded: ?img.Rgb = null;
-    defer if (padded) |p| p.deinit(gpa);
+    var padded: ?picture.Rgb = null;
+    defer if (padded) |*p| p.deinit(gpa);
     if (@min(w, h) < 32 and (ratio > 4 or ratio < 0.25)) { // square_pad: black, the image at the top left
         const side = @max(w, h);
         const px = try gpa.alloc(u8, @as(usize, side) * side * 3);
         @memset(px, 0);
-        for (0..h) |y| @memcpy(px[y * side * 3 ..][0 .. w * 3], src.px[y * w * 3 ..][0 .. w * 3]);
-        padded = .{ .w = side, .h = side, .px = px };
+        for (0..h) |y| @memcpy(px[y * side * 3 ..][0 .. w * 3], src.pixels[y * w * 3 ..][0 .. w * 3]);
+        padded = .{ .width = side, .height = side, .pixels = px };
         base = padded.?;
         w = side;
         h = side;
@@ -71,14 +74,14 @@ pub fn prepare(gpa: std.mem.Allocator, bytes: []const u8, ids: Ids, max_tokens: 
         w = @intFromFloat(@as(f64, @floatFromInt(w)) * s);
         h = @intFromFloat(@as(f64, @floatFromInt(h)) * s);
     }
-    var scaled = try img.resizeWith(gpa, base, w, h, img.bilinear_filter);
+    var scaled = try bilinear(gpa, base, w, h);
     defer scaled.deinit(gpa);
     var pieces: std.ArrayList(Piece) = .empty;
     const win = window(@max(w, h), @min(w, h));
     if (win > 0) {
         const cw = cropSize(w, win);
         const ch = cropSize(h, win);
-        var grid = if (cw != w or ch != h) try img.resizeWith(gpa, scaled, cw, ch, img.bilinear_filter) else scaled;
+        var grid = if (cw != w or ch != h) try bilinear(gpa, scaled, cw, ch) else scaled;
         defer if (cw != w or ch != h) grid.deinit(gpa);
         const xs = try starts(gpa, cw, win);
         defer gpa.free(xs);
@@ -109,29 +112,37 @@ pub fn prepare(gpa: std.mem.Allocator, bytes: []const u8, ids: Ids, max_tokens: 
     var tokens: u32 = 0;
     for (pieces.items) |p| tokens += p.tokens;
     if (tokens > max_tokens) return error.TooManyTokens;
-    return .{ .tokens = tokens, .hash = std.hash.Wyhash.hash(0x5735, bytes), .pieces = pieces.items };
+    const id = picture.identity.withGrid(picture.identity.ofBytes(0x5735, bytes), .{ tokens, @intCast(pieces.items.len) });
+    return .{ .tokens = tokens, .hash = id, .pieces = pieces.items };
+}
+
+/// Image.resize((w, h), BILINEAR).
+fn bilinear(gpa: std.mem.Allocator, src: picture.Rgb, w: u32, h: u32) Error!picture.Rgb {
+    const px = try resample.resizeWith(gpa, .pillow, .bilinear, .of(src.pixels, src.width, src.height), w, h);
+    return .{ .width = w, .height = h, .pixels = px };
 }
 
 /// PIL's crop: a side x side window at (x0, y0), black past the image.
-fn cropRgb(gpa: std.mem.Allocator, src: img.Rgb, x0: u32, y0: u32, side: u32) Error!img.Rgb {
+fn cropRgb(gpa: std.mem.Allocator, src: picture.Rgb, x0: u32, y0: u32, side: u32) Error!picture.Rgb {
     const px = try gpa.alloc(u8, @as(usize, side) * side * 3);
     @memset(px, 0);
     for (0..side) |y| {
-        if (y0 + y >= src.h) break;
-        const n = @min(side, src.w -| x0);
-        @memcpy(px[y * side * 3 ..][0 .. n * 3], src.px[((y0 + y) * src.w + x0) * 3 ..][0 .. n * 3]);
+        if (y0 + y >= src.height) break;
+        const n = @min(side, src.width -| x0);
+        @memcpy(px[y * side * 3 ..][0 .. n * 3], src.pixels[((y0 + y) * src.width + x0) * 3 ..][0 .. n * 3]);
     }
-    return .{ .w = side, .h = side, .px = px };
+    return .{ .width = side, .height = side, .pixels = px };
 }
 
 /// ToTensor, Normalize(mean, std), then Resize((side, side), bilinear, antialias) on the floats, as patches.
-fn patches(gpa: std.mem.Allocator, src: img.Rgb, side: u32) Error![]f32 {
-    const plane = try gpa.alloc(f32, @as(usize, src.w) * src.h * 3);
+fn patches(gpa: std.mem.Allocator, src: picture.Rgb, side: u32) Error![]f32 {
+    const n = src.width * src.height;
+    const plane = try gpa.alloc(f32, n * 3);
     defer gpa.free(plane);
-    for (0..@as(usize, src.w) * src.h) |i| for (0..3) |c| {
-        plane[c * src.w * src.h + i] = (@as(f32, @floatFromInt(src.px[i * 3 + c])) / 255.0 - mean[c]) / std_dev[c];
+    for (0..n) |i| for (0..3) |c| {
+        plane[c * n + i] = (@as(f32, @floatFromInt(src.pixels[i * 3 + c])) / 255.0 - mean[c]) / std_dev[c];
     };
-    const out = try resizeFloat(gpa, plane, src.w, src.h, side);
+    const out = try resizeFloat(gpa, plane, @intCast(src.width), @intCast(src.height), side);
     defer gpa.free(out);
     const g = side / patch;
     const p = try gpa.alloc(f32, @as(usize, g) * g * patch_width);
@@ -143,25 +154,23 @@ fn patches(gpa: std.mem.Allocator, src: img.Rgb, side: u32) Error![]f32 {
 
 /// torch's antialiased bilinear resize of 3 float planes to side x side: PIL's weights, unrounded, width then height.
 fn resizeFloat(gpa: std.mem.Allocator, plane: []const f32, w: u32, h: u32, side: u32) Error![]f32 {
-    const fw = try img.weights(gpa, w, side, img.bilinear_filter);
-    defer gpa.free(fw.bounds);
-    defer gpa.free(fw.w);
-    const fh = try img.weights(gpa, h, side, img.bilinear_filter);
-    defer gpa.free(fh.bounds);
-    defer gpa.free(fh.w);
+    var fw = try resample.Weights.init(gpa, .bilinear, w, side);
+    defer fw.deinit(gpa);
+    var fh = try resample.Weights.init(gpa, .bilinear, h, side);
+    defer fh.deinit(gpa);
     const mid = try gpa.alloc(f32, @as(usize, side) * h * 3);
     defer gpa.free(mid);
     for (0..3) |c| for (0..h) |y| for (0..side) |xx| {
         var s: f64 = 0;
-        const x0 = fw.bounds[xx * 2];
-        for (0..fw.bounds[xx * 2 + 1]) |k| s += fw.w[xx * fw.ksize + k] * plane[(c * h + y) * w + x0 + k];
+        const x0, const k = fw.at(xx);
+        for (k, 0..) |wt, j| s += wt * plane[(c * h + y) * w + x0 + j];
         mid[(c * h + y) * side + xx] = @floatCast(s);
     };
     const out = try gpa.alloc(f32, @as(usize, side) * side * 3);
     for (0..3) |c| for (0..side) |yy| for (0..side) |x| {
         var s: f64 = 0;
-        const y0 = fh.bounds[yy * 2];
-        for (0..fh.bounds[yy * 2 + 1]) |k| s += fh.w[yy * fh.ksize + k] * mid[(c * h + y0 + k) * side + x];
+        const y0, const k = fh.at(yy);
+        for (k, 0..) |wt, j| s += wt * mid[(c * h + y0 + j) * side + x];
         out[(c * side + yy) * side + x] = @floatCast(s);
     };
     return out;
