@@ -53,8 +53,15 @@ pub const Listener = struct {
             const e = posix.errno(rc);
             switch (e) {
                 .SUCCESS => {
+                    const fd: posix.socket_t = @intCast(rc);
+                    const one: c_int = 1;
+                    posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&one)) catch |err| {
+                        _ = posix.system.close(fd);
+                        log.line("could not configure accepted TCP connection: {s}", .{@errorName(err)});
+                        continue;
+                    };
                     nofile_logged.store(false, .release);
-                    return .{ .fd = @intCast(rc), .peer = Threaded.addressFromPosix(&storage) };
+                    return .{ .fd = fd, .peer = Threaded.addressFromPosix(&storage) };
                 },
                 .INTR, .AGAIN, .CONNABORTED, .MFILE, .NFILE, .NOBUFS, .NOMEM => {
                     if (e != .INTR) {
@@ -131,4 +138,26 @@ test "peer text" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("127.0.0.1", peerText(&buf, .{ .ip4 = .loopback(0) }));
     try std.testing.expectEqualStrings("::1", peerText(&buf, .{ .ip6 = .loopback(0) }));
+}
+
+test "accepted IPv4 and IPv6 TCP streams disable Nagle for incremental responses" {
+    for ([_]net.IpAddress{ .{ .ip4 = .loopback(0) }, .{ .ip6 = .loopback(0) } }) |address| {
+        const listener = try Listener.open(address);
+        defer listener.close();
+        const rc = posix.system.socket(if (address == .ip4) posix.AF.INET else posix.AF.INET6, posix.SOCK.STREAM, 0);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+        const client: posix.socket_t = @intCast(rc);
+        defer _ = posix.system.close(client);
+        const peer: net.IpAddress = if (address == .ip4) .{ .ip4 = .loopback(listener.port()) } else .{ .ip6 = .loopback(listener.port()) };
+        var storage: Threaded.PosixAddress = undefined;
+        const len = Threaded.addressToPosix(&peer, &storage);
+        if (posix.errno(posix.system.connect(client, &storage.any, len)) != .SUCCESS) return error.ConnectFailed;
+        const stop = std.atomic.Value(bool).init(false);
+        const accepted = listener.accept(&stop) orelse return error.AcceptFailed;
+        defer _ = posix.system.close(accepted.fd);
+        var value: c_int = 0;
+        var size: posix.socklen_t = @sizeOf(c_int);
+        try std.testing.expect(std.c.getsockopt(accepted.fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &value, &size) == 0);
+        try std.testing.expect(value != 0);
+    }
 }
