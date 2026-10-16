@@ -14,8 +14,8 @@ const clock = @import("clock.zig");
 const Server = @import("server.zig").Server;
 const family_mod = @import("family.zig");
 const chunk_plan = @import("chunk_plan.zig");
+const Mailbox = @import("mailbox.zig").Mailbox;
 const chat_generation = @import("chat_generation.zig");
-const Shown = chat_generation.Shown;
 const Generation = chat_generation.Generation;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -36,6 +36,8 @@ pub const Input = struct {
     id: []const u8 = "",
     /// ``logprobs: true`` with this many ``top_logprobs``; null: not asked.
     logprobs: ?u8 = null,
+    /// ``/v1/completions``' ``prompt_logprobs``: rows for the prompt with this many alternatives; null: not asked.
+    prompt_logprobs: ?u8 = null,
     /// The request body (a family reads fields of its own from it, such as ``response_format``).
     body: Value = .null,
     /// ``parallel_tool_calls: false``: the reply keeps its first call (a family applies it while streaming).
@@ -65,68 +67,13 @@ pub const Reply = struct {
     effort: ?[]const u8 = null,
     /// ``choices[0].logprobs`` (``{"content": [...]}``) for a request that asked; null otherwise.
     logprobs: ?Value = null,
+    /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
+    prompt_logprobs: ?Value = null,
     /// A family's parsed calls (OpenAI tool-call objects); null: the route parses the content itself.
     calls: ?[]Value = null,
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
-
-/// Events the engine thread hands this request, read by the request's own thread.
-pub const Mailbox = struct {
-    io: std.Io,
-    gpa: Allocator,
-    mutex: std.Io.Mutex = .init,
-    cond: std.Io.Condition = .init,
-    tokens: std.ArrayList(u32) = .empty,
-    chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
-    rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
-    cached: ?u32 = null,
-    prefilled_ns: ?i96 = null,
-    finished: bool = false,
-    reason: api.Reason = .stop,
-    stats: api.Stats = .{},
-    widths: []u32 = &.{},
-    raised: []bool = &.{},
-    telemetry: []u8 = "",
-    message: []u8 = "",
-
-    fn onEvent(ctx: *anyopaque, _: api.Id, event: *const api.Event) void {
-        const m: *Mailbox = @ptrCast(@alignCast(ctx));
-        m.mutex.lockUncancelable(m.io);
-        defer m.mutex.unlock(m.io);
-        switch (event.*) {
-            .prefilled => |cached| {
-                m.cached = cached;
-                m.prefilled_ns = std.Io.Clock.awake.now(m.io).toNanoseconds();
-            },
-            .logprobs => |r| m.rows.appendSlice(m.gpa, r) catch {},
-            .tokens => |t| {
-                m.tokens.appendSlice(m.gpa, t) catch {};
-                m.chunks.append(m.gpa, m.tokens.items.len) catch {};
-            },
-            .finished => |f| {
-                m.finished = true;
-                m.reason = f.reason;
-                m.stats = f.stats;
-                m.widths = m.gpa.dupe(u32, f.stats.prefill_widths) catch &.{};
-                m.raised = m.gpa.dupe(bool, f.stats.prefill_raised) catch &.{};
-                m.telemetry = m.gpa.dupe(u8, f.stats.telemetry_json) catch "";
-                m.message = m.gpa.dupe(u8, f.message) catch "";
-            },
-        }
-        m.cond.signal(m.io);
-    }
-
-    fn deinit(m: *Mailbox) void {
-        m.tokens.deinit(m.gpa);
-        m.chunks.deinit(m.gpa);
-        m.rows.deinit(m.gpa);
-        m.gpa.free(m.widths);
-        m.gpa.free(m.raised);
-        m.gpa.free(m.telemetry);
-        m.gpa.free(m.message);
-    }
-};
 
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
@@ -152,7 +99,7 @@ pub const Prepared = struct {
     preparing: bool,
     images_omitted: u32 = 0,
     /// the prompt's prepared images (a family's), held until the reply ends
-    images: ?family_mod.Images = null,
+    family_images: ?family_mod.Images = null,
 };
 
 /// Render ``input`` and run every check that can refuse it, before anything reaches the client or the engine.
@@ -175,7 +122,7 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
     const asked: ?[]const u8 = if (f.get("reasoning_effort")) |e| (if (e == .string) e.string else null) else null;
     const effort: ?[]const u8 = if (srv.family) |fam| asked orelse srv.config.reasoning_effort orelse fam.defaultEffort() else srv.effortFor(asked);
     const rendered = try prompt_mod.prepare(srv, cx, input, thinking, effort);
-    errdefer if (rendered.images) |im| im.release();
+    errdefer if (rendered.family_images) |im| im.release();
     if (gone.check()) return error.Cancelled;
     if (rendered.ids.len == 0) return cx.refuse("rendered prompt is empty");
     const window: i64 = srv.info.context_window;
@@ -208,11 +155,15 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids), // from the tokens alone, for every request: cached states are keyed by tokens
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
         .decide = if (input.prompt == null and !background) prompt_mod.decideOf(srv, rendered.ids) else null,
+        .images = rendered.images,
+        .cache_key = rendered.cache_key,
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
     if (thinking) {
         const budget_field = f.get("thinking_budget");
         const budget: i64 = if (budget_field != null and budget_field.?.truthy()) budget_field.?.int64() orelse 0 else srv.config.thinking_budget;
+        if (budget > 0 and !srv.info.thinking_budget)
+            return cx.refuse("thinking_budget is not supported by this native engine");
         if (srv.think_close.len > 0) request.loop_guard = srv.config.loop_guard;
         if ((budget > 0 or request.loop_guard) and srv.think_close.len > 0) {
             if (budget > 0) request.think_budget = @intCast(@min(budget, std.math.maxInt(u32)));
@@ -221,7 +172,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         }
     }
     if (input.logprobs) |count| request.logprobs = try @import("logprobs.zig").admit(srv, cx, thinking, request.think_budget, count);
-    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .images_omitted = rendered.images_omitted, .images = rendered.images };
+    request.prompt_logprobs = input.prompt_logprobs;
+    return .{ .input = input, .request = request, .prompt_len = rendered.ids.len, .received = received, .thinking = thinking, .effort = effort, .sampled = sampling != null, .drafts = drafts, .stops = stops_opt, .preparing = preparing, .images_omitted = rendered.images_omitted, .family_images = rendered.family_images };
 }
 
 /// Submit a prepared request and collect its reply; ``sink`` hears the stream (null: not streamed).
@@ -236,7 +188,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const stops_opt = prepared.stops;
     var preparing = prepared.preparing;
     defer release(srv, preparing);
-    defer if (prepared.images) |im| im.release(); // after the engine's finished event (the loop below waits for it)
+    defer if (prepared.family_images) |im| im.release(); // after the engine's finished event (the loop below waits for it)
     if (request.background) {
         while (true) {
             const now = nowNs(io);
@@ -247,6 +199,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
         }
     }
     if (gone.check()) return error.Cancelled;
+    if (srv.info.decides) return cx.refuse("this model makes decisions and does not write text: use POST /v1/systemone");
     var stop_hook: StopHook = .{ .srv = srv, .stops = .{ .strings = stops_opt.strings } };
     // a family matches stop strings in the answer (``push``); the generic path in the raw text on the engine's thread
     if (stops_opt.strings.len > 0 and srv.family == null) request.stop = .{ .ctx = &stop_hook, .check = StopHook.check };
@@ -260,11 +213,12 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
             error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
             error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
             error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
+            error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
         };
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .logprobs = request.logprobs != null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {

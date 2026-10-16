@@ -226,6 +226,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step) void {
     // the tool and the family's server compile on any host too; running them needs a GPU, the images and a pack
     const options = b.addOptions();
     options.addOption([]const u8, "version", @import("../../build.zig.zon").version);
+    options.addOption(bool, "slide_test_hooks", false); // main.zig reads it, as build.zig's options carry it
     for ([_]*std.Build.Step.Compile{ tool(b, host, .debug, rt, host_dk, false), server(b, host, .debug, rt, host_dk, options) }) |c| {
         step.dependOn(&c.step);
         test_step.dependOn(&c.step);

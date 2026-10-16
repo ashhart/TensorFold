@@ -91,7 +91,7 @@ const Reply = struct {
         return .{ .ctx = r, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
 
-    fn open(_: *anyopaque) error{Closed}!void {}
+    fn open(_: *anyopaque, _: usize) error{Closed}!void {}
 
     fn event(_: *anyopaque, _: ?json.Value) error{Closed}!void {}
 
