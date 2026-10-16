@@ -40,6 +40,7 @@ const draw = @import("launches/draw.zig");
 const tp = @import("launches/tp.zig");
 const flashnext = @import("launches/flashnext.zig");
 const mamba = @import("launches/mamba.zig");
+const nemotron_moe = @import("launches/nemotron_moe.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -83,6 +84,8 @@ pub const Launcher = struct {
     fnx: flashnext.Fns,
     /// Nemotron's Mamba-2 mixer kernels.
     mamba: mamba.Fns,
+    /// Nemotron-H's MoE pick and relu^2 (nemotron_moe.hpp).
+    nemo: nemotron_moe.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -256,6 +259,7 @@ pub const Launcher = struct {
             try att.function(ns ++ "10fa_prefillI12hip_bfloat16Li64EEEvPKfPKT_S7_Pfiiiiifixxxxxx"),
             try att.function(ns ++ "10fa_prefillIfLi32EEEvPKfPKT_S6_Pfiiiiifixxxxxx"),
         };
+        l.nemo = try nemotron_moe.Fns.load(ops);
         l.softmax_stats = try att.function("tf_softmax_stats");
         l.sum_partials = try att.function("tf_sum_partials");
         l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);

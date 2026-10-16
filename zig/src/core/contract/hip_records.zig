@@ -84,6 +84,61 @@ const own_records = [_]Record{
             .{ .vgprs = 23, .sgprs = 24, .lds = 16, .private = 0, .bound = 128, .wave = 32 },
         },
     },
+    .{
+        .launch = .{ .name = "nemotron tf_nemo_select", .symbol = "tf_nemo_select", .image = "ops", .threads = 32 },
+        .usage = .{
+            .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 26, .lds = 8320, .private = 0, .bound = 32, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "nemotron tf_nemo_select_rank",
+            .symbol = "tf_nemo_select_rank",
+            .image = "ops",
+            .threads = 512,
+        },
+        .usage = .{
+            .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 30, .lds = 8320, .private = 0, .bound = 512, .wave = 32 },
+            .{ .vgprs = 27, .sgprs = 29, .lds = 8320, .private = 0, .bound = 512, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "nemotron tf_nemo_relu2", .symbol = "tf_nemo_relu2", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 8, .sgprs = 9, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "nemotron tf_nemo_localize",
+            .symbol = "tf_nemo_localize",
+            .image = "ops",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 4, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 4, .sgprs = 10, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 4, .sgprs = 9, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "nemotron tf_nemo_combine", .symbol = "tf_nemo_combine", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
 };
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
