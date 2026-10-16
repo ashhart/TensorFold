@@ -31,9 +31,9 @@ pub const Bounded = struct {
 pub const Policy = struct {
     /// bounded state the RAM tier keeps (least recently used entries go past it)
     ram_bytes: u64 = 512 << 20,
-    /// idle chats resident in the pool (0: no limit) and pool bytes held by entries alone (0: no limit)
-    chats: u32 = 0,
-    resident_bytes: u64 = 0,
+    /// Idle chats and entry-only pool bytes: null is unlimited; zero retains no idle residency.
+    chats: ?u32 = null,
+    resident_bytes: ?u64 = null,
     /// park an evicted chat's older turns too (default: drop them, the leaf's file covers them)
     park_prefixes: bool = false,
     /// drop, never write, an entry a newer entry of its chain covers
@@ -495,7 +495,7 @@ pub const Store = struct {
     /// Evicts LRU idle chats past the residency budget (leaf parked, unshared older turns dropped); returns how many.
     pub fn enforce(s: *Store) !u32 {
         const pol = s.policy;
-        if (pol.chats == 0 and pol.resident_bytes == 0) return 0;
+        if (pol.chats == null and pol.resident_bytes == null) return 0;
         var chats: std.ArrayList(Chat) = .empty;
         defer chats.deinit(s.gpa);
         var members: std.ArrayList(u32) = .empty;
@@ -510,8 +510,8 @@ pub const Store = struct {
         var idle: u32 = @intCast(chats.items.len);
         var gone: u32 = 0;
         for (chats.items) |c| {
-            const over_n = pol.chats > 0 and idle > pol.chats;
-            const over_b = pol.resident_bytes > 0 and s.pool.entryOnlyBytes() > pol.resident_bytes;
+            const over_n = if (pol.chats) |limit| idle > limit else false;
+            const over_b = if (pol.resident_bytes) |limit| s.pool.entryOnlyBytes() > limit else false;
             if (!over_n and !over_b) break;
             if (!s.index.get(c.leaf).ram or !s.idleLeaf(c.leaf)) continue;
             members.clearRetainingCapacity();

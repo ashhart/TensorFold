@@ -24,6 +24,11 @@ fn rowBytes(c: cfg.Config, at: usize) usize {
     return at * c.head_dim * 2;
 }
 
+/// A state's buffer for the disk: the Mamba states whole, then a key and a value row a token, by head, for each cache.
+pub fn diskShape(c: cfg.Config, head: bool) struct { mamba: usize, planes: usize, row: u32 } {
+    return .{ .mamba = c.count(.mamba) * (convBytes(c) + ssmBytes(c)), .planes = (c.count(.attention) + @intFromBool(head)) * 2 * c.kv_heads, .row = @intCast(rowBytes(c, 1)) };
+}
+
 /// The bytes a state at `at` tokens takes (with the head's cache when `head`).
 pub fn bytes(c: cfg.Config, at: usize, head: bool) usize {
     const kvs = c.count(.attention) + @intFromBool(head);

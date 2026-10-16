@@ -1,6 +1,7 @@
 //! Resolve checkpoint affine formats and per-module aliases without changing native words or floating metadata.
 const std = @import("std");
 const object = @import("config.zig").object;
+const keys = @import("core").quant.keys;
 
 pub const Spec = struct {
     bits: u8,
@@ -11,15 +12,6 @@ pub const Spec = struct {
             std.mem.indexOfScalar(usize, &.{ 32, 64, 128 }, s.group_size) == null) return error.BadAffine;
     }
 };
-
-pub fn canonical(path: []const u8) []const u8 {
-    var p = path;
-    if (std.mem.endsWith(u8, p, ".weight")) p = p[0 .. p.len - 7];
-    for ([_][]const u8{ "model.language_model.", "language_model.", "text_model.", "model." }) |prefix| {
-        if (std.mem.startsWith(u8, p, prefix)) p = p[prefix.len..];
-    }
-    return p;
-}
 
 fn spec(o: std.json.ObjectMap, fallback: ?u8) !Spec {
     const bits = if (o.get("bits")) |v| blk: {
@@ -72,13 +64,13 @@ pub const Formats = struct {
     }
 
     pub fn resolve(f: *const Formats, path: ?[]const u8) !?Spec {
-        const wanted = canonical(path orelse return f.global);
+        const wanted = keys.canonical(path orelse return f.global);
         const q = f.quant orelse return null;
         var matched = false;
         var found: ?Spec = null;
         var it = q.iterator();
         while (it.next()) |item| {
-            if (!std.mem.eql(u8, canonical(item.key_ptr.*), wanted)) continue;
+            if (!std.mem.eql(u8, keys.canonical(item.key_ptr.*), wanted)) continue;
             const v = item.value_ptr.*;
             const own: ?Spec = switch (v) {
                 .bool => |yes| if (yes) f.global else null,
@@ -146,5 +138,5 @@ test "no affine metadata remains explicit rather than guessing four bits" {
     var f = try Formats.init(std.testing.allocator, "{}");
     defer f.deinit();
     try std.testing.expectEqual(@as(?Spec, null), try f.resolve("lm_head"));
-    try std.testing.expectEqualStrings("layers.3.self_attn.q_proj", canonical("model.language_model.model.layers.3.self_attn.q_proj.weight"));
+    try std.testing.expectEqualStrings("layers.3.self_attn.q_proj", keys.canonical("model.language_model.model.layers.3.self_attn.q_proj.weight"));
 }

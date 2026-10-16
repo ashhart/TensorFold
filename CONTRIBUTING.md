@@ -1,7 +1,7 @@
 # Contributing to TensorFold
 
 TensorFold's main line is the Zig engine and server.
-Python 0.6.6 is maintained on `python-0.6`; Python clients and references under `tools` are development tools.
+Python 0.6.6 stays available at the `v0.6.6` tag and takes no further changes; Python clients and references under `tools` are development tools.
 Start from the release branch named in the issue, and keep one change per pull request.
 Open an issue before a new model family, backend or arithmetic change so we can agree on its gate.
 
@@ -38,6 +38,7 @@ Verify these contracts at the same checkpoint, backend, runtime and settings:
 - Prompt chunks and decode use the required row arithmetic, with recurrent state, KV and final logits checked at seams.
 - Cancellation, reset and partial acceptance leave the next request's state valid.
 
+A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line.
 Keep the checkpoint's activation precision and the required accumulation precision.
 A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
 Compare prompt and decode references separately on identical input rows.

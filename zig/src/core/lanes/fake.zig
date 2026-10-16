@@ -59,6 +59,9 @@ pub const Fake = struct {
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
     ranked: bool = false, // the head gives its held chain back (alternatives)
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
+    fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
+    last_rows: usize = 0, // the last verify's rows, for test clocks
+    last_sampled: bool = false, // and whether one of its streams drew keyed samples
     pieces_run: usize = 0, // prompt pieces run (`pieceBackend`)
     joins: usize = 0, // prompts whose last token joined a round (`joinBackend`)
     drafts_calls: usize = 0, // `draft` calls, and the most requests one took
@@ -80,12 +83,12 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts, .reports_fill = true } };
     }
 
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
     pub fn stepped(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
     }
 
     /// The backend with prompts in pieces (begin / piece / finish) beside whole prompts.
@@ -197,6 +200,7 @@ pub const Fake = struct {
         const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
         for (0..chunks) |chunk| {
             x.prefill_count += 1;
+            s.fill_at.store(@intCast(s.prompt_len * (chunk + 1) / chunks), .monotonic);
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
             if (s.yields()) return error.Yielded;
@@ -216,6 +220,7 @@ pub const Fake = struct {
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
         l.filled += 1;
+        s.fill_at.store(@intCast(s.prompt_len * l.filled / @max(1, x.prefill_chunks)), .monotonic);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);
@@ -310,7 +315,12 @@ pub const Fake = struct {
     fn verify(ptr: *anyopaque, windows: []const be.Window, out: []be.Verified) anyerror!void {
         const x = self(ptr);
         x.rounds += 1;
+        if (x.fail_round == x.rounds) return error.GpuFailed;
+        x.last_rows = 0;
+        x.last_sampled = false;
         for (windows, out) |w, o| {
+            x.last_rows += w.rows();
+            x.last_sampled = x.last_sampled or w.stream.sampling != null;
             const l = x.lane(w.stream);
             l.base = l.history.items.len;
             l.rows.clearRetainingCapacity();
