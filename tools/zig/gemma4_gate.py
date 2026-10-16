@@ -96,7 +96,8 @@ def oracle(args: argparse.Namespace) -> None:
         np.asarray(family.last_row).astype(np.float32).tofile(out / f"{name}.last.f32")
         print(f"{name}: {len(ids)} prompt tokens, {tokenizer.decode(tokens)[:80]!r}", flush=True)
     receipt = {"environment": environment(), "model": str(args.model), "prompt_path": args.prompt,
-               "decode": family.decode.backend, "kinds": sorted({k for p in family.decode.qkv for k in getattr(p, "kinds", ())}),
+               "decode": family.decode.backend,
+               "kinds": sorted({k for p in family.decode.qkv for k in getattr(p, "kinds", ())}),
                "tokens": args.tokens, "results": results}
     (out / "oracle.json").write_text(json.dumps(receipt, indent=1) + "\n")
 

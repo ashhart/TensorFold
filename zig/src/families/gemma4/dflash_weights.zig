@@ -186,7 +186,7 @@ fn stackShape(c: *const ckpt.Checkpoint, prefix: []const u8, members: []const []
     return .{ n, k };
 }
 
-/// The members' bf16 rows stacked along N, always 4-bit (the MTP assistant's linears and its tied head).
+/// The members' bf16 rows stacked along N, always 4-bit: DFlash's by default, the MTP assistant's linears and head.
 pub fn quantized(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
     var name: [160]u8 = undefined;
     const n, const k = try stackShape(c, prefix, members);

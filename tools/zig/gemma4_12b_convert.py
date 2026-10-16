@@ -28,7 +28,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         staged = Path(tmp)
         for f in args.source.iterdir():
-            if f.name != "config.json" and not f.name.endswith(".safetensors") and f.name != "model.safetensors.index.json":
+            weights_file = f.name.endswith(".safetensors") or f.name == "model.safetensors.index.json"
+            if f.name != "config.json" and not weights_file:
                 (staged / f.name).symlink_to(f.resolve())
         weights = {}
         for f in sorted(args.source.glob("*.safetensors")):
