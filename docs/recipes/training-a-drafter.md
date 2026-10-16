@@ -39,7 +39,7 @@ prefills text through the target with that fork's Kolibri forward. TensorFold sh
 | `.pos` | u32: the row's cache position |
 | `.kind` | u8: 1 for a reply's row, 0 for a prompt's |
 | `.st` | the tapped rows, `row_bytes` each, as the family's `features` gives them |
-| `.top` | with `logprobs`: each reply row's best ids (u32 x k), then their logprobs (f32 x k) |
+| `.top` | with `logprobs`, entry j for reply token j: the best ids (u32 x k), then their logprobs (f32 x k), from the row at cache position `prompt_len - 1 + j` |
 | `.json` | `rows`, `first_row`, `prompt_len`, `taps`, `row_bytes`, `dtype`, `top_k`, and `gap` if the stream stopped early |
 
 - Record with drafts on. On Nemotron the recorded rows were byte-identical drafted, with `"draft": false` and with
@@ -55,6 +55,12 @@ prefills text through the target with that fork's Kolibri forward. TensorFold sh
 - Disk: `row_bytes` per row. Nemotron's one tap is 5,376 bytes, so a million rows is 5.4 GB. Kolibri's three bf16
   taps were 15,360 bytes a row, so its 6.03M recorded rows held about 93 GB of tapped rows. A stream starts no files
   below 25 GiB free.
+- Join the files by `.pos`, not by file order. Row i of `.tok`, `.pos`, `.kind` and `.st` is one committed row at
+  cache position `.pos[i]`. A resumed prompt records from its cached prefix on, so its rows start at `first_row`, and a
+  `gap` ends them early. `.top[j]` is the distribution the target computed at position `prompt_len - 1 + j`, the one
+  that drew reply token j, so the row at position p pairs with `.top[p - prompt_len + 1]`. For a 36-token prompt,
+  `.top[0]` belongs to position 35, a prompt row (kind 0), and the first reply row, position 36, pairs with `.top[1]`.
+  A row with no entry there has no recorded distribution.
 - Check every `.json` against the release you train for (`checkRecording` in `zig/src/core/drafter_release.zig`):
   the same `taps`, `row_bytes` and `dtype`. A recording with other taps cannot train that release.
 - Serve with at least as many `--parallel` slots as clients, or the prompt cache misses and every agent turn records
@@ -105,16 +111,16 @@ development numbers, not a test set.
 
 ## Check it in TensorFold
 
-- **Replies.** Drafted replies equal `"draft": false` ones, greedy and sampled with a seed, solo and concurrent: the
-  same `token_sha`. The drafter changes how fast a reply comes, never which reply. Any difference is a bug in the
-  serving path, not a weak drafter.
+- **Replies.** Drafted replies equal `"draft": false` ones, greedy and sampled with a seed, solo and concurrent, and a
+  prompt resumed from the cache gives the reply a fresh one does: the same `token_sha`. The drafter changes how fast a
+  reply comes, never which reply. Any difference is a bug in the serving path, not a weak drafter.
 - **Speed.** Decode tok/s against the same build with copy drafting alone, one stream and several, on prompts no
   checkpoint trained on. The reply's `acceptance_rate` and `tokens_per_round` explain a speed change; they don't rank
   drafters on their own, because a round's cost depends on depth, batch and the bytes the drafter reads.
 - **Format.** The release opens (`Release.open`), its adapter matches the target the server loaded (`check`), and
-  every recording it was trained on matches its taps (`checkRecording`). A loader runs `check` before serving, so a
-  release whose `embed_scale`, `tied`, `softcap` or `head_bias` differ from the target is refused, not served with
-  wrong logits.
+  every recording it was trained on matches its taps (`checkRecording`). These check the folder; they do not run the
+  drafter. Nothing loads a release at serve time yet. The loader that does must run `check` first, so a release whose
+  `embed_scale`, `tied`, `softcap` or `head_bias` differ from the target's is refused, not served with wrong logits.
 
 ## Don't bother
 
