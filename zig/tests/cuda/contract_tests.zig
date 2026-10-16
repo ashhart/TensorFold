@@ -12,6 +12,7 @@ const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
 const utility_k = @import("contract_utility.zig");
+const best_k = @import("contract_row_best.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -131,6 +132,11 @@ pub fn run(gpu: check.Gpu) !void {
     defer for (&shifts) |*shift| shift.deinit();
     for (&sums) |*sum| try kernels.append(a, sum.kernel());
     for (&shifts) |*shift| try kernels.append(a, shift.kernel());
+    var mtp = try cuda.Module.load(gpu.d, kk.flashnext_mtp);
+    defer mtp.unload();
+    var best = best_k.Best{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best") };
+    defer best.deinit();
+    try kernels.append(a, best.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
