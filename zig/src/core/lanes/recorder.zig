@@ -123,7 +123,7 @@ pub const Recorder = struct {
         for (exts, &files) |ext, *f| {
             const path = try std.fmt.allocPrint(r.gpa, "{s}{s}", .{ base, ext });
             defer r.gpa.free(path);
-            f.* = try r.space.createFile(r.io, path, .{ .exclusive = true });
+            f.* = try r.createNew(path);
             made += 1;
         }
         r.streams.putAssumeCapacity(s, .{ .base = base, .files = files });
@@ -195,9 +195,17 @@ pub const Recorder = struct {
         try r.create(try std.fmt.allocPrint(a, "{s}.json", .{o.base}), text.written());
     }
 
+    /// A new file at `path`, never through a link there: Windows' exclusive create follows a dangling one.
+    fn createNew(r: *Recorder, path: []const u8) !Io.File {
+        if (comptime @import("builtin").os.tag == .windows) {
+            if (r.space.statFile(r.io, path, .{ .follow_symlinks = false })) |_| return error.PathAlreadyExists else |_| {}
+        }
+        return r.space.createFile(r.io, path, .{ .exclusive = true });
+    }
+
     /// A new file in the recorder's folder with these bytes; one already there is an error, never overwritten.
     fn create(r: *Recorder, path: []const u8, bytes: []const u8) !void {
-        const f = try r.space.createFile(r.io, path, .{ .exclusive = true });
+        const f = try r.createNew(path);
         defer f.close(r.io);
         try f.writeStreamingAll(r.io, bytes);
     }
