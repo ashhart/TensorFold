@@ -56,6 +56,7 @@ pub const Prefix = struct {
     }
 
     pub fn send(p: *Prefix, words: []const u32) !void {
+        if (p.e.stopped) return error.GroupStopped;
         if (p.link) |l| try l.send(words);
     }
 
@@ -151,3 +152,41 @@ pub const Prefix = struct {
 
     const pool_pages: radix.Pages.VTable = .{ .retain = retain, .release = release, .holders = holders, .available = available };
 };
+
+/// A link that counts what rank 0 sent, for the test.
+const Counter = struct {
+    sent: usize = 0,
+
+    fn send(ptr: *anyopaque, _: []const u32) hip.collective.LinkError!void {
+        const c: *Counter = @ptrCast(@alignCast(ptr));
+        c.sent += 1;
+    }
+
+    fn recv(_: *anyopaque, _: Allocator, _: *std.ArrayList(u32)) hip.collective.LinkError!void {
+        return error.LinkFailed;
+    }
+
+    fn agree(
+        _: *anyopaque,
+        _: hip.collective.Step,
+        _: hip.collective.How,
+    ) hip.collective.LinkError!hip.collective.Verdict {
+        return error.LinkFailed;
+    }
+
+    const vtable: hip.collective.Link.VTable = .{ .send = send, .recv = recv, .agree = agree };
+};
+
+test "no prompt cache step goes to the other ranks once the group stopped" {
+    const gpa = std.testing.allocator;
+    const e = try gpa.create(Engine);
+    defer gpa.destroy(e);
+    e.stopped = true;
+    var c: Counter = .{};
+    const link: hip.collective.Link = .{ .ptr = &c, .vtable = &Counter.vtable };
+    var p: Prefix = .{ .gpa = gpa, .e = e, .store = undefined, .snaps = undefined, .link = link };
+    defer p.msg.deinit(gpa);
+    try std.testing.expectError(error.GroupStopped, p.sendPages(3, 0, &.{ 7, 8 }));
+    try std.testing.expectError(error.GroupStopped, p.send(&.{ @backingInt(worker.Op.snap), 3, 0 }));
+    try std.testing.expectEqual(@as(usize, 0), c.sent);
+}
