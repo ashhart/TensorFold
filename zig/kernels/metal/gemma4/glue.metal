@@ -28,7 +28,7 @@ kernel void gemma_embed(const device uint* ids [[buffer(0)]], const device uchar
   out[size_t(r) * D + 2 * b + 1] = bfloat(float(bfloat(s * float(v >> 4) + z)) * scale);
 }
 
-// MLX's rms_looped (rows past 4096): 1024 threads, 4 reads a thread a pass, out = bf16(w * bf16(x * inv)).
+// MLX 0.32's rms_looped (rms_norm.metal, MIT) for bf16, stride-1 w and D wide, its two loops as one; row sums after.
 kernel void gemma_rms_looped(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
                              device bfloat* out [[buffer(2)]], constant float& eps [[buffer(3)]],
                              device float* XS [[buffer(4)]], constant int& xst [[buffer(5)]],
