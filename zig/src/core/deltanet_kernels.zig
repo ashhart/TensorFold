@@ -28,6 +28,8 @@ pub const Kernels = struct {
     publish_conv: metal.Pipeline,
     chain_wide_marks: metal.Pipeline,
     mark_conv: metal.Pipeline,
+    /// tf_delta_gdn_pre for one-row segments kept in place: the conv window written to history, no commit or publish.
+    pre_step: metal.Pipeline,
 
     pub fn init(device: metal.Device) !Kernels {
         const library = try metal.Library.fromSource(device, source.core_deltanet, metal.CompileOptions.mlx());
@@ -45,6 +47,7 @@ pub const Kernels = struct {
             "chain_wide",
             "chain_wide_marks",
             "mark_conv",
+            "pre_step",
         };
         var pipelines: [names.len]metal.Pipeline = undefined;
         var done: usize = 0;
@@ -70,6 +73,7 @@ pub const Kernels = struct {
             .chain_wide = pipelines[9],
             .chain_wide_marks = pipelines[10],
             .mark_conv = pipelines[11],
+            .pre_step = pipelines[12],
         };
     }
 
@@ -87,6 +91,7 @@ pub const Kernels = struct {
             k.chain_wide,
             k.chain_wide_marks,
             k.mark_conv,
+            k.pre_step,
         }) |p| p.deinit();
         k.library.deinit();
     }
