@@ -30,6 +30,11 @@ fn mlaCount(c: *const cfg.Config) usize {
     return c.countKind(.mla) + @as(usize, if (c.mtp > 0) 1 else 0);
 }
 
+/// A whole state's layout for the disk: KDA states, then each MLA layer's key, indexer key, gate and pooled index rows.
+pub fn diskShape(c: *const cfg.Config) struct { kda: usize, mla: usize, key_row: u32, i_row: u32, kpool: u32 } {
+    return .{ .kda = c.countKind(.kda) * (stBytes(c) + csBytes(c)), .mla = mlaCount(c), .key_row = c.kv_lora * 2, .i_row = c.i_dim * 2, .kpool = c.kpool };
+}
+
 /// The pooled index blocks `at` tokens hold (a partial last block is copied, never read until whole).
 fn blocks(c: *const cfg.Config, at: u32) usize {
     return at / c.kpool + 1;

@@ -4,11 +4,13 @@ const api = @import("engine_api");
 const errors = @import("errors.zig");
 const log = @import("log.zig");
 const wording = @import("slide_words.zig");
+const untold = @import("slide_untold.zig");
 const units = @import("slide_units.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");
 const slide_think = @import("slide_think.zig");
 const slide_subject = @import("slide_subject.zig");
+const slide_span = @import("slide_span.zig");
 const side = @import("slide_side.zig");
 const Held = @import("slide_lesson.zig").Held;
 const Server = @import("server.zig").Server;
@@ -30,7 +32,7 @@ pub const Got = struct {
     pairs: std.ArrayList(api.Example) = .empty,
     thinking: std.ArrayList(?api.Example) = .empty, // each pair's thinking answer: the recall line, then the answer
     refs: std.ArrayList(Held) = .empty,
-    subjects: std.ArrayList(?[]const u8) = .empty,
+    subjects: std.ArrayList(?[]const u8) = .empty, // full replacement spans; refs keep the single-word neuron keys
     unnamed: std.ArrayList([]const u8) = .empty, // questions that asked for the subject instead of naming it
     unjudged: bool = false, // the questions taken next are built from the fact (another value's): no judge asked
 };
@@ -134,7 +136,7 @@ fn write(srv: *Server, cx: *Cx, words: []const []const u8, named: []const []cons
         t.subject = try subjectRow(srv, cx, t.*, word);
         t.value = try valueRow(srv, cx, t.*, short);
     }
-    return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = if (word.len > 0) word else null };
+    return .{ .ex = ex, .think = think, .ref = .{ .question = q, .answer = answer, .fact = f, .subject = word, .short = short }, .subject = slide_span.subject(q, word, named) };
 }
 
 /// The fewest words that answer `question` from the fact (in `note`), as the model gives them.
@@ -247,4 +249,19 @@ pub fn judged(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, doc
     const reply = try askBase(srv, cx, null, try std.fmt.allocPrint(cx.a, prompts.judge_prompt, .{ fact, question }), 16, gone);
     const said = std.mem.trim(u8, reply.content, " \t\r\n\"*.");
     return !std.ascii.startsWithIgnoreCase(said, "not stated") and wording.answersFrom(fact, question, said);
+}
+
+/// Whether the lesson teaches `question`: one of its own, or one a fact sharing a word with it answers.
+pub fn answeredByAny(srv: *Server, cx: *Cx, told: []const []const u8, kept: []const bool, own: []const []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (untold.taught(own, question)) return true;
+    for (told, kept) |fact, k| if (k and wording.shares(fact, question) and try answered(srv, cx, fact, question, document, gone)) return true;
+    return false;
+}
+
+/// Whether the fact answers `question`, as the model judges it when asked so (never one about someone it leaves out).
+pub fn answered(srv: *Server, cx: *Cx, fact: []const u8, question: []const u8, document: bool, gone: anytype) !bool {
+    if (!document and wording.someoneElse(fact, question)) return false;
+    const yes = try judged(srv, cx, fact, question, document, gone);
+    if (yes) log.line("slide: \"{s}\" is answered by the fact, so it is learned rather than kept", .{question});
+    return yes;
 }
