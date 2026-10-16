@@ -101,61 +101,65 @@ pub fn run(gpu: check.Gpu) !void {
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
     defer mod.unload();
     const router = try cuda.grouped.Router.resolve(mod);
-    var kernels = try fx.load(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)));
-    defer kernels.unload();
-    const act = try r.out(most * slots * rank_width * 2);
-    const out = try r.out(most * slots * d * 4);
-    const combined = try a.alloc(f32, most * slots * d);
-    @memset(combined, 0);
-    const reference_full = try a.alloc(f64, combined.len);
-    @memset(reference_full, 0);
-    const reference_abs = try a.alloc(f64, combined.len);
-    @memset(reference_abs, 0);
-    for ([_]*const flash.modelopt_experts.Owned{ &left, &right }, 0..) |owned, rank| {
-        var all: []f32 = undefined;
-        for ([_]usize{ most, 1, 7 }) |rows| {
-            try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, most * slots * d * 4, r.s.handle), "cuMemsetD8Async");
-            const items = cuda.grouped.maxItems(rows * slots, experts + 1, 16);
-            try router.route(r.s, dp, rows * slots, experts + 1, 16, plan);
-            try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act, items, experts);
-            try kernels.run(r.s, .down_f32, .{ .x = act, .stride = rank_width }, owned.view(), plan, out, items, experts);
-            if (rows == most) all = try r.back(f32, out, most * slots * d) else try r.sameRows("NVFP4 rank output rows", f32, out, all[0 .. rows * slots * d]);
+    var prior: [2]?[]f32 = .{ null, null };
+    for ([_]usize{ 4, 1 }) |warps| {
+        var kernels = try fx.loadWarps(gpu.d, @intCast(try gpu.ctx.attribute(.multiprocessor_count)), warps);
+        defer kernels.unload();
+        const act = try r.out(most * slots * rank_width * 2);
+        const out = try r.out(most * slots * d * 4);
+        const combined = try a.alloc(f32, most * slots * d);
+        @memset(combined, 0);
+        const reference_full = try a.alloc(f64, combined.len);
+        @memset(reference_full, 0);
+        const reference_abs = try a.alloc(f64, combined.len);
+        @memset(reference_abs, 0);
+        for ([_]*const flash.modelopt_experts.Owned{ &left, &right }, 0..) |owned, rank| {
+            var all: []f32 = undefined;
+            for ([_]usize{ most, 1, 7 }) |rows| {
+                try gpu.d.check(gpu.d.api.cuMemsetD8Async(out, 0, most * slots * d * 4, r.s.handle), "cuMemsetD8Async");
+                const items = cuda.grouped.maxItems(rows * slots, experts + 1, 16);
+                try router.route(r.s, dp, rows * slots, experts + 1, 16, plan);
+                try kernels.run(r.s, .up, .{ .x = dx, .stride = d, .slots = slots }, owned.view(), plan, act, items, experts);
+                try kernels.run(r.s, .down_f32, .{ .x = act, .stride = rank_width }, owned.view(), plan, out, items, experts);
+                if (rows == most) all = try r.back(f32, out, most * slots * d) else try r.sameRows("NVFP4 rank output rows", f32, out, all[0 .. rows * slots * d]);
+            }
+            if (prior[rank]) |ref| try check.sameBytes("NVFP4 CTA grouping leaves every rank output byte-exact", std.mem.sliceAsBytes(all), std.mem.sliceAsBytes(ref)) else prior[rank] = all;
+            for (0..most) |row| for (0..slots) |slot| {
+                const e: usize = @intCast(picks[row * slots + slot]);
+                if (e == experts) {
+                    for (all[(row * slots + slot) * d ..][0..d]) |v| try check.expect(v == 0, "shared slot untouched by NVFP4", .{});
+                    continue;
+                }
+                var activation: [rank_width]f64 = undefined;
+                for (&activation, 0..) |*v, j| {
+                    const channel = rank * rank_width + j;
+                    var gate: f64 = 0;
+                    var up: f64 = 0;
+                    for (0..d) |k| {
+                        gate += rig.bf(x[row * d + k]) * weight(&source, e, 0, channel, k);
+                        up += rig.bf(x[row * d + k]) * weight(&source, e, 1, channel, k);
+                    }
+                    gate = rig.rbf(gate);
+                    up = rig.rbf(up);
+                    v.* = rig.rbf(rig.rbf(gate / (1 + @exp(-gate))) * up);
+                }
+                for (0..d) |j| {
+                    var want: f64 = 0;
+                    var mag: f64 = 0;
+                    for (activation, 0..) |v, k| {
+                        const term = v * weight(&source, e, 2, j, rank * rank_width + k);
+                        want += term;
+                        mag += @abs(term);
+                    }
+                    const at = (row * slots + slot) * d + j;
+                    try r.within("NVFP4 rank FP32 down", all[at], want, rig.sumTol(mag, rank_width) + 1e-6);
+                    combined[at] += all[at];
+                    reference_full[at] += want;
+                    reference_abs[at] += mag;
+                }
+            };
         }
-        for (0..most) |row| for (0..slots) |slot| {
-            const e: usize = @intCast(picks[row * slots + slot]);
-            if (e == experts) {
-                for (all[(row * slots + slot) * d ..][0..d]) |v| try check.expect(v == 0, "shared slot untouched by NVFP4", .{});
-                continue;
-            }
-            var activation: [rank_width]f64 = undefined;
-            for (&activation, 0..) |*v, j| {
-                const channel = rank * rank_width + j;
-                var gate: f64 = 0;
-                var up: f64 = 0;
-                for (0..d) |k| {
-                    gate += rig.bf(x[row * d + k]) * weight(&source, e, 0, channel, k);
-                    up += rig.bf(x[row * d + k]) * weight(&source, e, 1, channel, k);
-                }
-                gate = rig.rbf(gate);
-                up = rig.rbf(up);
-                v.* = rig.rbf(rig.rbf(gate / (1 + @exp(-gate))) * up);
-            }
-            for (0..d) |j| {
-                var want: f64 = 0;
-                var mag: f64 = 0;
-                for (activation, 0..) |v, k| {
-                    const term = v * weight(&source, e, 2, j, rank * rank_width + k);
-                    want += term;
-                    mag += @abs(term);
-                }
-                const at = (row * slots + slot) * d + j;
-                try r.within("NVFP4 rank FP32 down", all[at], want, rig.sumTol(mag, rank_width) + 1e-6);
-                combined[at] += all[at];
-                reference_full[at] += want;
-                reference_abs[at] += mag;
-            }
-        };
+        for (combined, reference_full, reference_abs) |got, want, mag| try r.within("NVFP4 summed rank partials", got, want, rig.sumTol(mag, width) + 2e-6);
+        r.report("NVFP4 TP cuts: both intermediate halves, exact source reader and packing, independent FP64 reference, FP32 partials and untouched shared slot; rows 1/7/17 equal");
     }
-    for (combined, reference_full, reference_abs) |got, want, mag| try r.within("NVFP4 summed rank partials", got, want, rig.sumTol(mag, width) + 2e-6);
-    r.report("NVFP4 TP cuts: both intermediate halves, exact source reader and packing, independent FP64 reference, FP32 partials and untouched shared slot; rows 1/7/17 equal");
 }
