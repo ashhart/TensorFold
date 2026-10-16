@@ -68,6 +68,41 @@ test "a stream's rows carry a lesson only after its decision row" {
     try std.testing.expect(r.seg[2][2] >= r.seg[2][0] + r.seg[2][1]);
 }
 
+/// A pass's rows the pocket acts on, segment by segment in pass order: runs of rows between untaught streams' rows.
+pub const Runs = struct {
+    first: usize = 0, // the open run's first row
+    rows: usize = 0, // and its rows so far
+
+    /// The run a segment of `rows` rows closes, if any: an untaught segment ends the open run and is left out.
+    pub fn next(r: *Runs, rows: usize, untaught: bool) ?[2]usize {
+        if (!untaught) {
+            r.rows += rows;
+            return null;
+        }
+        const closed = r.last();
+        r.* = .{ .first = r.first + r.rows + rows };
+        return closed;
+    }
+
+    /// The open run, once every segment is in.
+    pub fn last(r: *const Runs) ?[2]usize {
+        return if (r.rows > 0) .{ r.first, r.rows } else null;
+    }
+};
+
+test "the pocket's runs leave out the rows of streams that read the model as shipped" {
+    var r: Runs = .{};
+    try std.testing.expectEqual(@as(?[2]usize, null), r.next(3, false));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 0, 3 }), r.next(2, true));
+    try std.testing.expectEqual(@as(?[2]usize, null), r.next(4, true));
+    try std.testing.expectEqual(@as(?[2]usize, null), r.next(1, false));
+    try std.testing.expectEqual(@as(?[2]usize, null), r.next(2, false));
+    try std.testing.expectEqual(@as(?[2]usize, .{ 9, 3 }), r.last());
+    var all: Runs = .{};
+    try std.testing.expectEqual(@as(?[2]usize, null), all.next(5, true));
+    try std.testing.expectEqual(@as(?[2]usize, null), all.last());
+}
+
 /// The kept lessons (blocks below `blocks`) whose router scores reach what they need.
 pub fn latched(score: []const f32, need: []const f32, blocks: usize) Acting {
     var bits: Acting = .empty;

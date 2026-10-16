@@ -1,4 +1,4 @@
-// logprobs (lanes/logprob.zig): log normalizer, the pick's logit, then the k best ids and logits (logit desc, id asc).
+// logprobs (lanes/logprob.zig): log normalizer, the pick's logit, the k best ids and logits (logit desc, id asc), rank.
 #pragma once
 
 #include <cuda_bf16.h>
@@ -10,7 +10,7 @@ constexpr unsigned TG = 1024;  // one block a row, as tf_logprob_rows launches i
 constexpr unsigned NSG = TG / 32;
 constexpr unsigned FULL = 0xFFFFFFFFu;
 constexpr unsigned LP_TOP = 20;
-constexpr unsigned LP_WORDS = 2 + 2 * LP_TOP;
+constexpr unsigned LP_WORDS = 3 + 2 * LP_TOP;
 
 // (m, s): a running max and the sum of exp(x - m) under it, merged with another part's
 __device__ __forceinline__ void lse_merge(float& m, float& s, float m2, float s2) {
@@ -29,7 +29,7 @@ __device__ __forceinline__ void lse_merge(float& m, float& s, float m2, float s2
 __device__ __forceinline__ bool better(float v, unsigned i, float bv, unsigned bi) { return v > bv || (v == bv && i < bi); }
 
 // One row: a fixed reduction tree (lane tree, then warp 0 over the warps), so a row's words never depend on timing.
-__device__ void logprob_row(const __nv_bfloat16* L, unsigned V, unsigned pick, unsigned k, unsigned* out) {
+__device__ void logprob_row(const __nv_bfloat16* L, unsigned V, unsigned pick, unsigned k, bool rank, unsigned* out) {
     __shared__ float part_m[NSG], part_s[NSG], part_v[NSG];
     __shared__ unsigned part_i[NSG];
     __shared__ float prev_v;
@@ -72,6 +72,25 @@ __device__ void logprob_row(const __nv_bfloat16* L, unsigned V, unsigned pick, u
             out[0] = __float_as_uint(m + logf(s));
             out[1] = __float_as_uint(pick < V ? __bfloat162float(L[pick]) : NAN);
         }
+    }
+    if (rank) {
+        // vLLM's rank: the entries whose logit is at or above the pick's, the pick itself included
+        const float pk = pick < V ? __bfloat162float(L[pick]) : INFINITY;
+        unsigned above = 0;
+        for (unsigned i = t; i < V; i += TG) above += __bfloat162float(L[i]) >= pk ? 1u : 0u;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) above += __shfl_down_sync(FULL, above, off);
+        if (lane == 0) part_i[warp] = above;
+        __syncthreads();
+        if (warp == 0) {
+            above = part_i[lane];
+#pragma unroll
+            for (int off = 16; off > 0; off >>= 1) above += __shfl_down_sync(FULL, above, off);
+            if (lane == 0) out[2 + 2 * LP_TOP] = above;
+        }
+        __syncthreads();
+    } else if (t == 0) {
+        out[2 + 2 * LP_TOP] = 0;
     }
     for (unsigned r = 0; r < k; ++r) {
         // the best entry after the last one taken: a strict total order, so the result is exact

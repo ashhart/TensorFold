@@ -214,3 +214,28 @@ test "two split ranks make the same decisions on the same calls and each restore
     try restart(gpa, root, 2, 1);
     try testing.expectEqualSlices(u64, t0.items, t1.items);
 }
+
+test "zero chat or byte budgets evict idle residency while null remains unlimited" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "zero-budget");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 1, 0, .{});
+    defer r.deinit();
+    const slot = try r.pool.newSlot(64 * page);
+    const ids = try chatIds(gpa, 1, 5 * page);
+    defer gpa.free(ids);
+    _ = try turn(gpa, &r, slot, 1, ids);
+    try testing.expectEqual(@as(u32, 1), r.store.resident().chats);
+    r.store.policy.chats = 0;
+    try testing.expectEqual(@as(u32, 1), try r.store.enforce());
+    try testing.expectEqual(@as(u32, 0), r.store.resident().chats);
+    r.store.policy.chats = null;
+    _ = try turn(gpa, &r, slot, 1, ids);
+    try testing.expect(r.store.resident().bytes > 0);
+    r.store.policy.resident_bytes = 0;
+    try testing.expectEqual(@as(u32, 1), try r.store.enforce());
+    try testing.expectEqual(@as(u64, 0), r.store.resident().bytes);
+}

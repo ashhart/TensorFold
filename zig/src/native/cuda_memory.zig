@@ -1,6 +1,20 @@
-//! CUDA memory admission arithmetic and host-pool validation, without a device.
+//! CUDA memory admission arithmetic, and the host pool read from /proc/meminfo and validated, without a device.
 const std = @import("std");
 const gib: f64 = 1 << 30;
+
+/// The bytes of the checkpoint's safetensors files: what its weights need on the device, near enough to refuse early.
+pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
+    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+    defer d.close(io);
+    var total: u64 = 0;
+    var it = d.iterate();
+    while (it.next(io) catch null) |e| {
+        if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
+        const st = d.statFile(io, e.name, .{}) catch continue;
+        total += st.size;
+    }
+    return total;
+}
 
 /// What /proc/meminfo says: MemTotal and MemAvailable in bytes (the page cache counts as available).
 pub const MemInfo = struct { total: u64, available: u64 };
@@ -28,6 +42,15 @@ pub fn meminfo(text: []const u8) ?MemInfo {
     const t = total orelse return null;
     const a = available orelse return null;
     return if (t > 0 and a <= t) .{ .total = t, .available = a } else null;
+}
+
+/// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
+pub fn procText(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
+    var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;
+    defer file.close(io);
+    var buf: [4096]u8 = undefined;
+    var r = file.readerStreaming(io, &buf);
+    return r.interface.allocRemaining(a, .limited(1 << 20)) catch null;
 }
 
 /// CUDA allocation room after the reserve and optional process-memory cap.
@@ -134,6 +157,14 @@ test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams
     try std.testing.expectEqual(52 * g, cacheBytes(64, 60 * g, 8 * g));
     try std.testing.expectEqual(@as(u64, 0), cacheBytes(0, 60 * g, 8 * g));
     try std.testing.expectEqual(@as(u64, 0), cacheBytes(null, 6 * g, 8 * g));
+}
+
+test "this host's /proc/meminfo reads whole and parses (Linux)" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const text = procText(a, std.testing.io, "/proc/meminfo") orelse return error.Unreadable;
+    defer a.free(text);
+    try std.testing.expect(meminfo(text) != null);
 }
 
 test "meminfo: total and available in bytes" {

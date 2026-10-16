@@ -257,7 +257,7 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
 }
 
 /// A learner that takes `total` steps over a lesson, then reports it learned in that many.
-pub const FakeLearner = struct {
+const FakeLearner = struct {
     sink: ?api.LearnSink = null,
     steps: u32 = 0,
     total: u32 = 3,
@@ -266,11 +266,11 @@ pub const FakeLearner = struct {
     fn emit(l: *FakeLearner, event: api.LearnEvent) void {
         l.sink.?.event(l.sink.?.ctx, &event);
     }
-    pub fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
+    fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.* = .{ .sink = sink, .total = l.total, .examples = request.train.len };
     }
-    pub fn step(ctx: *anyopaque) api.Learner.Step {
+    fn step(ctx: *anyopaque) api.Learner.Step {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.steps += 1;
         if (l.steps < l.total) return .{ .done = false, .changed = false };
@@ -278,20 +278,20 @@ pub const FakeLearner = struct {
         l.emit(.{ .done = .{} });
         return .{ .done = true, .changed = true };
     }
-    pub fn abort(ctx: *anyopaque) void {
+    fn abort(ctx: *anyopaque) void {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.emit(.{ .done = .{ .message = "aborted" } });
     }
 };
 
 /// Learn events as tags, read on the test's thread once `done` arrives.
-pub const LearnBox = struct {
+const LearnBox = struct {
     mutex: std.Io.Mutex = .init,
     tags: std.ArrayList(std.meta.Tag(api.LearnEvent)) = .empty,
     steps: u32 = 0,
     done: bool = false,
 
-    pub fn sink(b: *LearnBox) api.LearnSink {
+    fn sink(b: *LearnBox) api.LearnSink {
         return .{ .ctx = b, .event = event };
     }
     fn event(ctx: *anyopaque, e: *const api.LearnEvent) void {
@@ -302,7 +302,7 @@ pub const LearnBox = struct {
         if (e.* == .learned) b.steps = e.learned.steps;
         if (e.* == .done) b.done = true;
     }
-    pub fn wait(b: *LearnBox) void {
+    fn wait(b: *LearnBox) void {
         while (true) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
@@ -555,4 +555,19 @@ test "a request that does not fit a shared cache pool waits, in order, until a s
     try std.testing.expectEqual(Reason.cancelled, a.wait());
     try std.testing.expectEqual(Reason.length, b.wait()); // alone again: admitted
     try std.testing.expectEqual(@as(usize, 4), b.state()[0]);
+}
+
+test {
+    _ = @import("lane_host_fail_test.zig");
+    _ = @import("lane_host_lone_test.zig");
+    _ = @import("lane_host_admit_test.zig");
+    _ = @import("lane_host_recall_test.zig");
+    _ = @import("lane_host_fill_test.zig");
+    _ = @import("lane_host_status_test.zig");
+    _ = @import("lane_host_stale_test.zig");
+    _ = @import("lane_host_reuse_test.zig");
+    _ = @import("lane_host_cache_lifetime_test.zig");
+    _ = @import("lane_host_borrow_test.zig");
+    _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_rows_test.zig");
 }

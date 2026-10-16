@@ -3,6 +3,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const pull = @import("pull.zig");
 const ranged = @import("pull_parts.zig");
+const single = @import("pull_file.zig");
+const exlr8_pull = @import("pull_exlr8.zig");
 
 /// A fake hub on 127.0.0.1: revision and tree APIs, ranged resolve endpoints, a body cut once, a repo ignoring ranges.
 const FakeHub = struct {
@@ -120,6 +122,10 @@ const FakeHub = struct {
         const line_end = std.mem.indexOf(u8, head, "\r\n") orelse return false;
         var parts = std.mem.tokenizeScalar(u8, head[0..line_end], ' ');
         const method = parts.next() orelse return false;
+        if (std.mem.eql(u8, method, "HEAD")) {
+            sendAll(fd, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"); // no redirect: the hub's link is the storage link
+            return true;
+        }
         if (!std.mem.eql(u8, method, "GET")) return false;
         const raw_path = parts.next() orelse return false;
         const path = if (std.mem.indexOfScalar(u8, raw_path, '?')) |q| raw_path[0..q] else raw_path;
@@ -386,4 +392,32 @@ fn hexBytes(text: []const u8) ![32]u8 {
     var out: [32]u8 = undefined;
     _ = try std.fmt.hexToBytes(&out, text);
     return out;
+}
+
+test "an EXLR8 node's whole files land in a relative directory, small files and LFS pieces alike" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    const io = std.testing.io;
+    var fake_hub = FakeHub.open() catch return error.SkipZigTest;
+    fake_hub.start();
+    defer fake_hub.stopServer();
+    const dir = try std.fmt.allocPrint(a, ".tf-pull-exlr8-{d}", .{std.Io.Clock.awake.now(io).toNanoseconds()});
+    defer std.Io.Dir.cwd().deleteTree(io, dir) catch {};
+    var sha256: [32]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&sha256, fake_hub.weights_sha_hex);
+    var git_sha1: [20]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&git_sha1, &fake_hub.config_git_hex);
+    const whole = [_]single.Entry{
+        .{ .path = "config.json", .size = FakeHub.config_body.len, .git_sha1 = git_sha1 },
+        .{ .path = "weights.safetensors", .size = FakeHub.weights_body.len, .sha256 = sha256 },
+    };
+    var client: std.http.Client = .{ .allocator = a, .io = io };
+    defer client.deinit();
+    var out: std.Io.Writer.Allocating = .init(a);
+    var err_out: std.Io.Writer.Allocating = .init(a);
+    try std.testing.expectEqual(@as(u32, 2), try exlr8_pull.fetchWhole(a, io, &client, &out.writer, &err_out.writer, try fake_hub.endpoint(a), "Org/Flash", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1", dir, &whole));
+    const cwd = std.Io.Dir.cwd();
+    try std.testing.expectEqualStrings(FakeHub.config_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "config.json" }), a, .limited(1 << 20)));
+    try std.testing.expectEqualSlices(u8, FakeHub.weights_body, try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "weights.safetensors" }), a, .limited(1 << 20)));
 }

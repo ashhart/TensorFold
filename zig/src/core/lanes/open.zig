@@ -23,16 +23,8 @@ pub fn add(e: *Engine, s: *Stream) !void {
     try opened(e, s);
 }
 
-/// How a stream's first drafts are sized: the depth rule, or the head's whole reach under node probabilities.
-pub const Reach = enum { rule, head };
-
 /// After the prompt pass: the first token drawn and committed, the first drafts asked; rounds from the next.
 pub fn opened(e: *Engine, s: *Stream) !void {
-    return openedWith(e, s, .rule);
-}
-
-/// `opened` with its first drafts sized by `reach` (a family planner's prompts in pieces: `.head`).
-pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);
         return error.Cancelled;
@@ -48,7 +40,7 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
     var asked: ?u32 = null;
     if (e.cfg.family_mtp and s.drafts) {
         // the head reads the prompt's last row and the first token, and drafts the one after it
-        const d = try firstDepth(e, s, reach);
+        const d: u32 = @intCast(try e.rule.depth(win.who(s)));
         asked = d;
         try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
         s.dropHeld(e.gpa);
@@ -76,13 +68,6 @@ pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
         return;
     }
     try e.live.append(e.gpa, s);
-}
-
-/// The first drafts' depth for `reach`.
-pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
-    var who = win.who(s);
-    if (reach == .head and e.cfg.node_probabilities) return @intCast(try e.rule.headDepth(&who, null, win.probe(e)));
-    return @intCast(try e.rule.depth(who));
 }
 
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).
