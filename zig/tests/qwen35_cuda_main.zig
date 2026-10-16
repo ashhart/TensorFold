@@ -13,6 +13,10 @@ const usage =
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
     \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
+    \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control]
+    \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in windows,
+    \\each row's KL(bf16 || fp8) of the next-token distributions and top-1 agreement; control: bf16 against bf16 rotated
+    \\three positions off, a defect the meter must show.
     \\
 ;
 
@@ -28,6 +32,15 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
         return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
+    }
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "kl")) {
+        if (args.len != 7 and args.len != 8) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        const skip = try std.fmt.parseInt(usize, args[5], 10);
+        const control = args.len == 8 and std.mem.eql(u8, args[7], "control");
+        return kl(init, a, args[1], args[3], args[4], skip, try std.fmt.parseInt(usize, args[6], 10), control);
     }
     if (args.len != 5 and !(args.len == 6 and std.mem.eql(u8, args[5], "fp8"))) {
         std.debug.print("{s}", .{usage});
@@ -265,6 +278,88 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: 
     try meta.appendSlice(a, "}\n");
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/meta.json", .{out}), .data = meta.items });
     return if (failed) 1 else 0;
+}
+
+/// bf16 caches against fp8 ones (or a control) on the same ids: each window row's KL and top-1, summed up into `out`.
+fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path: []const u8, out: []const u8, skip: usize, rows: usize, control: bool) !u8 {
+    const io = init.io;
+    var ids: std.ArrayList(u32) = .empty;
+    var it = std.mem.tokenizeAny(u8, try std.Io.Dir.cwd().readFileAlloc(io, ids_path, a, .limited(64 << 20)), ", \n");
+    while (it.next()) |t| try ids.append(a, try std.fmt.parseInt(u32, t, 10));
+    if (skip + rows > ids.items.len) return error.FixtureTooShort;
+    var driver = try cuda.Driver.open();
+    defer driver.close();
+    var ctx = try cuda.Context.init(&driver, 0);
+    defer ctx.deinit();
+    const eb = try E.Engine.init(init.gpa, io, &ctx, model, false);
+    defer eb.deinit();
+    const e8 = try E.Engine.init(init.gpa, io, &ctx, model, !control);
+    defer e8.deinit();
+    var cb = try E.Cache.init(init.gpa, eb, skip + rows + 64);
+    defer cb.deinit(init.gpa);
+    var c8 = try E.Cache.init(init.gpa, e8, skip + rows + 64);
+    defer c8.deinit(init.gpa);
+    if (control) c8.delta = 3;
+    try fill(eb, &cb, ids.items[0..skip], skip);
+    try fill(e8, &c8, ids.items[0..skip], skip);
+    const kls = try a.alloc(f64, rows);
+    var top1: usize = 0;
+    var at: usize = 0;
+    while (at < rows) {
+        const n = @min(eb.window_rows, rows - at);
+        const w = ids.items[skip + at ..][0..n];
+        try eb.forward(&.{.{ .cache = &cb, .rows = n }}, w, .logits);
+        try e8.forward(&.{.{ .cache = &c8, .rows = n }}, w, .logits);
+        for (0..n) |r| {
+            const d = divergence(eb.rowLogits(r), e8.rowLogits(r));
+            kls[at + r] = d.kl;
+            top1 += @intFromBool(d.same_top);
+        }
+        at += n;
+    }
+    var sum: f64 = 0;
+    for (kls) |x| sum += x;
+    std.mem.sort(f64, kls, {}, std.sort.asc(f64));
+    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}}}\n", .{ rows, skip, control, sum / @as(f64, @floatFromInt(rows)), kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / @as(f64, @floatFromInt(rows)) });
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = report });
+    std.debug.print("{s}", .{report});
+    return 0;
+}
+
+/// KL(p || q) in float64 of two rows of bf16 logits, and whether their largest logits sit at one token.
+fn divergence(p: []const u16, q: []const u16) struct { kl: f64, same_top: bool } {
+    var mp: f64 = -std.math.inf(f64);
+    var mq: f64 = -std.math.inf(f64);
+    var ap: usize = 0;
+    var aq: usize = 0;
+    for (p, q, 0..) |x, y, i| {
+        if (bf(x) > mp) {
+            mp = bf(x);
+            ap = i;
+        }
+        if (bf(y) > mq) {
+            mq = bf(y);
+            aq = i;
+        }
+    }
+    var zp: f64 = 0;
+    var zq: f64 = 0;
+    for (p, q) |x, y| {
+        zp += @exp(bf(x) - mp);
+        zq += @exp(bf(y) - mq);
+    }
+    const lp = mp + @log(zp);
+    const lq = mq + @log(zq);
+    var d: f64 = 0;
+    for (p, q) |x, y| {
+        const a = bf(x) - lp;
+        d += @exp(a) * (a - (bf(y) - lq));
+    }
+    return .{ .kl = @max(d, 0), .same_top = ap == aq };
+}
+
+fn bf(h: u16) f64 {
+    return @as(f32, @bitCast(@as(u32, h) << 16));
 }
 
 /// A picture file prepared as the server prepares it, or NAME.f32@HxW: patches another machine prepared, on that grid.
