@@ -3,8 +3,8 @@ const std = @import("std");
 const c = @import("contract.zig");
 const rows = @import("rows.zig");
 
-/// The formula a kernel computes: MLX's per-group s*sum(q x) + b*sum(x), or each weight s*q + b first.
-pub const Form = enum { factored, dequantized };
+/// The formula a kernel computes: MLX's s*sum(q x) + b*sum(x), each weight s*q + b first, or bf16(fma(s, q, b)) first.
+pub const Form = enum { factored, dequantized, rounded };
 
 /// Host inputs of y = x W^T: x [rows, k] bf16, codes [n, k], scales and biases [n, k / group] bf16.
 pub const Affine = struct {
@@ -102,6 +102,11 @@ pub const Affine = struct {
         return c.fromBf16(f.x[r * f.shape.k + i]);
     }
 
+    /// A weight as `rounded` loads it: bf16(fma(s, q, b)) in fp32.
+    fn roundedWeight(p: [2]f64, q: f64) f64 {
+        return c.fromBf16(c.toBf16(@mulAdd(f32, @floatCast(p[0]), @floatCast(q), @floatCast(p[1]))));
+    }
+
     fn sb(f: Affine, j: usize, g: usize) [2]f64 {
         const at = j * (f.shape.k / f.group) + g;
         return .{ c.fromBf16(f.scales[at]), c.fromBf16(f.biases[at]) };
@@ -127,12 +132,13 @@ pub const Affine = struct {
                         xs += x;
                     },
                     .dequantized => qx += (p[0] * q + p[1]) * x,
+                    .rounded => qx += roundedWeight(p, q) * x,
                 }
-                qa += @abs((q + f.off) * x);
+                qa += if (f.form == .rounded) @abs(roundedWeight(p, q) * x) else @abs((q + f.off) * x);
                 xa += @abs(x);
             }
             y += if (f.form == .factored) p[0] * qx + p[1] * xs else qx;
-            mag += @abs(p[0]) * qa + @abs(p[1] - f.off * p[0]) * xa;
+            mag += if (f.form == .rounded) qa else @abs(p[0]) * qa + @abs(p[1] - f.off * p[0]) * xa;
         }
         return .{ y, mag };
     }
@@ -166,7 +172,10 @@ pub const Affine = struct {
                 y.* = rows.sumIn(acc, .sequential, t[g * f.group ..][0..f.group]) * pg[0] + rows.sumIn(acc, .sequential, t[k + g * f.group ..][0..f.group]) * (pg[1] - f.off * pg[0]);
             }
             const grouped = rows.sumIn(acc, order, gs);
-            for (0..k) |i| t[i] = (p[0] * @as(f64, @floatFromInt(f.codes[j * k + i])) + p[1]) * f.xv(r, i);
+            for (0..k) |i| {
+                const q: f64 = @floatFromInt(f.codes[j * k + i]);
+                t[i] = (if (f.form == .rounded) roundedWeight(p, q) else p[0] * q + p[1]) * f.xv(r, i);
+            }
             const direct = rows.sumIn(acc, order, t[0..k]);
             var best = whole;
             for ([_]f64{ grouped, direct }) |v| if (!std.math.isFinite(best) or @abs(v - want) < @abs(best - want)) {

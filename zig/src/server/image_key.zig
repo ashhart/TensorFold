@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
 const images = @import("images.zig");
+const messages = @import("messages.zig");
 
 /// The marker before an image's rows: its identity's low 31 bits, exactly (core/picture/identity.zig keeps 62).
 pub fn open(hash: u64) u32 {
@@ -84,4 +85,29 @@ test "one-token images whose row words collide share no kept state; the same ima
     try std.testing.expect(store.keep(first, 4, null, &.{}, &.{})); // a state kept past the image and its markers
     try std.testing.expect(store.find(other, &.{}, &.{}) == null);
     try std.testing.expectEqual(@as(?u32, 4), if (store.find(try keyOf(a, ids[0]), &.{}, &.{})) |e| e.at else null);
+}
+
+test "a template that reads \"image\" parts gets them so typed, twice normalized, and the server's wrap around the rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var dummy: u8 = 0;
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = named, .image_token = 9, .markers = &.{ 5, 9, 6 }, .wrap = .{ 5, 6 }, .part_type = "image", .image_tokens = 64, .max_images = 4 };
+    const text =
+        \\[{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "data:,%FF%D8%FF%01%02%03%04%05%06%07%08"}}, {"type": "text", "text": "x"}]}]
+    ;
+    const msgs = switch (try json.parseText(a, text)) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    var cx: errors.Cx = .{ .a = a };
+    const once = try messages.normalizeWith(&cx, msgs, "system", false, .of(v));
+    const twice = try messages.normalizeWith(&cx, once, "system", false, .of(v));
+    const part = twice.array[0].get("content").?.array[0];
+    try std.testing.expectEqualStrings("image", part.get("type").?.string);
+    try std.testing.expect(part.get("image_url") != null);
+    // the template's placeholder alone (1, 9, 2): the server writes 5 and 6 around the image's row
+    const x = (try images.expand(v, null, images.MarkText.text(), &cx, twice, &[_]u32{ 1, 9, 2 }, 3)).?;
+    try std.testing.expectEqualSlices(u32, &.{ 1, 5, 9, 6, 2 }, x.ids);
+    try std.testing.expectEqual(@as(u32, 2), x.images[0].at);
 }
