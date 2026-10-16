@@ -125,7 +125,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.wts = try big.of(arena, n * 4);
     p.counts = try big.of(arena, blocks * c.experts * 4);
     p.starts = try big.of(arena, blocks * c.experts * 4);
-    p.offsets = try big.of(arena, (c.experts + 1) * 4);
+    p.offsets = try big.of(arena, c.experts * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
     // the rest share three regions by layer; proj: KDA's projection, MLA's queries and key lists then values, the experts' planes, the dense gate and up
@@ -259,8 +259,28 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     }
     const path = wide.routed(w.gate, w.up, w.down);
     if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, p.offsets, p.order, p.act, c.moe_inter);
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D);
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit },
+            x_in,
+            p.offsets,
+            p.order,
+            p.act,
+            c.moe_inter,
+            n,
+        );
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.down, .experts = E, .repeat = 1 },
+            p.act,
+            p.offsets,
+            p.order,
+            p.yp,
+            D,
+            n,
+        );
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
         gateUp(p, mm, x, e, w, x_in, n);
@@ -439,7 +459,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             e.setPipeline(if (c.tp > 1) x.k.sparse_nax_tp else x.k.sparse_nax);
             bind(e, 0, .{ p.ql, x.s.mla[mi].keys, p.indices });
             e.setValue(@as(f32, 1.0 / 16.0), 3);
-            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), 0, 0 }, 4);
+            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), @intCast(pos), 0 }, 4);
             bind(e, 5, .{p.att});
             e.dispatchGroups(size(c.mla_heads / 16, M, 1), size(128, 1, 1));
         } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);

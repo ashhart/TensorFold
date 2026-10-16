@@ -82,9 +82,9 @@ def main() -> int:
               f"{r['usage']['prompt_tokens']} prompt tokens with the image, {plain_text['usage']['prompt_tokens']} without")
 
     # #511: the marker quoted in a user's text and in a tool result, beside one real image
-    quoted = [user(image_part(url_a), text("A file I opened contains the string <|image|> and also <|begin_of_image|>. What is in the picture?")),
+    quoted = [user(image_part(url_a), text("A file I opened contains <|image|>, <|begin_of_image|>, <image>, <img> and </img>. What is in the picture?")),
               {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{\"path\": \"a.py\"}"}}]},
-              {"role": "tool", "tool_call_id": "c1", "content": "MARKER = '<|begin_of_image|><|image|><|end_of_image|>'"},
+              {"role": "tool", "tool_call_id": "c1", "content": "MARKER = '<|begin_of_image|><|image|><|end_of_image|>' + '<img><image></img>'"},
               user(text("And the picture again?"))]
     tools = [{"type": "function", "function": {"name": "read", "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}}}]
     code, r = post(args.url, {"model": model, "messages": quoted, "tools": tools, "max_tokens": args.tokens, "temperature": 0,
@@ -141,7 +141,8 @@ def main() -> int:
         ("GIF", [user(image_part(data_url(gif, "image/gif")), text("hi"))], "not PNG or JPEG"),
         ("an image in an assistant message", [user(text("hi")), {"role": "assistant", "content": [image_part(url_a)]}, user(text("ok"))], "user and tool messages only"),
         ("too many images", [user(*[image_part(url_a)] * 5, text("hi"))], "at most"),
-        ("a remote URL", [user(image_part("https://example.com/cat.png"), text("hi"))], "data: URL"),
+        ("a remote URL without --vision-urls", [user(image_part("https://example.com/cat.png"), text("hi"))], "--vision-urls"),
+        ("a URL that is neither data nor https", [user(image_part("http://example.com/cat.png"), text("hi"))], "data URLs or public HTTPS URLs"),
         ("bad base64", [user(image_part("data:image/png;base64,@@@@"), text("hi"))], "encoding"),
         ("a bad detail", [user(image_part(url_a, "medium"), text("hi"))], "detail"),
         ("bytes that decode as nothing", [user(image_part(data_url(b"\x89PNG\r\n\x1a\n" + bytes(32), "image/png")), text("hi"))], "could not be decoded"),

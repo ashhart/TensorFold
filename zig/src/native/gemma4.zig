@@ -16,12 +16,13 @@ pub const takes_drafter = true;
 
 const Host = struct {
     gpa: std.mem.Allocator,
+    io: std.Io, // the image decoder's, on the HTTP thread
     model: *g.Model,
     metal: *g.backend.Metal,
     draft: ?*g.dflash.Drafter = null,
     wrap: ?lanes.drafted.Drafted = null,
     warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
-    resident: ?Resident = null, // weights, scratches, the drafter's and the tower's buffers, kept wired between requests
+    resident: ?Resident = null, // weights, scratches, the drafter's and the tower's buffers, wired between requests
     config: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -77,6 +78,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.gpa = gpa;
+    h.io = io;
     h.model = model;
     h.markers = .{ 255999, 258880, 258882 };
     h.metal = try g.backend.Metal.init(gpa, io, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 2) });
@@ -100,13 +102,14 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.config, if (h.wrap) |*w| w.backend() else h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images } else null;
+    const vis: ?api.Vision = if (o.vision) |v| .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .wrap = .{ h.markers[0], h.markers[2] }, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images, .explain = g.image.decoderProblem } else null;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = g.state.chunk_rows, .structures = true, .vision = vis });
     h.cache = null;
     try enableCache(h, a, o, @intCast(window), problem);
     errdefer if (h.cache) |*store| store.deinit();
-    try holdResident(h);
-    errdefer h.resident.?.deinit();
+    h.warm = .{ .queue = model.queue };
+    holdResident(h) catch |err| std.log.warn("gemma4: no residency set ({s}); the first request after an idle second re-wires the weights", .{@errorName(err)});
+    errdefer if (h.resident) |*r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
     std.log.info("gemma4: the dense 31B, context {d} tokens, {d} streams{s}{s}", .{ window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "", if (vis != null) ", images" else "" });
@@ -128,7 +131,7 @@ fn holdResident(h: *Host) !void {
         try buffersOf(h.gpa, &list, d);
     }
     if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.scratch, v.patches, v.cos, v.sin });
-    h.resident = try Resident.init(m.device, m.queue, list.items);
+    h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "gemma4") orelse return;
     h.warm = (&h.resident.?).target();
 }
 
@@ -193,11 +196,9 @@ fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, window: usize, probl
     h.host.info_.prompt_cache_plan = plan;
 }
 
-/// Info.vision's prepare (on the HTTP thread): the template writes <|image|> alone, so its rows go between boi and eoi.
+/// Info.vision's prepare (on the HTTP thread); the template writes <|image|> alone: the server adds boi and eoi.
 fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    const p = try g.image.prepare(a, bytes, max_tokens);
-    const pieces = try a.alloc(api.Piece, 1);
-    pieces[0] = .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .before = h.markers[0..1], .after = h.markers[2..3] };
-    return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash, .pieces = pieces };
+    const p = try g.image.prepare(h.io, a, bytes, max_tokens);
+    return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }

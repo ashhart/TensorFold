@@ -5,6 +5,7 @@ const shape = @import("shape.zig");
 const plan_lanes = @import("plan_lanes.zig");
 const Allocator = std.mem.Allocator;
 const Proposer = @import("proposer.zig").Proposer;
+const Reader = @import("recall.zig").Reader;
 const Sampling = @import("sampling.zig").Sampling;
 const State = @import("depth.zig").State;
 const Row = @import("logprob.zig").Row;
@@ -108,6 +109,7 @@ pub const Spec = struct {
     sampling: ?Sampling = null,
     drafts: bool = true,
     proposer: ?Proposer = null,
+    recall: ?*Reader = null, // copies and grafts from the record of earlier requests (lanes/recall.zig)
     stop_check: ?StopCheck = null,
     cancel_check: ?CancelCheck = null,
     yield_check: ?CancelCheck = null, // a background prompt pass: real work waits, so it keeps what it has and stops
@@ -127,6 +129,7 @@ pub const Spec = struct {
     grammar: ?*grammar.Constraint = null, // structured output: the reply stays in it (the creator frees it)
     decode_spans: []const [2]u32 = &.{}, // prompt rows an earlier reply decoded (Request.decode_spans), for backends that keep their bits
     images: []const Image = &.{}, // in prompt order; the backend's tower fills their rows
+    key: []const u32 = &.{}, // the prompt as the cache matches it (image rows by their image); empty: the prompt
 };
 
 pub const Stream = struct {
@@ -137,6 +140,7 @@ pub const Stream = struct {
     sampling: ?Sampling,
     drafts: bool,
     proposer: ?Proposer,
+    recall: ?*Reader,
     stop_check: ?StopCheck,
     cancel_check: ?CancelCheck,
     yield_check: ?CancelCheck,
@@ -160,7 +164,9 @@ pub const Stream = struct {
     decide: ?u32 = null,
     untaught: bool = false,
     images: []const Image = &.{},
+    key: []const u32 = &.{},
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
+    fill_at: std.atomic.Value(u32) = .init(0), // prompt tokens the pass has prefilled; the engine thread writes
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
     context: std.ArrayList(u32) = .empty,
     pending: ?u32 = null,
@@ -174,6 +180,7 @@ pub const Stream = struct {
     branch_rows: u64 = 0, // suffix-match branch rows verified (lanes/fill.zig)
     branch_accepted: u64 = 0, // of those, rows on the accepted path
     graft_hit: f64 = 1, // recent share of grafted rows kept; a read of the chain that grafted none counts as a miss
+    recall_hit: f64 = 1, // the same for rows Recall's candidates grafted, kept apart
     odds: ?shape.Odds = null, // how often the target took the head's rank-r lane at each depth (head trees)
     lanes: ?shape.Shape = null, // the shape of the held tree drafts
     landed: [shape.max_depth][shape.ranks][2]u32 = @splat(@splat(.{ 0, 0 })), // tree lanes verified and taken
@@ -203,6 +210,7 @@ pub const Stream = struct {
             .sampling = spec.sampling,
             .drafts = spec.drafts,
             .proposer = if (spec.drafts) spec.proposer else null,
+            .recall = if (spec.drafts) spec.recall else null,
             .stop_check = spec.stop_check,
             .cancel_check = spec.cancel_check,
             .yield_check = spec.yield_check,
@@ -215,6 +223,7 @@ pub const Stream = struct {
             .history_len = spec.history_len,
             .shared_prefixes = spec.shared_prefixes,
             .reuse = spec.reuse,
+            .fill_at = .init(if (spec.reuse.saved != null) spec.reuse.at else 0), // a kept prefix is filled from the start
             .decide = spec.decide,
             .untaught = spec.untaught,
             .logprobs = spec.logprobs,
@@ -222,6 +231,7 @@ pub const Stream = struct {
             .grammar = spec.grammar,
             .decode_spans = spec.decode_spans,
             .images = spec.images,
+            .key = spec.key,
         };
         // under a grammar a forced close ends at the think end: the grammar takes the reply from the next token
         if (spec.grammar) |g| if (g.after) |end| if (std.mem.indexOfScalar(u32, s.think_close, end)) |at| {

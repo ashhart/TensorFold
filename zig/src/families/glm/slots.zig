@@ -11,6 +11,7 @@ const kept_mod = @import("kept.zig");
 const Engine = @import("engine.zig").Engine;
 const Ref = @import("weights.zig").Ref;
 const Fence = @import("../../core/fence.zig").Fence;
+const lanes = @import("lanes");
 
 /// Handles of tokens on the GPU: queued rounds' picks and the host tokens they read, a slot each.
 const ring_len = 64;
@@ -58,6 +59,7 @@ pub const Slots = struct {
     launched: ?mtl.CommandBuffer = null, // keeps and drafts committed ahead: the window after them encodes while they run
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
+    expire: ?kept_mod.Expire = null, // invalidates lookup immediately; destruction waits for the host's safe boundary
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
@@ -98,6 +100,7 @@ pub const Slots = struct {
     pub const probe = kept_mod.probe;
     pub const writeSnap = kept_mod.writeSnap;
     pub const readSnap = kept_mod.readSnap;
+    pub const blank = kept_mod.blank;
     pub const drop = kept_mod.drop;
     pub const pick = kept_mod.pick;
     pub const copyOut = kept_mod.copyOut;
@@ -205,8 +208,8 @@ pub const Slots = struct {
         return @min(if (chunked) sl.e.chunk_rows else st.max_rows, left);
     }
 
-    /// Prompt rows [at, at + n) of slot `i`, the head absorbing each with its next token; the last pick to `picks`.
-    pub fn chunk(sl: *Slots, i: u32, at: u32, n: u32) !void {
+    /// Prompt rows [at, at + n) of slot `i`; `draws` rules a pass row, the first reply token's rule.
+    pub fn chunk(sl: *Slots, i: u32, at: u32, n: u32, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         const slot = try sl.slotAt(i);
         const P = slot.prompt_len;
@@ -220,6 +223,7 @@ pub const Slots = struct {
         defer pool.pop();
         var x = sl.ctx(slot);
         x.inject = if (e.vision) |v| v.injected(i) else null; // an image prompt's rows over its placeholders (slot_images.zig)
+        if (draws) |d| x.draws = d; // the head's one output row reads rule row 0, keyed at the prompt's length
         const b = e.begin();
         const ids = e.prompt_ids.at(@as(usize, at) * 4);
         const next = e.prompt_ids.at(@as(usize, at + 1) * 4);
@@ -243,8 +247,8 @@ pub const Slots = struct {
         slot.s.pos = at + n; // the pass stands here: a snapshot of it is this prefix's state
     }
 
-    /// One forward over every window, each stream's rows against its own caches; each row's pick into `picks`.
-    pub fn window(sl: *Slots, wins: []const Win) !void {
+    /// One forward over every window, each stream's rows against its own caches; `draws` rules its rows.
+    pub fn window(sl: *Slots, wins: []const Win, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
@@ -253,6 +257,7 @@ pub const Slots = struct {
         try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
         const ids = Engine.u32s(e.sc.ids, st.max_rows);
         var x = e.ctx();
+        if (draws) |d| x.draws = d; // each row's rule is its stream's, keyed at its own position
         const enc = sl.encoder();
         var total: u32 = 0;
         for (wins, segs[0..wins.len], 0..) |w, *g, wi| {
@@ -321,8 +326,8 @@ pub const Slots = struct {
         };
     }
 
-    /// Slot `i`'s next row queued ahead (its token from handle `from` on the GPU, its pick a new handle), the row before settled, ordered by a fence.
-    pub fn queueRound(sl: *Slots, i: u32, from: u32) !u32 {
+    /// Slot `i`'s next row queued ahead: its token from `from`, the row before settled; `sampling` arms its keyed draw.
+    pub fn queueRound(sl: *Slots, i: u32, from: u32, sampling: ?lanes.Sampling) !u32 {
         const e = sl.e;
         const slot = try sl.slotAt(i);
         if (from >= ring_len) return error.HandleOutOfStep;
@@ -340,6 +345,8 @@ pub const Slots = struct {
         const enc = cb.compute(.serial);
         fence.wait(enc); // after the round queued before it; synchronous work has finished before this is encoded
         var x = sl.ctx(slot);
+        const draws = @import("draw_rule.zig").promptDraws(sampling, slot.s.pos + 1, e.c.vocab);
+        x.draws = &draws;
         copyWords(&x, enc, sl.ring.at(@as(usize, from) * 4), e.sc.ids, 1);
         fwd.backbone(&x, enc, e.sc.ids, 1, slot.s.pos);
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, sl.ring.at(@as(usize, to) * 4), 1);

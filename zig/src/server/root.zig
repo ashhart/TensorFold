@@ -1,5 +1,5 @@
 //! The native HTTP server's surface: what main and the test servers build a server from.
-pub const json = @import("json.zig");
+pub const json = @import("json");
 pub const errors = @import("errors.zig");
 pub const auth = @import("auth.zig");
 pub const cli = @import("cli.zig");
@@ -17,7 +17,7 @@ pub const Config = server.Config;
 
 test {
     @import("std").testing.refAllDecls(@This());
-    _ = @import("json.zig");
+    _ = @import("json");
     _ = @import("std_options.zig");
     _ = @import("fields.zig");
     _ = @import("reply_text.zig");
@@ -30,16 +30,22 @@ test {
     _ = @import("http_conn.zig");
     _ = @import("auth.zig");
     _ = @import("cli.zig");
+    _ = @import("cli_test.zig");
     _ = @import("live.zig");
     _ = @import("listener.zig");
     _ = @import("hub.zig");
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
+    _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
     _ = @import("process_memory.zig");
     _ = @import("log.zig");
+    _ = @import("request_log.zig");
     _ = @import("messages.zig");
     _ = @import("images.zig");
+    _ = @import("image_key.zig");
+    _ = @import("media_fetch.zig");
+    _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");
@@ -49,16 +55,27 @@ test {
     _ = @import("server_init_test.zig");
     _ = @import("decisions.zig");
     _ = @import("decisions_test.zig");
+    _ = @import("systemone.zig");
+    _ = @import("systemone_test.zig");
     _ = @import("slide.zig");
+    _ = @import("slide_cli.zig");
+    _ = @import("slide_key.zig");
     _ = @import("slide_graph.zig");
+    _ = @import("slide_graph_delete.zig");
     _ = @import("slide_model.zig");
     _ = @import("slide_lesson.zig");
     _ = @import("slide_words.zig");
     _ = @import("slide_found.zig");
     _ = @import("slide_untold.zig");
     _ = @import("slide_replace.zig");
+    _ = @import("slide_answers.zig");
+    _ = @import("slide_recheck.zig");
+    _ = @import("slide_forget.zig");
+    _ = @import("slide_forget_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
+    _ = @import("slide_span.zig");
+    _ = @import("slide_route.zig");
     _ = @import("slide_side.zig");
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");
@@ -67,4 +84,18 @@ test {
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
+    _ = @import("recall_routes.zig");
+    _ = @import("benchmark_suite.zig");
+    _ = @import("benchmark_check.zig");
+    _ = @import("benchmark_receipt_test.zig");
+    _ = @import("benchmark_stop_test.zig");
+    _ = @import("benchmark_sse_test.zig");
+    _ = @import("benchmark_stream_test.zig");
+    _ = @import("benchmark_server_test.zig");
+    _ = @import("benchmark_facts_test.zig");
+    _ = @import("benchmark_upload.zig");
+    _ = @import("benchmark_upload_test.zig");
+    _ = @import("benchmark_args.zig");
+    _ = @import("benchmark_cli_test.zig");
+    _ = @import("benchmark_run_test.zig");
 }

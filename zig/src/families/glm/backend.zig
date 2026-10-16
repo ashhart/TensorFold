@@ -11,6 +11,7 @@ const timing = @import("timing.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
+const fwd = @import("forward.zig");
 
 /// One stream's window and a shared forward's rows, ms on one M5 Ultra (a pair times its own at load: timing.zig).
 const one_mac_window_costs = costTable(13.0, 4.1);
@@ -39,7 +40,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
@@ -88,7 +89,7 @@ pub const Backend = struct {
         const b = self(ptr);
         const e = b.sl.e;
         if (e.followsPeer()) return error.FollowsPeer;
-        if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
+        if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
         if (prompt.len + s.max_new + st.max_rows + 1 > pool.capacity(b.sl)) return error.ContextFull;
@@ -119,6 +120,10 @@ pub const Backend = struct {
             } else s.reuse_failed = true;
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
+        s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored
+        // The first reply token's draw, keyed at P: the head's one output row is draws row 0, no prompt rule.
+        const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(prompt.len), e.c.vocab);
+        const sampled_prompt = draws.n > 0;
         while (at < prompt.len) {
             if (s.isCancelled()) return error.Cancelled; // the core releases the slot
             while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
@@ -126,8 +131,11 @@ pub const Backend = struct {
             const n = b.sl.chunkRows(at, end);
             try b.copyOut(i, at);
             try mirror.send(e, .chunk, &.{ i, at, n });
-            try b.sl.chunk(i, at, n);
+            // Only the prompt's final chunk draws a token (its head runs): its last pass row takes the rule.
+            const chunk_draws: ?*const fwd.Draws = if (sampled_prompt and at + n == prompt.len) &draws else null;
+            try b.sl.chunk(i, at, n, chunk_draws); // the chunk's compute completes here: `at` is landed progress
             at += n;
+            s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
     }
@@ -290,7 +298,8 @@ pub const Backend = struct {
             .handle => |h| @as(u32, @intCast(h)),
             .value => |v| b.sl.ringPut(v),
         };
-        return try b.sl.queueRound(i, from);
+        // The stream's sampling arms the queued round's keyed draw (a positive temperature); greedy streams stay plain.
+        return try b.sl.queueRound(i, from, s.sampling);
     }
 
     fn read(ptr: *anyopaque, handle: u64) anyerror!u32 {
@@ -311,9 +320,10 @@ pub const Backend = struct {
             try b.wins.append(b.gpa, .{ .slot = i, .pending = w.pending, .held = w.held, .tokens = w.tokens });
         }
         if (total > st.max_rows) return error.WindowOutOfStep;
+        const draws = @import("draw_rule.zig").windowDraws(windows, b.sl.e.c.vocab);
         try mirror.windowWords(&b.words, b.gpa, b.sl.digest, b.wins.items);
         try mirror.send(b.sl.e, .window, b.words.items);
-        try b.sl.window(b.wins.items);
+        try b.sl.window(b.wins.items, &draws);
         const picks = Engine.u32s(b.sl.e.sc.picks, total);
         var row: usize = 0;
         for (windows, out, b.wins.items) |w, o, win| {

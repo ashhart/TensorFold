@@ -5,6 +5,8 @@ const wts = @import("weights.zig");
 const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
 const layers = @import("layers.zig");
+const prefill_w = @import("prefill_w.zig");
+const Experts = @import("../../core/row_projection.zig").Experts;
 
 const At = pl.At;
 const Chunk = pre.Chunk;
@@ -98,10 +100,10 @@ pub fn attention(x: Chunk, a: pre.Attention, lin: wts.Attention, index: usize) v
     const cap = kv.capacity;
     const qkv = At.of(s.qkv);
     var q_row = row;
-    if (L <= pre.lane_rows) {
+    if (L <= pre.lane_rows or lin.qkv.tiles == null) {
         // lane_qmm's q, k and v columns stacked in one call: a column's bits follow only K and its K slices
-        x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
-        x.f.coop(x.e, "qkv", lin.qkv, s.x, 0, s.xs, s.qkv, L);
+        if (lin.qkv.tiles != null) x.f.xsum(x.e, "xsum_2688", c.hidden, s.x, 0, s.xs, L);
+        if (L <= pre.lane_rows or !x.f.wide(x.e, lin.qkv, s.x, s.qkv, L)) x.f.coop(x.e, "qkv", lin.qkv, s.x, 0, s.xs, s.qkv, L);
         const e = x.e;
         e.pipe(x.f.k.get("tf_kv_write"));
         e.buf(s.qkv, 0, 0);
@@ -160,7 +162,23 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     const fc2 = [3]At{ pre.tensorAt(w.fc2[0]), pre.tensorAt(w.fc2[1]), pre.tensorAt(w.fc2[2]) };
     // the gathers read token rows and write down rows through the pair order, so y2 lands in pair order
     var pair_rows = s.y2;
-    if (n >= 16 and n / E >= 4) {
+    if (w.routed) |r| {
+        // another width: the routed rows in expert order through qmmw_nax's gathers (else the indexed rows), unsorted
+        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.x), order }, &.{ n, D, k }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
+        const g1 = prefill_w.of(x.f.k.gathers, r[0]);
+        const g2 = prefill_w.of(x.f.k.gathers, r[1]);
+        if (g1 != null and g2 != null) {
+            gatherW(x, g1.?, r[0], s.xr, D, W, n, s.y1);
+            x.relu2(s.y1, n * W, s.y1r);
+            gatherW(x, g2.?, r[1], s.y1r, W, D, n, s.y2);
+        } else {
+            x.f.indexed(e, r[0], 1, n, true, s.xr, s.sorted, s.y1r);
+            x.f.indexed(e, r[1], 1, n, false, s.y1r, s.sorted, s.y2);
+        }
+        l.glue("sort_inverse_uint32_t_int32_t_uint32_t", &.{order}, &.{n}, &.{At.of(s.inv)}, .{ n, 1, 1 }, .{ 256, 1, 1 });
+        l.glue("rows_take_bfloat16_t_uint32_t_int32_t_bfloat16_t", &.{ At.of(s.y2), At.of(s.inv) }, &.{ n, D, 1 }, &.{At.of(s.xr)}, .{ D, n, 1 }, .{ 256, 1, 1 });
+        pair_rows = s.xr;
+    } else if (n >= 16 and n / E >= 4) {
         l.gatherMap(At.of(s.x), fc1, At.of(s.offsets), order, k, At.of(s.y1), n, W, D, E);
         x.relu2(s.y1, n * W, s.y1r);
         l.gatherMap(At.of(s.y1r), fc2, At.of(s.offsets), order, 0, At.of(s.y2), n, D, W, E);
@@ -187,6 +205,22 @@ pub fn moe(x: Chunk, m: pre.Moe, w: wts.Moe) void {
     if (w.adapter) |ad| layers.adapt(x.f, e, ad, s.upr, s.sh, L);
     if (w.pocket) |p| if (p.used > 0) layers.taught(x.f, e, p, s.x, s.sh, L);
     x.add(s.out, s.sh, L * D, s.out);
+}
+
+/// y [n, N] = the sorted pairs' rows `xs` times each one's expert W^T at its width, experts' first rows in s.offsets.
+fn gatherW(x: Chunk, g: prefill_w.Gathers, ex: Experts, xs: mtl.Buffer, K: usize, N: usize, n: usize, y: mtl.Buffer) void {
+    const E = x.p.c.experts;
+    const bm: usize = if (n / E < 64) 32 else 64;
+    const e = x.e;
+    e.pipe(g.tiles[if (bm == 64) 1 else 0]);
+    e.buf(xs, 0, 0);
+    e.buf(ex.one.w, ex.one.w_off, 1);
+    e.buf(ex.one.scales, ex.one.s_off, 2);
+    e.buf(ex.one.biases, ex.one.b_off, 3);
+    e.buf(x.p.s.offsets, 0, 4);
+    e.bytes([4]i32{ @intCast(n), @intCast(N), @intCast(K), @intCast(E) }, 5);
+    e.buf(y, 0, 6);
+    e.run(.{ (N + 63) / 64 * 128, n / bm + E, 1 }, .{ 128, 1, 1 });
 }
 
 /// Each sorted pair's row of `rows` (by `xids`) times its expert's 4-bit W^T: tf_gather_qmv_b4_g64 into y [n, N].

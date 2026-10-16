@@ -91,6 +91,7 @@ inline void am_weights(thread const Codes& c, float s, float b, threadgroup bflo
   }
 }
 
+
 // A lane's two rows (home.y and home.y + 8) of each of its TM fragments: their starts in x.
 template <int TM>
 struct AmRows {
@@ -325,6 +326,15 @@ TF_GATHER(64)
 TF_GATHER_SCATTER(32)
 TF_GATHER_SCATTER(64)
 
+#ifdef TF_GLU_PLAIN
+// mlx-lm's compiled SwiGLU on bf16 rows (LFM2): silu(g) * u, rounded to bf16 at each step; `limit` unused.
+inline bfloat am_swiglu(float g, float u, float limit) {
+  const float gt = float(bfloat(g));
+  const bfloat s = static_cast<bfloat>(1.0f / (1.0f + metal::precise::exp(-gt)));
+  const bfloat silu = static_cast<bfloat>(gt * float(s));
+  return static_cast<bfloat>(float(silu) * float(bfloat(u)));
+}
+#else
 // The glue's SwiGLU in bf16 (glm_act2): MLX's bf16 exp and abs, nn.silu's x * sigmoid(x), gate and up clipped at `limit`.
 inline bfloat am_sigmoid(bfloat x) {
   const bfloat e = bfloat(__metal_exp(float(bfloat(__metal_fabs(float(x), __METAL_MAYBE_FAST_MATH__))), __METAL_MAYBE_FAST_MATH__));
@@ -339,6 +349,7 @@ inline bfloat am_swiglu(float g, float u, float limit) {
   const bfloat sl = gt * am_sigmoid(gt);
   return sl * up;
 }
+#endif
 
 // A simdgroup's gate (j 0) and up (j 1) fragments as SwiGLU outputs into y (ld N), rows below live only.
 template <int TM>

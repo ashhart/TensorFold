@@ -411,3 +411,89 @@ test "a learn step that moves the weights drops every kept state: the next turn 
     try std.testing.expectEqual(@as(?u32, 0), b2.cached);
     try std.testing.expectEqual(@as(u64, 0), store.counts.hits);
 }
+
+test "a resumed prompt's fill counts its restored prefix as filled from the first status poll" {
+    const gpa = std.testing.allocator;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 2 };
+    defer target.deinit();
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.stepped(), clock.clock());
+    defer core.deinit();
+    const Snaps = struct {
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + 4 * @as(u64, at);
+        }
+        fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!pc.Saved {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            return f.save(@ptrCast(@alignCast(owner.?)), at);
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+            return error.BackendRestores;
+        }
+        fn drop(ptr: *anyopaque, saved: pc.Saved) void {
+            const f: *lanes.fake.Fake = @ptrCast(@alignCast(ptr));
+            f.drop(saved);
+        }
+    };
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .min_gap = 4, .min_prompt = 0 }, 1 << 20);
+    defer store.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
+    host.cache = &store;
+    try host.start();
+    defer host.stop();
+    const Box = struct {
+        mutex: std.Io.Mutex = .init,
+        cached: ?u32 = null,
+        done: ?Reason = null,
+        fn event(ctx: *anyopaque, _: Id, e: *const Event) void {
+            const b: *@This() = @ptrCast(@alignCast(ctx));
+            b.mutex.lockUncancelable(std.testing.io);
+            defer b.mutex.unlock(std.testing.io);
+            switch (e.*) {
+                .prefilled => |c| b.cached = c,
+                .finished => |f| b.done = f.reason,
+                else => {},
+            }
+        }
+        fn wait(b: *@This()) Reason {
+            while (true) {
+                b.mutex.lockUncancelable(std.testing.io);
+                const d = b.done;
+                b.mutex.unlock(std.testing.io);
+                if (d) |r| return r;
+                std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+            }
+        }
+    };
+    const First = struct { // the resumed turn's status before its pass lands a chunk (the stepped fake hooks first)
+        engine: api.Engine,
+        status: ?api.Status = null,
+        fn hook(ctx: *anyopaque, s: *lanes.Stream, filled: usize) void {
+            const p: *@This() = @ptrCast(@alignCast(ctx));
+            if (s.prompt_len != 16 or filled != 0) return;
+            var status: api.Status = .{};
+            p.engine.status(&status, &.{});
+            p.status = status;
+        }
+    };
+    const e = host.engine();
+    var first: First = .{ .engine = e };
+    target.prefill_hook = First.hook;
+    target.prefill_hook_ctx = &first;
+    const t1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3 };
+    var b1: Box = .{};
+    const r1: Request = .{ .prompt = &t1, .max_tokens = 4, .history_len = 8 };
+    try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, b1.wait());
+    const t2 = t1[0..8].* ++ [_]u32{ 7, 7, 5, 3, 2, 7, 1, 8 }; // the kept 8 tokens, then 8 new ones
+    var b2: Box = .{};
+    const r2: Request = .{ .prompt = &t2, .max_tokens = 4, .history_len = 14 };
+    try e.submit(2, &r2, .{ .ctx = &b2, .event = Box.event });
+    try std.testing.expectEqual(Reason.length, b2.wait());
+    try std.testing.expectEqual(@as(?u32, 8), b2.cached);
+    const got = first.status orelse return error.NeverPolled;
+    try std.testing.expectEqual(@as(?u32, 16), got.fill_prompt_tokens);
+    try std.testing.expectEqual(@as(?u32, 8), got.fill_tokens_left); // the restored 8 count as filled, not as left
+}

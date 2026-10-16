@@ -1,8 +1,10 @@
 //! An image's bytes to Gemma 4's tower inputs, as transformers' Gemma4ImageProcessorPil makes them.
 const std = @import("std");
-const img = @import("../glm/image.zig");
+const picture = @import("../../core/picture/picture.zig");
 
-pub const Error = img.Error || error{TooFewTokens};
+/// The shared decoder's refusals, and sizes or budgets the processor cannot take.
+pub const Error = picture.Error || error{ ImageTooSmall, ImageTooLarge, TooFewTokens };
+pub const decoderProblem = picture.decoderProblem;
 
 /// The processor's constants: patch side, the pooling kernel, and the soft-token budgets it accepts.
 pub const patch = 16;
@@ -46,26 +48,28 @@ pub fn budget(max_tokens: u32) Error!u32 {
     return best orelse error.TooFewTokens;
 }
 
-/// The image's bytes to its patches: resized with PIL's bicubic filter, scaled to [0, 1], patches in row order.
-pub fn prepare(gpa: std.mem.Allocator, bytes: []const u8, max_tokens: u32) Error!Prepared {
+/// Bytes to patches (core's picture decoder, Pillow's bicubic resize, [0, 1]); the hash covers the bytes and the grid.
+pub fn prepare(io: std.Io, gpa: std.mem.Allocator, bytes: []const u8, max_tokens: u32) Error!Prepared {
     const max_patches = try budget(max_tokens) * pool * pool;
-    var src = try img.decode(gpa, bytes);
+    var src = try picture.decode(io, gpa, bytes);
     defer src.deinit(gpa);
-    const size = try targetSize(src.h, src.w, max_patches);
-    var scaled = if (size[0] == src.h and size[1] == src.w) src else try img.resize(gpa, src, size[1], size[0]);
-    defer if (scaled.px.ptr != src.px.ptr) scaled.deinit(gpa);
+    const size = try targetSize(@intCast(src.height), @intCast(src.width), max_patches);
+    const resized = try picture.resample.resize(gpa, .pillow, .of(src.pixels, src.width, src.height), size[1], size[0]);
+    defer gpa.free(resized);
     const gh = size[0] / patch;
     const gw = size[1] / patch;
-    return .{ .pixels = try patches(gpa, scaled), .gh = gh, .gw = gw, .tokens = gh * gw / (pool * pool), .hash = std.hash.Wyhash.hash(0x6e34, bytes) };
+    const grid = [2]u32{ gh, gw };
+    const hash = picture.identity.withGrid(picture.identity.ofBytes(0x6e34, bytes), grid);
+    return .{ .pixels = try patches(gpa, .{ .width = size[1], .height = size[0], .pixels = resized }), .gh = gh, .gw = gw, .tokens = gh * gw / (pool * pool), .hash = hash };
 }
 
 /// convert_image_to_patches after np_rescale (float64 times 1/255, then float32): a patch's pixels in row order, RGB.
-fn patches(gpa: std.mem.Allocator, src: img.Rgb) Error![]f32 {
-    const gh = src.h / patch;
-    const gw = src.w / patch;
+fn patches(gpa: std.mem.Allocator, src: picture.Rgb) Error![]f32 {
+    const gh = src.height / patch;
+    const gw = src.width / patch;
     const out = try gpa.alloc(f32, @as(usize, gh) * gw * patch_width);
     for (0..gh) |py| for (0..gw) |px| for (0..patch) |y| for (0..patch) |x| for (0..3) |c| {
-        const v = src.px[((py * patch + y) * src.w + px * patch + x) * 3 + c];
+        const v = src.pixels[((py * patch + y) * src.width + px * patch + x) * 3 + c];
         out[(py * gw + px) * patch_width + (y * patch + x) * 3 + c] = @floatCast(@as(f64, @floatFromInt(v)) * (1.0 / 255.0));
     };
     return out;
