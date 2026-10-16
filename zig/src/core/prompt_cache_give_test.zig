@@ -47,6 +47,7 @@ test "a new slot's memory comes from kept states: the superseded one, then the o
     try std.testing.expectEqualSlices(u32, &.{ 4, 6, 7, 8 }, ats(&s, &buf));
     try std.testing.expectEqual(@as(u64, 104 + 106 + 108 + 107), s.held);
     const l = try s.lookup(a, &c3_next, 9, &.{}, &.{}, &.{}); // c3's next turn restores its state at 8
+    defer s.release(l.entry.?);
     const keep = l.entry.?.saved;
     try std.testing.expect(s.giveBack(keep, &c3_next, Left{ .store = &s, .total = 500, .need = 285 }));
     try std.testing.expectEqualSlices(u32, &.{ 7, 8 }, ats(&s, &buf)); // c1 at 4 (moved past), then c2 (oldest)
@@ -70,6 +71,7 @@ test "kept states that cannot free enough all go but the restored one, and the s
     try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
     try std.testing.expect(s.entries.items[0].saved == l.entry.?.saved); // its restore still finds its state
     try std.testing.expectEqual(@as(u64, 108), s.held);
+    s.release(l.entry.?); // the refused pass no longer borrows a restore state
     try std.testing.expect(s.giveBack(null, &c3_next, Left{ .store = &s, .total = 500, .need = 400 })); // nothing to keep: it goes too
     try std.testing.expectEqual(@as(usize, 0), s.entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), f.live);

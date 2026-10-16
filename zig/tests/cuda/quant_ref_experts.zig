@@ -120,6 +120,61 @@ fn batch(r: *Rig, comptime label: []const u8, g: experts.Grouped, router: groupe
     return .{ .act = act, .y = y };
 }
 
+/// Prompt items of expert `skip` (the shared one, as a family that computes it itself passes) are left alone.
+fn skipped(
+    r: *Rig,
+    comptime label: []const u8,
+    g: experts.Grouped,
+    router: grouped.Router,
+    l: experts.Layer,
+    x: []const u16,
+    rows: usize,
+) !void {
+    const pairs = rows * slots;
+    const pk = try picks(r, rows);
+    const pl = try plan(r, router, try r.dev(std.mem.sliceAsBytes(pk)), pairs, experts.promptTile(l.format));
+    const fill = try r.a.alloc(u8, pairs * @max(NI, D) * 2);
+    @memset(fill, 0xA5);
+    const skip: i32 = E - 1;
+    const xd = try r.dev(std.mem.sliceAsBytes(x[0 .. rows * D]));
+    const up_in: experts.Rows = .{ .x = xd, .stride = D, .slots = slots };
+    const a0 = try r.zeros(pairs * NI * 2);
+    const a1 = try r.dev(fill[0 .. pairs * NI * 2]);
+    try g.prompt(r.s, .up, up_in, l, pl.p, a0, pl.items, -1);
+    try g.prompt(r.s, .up, up_in, l, pl.p, a1, pl.items, skip);
+    const up_plain = try r.back(a0, pairs * NI * 2);
+    try leftAlone(label ++ " prompt gate-up", pk, skip, up_plain, try r.back(a1, pairs * NI * 2), NI * 2, fill);
+    const down_in: experts.Rows = .{ .x = a0, .stride = NI };
+    const y0 = try r.zeros(pairs * D * 2);
+    const y1 = try r.dev(fill[0 .. pairs * D * 2]);
+    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y0, pl.items, -1);
+    try g.prompt(r.s, .down_bf16, down_in, l, pl.p, y1, pl.items, skip);
+    const down_plain = try r.back(y0, pairs * D * 2);
+    try leftAlone(label ++ " prompt down", pk, skip, down_plain, try r.back(y1, pairs * D * 2), D * 2, fill);
+}
+
+/// Each pair's row: the skipped expert's still the fill, every other one equal to the run without skip.
+fn leftAlone(
+    name: []const u8,
+    pk: []const i32,
+    skip: i32,
+    plain: []const u8,
+    got: []const u8,
+    row: usize,
+    fill: []const u8,
+) !void {
+    var left: usize = 0;
+    var differ: usize = 0;
+    for (pk, 0..) |e, p| {
+        const b = got[p * row ..][0..row];
+        if (e == skip) {
+            if (std.mem.eql(u8, b, fill[0..row])) left += 1 else differ += 1;
+        } else if (!std.mem.eql(u8, plain[p * row ..][0..row], b)) differ += 1;
+    }
+    const what = "{s}: expert {d}'s {d} pairs left alone, every other pair as without skip ({d} differ)";
+    try check.expect(differ == 0 and left > 0, what, .{ name, skip, left, differ });
+}
+
 const Fp8M = struct { codes: []const u8, inv: []const f32, n: usize, k: usize };
 fn fp8Val(c: Fp8M, e: usize, row: usize, col: usize) f64 {
     const nb = c.n / 128;
@@ -181,6 +236,7 @@ pub fn run(r: *Rig) !void {
         const M = Matrix(Fp8M);
         for ([_]usize{ 1, 3 }) |rows| _ = try batch(r, "fp8", g, router, l, x, rows, false, M{ .ctx = gm, .value = fp8Val }, M{ .ctx = um, .value = fp8Val }, M{ .ctx = dm, .value = fp8Val });
         _ = try batch(r, "fp8", g, router, l, x, 300, true, M{ .ctx = gm, .value = fp8Val }, M{ .ctx = um, .value = fp8Val }, M{ .ctx = dm, .value = fp8Val });
+        try skipped(r, "fp8", g, router, l, x, 300);
     }
     // NVFP4
     {
@@ -195,7 +251,9 @@ pub fn run(r: *Rig) !void {
         const sb = NI * D / 16;
         const us = try r.a.alloc(f32, 2 * E);
         for (0..E) |e| {
-            try W.packGateUp(r.a, pu[e * 2 * blk ..][0 .. 2 * blk], .{ gm.codes[e * wb ..][0..wb], gm.scales[e * sb ..][0..sb] }, .{ um.codes[e * wb ..][0..wb], um.scales[e * sb ..][0..sb] }, NI, D);
+            const gate: [2][]const u8 = .{ gm.codes[e * wb ..][0..wb], gm.scales[e * sb ..][0..sb] };
+            const up: [2][]const u8 = .{ um.codes[e * wb ..][0..wb], um.scales[e * sb ..][0..sb] };
+            W.packGateUp(pu[e * 2 * blk ..][0 .. 2 * blk], gate, up, NI, D);
             W.packOne(pd[e * blk ..][0..blk], dm.codes[e * wb ..][0..wb], dm.scales[e * sb ..][0..sb], D, NI);
             us[2 * e] = gm.global[e];
             us[2 * e + 1] = um.global[e];
@@ -207,6 +265,8 @@ pub fn run(r: *Rig) !void {
         const M = Matrix(Fp4M);
         for ([_]usize{ 1, 3, 40 }) |rows| _ = try batch(r, "nvfp4", g, router, l, x, rows, false, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
         _ = try batch(r, "nvfp4", g, router, l, x, 300, true, M{ .ctx = gm, .value = fp4Val }, M{ .ctx = um, .value = fp4Val }, M{ .ctx = dm, .value = fp4Val });
+        try skipped(r, "nvfp4", g, router, l, x, 300);
     }
-    check.pass("experts fp8g and nvfp4 (decode, prompt): gate-up and down within float64 tolerance", .{});
+    const what = "experts fp8g and nvfp4 (decode, prompt): gate-up and down within float64 tolerance";
+    check.pass(what ++ "; a skipped expert's prompt items left alone", .{});
 }

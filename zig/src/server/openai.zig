@@ -1,6 +1,6 @@
 //! POST /v1/chat/completions and /v1/completions, JSON or SSE, as ``server.http`` answers them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const chat = @import("chat.zig");
@@ -116,6 +116,11 @@ const Plan = struct {
     named: []const u8,
 };
 
+/// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
+pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
+    return (try plan(srv, cx, true, raw)).input;
+}
+
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
 fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
@@ -127,10 +132,10 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined };
     if (is_chat) {
-        input.messages = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
+        input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
-        input.messages = try messages.normalize(cx, m, "system", srv.needs_user_after_tool);
+        input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, .of(srv.info.vision));
     };
     if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now

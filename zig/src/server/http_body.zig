@@ -1,6 +1,6 @@
 //! Bounded request bodies, fixed-length or chunked, refused as the Python server refuses them.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
