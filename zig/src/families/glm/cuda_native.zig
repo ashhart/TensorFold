@@ -91,6 +91,28 @@ const Owned = struct {
     lanes: glm_lanes.Lanes,
 };
 
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
+fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
+    const bytes = 4 << 20; // a prompt piece's exchange: every channel a large send/recv takes
+    var buf = try cuda.DeviceBuffer.alloc(d, 2 * bytes * g.world);
+    defer buf.free();
+    var s = try cuda.Stream.init(d, false);
+    defer s.deinit();
+    try g.lib.check(g.lib.api.ncclGroupStart(), "ncclGroupStart");
+    const posted: anyerror!void = post: {
+        for (0..g.world) |peer| if (peer != g.rank) {
+            g.send(s, buf.ptr + peer * bytes, bytes, peer) catch |err| break :post err;
+            g.recv(s, buf.ptr + (g.world + peer) * bytes, bytes, peer) catch |err| break :post err;
+        };
+        break :post {};
+    };
+    try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd"); // the group closes on every path
+    try posted;
+    try s.synchronize();
+}
+
 /// The largest shard a rank sends by RoCE writes: a decode window's partials (8 rows of fp32) fit.
 const roce_cap = 512 << 10;
 
@@ -103,9 +125,12 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("{s}", .{problem});
         return err;
     };
+    if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world); // rank 0's line before NCCL: a failure stops every rank
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
+    // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
+    if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
@@ -114,6 +139,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
     own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
+    if (p.world > 1) try warmPeers(ctx.d, &own.group);
     const cap = capacity(o.context);
     own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set });
     errdefer own.e.deinit();
@@ -131,11 +157,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     for (rooms[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
         peer = .{ .bytes = r, .rank = q };
     };
+    // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
+    if (p.world > 1) try cuda.tp_watch.ready(io, ranks.hashBytes(std.fs.path.basename(std.mem.trimEnd(u8, dir, "/"))));
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
-            std.process.exit(1);
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with it instead of waiting on this rank
+            std.c._exit(1); // the stream may hold kernels waiting on a gone rank: a normal exit would join them
         };
+        cuda.tp_watch.ended();
         std.log.info("rank {d}: rank 0 ended; leaving", .{p.rank});
         std.process.exit(0);
     }
@@ -196,6 +226,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 fn close(ptr: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(ptr));
+    cuda.tp_watch.ended(); // the other ranks' lines close on purpose from here
     own.lanes.x.end() catch {};
     own.lanes.deinit();
     own.link.deinit();
