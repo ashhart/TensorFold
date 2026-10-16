@@ -43,6 +43,7 @@ export function buildSessionCsp(opts: { trustedTypes?: boolean; connectSources?:
     opts.dev ? "script-src 'self' 'unsafe-inline'" : "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
+    "media-src 'self' blob:",
     "font-src 'self' data:",
     `connect-src ${connectSources.join(' ')}`,
     `frame-src ${frameSources.length ? frameSources.join(' ') : "'none'"}`,

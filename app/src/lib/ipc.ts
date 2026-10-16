@@ -1,3 +1,4 @@
+import type { ThreadMemoryPolicy } from './types'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, CueRunPayload, CueRunResult, Settings, StartRunPayload, Thread, RendererThreadPatch, Project, Room, RoomStreamEvent, Ticket, TicketRemoteLifecycleCommand, TicketWorkOptions, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitRepositoryState, GitStatus, TokenUsageSnapshot, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, ChannelApprovalRequest, ChannelApprovalResult, AppUpdateStatus, Provider, OmlxDiscovery, ProviderDiscovery, ProviderDiscoveryKind, ResolvedInstructionGraph, ProjectMemoryCandidate, ProjectMemoryCandidateDiff, ProjectMemoryEntry, WebhookEndpoint, WebhookSnapshot, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, EmailConnectorSettings, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSummaryResult, EmailSyncResult, EmailThreadResult, Skill, ProjectSkillView, SkillSuggestionDiff, Artifact, ArtifactPreview, Command, SkillSuggestion, McpServerConfig, McpSnapshot, McpToolCallResult, BotControlPollResult, ControllerSnapshot, ControllerStatus, RemoteControlPairingInfo, RemoteControlStatus, RemoteConnectionTestResult, RemoteDirectoryListResult, RemoteOrchestratorSnapshotResult, PersistenceFailure, SecurityControlSnapshot, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession, CliToolStatus, ImportableSession, ImportSessionSource, SpineAggregate, ReadSinceResult, CommandReceipt, TurnCheckpoint, PersistedProviderStatus } from './types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarConnectorSettings, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DocumentConnectorSettings, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, IMessageItem, IMessageReadResult, IMessageSyncResult, WhatsAppBridgeConnectorSettings, WhatsAppBridgeSource, DiscordConnectorSettings, DiscordChannel, DiscordSource, MattermostConnectorSettings, MattermostChannel, MattermostSource, MatrixConnectorSettings, MatrixRoom, MatrixSource, GoogleChatConnectorSettings, GoogleChatSpace, GoogleChatSource, SlackConnectorSettings, SlackListOptions, SlackMessage, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from './types'
 // Phase 6/7 (incident mode + run export) — additive import line alongside the Codex lane.
@@ -5,18 +6,59 @@ import type { Incident, CreateIncidentInput, IncidentEventKind, IncidentMitigati
 import type { Readiness, CliLoginResult } from './types'
 import type { LoopRecord, LoopStartInput } from './types'
 import type { LocalTtsDiscovery, VoiceSynthesisResult, VoiceTranscriptionInput, VoiceTranscriptionResult } from './types'
+import type { KokoroStatus, KokoroSynthesisInput } from './types'
 import type { OrchestrationEvent } from './types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from './types'
-import type { EngineConnection, EngineEvent, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './types'
+import type { EngineConnection, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './types'
 import type { MobileBridgePairing, MobileBridgeStatus } from '../../electron/agent/types/mobile-bridge'
 
+import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './types'
+import type { PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneActionInput } from './types'
+import type { BotVmStatus, BotVmSetupStatus } from './types'
+import type { UserQuestion, UserQuestionAnswer } from './types'
+import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } from '../../shared/bot-recipe'
+
 export interface TensorFoldStudioApi {
+  botRecipePreview(input: { kind: 'import' | 'export'; value: string }): Promise<BotRecipePreview>
+  botRecipeImport(input: BotRecipeImportInput): Promise<Settings>
+  botRecipeExport(input: BotRecipeExportInput): Promise<{ saved: boolean }>
+  userQuestionAnswer(input: UserQuestionAnswer): Promise<UserQuestion>
+  userQuestionState(input: { threadId: string; questionId: string }): Promise<UserQuestion | null>
+  botVmStatus(botId: string): Promise<BotVmStatus>
+  botVmManagedSetup(botId: string): Promise<BotVmStatus>
+  botVmSetupStatus(): Promise<BotVmSetupStatus>
+  botVmCancelSetup(): Promise<BotVmSetupStatus>
+  botVmProvision(botId: string): Promise<BotVmStatus>
+  botVmStart(botId: string): Promise<BotVmStatus>
+  botVmStop(botId: string): Promise<BotVmStatus>
+  botVmRebuild(botId: string): Promise<BotVmStatus>
+  botVmPickRuntime(): Promise<boolean | null>
+  botVmStartRuntime(): Promise<void>
+  createBotChat(presetId: string): Promise<Thread>
+  phoneSnapshot(): Promise<PhoneSnapshot>
+  phoneRefresh(): Promise<PhoneSnapshot>
+  phonePickAdb(): Promise<PhoneSnapshot | null>
+  phonePairWifi(input: PhonePairInput): Promise<PhoneSnapshot>
+  phoneConnectWifi(endpoint: string): Promise<PhoneSnapshot>
+  phoneConnect(input: PhoneConnectInput): Promise<PhoneSnapshot>
+  phoneConnectDeveloper(input: PhoneDeveloperConnectInput): Promise<PhoneSnapshot>
+  phoneGrantChat(threadId: string): Promise<PhoneSnapshot>
+  phoneStop(): Promise<PhoneSnapshot>
+  phoneDisconnect(): Promise<PhoneSnapshot>
+  phoneObserve(): Promise<PhoneSnapshot>
+  phoneAction(input: PhoneActionInput): Promise<PhoneSnapshot>
+  phoneMirroringPermissions(): Promise<PhoneSnapshot>
+  onPhoneEvent(cb: (snapshot: PhoneSnapshot) => void): () => void
   platform: string
   getSecurityControls(): Promise<SecurityControlSnapshot>
   purgeLocalMemory(): Promise<SecurityPurgeResult>
   writeClipboard(text: string): Promise<{ ok: boolean }>
   getSettings(): Promise<Settings>
   saveSettings(s: Settings): Promise<Settings>
+  desktopModeSet(mode: 'minimal' | 'full', onboardingComplete?: boolean): Promise<Settings>
+  desktopModeHide(): Promise<{ hidden: boolean }>
+  onDesktopModeChanged(cb: (settings: Settings) => void): () => void
+  onDesktopNavigate(cb: (input: { target: 'overview' | 'models' | 'api' }) => void): () => void
   revokeApprovalRule(id: string): Promise<Settings>
   getRemoteStatus(): Promise<RemoteControlStatus>
   getMobileBridgeStatus(): Promise<MobileBridgeStatus>
@@ -91,13 +133,14 @@ export interface TensorFoldStudioApi {
   restoreItem(kind: ArchiveKind, id: string): Promise<ArchiveSnapshot>
   // commandId (optional) makes the create exactly-once through the event spine: a retried
   // call with the same id returns the SAME thread instead of creating a duplicate.
-  createThread(cwd: string, kind?: 'task' | 'chat', projectId?: string | null, commandId?: string): Promise<Thread>
+  createThread(cwd: string, kind?: 'task' | 'chat', projectId?: string | null, commandId?: string, incognito?: boolean): Promise<Thread>
   setThreadProject(id: string, projectId: string | null): Promise<void>
   deleteThread(id: string): Promise<void>
   renameThread(id: string, title: string): Promise<void>
   setThreadEngine(id: string, engine: 'native' | 'omp'): Promise<void>
   ompStatus(): Promise<{ available: boolean; binary: string; version?: string }>
   configureThread(id: string, providerId: string, model: string, providerAccountId?: string | null): Promise<void>
+  setThreadMemoryPolicy(id: string, policy: ThreadMemoryPolicy, expectedRevision: number): Promise<Thread>
   patchThread(id: string, patch: RendererThreadPatch): Promise<Thread>
   setThreadWorkspace(id: string, workspace: WorkspaceLocation | null, cwd?: string | null): Promise<Thread>
   appendThreadNotice(id: string, text: string): Promise<void>
@@ -108,7 +151,8 @@ export interface TensorFoldStudioApi {
   approve(callId: string, decision: 'allow' | 'allow_always' | 'deny'): Promise<void>
   pickDirectory(): Promise<string | null>
   fetchModels(provider: Provider): Promise<string[]>
-  getModelReadiness(input: { providerId?: string | null; accountId?: string | null }): Promise<Readiness>
+  testProviderResponse(input: { provider: Provider; model: string }): Promise<ProviderGenerationProbe>
+  getModelReadiness(input: { providerId?: string | null; accountId?: string | null; model?: string | null }): Promise<Readiness>
   loginCliProvider(input: { providerId: string; accountId?: string | null }): Promise<CliLoginResult>
   cancelCliLogin(providerId: string): Promise<{ cancelled: boolean }>
   checkCliTransport(input: { transport: 'codex-cli' | 'claude-cli'; cliPath?: string }): Promise<{ loggedIn: boolean; binaryPresent: boolean; detail?: string; message?: string }>
@@ -124,6 +168,12 @@ export interface TensorFoldStudioApi {
   discoverOmlxProvider(): Promise<OmlxDiscovery>
   synthesizeVoice(text: string): Promise<VoiceSynthesisResult>
   synthesizeLocalVoice(text: string): Promise<VoiceSynthesisResult>
+  getKokoroStatus(): Promise<KokoroStatus>
+  installKokoro(): Promise<KokoroStatus>
+  cancelKokoroInstall(): Promise<KokoroStatus>
+  removeKokoro(): Promise<KokoroStatus>
+  synthesizeKokoroVoice(input: KokoroSynthesisInput): Promise<VoiceSynthesisResult>
+  cancelKokoroVoice(requestId: string): Promise<{ cancelled: boolean }>
   transcribeVoice(input: VoiceTranscriptionInput): Promise<VoiceTranscriptionResult>
   discoverLocalTts(baseUrl?: string): Promise<LocalTtsDiscovery>
   getTokenUsage(): Promise<TokenUsageSnapshot>
@@ -396,6 +446,11 @@ export interface TensorFoldStudioApi {
   // Contains a launch credential: request only in the user's explicit copy-connection action.
   engineConnection(): Promise<EngineConnection | null>
   engineRefresh(): Promise<EngineSnapshot>
+  engineLibrary(): Promise<EngineModelLibrarySnapshot>
+  engineScanLibrary(options?: EngineLibraryScanOptions): Promise<EngineModelLibrarySnapshot>
+  engineAddLibraryFolder(): Promise<EngineModelLibrarySnapshot | null>
+  engineRemoveLibraryFolder(id: string): Promise<EngineModelLibrarySnapshot>
+  engineCancelLibraryScan(): Promise<EngineModelLibrarySnapshot>
   engineSearch(query: string): Promise<HubModelSummary[]>
   enginePreflight(repo: string, revision?: string | null): Promise<ModelPreflight>
   enginePull(repo: string, revision?: string | null): Promise<PullProgress>
@@ -403,6 +458,10 @@ export interface TensorFoldStudioApi {
   engineLoad(repo: string): Promise<EngineStatus>
   engineUnload(): Promise<EngineStatus>
   engineSetCortheon(enabled: boolean): Promise<EngineStatus>
+  engineLearning(): Promise<EngineLearningSnapshot>
+  engineSetLearning(enabled: boolean, model?: string): Promise<EngineLearningSnapshot>
+  engineTeach(text: string): Promise<EngineLearningSnapshot>
+  engineCancelTeach(): Promise<EngineLearningSnapshot>
   engineDelete(repo: string): Promise<EngineInstalledModel[]>
   onEngineEvent(cb: (event: EngineEvent) => void): () => void
 }
@@ -468,3 +527,4 @@ function pickBrowserTransport(): TensorFoldStudioApi {
 }
 
 export const api: TensorFoldStudioApi = surfaceIpcErrors(window.tensorfoldStudio ?? window.vontra ?? pickBrowserTransport())
+import type { ProviderGenerationProbe } from '../../electron/agent/provider-generation-probe'

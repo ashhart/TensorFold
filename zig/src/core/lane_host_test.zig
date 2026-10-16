@@ -561,4 +561,14 @@ test {
     _ = @import("lane_host_fail_test.zig");
     _ = @import("lane_host_lone_test.zig");
     _ = @import("lane_host_admit_test.zig");
+    _ = @import("lane_host_recall_test.zig");
+    _ = @import("lane_host_fill_test.zig");
+    _ = @import("lane_host_status_test.zig");
+    _ = @import("lane_host_stale_test.zig");
+    _ = @import("lane_host_reuse_test.zig");
+    _ = @import("lane_host_cache_lifetime_test.zig");
+    _ = @import("lane_host_borrow_test.zig");
+    _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_rows_test.zig");
+    _ = @import("lane_host_many_test.zig");
 }

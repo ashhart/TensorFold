@@ -20,6 +20,7 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, api: *Module, tokeni
         }),
         .filters = &.{"cortheon.fuzz."},
     });
+    _ = @import("server.zig").addTo(b, harness.root_module, target, optimize);
     const step = b.step("fuzz-cortheon", "Cortheon's page, link, search and filter readers under the fuzz harness");
     step.dependOn(&b.addRunArtifact(harness).step);
 }

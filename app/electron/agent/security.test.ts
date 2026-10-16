@@ -110,6 +110,7 @@ async function main() {
   assert.equal(currentSecurityRoleFromEnv({ VONTRA_SECURITY_ROLE: 'bogus' }), 'operator')
 
   const csp = buildSessionCsp()
+  assert.match(csp, /(?:^|;)\s*media-src 'self' blob:(?:;|$)/, 'offline generated speech must play through Blob URLs without allowing remote audio')
   assert.match(csp, /script-src 'self'/)
   assert.match(csp, /object-src 'none'/)
   assert.doesNotMatch(csp, /connect-src[^;]*\shttps:/)
@@ -129,6 +130,7 @@ async function main() {
   assert.match(devCsp, /connect-src[^;]*http:\/\/127\.0\.0\.1:5173[^;]*ws:\/\/127\.0\.0\.1:5173/)
   const html = readFileSync('index.html', 'utf8')
   const metaCsp = html.match(/data-vontra-production-csp[^>]*content="([^"]+)"/)?.[1] ?? ''
+  assert.match(metaCsp, /(?:^|;)\s*media-src 'self' blob:(?:;|$)/, 'the HTML policy must also permit local speech playback')
   const directiveSources = (value: string, name: string) => value.split(';').map((part) => part.trim()).find((part) => part.startsWith(`${name} `))?.split(/\s+/).slice(1) ?? []
   assert.deepEqual(directiveSources(metaCsp, 'frame-src'), directiveSources(csp, 'frame-src'), 'production meta/header frame allowlists match exactly')
   assert.deepEqual(directiveSources(metaCsp, 'connect-src'), ["'self'"], 'production meta fallback allows only same-origin renderer fetches')

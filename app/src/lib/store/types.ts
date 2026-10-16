@@ -1,10 +1,11 @@
 import type { WorkPaneTab } from '../work-pane'
+import type { FullWorkspaceLayout } from '../full-workspace-layout'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, Settings, Thread, RendererThreadPatch, TimelineItem, Project, ProjectExecutionTarget, Room, RoomManualMemoryCommand, Seat, RoomStreamEvent, Ticket, TicketStatus, TicketWorkOptions, Automation, Job, AppUpdateStatus, Provider, PersistenceFailure, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession } from '../types'
 
 export type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, Settings, Thread, RendererThreadPatch, TimelineItem, Project, ProjectExecutionTarget, Room, RoomManualMemoryCommand, Seat, RoomStreamEvent, Ticket, TicketStatus, TicketWorkOptions, Automation, Job, AppUpdateStatus, Provider, PersistenceFailure, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession }
 
 export type ProjectTab = 'overview' | 'rooms' | 'board' | 'chats' | 'files' | 'terminals' | 'settings'
-export type View = { name: 'home' } | { name: 'thread'; id: string } | { name: 'commandCentre' } | { name: 'assistant' } | { name: 'settings'; section?: string } | { name: 'plugins' } | { name: 'automations' } | { name: 'projects' } | { name: 'project'; id: string; tab?: ProjectTab } | { name: 'room'; id: string } | { name: 'models' }
+export type View = { name: 'home' } | { name: 'bots' } | { name: 'thread'; id: string } | { name: 'commandCentre' } | { name: 'assistant' } | { name: 'settings'; section?: string } | { name: 'plugins' } | { name: 'automations' } | { name: 'projects' } | { name: 'project'; id: string; tab?: ProjectTab } | { name: 'room'; id: string } | { name: 'models'; tab?: 'Models' | 'Workers' | 'Learning' | 'API' }
 export type RunStatus = 'idle' | 'thinking' | 'streaming' | 'tool' | 'awaiting' | 'done' | 'error'
 export interface Approval { callId: string; itemId: string }
 export const BUSY_RUN = new Set<RunStatus>(['thinking', 'streaming', 'tool', 'awaiting'])
@@ -37,9 +38,10 @@ export interface AppState {
   archives: ArchiveSnapshot | null
   updateStatus: AppUpdateStatus | null
   // Update/changelog modal. `updateModalOpen` is the explicit UI gate;
-  // `updateModalSeen` tracks the latest version the user has already viewed
-  // the release notes for, so we only auto-pop on a genuinely new release.
+  // `updateModalSeen` records release notes opened explicitly by the user.
   updateModalOpen: boolean
+  /** Explicit install request awaiting native preflight or handoff. */
+  updateInstallPending: boolean
   updateModalSeen: string | null
   newProjectOpen: boolean
   newProjectIntent: number
@@ -49,6 +51,7 @@ export interface AppState {
   composerSeed: { text: string; n: number } | null
   threadDockRequest: { threadId: string; dock: 'terminal' | 'preview'; nonce: number } | null
   sidebarCollapsed: boolean
+  fullWorkspaceLayout: FullWorkspaceLayout
   // Thread work pane: folder threads follow rightPanelHidden, a folderless chat opens only as chatPaneOpenId.
   rightPanelHidden: boolean
   chatPaneOpenId: string | null
@@ -81,6 +84,7 @@ export interface AppState {
 
   init(options?: { retry?: boolean }): Promise<void>
   toggleSidebar(): void
+  setFullWorkspaceLayout(layout: FullWorkspaceLayout): void
   toggleRightPanel(): void
   openWorkPane(tab: WorkPaneTab, opts?: { path?: string }): void
   setWorkPaneTab(threadId: string, tab: WorkPaneTab): void
@@ -106,7 +110,7 @@ export interface AppState {
   // transcript and auto-runs it as the new thread's first turn.
   // intent 'run-plan' hands an external model's plan to a trusted local engine to carry out.
   handoffThread(threadId: string, toProviderId: string, toModel?: string | null, intent?: 'run-plan'): Promise<{ ok: boolean; error?: string }>
-  launch(opts: { text: string; cwd: string; providerId: string; model: string; approvalMode: Settings['approvalMode']; providerAccountId?: string | null; projectId?: string | null; workspace?: WorkspaceLocation | null; attachments?: Attachment[]; sourceThreadKey?: string; persistActiveModel?: boolean; incognito?: boolean }): Promise<void>
+  launch(opts: { text: string; cwd: string; providerId: string; model: string; approvalMode: Settings['approvalMode']; providerAccountId?: string | null; projectId?: string | null; workspace?: WorkspaceLocation | null; attachments?: Attachment[]; sourceThreadKey?: string; persistActiveModel?: boolean; incognito?: boolean; memoryPolicy?: import('../types').ThreadMemoryPolicy }): Promise<{ ok: boolean; threadId: string; error?: string }>
   refreshSshHosts(): Promise<void>
   connectSshHost(hostId: string): Promise<void>
   disconnectSshHost(hostId: string): Promise<void>

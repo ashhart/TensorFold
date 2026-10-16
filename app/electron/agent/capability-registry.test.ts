@@ -324,8 +324,13 @@ console.log('capability registry tests:')
 
 {
   const names = schemaNames(buildChatToolSchemas({ disabledCapabilityIds: ['tool:web'] }))
-  assert.deepStrictEqual(names, ['visualize'])
-  ok('chat schemas respect capability visibility')
+  // A local clarification is an explicit user interaction, independent of
+  // public web access; it cannot expose shell/files/connectors or grant approval.
+  assert.deepStrictEqual(names, ['ask_user', 'visualize'])
+  assert.ok(!names.some((name) => ['web_search', 'web_fetch', 'run_command', 'write_file', 'email_compose'].includes(name)))
+  const withoutQuestions = schemaNames(buildChatToolSchemas({ disabledCapabilityIds: ['tool:web'], disabledToolNames: ['ask_user'] }))
+  assert.deepStrictEqual(withoutQuestions, ['visualize'], 'the explicit question tool disable still wins')
+  ok('chat schemas retain local clarification while respecting web and explicit tool restrictions')
 }
 
 console.log(`capability registry tests: ${passed} passed`)

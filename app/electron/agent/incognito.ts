@@ -1,7 +1,12 @@
 // Incognito threads (composer toggle): memory-only conversations. Two seams keep
-// them off disk — saveThreads strips them from threads.json, and the event-spine
-// bridge drops their events before the journal sees them. Everything else treats
-// them as ordinary threads while the app runs.
+// them off disk — protected snapshots, journals and automatic learning skip them.
+// Cross-conversation retrieval cannot expose their live in-memory history either.
+
+/** These tools create derived durable conversations, mailboxes or learned skills. */
+export const INCOGNITO_PERSISTENT_TOOLS = new Set([
+  'delegate_task', 'launch_subagent', 'launch_subagents', 'subagent_send', 'subagent_inbox',
+  'suggest_skill', 'skill_curator', 'save_artifact',
+])
 
 /** Threads that may be written to disk — incognito ones never persist. */
 export function stripIncognitoThreads<T extends { incognito?: boolean }>(threads: T[]): T[] {

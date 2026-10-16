@@ -99,3 +99,11 @@ export function selectRelevantMemory<T extends EntryLike>(entries: T[], query: s
     .sort((a, b) => b.score - a.score)
   return scored.slice(0, k).map((s) => s.e)
 }
+
+/** Host-marked direct user text only: quoted/attached/connector data is not a preference. */
+export function authoredMemoryMessages(thread: import('./types').Thread, messages?: MsgLike[]): MsgLike[] {
+  const authored = (thread.timeline ?? []).filter((item) => (item.kind === 'user' || item.kind === 'cue') && item.memorySource === 'user' && !item.attachments?.length && item.text && !/(?:^|\n)\s*(?:>|```|<)|[“”"]|\b(?:quoted|attachment|forwarded message|from:|subject:)\b/i.test(item.text)).map((item) => item.text!)
+  if (!messages) return authored.map((content) => ({ role: 'user', content }))
+  const known = new Set(authored)
+  return messages.filter((message) => message.role === 'user' && known.has(contentText(message.content)))
+}

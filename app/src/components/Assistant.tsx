@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
 import { discardPendingDraft } from '../lib/draft-approval'
@@ -17,7 +17,6 @@ import type { AssistantItem, SourceKey } from './assistant/types'
 
 export function Assistant() {
   const launch = useStore((s) => s.launch)
-  const newChat = useStore((s) => s.newChat)
   const settings = useStore((s) => s.settings)
 
   // Source filter lives in the store so the app sidebar drives it (the Assistant no
@@ -30,6 +29,7 @@ export function Assistant() {
   const [taskText, setTaskText] = useState('')
   const [taskBusy, setTaskBusy] = useState(false)
   const [sendingReply, setSendingReply] = useState(false)
+  const actionPending = useRef(false)
   const [resolvingEmail, setResolvingEmail] = useState(false)
   const [syncingEmail, setSyncingEmail] = useState(false)
   const [notice, setNotice] = useState('')
@@ -132,28 +132,36 @@ export function Assistant() {
   const sendReply = async () => {
     const text = taskText.trim()
     const key = selectedItem?.threadKey
-    if (!text || !key || sendingReply) return
+    if (!text || !key || actionPending.current) return
     if (!confirm(`Send this reply to ${selectedItem!.from} via ${sourceName(selectedItem!.source)}?`)) return
+    actionPending.current = true
     setSendingReply(true)
     setNotice('')
     try {
       const r = await api.replyToThread(key, text)
-      if (r.ok) { setTaskText(''); setNotice(`Sent to ${selectedItem!.from}.`); void refresh() }
+      if (r.ok) { setTaskText((current) => current.trim() === text ? '' : current); setNotice(`Sent to ${selectedItem!.from}.`); void refresh() }
       else setNotice(r.error || 'Could not send the reply.')
     } catch (e: any) {
       setNotice(e?.message ?? 'Could not send the reply.')
     } finally {
+      actionPending.current = false
       setSendingReply(false)
     }
   }
 
   const startTask = async () => {
     const text = taskText.trim()
-    if (!text) return
+    if (!text || actionPending.current) return
+    const selection = settings ? resolveAssistantModel(settings) : null
+    if (!settings || !selection?.providerId || !selection.model) {
+      setNotice('Choose a model in Models before starting an assistant task. Your draft is still here.')
+      return
+    }
+    actionPending.current = true
     setTaskBusy(true)
     setNotice('')
     try {
-      if (settings?.activeProviderId && settings.activeModel) {
+      {
         const scope = selectedSource === 'all' ? 'all assistant sources' : sourceName(selectedSource)
         let sourceContext = assistantTaskContext(scope, selectedItem, selectedEvent, filteredItems, snapshot?.briefing)
         if (selectedItem?.source === 'email' && selectedItem.threadKey) {
@@ -164,7 +172,7 @@ export function Assistant() {
             sourceContext = `${sourceContext}\n\n<email_thread_read_error>${err instanceof Error ? err.message : String(err)}</email_thread_read_error>`
           }
         }
-        await launch({
+        const result = await launch({
           text: [
             `Assistant task for ${scope}.`,
             sourceContext,
@@ -177,9 +185,9 @@ export function Assistant() {
           cwd: settings.defaultCwd || '',
           // Use the dedicated Assistant model when set; the ?? keeps types non-null (active* are
           // already guaranteed by the guard above) and is the same value the resolver falls back to.
-          providerId: resolveAssistantModel(settings).providerId ?? settings.activeProviderId,
-          providerAccountId: resolveAssistantModel(settings).providerAccountId,
-          model: resolveAssistantModel(settings).model ?? settings.activeModel,
+          providerId: selection.providerId,
+          providerAccountId: selection.providerAccountId,
+          model: selection.model,
           approvalMode: settings.approvalMode,
           projectId: null,
           // Originating connector conversation (slack:<src>:<chan>:<ts>, discord:<src>:<chan>,
@@ -188,13 +196,13 @@ export function Assistant() {
           sourceThreadKey: selectedItem?.threadKey,
           persistActiveModel: false,
         })
-      } else {
-        await newChat(null)
+        if (!result.ok) throw new Error(result.error || 'The assistant could not start. Your draft is still here.')
       }
-      setTaskText('')
+      setTaskText((current) => current.trim() === text ? '' : current)
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err))
     } finally {
+      actionPending.current = false
       setTaskBusy(false)
     }
   }

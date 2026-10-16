@@ -92,12 +92,13 @@ function raceAbort(promise: Promise<LiveEndpoint>, signal?: AbortSignal): Promis
 
 // Loopback-only fetch for the running engine. undici's own header and body timeouts are raised to
 // the first-byte budget; streamChat's idle timer is the finer limit.
-export function engineFetch(baseUrl: string): typeof fetch {
+export function engineFetch(baseUrl: string, assertRequestAllowed?: () => void): typeof fetch {
   const origin = new URL(baseUrl).origin
   if (!/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) throw new Error('The built-in engine only listens on 127.0.0.1.')
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url)
     if (url.origin !== origin) throw new Error('Refusing a built-in engine request to another origin.')
+    assertRequestAllowed?.()
     const { Agent } = require('undici') as { Agent: new (options: Record<string, unknown>) => { close(): Promise<void>; destroy(): Promise<void> } }
     const dispatcher = new Agent({ headersTimeout: ENGINE_FIRST_BYTE_MS, bodyTimeout: ENGINE_FIRST_BYTE_MS })
     try {
@@ -123,7 +124,7 @@ export async function engineRoute(p: ChatParams, options: { start: boolean } = {
     const provider = { ...p.provider!, baseUrl: live.baseUrl, apiKey: live.apiKey }
     return {
       params: { ...p, provider, baseUrl: live.baseUrl, apiKey: live.apiKey },
-      fetch: engineFetch(live.baseUrl),
+      fetch: engineFetch(live.baseUrl, p.assertRequestAllowed),
       firstByteMs: ENGINE_FIRST_BYTE_MS,
       idleMs: ENGINE_IDLE_MS,
       release: live.release,

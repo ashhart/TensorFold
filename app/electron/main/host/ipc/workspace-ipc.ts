@@ -1,3 +1,5 @@
+import { createThreadMemoryPolicyHost } from '../thread-memory-policy-host'
+import { assertThreadMemoryTransport } from '../../../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { promises as fs } from 'node:fs'
@@ -22,6 +24,9 @@ import { persistThreads } from '../persistence'
 import { runtimeProviderWithFreshModels, resolveProjectProvider, selectedProviderAccountId } from '../provider-runtime'
 import { assertSshThreadTransportSupported } from '../thread-runtime'
 import type { WorkspaceMutationGuard } from '../workspace-mutation-guard'
+import { captureBotConfig } from '../../../../shared/bot-policy'
+import { saveThreads } from '../../../store'
+import { assertBotLifecycleIdle } from '../bot-run-boundary'
 
 const RENDERER_THREAD_PATCH_KEYS = new Set([
   'goal', 'goalStatus', 'plan', 'notepad', 'annotations', 'diffReviewedAt', 'incognito',
@@ -91,6 +96,7 @@ export interface WorkspaceIpcDeps {
 }
 
 export function registerWorkspaceIpc(deps: WorkspaceIpcDeps) {
+  const privateCreateCommands = new Map<string, string>()
   const {
     remoteServer,
     spine,
@@ -121,21 +127,30 @@ handle('archives:restore', async (_e, { kind, id }: { kind: 'project' | 'thread'
   return restoreEntity(kind, id, { publish: (recordKind, data) => remoteServer.publish({ kind: recordKind, data }) })
 })
 
-handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, commandId }: { cwd: string; kind?: 'task' | 'chat'; projectId?: string | null; commandId?: string }) => {
+handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, commandId, incognito = false }: { cwd: string; kind?: 'task' | 'chat'; projectId?: string | null; commandId?: string; incognito?: boolean }) => {
   requireSecurityRole('operator', 'create threads')
+  if (typeof incognito !== 'boolean') throw new Error('Incognito must be selected as a boolean option.')
   // Exactly-once via the spine (VST-034): a retried create with the same commandId (lost
   // IPC reply, reconnect replay) returns the thread the accepted receipt points at instead
   // of minting a duplicate.
-  const spineHost = spine()
+  const spineHost = incognito ? null : spine()
   const cmdId = typeof commandId === 'string' && commandId.trim() ? commandId.trim() : null
-  if (cmdId && spineHost) {
-    const prior = spineHost.receipt(cmdId)
-    if (prior?.status === 'accepted') {
-      const existing = store.threads.find((t) => t.id === prior.streamId)
-      if (existing) return existing
+  if (cmdId && cmdId.length > 160) throw new Error('Thread creation command is too long.')
+  const priorCreatedThread = () => {
+    if (!cmdId) return null
+    if (incognito) {
+      const existingId = privateCreateCommands.get(cmdId)
+      return existingId ? store.threads.find((thread) => thread.id === existingId && thread.incognito) ?? null : null
     }
+    const prior = spineHost?.receipt(cmdId)
+    const existing = prior?.status === 'accepted' ? store.threads.find((thread) => thread.id === prior.streamId) : null
+    if (existing?.incognito) throw new Error('That creation command belongs to a private chat.')
+    return existing ?? null
   }
+  const prior = priorCreatedThread()
+  if (prior) return prior
   const project = projectId ? store.projects.find((p) => p.id === projectId) : null
+  if (incognito && project?.executionTarget === 'orchestrator') throw new Error('Incognito tasks run in this desktop app; choose This Mac before starting a private task.')
   if (projectId && (!project || project.archivedAt)) throw new Error('Choose an active project before creating a thread.')
   const projectWorkspace = project?.workspace ?? null
   const candidateCwd = cwd || project?.cwd || (projectWorkspace?.kind === 'ssh' ? projectWorkspace.path : '') || store.settings.defaultCwd || ''
@@ -150,8 +165,12 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
   const baseProvider = resolved?.baseProvider ?? store.settings.providers.find((p) => p.id === store.settings.activeProviderId)
   const providerAccountId = resolved?.providerAccountId ?? (baseProvider ? selectedProviderAccountId(baseProvider, store.settings.activeProviderAccountId ?? undefined) : null)
   const model = resolved?.model ?? (baseProvider ? resolveProviderModel(baseProvider, providerAccountId, store.settings.activeModel) : store.settings.activeModel)
+  // Folder checks above yield; a simultaneous retry may have completed meanwhile.
+  const concurrent = priorCreatedThread()
+  if (concurrent) return concurrent
   const t: Thread = {
     id: randomUUID(),
+    ...(incognito ? { incognito: true } : {}),
     title: kind === 'chat' ? 'New chat' : 'New task',
     kind,
     projectId: projectId ?? null,
@@ -167,6 +186,10 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
     timeline: [],
   }
   store.threads.unshift(t)
+  if (incognito && cmdId) {
+    privateCreateCommands.set(cmdId, t.id)
+    if (privateCreateCommands.size > 500) privateCreateCommands.delete(privateCreateCommands.keys().next().value as string)
+  }
   persistThreads()
   spineHost?.executeCommand(
     { commandId: cmdId ?? randomUUID(), aggregate: 'thread', streamId: t.id, kind: 'thread.create', actor: 'user' },
@@ -177,9 +200,32 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
   return t
 })
 
+handle('bots:createChat', async (_e, { presetId }: { presetId: string }) => {
+  requireSecurityRole('operator', 'start bot chats')
+  const preset = store.settings.agentPresets.find((candidate) => candidate.id === presetId)
+  if (!preset) throw new Error('Bot not found.')
+  assertBotLifecycleIdle(preset.id)
+  const bot = captureBotConfig(preset, store.settings.providers)
+  const t: Thread = {
+    id: randomUUID(), title: `${bot.name} chat`, kind: 'chat', projectId: null,
+    cwd: bot.executionTarget === 'vm' ? '/workspace' : '', workspace: null, bot,
+    providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model,
+    createdAt: Date.now(), updatedAt: Date.now(), status: 'idle', apiMessages: [], timeline: [],
+  }
+  const lease = workspaceMutationGuard.reserveStart({ threadId: t.id, workspaceKeys: [] })
+  try {
+    store.threads.unshift(t)
+    try { await saveThreads(store.threads) } catch (error) { store.threads = store.threads.filter((candidate) => candidate.id !== t.id); throw error }
+    store.win?.webContents.send('thread:update', t)
+    remoteServer.publish({ kind: 'thread', data: t })
+    return t
+  } finally { lease.release() }
+})
+
 handle('threads:delete', async (_e, id: string) => {
   requireSecurityRole('operator', 'delete threads')
-  spine()?.executeCommand(
+  const deletingThread = store.threads.find((thread) => thread.id === id)
+  if (!deletingThread?.incognito) spine()?.executeCommand(
     { commandId: randomUUID(), aggregate: 'thread', streamId: id, kind: 'thread.archive', actor: 'user' },
     () => ({ aggregate: 'thread', streamId: id, type: 'thread.archived', payload: {} }),
   )
@@ -211,10 +257,12 @@ handle('threads:setEngine', async (_e, { id, engine }: { id: string; engine: 'na
   const t = store.threads.find((t) => t.id === id)
   if (t?.archivedAt) throw new Error('Restore the archived thread before changing its engine.')
   if (t) {
+    if (t.bot) throw new Error('Bot chats use TensorFold’s permission checks; start a new chat to change engines.')
     if (engine === 'omp') {
       const binary = discoverOmpBinary()
       if (!existsSync(binary)) throw new Error('The omp CLI is not installed. Install @oh-my-pi/pi-coding-agent first.')
     }
+    assertThreadMemoryTransport({ ...t, engine }, store.settings.providers.find((p) => p.id === t.providerId))
     t.engine = engine === 'native' ? undefined : engine
     t.updatedAt = Date.now()
     persistThreads()
@@ -243,7 +291,9 @@ handle('threads:configure', async (_e, { id, providerId, model, providerAccountI
   const t = store.threads.find((t) => t.id === id)
   if (t?.archivedAt) throw new Error('Restore the archived thread before configuring it.')
   if (t) {
+    if (t.bot) throw new Error('This chat keeps its bot’s saved model; edit the bot and start a new chat to change it.')
     const provider = store.settings.providers.find((p) => p.id === providerId)
+    assertThreadMemoryTransport(t, provider)
     const accountId = provider ? selectedProviderAccountId(provider, providerAccountId) : providerAccountId ?? null
     t.providerId = providerId
     t.providerAccountId = accountId
@@ -257,6 +307,17 @@ handle('threads:configure', async (_e, { id, providerId, model, providerAccountI
 
 // Generic thread patch is deliberately narrow: only renderer-owned planning/notes
 // fields cross this seam. Workspace/runtime/timeline state has dedicated host APIs.
+const updateMemoryPolicy = createThreadMemoryPolicyHost({
+  threads: () => store.threads,
+  provider: (thread) => store.settings.providers.find((p) => p.id === thread.providerId),
+  aborters, guard: workspaceMutationGuard,
+  publish: (thread) => { store.win?.webContents.send('thread:update', thread); remoteServer.publish({ kind: 'thread', data: thread }) },
+})
+handle('threads:setMemoryPolicy', async (_e, { id, policy, expectedRevision }: { id: string; policy: unknown; expectedRevision: number }) => {
+  requireSecurityRole('operator', 'change saved-memory choices')
+  return updateMemoryPolicy(id, policy, expectedRevision)
+})
+
 handle('threads:patch', async (_e, { id, patch }: { id: string; patch: RendererThreadPatch }) => {
   requireSecurityRole('operator', 'patch threads')
   const t = store.threads.find((t) => t.id === id)
@@ -264,7 +325,7 @@ handle('threads:patch', async (_e, { id, patch }: { id: string; patch: RendererT
   if (t) {
     const safe = sanitizeRendererThreadPatch(patch)
     if (safe.incognito === false && t.incognito) throw new Error('An incognito thread cannot be converted into a persisted thread.')
-    if (safe.incognito === true && (t.timeline.length > 0 || t.apiMessages.length > 0)) throw new Error('Incognito mode must be selected before a thread starts.')
+    if (safe.incognito === true && (t.timeline.length > 0 || t.apiMessages.length > 0 || t.status === 'running' || aborters.has(t.id))) throw new Error('Incognito mode must be selected before a thread starts.')
     Object.assign(t, safe, { updatedAt: Date.now() })
     persistThreads()
     store.win?.webContents.send('thread:update', t)
@@ -278,6 +339,7 @@ handle('threads:setWorkspace', async (_e, input: { id: string; workspace?: Works
   const t = store.threads.find((candidate) => candidate.id === String(input?.id ?? ''))
   if (!t) throw new Error('Thread not found.')
   if (t.archivedAt) throw new Error('Restore the archived thread before changing its workspace.')
+  if (t.bot) throw new Error('Bot chats keep their captured execution location; start a new bot chat to change it.')
   if (aborters.has(t.id)) throw new Error('Stop the running thread before changing its workspace.')
   const targetLease = workspaceMutationGuard.reserveStart({ threadId: t.id })
   try {
@@ -358,6 +420,7 @@ handle('threads:setProject', async (_e, { id, projectId }: { id: string; project
   const t = store.threads.find((t) => t.id === id)
   if (t?.archivedAt) throw new Error('Restore the archived thread before assigning its project.')
   if (t) {
+    if (t.bot) throw new Error('Bot chats keep their captured execution location; start a new bot chat to choose a project.')
     if (aborters.has(t.id)) throw new Error('Stop the running thread before assigning its project.')
     const targetLease = workspaceMutationGuard.reserveStart({ threadId: t.id })
     try {

@@ -1,5 +1,6 @@
 import type { GetState, Slice } from '../types'
 import { effectiveThreadCwd } from '../../thread-workspace'
+import { readFullWorkspaceLayout, saveFullWorkspaceLayout } from '../../full-workspace-layout'
 
 const PINNED_KEY = 'vontra.pinnedThreads'
 
@@ -30,6 +31,7 @@ export const uiSlice: Slice = (set, get) => ({
   composerSeed: null as { text: string; n: number } | null,
   threadDockRequest: null as { threadId: string; dock: 'terminal' | 'preview'; nonce: number } | null,
   sidebarCollapsed: false,
+  fullWorkspaceLayout: readFullWorkspaceLayout(),
   rightPanelHidden: false,
   chatPaneOpenId: null,
   workPaneTabs: {},
@@ -41,8 +43,16 @@ export const uiSlice: Slice = (set, get) => ({
   collapseReasoningDefault: true,
   collapseToolRunsDefault: true,
 
-  toggleSidebar() { set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })) },
+  setFullWorkspaceLayout(layout) {
+    const saved = saveFullWorkspaceLayout(layout)
+    set({ fullWorkspaceLayout: layout, ...(!saved ? { notice: { kind: 'error', message: 'Layout changed for this session, but the preference could not be saved on this device.' } } : {}) })
+  },
+  toggleSidebar() {
+    if (get().fullWorkspaceLayout === 'chat') { get().setFullWorkspaceLayout('workspace'); return }
+    set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed }))
+  },
   toggleRightPanel() {
+    if (get().fullWorkspaceLayout === 'chat') { get().setFullWorkspaceLayout('workspace'); return }
     const current = viewedThread(get)
     if (current && !current.hasFolder) set((s) => ({ chatPaneOpenId: s.chatPaneOpenId === current.id ? null : current.id }))
     else set((s) => ({ rightPanelHidden: !s.rightPanelHidden }))
@@ -50,6 +60,7 @@ export const uiSlice: Slice = (set, get) => ({
   openWorkPane(tab, opts) {
     const current = viewedThread(get)
     if (!current) return
+    if (get().fullWorkspaceLayout === 'chat') get().setFullWorkspaceLayout('workspace')
     set((s) => ({
       ...(current.hasFolder ? { rightPanelHidden: false } : { chatPaneOpenId: current.id }),
       workPaneTabs: { ...s.workPaneTabs, [current.id]: tab },

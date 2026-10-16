@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { store } from '../state'
-import { pairedRemoteArchiveSnapshot, pairedRemoteControlSnapshot, redactRemoteControlEventForPaired, remoteControlSnapshot } from './remote-snapshot'
+import { pairedRemoteArchiveSnapshot, pairedRemoteControlSnapshot, redactRemoteControlEventForPaired, remoteControlSnapshot, remoteArchiveSnapshot, remoteControlDoctorSnapshot, isRemoteEventVisible } from './remote-snapshot'
 
 const secret = 'snapshot-secret-material'
 store.settings = {
@@ -46,5 +46,27 @@ assert.doesNotMatch(JSON.stringify(pairedArchives), new RegExp(secret), 'paired 
 
 const event = redactRemoteControlEventForPaired({ kind: 'agent', data: { type: 'item_delta', runId: 'r', threadId: 't', id: 'i', field: 'text', chunk: secret } })
 assert.doesNotMatch(JSON.stringify(event), new RegExp(secret), 'paired live events cannot reintroduce redacted transcript chunks')
+
+const privateMarker = 'incognito-projection-synthetic-content'
+const privateThread = { ...store.threads[0], id: 'private-thread', title: privateMarker, incognito: true, apiMessages: [{ role: 'user', content: privateMarker }], timeline: [{ id: 'q', kind: 'tool', tool: 'ask_user', question: { answer: privateMarker } }] } as any
+store.threads.push(privateThread)
+store.jobs.push({ ...store.jobs[0], id: 'private-job', incognito: true, owner: privateThread.id, threadId: privateThread.id, currentThreadId: privateThread.id, metadata: { title: privateMarker } } as any)
+store.jobs.push({ ...store.jobs[0], id: 'legacy-linked-private-job', owner: privateThread.id, metadata: { title: privateMarker } } as any)
+const active = { ...runtime, activeThreadIds: ['thread', privateThread.id] }
+for (const snapshot of [remoteControlSnapshot(active), pairedRemoteControlSnapshot(active)]) {
+  assert.doesNotMatch(JSON.stringify(snapshot), new RegExp(privateMarker), 'neither owner nor paired/mobile snapshots serialize Incognito transcript, title or job metadata')
+  assert.deepEqual(snapshot.activeThreadIds, ['thread'])
+  assert.equal(snapshot.work?.jobs.total, 1, 'private jobs do not enter remote counts or wake projections')
+}
+const archives = { projects: [], threads: [{ ...privateThread, archivedAt: 2 }], rooms: [], tickets: [] }
+assert.equal(remoteArchiveSnapshot(archives).threads.length, 0)
+assert.equal(pairedRemoteArchiveSnapshot(archives).threads.length, 0)
+assert.equal(remoteControlDoctorSnapshot(active).counts.activeThreads, 1)
+assert.equal(remoteControlDoctorSnapshot(active).counts.jobs, 1)
+assert.equal(isRemoteEventVisible({ kind: 'agent', data: { threadId: privateThread.id, patch: { question: { answer: privateMarker } } } }), false)
+assert.equal(isRemoteEventVisible({ kind: 'thread', data: privateThread }), false)
+assert.equal(isRemoteEventVisible({ kind: 'job', data: store.jobs[1] }), false)
+assert.equal(isRemoteEventVisible({ kind: 'job', data: { ...store.jobs[1], threadId: null, currentThreadId: null, owner: 'deleted-thread' } }), false, 'sticky private flag survives missing thread lookup')
+assert.equal(isRemoteEventVisible({ kind: 'agent', data: { threadId: 'thread', type: 'done' } }), true)
 
 console.log('remote paired snapshot minimization tests passed')

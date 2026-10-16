@@ -1,0 +1,7 @@
+{
+  "name": "phonemizer",
+  "version": "1.2.1-tensorfold.1",
+  "private": true,
+  "main": "index.cjs",
+  "license": "MIT"
+}

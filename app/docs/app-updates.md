@@ -34,10 +34,10 @@ supplied Ed25519 private key derives the embedded public SPKI, and signs the can
 ```bash
 npm run release:manifest -- \
   --version 1.0.1 \
-  --artifact release/TensorFold-Studio-1.0.1-arm64.dmg \
-  --download-url https://example.com/vontra/TensorFold-Studio-1.0.1-arm64.dmg \
+  --artifact release/TensorFold-1.0.1-arm64.dmg \
+  --download-url https://example.com/tensorfold/TensorFold-1.0.1-arm64.dmg \
   --update-zip "release/TensorFold-1.0.1-arm64.zip" \
-  --update-zip-url https://example.com/vontra/TensorFold-Studio-1.0.1-arm64.zip \
+  --update-zip-url https://example.com/tensorfold/TensorFold-1.0.1-arm64.zip \
   --notes CHANGELOG.md \
   --out release/update.json \
   --private-key /protected/release/update-signing-ed25519.pem

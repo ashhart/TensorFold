@@ -4,11 +4,13 @@ import { api } from '../lib/ipc'
 import clsx from 'clsx'
 import { ThreadTrustBadge } from './ThreadTrustBadge'
 import { CortheonBadge } from './CortheonBadge'
+import { ChatWorkspaceHeader } from './full-workspace/ChatWorkspaceHeader'
+import { FullLayoutSwitch } from './full-workspace/FullLayoutSwitch'
 
 // Top bar: compact (44px), borderless on the content card.
 // Thread icon + title on the left; "Hand off" + panel toggles on the right.
 // Folder/branch context lives in the composer's context strip, not up here.
-export function TitleBar() {
+export function TitleBar({ simple = false }: { simple?: boolean }) {
   const view = useStore((s) => s.view)
   const threads = useStore((s) => s.threads)
   const projects = useStore((s) => s.projects)
@@ -35,6 +37,7 @@ export function TitleBar() {
           ? 'Assistant'
           : view.name.charAt(0).toUpperCase() + view.name.slice(1)
 
+  if (simple) return <ChatWorkspaceHeader title={title || (view.name === 'home' ? 'New task' : 'TensorFold')} thread={thread} />
   return (
     <header className={clsx('drag relative z-10 flex h-11 shrink-0 items-center gap-2 pr-3', sidebarCollapsed ? 'pl-[96px]' : 'pl-3')}>
       <button onClick={toggleSidebar} title="Toggle sidebar (⌘B)" className="no-drag flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink"><Icon name="sidebar" size={15} /></button>
@@ -45,6 +48,7 @@ export function TitleBar() {
         )}
         {title && <span className="truncate text-[13px] font-medium text-ink">{title}</span>}
         {thread && <ThreadTrustBadge thread={thread} />}
+        {thread?.bot && <button className="no-drag hidden max-w-[220px] shrink-0 truncate rounded-full border border-line px-2 py-0.5 text-[12px] text-ink-2 sm:block" onClick={() => setView({ name: 'bots' })} title="This chat keeps the bot instructions, model and permissions from when it was created.">{thread.bot.name}<span className="hidden lg:inline"> · {thread.bot.executionTarget === 'vm' ? 'Bot VM' : 'This Mac'} · {thread.bot.approvalScope === 'readonly' ? 'Read only' : 'Review actions'}</span></button>}
         {thread && <CortheonBadge thread={thread} />}
         {thread?.parentId && (
           <ThreadLineageChip parentId={thread.parentId} />
@@ -52,6 +56,7 @@ export function TitleBar() {
       </div>
 
       <div className="no-drag flex items-center gap-1">
+        <FullLayoutSwitch />
         {/* Paired session (VST-035): this renderer is a browser driving a TensorFold host over
             /v1 — always visible so limited surfaces are never mistaken for broken ones. */}
         {api.platform === 'web-remote' && (

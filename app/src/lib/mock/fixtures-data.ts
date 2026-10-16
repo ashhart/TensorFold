@@ -82,6 +82,7 @@ export function mkAuto(p: Partial<Automation>): Automation {
   return {
     id: p.id || uid(), name: p.name || 'Untitled automation', prompt: p.prompt || '',
     scheduleKind: p.scheduleKind || 'manual', everyMinutes: p.everyMinutes ?? 60, atHour: p.atHour ?? 9, atMinute: p.atMinute ?? 0,
+    ...(p.timeZone !== undefined ? { timeZone: p.timeZone } : {}),
     providerId: p.providerId ?? 'openai', model: p.model ?? 'gpt-4o', mode: p.mode || 'chat', cwd: p.cwd ?? null,
     deliverTo: p.deliverTo || 'inbox', enabled: p.enabled ?? false,
     lastRunAt: p.lastRunAt ?? null, nextRunAt: p.nextRunAt ?? null, lastStatus: p.lastStatus ?? null,

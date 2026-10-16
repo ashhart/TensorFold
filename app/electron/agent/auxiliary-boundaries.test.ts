@@ -33,8 +33,8 @@ for (const [start, end, label] of [
   const region = source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)))
   assert.match(region, /approvalMode:\s*'readonly'/, `${label} model call is explicitly read-only`)
 }
-assert.match(source, /runExplore\([^\n]+deps\.toolContext\)/, 'explore receives parent tool context')
-assert.match(source, /runDelegateChild\([^\n]+deps\.toolContext\)/, 'delegate children receive parent tool context')
-assert.match(source, /runOracle\([^\n]+deps\.toolContext\)/, 'oracle receives parent tool context')
+assert.match(source, /runExplore\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'explore receives parent tool context and its live request guard')
+assert.match(source, /runDelegateChild\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'delegate children receive parent tool context and its live request guard')
+assert.match(source, /runOracle\([^\n]+deps\.toolContext,\s*assertRequestAllowed\)/, 'oracle receives parent tool context and its live request guard')
 
 console.log('auxiliary model and SSH instruction boundaries are fail-closed')

@@ -1,3 +1,5 @@
+import { captureThreadMemoryPolicy, assertThreadMemoryTransport, threadMemoryPolicyRevision } from '../../../shared/thread-memory-policy'
+import { assertThreadChildSupported } from '../../../shared/thread-child-policy'
 import { randomUUID } from 'node:crypto'
 import { runBestOfN, type BestOfNResult, type VerifierVerdict } from '../../agent/best-of-n'
 import { renderTranscript } from '../../agent/compaction'
@@ -28,6 +30,7 @@ export interface MissionRuntime {
 }
 
 interface MissionRuntimeDeps {
+  resolveWorkspace?: typeof resolveWorkspaceCwd
   runningMissions: Set<string>
   missionAborters: Map<string, AbortController>
   missionApprovalResolvers: Map<string, (d: 'allow' | 'allow_always' | 'deny') => void>
@@ -37,7 +40,7 @@ interface MissionRuntimeDeps {
   finishJob(job: Job | null, outcome: 'completed' | 'failed' | 'cancelled' | 'paused', reason?: string): void
   getMission(id: string): Mission
   replaceMission(next: Mission): Mission
-  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal }): any
+  fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }): any
   renderProjectMemoryBucket(project: { id: string; name: string } | undefined): string
   applyEventToThread(thread: Thread, event: AgentEvent): void
   timelineErrorSince(thread: Thread, timelineStart: number): TimelineItem | null
@@ -81,7 +84,7 @@ export function registerMissionApprovalResolver(
 
 type MissionWorkspaceState = {
   projects: Array<Pick<Project, 'id' | 'workspace' | 'archivedAt'>>
-  threads: Array<Pick<Thread, 'id' | 'projectId' | 'workspace' | 'archivedAt'>>
+  threads: Array<Pick<Thread, 'id' | 'projectId' | 'workspace' | 'archivedAt' | 'bot' | 'phoneLocalOnly'>>
 }
 
 export interface MissionArchiveTarget {
@@ -139,6 +142,7 @@ export function assertMissionWorkspaceSupported(
 ): void {
   const thread = mission.threadId ? state.threads.find((candidate) => candidate.id === mission.threadId) ?? null : null
   if (mission.threadId && !thread) throw new Error('Mission source thread not found.')
+  assertThreadChildSupported(thread)
   if (thread?.archivedAt) throw new Error('Restore the archived mission thread before running this mission.')
   if (mission.projectId != null && thread && mission.projectId !== (thread.projectId ?? null)) {
     throw new Error('Mission project does not match its source thread project.')
@@ -270,7 +274,8 @@ interface MissionFanOutPassResult {
   integration: Awaited<ReturnType<typeof integrateMissionAttemptWinner>>
 }
 
-async function verifyMissionStopCondition(provider: Provider, model: string, mission: Mission, thread: Thread, signal: AbortSignal) {
+async function verifyMissionStopCondition(provider: Provider, model: string, mission: Mission, thread: Thread, signal: AbortSignal, assertRequestAllowed?: () => void) {
+  assertRequestAllowed?.()
   const stopCondition = mission.stopCondition.trim()
   if (!stopCondition) return { done: true, note: 'No stop condition configured.', evidenceCount: missionEvidenceItems(thread).length }
   const evidence = missionEvidenceItems(thread)
@@ -297,10 +302,11 @@ async function verifyMissionStopCondition(provider: Provider, model: string, mis
   ].join('\n')
   let out = ''
   try {
-    for await (const ch of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.1, reasoningEffort: 'low', approvalMode: 'readonly', cwd: thread.cwd, signal })) {
+    for await (const ch of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: [{ role: 'system', content: sys }, { role: 'user', content: user }], temperature: 0.1, reasoningEffort: 'low', approvalMode: 'readonly', cwd: thread.cwd, signal, assertRequestAllowed })) {
       if (ch.type === 'content') out += ch.text
     }
   } catch {
+    assertRequestAllowed?.()
     return { done: false, note: 'Stop-condition verification failed; continuing.', evidenceCount: evidence.length }
   }
   const text = out.trim()
@@ -312,6 +318,20 @@ async function verifyMissionStopCondition(provider: Provider, model: string, mis
 async function runMission(mission: Mission): Promise<void> {
   if (runningMissions.has(mission.id)) return
   assertMissionWorkspaceSupported(mission)
+  // Resolve the host-owned record before accepting its source identity. A caller
+  // cannot downgrade a saved guarded mission by supplying an ordinary thread ID.
+  const ownedMission = getMission(mission.id)
+  assertMissionWorkspaceSupported(ownedMission)
+  mission = ownedMission
+  const sourceThreadId = mission.threadId ?? null
+  const sourceProjectId = mission.projectId ?? null
+  const assertRequestAllowed = () => {
+    const live = getMission(mission.id)
+    if ((live.threadId ?? null) !== sourceThreadId || (live.projectId ?? null) !== sourceProjectId) throw new Error('The mission source changed; stop and restart it with its current owner.')
+    assertMissionWorkspaceSupported(live)
+  }
+  const requestGuards = new Map<string, () => void>()
+  assertRequestAllowed()
   runningMissions.add(mission.id)
   const controller = new AbortController()
   missionAborters.set(mission.id, controller)
@@ -322,6 +342,11 @@ async function runMission(mission: Mission): Promise<void> {
     job = claimJob({ kind: 'mission', owner: mission.id, missionId: mission.id, projectId: mission.projectId, threadId: mission.threadId, currentThreadId: mission.threadId, metadata: { title: mission.title } })
     const baseProvider = store.settings.providers.find((p) => p.id === (mission.providerId ?? store.settings.activeProviderId))
     if (!baseProvider) throw new Error('No provider configured for this mission.')
+    const memoryParent = mission.threadId ? store.threads.find((thread) => thread.id === mission.threadId) : undefined
+    if (mission.threadId && !memoryParent) throw new Error('The source chat is unavailable; create a new mission with explicit settings.')
+    const memoryPolicy = captureThreadMemoryPolicy(memoryParent ?? {})
+    assertThreadMemoryTransport({ ...memoryParent, memoryPolicy }, baseProvider)
+    const memoryOwner = memoryParent ? { id: memoryParent.id, revision: threadMemoryPolicyRevision(memoryParent) } : undefined
     const requestedProviderAccountId = selectedProviderAccountId(baseProvider, mission.providerAccountId === undefined ? undefined : mission.providerAccountId)
     const requestedProvider = await runtimeProviderWithFreshModels(baseProvider, requestedProviderAccountId)
     let model = resolveProviderModel(requestedProvider, null, mission.model, store.settings.activeModel)
@@ -383,7 +408,7 @@ async function runMission(mission: Mission): Promise<void> {
       })
     }
     let activeRoute = { provider, providerAccountId, model }
-    const cwd = await resolveWorkspaceCwd(mission.cwd ?? store.settings.defaultCwd, 'mission workspace')
+    const cwd = await (deps.resolveWorkspace ?? resolveWorkspaceCwd)(mission.cwd ?? store.settings.defaultCwd, 'mission workspace')
     // Hardened headless posture: read-only + deny-all by default. A mission opts into
     // mutating tools only with metadata.allowMutations === true.
     const allowMutations = mission.metadata?.allowMutations === true
@@ -437,6 +462,7 @@ async function runMission(mission: Mission): Promise<void> {
     }, Math.max(5_000, Math.min(beatMs, 30_000)))
 
     while (!controller.signal.aborted) {
+      assertRequestAllowed()
       const current = getMission(mission.id)
       if (current.status !== 'running' && current.status !== 'waiting_approval') {
         finishJob(job, 'paused', `Mission is ${current.status}.`)
@@ -446,6 +472,7 @@ async function runMission(mission: Mission): Promise<void> {
       const prompt = continuationPrompt ?? buildMissionRunPrompt(current, nextRunIndex, missionCheckpointNotes(current))
       if (!thread || shouldStartFreshMissionThread(current, nextRunIndex)) {
         thread = {
+          memoryPolicy: { ...memoryPolicy },
           id: randomUUID(), title: `${current.title} · pass ${nextRunIndex}`, kind: 'task', projectId: current.projectId ?? null,
           cwd, providerId: baseProvider.id, providerAccountId: activeRoute.providerAccountId, model: activeRoute.model, createdAt: Date.now(), updatedAt: Date.now(),
           status: 'running', apiMessages: [{ role: 'user', content: prompt }], timeline: [],
@@ -473,16 +500,23 @@ async function runMission(mission: Mission): Promise<void> {
         targetTimelineStart: number,
         route: { provider: Provider; providerAccountId: string | null; model: string },
       ) => {
+        assertRequestAllowed()
         targetThread.providerId = baseProvider.id
         targetThread.providerAccountId = route.providerAccountId
         targetThread.model = route.model
+        const toolContext = fullToolContext({ thread: targetThread, provider: route.provider, model: route.model, signal: controller.signal, memoryPolicy, memoryOwner })
+        const recallGuard = toolContext.assertRecallSourcesAllowed
+        const requestGuard = () => { assertRequestAllowed(); recallGuard?.() }
+        requestGuards.set(targetThread.id, requestGuard)
         await runAgent({
+          assertRequestAllowed: requestGuard,
           thread: targetThread, provider: route.provider, model: route.model,
           approvalMode: allowMutations ? 'suggest' : 'readonly',
           temperature: store.settings.temperature, reasoningEffort: store.settings.reasoningEffort,
           autoCompact: store.settings.autoCompact, contextLimit: effectiveContextLimit(route.provider, route.model),
-          toolContext: fullToolContext({ thread: targetThread, provider: route.provider, model: route.model, signal: controller.signal }),
-          projectMemory: renderProjectMemoryBucket(store.projects.find((p) => p.id === current.projectId)),
+          memoryPolicy,
+          toolContext,
+          projectMemory: memoryPolicy.useExisting ? renderProjectMemoryBucket(store.projects.find((p) => p.id === current.projectId)) : '',
           maxSteps, maxWallMs,
           emit: (e) => {
             applyEventToThread(targetThread, e)
@@ -558,7 +592,7 @@ async function runMission(mission: Mission): Promise<void> {
             verify: async (descriptor, _outcome): Promise<VerifierVerdict> => {
               const settled = attemptRuns.get(descriptor.id)
               if (!settled) return { vote: 0, rationale: 'Attempt produced no thread state.' }
-              const verifier = await verifyMissionStopCondition(route.provider, route.model, current, settled.thread, controller.signal)
+              const verifier = await verifyMissionStopCondition(route.provider, route.model, current, settled.thread, controller.signal, requestGuards.get(settled.thread.id) ?? assertRequestAllowed)
               settled.verifier = verifier
               return {
                 testsPassed: missionCommandTestSignal(settled.thread, settled.timelineStart),
@@ -685,7 +719,7 @@ async function runMission(mission: Mission): Promise<void> {
 
       runIndex = nextRunIndex
       const passTimelineStart = fanOutPass?.timelineStart ?? timelineStart
-      const verifier = fanOutPass?.verifier ?? await verifyMissionStopCondition(activeRoute.provider, activeRoute.model, current, thread, controller.signal)
+      const verifier = fanOutPass?.verifier ?? await verifyMissionStopCondition(activeRoute.provider, activeRoute.model, current, thread, controller.signal, requestGuards.get(thread.id) ?? assertRequestAllowed)
       const frontendEvidence = missionNeedsFrontendUiSmoke(current) ? buildFrontendMissionEvidence(thread) : null
       let afterPass = addMissionCheckpoint(getMission(current.id), {
         label: `Mission pass ${runIndex}`,

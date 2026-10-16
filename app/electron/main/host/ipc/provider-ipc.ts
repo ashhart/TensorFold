@@ -1,3 +1,4 @@
+import { modelForReadiness, type ModelReadinessRequest } from '../../../../shared/model-readiness'
 import { discoverLocalProvider } from '../../../agent/local-providers'
 import { providerWithAccount } from '../../../agent/provider-accounts'
 import { assertLocalProviderDiscoveryUrl, auditPreview } from '../../../agent/security'
@@ -9,14 +10,35 @@ import { auditEvent, requireSecurityRole } from '../audit'
 import { handle } from '../ipc'
 import { isEngineProvider } from '../../../agent/engine/provider'
 import { engineService } from '../engine-runtime'
-import { listProviderModels } from '../provider-runtime'
+import { listProviderModels, resolveProviderProbe } from '../provider-runtime'
+import { probeProviderGeneration, providerProbeFailure } from '../../../agent/provider-generation-probe'
 import { discoverLocalTts, synthesizeLocalTts } from '../voice-runtime'
+import { app } from 'electron'
+import path from 'node:path'
+import { KokoroService } from '../../../voice/kokoro-service'
+import type { KokoroSynthesisInput } from '../../../agent/types/kokoro'
+
+let managedKokoro: KokoroService | null = null
+function kokoro(): KokoroService {
+  if (!managedKokoro) {
+    managedKokoro = new KokoroService({ root: path.join(app.getPath('userData'), 'voice', 'kokoro'), workerFile: path.join(__dirname, 'kokoro-worker.js') })
+    app.once('before-quit', () => managedKokoro?.dispose())
+  }
+  return managedKokoro
+}
 
 export function registerProviderIpc() {
 
 handle('provider:models', async (_e, provider: Provider) => {
   requireSecurityRole('operator', 'fetch provider models')
   return listProviderModels(provider)
+})
+
+handle('provider:testResponse', async (_e, input: { provider: Provider; model: string }) => {
+  requireSecurityRole('operator', 'test a model response')
+  const provider = resolveProviderProbe(input.provider)
+  try { return await probeProviderGeneration(provider, input.model) }
+  catch (error) { throw new Error(providerProbeFailure(error)) }
 })
 
 handle('provider:discoverLocal', async (_e, payload: ProviderDiscoveryKind | { kind: ProviderDiscoveryKind; baseUrl?: string; apiKey?: string }) => {
@@ -64,6 +86,26 @@ handle('voice:localSynthesize', async (_e, payload: { text: string }) => {
   return synthesizeLocalTts(String(payload?.text ?? ''))
 })
 
+handle('voice:kokoroStatus', async () => kokoro().status())
+handle('voice:kokoroInstall', async () => {
+  requireSecurityRole('operator', 'download the Kokoro speech model')
+  return kokoro().install()
+})
+handle('voice:kokoroCancelInstall', async () => {
+  requireSecurityRole('operator', 'cancel the Kokoro download')
+  return kokoro().cancelInstall()
+})
+handle('voice:kokoroRemove', async () => {
+  requireSecurityRole('operator', 'remove the Kokoro speech model')
+  return kokoro().remove()
+})
+handle('voice:kokoroSynthesize', async (_e, input: KokoroSynthesisInput) => {
+  requireSecurityRole('operator', 'read text with Kokoro')
+  if (!store.settings.voice.enabled || !store.settings.voice.ttsEnabled) return { ok: false, error: 'Voice output is disabled.' }
+  return kokoro().synthesize(input)
+})
+handle('voice:kokoroCancelSpeech', async (_e, input: { requestId: string }) => ({ cancelled: kokoro().cancelSpeech(String(input?.requestId ?? '')) }))
+
 handle('voice:transcribe', async (_e, _payload: VoiceTranscriptionInput) => {
   return { ok: false, error: CLOUD_VOICE_OFF }
 })
@@ -76,7 +118,7 @@ handle('voice:discoverLocalTts', async (_e, payload?: { baseUrl?: string }) => {
 // Point-of-use guard: is there a usable model for this provider? CLI providers
 // resolve auth by spawning `<cli> <status>`; HTTP providers check for a key here
 // (where the real, unmasked secret lives).
-handle('provider:readiness', async (_e, input: { providerId?: string | null; accountId?: string | null }) => {
+handle('provider:readiness', async (_e, input: ModelReadinessRequest) => {
   requireSecurityRole('operator', 'check model readiness')
   const providerId = input?.providerId ?? store.settings.activeProviderId
   const base = store.settings.providers.find((p) => p.id === providerId)
@@ -84,7 +126,7 @@ handle('provider:readiness', async (_e, input: { providerId?: string | null; acc
   const accountId = input?.accountId !== undefined ? input.accountId : (store.settings.activeProviderAccountId ?? base.defaultAccountId ?? null)
   const provider = providerWithAccount(base, accountId)
   if (isEngineProvider(provider)) {
-    const model = providerId === store.settings.activeProviderId ? store.settings.activeModel ?? null : null
+    const model = modelForReadiness(input, store.settings.activeProviderId, store.settings.activeModel)
     return engineService()?.readiness(model) ?? { ready: false, reason: 'needs-endpoint', message: 'The built-in engine is not available in this process.' }
   }
   if (provider.transport === 'codex-cli' || provider.transport === 'claude-cli') {

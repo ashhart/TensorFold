@@ -1,19 +1,28 @@
-# EXL3 weights on CUDA, for any family
+# EXL3 weights
 
-ExLlamaV3's trellis quantization (EXL3) is what the community's best 4-bit and low-bit NVIDIA checkpoints ship as:
+ExLlamaV3's trellis quantization (EXL3) is what many of the community's best low-bit NVIDIA checkpoints ship as:
 `mul1` codebook at 2 to 6 bits for MiMo-V2.6-Flash, Qwen3.8-27B and Flash Next, `mcg` at 4 bits for
-GLM-5.3-Flash. TensorFold reads all of it with one module, so a family's engine does not need its own EXL3
-kernel:
+GLM-5.3-Flash.
 
-- `src/tensorfold/cuda/exl3/format.py`: the format, per-tensor metadata out of the safetensors headers, and a
-  numpy reference decoder;
-- `src/tensorfold/cuda/exl3/decode.cuh`: header-only device functions that decode a 16x16 tile of any codebook
-  and width straight into the B fragments of two `mma.m16n8k16`;
-- `src/tensorfold/cuda/exl3/linear.py`, `linear.cu`: a row-invariant linear layer for 1 to 128 rows;
-- `python -m tensorfold.cuda.exl3.inspect MODEL_DIR`: what a checkpoint holds, from its headers alone.
+## Where it stands
 
-The GLM-5.3-Flash engine keeps its own tuned `src/tensorfold/families/glm5_next/cuda/exl3.py` (4-bit `mcg`, routed experts
-only); it stays as it is.
+- The native engine has the format and a reference decoder in core (`zig/src/core/exl3_format.zig`, @akol1, #496),
+  and Metal has a standalone EXL3 projection (`zig/src/core/exl3_projection.zig`, @akol1, #681). No model serves an
+  EXL3 checkpoint in this release.
+- CUDA projections and routed experts on this format are in review (#740, #741, #806). A model needs them and a loader
+  for its EXL3 tensors before it can serve a checkpoint; the 27B on CUDA is the first planned.
+- The Python engine served EXL3 on CUDA from 0.3.6 to 0.6.6 through the module @vcruz305 wrote (#42): every codebook,
+  widths 1 to 8 mixed per tensor, a row-invariant linear for 1 to 128 rows, and grouped routed experts, for the 27B,
+  Flash Next and mixed-width packs. It is at the
+  [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3).
+- This page's format description and arithmetic came with that module. The native decoder and the CUDA operators in
+  review follow them.
+
+## Engine versions
+
+The sections below describe the Python 0.6.6 engine's module: its files are under `src/tensorfold/` at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6), and its numbers were measured on that engine. The
+format, the layer's arithmetic and the traps hold for any implementation.
 
 ## What a family has to say
 
@@ -164,12 +173,15 @@ layout read-only and gathers only requested rows; the consolidated layout does n
 requantization. Admission treats the packed table as reclaimable mapped pages, while head metadata remains
 resident. Mapped pages still consume physical RAM when touched; keep the normal cache/workspace reserve.
 
-A backend-neutral Zig reference decoder for this format now lives at
+A backend-neutral Zig reference decoder for this format (@akol1, #496) lives at
 `zig/src/core/exl3_format.zig`: the bitstream, the three codebooks, tile placement and
 the Hadamard rotations, written deliberately naive (one bit at a time) so it reads
-exactly like this page. It is a correctness oracle for future native CUDA and Metal tile decoders; `zig test zig/src/core/exl3_format.zig` from the repository root
+exactly like this page. It is the correctness oracle for the native tile decoders: the
+standalone Metal projection (`zig/src/core/exl3_projection.zig`, @akol1, #681) today, and
+a CUDA one to come; `zig test zig/src/core/exl3_format.zig` from the repository root
 reproduces the numpy oracle on every codebook and width and on real checkpoint bytes
 (the oracle vectors ship beside the test). Its real checkpoint bytes are one 128x128 block from
 `UnstableLlama/Qwen3.5-2B-exl3-8.00bpw` (mcg codebook, 8.00 bpw), in `zig/tests/fixtures/exl3_oracle.bin`.
 
-The scalar decoder and its oracle tests do not register an EXL3 model or provide a native GPU projection.
+No model is registered for EXL3 yet: the Metal projection (#681) and the CUDA operators in review are the GPU parts
+so far.

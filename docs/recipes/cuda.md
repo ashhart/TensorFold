@@ -4,7 +4,9 @@
 
 The family and checkpoint tables, two-rank setup and PyTorch/Triton implementation notes on this page describe
 the Python 0.6.6 engine, available at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6).
-They are not the native Zig release's support matrix.
+They are not the native Zig release's support matrix. The kernel paths, the prompt and NVFP4 precision flags
+(`--prefill-fp8`, `--no-prefill-fp8`, `--precision`) and the request and memory notes below are that engine's too,
+and the native binary refuses those flags.
 
 The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
 A user's receipt for 1.0.4 on a bare-metal RTX 3090, at 225 W and 350 W, is in [#592](https://github.com/ashhart/TensorFold/issues/592).
@@ -45,10 +47,14 @@ The Python engine's Windows path is experimental, one GPU a process and not yet 
 | [Qwen3.6-35B-A3B](qwen3.6-moe.md#cuda-execution) | One rank, MTP chains and context copies, CUDA graphs |
 
 An EXL3 checkpoint's trellis is read by one shared module for every family, any codebook (3inst, mcg, mul1)
-and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`. A family
+and any width 1 to 8, mixed across a checkpoint and inside one MoE layer: `src/tensorfold/cuda/exl3/`, written by
+@vcruz305 (#42). A family
 whose CUDA engine reads it declares `EXL3_VARIANT = "any"`, and TensorFold checks the checkpoint before
 downloading. The dense linear layer, its plan and its measured throughput are in [EXL3 weights](exl3.md);
 `python -m tensorfold.cuda.exl3.inspect MODEL_DIR` prints what a checkpoint holds.
+The module is at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3)
+([#42](https://github.com/ashhart/TensorFold/pull/42)). The native engine serves no EXL3 pack yet; its reference
+decoder is `zig/src/core/exl3_format.zig`.
 
 ## Checkpoints
 
@@ -143,6 +149,9 @@ Each engine defines its own serial reference. A verify row uses the same group o
 rounding as that row alone. Attention partitions depend on absolute key position; router ties use a
 stable ID order. Recurrent commits replay the accepted path with the same update routine.
 
+Two ranks are the Python engine's; the native CUDA build serves one GPU. In that engine, @jayleaton's
+[#219](https://github.com/ashhart/TensorFold/pull/219) gave the communicator its transport interface
+([`src/tensorfold/cuda/comm.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/comm.py)).
 A two-rank engine opens its communicator with `tensorfold.cuda.comm.open_comm`: NCCL, wrapped by a registered
 transport (a `Transport` subclass) when `TF_COMM_BACKEND` names one; NCCL stays the control channel, and the ranks
 refuse to start with different transports. A model exchange calls `fast_gather`, which takes the transport's
@@ -157,10 +166,15 @@ CUDA graphs replay the same kernels using stable buffers; changing capture shape
 
 ## Shared kernels and prefill
 
+The Python files named here are at the [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda).
+Several native kernels under `zig/kernels/cuda/` are their device code, noted beside each.
+
 `src/tensorfold/cuda/kernels/qmm.py` packs 4-bit weights for the shared CUDA matmul. Its decode kernel fixes
 the K split by weight shape, while the prompt kernel (`qmm_prefill.cu`) rounds each weight once to bf16 and adds
-every product over K in one fp32 chain, the arithmetic of MLX's prompt matmul. NVFP4, FP8 and MXFP8 weights take
-`src/tensorfold/cuda/nvfp4/prompt.cu`, where each weight is exact in bf16. Prompts run in chunks of up to 4,096 tokens with bf16
+every product over K in one fp32 chain, the arithmetic of MLX's prompt matmul (natively `zig/kernels/cuda/qmm_group.cu`
+and `qmm_prefill.cu`). NVFP4, FP8 and MXFP8 weights take
+`src/tensorfold/cuda/nvfp4/prompt.cu` (natively `zig/kernels/cuda/prompt16.cu`), where each weight is exact in bf16.
+Prompts run in chunks of up to 4,096 tokens with bf16
 activations, as decode does. A row's bits never depend on its chunk or the kernel's tile, so a resumed prompt
 equals a fresh one; they differ from decode's, so the engines retain prompt-end states and prefill replies
 again on a follow-up.
@@ -169,10 +183,16 @@ again on a follow-up.
 supplies its own tree, cache offsets and accepted path. `src/tensorfold/cuda/experts.py` groups routed
 row/expert pairs so the MLX 4-bit formats of Flash Next, GLM and Nemotron share expert kernels, with
 separate prefill and decode forms. A shared call must preserve each row's arithmetic and each stream's cache.
+Natively, `zig/kernels/cuda/gdn.cu` carries the device code of the `gdn.cu` behind `gdn.py`, and
+`zig/kernels/cuda/experts.cu` and `experts_prefill.cu` that of the Python expert kernels; `attention.py` has no native
+counterpart.
 
 <a id="prompt-precision"></a>
 
 ### Prompt precision
+
+This section and the next describe the Python 0.6.6 engine; the native binary refuses `--prefill-fp8`,
+`--no-prefill-fp8` and `--precision`.
 
 Prompt matmuls take bf16 activations by default. `--prefill-fp8` switches the ones that have an FP8 kernel (the
 27B's and Qwen3.6's MLX 4-bit projections, and the FP8, NVFP4 and MXFP8 layers of NVFP4 checkpoints) to e4m3
@@ -275,6 +295,11 @@ activations, so the server refuses the pair. The bf16 GDN gates of NVFP4 and EXL
 whose rows never depend on their chunk; an EXL3 27B's prompt bits change with it, still equal to its fresh prefill.
 
 ## Requests and memory
+
+This section describes the Python 0.6.6 engine's CUDA families. The native CUDA build reads the same
+`TENSORFOLD_MEMORY_RESERVE_GIB` (@MiaAI-Lab, [#133](https://github.com/ashhart/TensorFold/pull/133)) and
+`TENSORFOLD_CUDA_MEMORY_LIMIT_GB` (@eleqtrizit, [#165](https://github.com/ashhart/TensorFold/pull/165)) in
+`zig/src/native/cuda_memory.zig`; its own reserves are in the [API reference](../api.md#context-and-errors).
 
 CUDA `--parallel auto` serves one request at a time. Set an explicit `--parallel N` above one for shared
 Qwen3.8-27B or Flash Next rounds on one or two ranks; Nemotron, GLM and Qwen3.6 remain serialized. The shared

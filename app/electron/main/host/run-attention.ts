@@ -4,7 +4,7 @@ import type { AgentEvent } from '../../agent/types'
 // while the window is in the background, and a dock badge counting threads that need the user.
 // The decisions are pure; the host supplies the Electron sinks.
 
-export type AttentionKind = 'finished' | 'failed' | 'approval'
+export type AttentionKind = 'finished' | 'failed' | 'approval' | 'question'
 
 export interface AttentionNotice { kind: AttentionKind; threadId: string; title: string; body: string }
 
@@ -14,6 +14,7 @@ export function shouldNotify(input: { enabled: boolean; focused: boolean; suppor
 
 export function attentionNotice(kind: AttentionKind, threadId: string, threadTitle: string | null, detail?: string | null): AttentionNotice {
   const name = threadTitle?.trim() || 'A thread'
+  if (kind === 'question') return { kind, threadId, title: 'Needs your answer', body: name }
   if (kind === 'approval') return { kind, threadId, title: 'Needs your approval', body: detail ? `${name}: run ${detail}?` : name }
   if (kind === 'failed') return { kind, threadId, title: 'Run failed', body: detail ? `${name}: ${detail}`.slice(0, 140) : name }
   return { kind, threadId, title: 'Run finished', body: name }
@@ -33,6 +34,7 @@ export function badgeText(count: number): string {
 }
 
 export interface RunAttentionDeps {
+  isIncognito?(threadId: string): boolean
   enabled(): boolean
   focused(): boolean
   supported(): boolean
@@ -44,6 +46,9 @@ export interface RunAttentionDeps {
 export function createRunAttention(deps: RunAttentionDeps) {
   let needsYou = new Set<string>()
   const notifiedRuns = new Set<string>()
+  const notifiedQuestions = new Set<string>()
+  const pendingQuestions = new Map<string, { id: string; runId: string }>()
+  const pendingApprovals = new Set<string>()
 
   const publishBadge = () => { try { deps.setBadge(badgeText(needsYou.size)) } catch { /* best effort */ } }
   const maybeNotify = (notice: AttentionNotice) => {
@@ -54,7 +59,31 @@ export function createRunAttention(deps: RunAttentionDeps) {
 
   return {
     observe(event: AgentEvent) {
+      if (deps.isIncognito?.(event.threadId)) return
+      if (event.type === 'item_update' && event.patch.question) {
+        const question = event.patch.question
+        if (question.state === 'pending') {
+          pendingQuestions.set(event.threadId, { id: question.id, runId: event.runId })
+          if (!needsYou.has(event.threadId)) { needsYou.add(event.threadId); publishBadge() }
+          if (!notifiedQuestions.has(question.id)) {
+            notifiedQuestions.add(question.id)
+            if (notifiedQuestions.size > 500) notifiedQuestions.delete(notifiedQuestions.values().next().value as string)
+            maybeNotify(attentionNotice('question', event.threadId, deps.threadTitle(event.threadId) ?? null))
+          }
+        } else {
+          const active = pendingQuestions.get(event.threadId)
+          if (active?.id === question.id && active.runId === event.runId) {
+            pendingQuestions.delete(event.threadId)
+            if (!pendingApprovals.has(event.threadId) && needsYou.delete(event.threadId)) publishBadge()
+          }
+        }
+        return
+      }
       if (event.type !== 'status' && event.type !== 'done' && event.type !== 'error') return
+      if (event.type !== 'status' || event.status !== 'awaiting') {
+        pendingQuestions.delete(event.threadId)
+        pendingApprovals.delete(event.threadId)
+      }
       const before = needsYou.size
       needsYou = nextNeedsYou(needsYou, event as Pick<AgentEvent, 'type' | 'threadId'> & { status?: string })
       if (needsYou.size !== before) publishBadge()
@@ -71,6 +100,8 @@ export function createRunAttention(deps: RunAttentionDeps) {
     },
     // Fired only when an approval is genuinely waiting (not auto-resolved by a saved rule).
     approvalPending(meta: { threadId: string; tool: string }) {
+      if (deps.isIncognito?.(meta.threadId)) return
+      pendingApprovals.add(meta.threadId)
       if (!needsYou.has(meta.threadId)) { needsYou.add(meta.threadId); publishBadge() }
       maybeNotify(attentionNotice('approval', meta.threadId, deps.threadTitle(meta.threadId) ?? null, meta.tool))
     },

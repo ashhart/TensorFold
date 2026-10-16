@@ -10,7 +10,7 @@ three bring-ups:
 - Kimi K3 on four M3 Ultras, 3-4 Oct. One stream went from 2.7 to 11.6 tok/s plain, and 20.3 drafted on prose.
 
 The Python engine's guides, [adding an MLX family](adding-a-family.md) and
-[adding a CUDA family](adding-a-cuda-family.md), describe the engine frozen at 0.6.5. New families go here.
+[adding a CUDA family](adding-a-cuda-family.md), describe the engine frozen at 0.6.6. New families go here.
 
 ## How to use it
 
