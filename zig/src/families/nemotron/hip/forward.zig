@@ -1,4 +1,4 @@
-//! Nemotron-H's forward on a HIP rank: a stream's rows through every block by kind, the final norm, the MTP head.
+//! Nemotron-H's forward on a HIP rank: a prompt's rows through every block by kind, the final norm, the MTP head.
 const std = @import("std");
 const hip = @import("hip");
 const config = @import("../config.zig");
@@ -10,6 +10,7 @@ const moe = @import("moe.zig");
 const Ops = hip.ops.Ops;
 const Tensor = hip.ops.Tensor;
 const Kind = hip.ops.Kind;
+const pops = hip.plan_ops;
 
 pub const Error = hip.reduce.Error || mamba.Error || moe.Error || error{Cancelled};
 
@@ -34,68 +35,57 @@ pub fn scaleOf(head_dim: usize) f32 {
     return @floatCast(std.math.pow(f64, @floatFromInt(head_dim), -0.5));
 }
 
-/// A window's per-row Mamba states: slot r (r * stride bytes into `buf`) holds every layer's state after row r - 1.
-pub const Snaps = struct { buf: hip.DeviceBuffer, stride: usize };
-
-/// Where the blocks find a stream's state: the KV pool, the stream, and where a window leaves each row's Mamba state.
-pub const Ctx = struct { pool: *const pages.Pool, stream: *pages.Stream, snaps: ?Snaps = null, trace: ?Trace = null };
+/// Where the blocks find a stream's state: the KV pool and the stream.
+pub const Ctx = struct { pool: *const pages.Pool, stream: *pages.Stream, trace: ?Trace = null };
 
 /// A check's view of the residual after each block (the layer, the rows, their count).
 pub const Trace = struct { ctx: *anyopaque, layer: *const fn (*anyopaque, usize, Tensor, usize) anyerror!void };
 
-/// Attention on `rows` normed rows at `pos`: q, k, v; k and v into the pages; the causal tile over them; o.
+/// Where attention keeps and reads keys: one stream's pages from `pos` (a prompt), or a round's plan (any streams).
+pub const Where = union(enum) {
+    paged: struct { c: Ops.Paged, pos: usize },
+    plan: struct { p: pops.Plan, slot: usize, span: usize },
+};
+
+/// Attention on `rows` normed rows: q, k, v; k and v into the pages; the causal walk over them; o.
 pub fn attention(
     o: Ops,
     act: Kind,
     d: model.Dims,
     w: model.Attention,
-    c: Ops.Paged,
+    where: Where,
     x: Tensor,
     rows: usize,
-    pos: usize,
 ) Error!Tensor {
     const hd = d.head_dim;
     const q = try o.project(x, w.q, rows, false);
     const keys = try o.project(x, w.k, rows, false);
     const values = try o.project(x, w.v, rows, false);
     const n = rows * d.heads * hd;
-    // q (rows, heads, d) to (heads, rows, d) fp32: the prefill RoPE kernel with no rotary part is that copy
     const q32 = try o.arena.of(f32, n);
-    try o.pageWrite(keys.ptr, c.k, c.table, rows, d.kv_heads, hd, hd, d.kv_heads * hd, pos, c.count);
-    try o.pageWrite(values.ptr, c.v, c.table, rows, d.kv_heads, hd, hd, d.kv_heads * hd, pos, c.count);
     const att = try o.arena.of(f32, n);
     const flat = try take(o, act, n);
-    // a window's rows run the tile one row at a time, as a one-token step does: its bits do not depend on the width
-    const each: usize = if (o.prefill) rows else 1;
-    var r: usize = 0;
-    while (r < rows) : (r += each) {
-        const off = r * d.heads * hd;
-        try o.ropePrefill(
-            at(q, off),
-            .{ .ptr = q32 + off * 4, .kind = .f32 },
-            each * hd,
-            hd,
-            each,
-            d.heads,
-            hd,
-            0,
-            pos + r,
-            1,
-        );
-        try o.causalPaged(q32 + off * 4, c, att + off * 4, each, pos + r + each, d.heads, scaleOf(hd), pos + r);
-        // (heads, rows, d) fp32 back to (rows, heads, d) in act: the same copy with heads and rows swapped
-        try o.ropePrefill(
-            .{ .ptr = att + off * 4, .kind = .f32 },
-            at(flat, off),
-            d.heads * hd,
-            hd,
-            d.heads,
-            each,
-            hd,
-            0,
-            0,
-            1,
-        );
+    switch (where) {
+        .paged => |pg| {
+            const c = pg.c;
+            const pos = pg.pos;
+            try o.pageWrite(keys.ptr, c.k, c.table, rows, d.kv_heads, hd, hd, d.kv_heads * hd, pos, c.count);
+            try o.pageWrite(values.ptr, c.v, c.table, rows, d.kv_heads, hd, hd, d.kv_heads * hd, pos, c.count);
+            // q (rows, heads, d) to (heads, rows, d) fp32: the prefill RoPE kernel with no rotary part is that copy
+            try o.ropePrefill(q, .{ .ptr = q32, .kind = .f32 }, rows * hd, hd, rows, d.heads, hd, 0, pos, 1);
+            try o.causalPaged(q32, c, att, rows, pos + rows, d.heads, scaleOf(hd), pos);
+            // (heads, rows, d) fp32 back to (rows, heads, d) in act: the same copy with heads and rows swapped
+            try o.ropePrefill(.{ .ptr = att, .kind = .f32 }, flat, d.heads * hd, hd, d.heads, rows, hd, 0, 0, 1);
+        },
+        .plan => |pl| {
+            // each row's keys and values into its own stream's pages, then one query a row over them
+            const k32 = try o.arena.of(f32, rows * d.kv_heads * hd);
+            try o.cast(keys, .{ .ptr = k32, .kind = .f32 }, rows * d.kv_heads * hd);
+            try pops.kvWrite(o, k32, values, pl.p, pl.slot, d.kv_heads, hd);
+            try o.cast(q, .{ .ptr = q32, .kind = .f32 }, n);
+            try pops.causal(o, q32, act, att, pl.p, pl.slot, d.heads, d.kv_heads, hd, pl.span, scaleOf(hd));
+            try o.cast(.{ .ptr = att, .kind = .f32 }, flat, n);
+        },
     }
     return o.project(flat, w.o, rows, w.o.partial);
 }
@@ -110,13 +100,7 @@ pub fn slots(c: *const config.Config, out: []usize) []const usize {
     return out[0..c.layers];
 }
 
-/// Mamba layer `slot`'s place in the window's snapshots, when it takes them.
-fn snapOf(ctx: Ctx, slot: usize) ?mamba.Snap {
-    const sn = ctx.snaps orelse return null;
-    return .{ .buf = sn.buf, .offset = ctx.stream.states[slot].conv - ctx.stream.mem.base(), .stride = sn.stride };
-}
-
-/// One stream's `rows` tokens (int32 `ids` on the device) at `pos` through every block: the final-normed rows.
+/// A prompt's `rows` tokens (int32 `ids` on the device) at `pos` through every block: the final-normed rows.
 pub fn run(
     ops: Ops,
     m: *const model.Model,
@@ -125,11 +109,10 @@ pub fn run(
     ids: u64,
     rows: usize,
     pos: usize,
-    prompt: bool,
 ) Error!Tensor {
     var o = ops;
     // a prompt's rows run on the prefill kernels at any count, so their bits do not depend on where it is cut
-    o.prefill = prompt;
+    o.prefill = true;
     const d = m.dims;
     const x = try take(o, m.act, rows * d.hidden);
     try o.embedRows(m.embed, ids, rows, x);
@@ -139,16 +122,15 @@ pub fn run(
         const normed = try take(o, m.act, rows * d.hidden);
         try o.rms(x, b.norm, normed, rows, d.hidden, d.eps);
         const y = switch (b.mixer) {
-            .mamba => |w| try mamba.mixer(o, d, m.act, w, ctx.stream.states[slot], normed, rows, snapOf(ctx, slot)),
+            .mamba => |w| try mamba.mixer(o, d, m.act, w, ctx.stream.states[slot], normed, rows, null),
             .attention => |w| try attention(
                 o,
                 m.act,
                 d,
                 w,
-                ctx.pool.paged(slot, ctx.stream.table.base()),
+                .{ .paged = .{ .c = ctx.pool.paged(slot, ctx.stream.table()), .pos = pos } },
                 normed,
                 rows,
-                pos,
             ),
             .moe => |w| try moe.layer(o, d, m.act, w, normed, rows),
         };
@@ -164,21 +146,8 @@ pub fn run(
 pub const Drafted = struct { logits: Tensor, normed: Tensor };
 
 /// The MTP head over the next tokens' `ids` and the model's final-normed `hidden` rows: logits of the draft rows.
-pub fn draft(
-    ops: Ops,
-    m: *const model.Model,
-    slot: usize,
-    ctx: Ctx,
-    ids: u64,
-    hidden: Tensor,
-    rows: usize,
-    pos: usize,
-    prompt: bool,
-) Error!Drafted {
-    var o = ops;
-    o.prefill = prompt;
+pub fn draft(o: Ops, m: *const model.Model, where: Where, ids: u64, hidden: Tensor, rows: usize) Error!Drafted {
     const h = m.mtp orelse return error.BadShape;
-    // its attention fills pool slot `slot` from the head's own position `pos`
     const d = h.dims;
     const n = rows * d.hidden;
     const e = try take(o, m.act, n);
@@ -195,7 +164,7 @@ pub fn draft(
     try o.cast(ye, x, n);
     const normed = try take(o, m.act, n);
     try o.rms(x, h.attn_norm, normed, rows, d.hidden, d.eps);
-    const y = try attention(o, m.act, d, h.attn, ctx.pool.paged(slot, ctx.stream.table.base()), normed, rows, pos);
+    const y = try attention(o, m.act, d, h.attn, where, normed, rows);
     try hip.reduce.residual(o, null, x, y, n);
     try o.rms(x, h.moe_norm, normed, rows, d.hidden, d.eps);
     const z = try moe.layer(o, d, m.act, h.moe, normed, rows);

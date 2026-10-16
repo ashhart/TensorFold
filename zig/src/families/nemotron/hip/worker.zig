@@ -50,10 +50,23 @@ pub const Worker = struct {
         _ = try w.h.chunk(l, prompt, from, to, null);
     }
 
-    /// verify: id, rows, the window's tokens.
+    /// verify: the window count, then each window's id, rows and tokens; every rank runs the same round.
     pub fn verify(w: *Worker, f: *Follower, m: []const u32) !void {
-        if (m[2] > lanes.max_window) return error.WindowTooWide;
-        _ = try w.h.window(try f.lane(m[1]), m[3..][0..m[2]]);
+        const n = m[1];
+        var ls: [64]*Lane = undefined;
+        var toks: [64][]const u32 = undefined;
+        if (n > ls.len) return error.WindowTooWide;
+        var at: usize = 2;
+        for (0..n) |i| {
+            if (at + 2 > m.len or m[at + 1] > lanes.max_window or at + 2 + m[
+                at +
+                    1
+            ] > m.len) return error.WindowTooWide;
+            ls[i] = try f.lane(m[at]);
+            toks[i] = m[at + 2 ..][0..m[at + 1]];
+            at += 2 + m[at + 1];
+        }
+        _ = try w.h.windows(ls[0..n], toks[0..n]);
     }
 
     /// keep: id, rows of the last window kept.

@@ -1,4 +1,4 @@
-//! A stream's state on a rank: attention keys and values in a pool of 64-position pages, each Mamba layer's state.
+//! A stream's state on a rank: its pages of a pool of 64-position pages behind a descriptor, each Mamba layer's state.
 const std = @import("std");
 const hip = @import("hip");
 const shared = @import("hip_serve").pages;
@@ -129,12 +129,17 @@ pub const Pool = struct {
     }
 };
 
-/// One stream: its page table, positions kept (the model's and the MTP head's), every Mamba layer's state.
+/// Words of a stream's descriptor before its pool slots: the capacity, and the last kept row (unused here).
+pub const header_words = 2;
+
+/// One stream: its descriptor (the plan kernels' view of its pages), positions kept, every Mamba layer's state.
 pub const Stream = struct {
     gpa: Allocator,
-    /// int32 page ids on the device, `cap / tokens` of them; `ids` the same on the host.
-    table: hip.DeviceBuffer,
+    /// u64 words: the capacity, 0, each pool slot's keys and values, then the page table (int32 ids); `ids` the same.
+    desc: hip.DeviceBuffer,
     ids: std.ArrayList(u32) = .empty,
+    /// Bytes into `desc` where the page table starts.
+    table_at: usize,
     cap: usize,
     len: usize = 0,
     mtp_len: usize = 0,
@@ -151,16 +156,30 @@ pub const Stream = struct {
         return layers * (mamba.convBytes(d, act) + mamba.ssmBytes(d));
     }
 
+    /// Bytes of the descriptor of a stream of `cap` positions over `slots` pool slots.
+    pub fn descBytes(slots: usize, cap: usize) usize {
+        return 8 * (header_words + 2 * slots) + 4 * std.mem.alignForward(usize, @max(1, pagesFor(cap)), 2);
+    }
+
     pub fn init(
         gpa: Allocator,
         r: *const hip.Runtime,
+        pool: *const Pool,
         d: model.Dims,
         act: model.Kind,
         layers: usize,
         cap: usize,
     ) !Stream {
-        var table = try hip.DeviceBuffer.alloc(r, @max(4, 4 * pagesFor(cap)));
-        errdefer table.free();
+        const slots = pool.keys.len;
+        const table_at = 8 * (header_words + 2 * slots);
+        const words = try gpa.alloc(u64, header_words + 2 * slots);
+        defer gpa.free(words);
+        words[0] = cap;
+        words[1] = 0;
+        for (pool.keys, pool.values, 0..) |k, v, i| words[header_words + 2 * i ..][0..2].* = .{ k.base(), v.base() };
+        var desc = try hip.DeviceBuffer.alloc(r, descBytes(slots, cap));
+        errdefer desc.free();
+        try desc.upload(0, std.mem.sliceAsBytes(words));
         var mem = try hip.DeviceBuffer.alloc(r, @max(4, stateBytes(d, act, layers)));
         errdefer mem.free();
         try mem.fill8(0);
@@ -168,7 +187,7 @@ pub const Stream = struct {
         const conv = mamba.convBytes(d, act);
         const each = conv + mamba.ssmBytes(d);
         for (states, 0..) |*s, i| s.* = .{ .conv = mem.base() + i * each, .ssm = mem.base() + i * each + conv };
-        return .{ .gpa = gpa, .table = table, .cap = cap, .mem = mem, .states = states };
+        return .{ .gpa = gpa, .desc = desc, .table_at = table_at, .cap = cap, .mem = mem, .states = states };
     }
 
     /// The pages back to `pool`, the buffers freed.
@@ -178,13 +197,22 @@ pub const Stream = struct {
         s.ids.deinit(s.gpa);
         s.gpa.free(s.states);
         s.mem.free();
-        s.table.free();
+        s.desc.free();
         s.* = undefined;
+    }
+
+    /// The page table's device address (int32 ids), as the attention kernels read it.
+    pub fn table(s: *const Stream) u64 {
+        return s.desc.base() + s.table_at;
     }
 
     /// The Mamba state zeroed (a fresh prompt from position 0).
     pub fn clear(s: *Stream, stream: hip.Stream) !void {
         try s.mem.fill8Async(0, stream);
+    }
+
+    fn put(s: *Stream) !void {
+        try s.desc.upload(s.table_at, std.mem.sliceAsBytes(s.ids.items));
     }
 
     /// Pages to cover `n` positions, taken from `pool` and the table sent up; refused past the stream's capacity.
@@ -200,7 +228,7 @@ pub const Stream = struct {
                 pool.ids.reserved -= 1;
             }
         }
-        try s.table.upload(0, std.mem.sliceAsBytes(s.ids.items));
+        try s.put();
     }
 
     /// A follower's table from page `first` on is rank 0's `ids`: the pool is not asked, the table sent up.
@@ -209,7 +237,7 @@ pub const Stream = struct {
         s.mirror = true;
         if (first + ids.len > s.ids.items.len) try s.ids.resize(s.gpa, first + ids.len);
         @memcpy(s.ids.items[first..][0..ids.len], ids);
-        try s.table.upload(0, std.mem.sliceAsBytes(s.ids.items));
+        try s.put();
     }
 
     /// The leading pages replaced by `ids` (held once more by this stream when `retain`; the old ones released).
@@ -218,10 +246,15 @@ pub const Stream = struct {
         for (s.ids.items[0..@min(ids.len, s.ids.items.len)]) |id| pool.release(id);
         if (ids.len > s.ids.items.len) try s.ids.resize(s.gpa, ids.len);
         @memcpy(s.ids.items[0..ids.len], ids);
-        try s.table.upload(0, std.mem.sliceAsBytes(s.ids.items));
+        try s.put();
     }
 };
 
 test "a pool of pages holds keys and values of every attention layer" {
     try std.testing.expectEqual(@as(usize, 2 * 7 * 10 * 2 * 64 * 128 * 2), Pool.bytes(7, 10, 2, 128, .bf16));
+}
+
+test "a descriptor holds the header, two addresses a slot and an even count of table words" {
+    try std.testing.expectEqual(@as(usize, 8 * (2 + 2 * 7) + 4 * 2), Stream.descBytes(7, 64));
+    try std.testing.expectEqual(@as(usize, 8 * (2 + 2 * 7) + 4 * 4), Stream.descBytes(7, 65 * 3));
 }

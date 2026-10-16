@@ -10,13 +10,16 @@ pub const usage = "       tf-nemotron-hip-test gen <model dir> <ids.bin> <out st
     "[--no-mtp]\n       tf-nemotron-hip-test teacher <model dir> <ids.bin> <logits.bin> [--no-mtp] [--chunk " ++
     "N] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test window <model dir> <ids.bin> " ++
     "<unused> [--steps K] [--no-mtp] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test " ++
-    "trace <model dir> <ids.bin> <residuals.bin> [--tp W --rank R --master H --port P]\n";
+    "rounds <model dir> <ids.bin> <unused> [--steps K] [--streams N] [--no-mtp] [--tp W --rank R --master H " ++
+    "--port P]\n       tf-nemotron-hip-test trace <model dir> <ids.bin> <residuals.bin> [--tp W --rank R " ++
+    "--master H --port P]\n";
 
 const Args = struct {
     dir: []const u8,
     ids: []const u8,
     out: []const u8,
     steps: usize = 32,
+    streams: usize = 3,
     mtp: bool = true,
     chunk: usize = 512,
     g: group.Group = .{},
@@ -37,6 +40,10 @@ fn parse(args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             a.chunk = try std.fmt.parseInt(usize, args[i], 10);
+        } else if (std.mem.eql(u8, args[i], "--streams")) {
+            i += 1;
+            if (i >= args.len) return error.MissingArgument;
+            a.streams = try std.fmt.parseInt(usize, args[i], 10);
         } else if (!try a.g.option(args, &i)) return error.UnknownOption;
     }
     return a;
@@ -113,22 +120,11 @@ pub fn gen(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void
         try rows.appendSlice(gpa, row);
         const next = argmax(row);
         try out.append(gpa, next);
-        try e.fresh();
-        o = e.ops(&e.arena);
-        const dev = try e.ids(o, &.{next});
         try s.cover(&e.pool, s.len + 1);
-        const h = try nem.forward.run(
-            o,
-            m,
-            e.place[0..e.cfg.layers],
-            .{ .pool = &e.pool, .stream = &s },
-            dev,
-            1,
-            s.len,
-            false,
-        );
+        const h = try e.round(&.{.{ .s = &s, .tokens = &.{next} }}, null);
+        o = e.ops(&e.arena);
         s.len += 1;
-        y = try e.logits(o, h, 1);
+        y = try e.roundLogits(o, h, 1);
         try readBack(e, gpa, y, row);
     }
     const t2 = nowNs(io);
@@ -217,58 +213,31 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         var s = try e.openStream();
         defer e.closeStream(&s);
         _ = try e.prompt(&s, prompt);
-        try e.fresh();
         var o = e.ops(&e.arena);
         if (mode > 0) {
-            const dev = try e.ids(o, tail);
             try s.cover(&e.pool, s.len + k);
-            const ctx: nem.forward.Ctx = .{
-                .pool = &e.pool,
-                .stream = &s,
-                .snaps = if (mode == 2) .{ .buf = snaps, .stride = state_bytes } else null,
-            };
+            const sn: ?nem.round.Snaps = if (mode == 2) .{ .buf = snaps, .stride = state_bytes } else null;
             const base = s.len;
-            const h = try nem.forward.run(o, m, e.place[0..e.cfg.layers], ctx, dev, k, s.len, false);
-            try readBack(e, gpa, try e.logits(o, h, k), if (mode == 2) snapped else once);
+            const h = try e.round(&.{.{ .s = &s, .tokens = tail, .snaps = sn }}, null);
+            o = e.ops(&e.arena);
+            try readBack(e, gpa, try e.roundLogits(o, h, k), if (mode == 2) snapped else once);
             if (mode == 2 and k >= 2) {
                 // roll back to the state after k - 2 rows and run the last two rows one at a time
                 try hip.raw.copy(s.mem, 0, snaps.base() + (k - 2) * state_bytes, state_bytes, e.stream.handle);
                 s.len = base + k - 2;
-                for (tail[k - 2 ..], 0..) |t, i| {
-                    try e.fresh();
+                for (0..2) |i| {
+                    const h1 = try e.round(&.{.{ .s = &s, .tokens = tail[k - 2 + i ..][0..1] }}, null);
                     o = e.ops(&e.arena);
-                    const d1 = try e.ids(o, &.{t});
-                    const h1 = try nem.forward.run(
-                        o,
-                        m,
-                        e.place[0..e.cfg.layers],
-                        .{ .pool = &e.pool, .stream = &s },
-                        d1,
-                        1,
-                        s.len,
-                        false,
-                    );
                     s.len += 1;
-                    try readBack(e, gpa, try e.logits(o, h1, 1), back[i * v ..][0..v]);
+                    try readBack(e, gpa, try e.roundLogits(o, h1, 1), back[i * v ..][0..v]);
                 }
             } else s.len += k;
         } else for (tail, 0..) |t, i| {
-            try e.fresh();
-            o = e.ops(&e.arena);
-            const dev = try e.ids(o, &.{t});
             try s.cover(&e.pool, s.len + 1);
-            const h = try nem.forward.run(
-                o,
-                m,
-                e.place[0..e.cfg.layers],
-                .{ .pool = &e.pool, .stream = &s },
-                dev,
-                1,
-                s.len,
-                false,
-            );
+            const h = try e.round(&.{.{ .s = &s, .tokens = &.{t} }}, null);
+            o = e.ops(&e.arena);
             s.len += 1;
-            try readBack(e, gpa, try e.logits(o, h, 1), each[i * v ..][0..v]);
+            try readBack(e, gpa, try e.roundLogits(o, h, 1), each[i * v ..][0..v]);
         }
     }
     var worst: f32 = 0;
@@ -289,6 +258,82 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         .{ if (snap_same) "equals" else "DIFFERS from", if (back_same) "equal" else "DIFFER from" },
     );
     if (first != null or !snap_same or !back_same) return error.WindowMismatch;
+}
+
+/// N streams of different prompts, each a window of its own width, in one round and each alone a row at a time.
+pub fn rounds(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
+    const a = try parse(args);
+    const ids = try readIds(gpa, io, a.ids);
+    defer gpa.free(ids);
+    var j = try a.g.join(gpa, io, a.dir);
+    defer j.close();
+    const n = a.streams;
+    const k = a.steps;
+    if (n == 0 or k == 0 or k > nem.round.max_window or ids.len <= k + n) return error.MissingArgument;
+    const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = n, .mtp = a.mtp });
+    defer e.deinit();
+    const m = e.model_();
+    const v = m.dims.vocab;
+    const state_bytes = nem.pages.Stream.stateBytes(m.dims, e.act, e.cfg.count(.mamba));
+    var snaps = try hip.DeviceBuffer.alloc(&e.driver, (k + 1) * state_bytes);
+    defer snaps.free();
+    const streams = try gpa.alloc(nem.pages.Stream, n);
+    defer gpa.free(streams);
+    const rows = try gpa.alloc(nem.round.Rows, n);
+    defer gpa.free(rows);
+    // stream i's prompt ends i tokens earlier and its window holds k - (i mod k) rows, so positions and widths differ
+    var total: usize = 0;
+    var opened: usize = 0;
+    defer for (streams[0..opened]) |*s| e.closeStream(s);
+    for (streams, 0..) |*s, i| {
+        s.* = try e.openStream();
+        opened += 1;
+        const width = k - i % k;
+        _ = try e.prompt(s, ids[0 .. ids.len - k - i]);
+        try s.cover(&e.pool, s.len + width);
+        rows[i] = .{
+            .s = s,
+            .tokens = ids[ids.len - k - i ..][0..width],
+            .snaps = if (i == 0) .{ .buf = snaps, .stride = state_bytes } else null,
+        };
+        total += width;
+    }
+    const once = try gpa.alloc(f32, total * v);
+    defer gpa.free(once);
+    const h = try e.round(rows, null);
+    var o = e.ops(&e.arena);
+    try readBack(e, gpa, try e.roundLogits(o, h, total), once);
+    const each = try gpa.alloc(f32, total * v);
+    defer gpa.free(each);
+    // the same windows one stream and one row at a time, from the same prompts on fresh streams
+    var at: usize = 0;
+    var bad: usize = 0;
+    for (rows, 0..) |r, i| {
+        var s = try e.openStream();
+        defer e.closeStream(&s);
+        _ = try e.prompt(&s, ids[0 .. ids.len - k - i]);
+        for (r.tokens, 0..) |t, row| {
+            try s.cover(&e.pool, s.len + 1);
+            const h1 = try e.round(&.{.{ .s = &s, .tokens = &.{t} }}, null);
+            o = e.ops(&e.arena);
+            s.len += 1;
+            try readBack(e, gpa, try e.roundLogits(o, h1, 1), each[(at + row) * v ..][0..v]);
+            if (!std.mem.eql(f32, once[(at + row) * v ..][0..v], each[(at + row) * v ..][0..v])) {
+                bad += 1;
+                if (bad == 1) std.debug.print(
+                    "rounds: stream {d} row {d} differs between the shared round and its own step\n",
+                    .{ i, row },
+                );
+            }
+        }
+        at += r.tokens.len;
+    }
+    std.debug.print(
+        "rounds (rank {d} of {d}): {d} streams, {d} rows in one round and each stream alone a row at a " ++
+            "time: {s} ({d} rows differ)\n",
+        .{ a.g.rank, a.g.world, n, total, if (bad == 0) "the same bits" else "DIFFERENT", bad },
+    );
+    if (bad > 0) return error.WindowMismatch;
 }
 
 /// The rows of the residual after every block, fp32 [layers][rows][hidden] raw: a layer by layer view of two runs.
@@ -332,7 +377,6 @@ pub fn trace(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !vo
         dev,
         ids.len,
         0,
-        true,
     );
     const out = try a.g.outPath(gpa, a.out);
     defer if (a.g.rank > 0) gpa.free(out);

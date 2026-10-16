@@ -1,10 +1,11 @@
-//! The lane core's HIP backend for Nemotron-H: every stream its own pages and Mamba states, a window a forward.
+//! The lane core's HIP backend for Nemotron-H: every stream its own pages and Mamba states, every round one forward.
 const std = @import("std");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const serve = @import("hip_serve");
 const engine = @import("engine.zig");
 const forward = @import("forward.zig");
+const round = @import("round.zig");
 const pages = @import("pages.zig");
 const head = @import("head.zig");
 const prefix = @import("prefix.zig");
@@ -16,7 +17,7 @@ const Engine = engine.Engine;
 const Tensor = hip.ops.Tensor;
 
 /// Rows a window holds at most: the pending token and the drafts (every width reproduces one-token steps).
-pub const max_window = 4;
+pub const max_window = round.max_window;
 
 pub const Lane = struct {
     s: pages.Stream,
@@ -47,6 +48,39 @@ fn tracing() bool {
     return v[0] == '1';
 }
 
+/// A round's scratch on the host: each window's lane, tokens, rows and draws, sized for the engine's biggest round.
+const Scratch = struct {
+    lanes: []*Lane,
+    tokens: [][max_window]u32,
+    rows: []round.Rows,
+    jobs: []head.Job,
+    firsts: []u32,
+    reqs: []draw.Request,
+    drawn: []u32,
+
+    fn init(gpa: std.mem.Allocator, streams: usize, rows: usize) !Scratch {
+        return .{
+            .lanes = try gpa.alloc(*Lane, streams),
+            .tokens = try gpa.alloc([max_window]u32, streams),
+            .rows = try gpa.alloc(round.Rows, streams),
+            .jobs = try gpa.alloc(head.Job, streams),
+            .firsts = try gpa.alloc(u32, streams),
+            .reqs = try gpa.alloc(draw.Request, rows),
+            .drawn = try gpa.alloc(u32, rows),
+        };
+    }
+
+    fn deinit(sc: *Scratch, gpa: std.mem.Allocator) void {
+        gpa.free(sc.drawn);
+        gpa.free(sc.reqs);
+        gpa.free(sc.firsts);
+        gpa.free(sc.jobs);
+        gpa.free(sc.rows);
+        gpa.free(sc.tokens);
+        gpa.free(sc.lanes);
+    }
+};
+
 pub const Hip = struct {
     gpa: std.mem.Allocator,
     e: *Engine,
@@ -55,6 +89,7 @@ pub const Hip = struct {
     sampler: draw.Drawer,
     prefix: *prefix.Prefix,
     side: prefix.Side,
+    sc: Scratch,
     /// Bytes of one stream's Mamba state: a snapshot slot.
     state_bytes: usize,
     /// Tensor parallelism: the other ranks, which get every step before this rank runs it (`worker.follow`).
@@ -68,10 +103,12 @@ pub const Hip = struct {
         errdefer gpa.destroy(h);
         const m = e.model_();
         const dtype: serve.sample.Dtype = if (e.act == .f16) .f16 else .bf16;
-        var sampler = try draw.Drawer.init(gpa, &e.driver, dtype, m.dims.vocab, max_window);
+        var sampler = try draw.Drawer.init(gpa, &e.driver, dtype, m.dims.vocab, e.plan.rows);
         errdefer sampler.deinit();
         const mt = try head.Head.init(gpa, e);
         errdefer if (mt) |x| x.deinit();
+        var sc = try Scratch.init(gpa, e.plan.slots, e.plan.rows);
+        errdefer sc.deinit(gpa);
         const state_bytes = pages.Stream.stateBytes(m.dims, e.act, e.cfg.count(.mamba));
         h.* = .{
             .gpa = gpa,
@@ -81,6 +118,7 @@ pub const Hip = struct {
             .sampler = sampler,
             .prefix = undefined,
             .side = .{ .e = e, .state_bytes = state_bytes, .row_bytes = m.dims.hidden * e.act.size() },
+            .sc = sc,
             .state_bytes = state_bytes,
             .tp = .{ .gpa = gpa },
         };
@@ -97,6 +135,7 @@ pub const Hip = struct {
         h.prefix.deinit();
         if (h.head) |x| x.deinit();
         h.sampler.deinit();
+        h.sc.deinit(h.gpa);
         h.tp.deinit();
         h.gpa.destroy(h);
     }
@@ -120,7 +159,7 @@ pub const Hip = struct {
         return state * (max_window + 2) + max_window * m.dims.hidden * e.act.size() + 4 * pages.pagesFor(e.o.capacity);
     }
 
-    /// The facts the round loop reads at setup: exact windows, one stream a forward, the head's chained drafts.
+    /// The facts the round loop reads at setup: exact windows, every stream's window in one round, batched drafts.
     pub fn facts(h: *const Hip) lanes.Model {
         const drafting = h.head != null and h.e.o.policy.mtp.drafts > 0;
         return .{
@@ -130,10 +169,10 @@ pub const Hip = struct {
             .speculate = drafting,
             .speculate_early = false,
             .drafts = @min(head.max_depth, h.e.o.policy.mtp.drafts),
-            .hidden_rows = false,
-            .batch_rows = max_window,
-            .max_streams = 1,
-            .draft_streams = false,
+            .hidden_rows = true,
+            .batch_rows = @intCast(h.e.plan.rows),
+            .max_streams = @intCast(h.e.plan.slots),
+            .draft_streams = drafting,
             .plain_guard = false,
         };
     }
@@ -241,10 +280,43 @@ pub const Hip = struct {
     }
 
     /// The prompt's rows [from, to) through the model (the head absorbing them): the last row's logits at the end.
-    pub const chunk = @import("prompt.zig").chunk;
-
-    pub fn runPrompt(h: *Hip, o: hip.ops.Ops, ctx: forward.Ctx, ids: u64, rows: usize, pos: usize) !Tensor {
-        return forward.run(o, h.e.model_(), h.e.place[0..h.e.cfg.layers], ctx, ids, rows, pos, true);
+    pub fn chunk(h: *Hip, l: *Lane, prompt: []const u32, from: usize, to: usize) !?Tensor {
+        const e = h.e;
+        const m = e.model_();
+        const n = to - from;
+        try e.fresh();
+        const o = e.ops(&e.arena);
+        if (l.resumed) {
+            l.resumed = false;
+            if (h.head) |hd| _ = try hd.absorb(
+                o,
+                &l.s,
+                .{ .ptr = l.hidden.base(), .kind = e.act },
+                prompt[from..][0..1],
+            );
+        }
+        const dev = try e.ids(o, prompt[from..to]);
+        const hidden = try forward.run(
+            o,
+            m,
+            e.place[0..e.cfg.layers],
+            .{ .pool = &e.pool, .stream = &l.s },
+            dev,
+            n,
+            from,
+        );
+        l.s.len = to;
+        // the head absorbs each row with the token after it; the last row waits for the first drawn token
+        const last = to == prompt.len;
+        const pairs = if (last) n - 1 else n;
+        if (h.head) |hd| if (pairs > 0) {
+            _ = try hd.absorb(o, &l.s, hidden, prompt[from + 1 ..][0..pairs]);
+        };
+        // the last row is kept for the head: the first token's pair, or a kept state's resume
+        const width = m.dims.hidden * e.act.size();
+        try hip.raw.copy(l.hidden, 0, hidden.ptr + (n - 1) * width, width, o.stream);
+        if (!last) return null;
+        return try e.logits(o, forward.at(hidden, (n - 1) * m.dims.hidden), 1);
     }
 
     /// Where the chunk from `at` ends: the engine's chunk rows, or the cut; its pages ready on every rank.
@@ -255,19 +327,14 @@ pub const Hip = struct {
         return to;
     }
 
-    pub fn cancelOf(_: anytype, s: *lanes.Stream) ?Engine.Cancel {
-        const c = s.cancel_check orelse return null;
-        return .{ .ctx = c.ptr, .check = c.check };
-    }
-
-    pub fn advance(h: anytype, l: *Lane, prompt: []const u32, from: usize, to: usize, cancel: ?Engine.Cancel) !void {
-        _ = try h.chunk(l, prompt, from, to, cancel);
+    pub fn advance(h: *Hip, l: *Lane, prompt: []const u32, from: usize, to: usize) !void {
+        _ = try h.chunk(l, prompt, from, to);
     }
 
     /// The prompt's last chunk; its last row's token drawn as `req` says.
-    pub fn finish(h: anytype, l: *Lane, prompt: []const u32, from: usize, req: draw.Request, cancel: ?Engine.Cancel) !u32 {
+    pub fn finish(h: *Hip, l: *Lane, prompt: []const u32, from: usize, req: draw.Request) !u32 {
         const e = h.e;
-        const y = try h.chunk(l, prompt, from, prompt.len, cancel);
+        const y = try h.chunk(l, prompt, from, prompt.len);
         var token: [1]u32 = undefined;
         try h.sampler.draw(e.ops(&e.arena), e.stream, y.?, &.{req}, &token, false);
         return token[0];
@@ -277,54 +344,73 @@ pub const Hip = struct {
         try h.prefix.keep(l, prompt, at);
     }
 
-    /// The window's `tokens` (the pending token, then the drafts) through the model with per-row snapshots: logits.
-    pub fn window(h: *Hip, l: *Lane, tokens: []const u32) !Tensor {
+    /// The lanes' windows (each the pending token, then its drafts) in one round with per-row snapshots: the logits.
+    pub fn windows(h: *Hip, ls: []const *Lane, tokens: []const []const u32) !Tensor {
         const e = h.e;
         const m = e.model_();
-        const n = tokens.len;
-        try e.fresh();
-        const ops = e.ops(&e.arena);
-        const dev = try e.ids(ops, tokens);
-        const ctx: forward.Ctx = .{
-            .pool = &e.pool,
-            .stream = &l.s,
-            .snaps = .{ .buf = l.snaps, .stride = h.state_bytes },
-        };
-        const hidden = try forward.run(ops, m, e.place[0..e.cfg.layers], ctx, dev, n, l.s.len, false);
-        try hip.raw.copy(l.hidden, 0, hidden.ptr, n * m.dims.hidden * e.act.size(), ops.stream);
-        l.held_n = 0;
-        l.pending = .{ .rows = n };
-        return e.logits(ops, hidden, n);
+        const width = m.dims.hidden * e.act.size();
+        var total: usize = 0;
+        for (ls, tokens, h.sc.rows[0..ls.len]) |l, t, *r| {
+            r.* = .{ .s = &l.s, .tokens = t, .snaps = .{ .buf = l.snaps, .stride = h.state_bytes } };
+            total += t.len;
+        }
+        const hidden = try e.round(h.sc.rows[0..ls.len], null);
+        const o = e.ops(&e.arena);
+        var at: usize = 0;
+        for (ls, tokens) |l, t| {
+            try hip.raw.copy(l.hidden, 0, hidden.ptr + at * width, t.len * width, o.stream);
+            l.held_n = 0;
+            l.pending = .{ .rows = t.len };
+            at += t.len;
+        }
+        return e.roundLogits(o, hidden, total);
     }
 
-    /// Each stream's window from its kept length: the pending token, then the drafts; one forward a window.
-    pub fn verify(h: *Hip, windows: []const be.Window, out: []be.Verified) !void {
+    /// Each stream's window from its kept length: the pending token, then the drafts; one forward for all of them.
+    pub fn verify(h: *Hip, ws: []const be.Window, out: []be.Verified) !void {
         const e = h.e;
-        for (windows, out) |w, *o| {
+        if (ws.len > h.sc.lanes.len) return error.WindowTooWide;
+        var toks: [64][]const u32 = undefined;
+        if (ws.len > toks.len) return error.WindowTooWide;
+        var total: usize = 0;
+        for (ws, 0..) |w, i| {
             const l = try h.streams.get(w.stream);
             try glue.settle(h, l);
-            var tokens: [max_window]u32 = undefined;
-            const n = try glue.windowTokens(w, l.held[0..l.held_n], l.s.len, &tokens);
+            const n = try glue.windowTokens(w, l.held[0..l.held_n], l.s.len, &h.sc.tokens[i]);
             try l.s.cover(&e.pool, l.s.len + n);
             try h.syncPages(l);
-            try h.tp.send(.verify, &.{ &.{ l.id, @intCast(n) }, tokens[0..n] });
-            const y = try h.window(l, tokens[0..n]);
-            var reqs: [max_window]draw.Request = undefined;
-            glue.requests(w, &reqs);
-            try h.sampler.draw(e.ops(&e.arena), e.stream, y, reqs[0..n], o.sampled[0..n], false);
+            h.sc.lanes[i] = l;
+            toks[i] = h.sc.tokens[i][0..n];
+            if (total + n > h.sc.reqs.len) return error.WindowTooWide;
+            glue.requests(w, h.sc.reqs[total..]);
+            total += n;
+        }
+        try h.tp.begin(.verify, &.{@intCast(ws.len)});
+        for (h.sc.lanes[0..ws.len], toks[0..ws.len]) |l, t| {
+            try h.tp.add(&.{ l.id, @intCast(t.len) });
+            try h.tp.add(t);
+        }
+        try h.tp.finish();
+        const y = try h.windows(h.sc.lanes[0..ws.len], toks[0..ws.len]);
+        try h.sampler.draw(e.ops(&e.arena), e.stream, y, h.sc.reqs[0..total], h.sc.drawn[0..total], false);
+        var at: usize = 0;
+        for (ws, out, toks[0..ws.len]) |w, *o, t| {
+            @memcpy(o.sampled, h.sc.drawn[at..][0..t.len]);
+            @memcpy(o.drafts, t[1..]);
             if (tracing()) std.log.info(
                 "trace {s} verify at {d}: rows {any} -> {any}",
-                .{ w.stream.id, l.s.len, tokens[0..n], o.sampled[0..n] },
+                .{ w.stream.id, h.streams.map.get(w.stream).?.s.len, t, o.sampled },
             );
-            @memcpy(o.drafts, tokens[1..n]);
+            at += t.len;
         }
     }
 
-    /// The head absorbs each stream's kept rows and chains `depth` greedy drafts from its pending token.
+    /// The head absorbs each stream's kept rows and chains `depth` greedy drafts from its pending token, all at once.
     pub fn draft(h: *Hip, requests: []const be.DraftRequest) !void {
         const e = h.e;
         const hd = h.head orelse return error.NoDraftHead;
-        for (requests) |r| {
+        if (requests.len > h.sc.jobs.len) return error.WindowTooWide;
+        for (requests, 0..) |r, i| {
             const l = try h.streams.get(r.stream);
             try glue.keepFor(h, l, r);
             if (r.position != l.s.len + 1) {
@@ -333,25 +419,30 @@ pub const Hip = struct {
             }
             l.held_n = 0;
             // the pairs: each kept row with the token after it; a prompt's last row with the first drawn token
-            var first: [1]u32 = undefined;
             const next: []const u32 = if (r.rows != null) r.follow else blk: {
-                first[0] = try glue.firstToken(&h.streams.drawn, r);
-                break :blk &first;
+                h.sc.firsts[i] = try glue.firstToken(&h.streams.drawn, r);
+                break :blk h.sc.firsts[i..][0..1];
             };
             if (next.len == 0 or next.len > max_window) return error.PositionMismatch;
             // the chained steps write the head's keys past the kept rows: their pages must be the stream's own
             try l.s.cover(&e.pool, l.s.len + head.max_depth);
             try h.syncPages(l);
-            try e.fresh();
-            const o = e.ops(&e.arena);
-            const hidden: Tensor = .{ .ptr = l.hidden.base(), .kind = e.act };
             if (tracing()) std.log.info(
                 "trace {s} draft at {d}: pairs {any}, depth {d}",
                 .{ r.stream.id, l.s.len, next, r.depth },
             );
-            if (r.depth == 0) {
-                _ = try hd.absorb(o, &l.s, hidden, next, false);
-            } else l.held_n = try hd.chain(o, &l.s, hidden, next, l.held[0..@min(r.depth, head.max_depth)], false);
+            h.sc.lanes[i] = l;
+            h.sc.jobs[i] = .{
+                .s = &l.s,
+                .hidden = l.hidden.base(),
+                .next = next,
+                .out = l.held[0..@min(r.depth, head.max_depth)],
+            };
+        }
+        try e.fresh();
+        try hd.chains(e.ops(&e.arena), h.sc.jobs[0..requests.len]);
+        for (requests, h.sc.lanes[0..requests.len], h.sc.jobs[0..requests.len]) |r, l, j| {
+            l.held_n = j.got;
             if (l.s.mtp_len != l.s.len) {
                 std.log.err("the head holds {d} rows of {s}, the stream {d}", .{ l.s.mtp_len, r.stream.id, l.s.len });
                 return error.HeadBehind;

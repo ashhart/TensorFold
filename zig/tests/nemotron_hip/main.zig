@@ -94,13 +94,29 @@ fn attentionRows(e: *nem.engine.Engine, tokens: []const u32, halves: bool) !Tens
     const b = m.blocks[at];
     const normed = try nem.forward.take(o, m.act, n * d.hidden);
     try o.rms(x, b.norm, normed, n, d.hidden, d.eps);
-    const c = e.pool.paged(0, s.table.base());
+    const c = e.pool.paged(0, s.table());
     var p = o;
     p.prefill = true;
-    if (!halves) return nem.forward.attention(p, m.act, d, b.mixer.attention, c, normed, n, 0);
+    if (!halves) return nem.forward.attention(
+        p,
+        m.act,
+        d,
+        b.mixer.attention,
+        .{ .paged = .{ .c = c, .pos = 0 } },
+        normed,
+        n,
+    );
     const h = n / 2;
-    _ = try nem.forward.attention(p, m.act, d, b.mixer.attention, c, normed, h, 0);
-    return nem.forward.attention(p, m.act, d, b.mixer.attention, c, nem.forward.at(normed, h * d.hidden), h, h);
+    _ = try nem.forward.attention(p, m.act, d, b.mixer.attention, .{ .paged = .{ .c = c, .pos = 0 } }, normed, h);
+    return nem.forward.attention(
+        p,
+        m.act,
+        d,
+        b.mixer.attention,
+        .{ .paged = .{ .c = c, .pos = h } },
+        nem.forward.at(normed, h * d.hidden),
+        h,
+    );
 }
 
 fn check(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
@@ -263,6 +279,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "gen")) return run(gen.gen, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "teacher")) return run(gen.teacher, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "window")) return run(gen.window, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "rounds")) return run(gen.rounds, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "trace")) return run(gen.trace, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "replay")) return run(replay.replay, init, args[2..]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "load")) {

@@ -53,7 +53,7 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     try s.cover(&e.pool, prompt.len);
     try e.fresh();
     var o = e.ops(&e.arena);
-    var dev = try e.ids(o, prompt);
+    const dev = try e.ids(o, prompt);
     var hidden = try nem.forward.run(
         o,
         m,
@@ -62,10 +62,9 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         dev,
         prompt.len,
         0,
-        true,
     );
     s.len = prompt.len;
-    if (head) |h| _ = try h.absorb(o, &s, hidden, prompt[1..], true);
+    if (head) |h| _ = try h.absorb(o, &s, hidden, prompt[1..]);
     try hip.raw.copy(hid, 0, hidden.ptr + (prompt.len - 1) * width, width, o.stream);
     try gen.readBack(e, gpa, try e.logits(o, nem.forward.at(hidden, (prompt.len - 1) * d.hidden), 1), row[0..v]);
     std.debug.print(
@@ -78,17 +77,8 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     try r.cover(&e.pool, prompt.len);
     try e.fresh();
     var ro = e.ops(&e.arena);
-    var rdev = try e.ids(ro, prompt);
-    _ = try nem.forward.run(
-        ro,
-        m,
-        e.place[0..e.cfg.layers],
-        .{ .pool = &e.pool, .stream = &r },
-        rdev,
-        prompt.len,
-        0,
-        true,
-    );
+    const rdev = try e.ids(ro, prompt);
+    _ = try nem.forward.run(ro, m, e.place[0..e.cfg.layers], .{ .pool = &e.pool, .stream = &r }, rdev, prompt.len, 0);
     r.len = prompt.len;
     const reference = try gpa.alloc(f32, max_window * v);
     defer gpa.free(reference);
@@ -129,27 +119,14 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
                     return error.PositionMismatch;
                 }
                 try s.cover(&e.pool, s.len + n);
-                try e.fresh();
-                o = e.ops(&e.arena);
-                dev = try e.ids(o, tokens);
                 probe.into = probe.rows;
-                hidden = try nem.forward.run(
-                    o,
-                    m,
-                    e.place[0..e.cfg.layers],
-                    .{
-                        .pool = &e.pool,
-                        .stream = &s,
-                        .snaps = .{ .buf = snaps, .stride = state_bytes },
-                        .trace = probe.trace(),
-                    },
-                    dev,
-                    n,
-                    s.len,
-                    false,
+                hidden = try e.round(
+                    &.{.{ .s = &s, .tokens = tokens, .snaps = .{ .buf = snaps, .stride = state_bytes } }},
+                    probe.trace(),
                 );
+                o = e.ops(&e.arena);
                 try hip.raw.copy(hid, 0, hidden.ptr, n * width, o.stream);
-                try gen.readBack(e, gpa, try e.logits(o, hidden, n), row[0 .. n * v]);
+                try gen.readBack(e, gpa, try e.roundLogits(o, hidden, n), row[0 .. n * v]);
                 const got = gen.argmax(row[0..v]);
                 windows += 1;
                 pending = n;
@@ -179,22 +156,11 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
                 // the reference takes the kept rows one at a time; its logits and its state must match
                 for (0..k) |j| {
                     try r.cover(&e.pool, r.len + 1);
-                    try e.fresh();
-                    ro = e.ops(&e.arena);
-                    rdev = try e.ids(ro, last_rows[j..][0..1]);
                     probe.into = if (j == 0) probe.other else null;
-                    const rh = try nem.forward.run(
-                        ro,
-                        m,
-                        e.place[0..e.cfg.layers],
-                        .{ .pool = &e.pool, .stream = &r, .trace = probe.trace() },
-                        rdev,
-                        1,
-                        r.len,
-                        false,
-                    );
+                    const rh = try e.round(&.{.{ .s = &r, .tokens = last_rows[j..][0..1] }}, probe.trace());
+                    ro = e.ops(&e.arena);
                     r.len += 1;
-                    try gen.readBack(e, gpa, try e.logits(ro, rh, 1), reference[0..v]);
+                    try gen.readBack(e, gpa, try e.roundLogits(ro, rh, 1), reference[0..v]);
                     if (first_bits == null and !std.mem.eql(f32, row[j * v ..][0..v], reference[0..v])) {
                         first_bits = last_pos + j;
                         var worst: f32 = 0;
@@ -255,14 +221,13 @@ pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
                     try s.cover(&e.pool, s.len + nem.head.max_depth);
                     try e.fresh();
                     o = e.ops(&e.arena);
-                    _ = try h.chain(
-                        o,
-                        &s,
-                        .{ .ptr = hid.base(), .kind = e.act },
-                        pairs,
-                        held[0..@min(depth, nem.head.max_depth)],
-                        false,
-                    );
+                    var jobs = [_]nem.head.Job{.{
+                        .s = &s,
+                        .hidden = hid.base(),
+                        .next = pairs,
+                        .out = held[0..@min(depth, nem.head.max_depth)],
+                    }};
+                    try h.chains(o, &jobs);
                 }
             },
             else => return error.BadScript,

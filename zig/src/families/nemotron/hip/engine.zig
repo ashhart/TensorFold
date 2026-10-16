@@ -9,7 +9,7 @@ const pages = @import("pages.zig");
 const plan = @import("plan.zig");
 const admit = @import("admit.zig");
 const forward = @import("forward.zig");
-const prefix = @import("prefix.zig");
+const rounds = @import("round.zig");
 
 pub const Options = struct {
     device: c_int = 0,
@@ -33,27 +33,6 @@ pub const Options = struct {
 };
 
 pub const Engine = struct {
-    pub const Cancel = struct { ctx: *anyopaque, check: *const fn (*anyopaque) bool };
-
-    pub const Poll = struct {
-        stream: hip.Stream,
-        cancel: Cancel,
-
-        fn layer(ctx: *anyopaque, _: usize, _: hip.ops.Tensor, _: usize) anyerror!void {
-            const p: *Poll = @ptrCast(@alignCast(ctx));
-            try p.stream.synchronize();
-            if (p.cancel.check(p.cancel.ctx)) return error.Cancelled;
-        }
-    };
-
-    /// The prompt's layer trace only where cancellation cannot strand another rank in a collective.
-    pub fn poll(e: anytype, cancel: ?Cancel, rows: usize, p: *Poll) ?forward.Trace {
-        const c = cancel orelse return null;
-        if (!prefix.pollsLayers(e.o.world, rows)) return null;
-        p.* = .{ .stream = e.stream, .cancel = c };
-        return .{ .ctx = p, .layer = Poll.layer };
-    }
-
     gpa: std.mem.Allocator,
     io: std.Io,
     driver: hip.Runtime,
@@ -67,6 +46,9 @@ pub const Engine = struct {
     comm: ?hip.collective.Comm = null,
     arena: hip.Arena,
     pool: pages.Pool,
+    /// A lane round's plan and its windows, sized with the pool for `o.streams` streams of `rounds.max_window` rows.
+    plan: rounds.Plan,
+    wins: []rounds.Window,
     sized: bool,
     /// Each block's place among its kind; the MTP head's attention takes the pool slot after the model's.
     place: [config.max_layers]usize,
@@ -150,12 +132,20 @@ pub const Engine = struct {
             e.act,
             head_kv,
         );
+        errdefer e.pool.deinit();
+        e.plan = try rounds.Plan.init(&e.driver, &e.pool, streams * rounds.max_window, streams);
+        errdefer e.plan.deinit();
+        e.wins = try e.gpa.alloc(rounds.Window, streams);
         e.sized = true;
     }
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
-        if (e.sized) e.pool.deinit();
+        if (e.sized) {
+            e.gpa.free(e.wins);
+            e.plan.deinit();
+            e.pool.deinit();
+        }
         e.arena.deinit();
         e.weights.deinit();
         if (e.comm) |c| c.close();
@@ -181,7 +171,15 @@ pub const Engine = struct {
 
     /// A new stream at the engine's capacity: its page table and zeroed Mamba states.
     pub fn openStream(e: *Engine) !pages.Stream {
-        return pages.Stream.init(e.gpa, &e.driver, e.weights.model.dims, e.act, e.cfg.count(.mamba), e.o.capacity);
+        return pages.Stream.init(
+            e.gpa,
+            &e.driver,
+            &e.pool,
+            e.weights.model.dims,
+            e.act,
+            e.cfg.count(.mamba),
+            e.o.capacity,
+        );
     }
 
     pub fn closeStream(e: *Engine, s: *pages.Stream) void {
@@ -221,7 +219,6 @@ pub const Engine = struct {
                 dev,
                 n,
                 s.len,
-                true,
             );
             s.len += n;
             at += n;
@@ -242,40 +239,31 @@ pub const Engine = struct {
         for (0..rows) |row| for (0..c.world) |r| {
             const to = out + (row * c.world + r) * width * size;
             const from = parts + (r * rows + row) * width * size;
-            try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(
-                @ptrFromInt(to),
-                @ptrFromInt(from),
-                width * size,
-                o.stream,
-            ));
+            try e.copy(to, from, width * size, o.stream);
         };
         return .{ .ptr = out, .kind = y.kind };
     }
 
-    /// The MTP head over `next` (the tokens after the rows of `hidden`) at its next positions: draft logits.
-    pub fn draft(
-        e: *Engine,
-        o: hip.ops.Ops,
-        s: *pages.Stream,
-        next: []const u32,
-        hidden: hip.ops.Tensor,
-        prompt_rows: bool,
-    ) !hip.ops.Tensor {
-        const dev = try e.ids(o, next);
-        const ctx: forward.Ctx = .{ .pool = &e.pool, .stream = s };
-        const y = try forward.draft(
-            o,
-            &e.weights.model,
-            e.mtp_slot,
-            ctx,
-            dev,
-            hidden,
-            next.len,
-            s.mtp_len,
-            prompt_rows,
-        );
-        s.mtp_len += next.len;
-        return y.logits;
+    /// The output head over a round's `rows` rows on the decode tile, as each row alone takes it, at any row count.
+    pub fn roundLogits(e: *Engine, o: hip.ops.Ops, normed: hip.ops.Tensor, rows: usize) !hip.ops.Tensor {
+        var w = o;
+        w.window = true;
+        return e.logits(w, normed, rows);
+    }
+
+    /// `n` bytes from device address `from` to device address `to`, queued on `stream`.
+    pub fn copy(e: *Engine, to: u64, from: u64, n: usize, stream: hip.abi.Stream) !void {
+        try hip.runtime.check(e.driver.api.hipMemcpyDtoDAsync(@ptrFromInt(to), @ptrFromInt(from), n, stream));
+    }
+
+    /// Every stream's window in one round from its kept length (the arena fresh): the final-normed rows in order.
+    pub fn round(e: *Engine, rows: []const rounds.Rows, trace: ?forward.Trace) !hip.ops.Tensor {
+        if (rows.len > e.wins.len) return error.WindowTooWide;
+        for (rows, e.wins[0..rows.len]) |r, *w| w.* = .{ .s = r.s, .pos = r.s.len, .tokens = r.tokens };
+        try e.fresh();
+        const o = e.ops(&e.arena);
+        const l = try e.plan.send(e.wins[0..rows.len], e.o.capacity, e.stream);
+        return rounds.forwardRound(o, &e.weights.model, e.place[0..e.cfg.layers], rows, l, trace);
     }
 };
 

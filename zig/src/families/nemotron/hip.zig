@@ -11,6 +11,7 @@ pub const pages = @import("hip/pages.zig");
 pub const mamba = @import("hip/mamba.zig");
 pub const moe = @import("hip/moe.zig");
 pub const forward = @import("hip/forward.zig");
+pub const round = @import("hip/round.zig");
 pub const engine = @import("hip/engine.zig");
 /// The lane backend the native server drives, its draft head and its prompt cache.
 pub const lanes = @import("hip/lanes.zig");
@@ -30,6 +31,7 @@ test {
     _ = mamba;
     _ = moe;
     _ = forward;
+    _ = round;
     _ = native;
     _ = lanes;
     _ = head;

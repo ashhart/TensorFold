@@ -42,12 +42,28 @@ pub fn mixer(
     rows: usize,
     snap: ?Snap,
 ) Error!Tensor {
-    // in_proj's rows [z | x B C | dt] in act; the conv, dt, scan and gated norm run over them and move the state
     const proj = try o.project(x, w.in_proj, rows, false);
+    const normed: Tensor = .{ .ptr = try o.arena.take(rows * d.inner() * act.size()), .kind = act };
+    try body(o, d, act, w, s, proj, rows, snap, normed);
+    // y in act, or fp32 when w.out_proj.partial (under tp: this rank's share, which the caller sums)
+    return o.project(normed, w.out_proj, rows, w.out_proj.partial);
+}
+
+/// The conv, dt, scan and gated norm over in_proj's `rows` rows (`proj`: [z | x B C | dt], act) into `normed`.
+pub fn body(
+    o: hip.ops.Ops,
+    d: model.Dims,
+    act: model.Kind,
+    w: model.Mamba,
+    s: State,
+    proj: Tensor,
+    rows: usize,
+    snap: ?Snap,
+    normed: Tensor,
+) Error!void {
     const xc = try o.arena.take(rows * d.convDim() * act.size());
     const dt = try o.arena.of(f32, rows * d.mamba_heads);
     const y = try o.arena.take(rows * d.inner() * act.size());
-    const normed: Tensor = .{ .ptr = try o.arena.take(rows * d.inner() * act.size()), .kind = act };
     const weights: hip.ops.mamba.Weights = .{
         .conv_w = w.conv_w,
         .conv_b = w.conv_b,
@@ -64,30 +80,7 @@ pub fn mixer(
         .conv_kernel = d.conv_kernel,
     };
     const lim: hip.ops.mamba.Limits = .{ .dt_min = d.dt_min, .dt_max = d.dt_max, .eps = d.eps };
-    if (snap) |sn| {
-        // one row at a time, the state copied out after each: the recurrence is sequential, so the bits are the same
-        const each = convBytes(d, act) + ssmBytes(d);
-        try hip.raw.copy(sn.buf, sn.offset, s.conv, each, o.stream);
-        for (0..rows) |r| {
-            const src: Tensor = .{ .ptr = proj.ptr + r * d.projDim() * act.size(), .kind = act };
-            const sc: hip.ops.mamba.Scratch = .{
-                .xc = xc + r * d.convDim() * act.size(),
-                .dt = dt + r * d.mamba_heads * 4,
-                .y = y + r * d.inner() * act.size(),
-            };
-            try o.mambaMixer(
-                src,
-                .{ .conv = s.conv, .ssm = s.ssm },
-                sc,
-                normed.ptr + r * d.inner() * act.size(),
-                weights,
-                1,
-                shape,
-                lim,
-            );
-            try hip.raw.copy(sn.buf, sn.offset + (r + 1) * sn.stride, s.conv, each, o.stream);
-        }
-    } else {
+    const sn = snap orelse {
         try o.mambaMixer(
             proj,
             .{ .conv = s.conv, .ssm = s.ssm },
@@ -98,9 +91,30 @@ pub fn mixer(
             shape,
             lim,
         );
+        return;
+    };
+    // one row at a time, the state copied out after each: the recurrence is sequential, so the bits are the same
+    const each = convBytes(d, act) + ssmBytes(d);
+    try hip.raw.copy(sn.buf, sn.offset, s.conv, each, o.stream);
+    for (0..rows) |r| {
+        const src: Tensor = .{ .ptr = proj.ptr + r * d.projDim() * act.size(), .kind = act };
+        const sc: hip.ops.mamba.Scratch = .{
+            .xc = xc + r * d.convDim() * act.size(),
+            .dt = dt + r * d.mamba_heads * 4,
+            .y = y + r * d.inner() * act.size(),
+        };
+        try o.mambaMixer(
+            src,
+            .{ .conv = s.conv, .ssm = s.ssm },
+            sc,
+            normed.ptr + r * d.inner() * act.size(),
+            weights,
+            1,
+            shape,
+            lim,
+        );
+        try hip.raw.copy(sn.buf, sn.offset + (r + 1) * sn.stride, s.conv, each, o.stream);
     }
-    // y in act, or fp32 when w.out_proj.partial (under tp: this rank's share, which the caller sums)
-    return o.project(normed, w.out_proj, rows, w.out_proj.partial);
 }
 
 test "a State's bytes are the plan's" {
