@@ -201,6 +201,17 @@ pub const Stream = struct {
         s.* = undefined;
     }
 
+    /// The pages back to `pool` and the positions dropped, the buffers kept for another request (states zeroed after).
+    pub fn empty(s: *Stream, pool: *Pool) void {
+        if (!s.mirror) for (s.ids.items) |id| pool.release(id);
+        pool.ids.reserved -= @min(pool.ids.reserved, s.promised);
+        s.ids.clearRetainingCapacity();
+        s.promised = 0;
+        s.mirror = false;
+        s.len = 0;
+        s.mtp_len = 0;
+    }
+
     /// The page table's device address (int32 ids), as the attention kernels read it.
     pub fn table(s: *const Stream) u64 {
         return s.desc.base() + s.table_at;

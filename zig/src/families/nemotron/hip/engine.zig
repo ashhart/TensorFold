@@ -11,6 +11,7 @@ const admit = @import("admit.zig");
 const forward = @import("forward.zig");
 const prefix = @import("prefix.zig");
 const rounds = @import("round.zig");
+const graphs = @import("graphs.zig");
 
 pub const Options = struct {
     device: c_int = 0,
@@ -75,6 +76,13 @@ pub const Engine = struct {
     /// Each block's place among its kind; the MTP head's attention takes the pool slot after the model's.
     place: [config.max_layers]usize,
     mtp_slot: usize,
+    /// Rounds replayed from captured graphs, unless the policy says `graphs=off`.
+    graphs: graphs.Graphs,
+    replay: bool,
+    /// Every rank's vote on a captured round, in buffers made with the engine (a group only).
+    votes: ?hip.Votes,
+    /// A rank could not take a round: every rank stops before another collective.
+    stopped: bool,
 
     /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
@@ -96,6 +104,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.io = io;
         e.o = o;
+        e.stopped = false;
         e.driver = try hip.Runtime.open();
         errdefer e.driver.close();
         e.ctx = try hip.Context.init(&e.driver, o.device);
@@ -126,7 +135,11 @@ pub const Engine = struct {
         e.weights.model.tp = e.comm;
         e.arena = try hip.Arena.init(&e.driver, admit.scratch_bytes);
         errdefer e.arena.deinit();
+        e.votes = if (o.world > 1) try hip.Votes.init(&e.driver, o.world) else null;
+        errdefer if (e.votes) |*v| v.deinit();
         e.sized = false;
+        e.graphs = .init(gpa);
+        e.replay = o.policy.graphsOn();
         _ = forward.slots(&e.cfg, &e.place);
         e.mtp_slot = e.cfg.count(.attention);
         if (o.pool) try e.sizePool(o.capacity, o.streams, o.extra_pages);
@@ -163,11 +176,13 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.graphs.deinit();
         if (e.sized) {
             e.gpa.free(e.wins);
             e.plan.deinit();
             e.pool.deinit();
         }
+        if (e.votes) |*v| v.deinit();
         e.arena.deinit();
         e.weights.deinit();
         if (e.comm) |c| c.close();
@@ -224,6 +239,7 @@ pub const Engine = struct {
 
     /// A prompt's `tokens` from `s.len` into `s`, kept: the final-normed rows of its last chunk (valid until the next).
     pub fn prompt(e: *Engine, s: *pages.Stream, tokens: []const u32) !hip.ops.Tensor {
+        if (e.stopped) return error.GroupStopped;
         var out: hip.ops.Tensor = undefined;
         var at: usize = 0;
         while (at < tokens.len) {
@@ -280,14 +296,94 @@ pub const Engine = struct {
 
     /// Every stream's window in one round from its kept length (the arena fresh): the final-normed rows in order.
     pub fn round(e: *Engine, rows: []const rounds.Rows, trace: ?forward.Trace) !hip.ops.Tensor {
+        if (e.stopped) return error.GroupStopped;
         if (rows.len > e.wins.len) return error.WindowTooWide;
         for (rows, e.wins[0..rows.len]) |r, *w| w.* = .{ .s = r.s, .pos = r.s.len, .tokens = r.tokens };
         try e.fresh();
         const o = e.ops(&e.arena);
         const l = try e.plan.send(e.wins[0..rows.len], e.o.capacity, e.stream);
-        return rounds.forwardRound(o, &e.weights.model, e.place[0..e.cfg.layers], rows, l, trace);
+        const key = (if (trace == null and e.replay) graphs.keyOf(rows, l.span) else null) orelse
+            return rounds.forwardRound(o, &e.weights.model, e.place[0..e.cfg.layers], rows, l, trace);
+        e.graphs.cache.rounds += 1;
+        if (e.graphs.lookup(key)) |entry| switch (entry.state) {
+            .ready => {
+                e.arena.used = entry.out.used;
+                try entry.exec.?.launchOn(e.stream);
+                e.graphs.cache.replayed += 1;
+                return entry.out.hidden;
+            },
+            .failed => return rounds.forwardRound(o, &e.weights.model, e.place[0..e.cfg.layers], rows, l, null),
+            .seen => {},
+        };
+        if (!e.graphs.again(key)) return rounds.forwardRound(
+            o,
+            &e.weights.model,
+            e.place[0..e.cfg.layers],
+            rows,
+            l,
+            null,
+        );
+        return e.capture(try e.graphs.cache.find(key), rows, l);
+    }
+
+    /// Records the round, then every rank votes: all kept replay it, one decline runs it eagerly, a failure stops all.
+    fn capture(e: *Engine, entry: *graphs.Cache.Entry, rows: []const rounds.Rows, l: rounds.Launch) !hip.ops.Tensor {
+        const m = &e.weights.model;
+        const at = e.arena.mark();
+        const began = nowNs();
+        const body: Body = .{ .e = e, .rows = rows, .l = l };
+        const got = hip.vote.record(
+            graphs.Out,
+            e.gpa,
+            e.stream,
+            &m.tp,
+            e.o.policy.failsCapture(e.o.rank),
+            body,
+            Body.run,
+        );
+        e.graphs.cache.capture_ns += nowNs() - began;
+        if (got.split) |split| e.graphs.cache.hold(entry, split, got.out);
+        const all = if (e.votes) |*v| try v.agree(e.comm.?, got.vote, e.stream) else got.vote;
+        if (all == .kept) {
+            try entry.exec.?.launchOn(e.stream);
+            return entry.out.hidden;
+        }
+        e.graphs.cache.revoke(entry);
+        e.arena.release(at);
+        // nothing ran while it recorded: the round runs now, eagerly, as it will from now on
+        if (all == .declined) return rounds.forwardRound(e.ops(&e.arena), m, e.place[0..e.cfg.layers], rows, l, null);
+        if (e.o.world == 1) return error.OutOfDeviceMemory;
+        // no rank runs another collective once one could not take a round
+        e.stopped = true;
+        return error.GroupStopped;
     }
 };
+
+/// A round's forward as the recorder runs it: the final-normed rows and the arena's use after it.
+const Body = struct {
+    e: *Engine,
+    rows: []const rounds.Rows,
+    l: rounds.Launch,
+
+    fn run(b: Body) anyerror!graphs.Out {
+        const e = b.e;
+        const hidden = try rounds.forwardRound(
+            e.ops(&e.arena),
+            &e.weights.model,
+            e.place[0..e.cfg.layers],
+            b.rows,
+            b.l,
+            null,
+        );
+        return .{ .hidden = hidden, .used = e.arena.used };
+    }
+};
+
+fn nowNs() u64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
 
 /// Whether `dir`/`name` exists.
 pub fn hasFile(gpa: std.mem.Allocator, dir: []const u8, name: []const u8) bool {

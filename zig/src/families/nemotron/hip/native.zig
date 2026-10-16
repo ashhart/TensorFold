@@ -11,6 +11,7 @@ const plan = @import("plan.zig");
 const pages = @import("pages.zig");
 const hip_lanes = @import("lanes.zig");
 const worker = @import("worker.zig");
+const costs = @import("costs.zig");
 
 pub const model_type = "nemotron_h";
 pub const formats = admit.formats;
@@ -260,6 +261,27 @@ fn prepare(
     return .{ .e = e, .streams = streams, .cache = cache, .startup = startup };
 }
 
+/// The rounds and the head timed for the depth rule: every rank runs them (their collectives pair), rank 0 keeps them.
+fn time(h: *hip_lanes.Hip, world: usize) !void {
+    costs.measure(h, &h.costs) catch |err| {
+        // a rank stopped part way would leave the others' collectives unpaired
+        if (world > 1) return err;
+        std.log.warn("lane costs not timed: {t}", .{err});
+        h.costs = .{};
+        return;
+    };
+    const c = &h.costs;
+    var line: [512]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&line);
+    for (c.window[0..c.windows]) |x| w.print(" {d}:{d:.2}", .{ x.width, x.ms }) catch {};
+    w.writeAll("; shared rows") catch {};
+    for (c.shared[0..c.shareds]) |x| w.print(" {d}:{d:.2}", .{ x.width, x.ms }) catch {};
+    if (h.e.o.rank == 0) std.log.info(
+        "lane costs ms by window rows{s}; head step {d:.3}",
+        .{ w.buffered(), c.step_ms },
+    );
+}
+
 /// The engine for `dir` on `dev`: admitted, the streams its memory holds sized, the lane backend over it.
 pub fn open(
     a: std.mem.Allocator,
@@ -279,6 +301,7 @@ pub fn open(
     const backend = hip_lanes.Hip.init(gpa, p.e) catch |err|
         return steps.refuseAll(a, problem, "the native HIP engine cannot start Nemotron's lanes ({t})", .{err});
     errdefer backend.deinit();
+    try time(backend, o.world);
     if (p.cache.pages > 0 and p.cache.snaps > 0) backend.prefix.keepPages(p.cache.pages, p.cache.snaps);
     // rank 0 serves only once every follower is ready behind it
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
@@ -314,6 +337,7 @@ pub fn follow(
     const backend = hip_lanes.Hip.init(gpa, p.e) catch |err|
         return steps.refuseAll(a, problem, "the native HIP engine cannot start Nemotron's lanes ({t})", .{err});
     defer backend.deinit();
+    try time(backend, o.world);
     if (p.cache.pages > 0 and p.cache.snaps > 0) backend.prefix.keepPages(p.cache.pages, p.cache.snaps);
     _ = try steps.together(a, .{ 0, 0 }, .first, problem);
     var w = worker.Worker.init(gpa, backend);

@@ -9,6 +9,7 @@ const round = @import("round.zig");
 const pages = @import("pages.zig");
 const head = @import("head.zig");
 const prefix = @import("prefix.zig");
+const costs = @import("costs.zig");
 
 const be = lanes.backend;
 const draw = serve.draw;
@@ -94,6 +95,10 @@ pub const Hip = struct {
     state_bytes: usize,
     /// Tensor parallelism: the other ranks, which get every step before this rank runs it (`worker.follow`).
     tp: serve.protocol.Sender,
+    /// The forwards and the head timed at load (none: the rule drafts by acceptance alone).
+    costs: costs.Costs = .{},
+    /// Lanes of finished requests, their buffers kept: a new request takes one, so its rounds' graphs come back.
+    spare: std.ArrayList(*Lane) = .empty,
 
     const Shared = glue.Backend(Hip);
     pub const backend = Shared.backend;
@@ -120,7 +125,7 @@ pub const Hip = struct {
             .side = .{ .e = e, .state_bytes = state_bytes, .row_bytes = m.dims.hidden * e.act.size() },
             .sc = sc,
             .state_bytes = state_bytes,
-            .tp = .{ .gpa = gpa },
+            .tp = .{ .gpa = gpa, .stopped = &e.stopped },
         };
         h.prefix = try prefix.init(gpa, &h.side, &h.tp);
         return h;
@@ -131,6 +136,8 @@ pub const Hip = struct {
         h.e.stream.synchronize() catch {};
         var it = h.streams.map.valueIterator();
         while (it.next()) |l| h.free(l.*);
+        for (h.spare.items) |l| h.drop(l);
+        h.spare.deinit(h.gpa);
         h.streams.deinit();
         h.prefix.deinit();
         if (h.head) |x| x.deinit();
@@ -162,6 +169,8 @@ pub const Hip = struct {
     /// The facts the round loop reads at setup: exact windows, every stream's window in one round, batched drafts.
     pub fn facts(h: *const Hip) lanes.Model {
         const drafting = h.head != null and h.e.o.policy.mtp.drafts > 0;
+        // plain rounds compete with drafted ones once the forwards are timed
+        const timed = drafting and h.costs.windows > 0;
         return .{
             .exact_width = max_window,
             .gpu_tokens = false,
@@ -173,7 +182,10 @@ pub const Hip = struct {
             .batch_rows = @intCast(h.e.plan.rows),
             .max_streams = @intCast(h.e.plan.slots),
             .draft_streams = drafting,
-            .plain_guard = false,
+            .plain_guard = timed,
+            .window_costs = h.costs.window[0..h.costs.windows],
+            .shared_costs = h.costs.shared[0..h.costs.shareds],
+            .mtp_step_ms = h.costs.step_ms,
         };
     }
 
@@ -181,20 +193,39 @@ pub const Hip = struct {
         return &h.sampler;
     }
 
-    /// A lane's device side, freed; rank 0 tells the other ranks.
+    /// A lane's pages back to the pool and its buffers kept for the next request; rank 0 tells the other ranks.
     pub fn free(h: *Hip, l: *Lane) void {
         h.tp.release(l.id) catch {};
         h.e.stream.synchronize() catch {};
+        if (l.first_row) |row| h.gpa.free(row);
+        l.first_row = null;
+        l.s.empty(&h.e.pool);
+        if (h.spare.items.len < h.e.plan.slots) {
+            h.spare.append(h.gpa, l) catch return h.drop(l);
+            return;
+        }
+        h.drop(l);
+    }
+
+    /// A lane's device side freed (its pages are back already).
+    fn drop(h: *Hip, l: *Lane) void {
         l.s.deinit(&h.e.pool);
         l.snaps.free();
         l.hidden.free();
-        if (l.first_row) |row| h.gpa.free(row);
         h.gpa.destroy(l);
     }
 
     /// A fresh lane: a stream at the engine's capacity, its window's snapshot slots and the head's rows.
     pub fn make(h: *Hip) !*Lane {
         const e = h.e;
+        if (h.spare.pop()) |l| {
+            // a finished request's lane: its Mamba state zeroed, as a new stream's is
+            errdefer h.drop(l);
+            try l.s.clear(e.stream);
+            const kept: Lane = .{ .s = l.s, .snaps = l.snaps, .hidden = l.hidden };
+            l.* = kept;
+            return l;
+        }
         const m = e.model_();
         const l = try h.gpa.create(Lane);
         errdefer h.gpa.destroy(l);

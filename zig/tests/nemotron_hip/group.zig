@@ -43,6 +43,8 @@ pub const Group = struct {
     /// Joins the other ranks running the checkpoint in `dir` (the group stays open until the engine is gone).
     pub fn join(g: Group, gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Joined {
         var j: Joined = .{ .gpa = gpa };
+        // TF_POLICY as the server takes it (graphs=off: every round eager), rank 0's for the group
+        if (std.c.getenv("TF_POLICY")) |text| j.policy.apply(std.mem.span(text)) catch return error.BadPolicy;
         if (g.world < 2) return j;
         const device: c_int = @intCast(g.rank);
         var d = try hip.Runtime.open();
