@@ -146,14 +146,18 @@ fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
 /// A quoted marker's stand-in while the template renders: two private-use code points, the second naming the marker.
 const sentinel = "\u{F0000}";
 
-/// The image markers' text (Vision.markers), longest first so one never matches inside another.
+/// Media marker spellings, longest first so one never matches inside another.
 pub fn markerText(text: model_text.Text, a: std.mem.Allocator, v: api.Vision) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (v.markers) |id| {
         const s = try text.tokenString(a, id);
         if (s.len > 0) try out.append(a, s);
     }
-    if (v.video) |o| if (o.video_text.len > 0) try out.append(a, o.video_text); // user text that spells it stays text
+    if (v.video) |o| {
+        const s = try text.tokenString(a, o.video_token);
+        if (s.len > 0) try out.append(a, s);
+        if (o.video_text.len > 0 and !std.mem.eql(u8, o.video_text, s)) try out.append(a, o.video_text);
+    }
     std.mem.sort([]const u8, out.items, {}, struct {
         fn longer(_: void, x: []const u8, y: []const u8) bool {
             return x.len > y.len;
