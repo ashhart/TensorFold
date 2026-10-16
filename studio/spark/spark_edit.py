@@ -1,5 +1,5 @@
-"""Edit a picture on a DGX Spark (CUDA): Qwen-Image-2.1 with the picture as reference, via ComfyUI."""
-# Credit: the Qwen team (Qwen-Image-2.1), ComfyUI.
+"""Edit a picture on a DGX Spark (CUDA): Qwen-Image-2.1 or FLUX3-K with the picture as reference, via ComfyUI."""
+# Credit: the Qwen team (Qwen-Image-2.1), Black Forest Labs (FLUX 3 Image Klein, its upsampler), ComfyUI.
 import time
 import subprocess
 import argparse
@@ -12,6 +12,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import edit_plan  # noqa: E402  (the noise seed and the sizes, shared with the Mac build)
 import spark_generate as sg  # noqa: E402
+# FLUX3-K, a separate contribution: drop this import and the `flux3` lines of main() to remove it
+from flux3_workflows import FLUX3, flux3_edit_workflow as flux3_workflow, upsampler_pictures  # noqa: E402,F401
 
 
 def prepared(path: str, size: tuple[int, int], folder: Path, index: int) -> Path:
@@ -81,9 +83,15 @@ def main() -> None:
     parser.add_argument("--width", type=int, default=0, help="with --height: another size for the result (the edit shifts when its shape differs from the picture's)")
     parser.add_argument("--height", type=int, default=0)
     parser.add_argument("--lora", action="append", default=[], help="an image LoRA, PATH or PATH:STRENGTH (repeat to stack)")
-    parser.add_argument("--model", choices=("qwen",), default="qwen", help="qwen: Qwen-Image-2.1 (the default)")
+    parser.add_argument("--model", choices=("qwen", *FLUX3), default="qwen",
+                        help="qwen: Qwen-Image-2.1 (the default); flux3k-fast or flux3k-full: FLUX3-K (oneshot-setup-spark.sh --flux3)")
+    parser.add_argument("--no-upsample", dest="upsample", action="store_false",
+                        help="FLUX3-K: send the prompt as written (a full caption of the result) instead of BFL's prompt upsampler's")
     args = parser.parse_args()
     args.steps_set = "--steps" in sys.argv[1:]
+    flux3 = args.model in FLUX3
+    if flux3 and (args.base or args.lora):
+        sys.exit("image LoRAs and the base model are Qwen-Image-2.1's: FLUX3-K takes neither")
     for path in args.image:
         if not Path(path).is_file():
             sys.exit(f"no picture at {path}")
@@ -108,7 +116,9 @@ def main() -> None:
                 break
             time.sleep(1)
         time.sleep(5)
-    sg.ensure_server("image")
+    sg.ensure_server("flux3" if flux3 else "image")
+    if flux3 and not sg.installed("unet", FLUX3[args.model][0]):
+        sys.exit(f"{args.model} is not installed: oneshot-setup-spark.sh --flux3")
     if args.base and not sg.installed("unet", sg.QWEN_BASE):
         sys.exit("the base model is not installed: oneshot-setup-spark.sh --image-edit fetches Qwen-Image-2.1 (14 GB; Qwen Research License, non-commercial)")
     loras = sg.hub_loras(args.lora)
@@ -126,9 +136,13 @@ def main() -> None:
         with tempfile.TemporaryDirectory(prefix="studio-edit-") as scratch:
             fitted = [tuple(plan["source"])] + [edit_plan.beside(*one, made) for one in sizes[1:]]
             pictures = [sg.upload(str(prepared(path, fit, Path(scratch), index))) for index, (path, fit) in enumerate(zip(args.image, fitted))]
+            shown = [sg.upload(str(p)) for p in upsampler_pictures(args.image, Path(scratch))] if flux3 and args.upsample else []
         for prompt, output in edits:
             other = made if tuple(plan["source"]) != made else None
-            item, seconds = sg.render(workflow(args, pictures, prompt, noise, loras, other), "12")
+            if flux3:
+                item, seconds = sg.render(flux3_workflow(args, pictures, shown, prompt, noise, other), "12")
+            else:
+                item, seconds = sg.render(workflow(args, pictures, prompt, noise, loras, other), "12")
             sg.fetch(item, Path(output))
             if size != made:  # a side that is not on the model's grid: the result is brought back to the picture's own
                 from PIL import Image
@@ -136,7 +150,7 @@ def main() -> None:
                 with Image.open(output) as opened:
                     opened.resize(size, Image.Resampling.LANCZOS).save(output)
             print("[tensorfold] " + json.dumps({"output": str(output), "engine": "cuda", "model": args.model, "edit": prompt[:80], "seed": args.seed,
-                                                "noise_seed": noise, "turbo": not args.base, "loras": [name for name, _ in loras], "pictures": len(pictures),
+                                                "noise_seed": noise, "turbo": not args.base, **({"upsampled": args.upsample} if flux3 else {}), "loras": [name for name, _ in loras], "pictures": len(pictures),
                                                 "size": list(size), "made_at": list(made), "total_s": round(seconds, 1)}), flush=True)
     finally:
         for name in sg.UPLOADED:

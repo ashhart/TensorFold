@@ -20,6 +20,9 @@ from spark_media import (ASPECT_LIMIT, AUDIO_LIMIT, AUDIO_RATE, CLIP_SECONDS, CL
                          MODEL_MAX_PIXELS, MODEL_SHORT_EDGE, PICTURE_LIMIT, REFERENCE_MULTIPLE, TOTAL_LIMIT,
                          TOTAL_SECONDS, VIDEO_LIMIT, _tool, check_clip_lengths, prepared_sound, prepared_video,
                          probe_media, reference_video_size)
+# FLUX3-K, a separate contribution: drop this import and its dispatch lines in image() and main() to remove it
+from flux3_workflows import (FLUX3, FLUX3_DIR, FLUX3_TEXT, FLUX3_UPSAMPLER, FLUX3_VAE, flux3_images,  # noqa: E402,F401
+                             flux3_system_prompt, flux3_workflow)
 ENGINE_LIB = PREFIX / "tf-h3" / "libtf_h3.so"
 
 FASTH3 = {"bf16": "fastvideo_fasth3_8step_v2_pruned_bf16.safetensors",
@@ -342,10 +345,13 @@ def image(args) -> None:
     for name, value in (("width", args.width), ("height", args.height)):
         if value % 16:
             sys.exit(f"--{name} must be a multiple of 16, got {value}")
-    ensure_server("image")
+    flux3 = args.model in FLUX3
+    ensure_server("flux3" if flux3 else "image")
     text = prompt_of(args)
     target = Path(args.output)
     seeds = [int(s) for s in args.seeds.split(",")] if args.seeds else [args.seed]
+    if flux3:
+        return flux3_images(args, text, target, seeds)
     for seed in seeds:
         w = {
             "1": {"class_type": "UNETLoader", "inputs": {"unet_name": QWEN_BASE if args.base else QWEN,
@@ -431,9 +437,13 @@ def main() -> None:
     i.add_argument("-o", "--output", required=True)
     i.add_argument("--width", type=int, default=1344); i.add_argument("--height", type=int, default=768)
     i.add_argument("--seed", type=int, default=0); i.add_argument("--seeds", default="", help="several pictures: 1,2,3")
-    i.add_argument("--model", choices=("qwen",), default=os.environ.get("IMAGE_MODEL") or "qwen", help="qwen: Qwen-Image-2.1-Turbo")
+    i.add_argument("--model", choices=("qwen", *FLUX3), default=os.environ.get("IMAGE_MODEL") or "qwen",
+                   help="qwen: Qwen-Image-2.1-Turbo (the default); flux3k-fast: FLUX3-K distilled, 16 steps; "
+                        "flux3k-full: FLUX3-K base, 50 steps at CFG 3.5 (oneshot-setup-spark.sh --flux3)")
+    i.add_argument("--no-upsample", dest="upsample", action="store_false",
+                   help="FLUX3-K: send the prompt as written (a full scene caption) instead of BFL's prompt upsampler's")
     i.add_argument("--base", action="store_true", help="the base model without the turbo adapter")
-    i.add_argument("--steps", type=int, default=None, help="Qwen's base model (40)")
+    i.add_argument("--steps", type=int, default=None, help="Qwen's base model (40) or FLUX3-K (16 Fast, 50 Full)")
     i.add_argument("--cfg", type=float, default=4.0, help="base model only")
     i.add_argument("--negative", default="")
     i.set_defaults(run=image)

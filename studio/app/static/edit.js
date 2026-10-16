@@ -1,5 +1,5 @@
 "use strict";
-// Edit a picture (app/picture_edit.py): Qwen-Image-2.1 re-draws it; image LoRAs and camera angles
+// Edit a picture (app/picture_edit.py): Qwen-Image-2.1 or FLUX3-K re-draws it; image LoRAs and angles are Qwen's only
 const ED = { state: null, image: null, more: [], prompt: "", seed: 1, size: "source", base: false, loras: [], way: "words", picking: false, model: "qwen",
   angles: [{ direction: "front-right-quarter", height: "eye", close: false }], job: null, lib: null };
 const edImageLoras = () => LORAS.filter(r => r.target === "image");

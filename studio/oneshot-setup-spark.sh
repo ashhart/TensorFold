@@ -6,11 +6,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Credit: FastVideo (Hao AI Lab), MiniMax, the Qwen team, ComfyUI; Ash Hart (TensorFold), whose Studio this is for CUDA.
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 MODELS="${SPARK_MODELS:-$HOME/spark-studio-models}"
-COMFY_COMMIT=5a665890ded5020c282f63c4ea2dd9e083e025ff  # ComfyUI v0.41.0
-IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0
+COMFY_COMMIT=5a665890ded5020c282f63c4ea2dd9e083e025ff  # v0.41.0 and later: ComfyUI's FLUX 3 nodes
+IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0; FLUX3=0
 for arg in "$@"; do
   case "$arg" in
-    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --motion) MOTION=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
+    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --flux3) FLUX3=1;; --motion) MOTION=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
     --no-workflows) WORKFLOWS=0;;
     --loras) LORAS=all;; --loras=*) LORAS="${arg#--loras=}";; --no-loras) LORAS=none;; --lora-bundle=*) LORA_BUNDLE="${arg#--lora-bundle=}";;
     *) echo "unknown option $arg" >&2; exit 2;;
@@ -31,6 +31,7 @@ if [ "$UPGRADE" = 1 ]; then
   [ -x "$PREFIX/venv/bin/python" ] || die "nothing to upgrade at $PREFIX: run oneshot-setup-spark.sh without --upgrade"
   [ -s "$MODELS/FastH3-Comfy/diffusion_models/fastvideo_fasth3_8step_v2_pruned_bf16.safetensors" ] || IMAGE_ONLY=1
   [ ! -s "$MODELS/MiniMax-H3-Comfy/diffusion_models/minimax_h3_ref2va_pruned_bf16.safetensors" ] || REF2VA=1
+  [ ! -s "$MODELS/FLUX3-K-Comfy/diffusion_models/flux3_image_klein_sd_bf16.safetensors" ] || FLUX3=1
   ok "upgrade: installed $INSTALLED -> $(cat "$HERE/VERSION")$([ "$IMAGE_ONLY" = 0 ] || echo " (image-only install)")"
 else ok "version $(cat "$HERE/VERSION")$([ ! -f "$PREFIX/VERSION" ] || echo " (installed: $INSTALLED)")"; fi
 GPU="$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
@@ -84,12 +85,15 @@ studio:
     FastH3-Comfy/diffusion_models
     Qwen-Image-2.1-Comfy/diffusion_models
     MiniMax-H3-Comfy/diffusion_models
+    FLUX3-K-Comfy/diffusion_models
   text_encoders: |
     FastH3-Comfy/text_encoders
     Qwen-Image-2.1-Comfy/text_encoders
+    FLUX3-K-Comfy/text_encoders
   vae: |
     FastH3-Comfy/vae
     Qwen-Image-2.1-Comfy/vae
+    FLUX3-K-Comfy/vae
   loras: |
     loras
     MiniMax-H3-Comfy/loras
@@ -144,6 +148,19 @@ if [ "$IMAGE_EDIT" = 1 ] && [ "$VERIFY" = 0 ]; then
   if bash "$HERE/spark/comfy.sh" status | grep -q running; then echo "  restart ComfyUI to see it: bash spark/comfy.sh stop (the next render starts it)"; fi
 fi
 
+if [ "$FLUX3" = 1 ]; then
+  say "FLUX3-K for ComfyUI: Fast and Full, text encoder, prompt upsampler, decoder (41 GB) -> $MODELS"
+  [ "$VERIFY" = 1 ] || { echo "  FLUX 3 Image Klein is under the FLUX Kommunity License: non-commercial use, and commercial use of the outputs"
+    echo "  only for Qualifying Users (under US\$5M revenue). Read it, and accept it on the model page, first:"
+    echo "  https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy"; }
+  fetch black-forest-labs/flux-3-image-klein-comfy FLUX3-K-Comfy diffusion_models/flux3_image_klein_sd_bf16.safetensors \
+    diffusion_models/flux3_image_klein_base_bf16.safetensors text_encoders/qwen3vl_4b_bf16.safetensors \
+    text_encoders/qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors vae/flux2-vae.safetensors
+  fetch black-forest-labs/flux-3-image-klein-pup FLUX3-K-Comfy system_prompts.json
+  ok "FLUX3-K Fast and Full (bf16), Qwen3-VL-4B text encoder, BFL's prompt upsampler (8-bit) and the decoder"
+  if [ "$VERIFY" = 0 ] && bash "$HERE/spark/comfy.sh" status | grep -q running; then echo "  restart ComfyUI to see them: bash spark/comfy.sh stop (the next render starts it)"; fi
+fi
+
 if [ "$H3_BASE" = 1 ] && [ "$IMAGE_ONLY" = 0 ] && [ "$VERIFY" = 0 ]; then
   say "MiniMax H3's own first-and-last-frame transformer for ComfyUI (40 GB) -> $MODELS"
   fetch Comfy-Org/MiniMax-H3 MiniMax-H3-Comfy diffusion_models/minimax_h3_fl2va_pruned_bf16.safetensors
@@ -179,7 +196,7 @@ fi
 [ "$VERIFY" = 1 ] || cp "$HERE/VERSION" "$PREFIX/VERSION"
 if [ "$UPGRADE" = 1 ]; then
   say "Upgraded: $INSTALLED -> $(cat "$PREFIX/VERSION"). Checking the install (restart the app to serve the new pages: scripts/app.sh)"
-  exec bash "$HERE/oneshot-setup-spark.sh" --verify $([ "$IMAGE_ONLY" = 0 ] || echo --image-only) $([ "$REF2VA" = 0 ] || echo --ref2va)
+  exec bash "$HERE/oneshot-setup-spark.sh" --verify $([ "$IMAGE_ONLY" = 0 ] || echo --image-only) $([ "$REF2VA" = 0 ] || echo --ref2va) $([ "$FLUX3" = 0 ] || echo --flux3)
 fi
 # Essential LoRA bundle: --loras=GROUPS takes some groups, --lora-bundle=PATH installs offline, --no-loras skips it.
 if [ "$LORAS" != none ] && [ "$IMAGE_ONLY" = 0 ] && [ "$VERIFY" != 1 ]; then

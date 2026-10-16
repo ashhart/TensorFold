@@ -28,7 +28,7 @@ PLIST
   echo '#!/bin/bash'
   echo "# written by scripts/make-app.sh on $(date +%F)"
   printf 'export PACK=%q PREFIX=%q PORT=%q\n' "$HERE" "$PREFIX" "$PORT"
-  for name in QWEN_MODEL_DIR H3_MODEL_DIR FASTH3_DIR STUDIO_HOME HOST; do  # only what differs from the defaults matters
+  for name in QWEN_MODEL_DIR H3_MODEL_DIR FASTH3_DIR FLUX3_MODEL_DIR STUDIO_HOME HOST; do  # only what differs from the defaults matters
     [ -z "${!name:-}" ] || printf 'export %s=%q\n' "$name" "${!name}"
   done
   cat <<'LAUNCH'

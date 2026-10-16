@@ -7,6 +7,7 @@ PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 IMAGE="${1:-}"; PROMPT="${2:-}"; OUT="${3:-}"
 [ -f "$IMAGE" ] || { echo "give the picture to edit: bash scripts/edit.sh photo.png \"what changes\" out.png" >&2; exit 1; }
 ARGS=(--image "$IMAGE" --seed "${SEED:-0}" --size "${SIZE:-source}" --resolution "${RESOLUTION:-1024}" --model "${IMAGE_MODEL:-qwen}")
+[ "${UPSAMPLE:-1}" != 0 ] || ARGS+=(--no-upsample)
 if [ -n "${IMAGES:-}" ]; then
   while IFS= read -r ONE; do [ -z "$ONE" ] || ARGS+=(--image "$ONE"); done <<<"$IMAGES"
 fi

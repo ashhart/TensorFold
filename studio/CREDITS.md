@@ -82,6 +82,17 @@ prefix, the 64-channel VAE and the Qwen3-VL text encoder, with code in diffusers
 their model. The weights are under the Qwen Research License Agreement (non-commercial); this pack ships none of
 them. Built with Qwen.
 
+## The FLUX3-K picture models: Black Forest Labs
+
+**Black Forest Labs** released **FLUX 3 Image Klein**: the 5.6B image transformer in a distilled checkpoint (FLUX3-K
+Fast, 16 steps) and a base one (FLUX3-K Full, 50 steps), the Qwen3-VL-4B text encoder setup, the image autoencoder and
+the prompt upsampler with its system prompts, with their reference code and their files for ComfyUI. The weights are
+under the FLUX Kommunity License (non-commercial use; commercial use of the outputs for Qualifying Users under US$5M
+revenue); this pack ships none of them. On a DGX Spark they run on **ComfyUI**'s own FLUX 3 nodes (Jukka Seppänen
+(kijai) and the ComfyUI contributors, GPL-3.0, run as a separate program). On a Mac they run on **flux3-mlx** by
+**felix-ab**, a port of BFL's reference code to MLX (Apache-2.0), with the 8-bit MLX conversion of the prompt
+upsampler by **VisualInference**.
+
 ## The MLX port the image family is adapted from: Filip Strand and the mflux contributors
 
 **mflux** has the MLX implementation of Qwen-Image-2.1 that TensorFold's family is adapted from: the transformer

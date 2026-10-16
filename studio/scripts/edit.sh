@@ -1,5 +1,5 @@
 #!/bin/bash
-# Edit a picture with Qwen-Image-2.1. Usage: bash scripts/edit.sh photo.png "what changes" out.png
+# Edit a picture with Qwen-Image-2.1 or FLUX3-K. Usage: bash scripts/edit.sh photo.png "what changes" out.png
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/edit.sh.
@@ -9,9 +9,25 @@ QWEN_MODEL_DIR="${QWEN_MODEL_DIR:-$HOME/qwen-models/Qwen-Image-2.1-Turbo}"
 QWEN_BASE_DIR="${QWEN_BASE_DIR:-$(dirname "$QWEN_MODEL_DIR")/Qwen-Image-2.1}"
 IMAGE="${1:-}"; PROMPT="${2:-}"; OUT="${3:-}"
 [ -f "$IMAGE" ] || { echo "give the picture to edit: bash scripts/edit.sh photo.png \"what changes\" out.png" >&2; exit 1; }
+# IMAGE_MODEL=flux3k-fast | flux3k-full: FLUX3-K's edit (flux3_edit.py) in its own environment
 case "${IMAGE_MODEL:-qwen}" in
+  flux3k-fast|flux3k-full)
+    [ -z "${LORA:-}" ] && [ "${BASE:-0}" != 1 ] || { echo "image LoRAs and the base model are Qwen-Image-2.1's: FLUX3-K takes neither" >&2; exit 2; }
+    FLUX3_MODEL_DIR="${FLUX3_MODEL_DIR:-$HOME/flux3-models}"
+    CKPT="$FLUX3_MODEL_DIR/$([ "$IMAGE_MODEL" = flux3k-fast ] && echo FLUX3-K-Fast || echo FLUX3-K-Full)"
+    [ -x "$PREFIX/flux3-venv/bin/python" ] && [ -s "$CKPT/model.safetensors" ] \
+      || { echo "FLUX3-K is not installed here (no $CKPT): bash oneshot-setup.sh --flux3" >&2; exit 1; }
+    ARGS=("$CKPT" --model "$IMAGE_MODEL" --image "$IMAGE" --seed "${SEED:-0}" --size "${SIZE:-source}" --resolution "${RESOLUTION:-1024}")
+    if [ -n "${IMAGES:-}" ]; then
+      while IFS= read -r ONE; do [ -z "$ONE" ] || ARGS+=(--image "$ONE"); done <<<"$IMAGES"
+    fi
+    [ -z "${WIDTH:-}" ] || [ -z "${HEIGHT:-}" ] || ARGS+=(--width "$WIDTH" --height "$HEIGHT")
+    [ -z "${MOST_PIXELS:-}" ] || ARGS+=(--most "$MOST_PIXELS")
+    [ "${UPSAMPLE:-1}" = 0 ] || ARGS+=(--upsampler "$FLUX3_MODEL_DIR/FLUX3-K-pup-MLX-8bit")
+    if [ -n "${SET_FILE:-}" ]; then ARGS+=(--set "@$SET_FILE"); else ARGS+=(--prompt "$PROMPT" -o "$OUT"); fi
+    exec "$PREFIX/flux3-venv/bin/python" "$HERE/../flux3_edit.py" "${ARGS[@]}";;
   qwen) ;;
-  *) echo "IMAGE_MODEL is qwen, not ${IMAGE_MODEL}" >&2; exit 2;;
+  *) echo "IMAGE_MODEL is qwen, flux3k-fast or flux3k-full, not ${IMAGE_MODEL}" >&2; exit 2;;
 esac
 MODEL="$QWEN_MODEL_DIR"
 if [ "${BASE:-0}" = 1 ]; then

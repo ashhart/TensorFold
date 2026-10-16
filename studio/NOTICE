@@ -11,6 +11,12 @@ MiniMax H3 is licensed under the MiniMax H3 Community License Agreement, Copyrig
 The MiniMax H3 Community License limits the territories in which MiniMax H3 may be used. The 2x video decoder
 (speach1sdef178/MiniMax-H3-X2-Detail-VAE) is a derivative of MiniMax H3 under the same licence.
 
+FLUX 3 Image Klein (the FLUX3-K picture models) is licensed under the FLUX Kommunity License, Copyright (c) 2026 Black
+Forest Labs. Non-commercial use; commercial use of the outputs only for Qualifying Users (under US$5M annual revenue),
+under the licence's terms. This pack ships no FLUX 3 weights: they are downloaded from Black Forest Labs' releases
+(huggingface.co/black-forest-labs) when a user installs them with --flux3. On a Mac they run on flux3-mlx (Apache-2.0,
+felix-ab), installed in an environment of its own.
+
 Read these licences before downloading the weights.
 
 Engine source: TensorFold (Apache-2.0, Ash Hart and contributors) with

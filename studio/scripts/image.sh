@@ -1,5 +1,5 @@
 #!/bin/bash
-# One image with Qwen-Image-2.1-Turbo. Usage: bash scripts/image.sh "a prompt" out.png
+# One image with Qwen-Image-2.1-Turbo (or FLUX3-K: IMAGE_MODEL). Usage: bash scripts/image.sh "a prompt" out.png
 set -euo pipefail
 # On a DGX Spark (Linux, CUDA) the same interface is served by spark/image.sh.
 [ "$(uname -s)" != Linux ] || exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/spark/image.sh" "$@"
@@ -11,9 +11,20 @@ TURBO_ADAPTER="${TURBO_ADAPTER:-$PREFIX/adapters/Qwen-Image-2.1-viggle-turbo-v0.
 PROMPT="${1:-}"; OUT="${2:-outputs/image.png}"
 mkdir -p "$(dirname "$OUT")"
 export PATH="/opt/homebrew/bin:$PATH"
+# FLUX3-K via flux3-mlx in its own venv (--flux3): Fast 16 steps, Full 50; BFL's upsampler first unless UPSAMPLE=0
 case "${IMAGE_MODEL:-qwen}" in
+  flux3k-fast|flux3k-full)
+    FLUX3_MODEL_DIR="${FLUX3_MODEL_DIR:-$HOME/flux3-models}"
+    CKPT="$FLUX3_MODEL_DIR/$([ "$IMAGE_MODEL" = flux3k-fast ] && echo FLUX3-K-Fast || echo FLUX3-K-Full)"
+    [ -x "$PREFIX/flux3-venv/bin/python" ] && [ -s "$CKPT/model.safetensors" ] \
+      || { echo "FLUX3-K is not installed here (no $CKPT): bash oneshot-setup.sh --flux3" >&2; exit 1; }
+    ARGS=("$CKPT" --model "$IMAGE_MODEL" -o "$OUT" --width "${WIDTH:-1344}" --height "${HEIGHT:-768}" --seed "${SEED:-0}")
+    [ "${UPSAMPLE:-1}" = 0 ] || ARGS+=(--upsampler "$FLUX3_MODEL_DIR/FLUX3-K-pup-MLX-8bit")
+    if [ -n "${PROMPT_FILE:-}" ]; then ARGS+=(--prompt-file "$PROMPT_FILE"); else ARGS+=(--prompt "$PROMPT"); fi
+    # shellcheck disable=SC2086
+    exec "$PREFIX/flux3-venv/bin/python" "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/flux3_generate.py" "${ARGS[@]}" ${EXTRA:-};;
   qwen) ;;
-  *) echo "IMAGE_MODEL is qwen, not ${IMAGE_MODEL}" >&2; exit 2;;
+  *) echo "IMAGE_MODEL is qwen, flux3k-fast or flux3k-full, not ${IMAGE_MODEL}" >&2; exit 2;;
 esac
 # the Turbo checkpoint carries its schedule in model_index.json; the base model does not
 if grep -q sample_sigmas "$QWEN_MODEL_DIR/model_index.json" 2>/dev/null; then DISTILLED=1; else DISTILLED=0; fi
