@@ -55,6 +55,7 @@ test {
     _ = native;
     _ = @import("fake_driver.zig");
     _ = @import("store_test.zig");
+    _ = lanes;
 }
 
 test "config's fixed widths are the kernels' own: KDA heads, the latent cache, the rope" {

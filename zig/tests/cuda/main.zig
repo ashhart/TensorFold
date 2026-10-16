@@ -116,6 +116,7 @@ const usage =
     \\  ling-clamp <dir>          Ling's SwiGLU order min(silu(g), L): glue and the dir's grouped experts vs float64
     \\  ling-clamp-old <dir> <fatbins>   the grouped expert instances vs an older build's fatbins, byte for byte
     \\  ling-lanes <dir> <out> [ref] [--layers a,b] [--mtp]   Ling's lane backend: chunked, drafted, resumed, concurrent == plain
+    \\  ling-slots                the lane backend's slots over reused map buckets, in this build's mode (no GPU work)
     \\  ling-mtp-real <dir> <fixture>   the real MTP layer vs HF's (oracle/ling_mtp.py); cut, window == decode rows
     \\  ling-weights-real <dir> <refdir>   real Ling-3.1 layers 0, 4, 7 (4 experts) vs float64 and torch (oracle/ling_weights.py)
     \\  ling-pack <dir> <layer> [experts [stage]]   one MoE layer's experts: read, pack and cold load timed; bytes vs the host packers
@@ -233,6 +234,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "ling-clamp-old")) return @import("ling_clamp.zig").old(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "ling-mtp-real")) return @import("ling_mtp_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "ling-lanes")) return @import("ling_lanes.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "ling-slots")) return lingSlots(gpu);
     if (std.mem.eql(u8, cmd, "ling-weights-real")) return ling_real.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "ling-pack")) return @import("ling_pack.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
@@ -255,4 +257,9 @@ fn info(gpu: check.Gpu) !void {
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;
     return false;
+}
+
+fn lingSlots(gpu: check.Gpu) !void {
+    try @import("ling_cuda").lanes.slotCheck(gpu.gpa);
+    check.pass("ling-slots: new streams take the lowest free slot over buckets holding stale slots ({t})", .{@import("builtin").mode});
 }

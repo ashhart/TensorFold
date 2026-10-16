@@ -94,6 +94,14 @@ pub const Lanes = struct {
         }
     }
 
+    /// The stream's lane; a new one takes the lowest free slot, chosen before the map holds its (unset) entry.
+    pub fn claim(self: *Lanes, gpa: std.mem.Allocator, s: *const lanes.Stream) !*Lane {
+        if (self.lanes.getPtr(s)) |l| return l;
+        const slot = self.freeSlot();
+        try self.lanes.put(gpa, s, .{ .slot = slot });
+        return self.lanes.getPtr(s).?;
+    }
+
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
     fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
@@ -139,12 +147,11 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.e.capacity) return error.PromptTooLong;
-        const gop = try self.lanes.getOrPut(self.e.gpa, s);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .slot = self.freeSlot() };
-        gop.value_ptr.pending_rows = null;
-        gop.value_ptr.held_n = 0;
-        gop.value_ptr.fill = null;
-        try self.e.bind(gop.value_ptr.slot);
+        const l = try self.claim(self.e.gpa, s);
+        l.pending_rows = null;
+        l.held_n = 0;
+        l.fill = null;
+        try self.e.bind(l.slot);
         try self.e.begin(s.sampling);
         s.cached = 0;
         return self.resumeFrom(s, ids.len);
@@ -278,3 +285,24 @@ pub const Lanes = struct {
         self.e.release(kv.value.slot);
     }
 };
+
+/// A stand-in stream key: claim hashes the address and never reads through it.
+fn key(i: usize) *const lanes.Stream {
+    return @ptrFromInt(i * 4096);
+}
+
+/// Slots claimed over map buckets still holding slot 0 from cleared entries (a release build leaves a new value as is).
+pub fn slotCheck(gpa: std.mem.Allocator) !void {
+    var ll: Lanes = .{ .e = undefined };
+    defer ll.lanes.deinit(gpa);
+    for (1..9) |i| try ll.lanes.put(gpa, key(i), .{ .slot = 0 });
+    ll.lanes.clearRetainingCapacity();
+    const want = [_]struct { k: usize, slot: u32 }{ .{ .k = 1, .slot = 0 }, .{ .k = 2, .slot = 1 }, .{ .k = 1, .slot = 0 }, .{ .k = 3, .slot = 2 } };
+    for (want) |w| if ((try ll.claim(gpa, key(w.k))).slot != w.slot) return error.SlotTaken;
+    if (!ll.lanes.remove(key(1))) return error.SlotTaken;
+    if ((try ll.claim(gpa, key(4))).slot != 0 or (try ll.claim(gpa, key(5))).slot != 3) return error.SlotTaken;
+}
+
+test "a new stream takes the lowest free slot, a known one keeps its own, a released one's goes to the next" {
+    try slotCheck(std.testing.allocator);
+}
