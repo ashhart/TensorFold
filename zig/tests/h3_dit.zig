@@ -86,7 +86,7 @@ pub fn main(init: std.process.Init) !void {
     const expect_audio = try case.copy(f32, gpa, try case.at("audio_velocity", .f32, na), na);
     const video_step = try case.copy(f32, gpa, try case.at("video_step", .f32, 2 * steps), 2 * steps);
     const audio_step = try case.copy(f32, gpa, try case.at("audio_step", .f32, 2 * steps), 2 * steps);
-    std.debug.print("{s}: {d} rows (text {d}, audio {d}, video {d}), {d} tiles ({d} prefix, {d} video kept a query), {d} blocks of {d}/{d}/{d}, {d} steps, loaded in {d:.1} s\n", .{ device.name(), model.rows, model.text, model.audio, model.video, model.tiles, model.prefix_tiles, model.keep, model.blocks.len, model.hidden, model.inner, model.mlp, steps, mtl.clock.seconds() - loading });
+    std.debug.print("{s}: {d} rows (text {d}, keyframe {d}, audio {d}, video {d}), {d} tiles ({d} prefix, {d} video kept a query), {d} blocks of {d}/{d}/{d}, {d} steps, loaded in {d:.1} s\n", .{ device.name(), model.rows, model.text, model.condition, model.audio, model.video, model.tiles, model.prefix_tiles, model.keep, model.blocks.len, model.hidden, model.inner, model.mlp, steps, mtl.clock.seconds() - loading });
 
     const vv = try gpa.alloc(f32, nv);
     const av = try gpa.alloc(f32, na);
