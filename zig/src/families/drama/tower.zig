@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const checkpoint = @import("core").checkpoint;
+const Stager = @import("stager.zig").Stager;
 const Buffer = cuda.DeviceBuffer;
 const Linear = cuda.cublaslt.Linear;
 const Allocator = std.mem.Allocator;
@@ -182,19 +183,19 @@ const Impl = struct {
         return view(owned, 0, bytes);
     }
 
-    fn weight(p: *Impl, ck: *checkpoint.Checkpoint, name: []const u8, shape: []const usize) !Buffer {
+    fn weight(p: *Impl, st: *Stager, ck: *checkpoint.Checkpoint, name: []const u8, shape: []const usize) !Buffer {
         const t = try ck.expect(name, .bf16, shape);
         const out = try p.allocate(t.bytes.len);
-        try out.upload(0, t.bytes);
+        try st.put(out.ptr, t.bytes);
         return out;
     }
 
-    fn layerWeight(p: *Impl, ck: *checkpoint.Checkpoint, prefix: []const u8, suffix: []const u8, shape: []const usize) !Buffer {
+    fn layerWeight(p: *Impl, st: *Stager, ck: *checkpoint.Checkpoint, prefix: []const u8, suffix: []const u8, shape: []const usize) !Buffer {
         var name: [256]u8 = undefined;
-        return p.weight(ck, try std.fmt.bufPrint(&name, "{s}.{s}.weight", .{ prefix, suffix }), shape);
+        return p.weight(st, ck, try std.fmt.bufPrint(&name, "{s}.{s}.weight", .{ prefix, suffix }), shape);
     }
 
-    fn loadLayer(p: *Impl, ck: *checkpoint.Checkpoint, i: usize) !Layer {
+    fn loadLayer(p: *Impl, st: *Stager, ck: *checkpoint.Checkpoint, i: usize) !Layer {
         var name: [128]u8 = undefined;
         const prefix = if (i < 4)
             try std.fmt.bufPrint(&name, "audio_decoder_mtp_shared.layers.{d}", .{i})
@@ -204,22 +205,22 @@ const Impl = struct {
         var key: [256]u8 = undefined;
         for ([_][]const u8{ "w1", "w3" }, 0..) |part, half| {
             const t = try ck.expect(try std.fmt.bufPrint(&key, "{s}.transformer_layer.feed_forward.{s}.weight", .{ prefix, part }), .bf16, &.{ intermediate, hidden });
-            try gate_up.upload(half * intermediate * hidden * 2, t.bytes);
+            try st.put(gate_up.ptr + half * intermediate * hidden * 2, t.bytes);
         }
         return .{
-            .embedding = try p.layerWeight(ck, prefix, if (i < 4) "semantic_embedding" else "codebook_embedding", &.{ 4096, hidden }),
-            .enorm = try p.layerWeight(ck, prefix, "enorm", &.{hidden}),
-            .hnorm = try p.layerWeight(ck, prefix, "hnorm", &.{hidden}),
-            .eh = try p.layerWeight(ck, prefix, "eh_proj", &.{ hidden, 2 * hidden }),
-            .input_norm = try p.layerWeight(ck, prefix, "transformer_layer.attention_norm", &.{hidden}),
-            .qkv = try p.layerWeight(ck, prefix, "transformer_layer.attention.wqkv", &.{ qkv_width, hidden }),
-            .qnorm = try p.layerWeight(ck, prefix, "transformer_layer.attention.q_norm", &.{256}),
-            .knorm = try p.layerWeight(ck, prefix, "transformer_layer.attention.k_norm", &.{256}),
-            .out = try p.layerWeight(ck, prefix, "transformer_layer.attention.wo", &.{ hidden, query_width }),
-            .post_norm = try p.layerWeight(ck, prefix, "transformer_layer.ffn_norm", &.{hidden}),
+            .embedding = try p.layerWeight(st, ck, prefix, if (i < 4) "semantic_embedding" else "codebook_embedding", &.{ 4096, hidden }),
+            .enorm = try p.layerWeight(st, ck, prefix, "enorm", &.{hidden}),
+            .hnorm = try p.layerWeight(st, ck, prefix, "hnorm", &.{hidden}),
+            .eh = try p.layerWeight(st, ck, prefix, "eh_proj", &.{ hidden, 2 * hidden }),
+            .input_norm = try p.layerWeight(st, ck, prefix, "transformer_layer.attention_norm", &.{hidden}),
+            .qkv = try p.layerWeight(st, ck, prefix, "transformer_layer.attention.wqkv", &.{ qkv_width, hidden }),
+            .qnorm = try p.layerWeight(st, ck, prefix, "transformer_layer.attention.q_norm", &.{256}),
+            .knorm = try p.layerWeight(st, ck, prefix, "transformer_layer.attention.k_norm", &.{256}),
+            .out = try p.layerWeight(st, ck, prefix, "transformer_layer.attention.wo", &.{ hidden, query_width }),
+            .post_norm = try p.layerWeight(st, ck, prefix, "transformer_layer.ffn_norm", &.{hidden}),
             .gate_up = gate_up,
-            .down = try p.layerWeight(ck, prefix, "transformer_layer.feed_forward.w2", &.{ hidden, intermediate }),
-            .final_norm = try p.layerWeight(ck, prefix, "final_layernorm", &.{hidden}),
+            .down = try p.layerWeight(st, ck, prefix, "transformer_layer.feed_forward.w2", &.{ hidden, intermediate }),
+            .final_norm = try p.layerWeight(st, ck, prefix, "final_layernorm", &.{hidden}),
         };
     }
 
@@ -410,13 +411,19 @@ pub const Model = struct {
         };
         var ck = try checkpoint.Checkpoint.openModelPrefix(gpa, io, dir, "audio_decoder");
         defer ck.close();
-        p.embeddings = try p.weight(&ck, "audio_decoder.codebook_embeddings.weight", &.{ 40960, hidden });
-        for (0..layer_count) |i| p.layers[i] = try p.loadLayer(&ck, i);
+        var stream = try cuda.Stream.init(ctx.d, true);
+        defer stream.deinit();
+        var st: Stager = .init(gpa, ctx.d, stream);
+        defer st.deinit();
+        for (ck.files.items) |*f| try st.addFile(f.path, f.map.memory);
+        p.embeddings = try p.weight(&st, &ck, "audio_decoder.codebook_embeddings.weight", &.{ 40960, hidden });
+        for (0..layer_count) |i| p.layers[i] = try p.loadLayer(&st, &ck, i);
         for (&p.heads, 0..) |*head, i| {
             var name: [128]u8 = undefined;
-            head.* = try p.weight(&ck, try std.fmt.bufPrint(&name, "audio_decoder_mtp.heads.{d}.weight", .{i}), &.{ 4096, hidden });
+            head.* = try p.weight(&st, &ck, try std.fmt.bufPrint(&name, "audio_decoder_mtp.heads.{d}.weight", .{i}), &.{ 4096, hidden });
         }
         if (ck.unused() != 0) return error.UnusedTowerWeights;
+        try st.finish();
         const rows = options.max_rows;
         p.workspace = try p.allocate(workspace_bytes);
         p.cache = try p.allocate(layer_count * 2 * options.context * kv_width * 2);

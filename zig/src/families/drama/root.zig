@@ -9,4 +9,5 @@ test {
     _ = codec;
     _ = @import("codec_pth.zig");
     _ = @import("codec_load.zig");
+    _ = @import("stager.zig");
 }

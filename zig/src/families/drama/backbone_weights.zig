@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const cfg = @import("backbone_config.zig");
+const Stager = @import("stager.zig").Stager;
 
 const Io = std.Io;
 
@@ -94,7 +95,7 @@ fn size(t: DType) usize {
 
 const Entry = struct { shard: usize, dtype: ?DType, rank: usize, shape: [3]usize, begin: usize, end: usize };
 
-const Shard = struct { file: Io.File, map: Io.File.MemoryMap, data: usize };
+const Shard = struct { path: [:0]const u8, file: Io.File, map: Io.File.MemoryMap, data: usize };
 
 /// The checkpoint's shards mapped read-only, every header entry indexed by name.
 const Source = struct {
@@ -123,7 +124,7 @@ const Source = struct {
             try files.put(a, e.value_ptr.string, {});
         }
         for (files.keys(), 0..) |name, i| {
-            const path = try std.fs.path.join(a, &.{ dir, name });
+            const path = try std.fs.path.joinZ(a, &.{ dir, name });
             try s.mapShard(path, i);
         }
         // every name the index lists must be in its shard's header
@@ -135,7 +136,7 @@ const Source = struct {
         return s;
     }
 
-    fn mapShard(s: *Source, path: []const u8, index: usize) !void {
+    fn mapShard(s: *Source, path: [:0]const u8, index: usize) !void {
         const a = s.arena.allocator();
         // the file and its map belong to `shards` once appended; the errdefers cover only the steps before
         const sh = blk: {
@@ -147,7 +148,7 @@ const Source = struct {
             errdefer map.destroy(s.io);
             const header_len: usize = @intCast(std.mem.readInt(u64, map.memory[0..8], .little));
             if (header_len > len - 8) return error.BadDramaCheckpoint;
-            try s.shards.append(s.gpa, .{ .file = file, .map = map, .data = 8 + header_len });
+            try s.shards.append(s.gpa, .{ .path = path, .file = file, .map = map, .data = 8 + header_len });
             break :blk s.shards.items[s.shards.items.len - 1];
         };
         const data_len = sh.map.memory.len - sh.data;
@@ -209,69 +210,6 @@ const Source = struct {
         if (std.mem.startsWith(u8, name, prefix)) s.used += 1;
         const sh = s.shards.items[e.shard];
         return sh.map.memory[sh.data + e.begin .. sh.data + e.end];
-    }
-};
-
-/// Host-to-device copies through two pinned slots on one stream: a slot is refilled only after its copies land.
-const Stager = struct {
-    const slot_bytes = 64 << 20;
-
-    d: *const cuda.Driver,
-    stream: cuda.Stream,
-    slots: [2]cuda.HostBuffer,
-    events: [2]cuda.Event,
-    pending: [2]bool = .{ false, false },
-    cur: usize = 0,
-    used: usize = 0,
-
-    fn init(d: *const cuda.Driver, stream: cuda.Stream) !Stager {
-        var a = try cuda.HostBuffer.alloc(d, slot_bytes);
-        errdefer a.free();
-        var b = try cuda.HostBuffer.alloc(d, slot_bytes);
-        errdefer b.free();
-        var ea = try cuda.Event.init(d, false);
-        errdefer ea.deinit();
-        const eb = try cuda.Event.init(d, false);
-        return .{ .d = d, .stream = stream, .slots = .{ a, b }, .events = .{ ea, eb } };
-    }
-
-    fn deinit(st: *Stager) void {
-        st.stream.synchronize() catch {};
-        for (&st.slots) |*s| s.free();
-        for (&st.events) |*e| e.deinit();
-        st.* = undefined;
-    }
-
-    fn swap(st: *Stager) !void {
-        try st.events[st.cur].record(st.stream);
-        st.pending[st.cur] = true;
-        st.cur ^= 1;
-        if (st.pending[st.cur]) try st.events[st.cur].synchronize();
-        st.pending[st.cur] = false;
-        st.used = 0;
-    }
-
-    fn put(st: *Stager, dst: u64, bytes: []const u8) !void {
-        var off: usize = 0;
-        while (off < bytes.len) {
-            if (st.used == slot_bytes) try st.swap();
-            const n = @min(bytes.len - off, slot_bytes - st.used);
-            const host = st.slots[st.cur].bytes[st.used..][0..n];
-            @memcpy(host, bytes[off..][0..n]);
-            try st.d.check(st.d.api.cuMemcpyHtoDAsync_v2(dst + off, host.ptr, n, st.stream.handle), "cuMemcpyHtoDAsync");
-            st.used += n;
-            off += n;
-        }
-    }
-
-    fn zero(st: *Stager, dst: u64, n: usize) !void {
-        try st.d.check(st.d.api.cuMemsetD8Async(dst, 0, n, st.stream.handle), "cuMemsetD8Async");
-    }
-
-    fn finish(st: *Stager) !void {
-        try st.stream.synchronize();
-        st.pending = .{ false, false };
-        st.used = 0;
     }
 };
 
@@ -383,8 +321,9 @@ fn loadMoe(L: *Loader, i: usize, l: *Layer) !void {
 pub fn load(gpa: std.mem.Allocator, io: Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, c: cfg.Config) !Weights {
     var src = try Source.open(gpa, io, dir);
     defer src.close();
-    var st = try Stager.init(d, stream);
+    var st: Stager = .init(gpa, d, stream);
     defer st.deinit();
+    for (src.shards.items) |sh| try st.addFile(sh.path, sh.map.memory);
     var w: Weights = .{ .gpa = gpa };
     errdefer {
         stream.synchronize() catch {};
