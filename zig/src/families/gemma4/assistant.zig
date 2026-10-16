@@ -112,9 +112,9 @@ pub const Drafter = struct {
         d.tap = .{@intCast(geo.layers - 1)};
         d.w = try aw.load(gpa, target.device, io, dir, c, geo);
         errdefer d.w.deinit(gpa);
-        d.kinds[0] = try kernels.Kind.init(gpa, target.device, c.glue, false, true);
+        d.kinds[0] = try kernels.Kind.init(gpa, target.device, c.glue, false, true, target.weights.embed_bits);
         errdefer d.kinds[0].deinit();
-        d.kinds[1] = try kernels.Kind.init(gpa, target.device, c.glue, true, true);
+        d.kinds[1] = try kernels.Kind.init(gpa, target.device, c.glue, true, true, target.weights.embed_bits);
         errdefer d.kinds[1].deinit();
         const n = max_items;
         const hid: usize = c.hidden;
@@ -269,7 +269,7 @@ pub const Drafter = struct {
 
     /// A projection; `summed`: its input's group sums are in d.sums (stride rows), written by the input's own kernel.
     fn project(d: *Drafter, e: mtl.ComputeEncoder, l: aw.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize, summed: bool) !void {
-        const p = try d.projections.get(d.gpa, d.target.device, l.n, l.k);
+        const p = try d.projections.get(d.gpa, d.target.device, .{ .w = l.w, .sb = l.sb, .n = l.n, .k = l.k });
         if (summed) return p.encodeSums(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = d.sums }, .stride = @intCast(rows) }, .{ .buf = y }, @intCast(rows));
         try p.encode(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, @intCast(rows));
     }

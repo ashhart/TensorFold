@@ -329,8 +329,9 @@ pub fn main(init: std.process.Init) !void {
     const files = try tf.checkpoint_host.shardFiles(gpa, init.io, model);
     defer tf.checkpoint_host.freeShardFiles(gpa, files);
     for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
-    geo = (try cfg.Config.read(gpa, init.io, model)).geo;
-    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .k = try g4.kernels.Kernels.init(gpa, device, geo), .dump = dump };
+    const conf = try cfg.Config.read(gpa, init.io, model);
+    geo = conf.geo;
+    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .k = try g4.kernels.Kernels.init(gpa, device, geo, conf.widths.embed.bits), .dump = dump };
     defer c.k.deinit();
     defer {
         for (c.owned.items) |b| b.deinit();

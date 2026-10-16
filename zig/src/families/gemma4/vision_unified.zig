@@ -5,6 +5,9 @@ const ks = @import("kernel_sources");
 const frags = @import("../../core/frags.zig");
 const ck = @import("../../core/checkpoint_metal.zig");
 const lane = @import("../../core/lane_projection.zig");
+const affine_mm = @import("../../core/affine_mm.zig");
+const Mlx = @import("weights.zig").Mlx;
+const Width = @import("widths.zig").Width;
 const image = @import("image.zig");
 const vision = @import("vision.zig");
 
@@ -51,6 +54,8 @@ pub const Embedder = struct {
     pos_w: Ref,
     pos_b: Ref,
     proj: Ref,
+    /// The projection quantized (an oQ pack's, at its config width) with the model's affine_mm pipelines for it.
+    proj_q: ?struct { w: Mlx, mm: affine_mm.Pipes } = null,
     scratch: mtl.Buffer,
     a: Ref, // [T, merged_width]: patch_ln1's rows
     b: Ref, // [T, width]: patch_dense's, before its bias
@@ -59,10 +64,13 @@ pub const Embedder = struct {
     /// Host-written per image: the merged patches as bf16.
     patches: mtl.Buffer,
 
-    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, ckpt: *const ck.Checkpoint, out_hidden: usize) !*Embedder {
+    /// `mm` and `q`: the model's affine_mm pipelines and the config's width, for a quantized projection.
+    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, ckpt: *const ck.Checkpoint, out_hidden: usize, mm: affine_mm.Pipes, q: Width) !*Embedder {
         if (out_hidden != width) return error.UnexpectedGemmaVisionTensor;
         const v = try gpa.create(Embedder);
         errdefer gpa.destroy(v);
+        v.* = undefined;
+        v.proj_q = null;
         v.gpa = gpa;
         v.out_hidden = out_hidden;
         const body = try frags.source(device, gpa, ks.gemma4_vision);
@@ -103,7 +111,20 @@ pub const Embedder = struct {
         v.table = try t.get(ckpt, e ++ "pos_embedding", table_rows * 2 * width);
         v.pos_w = try t.get(ckpt, e ++ "pos_norm.weight", width);
         v.pos_b = try t.get(ckpt, e ++ "pos_norm.bias", width);
-        v.proj = try t.get(ckpt, "embed_vision.embedding_projection.weight", out_hidden * width);
+        const pp = "embed_vision.embedding_projection.";
+        if (ckpt.get(pp ++ "scales")) |s| {
+            const w = try ckpt.get(pp ++ "weight");
+            const b = try ckpt.get(pp ++ "biases");
+            const words = @as(usize, width) * q.bits / 32;
+            const fits = w.dtype == .u32 and w.rank == 2 and w.shape[0] == out_hidden and w.shape[1] == words and
+                s.dtype == .bf16 and b.dtype == .bf16 and s.count() == out_hidden * width / q.group and b.count() == s.count();
+            if (!fits) {
+                std.log.err("gemma4 vision: {s}* is not {d}-bit in groups of {d} [{d}, {d}]", .{ pp, q.bits, q.group, out_hidden, width });
+                return error.UnexpectedGemmaVisionTensor;
+            }
+            v.proj = ref(w);
+            v.proj_q = .{ .w = .{ .w = ref(w), .s = ref(s), .b = ref(b), .n = @intCast(out_hidden), .k = width, .bits = q.bits }, .mm = mm };
+        } else |_| v.proj = try t.get(ckpt, pp ++ "weight", out_hidden * width);
         const T: usize = image.max_budget;
         const sizes = [_]usize{ T * mw * 2, T * width * 2, T * width * 2, T * width * 2 };
         var total: usize = 0;
@@ -154,6 +175,7 @@ pub const Embedder = struct {
         for ([_]Ref{ v.d, v.d, v.c }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
         e.setValue(extern struct { width: u32, weighted: u32, eps: f32 }{ .width = width, .weighted = 0, .eps = rms_eps }, 3);
         e.dispatchGroups(mtl.Size.of(T, 1, 1), mtl.Size.of(256, 1, 1));
+        if (v.proj_q) |p| return affine_mm.dense(e, p.mm, v.c, p.w, out, T);
         v.linear(e, v.c, v.proj, out, T, @intCast(v.out_hidden), width);
     }
 

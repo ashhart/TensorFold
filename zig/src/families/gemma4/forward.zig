@@ -55,8 +55,15 @@ pub fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, c
 
 /// A projection on its input's group sums in s.sums, which the input's own kernel wrote (no sums dispatch).
 fn project(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
-    const p = try m.projections.get(m.gpa, m.device, l.n, l.k);
-    try p.encodeSums(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = s.sums }, .stride = @intCast(rows) }, .{ .buf = y }, @intCast(rows));
+    const p = try m.projections.get(m.gpa, m.device, l);
+    const out: lane.Ref = .{ .buf = y, .off = l.col * 2 };
+    if (!l.reg()) return l.encodeRows(p, e, .{ .buf = x }, out, rows);
+    try p.encodeSums(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = s.sums }, .stride = @intCast(rows) }, out, @intCast(rows));
+}
+
+/// A stack's runs, each writing its columns of y's rows.
+fn projectStack(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, st: *const weights.Stack, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
+    for (st.list()) |l| try project(m, s, e, l, x, y, rows);
 }
 
 /// The sums a producing kernel writes: s.sums with the window's rows as stride.
@@ -174,7 +181,7 @@ fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur:
 
 /// A fused projection on one row: its prologue's inputs and outputs (gemma4/fused.metal); eps in f.x, a tap in i.x.
 fn projectFused(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, fuse: u8, x: mtl.Buffer, y: mtl.Buffer, a: [6]lane.Ref, o: [2]lane.Ref, tap: i32) !void {
-    const p = try m.projections.getFused(m.gpa, m.device, l.n, l.k, fuse);
+    const p = try m.projections.getFused(m.gpa, m.device, l, fuse);
     try p.encodeFused(e, .{ .buf = x }, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .buf = y }, .{ .a = a, .o = o, .f = .{ cfg.eps, 0, 0, 0 }, .i = .{ tap, 0, 0, 0 } }, 1);
 }
 
@@ -198,8 +205,8 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     if (st.mm and fused and i > 0) {
         const pl = &m.weights.layers[i - 1];
         const tap = tapRef(m, s.taps, s.hn, i - 1);
-        try projectFused(m, e, l.qkv, 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride);
-    } else if (st.mm) try project(m, s, e, l.qkv, s.normed[cur], s.qkv, rows);
+        try projectFused(m, e, l.qkv.runs[0], 1, s.y, s.qkv, .{ .{ .buf = s.hn }, .{ .buf = s.y }, pl.post_feedforward, pl.scalar, l.input_norm, l.input_norm }, .{ .{ .buf = s.h[cur] }, tap.ref }, tap.stride);
+    } else if (st.mm) try projectStack(m, s, e, &l.qkv, s.normed[cur], s.qkv, rows);
     var at: usize = 0;
     for (segments) |seg| {
         const n = seg.rows;
@@ -280,12 +287,12 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     }
     if (st.mm) try project(m, s, e, l.o, s.attn, s.o, rows);
     if (!st.glue) {
-        if (st.mm) try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
+        if (st.mm) try projectStack(m, s, e, &l.gate_up, s.n_mlp, s.gate_up, rows);
         if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
         return;
     }
     if (fused and st.mm) {
-        try projectFused(m, e, l.gate_up, 2, s.o, s.act, .{ .{ .buf = s.h[cur] }, .{ .buf = s.o }, l.post_attention, l.pre_feedforward, l.pre_feedforward, l.pre_feedforward }, .{ .{ .buf = s.hn }, .{ .buf = s.hn } }, 0);
+        try projectFused(m, e, l.gate_up.runs[0], 2, s.o, s.act, .{ .{ .buf = s.h[cur] }, .{ .buf = s.o }, l.post_attention, l.pre_feedforward, l.pre_feedforward, l.pre_feedforward }, .{ .{ .buf = s.hn }, .{ .buf = s.hn } }, 0);
         try projectFused(m, e, l.down, 3, s.act, s.y, .{ .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act }, .{ .buf = s.act } }, .{ .{ .buf = s.y }, .{ .buf = s.y } }, 0);
         return;
     }
@@ -297,12 +304,12 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     bind(e, &.{ s.hn, s.n_mlp }, 5);
     sumsOut(e, s, rows, 7);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
-    if (st.mm) try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
+    if (st.mm) try projectStack(m, s, e, &l.gate_up, s.n_mlp, s.gate_up, rows);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
     e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
     sumsOut(e, s, rows, 3);
-    e.setValue(@as(i32, 1), 5); // the stack's rows interleaved in 16-row blocks
+    e.setValue(@as(i32, @intFromBool(l.gate_up.interleaved)), 5); // one run: its rows interleaved in 16-row blocks
     e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
     if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
     denseTail(m, e, s, i, cur, rows);

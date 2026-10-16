@@ -1,12 +1,12 @@
-//! Admission for dense Gemma 4 MLX affine checkpoints (31B and 12B): pinned geometries and format, each refusal named.
+//! Admission for dense Gemma 4 MLX affine checkpoints (31B and 12B): pinned geometries and widths, each refusal named.
 const std = @import("std");
+pub const widths = @import("widths.zig");
 
 pub const vocab = 262144;
 pub const sliding_dim = 256;
 pub const global_dim = 512;
 pub const window = 1024;
-pub const group = 64;
-pub const bits = 4;
+pub const group = widths.group;
 pub const eps: f32 = 1e-6;
 pub const softcap: f32 = 30.0;
 pub const sliding_theta: f64 = 10000.0;
@@ -14,7 +14,7 @@ pub const global_theta: f64 = 1000000.0;
 /// Pairs the global layers' proportional RoPE rotates: partial_rotary_factor 0.25 of 512 dims, in pairs.
 pub const global_rotated = 64;
 
-/// A model's sizes; everything else (head dims, window, vocab, RoPE, format) is the same in each admitted one.
+/// A model's sizes; everything else (head dims, window, vocab, RoPE) is the same in each admitted one.
 pub const Geometry = struct {
     name: []const u8,
     hidden: usize,
@@ -66,10 +66,12 @@ pub const Error = error{
     UnsupportedGemmaGeometry,
     UnsupportedGemmaRotary,
     UnsupportedGemmaQuantization,
-} || std.mem.Allocator.Error || std.json.ParseError(std.json.Scanner);
+} || widths.Error || std.json.ParseError(std.json.Scanner);
 
 pub const Config = struct {
     geo: Geometry,
+    /// Each linear's MLX affine width (the config's quantization table).
+    widths: widths.Widths = .{},
     context: usize,
     eos: [4]u32 = .{ 0, 0, 0, 0 },
     eos_count: usize = 0,
@@ -139,18 +141,13 @@ fn isTrue(o: std.json.ObjectMap, key: []const u8) bool {
     return v == .bool and v.bool;
 }
 
-fn quantization(v: std.json.Value) Error!void {
-    const o = try object(v);
-    if (try integer(o, "bits") != bits or try integer(o, "group_size") != group) return error.UnsupportedGemmaQuantization;
-    var it = o.iterator();
-    while (it.next()) |e| {
-        const k = e.key_ptr.*;
-        if (std.mem.eql(u8, k, "mode")) {
-            if (!isString(e.value_ptr.*, "affine")) return error.UnsupportedGemmaQuantization;
-        } else if (!std.mem.eql(u8, k, "bits") and !std.mem.eql(u8, k, "group_size")) {
-            return error.UnsupportedGemmaQuantization; // a per-module width (oQ) is the mixed-width path's
-        }
+/// The widths of `quantization`, and of `quantization_config` when present, which must name the same ones.
+fn quantization(gpa: std.mem.Allocator, root: std.json.ObjectMap, layers: usize) Error!widths.Widths {
+    const w = try widths.read(gpa, try object(root.get("quantization") orelse return error.UnsupportedGemmaQuantization), layers);
+    if (root.get("quantization_config")) |q| {
+        if (!std.meta.eql(w, try widths.read(gpa, try object(q), layers))) return error.UnsupportedGemmaQuantization;
     }
+    return w;
 }
 
 fn rope(o: std.json.ObjectMap, kind: []const u8, kind_type: []const u8, theta: f64, partial: ?f64) Error!void {
@@ -204,11 +201,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     const ropes = try object(try field(text, "rope_parameters"));
     try rope(ropes, "sliding_attention", "default", sliding_theta, null);
     try rope(ropes, "full_attention", "proportional", global_theta, 0.25);
-    try quantization(root.get("quantization") orelse return error.UnsupportedGemmaQuantization);
-    if (root.get("quantization_config")) |q| try quantization(q);
+    const ws = try quantization(gpa, root, geo.layers);
     const context: usize = @intCast(try integer(text, "max_position_embeddings"));
     if (context < 1 or context > 262144) return error.UnsupportedGemmaGeometry;
-    var c: Config = .{ .geo = geo, .context = context };
+    var c: Config = .{ .geo = geo, .widths = ws, .context = context };
     eosIds(root.get("eos_token_id") orelse try field(text, "eos_token_id"), &c);
     if (c.eos_count == 0) return error.BadGemmaConfig;
     return c;
@@ -274,7 +270,7 @@ test "each other unified layout is refused by name" {
         .{ "\"hidden_size_per_layer_input\": 0", "\"hidden_size_per_layer_input\": 256", error.GemmaPerLayerInputsNotServed },
         .{ "\"num_kv_shared_layers\": 0", "\"num_kv_shared_layers\": 18", error.GemmaSharedKvNotServed },
         .{ "\"enable_moe_block\": false", "\"enable_moe_block\": true", error.GemmaMoeNotServed },
-        .{ "\"bits\": 4", "\"bits\": 8", error.UnsupportedGemmaQuantization },
+        .{ "\"bits\": 4", "\"bits\": 7", error.UnsupportedGemmaQuantization },
     };
     inline for (cases) |c| {
         const bytes = try edited12b(gpa, &.{.{ c[0], c[1] }});
@@ -302,12 +298,24 @@ test "each other Gemma 4 layout is refused by name" {
     }
 }
 
-test "a per-module width override is the mixed-width path's, refused here" {
+test "other widths are admitted per module, and quantization_config must agree" {
     const gpa = std.testing.allocator;
-    const bytes = try edited(gpa, "\"group_size\": 64,", "\"group_size\": 64, \"language_model.model.layers.0.mlp.down_proj\": {\"bits\": 8, \"group_size\": 64},");
-    defer gpa.free(bytes);
-    try std.testing.expect(!std.mem.eql(u8, bytes, fixture));
-    try std.testing.expectError(error.UnsupportedGemmaQuantization, parse(gpa, bytes));
+    const eight = try edited12b(gpa, &.{.{ "\"bits\": 4", "\"bits\": 8" }}); // both tables
+    defer gpa.free(eight);
+    const c8 = try parse(gpa, eight);
+    try std.testing.expectEqual(@as(u8, 8), c8.widths.of(47, .down).bits);
+    try std.testing.expect(!c8.widths.allFast(c8.geo.layers));
+    try std.testing.expect((try parse(gpa, fixture_12b)).widths.allFast(48));
+    const entry = "\"group_size\": 64, \"language_model.model.layers.0.mlp.down_proj\": {\"bits\": 8, \"group_size\": 64},";
+    const one = try edited(gpa, "\"quantization\": {\n        \"group_size\": 64,", "\"quantization\": {" ++ entry);
+    defer gpa.free(one);
+    try std.testing.expect(!std.mem.eql(u8, one, fixture));
+    try std.testing.expectError(error.UnsupportedGemmaQuantization, parse(gpa, one)); // quantization_config disagrees
+    const both = try edited(gpa, "\"group_size\": 64,", entry);
+    defer gpa.free(both);
+    const c = try parse(gpa, both);
+    try std.testing.expectEqual(@as(u8, 8), c.widths.of(0, .down).bits);
+    try std.testing.expectEqual(@as(u8, 4), c.widths.of(1, .down).bits);
 }
 
 test "layer kinds, head dims and the proportional RoPE table" {

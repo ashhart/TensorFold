@@ -17,11 +17,11 @@ var given_sums: ?mtl.Buffer = null;
 fn projections(m: *g4.Model, rows: usize, x: mtl.Buffer, y: mtl.Buffer, reg: bool) !f64 {
     const cb = m.queue.commandBuffer();
     const e = cb.compute(.serial);
-    for (m.weights.layers[0..m.config.geo.layers]) |l| for ([_]g4.weights.Linear{ l.qkv, l.o, l.gate_up, l.down }) |lin| {
-        const p = try m.projections.get(m.gpa, m.device, lin.n, lin.k);
+    for (m.weights.layers[0..m.config.geo.layers]) |l| for ([_]g4.weights.Linear{ l.qkv.runs[0], l.o, l.gate_up.runs[0], l.down }) |lin| {
+        const p = try m.projections.get(m.gpa, m.device, lin);
         if (reg) try p.encodeSums(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .ref = .{ .buf = given_sums.? }, .stride = @intCast(rows) }, .{ .buf = y }, @intCast(rows)) else try p.encode(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = y }, @intCast(rows));
     };
-    const head = try m.projections.get(m.gpa, m.device, m.weights.head.n, m.weights.head.k);
+    const head = try m.projections.get(m.gpa, m.device, m.weights.head);
     try head.encode(e, .{ .buf = x }, .{ .buf = m.weights.head.w }, .{ .buf = m.weights.head.sb }, .{ .buf = y }, @intCast(rows));
     e.end();
     cb.commit();
@@ -119,13 +119,13 @@ fn fusedCosts(m: *g4.Model) !void {
                 const cb = m.queue.commandBuffer();
                 const e = cb.compute(.serial);
                 for (m.weights.layers[0..geo.layers]) |*ll| {
-                    const lin = if (kind == 1) ll.qkv else if (kind == 2) ll.gate_up else if (kind == 3) ll.down else ll.o;
+                    const lin = if (kind == 1) ll.qkv.runs[0] else if (kind == 2) ll.gate_up.runs[0] else if (kind == 3) ll.down else ll.o;
                     if (fused) {
-                        const p = try m.projections.getFused(m.gpa, m.device, lin.n, lin.k, kind);
+                        const p = try m.projections.getFused(m.gpa, m.device, lin, kind);
                         const x = if (kind == 3) s.act else s.y;
                         try p.encodeFused(e, .{ .buf = x }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .buf = if (kind == 2) s.act else s.qkv }, .{ .a = .{ .{ .buf = s.hn }, .{ .buf = s.y }, l.post_feedforward, l.scalar, l.input_norm, l.input_norm }, .o = .{ .{ .buf = s.h[0] }, .{ .buf = s.h[1] } }, .f = .{ cfg.eps, 0, 0, 0 } }, 1);
                     } else {
-                        const p = try m.projections.get(m.gpa, m.device, lin.n, lin.k);
+                        const p = try m.projections.get(m.gpa, m.device, lin);
                         try p.encodeSums(e, .{ .buf = s.act }, .{ .buf = lin.w }, .{ .buf = lin.sb }, .{ .ref = .{ .buf = s.sums }, .stride = 1 }, .{ .buf = s.qkv }, 1);
                     }
                 }
@@ -142,7 +142,7 @@ fn fusedCosts(m: *g4.Model) !void {
     for (0..6) |_| {
         const cb = m.queue.commandBuffer();
         const e = cb.compute(.serial);
-        const p = try m.projections.get(m.gpa, m.device, m.weights.head.n, m.weights.head.k);
+        const p = try m.projections.get(m.gpa, m.device, m.weights.head);
         for (0..8) |_| try p.encodeSums(e, .{ .buf = s.act }, .{ .buf = m.weights.head.w }, .{ .buf = m.weights.head.sb }, .{ .ref = .{ .buf = s.sums }, .stride = 1 }, .{ .buf = s.logits }, 1);
         e.end();
         cb.commit();
@@ -257,10 +257,14 @@ pub fn main(init: std.process.Init) !void {
     const model_dir = args.next() orelse return error.Usage;
     const m = try g4.Model.load(gpa, io, model_dir);
     defer m.deinit();
+    if (!m.config.widths.allFast(m.config.geo.layers)) {
+        std.debug.print("tf-gemma4-bench measures the 4-bit groups-of-64 kernels; this checkpoint has other widths\n", .{});
+        return error.Usage;
+    }
     m.fuse = std.c.getenv("GEMMA_NO_FUSE") == null;
     const geo = m.config.geo;
     var bytes: usize = 0;
-    for (m.weights.layers[0..geo.layers]) |l| for ([_]g4.weights.Linear{ l.qkv, l.o, l.gate_up, l.down }) |lin| {
+    for (m.weights.layers[0..geo.layers]) |l| for ([_]g4.weights.Linear{ l.qkv.runs[0], l.o, l.gate_up.runs[0], l.down }) |lin| {
         bytes += lin.n * lin.k / 2 + lin.n * lin.k / 64 * 4;
     };
     bytes += m.weights.head.n * m.weights.head.k / 2 + m.weights.head.n * m.weights.head.k / 64 * 4;

@@ -297,5 +297,5 @@ test "every assistant linear fits the reg lane layout at the target's splits" {
             count += 1;
         }
     }
-    for (shapes[0..count]) |s| try weights.layout(g, s[0], s[1]).validate();
+    for (shapes[0..count]) |s| try weights.layout(g, .{ .w = undefined, .sb = undefined, .n = s[0], .k = s[1] }).validate();
 }

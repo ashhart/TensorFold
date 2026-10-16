@@ -233,7 +233,7 @@ pub const Drafter = struct {
     /// A projection; `summed`: its input's group sums are in d.xs (stride rows), written by the input's own kernel.
     fn project(d: *Drafter, e: mtl.ComputeEncoder, l: dw.Linear, x: Ref, y: Ref, rows: usize, summed: bool) !void {
         if (l.bf16) return d.ops.linear(e, .{ .buf = x.buf, .off = x.off }, .{ .buf = l.w }, .{ .buf = y.buf, .off = y.off }, .{ .rows = @intCast(rows), .n = @intCast(l.n), .k = @intCast(l.k), .x_stride = @intCast(l.k), .w_stride = @intCast(l.k), .y_stride = @intCast(l.n) });
-        const p = try d.projections.get(d.gpa, d.target.device, l.n, l.k);
+        const p = try d.projections.get(d.gpa, d.target.device, .{ .w = l.w, .sb = l.sb, .n = l.n, .k = l.k });
         if (summed) return p.encodeSums(e, x, .{ .buf = l.w }, .{ .buf = l.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(rows) }, y, @intCast(rows));
         try p.encode(e, x, .{ .buf = l.w }, .{ .buf = l.sb }, y, @intCast(rows));
     }
@@ -508,8 +508,9 @@ pub const Drafter = struct {
             d.add(e, d.h, d.o, rows * hid);
         }
         d.normSums(e, .{ .buf = d.h }, d.w.norm, .{ .buf = d.x }, rows);
-        const head = try t.projections.get(t.gpa, t.device, t.weights.head.n, t.weights.head.k);
-        try head.encodeSums(e, .{ .buf = d.x }, .{ .buf = t.weights.head.w }, .{ .buf = t.weights.head.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(rows) }, .{ .buf = d.logits }, @intCast(rows));
+        const tw = t.weights.head;
+        const head = try t.projections.get(t.gpa, t.device, tw);
+        if (tw.reg()) try head.encodeSums(e, .{ .buf = d.x }, .{ .buf = tw.w }, .{ .buf = tw.sb }, .{ .ref = .{ .buf = d.xs }, .stride = @intCast(rows) }, .{ .buf = d.logits }, @intCast(rows)) else try tw.encodeRows(head, e, .{ .buf = d.x }, .{ .buf = d.logits }, rows);
         var first: usize = 0;
         while (first < rows) : (first += 16) {
             const n = @min(16, rows - first);

@@ -79,7 +79,7 @@ pub const Scratch = struct {
 
 /// y[:, col..col + q.n] (row pitch `pitch`) = x q^T.
 fn mm(m: *Model, e: mtl.ComputeEncoder, q: Q, x: mtl.Buffer, y: mtl.Buffer, col: usize, pitch: usize, rows: u32) void {
-    affine_mm.denseBatch(e, m.mm, Ref{ .buf = x }, q, Ref{ .buf = y, .off = col * 2 }, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(pitch) });
+    affine_mm.denseBatch(e, m.pipes(q.bits), Ref{ .buf = x }, q, Ref{ .buf = y, .off = col * 2 }, rows, 1, .{ .x_row = @intCast(q.k), .y_row = @intCast(pitch) });
 }
 
 /// The glue's optional group sums off (the lane kernels' operand; affine_mm dequantizes its weights instead).
@@ -142,7 +142,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
-    const head = try m.projections.get(m.gpa, m.device, w.head.n, w.head.k);
+    const head = try m.projections.get(m.gpa, m.device, w.head);
     try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * geo.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
