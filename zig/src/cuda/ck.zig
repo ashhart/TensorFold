@@ -62,7 +62,7 @@ pub const Ck = struct {
     up_fns: [2]Function, // calls under prompt_tokens, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
     down_fns: [2]Function,
     resident: [2][2]usize, // blocks the up and down kernels fill, by up_fns' order: per SM times SMs
-    prompt_fns: [2]Function, // over prompt plans: relu^2 up, fp32 down (256 threads)
+    prompt_fns: [2]Function, // over prompt plans: relu^2 up to NVFP4 rows, fp32 down (256 threads)
     prompt_resident: [2]usize,
     clusters: bool,
 
@@ -87,7 +87,7 @@ pub const Ck = struct {
             c.down_fns[i] = try experts_mod.function(names[1]);
             c.resident[i] = .{ @max(1, try c.up_fns[i].occupancy(128, 0)) * sms, @max(1, try c.down_fns[i].occupancy(128, 0)) * sms };
         }
-        for ([_][:0]const u8{ "tf_ck4_up_relu2_prompt", "tf_ck4_down_f32_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
+        for ([_][:0]const u8{ "tf_ck4_up_nvfp4_prompt", "tf_ck4_down_f32_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
             f.* = try experts_mod.function(name);
             n.* = @max(1, try f.occupancy(256, 0)) * sms;
         }
@@ -207,9 +207,11 @@ pub const Ck = struct {
         return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 
-    /// `up` over a prompt plan.
-    pub fn promptUp(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, out: u64, items: usize) !void {
+    /// `up` over a prompt plan to the NVFP4 rows quant4 makes of its bf16 rows at down's input scale (rowsBytes).
+    pub fn promptUp(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, pairs: usize, out: u64, items: usize) !void {
         var a = args(rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out);
+        a.add(out + pairs * l.width / 2);
+        a.add(inverse(l.down_act));
         try runPrompt(s, c.prompt_fns[0], c.prompt_resident[0], l.width, items, &a);
     }
 

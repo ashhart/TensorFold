@@ -29,7 +29,7 @@ fn plan(r: *Rig, pairs: usize, count: usize, tile: usize) !struct { p: cuda.grou
     return .{ .p = .{ .items = try r.dev(std.mem.sliceAsBytes(items.items)), .members = try r.dev(std.mem.sliceAsBytes(members)), .counts = try r.dev(std.mem.asBytes(&n)), .rank = 0, .hist = 0 }, .items = @intCast(n) };
 }
 
-/// `m` rows through `count` experts (k inputs, n outputs): prompt tiles against decode warps in both epilogues.
+/// `m` rows through `count` experts (k inputs, n outputs): prompt tiles against decode warps (up then quant4, down).
 fn experts(r: *Rig, q: *const cuda.ck.Ck, m: usize, k: usize, n: usize, count: usize) !void {
     const pairs = m * count;
     const al = try r.a.alloc(f32, count);
@@ -43,7 +43,7 @@ fn experts(r: *Rig, q: *const cuda.ck.Ck, m: usize, k: usize, n: usize, count: u
         .up_alpha = alpha,
         .down_alpha = alpha,
         .up_act = 1,
-        .down_act = 1,
+        .down_act = 0.375,
         .experts = count,
         .width = n,
         .dims = k,
@@ -53,16 +53,18 @@ fn experts(r: *Rig, q: *const cuda.ck.Ck, m: usize, k: usize, n: usize, count: u
     const narrow = try plan(r, pairs, count, 16);
     const wide = try plan(r, pairs, count, cuda.ck.prompt_tile);
     const up0 = try r.zeros(pairs * n * 2);
-    const up1 = try r.zeros(pairs * n * 2);
+    const rows0 = try r.zeros(cuda.ck.rowsBytes(pairs, n));
+    const rows1 = try r.zeros(cuda.ck.rowsBytes(pairs, n));
     const down0 = try r.zeros(pairs * k * 4);
     const down1 = try r.zeros(pairs * k * 4);
     try q.up(r.s, l, x, m, count, narrow.p, up0, narrow.items);
-    try q.promptUp(r.s, l, x, m, count, wide.p, up1, wide.items);
+    try q.quant4(r.s, up0, n, pairs, n, l.down_act, rows0);
+    try q.promptUp(r.s, l, x, m, count, wide.p, pairs, rows1, wide.items);
     try q.down(r.s, l, act, pairs, m, narrow.p, down0, narrow.items);
     try q.promptDown(r.s, l, act, pairs, wide.p, down1, wide.items);
-    try check.sameBytes("checkpoint prompt up", try r.back(up1, pairs * n * 2), try r.back(up0, pairs * n * 2));
+    try check.sameBytes("checkpoint prompt up rows", try r.back(rows1, cuda.ck.rowsBytes(pairs, n)), try r.back(rows0, cuda.ck.rowsBytes(pairs, n)));
     try check.sameBytes("checkpoint prompt down", try r.back(down1, pairs * k * 4), try r.back(down0, pairs * k * 4));
-    check.pass("checkpoint experts: {d} pairs over {d} experts [{d}, {d}], prompt and decode plans byte-equal in both epilogues", .{ pairs, count, n, k });
+    check.pass("checkpoint experts: {d} pairs over {d} experts [{d}, {d}], prompt NVFP4 up rows == decode up then quant4, prompt down == decode down", .{ pairs, count, n, k });
 }
 
 fn lane(r: *Rig, q: *const cuda.ck.Ck, n: usize, k: usize) !void {

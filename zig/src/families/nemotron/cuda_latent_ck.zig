@@ -54,7 +54,7 @@ fn tile(rows: usize) usize {
     return if (rows >= cuda.ck.prompt_tokens) cuda.ck.prompt_tile else 16;
 }
 
-/// The routed pairs' rows into `out` (fp32), the first region of latent.partials' layout.
+/// The routed pairs' rows into `out` (fp32); prompt passes' up writes down's NVFP4 rows itself.
 pub fn routed(o: kern.Ops, r: Layer, plan: kern.Plan, act: u64, ck4: u64, picks: u64, lat: u64, rows: usize, own: usize, c: Config, out: u64) !void {
     const q = if (o.k.ck) |*x| x else return error.CheckpointMathNotLoaded;
     if (ck4 == 0) return error.NoCheckpointRows;
@@ -65,8 +65,7 @@ pub fn routed(o: kern.Ops, r: Layer, plan: kern.Plan, act: u64, ck4: u64, picks:
     try o.plan(picks, pairs, r.experts, t, plan);
     const items = kern.maxItems(pairs, r.experts, t);
     if (t == cuda.ck.prompt_tile) {
-        try q.promptUp(o.s, r, at.lat, rows, c.top_k * own, plan, act, items);
-        try q.quant4(o.s, act, r.width, pairs, r.width, r.down_act, at.act);
+        try q.promptUp(o.s, r, at.lat, rows, c.top_k * own, plan, pairs, at.act, items);
         return q.promptDown(o.s, r, at.act, pairs, plan, out, items);
     }
     try q.up(o.s, r, at.lat, rows, c.top_k * own, plan, act, items);
@@ -85,8 +84,7 @@ pub fn shared(o: kern.Ops, h: Layer, plan: kern.Plan, shared_plan: ?kern.Plan, s
     if (shared_plan == null) try o.plan(sids, rows * own, own, t, sp);
     const sh_items = kern.maxItems(rows * own, own, t);
     if (t == cuda.ck.prompt_tile) {
-        try q.promptUp(o.s, h, at.hid, rows, own, sp, sact, sh_items);
-        try q.quant4(o.s, sact, h.width, rows * own, h.width, h.down_act, at.sact);
+        try q.promptUp(o.s, h, at.hid, rows, own, sp, rows * own, at.sact, sh_items);
         return q.promptDown(o.s, h, at.sact, rows * own, sp, out, sh_items);
     }
     try q.up(o.s, h, at.hid, rows, own, sp, sact, sh_items);

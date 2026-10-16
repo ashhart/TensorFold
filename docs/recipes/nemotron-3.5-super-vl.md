@@ -85,8 +85,9 @@ describes both modes. Both ranks of a two-GB10 setup must run the same precision
 Checkpoint prompt passes of 128 rows or more run the FP8 layers in 128-row tiles (128 columns where K slices meet in
 a cluster) and the NVFP4 experts in blocks of 128 pairs of one expert by 128 columns, their inputs and weights staged
 through shared memory; decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output
-rounding are unchanged. `tf-cuda-test checkpoint` compares the prompt kernels with decode rows byte for byte on
-synthetic inputs.
+rounding are unchanged. The prompt up kernel quantizes its relu^2 rows to down's NVFP4 input in its epilogue, the same
+bytes the decode path's bf16 rows and separate quantizer give. `tf-cuda-test checkpoint` compares the prompt kernels
+with the decode path byte for byte on synthetic inputs.
 
 ## Exactness and speed
 

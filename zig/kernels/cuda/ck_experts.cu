@@ -181,6 +181,9 @@ struct PromptStage {
     uint32_t sb[2][64];
 };
 
+// What a prompt block writes: fp32 sums, or relu^2 rows quantized as tf_ck_quant4 quantizes them (codes, scales).
+enum PromptEpi : int { F32 = 0, RELU2_NVFP4 = 1 };
+
 }  // namespace tf_ck4
 
 // A block: a plan item (up to 128 pairs of one expert) by 128 columns; each output keeps the decode warp's MMA chain.
@@ -189,9 +192,12 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
                                                int slots, const uint32_t* __restrict__ w,
                                                const uint8_t* __restrict__ ws, const float* __restrict__ alpha, int K,
                                                int N, const int* __restrict__ items, const int* __restrict__ counts,
-                                               const int* __restrict__ members, void* __restrict__ out) {
+                                               const int* __restrict__ members, void* __restrict__ out,
+                                               uint8_t* __restrict__ out_scales, float g_out) {
     using namespace tf_ck4;
     __shared__ __align__(128) PromptStage st[PSTAGES];
+    __shared__ __align__(16) uint2 row_codes[PM][PN / 16];  // RELU2_NVFP4: the tile's rows, written out whole
+    __shared__ uint8_t row_scales[PM][PN / 16];
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
     const int wm = warp >> 2, wn = warp & 3;
     const int NB = N / 64, NT = (NB + 1) / 2, KG = K / 64, units = __ldg(counts) * NT;
@@ -262,25 +268,67 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
         }
         __syncthreads();  // every warp is past the last stage: the next unit's first steps load under this epilogue
         if (unit + gridDim.x < units) stage_unit(unit + gridDim.x);
-        if (!cols) continue;
         const float al = __ldg(alpha + e);
+        if constexpr (EPI == RELU2_NVFP4) {
+            if (cols) {  // tf_ck_quant4's blocks of 16 inputs: two n8 tiles across a quad, four values a lane
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
+                for (int i = 0; i < 4; ++i)
 #pragma unroll
-            for (int h = 0; h < 2; ++h) {
-                const int r = wm * 64 + i * 16 + g + h * 8;
-                if (r >= cnt) continue;
-                const size_t dst = static_cast<size_t>(__ldg(members + first + r)) * N;
+                    for (int h = 0; h < 2; ++h)
 #pragma unroll
-                for (int j = 0; j < 4; ++j) {
-                    const int col = ct * PN + wn * 32 + j * 8 + 2 * t;
-                    const float a0 = acc[i][j][2 * h] * al, a1 = acc[i][j][2 * h + 1] * al;
-                    if constexpr (EPI == 0) {
-                        *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + dst + col) = make_float2(a0, a1);
-                    } else {
-                        const float u0 = fmaxf(tf_ck4::bf(a0), 0.0f), u1 = fmaxf(tf_ck4::bf(a1), 0.0f);
-                        *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + dst + col) =
-                            __floats2bfloat162_rn(u0 * u0, u1 * u1);
+                        for (int bk = 0; bk < 2; ++bk) {
+                            float f[4], amax = 0.0f;
+#pragma unroll
+                            for (int c = 0; c < 4; ++c) {
+                                const float u = fmaxf(tf_ck4::bf(acc[i][2 * bk + c / 2][2 * h + c % 2] * al), 0.0f);
+                                f[c] = tf_ck4::bf(u * u);
+                                amax = fmaxf(amax, fabsf(f[c]));
+                            }
+                            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));
+                            amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));
+                            const nvfp4q::Scale sc = nvfp4q::block_scale(amax, g_out);
+                            // lane t holds inputs 2t, 2t + 1 of each 8: byte t of the block's two code words
+                            uint32_t lo = (nvfp4q::e2m1(f[0] * sc.mul) | nvfp4q::e2m1(f[1] * sc.mul) << 4) << (8 * t);
+                            uint32_t hi = (nvfp4q::e2m1(f[2] * sc.mul) | nvfp4q::e2m1(f[3] * sc.mul) << 4) << (8 * t);
+#pragma unroll
+                            for (int o = 1; o < 4; o <<= 1) {
+                                lo |= __shfl_xor_sync(0xffffffffu, lo, o);
+                                hi |= __shfl_xor_sync(0xffffffffu, hi, o);
+                            }
+                            const int r = wm * 64 + i * 16 + g + h * 8;
+                            if (t == 0) {
+                                row_codes[r][wn * 2 + bk] = make_uint2(lo, hi);
+                                row_scales[r][wn * 2 + bk] = static_cast<uint8_t>(sc.sf8);
+                            }
+                        }
+            }
+            __syncthreads();  // the staged rows whole (their next writes wait on the next unit's step barriers)
+            const int r = tid >> 1, part = tid & 1;  // two threads a row: 32 code bytes each, the odd one the scales
+            if (r >= cnt) continue;
+            const size_t row = __ldg(members + first + r);
+            uint4* to = reinterpret_cast<uint4*>(static_cast<uint8_t*>(out) + row * (N / 2) + ct * (PN / 2));
+            const uint4* from = reinterpret_cast<const uint4*>(row_codes[r]);
+            const int chunks = min(PN / 32, (N - ct * PN) / 32);  // 16-byte chunks of the row inside N
+#pragma unroll
+            for (int c = 2 * part; c < 2 * part + 2; ++c)
+                if (c < chunks) to[c] = from[c];
+            if (part)
+                for (int b = 0; b < min(PN, N - ct * PN) / 16; ++b)
+                    out_scales[row * (N / 16) + ct * (PN / 16) + b] = row_scales[r][b];
+        } else {
+            if (!cols) continue;
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+#pragma unroll
+                for (int h = 0; h < 2; ++h) {
+                    const int r = wm * 64 + i * 16 + g + h * 8;
+                    if (r >= cnt) continue;
+                    const size_t dst = static_cast<size_t>(__ldg(members + first + r)) * N;
+#pragma unroll
+                    for (int j = 0; j < 4; ++j) {
+                        const int col = ct * PN + wn * 32 + j * 8 + 2 * t;
+                        *reinterpret_cast<float2*>(static_cast<float*>(out) + dst + col) =
+                            make_float2(acc[i][j][2 * h] * al, acc[i][j][2 * h + 1] * al);
                     }
                 }
             }
@@ -288,13 +336,15 @@ __device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes
     }
 }
 
-// Prompt plans (128 pairs an item): the decode kernels' epilogues, a block a (item, 128 columns).
+// Prompt up: relu^2 rows as tf_ck_quant4's NVFP4 rows under global scale g (codes at out, e4m3 scales at out_scales).
 extern "C" __global__ void __launch_bounds__(256)
-    tf_ck4_up_relu2_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
+    tf_ck4_up_nvfp4_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
                            const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
                            const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
-                           const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out) {
-    grouped_prompt<1>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);
+                           const int* __restrict__ counts, const int* __restrict__ members, uint8_t* __restrict__ out,
+                           uint8_t* __restrict__ out_scales, float g) {
+    grouped_prompt<tf_ck4::RELU2_NVFP4>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, out_scales,
+                                        g);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
@@ -302,5 +352,5 @@ extern "C" __global__ void __launch_bounds__(256)
                            const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
                            const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
                            const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out) {
-    grouped_prompt<0>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);
+    grouped_prompt<tf_ck4::F32>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out, nullptr, 0.0f);
 }
