@@ -6,6 +6,7 @@
 
 #include "mma4.cuh"
 #include "nvfp4q.cuh"
+#include "qmm_frag.cuh"
 
 namespace tf_ck4 {
 
@@ -162,8 +163,144 @@ __device__ __forceinline__ void grouped(const uint8_t* __restrict__ codes, const
              void* __restrict__ out) {                                                                                 \
         grouped<EPI, TJ, U>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);                       \
     }
-// Prompt chunks: 64 columns a warp, a step at a time; decode-sized calls: 32 a warp, four steps in flight. Same bits.
+// Under 128 token rows: 64 columns a warp, a step at a time; decode-sized: 32 a warp, 4 steps in flight. Same bits.
 TF_CK4(tf_ck4_up_relu2, 1, 8, 1)
 TF_CK4(tf_ck4_down_f32, 0, 8, 1)
 TF_CK4(tf_ck4_up_relu2_few, 1, 4, 4)
 TF_CK4(tf_ck4_down_f32_few, 0, 4, 4)
+
+namespace tf_ck4 {
+
+constexpr int PM = 128, PN = 128, PSTAGES = 4;  // a prompt CTA's rows (one plan item), columns, staged K steps
+
+// One staged 64-input step: the item's rows (chunks swizzled for ldmatrix), two 64-column weight tiles, their scales.
+struct PromptStage {
+    uint4 a[PM][2];  // 32-byte rows
+    uint32_t sa[PM];
+    uint2 b[2][256];  // as packed: fragment order
+    uint32_t sb[2][64];
+};
+
+}  // namespace tf_ck4
+
+// A block: a plan item (up to 128 pairs of one expert) by 128 columns; each output keeps the decode warp's MMA chain.
+template <int EPI>
+__device__ __forceinline__ void grouped_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs,
+                                               int slots, const uint32_t* __restrict__ w,
+                                               const uint8_t* __restrict__ ws, const float* __restrict__ alpha, int K,
+                                               int N, const int* __restrict__ items, const int* __restrict__ counts,
+                                               const int* __restrict__ members, void* __restrict__ out) {
+    using namespace tf_ck4;
+    __shared__ __align__(128) PromptStage st[PSTAGES];
+    const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, g = lane >> 2, t = lane & 3;
+    const int wm = warp >> 2, wn = warp & 3;
+    const int NB = N / 64, NT = (NB + 1) / 2, KG = K / 64, units = __ldg(counts) * NT;
+    // loader roles: A row tid / 2 (16-byte half tid % 2) and its scales; weight tile tid / 128, 16 bytes tid % 128
+    const int arow = tid >> 1, half = tid & 1, bt = tid >> 7, bq = tid & 127;
+    // ldmatrix rows: lane l gives row (l % 8) + 8 ((l / 8) % 2) of chunk l / 16
+    const int lrow = (lane & 7) + ((lane >> 3) & 1) * 8, lchunk = lane >> 4;
+    // the staged unit: its item and the sources its loads read
+    int u_e = 0, u_first = 0, u_cnt = 0, u_ct = 0;
+    const uint8_t *a_src = nullptr, *sa_src = nullptr;
+    const uint4 *b_src = nullptr, *sb_src = nullptr;
+    auto load = [&](int stage, int kg) {
+        PromptStage& p = st[stage];
+        qmm_frag::cp16(&p.a[arow][mma4::chunk<mma4::A4>(arow, half)], a_src + kg * 32);
+        if (!half) qmm_frag::cp4(&p.sa[arow], sa_src + kg * 4);
+        qmm_frag::cp16(reinterpret_cast<uint4*>(p.b[bt]) + bq, b_src + kg * 128);
+        if (bq < 16) qmm_frag::cp16(reinterpret_cast<uint4*>(p.sb[bt]) + bq, sb_src + kg * 16);
+    };
+    // a unit's item and sources, and its first steps in flight (always PSTAGES - 1 commit groups)
+    auto stage_unit = [&](int unit) {
+        const int it = unit / NT;
+        u_ct = unit % NT;
+        u_e = __ldg(items + 3 * it), u_first = __ldg(items + 3 * it + 1), u_cnt = __ldg(items + 3 * it + 2);
+        const int pair = arow < u_cnt ? __ldg(members + u_first + arow) : 0;  // rows past the item read row 0, unused
+        const size_t xr = slots ? pair / slots : pair;
+        a_src = codes + xr * (K / 2) + half * 16;
+        sa_src = xs + xr * (K / 16);
+        const size_t tile = static_cast<size_t>(u_e) * NB + min(u_ct * 2 + bt, NB - 1);  // past N: the last, unread
+        b_src = reinterpret_cast<const uint4*>(w) + tile * KG * 128 + bq;
+        sb_src = reinterpret_cast<const uint4*>(ws) + tile * KG * 16 + bq;
+#pragma unroll
+        for (int s = 0; s < PSTAGES - 1; ++s) {
+            if (s < KG) load(s, s);
+            qmm_frag::commit();
+        }
+    };
+    if (blockIdx.x < units) stage_unit(blockIdx.x);
+    for (int unit = blockIdx.x; unit < units; unit += gridDim.x) {
+        const int e = u_e, first = u_first, cnt = u_cnt, ct = u_ct;
+        const bool cols = ct * PN + wn * 32 < N;  // a warp's 32 columns are all in or all past N
+        float acc[4][4][4] = {};
+        for (int kg = 0; kg < KG; ++kg) {
+            qmm_frag::wait<PSTAGES - 2>();
+            __syncthreads();
+            if (kg + PSTAGES - 1 < KG) load((kg + PSTAGES - 1) % PSTAGES, kg + PSTAGES - 1);
+            qmm_frag::commit();
+            if (!cols) continue;
+            const PromptStage& p = st[kg % PSTAGES];
+            uint2 b[4];
+            uint32_t sb[4];
+#pragma unroll
+            for (int j = 0; j < 4; ++j) {
+                const int nt = (wn & 1) * 4 + j;
+                b[j] = p.b[wn >> 1][nt * 32 + lane];
+                sb[j] = p.sb[wn >> 1][nt * 8 + g];
+            }
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int r0 = wm * 64 + i * 16;
+                if (r0 >= cnt) break;
+                uint32_t a[4];
+                const int r = r0 + lrow;
+                qmm_frag::ldmatrix4(a, &p.a[r][mma4::chunk<mma4::A4>(r, lchunk)]);
+                const uint32_t sa = p.sa[r0 + g + (t & 1) * 8];
+#pragma unroll
+                for (int j = 0; j < 4; ++j) mma4::mma_fp4(acc[i][j], a, b[j].x, b[j].y, sa, sb[j]);
+            }
+        }
+        __syncthreads();  // every warp is past the last stage: the next unit's first steps load under this epilogue
+        if (unit + gridDim.x < units) stage_unit(unit + gridDim.x);
+        if (!cols) continue;
+        const float al = __ldg(alpha + e);
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                const int r = wm * 64 + i * 16 + g + h * 8;
+                if (r >= cnt) continue;
+                const size_t dst = static_cast<size_t>(__ldg(members + first + r)) * N;
+#pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    const int col = ct * PN + wn * 32 + j * 8 + 2 * t;
+                    const float a0 = acc[i][j][2 * h] * al, a1 = acc[i][j][2 * h + 1] * al;
+                    if constexpr (EPI == 0) {
+                        *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + dst + col) = make_float2(a0, a1);
+                    } else {
+                        const float u0 = fmaxf(tf_ck4::bf(a0), 0.0f), u1 = fmaxf(tf_ck4::bf(a1), 0.0f);
+                        *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(out) + dst + col) =
+                            __floats2bfloat162_rn(u0 * u0, u1 * u1);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Prompt plans (128 pairs an item): the decode kernels' epilogues, a block a (item, 128 columns).
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ck4_up_relu2_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
+                           const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
+                           const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
+                           const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out) {
+    grouped_prompt<1>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+    tf_ck4_down_f32_prompt(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
+                           const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
+                           const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
+                           const int* __restrict__ counts, const int* __restrict__ members, void* __restrict__ out) {
+    grouped_prompt<0>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);
+}

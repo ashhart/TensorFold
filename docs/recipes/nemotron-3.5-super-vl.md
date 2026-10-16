@@ -83,8 +83,10 @@ decodes at about the same speed. The [quantization guide](../quantization.md#nvi
 describes both modes. Both ranks of a two-GB10 setup must run the same precision; they check it before loading.
 
 Checkpoint prompt passes of 128 rows or more run the FP8 layers in 128-row tiles (128 columns where K slices meet in
-a cluster); decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output rounding are
-unchanged. `tf-cuda-test checkpoint` compares the prompt kernels with decode rows byte for byte on synthetic inputs.
+a cluster) and the NVFP4 experts in blocks of 128 pairs of one expert by 128 columns, their inputs and weights staged
+through shared memory; decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output
+rounding are unchanged. `tf-cuda-test checkpoint` compares the prompt kernels with decode rows byte for byte on
+synthetic inputs.
 
 ## Exactness and speed
 

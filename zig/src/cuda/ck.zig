@@ -14,6 +14,12 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 
+/// Token rows from which a pass's expert calls take the prompt kernels, over plans of `prompt_tile` pairs an item.
+pub const prompt_tokens = 128;
+
+/// Pairs a prompt plan item holds: ck_experts.cu's prompt tile rows (decode plans hold 16).
+pub const prompt_tile = 128;
+
 /// One fp32 factor: the checkpoint's runtimes multiply the input scale by the weight's in fp32.
 pub fn alpha(act: f32, scale: f32) f32 {
     return act * scale;
@@ -53,9 +59,11 @@ pub const Ck = struct {
     quant4_fn: Function,
     pack4_fn: Function,
     pack4_scales_fn: Function,
-    up_fns: [2]Function, // prompt chunks, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
+    up_fns: [2]Function, // calls under prompt_tokens, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
     down_fns: [2]Function,
     resident: [2][2]usize, // blocks the up and down kernels fill, by up_fns' order: per SM times SMs
+    prompt_fns: [2]Function, // over prompt plans: relu^2 up, fp32 down (256 threads)
+    prompt_resident: [2]usize,
     clusters: bool,
 
     pub fn load(d: *const Driver, capability_major: u32, sms: usize) !Ck {
@@ -78,6 +86,10 @@ pub const Ck = struct {
             c.up_fns[i] = try experts_mod.function(names[0]);
             c.down_fns[i] = try experts_mod.function(names[1]);
             c.resident[i] = .{ @max(1, try c.up_fns[i].occupancy(128, 0)) * sms, @max(1, try c.down_fns[i].occupancy(128, 0)) * sms };
+        }
+        for ([_][:0]const u8{ "tf_ck4_up_relu2_prompt", "tf_ck4_down_f32_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
+            f.* = try experts_mod.function(name);
+            n.* = @max(1, try f.occupancy(256, 0)) * sms;
         }
         c.clusters = capability_major >= 9;
         return c;
@@ -110,7 +122,7 @@ pub const Ck = struct {
         const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
-        const prompt = m >= 128;
+        const prompt = m >= prompt_tokens;
         const bm: usize = if (prompt) 128 else if (m <= 16) 16 else if (m <= 32) 32 else 64;
         const bn: usize = if (prompt and cluster) 128 else 64;
         const ti: usize = if (prompt) 4 else if (bm == 16) 0 else if (bm == 32) 1 else if (m % 64 == 0) 2 else 3;
@@ -195,11 +207,36 @@ pub const Ck = struct {
         return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 
+    /// `up` over a prompt plan.
+    pub fn promptUp(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, out: u64, items: usize) !void {
+        var a = args(rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out);
+        try runPrompt(s, c.prompt_fns[0], c.prompt_resident[0], l.width, items, &a);
+    }
+
+    /// `down` over a prompt plan.
+    pub fn promptDown(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize) !void {
+        var a = args(rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out);
+        try runPrompt(s, c.prompt_fns[1], c.prompt_resident[1], l.dims, items, &a);
+    }
+
     /// One grouped launch of `f` over a plan: NVFP4 rows at `rows` (`nrows` of `k`), `n` columns of `columns` a warp.
     pub fn run(s: Stream, f: Function, resident: usize, columns: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
         const nb = n / columns;
         const grid = @min((items * nb + 3) / 4, resident);
         if (grid < 1) return;
+        var a = args(rows, nrows, slots, w, ws, al, k, n, p, out);
+        try go(f, s, .{ grid, 1, 1 }, 128, 0, &a);
+    }
+
+    /// A prompt kernel's launch: a block a (plan item, 128 columns of `n`).
+    fn runPrompt(s: Stream, f: Function, resident: usize, n: usize, items: usize, a: *launch_.Args) !void {
+        const grid = @min(items * ((n / 64 + 1) / 2), resident);
+        if (grid < 1) return;
+        try go(f, s, .{ grid, 1, 1 }, 256, 0, a);
+    }
+
+    /// The expert kernels' leading arguments: input rows and their scales, the weights, the shape, the plan, `out`.
+    fn args(rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64) launch_.Args {
         var a: launch_.Args = .{};
         a.add(rows);
         a.add(rows + nrows * k / 2);
@@ -210,7 +247,7 @@ pub const Ck = struct {
         a.add(@as(i32, @intCast(k)));
         a.add(@as(i32, @intCast(n)));
         for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
-        try go(f, s, .{ grid, 1, 1 }, 128, 0, &a);
+        return a;
     }
 };
 
