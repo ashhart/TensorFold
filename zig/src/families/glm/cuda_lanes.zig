@@ -11,8 +11,9 @@ const be = lanes.backend;
 /// First tokens a handle names.
 const ring = 1024;
 
-/// The widest verify window: the pending token and a full draft chain (glm-decode-check's, the AOT row variants).
-pub const max_rows = 1 + engine.max_drafts;
+/// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
+pub const max_rows = fw.window_rows;
+const mtp_rows = 1 + engine.max_drafts;
 
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
@@ -56,12 +57,13 @@ pub const Lanes = struct {
         break :vt v;
     };
 
-    /// Round loop facts: windows up to max_rows, drafts with the head loaded, shared windows unless TF_GLM_SHARED=0.
+    /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
         const sharing = drafting and !self.alone;
         return .{
             .exact_width = if (drafting) max_rows else 1,
+            .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
