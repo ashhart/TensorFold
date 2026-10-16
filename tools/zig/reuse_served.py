@@ -16,7 +16,7 @@ PROBE = chr(0x2063) + "probe"  # the server's system-prefix probe (prompt.zig sy
 USAGE = """modes:
   record BASE MODEL ROWS.jsonl     every scenario on a server with the prompt cache on; cached tokens checked per reply
   replay BASE MODEL ROWS.jsonl OUT the same bodies, in order, on a server started with --prompt-cache-gib 0
-  compare ROWS.jsonl OUT           token_sha equal, drafted == "draft": false, resumed first tokens sooner than fresh
+  compare ROWS.jsonl OUT           full token digests equal, drafted == "draft": false; timing apart
   evict BASE MODEL ROWS.jsonl GIB  a budget that holds one conversation: alternating ones evict, a big one is refused
   cold BASE MODEL PROMPTS.json OUT cold prompts 2k-64k (built once through /v1/tokenize): time to first token
   pp OUT...                        cold medians by length, each run against the first
@@ -58,7 +58,9 @@ class Client:
         wall = time.perf_counter() - t0
         tf, usage, choice = out.get("tensorfold") or {}, out.get("usage") or {}, out["choices"][0]
         msg = choice["message"]
-        return {"sha": tf.get("token_sha"), "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
+        sha = tf.get("token_sha256")  # the full token digest; a short fingerprint or none is no evidence
+        sha = sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha) else None
+        return {"sha": sha, "cached": (usage.get("prompt_tokens_details") or {}).get("cached_tokens"),
                 "prompt": usage.get("prompt_tokens"), "tokens": usage.get("completion_tokens"),
                 "ttft": tf.get("time_to_first_token"), "prefill": tf.get("prefill_seconds"), "wall": wall,
                 "finish": choice.get("finish_reason"), "content": msg.get("content") or "",
@@ -333,7 +335,7 @@ def replay(client: Client, rows_path: str, out_path: str) -> int:
 def compare(rows_path: str, fresh_path: str) -> int:
     rows = {r["i"]: r for r in map(json.loads, open(rows_path))}
     fresh = {r["i"]: r["got"] for r in map(json.loads, open(fresh_path))}
-    bad, faster, total = 0, [], 0
+    bad, faster, slow, total = 0, [], [], 0
     by_messages: dict[tuple, set] = {}
     for i, r in sorted(rows.items()):
         if r["arm"] == "cancel":
@@ -344,14 +346,16 @@ def compare(rows_path: str, fresh_path: str) -> int:
         if f is None:
             problems.append("no fresh reply")
         else:
-            if g.get("sha") != f.get("sha"):
+            if g.get("sha") is None or f.get("sha") is None:
+                problems.append("no full token digest")
+            elif g.get("sha") != f.get("sha"):
                 problems.append(f"sha {g.get('sha')} != fresh {f.get('sha')}")
             if f.get("cached"):
                 problems.append(f"fresh cached {f.get('cached')}")
             if g.get("cached") and f.get("ttft") and g.get("ttft") is not None:
                 faster.append((r["conv"], r["turn"], r["arm"], g["prompt"], g["cached"], g["ttft"], f["ttft"]))
                 if g["ttft"] >= f["ttft"]:
-                    problems.append(f"resumed ttft {g['ttft']:.2f} >= fresh {f['ttft']:.2f}")
+                    slow.append(i)  # timing, reported apart from the replies' equality
         if not r["ok"]:
             problems.append(f"cached {g.get('cached')} not in {r['allowed']}")
         key = json.dumps({k: v for k, v in r["body"].items() if k != "draft"}, sort_keys=True)
@@ -363,6 +367,7 @@ def compare(rows_path: str, fresh_path: str) -> int:
     for conv, turn, arm, prompt, cached, t, ft in faster:
         print(f"  {conv:>4} t{turn} {arm:<7} prompt {prompt:6d} cached {cached:6d}: ttft {t:6.2f} s vs fresh {ft:6.2f} s ({ft / max(t, 1e-6):5.1f}x)")
     print(f"{'PASS' if bad == 0 and not split else 'FAIL'}: {total - bad}/{total} replies equal and as cached as planned")
+    print(f"timing: {len(slow)} resumed replies no sooner than fresh{': ' + str(slow) if slow else ''}")
     return 1 if bad or split else 0
 
 

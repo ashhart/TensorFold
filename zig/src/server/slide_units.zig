@@ -35,9 +35,29 @@ pub fn notable_(word: []const u8) bool {
     return !isCommon(word);
 }
 
-/// A word worth comparing in a sentence: a notable one, or a short name (capitalised, three letters, not the first).
+/// Three-letter grammar words in English and the languages first-person facts are told in (red, tea and Leo are not).
+const short_common = [_][]const u8{
+    "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "had", "her", "was", "one", "our", "out", "get",
+    "has", "him", "his", "how", "now", "new", "old", "see", "two", "way", "who", "did", "its", "let", "put", "say", "she",
+    "too", "use", "yes", "yet", "why", "may", "own", "off", "few", "got", "ago", "per", "via", "etc", "i'm", "i'd", "ten",
+    "six", "day", "lot", "set", "try", "ask", "nor", "aka", "bit", "due", "nie", "jak", "czy", "ale", "pod", "nad", "bez",
+    "jej", "tak", "lub", "dla", "nam", "tam", "kto", "gdy", "aby", "ani", "mam", "moi", "ich", "der", "die", "das", "und",
+    "ist", "ein", "mit", "von", "zum", "zur", "auf", "aus", "bei", "nur", "den", "dem", "des", "wie", "wer", "sie", "wir",
+    "ihr", "uns", "man", "mir", "bin", "hat", "war", "als", "vor", "bis", "ins", "les", "une", "est", "pas", "qui", "que",
+    "ses", "sur", "par", "mon", "mes", "ton", "tes", "nos", "vos", "aux", "ont", "lui", "moi", "toi", "eux", "ces", "cet",
+    "ici", "oui", "non", "los", "las", "una", "por", "con", "del", "mis", "sus", "muy", "fue", "hay", "ese", "esa", "eso",
+    "uno", "tus", "che", "gli", "nel", "dei", "mio", "suo", "sua", "noi", "voi", "lei", "chi", "sul", "dal", "nei", "uma",
+    "com", "dos", "das", "meu", "seu", "ele", "foi", "tem", "mas", "pra", "num", "het", "een", "van", "dat", "met", "ook",
+    "wat", "hoe", "mij", "wij", "jij", "hij", "zij", "ons", "aan", "bij", "tot", "uit", "nog", "wel", "heb",
+};
+
+/// A word worth comparing in a sentence: a notable one, a short name (capitalised, not first) or short content word.
 pub fn marked_(raw: []const u8, word: []const u8, first: bool) bool {
-    return notable_(word) or (word.len == 3 and !first and std.ascii.isUpper(raw[0]) and !isCommon(word));
+    if (notable_(word)) return true;
+    if (word.len != 3 or isCommon(word)) return false;
+    if (!first and std.ascii.isUpper(raw[0])) return true;
+    for (short_common) |c| if (std.mem.eql(u8, c, word)) return false;
+    return true;
 }
 
 pub const delimiters = " \t\r\n,;:!?()[]\"*-";

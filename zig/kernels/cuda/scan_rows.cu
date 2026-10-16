@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/families/nemotron_h/cuda/scan_rows.cu (lines 1-90, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// The Mamba scan of a prompt chunk (nemotron_h): its fp32 state stored at the chunk's end and at the rows Snaps names.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -9,14 +9,33 @@ constexpr int DS = 128;      // states a row
 constexpr int TPR = 4;       // threads a value row
 constexpr int ROWS = 32;     // value rows a block
 constexpr int STEPS = 16;    // chunk rows staged at a time
+constexpr int SNAPS = 16;    // states a launch writes out at rows inside it (cuda_marks.zig `max`)
+
+// Where the state goes after `r[k]` rows (ascending; -1: none), as a chunk ending there would store it.
+struct Snaps { float* p[SNAPS]; int r[SNAPS]; };
 
 __device__ __forceinline__ float bf(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 
+__device__ __forceinline__ int snapRow(const Snaps& sn, int k) {
+    int v = -1;
+#pragma unroll
+    for (int i = 0; i < SNAPS; ++i) if (i == k) v = sn.r[i];
+    return v;
+}
+
+__device__ __forceinline__ float* snapAt(const Snaps& sn, int k) {
+    float* v = nullptr;
+#pragma unroll
+    for (int i = 0; i < SNAPS; ++i) if (i == k) v = sn.p[i];
+    return v;
+}
+
+template <bool SNAP>  // false: no row inside the launch keeps its state, and the loop has no check for one
 __global__ void __launch_bounds__(TPR * ROWS) scan_kernel(
         const __nv_bfloat16* __restrict__ proj, const __nv_bfloat16* __restrict__ xc, float* __restrict__ state,
         const float* __restrict__ a, const float* __restrict__ dsk, const float* __restrict__ dtb,
         __nv_bfloat16* __restrict__ y, int W, int proj_w, int xd, int cd, int dt_off, int dh, int per_group,
-        int groups, float lo, float hi) {
+        int groups, float lo, float hi, const Snaps sn) {
     __shared__ float4 bs[STEPS][DS / 4], cs[STEPS][DS / 4];
     __shared__ float xs[STEPS][ROWS], gzs[STEPS][ROWS], dts[STEPS], das[STEPS];
     const int head = blockIdx.x, g = head / per_group;
@@ -31,6 +50,7 @@ __global__ void __launch_bounds__(TPR * ROWS) scan_kernel(
         s[4 * j] = t.x; s[4 * j + 1] = t.y; s[4 * j + 2] = t.z; s[4 * j + 3] = t.w;
     }
     const int b_col = xd + g * DS, c_col = xd + groups * DS + g * DS;
+    [[maybe_unused]] int snapped = 0, want = SNAP ? snapRow(sn, 0) : -1;
     for (int t0 = 0; t0 < W; t0 += STEPS) {
         const int n = min(STEPS, W - t0);
         __syncthreads();
@@ -73,6 +93,15 @@ __global__ void __launch_bounds__(TPR * ROWS) scan_kernel(
                 m[2] = __fmaf_rn(s[4 * j + 2], c.z, m[2]);
                 m[3] = __fmaf_rn(s[4 * j + 3], c.w, m[3]);
             }
+            if constexpr (SNAP) {
+                if (t0 + tt + 1 == want) {
+                    float* s1 = snapAt(sn, snapped) + (static_cast<size_t>(head) * dh + row) * DS;
+#pragma unroll
+                    for (int j = 0; j < NJ; ++j)
+                        *reinterpret_cast<float4*>(s1 + 4 * (TPR * j + q)) = make_float4(s[4 * j], s[4 * j + 1], s[4 * j + 2], s[4 * j + 3]);
+                    want = snapRow(sn, ++snapped);
+                }
+            }
             float out = (m[0] + m[1]) + (m[2] + m[3]);
             out = out + __shfl_xor_sync(0xffffffffu, out, 1);
             out = out + __shfl_xor_sync(0xffffffffu, out, 2);
@@ -88,3 +117,7 @@ __global__ void __launch_bounds__(TPR * ROWS) scan_kernel(
 
 } // namespace tf_scan_rows
 
+template __global__ void tf_scan_rows::scan_kernel<false>(const __nv_bfloat16*, const __nv_bfloat16*, float*, const float*,
+    const float*, const float*, __nv_bfloat16*, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);
+template __global__ void tf_scan_rows::scan_kernel<true>(const __nv_bfloat16*, const __nv_bfloat16*, float*, const float*,
+    const float*, const float*, __nv_bfloat16*, int, int, int, int, int, int, int, int, float, float, const tf_scan_rows::Snaps);
