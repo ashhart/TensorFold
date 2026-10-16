@@ -209,6 +209,7 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
 /// `load` with the packed kernels' library given; without tensor units a packed kernel that fails to build stays null.
 fn loadWith(allocator: std.mem.Allocator, device: mtl.Device, prebuilt: ?mtl.Library) !Kernels {
     var k = Kernels{};
+    errdefer k.deinit(); // every pipeline starts null; errors return only before the workers start or after they join
     const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 10);
     defer allocator.free(jobs);
     const names = try allocator.alloc([:0]const u8, sources.nemotron.all.len);
