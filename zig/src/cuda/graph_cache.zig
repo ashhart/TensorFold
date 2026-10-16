@@ -12,7 +12,7 @@ pub const Body = struct {
     run: *const fn (ctx: *anyopaque, stream: Stream) anyerror!void,
 };
 
-/// Every rank's verdict AND-ed on a miss (hits never call it), so ranks capture, evict and fall back together.
+/// Every rank's verdict AND-ed on a miss, never a hit; an off cache never votes, so ranks match `Settings.digest`.
 pub const Agree = struct {
     ctx: *anyopaque,
     all: *const fn (ctx: *anyopaque, ok: bool) anyerror!bool,
@@ -39,6 +39,30 @@ pub const Settings = struct {
         if (std.mem.eql(u8, v, "0") or std.ascii.eqlIgnoreCase(v, "off")) out.on = false;
         return out;
     }
+
+    /// What a cache runs with: the operator's value, min_keep under max (0 with hold), and every off cache one value.
+    pub fn effective(s: Settings, value: ?[]const u8) Settings {
+        var out = s.operator(value);
+        if (!out.on or out.max == 0) return .{ .on = false, .max = 0, .min_keep = 0, .hold = false };
+        out.min_keep = if (out.hold) 0 else @min(out.min_keep, out.max);
+        return out;
+    }
+
+    /// `effective` under this process's TF_GRAPH_CACHE.
+    pub fn fromEnv(s: Settings) Settings {
+        return s.effective(if (std.c.getenv("TF_GRAPH_CACHE")) |v| std.mem.span(v) else null);
+    }
+
+    /// The effective settings as bytes for ranks to compare at start (a family's bootstrap agreement), never per step.
+    pub fn digest(s: Settings) [10]u8 {
+        const e = s.effective(null);
+        var out: [10]u8 = undefined;
+        out[0] = @intFromBool(e.on);
+        out[1] = @intFromBool(e.hold);
+        std.mem.writeInt(u32, out[2..6], e.max, .little);
+        std.mem.writeInt(u32, out[6..10], e.min_keep, .little);
+        return out;
+    }
 };
 
 pub const Outcome = enum { replayed, captured, eager };
@@ -60,11 +84,10 @@ pub fn Cache(comptime Key: type) type {
         failed: bool = false, // a capture failed on some rank: eager from here on
         stats: struct { replayed: u64 = 0, captured: u64 = 0, eager: u64 = 0, evicted: u64 = 0, dropped: u64 = 0, floor_hits: u64 = 0 } = .{},
 
-        /// The cache with `settings`, unless TF_GRAPH_CACHE turns it off (set it alike on every rank, as `settings`).
+        /// The cache with `settings.fromEnv()`: every rank sharing an `agree` must hold an equal `Settings.digest`.
         pub fn init(gpa: std.mem.Allocator, engine: Engine, settings: Settings) Self {
-            var s = settings.operator(if (std.c.getenv("TF_GRAPH_CACHE")) |v| std.mem.span(v) else null);
-            if (!quiet and settings.on and !s.on) std.log.info("graph cache: off (TF_GRAPH_CACHE), every step eager", .{});
-            s.min_keep = @min(s.min_keep, s.max); // the floor never holds more than the configured max
+            const s = settings.fromEnv();
+            if (!quiet and settings.on and settings.max > 0 and !s.on) std.log.info("graph cache: off (TF_GRAPH_CACHE), every step eager", .{});
             return .{ .gpa = gpa, .engine = engine, .settings = s, .cap = s.max };
         }
 
@@ -421,4 +444,5 @@ test "graph cache: fingerprint" {
 
 test {
     _ = @import("graph_cache_regression_test.zig");
+    _ = @import("graph_cache_ranks_test.zig");
 }
