@@ -42,8 +42,9 @@ fn isAcc(c: *const Ctx, s: []const u8) bool {
 fn join(c: *Ctx, l: []const u8, r: []const u8) Error![]const u8 {
     const a = c.rt.a;
     if (l.len < acc_min and !isAcc(c, l)) return std.mem.concat(a, u8, &.{ l, r });
-    if (!isAcc(c, l) or c.acc.items.len + r.len > c.acc.capacity) {
-        var grown: std.ArrayList(u8) = try .initCapacity(a, (l.len + r.len) * 2);
+    const fresh = !isAcc(c, l);
+    if (fresh or c.acc.items.len + r.len > c.acc.capacity) {
+        var grown: std.ArrayList(u8) = try .initCapacity(a, if (fresh) l.len + r.len else (l.len + r.len) * 2);
         grown.appendSliceAssumeCapacity(l);
         c.acc = grown;
     }
