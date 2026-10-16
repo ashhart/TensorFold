@@ -152,12 +152,39 @@ test "accepted IPv4 and IPv6 TCP streams disable Nagle for incremental responses
         var storage: Threaded.PosixAddress = undefined;
         const len = Threaded.addressToPosix(&peer, &storage);
         if (posix.errno(posix.system.connect(client, &storage.any, len)) != .SUCCESS) return error.ConnectFailed;
-        const stop = std.atomic.Value(bool).init(false);
-        const accepted = listener.accept(&stop) orelse return error.AcceptFailed;
+        const accepted = acceptWithin(listener, 2000) orelse return error.AcceptFailed;
         defer _ = posix.system.close(accepted.fd);
         var value: c_int = 0;
         var size: posix.socklen_t = @sizeOf(c_int);
         try std.testing.expect(std.c.getsockopt(accepted.fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &value, &size) == 0);
         try std.testing.expect(value != 0);
     }
+}
+
+fn acceptWithin(listener: Listener, timeout_ms: u32) ?Listener.Accepted {
+    const Watchdog = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(w: *@This(), milliseconds: u32) void {
+            var elapsed: u32 = 0;
+            while (elapsed < milliseconds and !w.done.load(.acquire)) : (elapsed += 10) {
+                std.Io.sleep(log.io(), .fromMilliseconds(10), .awake) catch break;
+            }
+            if (!w.done.load(.acquire)) w.stop.store(true, .release);
+        }
+    };
+    var watchdog: Watchdog = .{};
+    const thread = std.Thread.spawn(.{}, Watchdog.run, .{ &watchdog, timeout_ms }) catch return null;
+    defer {
+        watchdog.done.store(true, .release);
+        thread.join();
+    }
+    return listener.accept(&watchdog.stop);
+}
+
+test "the accepted-stream test stops when no usable connection arrives" {
+    const listener = try Listener.open(.{ .ip4 = .loopback(0) });
+    defer listener.close();
+    try std.testing.expect(acceptWithin(listener, 20) == null);
 }
