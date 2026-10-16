@@ -13,12 +13,17 @@ fn Blob(comptime import_name: []const u8) type {
 pub const available = options.with_kernels;
 
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
+pub const flashnext_gdn: []const u8 = if (available) &Blob("fatbin_flashnext_gdn").bytes else &.{};
+pub const flashnext_batch: []const u8 = if (available) &Blob("fatbin_flashnext_batch").bytes else &.{};
+pub const flashnext_mtp: []const u8 = if (available) &Blob("fatbin_flashnext_mtp").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
+pub const qmm: []const u8 = if (available) &Blob("fatbin_qmm").bytes else &.{};
 pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").bytes else &.{};
 pub const experts: []const u8 = if (available) &Blob("fatbin_experts").bytes else &.{};
 pub const experts_prefill: []const u8 = if (available) &Blob("fatbin_experts_prefill").bytes else &.{};
 pub const experts_pack: []const u8 = if (available) &Blob("fatbin_experts_pack").bytes else &.{};
+pub const experts_rows: []const u8 = if (available) &Blob("fatbin_experts_rows").bytes else &.{};
 pub const prefill_attention: []const u8 = if (available) &Blob("fatbin_prefill_attention").bytes else &.{};
 pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes else &.{};
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
@@ -46,6 +51,9 @@ pub const nemotron_attention: []const u8 = if (available) &Blob("fatbin_nemotron
 pub const nemotron_keyed: []const u8 = if (available) &Blob("fatbin_nemotron_keyed").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
+pub const route_rows: []const u8 = if (available) &Blob("fatbin_route_rows").bytes else &.{};
+pub const flashnext_hc: []const u8 = if (available) &Blob("fatbin_flashnext_hc").bytes else &.{};
+pub const flashnext_attn: []const u8 = if (available) &Blob("fatbin_flashnext_attn").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
