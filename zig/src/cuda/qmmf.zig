@@ -66,9 +66,9 @@ pub fn plan(m: usize, n: usize, k: usize, clusters: bool) Plan {
 }
 
 /// qmmf.cu's instance names, per mode: row tiles 16, 32, 64 (each plain, then with a cluster), then the fused kernel.
-fn symbol(comptime mode: Mode, comptime bm: u32, comptime cluster: bool, comptime fused: bool) [:0]const u8 {
-    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb0ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
-    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, @intFromBool(cluster), @intFromBool(fused) });
+fn symbol(comptime mode: Mode, comptime bm: u32, comptime cluster: bool, comptime fused: bool, comptime f32_out: bool) [:0]const u8 {
+    const name = "_ZN7tf_qmmf11qmmf_kernelILi{d}ELi{d}ELi64ELi1ELi4ELi4ELb{d}ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
+    return std.fmt.comptimePrint(name, .{ @backingInt(mode), bm, @intFromBool(f32_out), @intFromBool(cluster), @intFromBool(fused) });
 }
 
 pub const reduce_symbol = "_ZN7tf_qmmf13reduce_kernelILb0EEEvPKfPvxif";
@@ -78,22 +78,30 @@ pub const Lane = struct {
     mod: Module,
     fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
     reduce: Function,
+    f32_fns: [modes.len][7]Function,
+    reduce_f32: Function,
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
     pub fn load(d: *const Driver, capability_major: u32) !Lane {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.qmmf);
         errdefer mod.unload();
-        var l: Lane = .{ .mod = mod, .fns = undefined, .reduce = try mod.function(reduce_symbol), .clusters = capability_major >= 9 };
+        var l: Lane = .{ .mod = mod, .fns = undefined, .f32_fns = undefined, .reduce = try mod.function(reduce_symbol), .reduce_f32 = try mod.function("_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif"), .clusters = capability_major >= 9 };
         inline for (modes, 0..) |mode, mi| {
             inline for (row_tiles, 0..) |bm, ti| inline for (.{ false, true }, 0..) |cl, ci| {
-                const f = try mod.function(symbol(mode, bm, cl, false));
+                const f = try mod.function(symbol(mode, bm, cl, false, false));
                 try f.allowDynamicShared(sharedBytes(mode, bm));
                 l.fns[mi][ti * 2 + ci] = f;
+                const fp32_fn = try mod.function(symbol(mode, bm, cl, false, true));
+                try fp32_fn.allowDynamicShared(sharedBytes(mode, bm));
+                l.f32_fns[mi][ti * 2 + ci] = fp32_fn;
             };
-            const f = try mod.function(symbol(mode, 64, false, true));
+            const f = try mod.function(symbol(mode, 64, false, true, false));
             try f.allowDynamicShared(sharedBytes(mode, 64));
             l.fns[mi][6] = f;
+            const fp32_fn = try mod.function(symbol(mode, 64, false, true, true));
+            try fp32_fn.allowDynamicShared(sharedBytes(mode, 64));
+            l.f32_fns[mi][6] = fp32_fn;
         }
         return l;
     }
@@ -110,8 +118,17 @@ pub const Lane = struct {
 
     /// y [m, n] bf16 = x [m, k] bf16 (rows `ldx` apart) times the weight, fp32 sums; `part` holds partBytes.
     pub fn matmul(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
+        return l.matmulTo(s, x, ldx, m, w, y, part, false);
+    }
+
+    /// The same accumulation and reduction, preserving FP32 outputs for a later residual or tensor-rank sum.
+    pub fn matmulF32(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
+        return l.matmulTo(s, x, ldx, m, w, y, part, true);
+    }
+
+    fn matmulTo(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64, f32_out: bool) !void {
         const p = plan(m, w.n, w.k, l.clusters);
-        const set = l.fns[modeIndex(w.mode)];
+        const set = (if (f32_out) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const rows_t = (m + p.bm - 1) / p.bm;
@@ -144,7 +161,7 @@ pub const Lane = struct {
             r.add(@as(i64, @intCast(total)));
             r.add(@as(i32, @intCast(p.sk)));
             r.add(w.scale);
-            try launch_.launch(l.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &r);
+            try launch_.launch(if (f32_out) l.reduce_f32 else l.reduce, .{ .grid = .{ .x = @intCast((total + 255) / 256), .y = 1, .z = 1 }, .block = .{ .x = 256, .y = 1, .z = 1 } }, s, &r);
         }
     }
 };
@@ -212,7 +229,8 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
 }
 
 test "instance names are qmmf.cu's" {
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi2ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.mxfp8, 16, true, false));
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false));
-    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi4ELi64ELi64ELi1ELi4ELi4ELb1ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.bf16, 64, false, true, true));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi2ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.mxfp8, 16, true, false, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true, false));
 }
