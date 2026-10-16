@@ -375,12 +375,22 @@ pub fn moe(
 /// `moe`'s buffers: x rows, the picks' expert ids, act and acts (gate|up out), ye and ys (down out).
 pub const MoeIo = struct { x: Ref, ids: Ref, act: Ref, acts: Ref, ye: Ref, ys: Ref };
 
-/// Each expert's sorted pairs (offsets, order): with `up` x row order / repeat to row i, else x row i to row order[i].
-pub fn bySorted(p: *const Pipes, e: mtl.ComputeEncoder, m: Picks, x: Ref, offsets: Ref, order: Ref, out: Ref, ldo: u32) void {
+/// `pairs` pairs by expert (offsets, order): with `up` x row order / repeat to row i, else x row i to row order[i].
+pub fn bySorted(
+    p: *const Pipes,
+    e: mtl.ComputeEncoder,
+    m: Picks,
+    x: Ref,
+    offsets: Ref,
+    order: Ref,
+    out: Ref,
+    ldo: u32,
+    pairs: u32,
+) void {
     const u = m.up orelse m.w;
     e.setPipeline(if (m.up != null) p.glu_sorted[at(m.w.bits)] else p.sorted[at(m.w.bits)]);
     bind(e, 0, .{ x, m.w.w, m.w.s, m.w.b });
-    e.setValue(pickDims(m, 0, ldo), 4);
+    e.setValue(pickDims(m, pairs, ldo), 4);
     bind(e, 5, .{ out, offsets, order, u.w, u.s, u.b });
     e.dispatchGroups(mtl.Size.of((m.w.n + 7) / 8, m.experts, 1), mtl.Size.of(64, 1, 1));
 }

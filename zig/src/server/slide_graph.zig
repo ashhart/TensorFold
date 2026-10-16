@@ -1,12 +1,16 @@
 //! The Sliding Weights fact graph: what was taught, how far each lesson is, where its neurons went; never the weights.
 const std = @import("std");
+const builtin = @import("builtin");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const slide_model = @import("slide_model.zig");
+const answers = @import("slide_answers.zig");
+const deleting = @import("slide_graph_delete.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-pub const State = enum { queued, learning, learned, missed, replaced }; // replaced: a newer fact took its place
+pub const State = enum { queued, learning, learned, missed, replaced, deleting, deleted }; // replaced: a newer fact took its place; deleting: a delete began, the shards may hold it
+pub const Answer = answers.Answer;
 
 /// Where a learning fact stands: its lesson written by the model, then the engine's stages in turn.
 pub const Phase = enum { writing, reading, fitting, values, checking };
@@ -19,6 +23,8 @@ pub const Fact = struct {
     state: State,
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
+    answers: []const Answer = &.{}, // what they expect: each held-out wording's answer, then those it never learned
+    deleted: i64 = 0, // when it was deleted on request (ms; 0: it was not)
     message: []const u8 = "", // why it stopped, or what its lesson last did
     round: u32 = 0, // its lesson's round now, or the rounds it took
     checks: u32 = 0, // asked checks done, this session
@@ -60,6 +66,12 @@ pub const Graph = struct {
     model: ?slide_model.Model = null, // the served folder as last scanned
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
+    fault: Fault = .none, // a test's failure of the next file write (read in tests only)
+
+    pub const Fault = enum { none, write, rename };
+    pub const record = deleting.record;
+    pub const remove = deleting.remove;
+    pub const snapshot = deleting.snapshot;
 
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
@@ -95,7 +107,7 @@ pub const Graph = struct {
         const f = g.find(id) orelse return;
         f.state = state;
         if (state != .learning) f.phase = null;
-        if (state == .missed or state == .replaced) f.neurons = &.{};
+        if (state == .missed or state == .replaced or state == .deleted) f.neurons = &.{};
         g.save();
     }
 
@@ -172,6 +184,7 @@ pub const Graph = struct {
             if (x.layer != y.layer or x.neuron != y.neuron or x.key != y.key) break;
         } else return;
         f.neurons = g.arena.allocator().dupe(api.Neuron, neurons) catch return;
+        deleting.takeOver(g, f, neurons);
     }
 
     /// A learning fact's round, from one.
@@ -209,6 +222,15 @@ pub const Graph = struct {
         const out = a.alloc([]const u8, questions.len) catch return;
         for (questions, out) |q, *o| o.* = a.dupe(u8, q) catch return;
         f.questions = out;
+        g.save();
+    }
+
+    /// What a fact's checks expect, which a delete asks again of every fact it leaves.
+    pub fn expects(g: *Graph, id: u32, xs: []const Answer) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const f = g.find(id) orelse return;
+        f.answers = answers.dupe(g.arena.allocator(), xs) catch return;
         g.save();
     }
 
@@ -281,7 +303,7 @@ pub const Graph = struct {
         return g.document(a, true);
     }
 
-    fn find(g: *Graph, id: u32) ?*Fact {
+    pub fn find(g: *Graph, id: u32) ?*Fact {
         for (g.facts.items) |*f| if (f.id == id) return f;
         return null;
     }
@@ -303,6 +325,8 @@ pub const Graph = struct {
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
             if (f.questions.len > 0) try o.put(a, "questions", try strings(a, f.questions));
             if (f.neurons.len > 0) try o.put(a, "neurons", try neuronList(a, f.neurons));
+            if (f.answers.len > 0) try o.put(a, "answers", try answers.value(a, f.answers));
+            if (f.deleted > 0) try o.put(a, "deleted", try json.intValue(a, f.deleted));
             if (live) try g.liveFields(a, o, f);
             out.* = .{ .object = o };
         }
@@ -339,15 +363,24 @@ pub const Graph = struct {
 
     /// Write the file through a renamed temporary; a failed write keeps the old file (called under the lock).
     fn save(g: *Graph) void {
+        g.persist() catch {};
+    }
+
+    /// `save` with its failure returned, the old file then kept whole (called under the lock).
+    pub fn persist(g: *Graph) !void {
         const path = g.path orelse return;
         var scratch = std.heap.ArenaAllocator.init(g.gpa);
         defer scratch.deinit();
         const a = scratch.allocator();
-        const body = g.document(a, false) catch return;
-        const tmp = std.fmt.allocPrint(a, "{s}.tmp", .{path}) catch return;
-        if (std.fs.path.dirname(path)) |dir| Io.Dir.cwd().createDirPath(g.io, dir) catch return;
-        Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body }) catch return;
-        Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io) catch return;
+        const body = try g.document(a, false);
+        const tmp = try std.fmt.allocPrint(a, "{s}.tmp", .{path});
+        if (std.fs.path.dirname(path)) |dir| try Io.Dir.cwd().createDirPath(g.io, dir);
+        const fault: Fault = if (builtin.is_test) g.fault else .none;
+        if (builtin.is_test) g.fault = .none;
+        if (fault == .write) return error.GraphWrite;
+        try Io.Dir.cwd().writeFile(g.io, .{ .sub_path = tmp, .data = body });
+        if (fault == .rename) return error.GraphRename;
+        try Io.Dir.cwd().rename(tmp, Io.Dir.cwd(), path, g.io);
     }
 
     fn load(g: *Graph) !void {
@@ -363,6 +396,8 @@ pub const Graph = struct {
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
+            fact.deleted = int(i64, f.field("deleted")) catch 0;
+            if (f.field("answers")) |xs| fact.answers = try answers.read(a, xs);
             if (f.field("questions")) |qs| if (qs.items()) |xs| {
                 const out = try a.alloc([]const u8, xs.len);
                 for (xs, out) |x, *o| o.* = x.str() orelse "";

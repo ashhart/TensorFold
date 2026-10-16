@@ -32,11 +32,15 @@ def one(base: str, model: str, item: dict, max_tokens: int, temperature: float, 
     out = {"id": item["id"], "sent": time.perf_counter(), "first": None, "last": None, "tokens": 0, "pieces": 0,
            "text_sha": None, "token_sha": None, "finish": None, "prompt_tokens": None, "error": None, "arrivals": []}
     text = []
+    complete = False
     try:
         with urllib.request.urlopen(req, timeout=3600) as resp:
             for raw in resp:
                 line = raw.decode().strip()
-                if not line.startswith("data:") or line == "data: [DONE]":
+                if line == "data: [DONE]":
+                    complete = True
+                    break
+                if not line.startswith("data:"):
                     continue
                 chunk = json.loads(line[5:])
                 if chunk.get("error"):
@@ -62,6 +66,8 @@ def one(base: str, model: str, item: dict, max_tokens: int, temperature: float, 
                         out["finish"] = choice["finish_reason"]
     except Exception as exc:  # noqa: BLE001 - a failed request is reported
         out["error"] = f"{type(exc).__name__}: {exc}"[:300]
+    if not complete and out["error"] is None:
+        out["error"] = "incomplete_stream"
     out["text_sha"] = hashlib.sha256("".join(text).encode()).hexdigest()[:16]
     return out
 

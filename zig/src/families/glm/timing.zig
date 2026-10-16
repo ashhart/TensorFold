@@ -101,7 +101,7 @@ const Scratch = struct {
         var at: u32 = 0;
         while (at < prompt_len) {
             const n = s.sl.chunkRows(at, prompt_len);
-            try s.sl.chunk(0, at, n);
+            try s.sl.chunk(0, at, n, null);
             at += n;
         }
     }
@@ -119,7 +119,7 @@ const Scratch = struct {
         try s.sl.flush();
         var clock: lanes.backend.WallClock = .{ .io = s.io };
         clock.clock().start();
-        try s.sl.window(&.{.{ .slot = 0, .pending = s.tokens[0], .held = 0, .tokens = s.tokens[1..rows] }});
+        try s.sl.window(&.{.{ .slot = 0, .pending = s.tokens[0], .held = 0, .tokens = s.tokens[1..rows] }}, null);
         const ms = clock.clock().elapsedMs(.cost);
         try s.sl.keep(0, 1);
         return ms;

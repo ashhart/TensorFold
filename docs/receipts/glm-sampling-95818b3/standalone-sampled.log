@@ -1,0 +1,35 @@
+warning: glm: GLM_LOAD_LIMIT_GB lets this Mac load 235.0 GB, past the default 179.2 GB (70% of RAM): a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it
+glm plan: 45 of 45 layers and the MTP layer, 180.58 GB in buffers, every tensor's name, dtype and shape checked; 4-bit/64 x408
+loaded in 60.6 s: 45 of 45 layers, routed experts 0-287, 180.6 GB of weights, MTP head yes, 3.58 GB of caches and buffers, prompt chunks of 16384 rows
+prose depth 0 run 0: 1428 prompt tokens in 2.91 s (491 tok/s), 64 tokens at 51.7 tok/s, 63 rounds, 0/0 drafts kept, hash dc5f52d6073ced52
+  tokens: { 785, 1196, 702, 3208, 264, 15481, 315, 11499, 5128, 330, 32, 6172, 14034, 458, 1946, 4621, 311, 458, 2550, 4621, 1189, 323, 1221, 17045, 330, 840, 20726, 6172, 46163, 304, 2326, 22809, 2217, 1986, 4977, 1075, 264, 1273, 476, 264, 9929, 448, 10072, 315, 53059, 13, 576, 5042 }
+  a round: 19.36 ms wall, 19.29 ms GPU, 0.19 ms encoding, 0.00 ms GPU idle between rounds; 1.00 tokens
+prose depth 0 run 1: 1428 prompt tokens in 2.93 s (487 tok/s), 64 tokens at 51.6 tok/s, 63 rounds, 0/0 drafts kept, hash dc5f52d6073ced52
+  tokens: { 785, 1196, 702, 3208, 264, 15481, 315, 11499, 5128, 330, 32, 6172, 14034, 458, 1946, 4621, 311, 458, 2550, 4621, 1189, 323, 1221, 17045, 330, 840, 20726, 6172, 46163, 304, 2326, 22809, 2217, 1986, 4977, 1075, 264, 1273, 476, 264, 9929, 448, 10072, 315, 53059, 13, 576, 5042 }
+  a round: 19.37 ms wall, 19.30 ms GPU, 0.20 ms encoding, 0.00 ms GPU idle between rounds; 1.00 tokens
+  equal to depth 0
+prose depth 3 run 0: 1428 prompt tokens in 2.94 s (486 tok/s), 64 tokens at 59.3 tok/s, 21 rounds, 42/63 drafts kept, hash dc5f52d6073ced52
+  tokens: { 785, 1196, 702, 3208, 264, 15481, 315, 11499, 5128, 330, 32, 6172, 14034, 458, 1946, 4621, 311, 458, 2550, 4621, 1189, 323, 1221, 17045, 330, 840, 20726, 6172, 46163, 304, 2326, 22809, 2217, 1986, 4977, 1075, 264, 1273, 476, 264, 9929, 448, 10072, 315, 53059, 13, 576, 5042 }
+  a round: 50.61 ms wall, 47.65 ms GPU, 0.21 ms encoding, 0.70 ms GPU idle between rounds; 3.00 tokens
+  equal to depth 0
+prose depth 3 run 1: 1428 prompt tokens in 2.93 s (487 tok/s), 64 tokens at 58.7 tok/s, 21 rounds, 42/63 drafts kept, hash dc5f52d6073ced52
+  tokens: { 785, 1196, 702, 3208, 264, 15481, 315, 11499, 5128, 330, 32, 6172, 14034, 458, 1946, 4621, 311, 458, 2550, 4621, 1189, 323, 1221, 17045, 330, 840, 20726, 6172, 46163, 304, 2326, 22809, 2217, 1986, 4977, 1075, 264, 1273, 476, 264, 9929, 448, 10072, 315, 53059, 13, 576, 5042 }
+  a round: 51.14 ms wall, 47.65 ms GPU, 0.22 ms encoding, 0.96 ms GPU idle between rounds; 3.00 tokens
+  equal to depth 0
+  cancel test: cancelled reply ended cancelled after 2 tokens; the next fresh reply equals the plain one
+code depth 0 run 0: 1559 prompt tokens in 3.16 s (493 tok/s), 64 tokens at 51.3 tok/s, 63 rounds, 0/0 drafts kept, hash 5092216d2bf50933
+  tokens: { 785, 1196, 702, 3208, 752, 264, 1943, 429, 5610, 264, 10946, 3311, 315, 11499, 2038, 1959, 279, 1852, 1565, 718, 2877, 11, 293, 45907, 729, 4512, 916, 323, 916, 1549, 11, 17246, 220, 106464, 10, 3039, 13, 5005, 518, 279, 835, 11, 807, 2548, 25, 330, 7984, 264 }
+  a round: 19.50 ms wall, 19.44 ms GPU, 0.18 ms encoding, 0.00 ms GPU idle between rounds; 1.00 tokens
+code depth 0 run 1: 1559 prompt tokens in 3.18 s (491 tok/s), 64 tokens at 51.3 tok/s, 63 rounds, 0/0 drafts kept, hash 5092216d2bf50933
+  tokens: { 785, 1196, 702, 3208, 752, 264, 1943, 429, 5610, 264, 10946, 3311, 315, 11499, 2038, 1959, 279, 1852, 1565, 718, 2877, 11, 293, 45907, 729, 4512, 916, 323, 916, 1549, 11, 17246, 220, 106464, 10, 3039, 13, 5005, 518, 279, 835, 11, 807, 2548, 25, 330, 7984, 264 }
+  a round: 19.51 ms wall, 19.41 ms GPU, 0.18 ms encoding, 0.00 ms GPU idle between rounds; 1.00 tokens
+  equal to depth 0
+code depth 3 run 0: 1559 prompt tokens in 3.17 s (491 tok/s), 64 tokens at 51.5 tok/s, 24 rounds, 39/72 drafts kept, hash 5092216d2bf50933
+  tokens: { 785, 1196, 702, 3208, 752, 264, 1943, 429, 5610, 264, 10946, 3311, 315, 11499, 2038, 1959, 279, 1852, 1565, 718, 2877, 11, 293, 45907, 729, 4512, 916, 323, 916, 1549, 11, 17246, 220, 106464, 10, 3039, 13, 5005, 518, 279, 835, 11, 807, 2548, 25, 330, 7984, 264 }
+  a round: 50.94 ms wall, 48.30 ms GPU, 0.21 ms encoding, 0.55 ms GPU idle between rounds; 2.63 tokens
+  equal to depth 0
+code depth 3 run 1: 1559 prompt tokens in 3.17 s (492 tok/s), 64 tokens at 51.4 tok/s, 24 rounds, 39/72 drafts kept, hash 5092216d2bf50933
+  tokens: { 785, 1196, 702, 3208, 752, 264, 1943, 429, 5610, 264, 10946, 3311, 315, 11499, 2038, 1959, 279, 1852, 1565, 718, 2877, 11, 293, 45907, 729, 4512, 916, 323, 916, 1549, 11, 17246, 220, 106464, 10, 3039, 13, 5005, 518, 279, 835, 11, 807, 2548, 25, 330, 7984, 264 }
+  a round: 51.04 ms wall, 48.25 ms GPU, 0.22 ms encoding, 0.78 ms GPU idle between rounds; 2.63 tokens
+  equal to depth 0
+  cancel test: cancelled reply ended cancelled after 2 tokens; the next fresh reply equals the plain one
