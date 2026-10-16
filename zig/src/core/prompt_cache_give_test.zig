@@ -100,3 +100,20 @@ test "a store of `most` slots keeps no more states than that: a keep past them f
     try std.testing.expect(!s.keep(&c2, 6, null, &.{}, &.{})); // no slot at all: refused, not saved
     try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
 }
+
+test "reusing spare storage still respects the kept-state count" {
+    const gpa = std.testing.allocator;
+    var f: Fake = .{ .gpa = gpa, .spare_bytes = 1000 };
+    var s = Store.init(gpa, f.pooled(), .{ .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    s.most = 1;
+    f.at = 4;
+    try std.testing.expect(s.keep(&c1, 4, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    f.at = 6;
+    try std.testing.expect(s.keep(&c2, 6, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), f.live);
+    try std.testing.expectEqual(@as(u32, 6), s.entries.items[0].at);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+}

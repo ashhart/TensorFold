@@ -461,7 +461,7 @@ pub const Store = struct {
             return false;
         }
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
-            if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) break;
+            if (s.family.vtable.reuses) |f| if (s.entries.items.len < s.most and f(s.family.ptr, at)) break;
             const free_ = s.spare();
             if (s.held + free_ + bytes <= s.budget and s.entries.items.len < s.most) break;
             if (free_ > 0) {
