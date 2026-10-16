@@ -14,9 +14,9 @@ const usage =
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
     \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control]
-    \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in windows,
-    \\each row's KL(bf16 || fp8) of the next-token distributions and top-1 agreement; control: bf16 against bf16 rotated
-    \\three positions off, a defect the meter must show.
+    \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
+    \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
+    \\id; control: bf16 against bf16 whose every other window rotates three positions on (a uniform shift cancels).
     \\
 ;
 
@@ -286,7 +286,7 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     var ids: std.ArrayList(u32) = .empty;
     var it = std.mem.tokenizeAny(u8, try std.Io.Dir.cwd().readFileAlloc(io, ids_path, a, .limited(64 << 20)), ", \n");
     while (it.next()) |t| try ids.append(a, try std.fmt.parseInt(u32, t, 10));
-    if (skip + rows > ids.items.len) return error.FixtureTooShort;
+    if (skip + rows >= ids.items.len) return error.FixtureTooShort;
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
@@ -299,11 +299,11 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     defer cb.deinit(init.gpa);
     var c8 = try E.Cache.init(init.gpa, e8, skip + rows + 64);
     defer c8.deinit(init.gpa);
-    if (control) c8.delta = 3;
     try fill(eb, &cb, ids.items[0..skip], skip);
     try fill(e8, &c8, ids.items[0..skip], skip);
     const kls = try a.alloc(f64, rows);
     var top1: usize = 0;
+    var loss: [2]f64 = .{ 0, 0 };
     var at: usize = 0;
     while (at < rows) {
         const n = @min(eb.window_rows, rows - at);
@@ -311,23 +311,26 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
         try eb.forward(&.{.{ .cache = &cb, .rows = n }}, w, .logits);
         try e8.forward(&.{.{ .cache = &c8, .rows = n }}, w, .logits);
         for (0..n) |r| {
-            const d = divergence(eb.rowLogits(r), e8.rowLogits(r));
+            const d = divergence(eb.rowLogits(r), e8.rowLogits(r), ids.items[skip + at + r + 1]);
             kls[at + r] = d.kl;
             top1 += @intFromBool(d.same_top);
+            for (&loss, d.loss) |*l, x| l.* += x;
         }
         at += n;
+        if (control) c8.delta = 3 - c8.delta;
     }
     var sum: f64 = 0;
     for (kls) |x| sum += x;
     std.mem.sort(f64, kls, {}, std.sort.asc(f64));
-    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}}}\n", .{ rows, skip, control, sum / @as(f64, @floatFromInt(rows)), kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / @as(f64, @floatFromInt(rows)) });
+    const nr: f64 = @floatFromInt(rows);
+    const report = try std.fmt.allocPrint(a, "{{\"rows\": {d}, \"skip\": {d}, \"control\": {}, \"kl_mean\": {d:.6}, \"kl_p99\": {d:.6}, \"kl_max\": {d:.6}, \"top1\": {d:.5}, \"loss_bf16\": {d:.5}, \"loss_other\": {d:.5}}}\n", .{ rows, skip, control, sum / nr, kls[(rows * 99) / 100], kls[rows - 1], @as(f64, @floatFromInt(top1)) / nr, loss[0] / nr, loss[1] / nr });
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = report });
     std.debug.print("{s}", .{report});
     return 0;
 }
 
-/// KL(p || q) in float64 of two rows of bf16 logits, and whether their largest logits sit at one token.
-fn divergence(p: []const u16, q: []const u16) struct { kl: f64, same_top: bool } {
+/// KL(p || q) in float64 of two bf16 logit rows, whether their largest sit at one token, and each one's loss on `next`.
+fn divergence(p: []const u16, q: []const u16, next: u32) struct { kl: f64, same_top: bool, loss: [2]f64 } {
     var mp: f64 = -std.math.inf(f64);
     var mq: f64 = -std.math.inf(f64);
     var ap: usize = 0;
@@ -355,7 +358,7 @@ fn divergence(p: []const u16, q: []const u16) struct { kl: f64, same_top: bool }
         const a = bf(x) - lp;
         d += @exp(a) * (a - (bf(y) - lq));
     }
-    return .{ .kl = @max(d, 0), .same_top = ap == aq };
+    return .{ .kl = @max(d, 0), .same_top = ap == aq, .loss = .{ lp - bf(p[next]), lq - bf(q[next]) } };
 }
 
 fn bf(h: u16) f64 {
