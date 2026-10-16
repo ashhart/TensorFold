@@ -457,3 +457,30 @@ test "unsupported budgets leave zero unset and thinking-disabled requests valid"
     }
     try std.testing.expectEqual(@as(usize, 3), backend.submissions);
 }
+
+test "closed or busy admission is service unavailable across chat, messages and responses" {
+    const ClosedEngine = struct {
+        reason: api.SubmitError = error.Closed,
+        fn engine(e: *@This()) api.Engine {
+            return .{ .ctx = e, .vtable = &.{ .info = HiEngine.info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+        }
+        fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+            return @as(*@This(), @ptrCast(@alignCast(ctx))).reason;
+        }
+    };
+    const cases = [_]struct { route: Route, body: []const u8 }{
+        .{ .route = .chat, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}" },
+        .{ .route = .messages, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}" },
+        .{ .route = .responses, .body = "{\"model\":\"test-model\",\"input\":\"x\",\"max_output_tokens\":1}" },
+    };
+    var engine: ClosedEngine = .{};
+    for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
+        engine.reason = reason;
+        for (cases) |c| {
+            const seen = try sendWith(engine.engine(), c.route, c.body, .{});
+            try std.testing.expectEqual(@as(?u16, 503), seen.status);
+            try std.testing.expect(!seen.opened);
+            try std.testing.expectEqual(@as(i64, 0), seen.preparing);
+        }
+    }
+}

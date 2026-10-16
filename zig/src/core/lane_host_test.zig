@@ -564,6 +564,7 @@ test {
     _ = @import("lane_host_recall_test.zig");
     _ = @import("lane_host_fill_test.zig");
     _ = @import("lane_host_status_test.zig");
+    _ = @import("lane_host_health_test.zig");
     _ = @import("lane_host_stale_test.zig");
     _ = @import("lane_host_reuse_test.zig");
     _ = @import("lane_host_cache_lifetime_test.zig");
