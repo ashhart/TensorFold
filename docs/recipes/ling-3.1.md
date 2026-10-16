@@ -264,6 +264,11 @@ the file, the grouped experts' gate-up (SwiGLU) and down, and each small tensor 
 `dt_bias`, router, bias) byte for byte. Measured: bf16 85 projections, FP8 and NVFP4 61 each, worst 0.433 of the bound
 (2^-7 of |y| plus 2^-12 of the sum of |x w|); 37 small tensors equal.
 
+`ling-init-faults DIR [--mtp]` opens the backend (engine, sequence 0, lane backend) on `fake_driver.zig`, a host
+stand-in for the driver, once cleanly and then with each of its driver calls, and each of its host allocations,
+failing in turn: every failed open must leave nothing allocated, held or freed twice (no GPU work; FP8 with `--mtp`
+is 869 calls and 394 allocations). `ling-slots` checks the lane backend's slot choice in the release build.
+
 With the real checkpoint:
 
 ```bash

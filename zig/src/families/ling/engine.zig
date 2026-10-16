@@ -126,6 +126,10 @@ pub const Engine = struct {
         errdefer e.smp.deinit();
         e.pairs = try cuda.DeviceBuffer.alloc(d, 8 * window_rows);
         errdefer e.pairs.free();
+        errdefer {
+            for (0..e.seqs.items.len) |i| e.free(i);
+            e.seqs.deinit(gpa);
+        }
         try e.bind(0);
         try e.stream.synchronize();
         return e;
