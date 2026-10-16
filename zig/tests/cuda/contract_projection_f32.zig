@@ -16,6 +16,8 @@ const served = [_]c.Shape{
     .{ .rows = 256, .n = 70, .k = 1024 },
     .{ .rows = 16, .n = 1280, .k = 2560 },
     .{ .rows = 16, .n = 2560, .k = 640 },
+    .{ .rows = 7, .n = 2560, .k = 10240 },
+    .{ .rows = 7, .n = 13952, .k = 2560 },
 };
 
 fn depth(shape: c.Shape) usize {
