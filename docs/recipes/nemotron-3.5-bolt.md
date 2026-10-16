@@ -31,7 +31,11 @@ token and head (4,224 bytes a token against 8,192), and `BOLT_KV_PIN=1` maps eve
 - Prompt cache over the Mamba state, attention rows and drafter context (`snap_*`, any row, no lookahead).
 - Images through the RADIO tower (`--vision`): each prompt piece encodes the images it crosses into the rows buffer, so a
   request holds as many images as fit the window (`--vision-max-images`, up to 64).
-- Not served: logprobs, grammars, speculative trees, int8 or int4 caches, `--slide`.
+- Structured output and forced tool calls: `response_format` (`json_schema`, `json_object`), `guided_*` fields and
+  `tool_choice` `required` or a named function. The server compiles the grammar (`libtfgrammar`, `zig build grammar`) to
+  per-row allowed-token bits; the backend redraws the rows of a verify window among those tokens (a masked top-k on the
+  GPU, `bolt_mask_rows`), hands the grammar its held drafts, and draws the first token again under the first mask.
+- Not served: logprobs, speculative trees, int8 or int4 caches, `--slide`.
 
 ## Exactness
 

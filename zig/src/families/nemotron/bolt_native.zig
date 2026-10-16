@@ -5,6 +5,7 @@ const reuse = @import("cuda_reuse.zig");
 const cuda = @import("cuda");
 const radio = @import("radio");
 const native = @import("cuda_native.zig");
+const lib = @import("bolt_api.zig");
 pub const vision = native.vision;
 
 pub const model_type = "nemotron_h_puzzle";
@@ -31,18 +32,12 @@ const max_batch: u32 = 128;
 /// Image spans a prompt piece may cross, and the rows its images take together (a piece cuts two 3,328-token images).
 const max_runs = 64;
 const image_rows: u32 = 16384;
-/// The C ABI version of libbolt this backend speaks (`bolt_abi`).
-const abi_version: c_int = 1;
 /// Candidates kept per row for the keyed draw.
 const cand_max: usize = 64;
 
 /// Acceptance by depth until a stream has its own (greedy replies on the drafter's own text: 0.86 a level).
 const prior = [_]f64{ 0.80, 0.78, 0.76, 0.74, 0.72, 0.70, 0.68 };
 
-extern "c" fn dlopen(path: [*:0]const u8, mode: c_int) ?*anyopaque;
-extern "c" fn dlsym(handle: ?*anyopaque, name: [*:0]const u8) ?*anyopaque;
-extern "c" fn dlerror() ?[*:0]const u8;
-extern "c" fn readlink(path: [*:0]const u8, buf: [*]u8, len: usize) isize;
 const Timespec = extern struct { sec: i64, nsec: i64 };
 extern "c" fn clock_gettime(clk: c_int, ts: *Timespec) c_int;
 fn nowMs() f64 {
@@ -51,74 +46,6 @@ fn nowMs() f64 {
     return @as(f64, @floatFromInt(ts.sec)) * 1000.0 + @as(f64, @floatFromInt(ts.nsec)) / 1e6;
 }
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-
-/// A run of a prompt piece whose embeddings are rows on the device (bolt_prefill_seq_rows).
-const RowRun = extern struct { pos: c_int, count: c_int, rows: u64 };
-
-/// libbolt's C ABI, resolved once.
-const Api = struct {
-    open: *const fn ([*:0]const u8, c_int) callconv(.c) ?*anyopaque,
-    free: *const fn (?*anyopaque) callconv(.c) void,
-    seqs: *const fn (?*anyopaque) callconv(.c) c_int,
-    seq_alloc: *const fn (?*anyopaque) callconv(.c) c_int,
-    seq_release: *const fn (?*anyopaque, c_int) callconv(.c) void,
-    seq_bytes: *const fn (?*anyopaque) callconv(.c) u64,
-    prompt_end: *const fn (?*anyopaque, c_int, c_int) callconv(.c) void,
-    prefill: *const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int) callconv(.c) c_int,
-    forward: *const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int, c_int) callconv(.c) c_int,
-    forward_multi: *const fn (?*anyopaque, c_int, [*]const c_int, [*]const c_int, [*]const c_int, c_int) callconv(.c) c_int,
-    candidates: *const fn (?*anyopaque, c_int, c_int, [*]f32, [*]c_int) callconv(.c) void,
-    keep: *const fn (?*anyopaque, c_int, c_int) callconv(.c) void,
-    propose: *const fn (?*anyopaque, c_int, c_int, [*]c_int) callconv(.c) c_int,
-    propose_multi: *const fn (?*anyopaque, c_int, [*]const c_int, [*]const c_int, [*]c_int, [*]c_int) callconv(.c) void,
-    has_draft: *const fn (?*anyopaque) callconv(.c) c_int,
-    abi: *const fn () callconv(.c) c_int,
-    prefill_rows: *const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int, [*]const RowRun, c_int) callconv(.c) c_int,
-    cost: *const fn (?*anyopaque, c_int) callconv(.c) f64,
-    draft_multi_cost: *const fn (?*anyopaque) callconv(.c) f64,
-    shared_costs: *const fn (?*anyopaque, [*]c_int, [*]f64, c_int) callconv(.c) c_int,
-    snap_bytes: *const fn (?*anyopaque, c_int) callconv(.c) u64,
-    snap_save: *const fn (?*anyopaque, c_int, c_int) callconv(.c) ?*anyopaque,
-    snap_restore: *const fn (?*anyopaque, c_int, ?*anyopaque) callconv(.c) c_int,
-    snap_drop: *const fn (?*anyopaque, ?*anyopaque) callconv(.c) void,
-
-    fn load(handle: ?*anyopaque) !Api {
-        return .{
-            .open = try sym(*const fn ([*:0]const u8, c_int) callconv(.c) ?*anyopaque, handle, "bolt_open"),
-            .free = try sym(*const fn (?*anyopaque) callconv(.c) void, handle, "bolt_free"),
-            .seqs = try sym(*const fn (?*anyopaque) callconv(.c) c_int, handle, "bolt_seqs"),
-            .seq_alloc = try sym(*const fn (?*anyopaque) callconv(.c) c_int, handle, "bolt_seq_alloc"),
-            .seq_release = try sym(*const fn (?*anyopaque, c_int) callconv(.c) void, handle, "bolt_seq_release"),
-            .seq_bytes = try sym(*const fn (?*anyopaque) callconv(.c) u64, handle, "bolt_seq_bytes"),
-            .prompt_end = try sym(*const fn (?*anyopaque, c_int, c_int) callconv(.c) void, handle, "bolt_prompt_end"),
-            .prefill = try sym(*const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int) callconv(.c) c_int, handle, "bolt_prefill_seq"),
-            .forward = try sym(*const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int, c_int) callconv(.c) c_int, handle, "bolt_forward_seq"),
-            .forward_multi = try sym(*const fn (?*anyopaque, c_int, [*]const c_int, [*]const c_int, [*]const c_int, c_int) callconv(.c) c_int, handle, "bolt_forward_multi"),
-            .candidates = try sym(*const fn (?*anyopaque, c_int, c_int, [*]f32, [*]c_int) callconv(.c) void, handle, "bolt_candidates"),
-            .keep = try sym(*const fn (?*anyopaque, c_int, c_int) callconv(.c) void, handle, "bolt_keep_seq"),
-            .propose = try sym(*const fn (?*anyopaque, c_int, c_int, [*]c_int) callconv(.c) c_int, handle, "bolt_propose_seq"),
-            .propose_multi = try sym(*const fn (?*anyopaque, c_int, [*]const c_int, [*]const c_int, [*]c_int, [*]c_int) callconv(.c) void, handle, "bolt_propose_multi"),
-            .has_draft = try sym(*const fn (?*anyopaque) callconv(.c) c_int, handle, "bolt_has_draft"),
-            .abi = try sym(*const fn () callconv(.c) c_int, handle, "bolt_abi"),
-            .prefill_rows = try sym(*const fn (?*anyopaque, c_int, [*]const c_int, c_int, c_int, [*]const RowRun, c_int) callconv(.c) c_int, handle, "bolt_prefill_seq_rows"),
-            .cost = try sym(*const fn (?*anyopaque, c_int) callconv(.c) f64, handle, "bolt_cost"),
-            .draft_multi_cost = try sym(*const fn (?*anyopaque) callconv(.c) f64, handle, "bolt_draft_multi_cost"),
-            .shared_costs = try sym(*const fn (?*anyopaque, [*]c_int, [*]f64, c_int) callconv(.c) c_int, handle, "bolt_shared_costs"),
-            .snap_bytes = try sym(*const fn (?*anyopaque, c_int) callconv(.c) u64, handle, "bolt_snap_bytes"),
-            .snap_save = try sym(*const fn (?*anyopaque, c_int, c_int) callconv(.c) ?*anyopaque, handle, "bolt_snap_save_seq"),
-            .snap_restore = try sym(*const fn (?*anyopaque, c_int, ?*anyopaque) callconv(.c) c_int, handle, "bolt_snap_restore_seq"),
-            .snap_drop = try sym(*const fn (?*anyopaque, ?*anyopaque) callconv(.c) void, handle, "bolt_snap_drop"),
-        };
-    }
-
-    fn sym(comptime T: type, handle: ?*anyopaque, name: [*:0]const u8) !T {
-        const p = dlsym(handle, name) orelse {
-            std.log.err("bolt: libbolt.so has no {s}", .{name});
-            return error.BoltMissing;
-        };
-        return @ptrCast(@alignCast(p));
-    }
-};
 
 /// What the backend keeps for one live stream: its libbolt sequence, the prompt pass in progress, and the drafts held.
 const Slot = struct {
@@ -135,7 +62,7 @@ const draw_ring = 4096;
 
 const Engine = struct {
     gpa: std.mem.Allocator,
-    api: Api,
+    api: lib.Api,
     model: *anyopaque,
     drafts: bool,
     seqs: u32,
@@ -148,6 +75,7 @@ const Engine = struct {
     target: reuse.Target = undefined,
     vision: ?*vision.Vision = null, // --vision: the RADIO tower and a rows buffer one prompt piece uses
     stream: ?cuda.Stream = null, // the stream the tower runs on
+    maskbuf: std.ArrayList(u32) = .empty, // structured output: a verify's masked rows' allowed-token bits, back to back
 
     /// Candidates the keyed draw needs for this stream's sampling: 1 when greedy.
     fn candCount(s: *const lanes.Stream) c_int {
@@ -168,7 +96,8 @@ const Engine = struct {
         e.api.candidates(e.model, @intCast(row), k, &vals, &ids);
         const sm = s.sampling orelse return @intCast(ids[0]);
         if (sm.temperature <= 0) return @intCast(ids[0]);
-        const n: usize = @intCast(k);
+        var n: usize = @intCast(k);
+        while (n > 1 and vals[n - 1] < -3.0e38) n -= 1; // a masked row with fewer allowed tokens than candidates
         var v: [cand_max]f64 = undefined;
         var d: [cand_max]u64 = undefined;
         for (0..n) |i| {
@@ -227,7 +156,7 @@ const Engine = struct {
         }
         const last = end == prompt_len;
         const cand: c_int = if (last) candCount(s) else 0;
-        var runs: [max_runs]RowRun = undefined;
+        var runs: [max_runs]lib.RowRun = undefined;
         const nruns = if (s.images.len > 0) try e.imageRuns(s, slot.at, end, &runs) else 0;
         const rc = if (nruns > 0)
             e.api.prefill_rows(e.model, slot.seq, slot.ids.ptr + slot.at, @intCast(end - slot.at), cand, &runs, @intCast(nruns))
@@ -247,7 +176,7 @@ const Engine = struct {
     }
 
     /// The images rows [lo, hi) cross, encoded into the rows buffer, and the runs libbolt reads (a cut one is redone).
-    fn imageRuns(e: *Engine, s: *const lanes.Stream, lo: usize, hi: usize, runs: []RowRun) !usize {
+    fn imageRuns(e: *Engine, s: *const lanes.Stream, lo: usize, hi: usize, runs: []lib.RowRun) !usize {
         const v = e.vision orelse return error.NoVision;
         const st = e.stream.?;
         const row_bytes = v.rows.hidden * 2;
@@ -281,6 +210,24 @@ const Engine = struct {
         return e.remember(token);
     }
 
+    /// The first token again, drawn among the tokens `mask` allows (the prompt pass drew it without the grammar).
+    fn firstMasked(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) !u64 {
+        const e: *Engine = @ptrCast(@alignCast(ptr));
+        const k = candCount(s);
+        const row0 = [1]c_int{0};
+        if (mask.len == 0 or e.api.mask_rows(e.model, 1, &row0, mask.ptr, @intCast(mask.len), k) != 0) return error.BoltForward;
+        const token = try e.draw(s, 0, position, k);
+        return e.remember(token);
+    }
+
+    /// The drafts held for the stream's next window, as host tokens in window order (a grammar walks them).
+    fn held(ptr: *anyopaque, s: *lanes.Stream, out: []u32) !void {
+        const e: *Engine = @ptrCast(@alignCast(ptr));
+        const slot = try e.slotOf(s);
+        if (out.len > slot.held_n) return error.HeldDraftsUnreadable;
+        @memcpy(out, slot.held[0..out.len]);
+    }
+
     fn queue(ptr: *anyopaque, s: *lanes.Stream, feed: lanes.backend.Feed, position: u64) !u64 {
         const e: *Engine = @ptrCast(@alignCast(ptr));
         const slot = try e.slotOf(s);
@@ -311,10 +258,24 @@ const Engine = struct {
         var toks: [max_batch]c_int = undefined;
         var total: usize = 0;
         var k: c_int = 1;
+        var masked: [max_batch]c_int = undefined; // the block rows whose draw is restricted by a grammar, and their mask width
+        var nmasked: usize = 0;
+        var mwords: usize = 0;
+        e.maskbuf.clearRetainingCapacity();
         for (windows, 0..) |w, i| {
             const slot = try e.slotOf(w.stream);
             const rows = w.rows();
-            if (rows > window or w.parents != null or w.masks.len != 0 or total + rows > max_batch) return error.WindowTooWide;
+            if (rows > window or w.parents != null or total + rows > max_batch) return error.WindowTooWide;
+            if (w.masks.len != 0) {
+                const words = w.masks.len / rows;
+                if (words == 0 or words * rows != w.masks.len or (mwords != 0 and words != mwords)) return error.BadMask;
+                mwords = words;
+                try e.maskbuf.appendSlice(e.gpa, w.masks);
+                for (0..rows) |r| {
+                    masked[nmasked] = @intCast(total + r);
+                    nmasked += 1;
+                }
+            }
             toks[total] = @intCast(w.pending);
             for (0..w.held) |j| {
                 toks[total + 1 + j] = @intCast(slot.held[j]);
@@ -329,6 +290,7 @@ const Engine = struct {
         if (e.seqs > 1) k = cand_max; // one candidate count keeps the captured forward graphs few
         const t0 = nowMs();
         if (e.api.forward_multi(e.model, @intCast(windows.len), &seqs, &counts, &toks, k) != 0) return error.BoltForward;
+        if (nmasked > 0 and e.api.mask_rows(e.model, @intCast(nmasked), &masked, e.maskbuf.items.ptr, @intCast(mwords), cand_max) != 0) return error.BoltForward;
         const t1 = nowMs();
         var row: usize = 0;
         for (windows, 0..) |w, i| {
@@ -417,6 +379,8 @@ const Engine = struct {
                 .prefill = Engine.prefill,
                 .prefill_step = Engine.prefillStep,
                 .first = Engine.first,
+                .first_masked = Engine.firstMasked,
+                .held = Engine.held,
                 .queue = Engine.queue,
                 .read = Engine.read,
                 .verify = Engine.verify,
@@ -447,6 +411,7 @@ pub const Loaded = struct {
 fn shutdown(p: *anyopaque) void {
     const e: *Engine = @ptrCast(@alignCast(p));
     e.api.free(e.model);
+    e.maskbuf.deinit(e.gpa);
     if (e.vision) |v| v.deinit();
     if (e.stream) |*st| st.deinit();
     e.slots.deinit(e.gpa);
@@ -485,28 +450,13 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 var costs: [window]lanes.config.Cost = undefined;
 var shared: [32]lanes.config.Cost = undefined;
 
-/// libbolt.so: TENSORFOLD_BOLT_LIB, else beside the server (native/lib), else the loader's path.
-fn openLibrary() ?*anyopaque {
-    if (std.c.getenv("TENSORFOLD_BOLT_LIB")) |p| return dlopen(p, 2);
-    var exe: [std.fs.max_path_bytes]u8 = undefined;
-    const n = readlink("/proc/self/exe", &exe, exe.len - 1);
-    if (n > 0) {
-        const dir = std.fs.path.dirname(exe[0..@intCast(n)]) orelse "";
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        if (std.fmt.bufPrintSentinel(&buf, "{s}/../lib/libbolt.so", .{dir}, 0)) |path| {
-            if (dlopen(path, 2)) |h| return h;
-        } else |_| {}
-    }
-    return dlopen("libbolt.so", 2);
-}
-
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels;
     // --vision: the RADIO tower and its rows buffer, before the language model takes its memory
     var tower: ?*vision.Vision = null;
     var problem: []const u8 = "";
     if (o.vision) |lim| {
-        // the rows buffer holds one prompt piece's images; the request's token total is the server's limit alone
+        // the rows buffer holds one prompt piece's images; a request's token totals are the server's limit alone
         tower = (try vision.Vision.init(gpa, io, ctx.d, dir, .{ .image_tokens = @min(lim.image_tokens, image_rows), .max_images = lim.max_images }, &problem)) orelse {
             std.log.err("--vision: {s}", .{problem});
             return error.VisionRefused;
@@ -516,13 +466,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (tower) |v| v.deinit();
     var stream: ?cuda.Stream = if (tower != null) try cuda.Stream.init(ctx.d, false) else null;
     errdefer if (stream) |*st| st.deinit();
-    const handle = openLibrary() orelse {
-        std.log.err("bolt: libbolt.so: {s} (zig build bolt -Dnvcc=NVCC installs it beside the server)", .{if (dlerror()) |m| std.mem.span(m) else "not found"});
+    const handle = lib.openLibrary() orelse {
+        std.log.err("bolt: libbolt.so: {s} (zig build bolt -Dnvcc=NVCC installs it beside the server)", .{if (lib.dlerror()) |m| std.mem.span(m) else "not found"});
         return error.BoltMissing;
     };
-    const api = try Api.load(handle);
-    if (api.abi() != abi_version) {
-        std.log.err("bolt: libbolt.so speaks ABI {d}, this server {d}: build it from the same source", .{ api.abi(), abi_version });
+    const api = try lib.Api.load(handle);
+    if (api.abi() != lib.abi_version) {
+        std.log.err("bolt: libbolt.so speaks ABI {d}, this server {d}: build it from the same source", .{ api.abi(), lib.abi_version });
         return error.BoltMissing;
     }
     // one libbolt sequence a stream (--parallel), unless BOLT_SEQS says otherwise
@@ -582,6 +532,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.VisionRefused => "--vision: this checkpoint has no image tower Bolt reads (the RADIO tower of an omni checkpoint); serve it without --vision",
         error.NoVision => "this server reads no images: start it with --vision",
         error.WindowTooWide => "Bolt verifies chains of up to eight rows a stream, sixteen streams at a time",
+        error.BadMask => "a grammar mask does not match the rows of its window",
         else => null,
     };
 }
