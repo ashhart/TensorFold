@@ -72,17 +72,17 @@ pub const Config = struct {
             .audio_pad = @intCast(try int(root, "audio_pad_token_id")),
         };
         const checks = .{
-            .{ tc, "hidden_size", hidden },                  .{ tc, "num_hidden_layers", layers },
-            .{ tc, "vocab_size", vocab },                    .{ tc, "num_attention_heads", heads },
-            .{ tc, "num_key_value_heads", kv_heads },        .{ tc, "head_dim", head_dim },
-            .{ tc, "num_experts", experts },                 .{ tc, "num_experts_per_tok", top_k },
-            .{ tc, "moe_intermediate_size", expert_width },  .{ tc, "shared_expert_intermediate_size", shared_width },
-            .{ tc, "linear_num_key_heads", lin_k_heads },    .{ tc, "linear_num_value_heads", lin_v_heads },
-            .{ tc, "linear_key_head_dim", lin_dim },         .{ tc, "linear_value_head_dim", lin_dim },
-            .{ tc, "linear_conv_kernel_dim", conv_kernel },  .{ ac, "dim", hidden },
-            .{ ac, "n_head", heads },                        .{ ac, "n_local_heads", kv_heads },
-            .{ ac, "head_dim", head_dim },                   .{ ac, "intermediate_size", tower_ffn },
-            .{ ac, "num_codebooks", codebooks },             .{ ac, "vocab_size", codebook_size },
+            .{ tc, "hidden_size", hidden },                     .{ tc, "num_hidden_layers", layers },
+            .{ tc, "vocab_size", vocab },                       .{ tc, "num_attention_heads", heads },
+            .{ tc, "num_key_value_heads", kv_heads },           .{ tc, "head_dim", head_dim },
+            .{ tc, "num_experts", experts },                    .{ tc, "num_experts_per_tok", top_k },
+            .{ tc, "moe_intermediate_size", expert_width },     .{ tc, "shared_expert_intermediate_size", shared_width },
+            .{ tc, "linear_num_key_heads", lin_k_heads },       .{ tc, "linear_num_value_heads", lin_v_heads },
+            .{ tc, "linear_key_head_dim", lin_dim },            .{ tc, "linear_value_head_dim", lin_dim },
+            .{ tc, "linear_conv_kernel_dim", conv_kernel },     .{ ac, "dim", hidden },
+            .{ ac, "n_head", heads },                           .{ ac, "n_local_heads", kv_heads },
+            .{ ac, "head_dim", head_dim },                      .{ ac, "intermediate_size", tower_ffn },
+            .{ ac, "num_codebooks", codebooks },                .{ ac, "vocab_size", codebook_size },
             .{ ac, "shared_enrichment_layers", shared_layers }, .{ ac, "vq_backbone_codebooks", 1 },
         };
         inline for (checks) |ck| {
