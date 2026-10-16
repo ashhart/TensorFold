@@ -63,6 +63,16 @@ Measured 2026-10-16 on DGX Spark (GB10, compute capability 12.1, driver 580.173.
 | All 50 blocks, dense attention, first pass | cosine 0.99669, relative error 0.0813, max abs 7.9e5 of values up to 6.2e6, worst row 0.561 |
 | All 50 blocks, sparse attention, against ComfyUI dense, first pass | cosine 0.641: a different attention, and at the first pass the tiles' routing is decided by noise |
 
+Memory, the library alone (`tf_h3_open` on the saved int8 copy, then three passes over the same 15,433-row geometry
+from host inputs, sampled every 0.5 s on the same GB10):
+
+| | Device memory (nvidia-smi, peak) | Process RSS (peak) | MemAvailable drop |
+|---|---|---|---|
+| One GPU, every tile | 23,052 MiB, of which the int8 weights are 20,226 MiB | 292 MiB | 23,878 MiB |
+| One of two ranks, its 144 tiles, 3 GiB registered region | 21,939 MiB | 3,281 MiB | 25,734 MiB |
+
+For scale, the bf16 checkpoint the host would otherwise hold for these blocks is 42,038 MiB.
+
 The kernel contract (`zig build kernel-contract -Dnvcc=/usr/local/cuda/bin/nvcc` on the GB10) registers the four
 int8 products and `h3_spans`; gate 5's records come from `kernel-contract-limits` over sm_80, 86, 89, 120 and 121.
 
