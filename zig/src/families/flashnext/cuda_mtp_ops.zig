@@ -120,7 +120,11 @@ pub fn Ops(comptime Tri: type) type {
                 p.pending = null;
                 try p.stage(next[at..][0..m]);
                 // the embedding branch: the token's row (stream 0 of the four copies), normed, fc_embedding
-                try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, m);
+                if (e.table.dense) {
+                    try tri.embedDense(s.ids, e.table.w.ptr, s.ple_keys, dims, streams, m);
+                } else {
+                    try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, m);
+                }
                 try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, m, dims, dims);
                 try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
                 try p.sumSlices(s.part, s.branch, true, m * dims, fc_sk);

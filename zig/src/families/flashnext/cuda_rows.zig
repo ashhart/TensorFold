@@ -70,6 +70,7 @@ pub const Rows = struct {
 
     /// Every row of `ids` from seq.fed one fused decode step; the last row's scores land in seq.logits.
     pub fn predict(r: *Rows, e: *prompt.Engine, comptime Tri: type, tri: Tri, seq: *prompt.Seq, ids: []const u32) !void {
+        if (e.table.dense or e.head_q.native != null) return error.UnsupportedQuantization;
         if (ids.len == 0 or seq.fed + ids.len > seq.cap) return error.UnexpectedTensor;
         // dense attention only: the reference stops where the indexer would start choosing
         if (seq.fed + ids.len > weights.dense_nch * 512) return error.UnexpectedTensor;

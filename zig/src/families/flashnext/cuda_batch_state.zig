@@ -445,6 +445,7 @@ pub const Model = struct {
     table_w: u64,
     table_s: u64,
     table_b: u64,
+    table_dense: bool = false,
     layers: []const Layer,
     mixer: HcW,
     head: Q4,

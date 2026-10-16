@@ -82,6 +82,11 @@ pub const Tri = struct {
         }, &.{ ci("D", dims), ci("S_COPIES", copies) });
     }
 
+    pub fn embedDense(t: Tri, ids: u64, w: u64, out: u64, dims: usize, copies: usize, rows: usize) !void {
+        const g = t.own orelse return error.NativeGlueRequired;
+        try g.embedDense(t.s, ids, w, out, dims, copies, rows);
+    }
+
     /// glue.rmsnorm per row and `group` features: bf16 out [rows, dims] and 32-group sums; x rows `x_stride` apart.
     pub fn rmsnorm(t: Tri, x: u64, w: u64, out: u64, xs: u64, eps: f32, x_stride: usize, rows: usize, dims: usize, group: usize) !void {
         if (t.glue("_rmsnorm")) |g| return g.rmsnorm(t.s, x, w, out, xs, eps, x_stride, rows, dims, group);

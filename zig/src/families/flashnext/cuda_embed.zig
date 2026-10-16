@@ -82,6 +82,7 @@ pub const Table = struct {
     b: cuda.DeviceBuffer,
     rows: usize,
     dims: usize,
+    dense: bool = false,
 
     /// Copies the three tensors. `dims` is hidden size (eight values per stored word).
     pub fn upload(d: *const cuda.Driver, weight: Tensor, scales: Tensor, biases: Tensor) !Table {
@@ -98,6 +99,16 @@ pub const Table = struct {
         var b = try cuda.DeviceBuffer.fromHost(d, biases.bytes);
         errdefer b.free();
         return .{ .w = w, .s = s, .b = b, .rows = rows, .dims = dims };
+    }
+
+    /// Own a dense table without converting any BF16 values.
+    pub fn uploadDense(d: *const cuda.Driver, weight: Tensor) !Table {
+        if (weight.dtype != .bf16 or weight.rank != 2 or weight.dim(0) == 0 or weight.dim(1) == 0 or weight.dim(1) % 8 != 0)
+            return error.UnexpectedTensor;
+        const count = try std.math.mul(usize, weight.dim(0), weight.dim(1));
+        if (weight.bytes.len != try std.math.mul(usize, count, 2)) return error.UnexpectedTensor;
+        const zero: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0 };
+        return .{ .w = try cuda.DeviceBuffer.fromHost(d, weight.bytes), .s = zero, .b = zero, .rows = weight.dim(0), .dims = weight.dim(1), .dense = true };
     }
 
     pub fn deinit(self: *Table) void {

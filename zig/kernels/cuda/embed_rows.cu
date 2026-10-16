@@ -43,3 +43,16 @@ extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16(const int* _
     if (8 * c >= d) return;
     *reinterpret_cast<uint4*>(out + r * d + 8 * c) = *reinterpret_cast<const uint4*>(w + static_cast<int64_t>(ids[r]) * d + 8 * c);
 }
+
+// Exact BF16 rows repeated across residual streams; no floating-point conversion.
+extern "C" __global__ void __launch_bounds__(NT) tf_embed_rows_bf16_copies(const int* __restrict__ ids,
+                                                                           const __nv_bfloat16* __restrict__ w,
+                                                                           __nv_bfloat16* __restrict__ out, int d,
+                                                                           int copies) {
+    const int64_t r = blockIdx.x;
+    const int c = blockIdx.y * NT + threadIdx.x;
+    if (8 * c >= d) return;
+    const uint4 value = *reinterpret_cast<const uint4*>(w + static_cast<int64_t>(ids[r]) * d + 8 * c);
+    for (int k = 0; k < copies; ++k)
+        *reinterpret_cast<uint4*>(out + (r * copies + k) * d + 8 * c) = value;
+}

@@ -179,7 +179,8 @@ fn embed(r: *Rig, d: usize, group: usize, copies: usize) !void {
     for (w) |*x| x.* = r.rng.int(u32);
     const sc = r.bfs(vocab * d / group, 0.1);
     const bi = r.bfs(vocab * d / group, 0.5);
-    const tab = r.bfs(vocab * d, 1);
+    const tab = try r.a.alloc(u16, vocab * d);
+    for (tab, 0..) |*x, i| x.* = @truncate(i); // every BF16 bit pattern, including NaN payloads
     const ids = try r.a.alloc(i32, most);
     for (ids) |*x| x.* = @intCast(r.rng.uintLessThan(usize, vocab));
     const did = try r.dev(std.mem.sliceAsBytes(ids));
@@ -189,7 +190,21 @@ fn embed(r: *Rig, d: usize, group: usize, copies: usize) !void {
     const ds = try r.dev(std.mem.sliceAsBytes(sc));
     const db = try r.dev(std.mem.sliceAsBytes(bi));
     if (group == 64 and copies == 1) try e.affine4(r.s, did, dw, ds, db, o4, most, d) else try e.affine4Groups(r.s, did, dw, ds, db, o4, most, d, group, copies);
-    try e.bf16(r.s, did, try r.dev(std.mem.sliceAsBytes(tab)), o16, most, d);
+    const dt = try r.dev(std.mem.sliceAsBytes(tab));
+    try e.bf16(r.s, did, dt, o16, most, d);
+    const oc = try r.out(most * copies * d * 2);
+    try e.bf16Copies(r.s, did, dt, oc, 0, d, copies);
+    try std.testing.expectError(error.RowShape, e.bf16Copies(r.s, did, dt, oc, most, d, 0));
+    try std.testing.expectError(error.RowShape, e.bf16Copies(r.s, did, dt, oc + 2, most, d, copies));
+    try std.testing.expectError(error.RowShape, e.bf16Copies(r.s, did, dt, oc, most, d - 1, copies));
+    for (counts) |rows| {
+        try e.bf16Copies(r.s, did, dt, oc, rows, d, copies);
+        const got = try r.back(u16, oc, rows * copies * d);
+        for (0..rows) |row| {
+            const token: usize = @intCast(ids[row]);
+            for (0..copies) |c| try check.sameBytes("embed BF16 exact copies", std.mem.sliceAsBytes(got[(row * copies + c) * d ..][0..d]), std.mem.sliceAsBytes(tab[token * d ..][0..d]));
+        }
+    }
     const g4 = try r.back(u16, o4, most * copies * d);
     const g16 = try r.back(u16, o16, most * d);
     for (0..most) |row| {

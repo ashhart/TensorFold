@@ -149,20 +149,30 @@ pub const Engine = struct {
         e.store = try Store.open(gpa, io, e.model_dir);
         errdefer e.store.deinit();
         const weight = try e.store.tensor(embed.weight_name);
-        const scales = try e.store.tensor(embed.scales_name);
-        const biases = try e.store.tensor(embed.biases_name);
-        e.table = try embed.Table.upload(driver, weight, scales, biases);
+        if (weight.dtype == .bf16) {
+            e.table = try embed.Table.uploadDense(driver, weight);
+        } else {
+            const scales = try e.store.tensor(embed.scales_name);
+            const biases = try e.store.tensor(embed.biases_name);
+            e.table = try embed.Table.upload(driver, weight, scales, biases);
+        }
         errdefer e.table.deinit();
         e.eos = try ple.eosOf(gpa, io, e.model_dir);
         e.mixer = try loadHc(gpa, driver, &e.store, "language_model.model.hyper_connection_mixer", false);
         errdefer e.mixer.free();
-        var buf: [80]u8 = undefined;
-        const head_w = try join3(gpa, &e.store, &buf, "language_model.lm_head", "");
-        defer gpa.free(head_w.w);
-        defer gpa.free(head_w.s);
-        defer gpa.free(head_w.b);
-        if (head_w.w.len != vocab * (dims / 8) * 4) return error.UnexpectedTensor;
-        e.head_q = try uploadQ4(gpa, driver, head_w.w, head_w.s, head_w.b, vocab, dims / 8);
+        const head_tensor = try e.store.tensor("language_model.lm_head.weight");
+        if (head_tensor.dtype == .bf16) {
+            if (!head_tensor.is(.bf16, &.{ vocab, dims })) return error.UnexpectedTensor;
+            e.head_q = try @import("cuda_projection.zig").dense(gpa, driver, head_tensor);
+        } else {
+            var buf: [80]u8 = undefined;
+            const head_w = try join3(gpa, &e.store, &buf, "language_model.lm_head", "");
+            defer gpa.free(head_w.w);
+            defer gpa.free(head_w.s);
+            defer gpa.free(head_w.b);
+            if (head_w.w.len != vocab * (dims / 8) * 4) return error.UnexpectedTensor;
+            e.head_q = try uploadQ4(gpa, driver, head_w.w, head_w.s, head_w.b, vocab, dims / 8);
+        }
         errdefer e.head_q.free();
         var pack_mod = try cuda.Module.load(driver, cuda.kernels.experts_pack);
         defer pack_mod.unload();
@@ -276,7 +286,7 @@ pub const Engine = struct {
             .tri = tri,
             .k = &e.batch_k,
             .s = s,
-            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
+            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
             .seq = seq.view(scores),
             .hooks = hooks,
         };
@@ -314,7 +324,7 @@ pub const Engine = struct {
             .tri = tri,
             .k = &e.batch_k,
             .s = s,
-            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
+            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
             .seq = rows[0].seq,
             .lanes = rows,
             .hooks = .{ .logits = .all, .logits_out = out },

@@ -141,6 +141,10 @@ pub const Glue = struct {
         try g.emb.affine4Groups(s, ids, w, sc, b, out, rows, dims, 32, copies);
     }
 
+    pub fn embedDense(g: *const Glue, s: cuda.Stream, ids: u64, w: u64, out: u64, dims: usize, copies: usize, rows: usize) !void {
+        try g.emb.bf16Copies(s, ids, w, out, rows, dims, copies);
+    }
+
     /// One RMS norm over each row's `dims` features (rows `x_stride` apart), bf16 out and 32-group sums (core norms).
     pub fn rmsnorm(g: *const Glue, s: cuda.Stream, x: u64, w: u64, out: u64, xs: u64, eps: f32, x_stride: usize, rows: usize, dims: usize, group: usize) !void {
         if (group != dims) return error.RowShape; // the head norms each row whole

@@ -451,7 +451,11 @@ pub fn Pass(comptime Tri: type) type {
             var thread: ?std.Thread = try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
             try self.stage(ids);
-            try self.tri.embed(s.ids, self.m.table_w, self.m.table_s, self.m.table_b, s.h, dims, streams, n);
+            if (self.m.table_dense) {
+                try self.tri.embedDense(s.ids, self.m.table_w, s.h, dims, streams, n);
+            } else {
+                try self.tri.embed(s.ids, self.m.table_w, self.m.table_s, self.m.table_b, s.h, dims, streams, n);
+            }
             for (self.m.layers, 0..) |*lw, layer| {
                 const keep: LayerKeep = if (self.hooks.keep) |kp| kp.layers[layer] else .{};
                 if (layer == ple_layer) {
