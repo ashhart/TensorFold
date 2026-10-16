@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 import lengths
+from motion_prompt import handoff, paced_fields
 from settings import FPS, LEAD, REFERENCE_AUDIO_LIMIT, REFERENCE_LIMIT, REFERENCE_VIDEO_LIMIT
 
 
@@ -47,9 +48,13 @@ def said_quiet(sound: str) -> bool:
 def compose_references(fields: dict, count: int) -> str:
     """The Ref2VA prompt form: who each reference is, what is kept of it, then the shot and its sound (README)."""
 
+    fields, motion, free = handoff(fields, count)
+
     videos = [(text or "").strip() for text in (fields.get("video_subjects") or [])][:REFERENCE_VIDEO_LIMIT]
     audios = [(text or "").strip() for text in (fields.get("audio_notes") or [])][:REFERENCE_AUDIO_LIMIT]
     count = max(0 if videos else 1, min(int(count), REFERENCE_LIMIT))
+    paced = paced_fields(fields, motion, bool(videos) or free, max(0, min(int(count), REFERENCE_LIMIT)))
+    fields, pacing = paced["fields"], paced["pace"]
     names = [(text or "").strip() for text in (fields.get("subjects") or [])][:count]
     names += [""] * (count - len(names))
     subjects = [f"<Subject {i}> is {name or 'the main subject'} shown in <Picture {i}>." for i, name in enumerate(names, start=1)]

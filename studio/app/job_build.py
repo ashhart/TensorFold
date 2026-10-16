@@ -12,6 +12,7 @@ import lora_flows
 import memory_guard
 import picture_models
 from engines import custom, media_seconds, ref2va_ready, ref2va_turbo_ready
+from motion_prompt import freed
 from settings import (AUDIO_SUFFIXES, DURATIONS, FPS, HOME, LONGEST, PACK, PRESETS, QUALITIES, REFERENCE_AUDIO_LIMIT,
                       REFERENCE_CLIP_SECONDS, REFERENCE_KIND_SECONDS, REFERENCE_LIMIT, REFERENCE_TOTAL,
                       REFERENCE_VIDEO_LIMIT, SCOUT_SIZES, SPARK, SPARK_ENGINE_LIB, VIDEO_SUFFIXES, inside, relative)
@@ -25,6 +26,8 @@ def references(params: dict) -> dict:
 
     found = {kind: [str(inside(path)) for path in (params.get(key) or []) if path]
              for kind, key in (("pictures", "references"), ("videos", "reference_videos"), ("audios", "reference_audios"))}
+    if len(found["videos"]) == 1 and freed(params.get("pace"), params.get("motion") if isinstance(params.get("motion"), dict) else None, len(found["pictures"])):
+        found["videos"] = []  # Impacts over a slow reference: the prompt carries the fight (see freed)
     pictures, videos, audios = found["pictures"], found["videos"], found["audios"]
     if not (pictures or videos or audios):
         return {}
@@ -52,6 +55,9 @@ def references(params: dict) -> dict:
     if wrong:
         raise HTTPException(400, f"a reference audio clip is a sound file, and {relative(Path(wrong[0]))} is not")
     video_sound = bool(videos and params.get("reference_video_sound"))
+    measured = (params.get("motion") or {}).get("measured") if isinstance(params.get("motion"), dict) else None
+    if video_sound and isinstance(measured, dict) and measured.get("sound") == "impacts" and params.get("pace") == "flow":
+        video_sound = False  # Flow by choice: the reference's own hits are not reused (as the prompt says)
     low, high = REFERENCE_CLIP_SECONDS
     for kind, files in (("video", videos), ("audio clip", audios)):
         total = 0.0

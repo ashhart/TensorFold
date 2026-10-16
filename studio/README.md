@@ -14,7 +14,8 @@ it here. Qwen-Image-2.1-Turbo images and MiniMax H3 / FastH3 video with sound, o
 
 **Sam Wasserman shaped the production side of this studio: the AI film workflow and the ideas behind it.** Slate, his
 prompt studio for AI filmmaking, is the workflow inside the Wasserman Slate AI Studio tab. The Wasserman Sharp Spec,
-the QA gate that follows it, and the 80s Horror LoRA that opens the Keys and Wasserman LoRA Hub are his too. The aim
+the QA gate that follows it, and the 80s Horror LoRA that opens the Keys and Wasserman LoRA Hub are his too. The Motion Previs tab's analysis is a
+Python port of his [Motion Previs Studio](https://github.com/wassermanproductions/motion-previs-studio). The aim
 we share is the best AI film studio there is, and this pack is where his planning tools meet a render engine. See
 [CREDITS.md](CREDITS.md).
 
@@ -141,7 +142,8 @@ bash oneshot-setup.sh --upgrade  # on Linux: oneshot-setup-spark.sh --upgrade
 ```
 
 `--upgrade` moves an existing install to the version of the clone: the environment's packages, ComfyUI at its pinned
-commit and the engine (rebuilt only when its pinned commit changed). It **fetches no weights** (a model that is not on disk is named and left out; an image-only
+commit, the engine (rebuilt only when its pinned commit changed) and the Motion Previs environment, which it adds
+when it is missing. It **fetches no weights** (a model that is not on disk is named and left out; an image-only
 install stays image-only), does not touch `~/TensorFoldStudio` (clips, projects, LoRAs, settings), prints the version
 before and after, and ends with `--verify`. Running it a second time changes nothing. Restart the app afterwards
 (`bash scripts/app.sh`) so it serves the new pages. Run it when no clip is rendering.
@@ -377,7 +379,7 @@ bash oneshot-setup.sh --upgrade         # add --app to rebuild the double-clicka
 
 `--upgrade` moves an existing install to the version of the clone: it replaces the TensorFold engine in the
 install's own environment when it is older than this version needs (2.6.1: the build with reference videos and
-audio), and copies the render scripts. It **fetches
+audio), copies the render scripts, and adds the Motion Previs environment when it is missing (0.5 GB). It **fetches
 no weights**: a model that is not on disk is named and left out, and an image-only install stays image-only. It does
 not touch `~/TensorFoldStudio` (clips, projects, LoRAs, settings), prints the version before and after, and ends with
 `--verify`. Running it a second time changes nothing. Quit and reopen the app afterwards. A plain
@@ -1034,6 +1036,10 @@ The app drives the same scripts as the command line, one job at a time, and keep
 under `~/TensorFoldStudio`. What it is not: the editor has one video track with trims and ordering only (no
 transforms, text, transitions or audio mixing), and there is no assisted prompt writing. The workflow is modelled
 on rookiestar28's ComfyUI-MiniMaxH3-Studio, which does far more; no code is shared with it.
+
+## Motion Previs
+
+See [docs/motion-previs.md](docs/motion-previs.md).
 
 ## FastH3 (new in 1.8)
 

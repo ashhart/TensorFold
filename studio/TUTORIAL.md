@@ -221,6 +221,145 @@ left as they were.
 The whole picture is drawn again, so small things elsewhere can change too. It works best on a short, continuous
 shot. The clip keeps its own sound, which still holds the removed person's voice: tick **No sound** to leave it out.
 
+## 9. Motion Previs: make a clip that moves like another
+
+The analysis in the **Motion Previs** tab is a port, modified, of Motion Previs Studio by Sam Wasserman
+(wassermanproductions.com), Apache-2.0. The app has the same lesson step by step: **Tutorial → Motion Previs**.
+
+**What it is for.** You have a shot whose movement you like: a drill, a fight, a camera move. Motion Previs takes the
+movement apart (the camera move in words, a pose skeleton, a depth layer, edges, a motion mask), and the create
+wizard then makes a new clip that keeps the part you choose: the same moves with another person, in another place,
+or only the camera. A reference video without the analysis is a plain reference: the model sees the clip and nothing
+tells it what to keep.
+
+It needs the motion environment (`bash oneshot-setup.sh --motion`, 0.5 GB) and, to render the new clip, MiniMax H3
+Ref2VA (`--ref2va` on a Mac; part of the DGX Spark install).
+
+### 9.1 Analyse the shot
+
+![The Motion Previs tab](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/blob/16c8972/samples/ui_motion_previs.png?raw=true)
+
+1. **1 · The shot:** *Upload a clip*, or *Pick from the studio folder* for an earlier render or upload. Choose the
+   part to analyse, 2 to 15 seconds. (*Upload a pack ZIP* takes a pack exported by Motion Previs Studio.)
+2. **2 · Reference mode:** what the new clip keeps.
+
+   | Mode | Keeps | Use it for |
+   |---|---|---|
+   | Camera only | the camera move and its timing | the same push-in or crane on another subject |
+   | Actor motion | the body motion and the camera | the same moves, a new person in a new place |
+   | Object motion | an object's or a vehicle's path and the camera | a car, a ball, a prop |
+   | Full scene | camera, blocking, subject motion and depth rhythm | the same shot with another person in it |
+
+   The mode does not change what is measured, and you can change it again in the wizard.
+3. **3 · Layers:** leave them all ticked the first time. *Samples a second*: 12 is the original's setting, 24
+   follows every frame of a Studio clip. *Pose model*: Lite is fastest, Heavy most exact.
+4. **Run analysis.** It runs on the processor beside the render queue. A 5 second 864x480 shot with every layer took
+   **6.6 s on a Mac Studio M5 Ultra** and **13 to 18 s on a DGX Spark**.
+
+### 9.2 Read the result
+
+![Review: the camera move in words and the layers side by side](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/blob/16c8972/samples/ui_motion_review.png?raw=true)
+
+**4 · Review** shows the length, the size and a quality figure, then **The camera move, in words** with its numbers
+(pan and tilt in pixels, zoom, roll, confidence). Under it the reference, the skeleton, the depth and the edges play
+side by side; *▶ Play all together* starts them in step. Check two things:
+
+- **The sentence matches the shot.** A pan and a sideways track look alike to this solve; with a low confidence, read
+  it against the clip.
+- **The skeleton sits on the right person.** The pose pass follows **one person only**: in the duel above it is on
+  one fighter, and asked for up to four people it still returned one in every frame.
+
+### 9.3 Send it to a new clip
+
+![5 · Motion reference](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/blob/16c8972/samples/ui_motion_handoff.png?raw=true)
+
+In **5 · Motion reference** pick the *layer that becomes `<Video 1>`*, the reference mode, the length, the size and
+the timing (*Fit the whole shot to the length*, or *Keep its speed: cut or hold*), then press **Use as motion
+reference**. The create wizard opens on its references screen with that layer as `<Video 1>` and the camera move
+ready for the prompt.
+
+| You want | Send | Add as `<Picture 1>` |
+|---|---|---|
+| the same place, a new person | *Reference clip* (the tested route) | a picture of the new person |
+| a new place | *AI depth*, as a control video | a picture of the opening frame: the look and the place come from it |
+| only the camera move | *None: the camera move in words only* | nothing, or a first picture of your own |
+
+The *OpenPose skeleton* is offered too; it held the motion most loosely (a kick was lost in our test).
+
+You can also start in the wizard: *The clip starts from → References*, add a video, and press **Analyse motion**
+under it.
+
+### 9.4 The choices in the wizard
+
+![Motion of Video 1 in the create wizard](https://github.com/drowzeys/keys-Wasserman-Slate-AI-Studio-powered-by-TensorFold-built-with-integrated-Fish-Audio-Drama3/blob/16c8972/samples/ui_motion_wizard.png?raw=true)
+
+- **What to carry over** is the reference mode again; **What goes to the model as `<Video 1>`** is the layer.
+- **People in `<Video 1>`:** *One*, or *Two or more*. You have to say it; the analysis does not count them. With a
+  picture of a new pair and *One*, only one fighter of the duel was replaced; with *Two or more*, both were.
+- **Sound and movement.** A reference is followed at its own speed, whatever the prompt says, so the sound has to
+  agree with it:
+
+  | Choice | Movement | Sound |
+  |---|---|---|
+  | Impacts | fast strikes and blocks. Over a slow reference the video is left out and the picture and the prompt carry the fight; the camera move stays, in words | the hits |
+  | Flow | slow, smooth, continuous; no strike lands | none, or music if you name it in step 3 |
+  | Automatic | as you wrote it, except that hits over a slow reference become Flow | as Flow in that one case |
+
+  The line under the choice says what was measured in `<Video 1>` (for example "the quickest movement is 14.4 percent
+  of the frame width a second (slow; fast is 24 or more)"). When the clip is done its job card says
+  **Sound and movement: agree**, or **impact sound over slow motion** in red: a flag beside the clip, never a failed
+  job.
+- **Keep the mouth of `<Video 1>` out of the clip** is on when nobody speaks: the mouth of the person in the source
+  clip is smoothed over before the model sees it. Left in, the new face mouths that person's words. It turns itself
+  off when the clip has spoken lines or reuses the video's own sound.
+- **Add the camera move to the prompt** writes the solved sentence into the prompt, unless the Camera field of step 1
+  has text of its own.
+- **Passes** (step 1, *Reference to video*): *Turbo 4 passes* to start with, *20 passes* for the model as released,
+  *Custom* for a number of your own.
+
+### 9.5 Two worked examples
+
+Both are 5 seconds at 864x480, seed 7, from two cuts of a martial-arts short with fictional people.
+
+**The dummy drill with a new person.** A man drills a wooden dummy while the camera pushes in to a close-up.
+Analyse it; *Full scene*; *Source clip* as `<Video 1>`; a picture of a woman as `<Picture 1>`; *People: One*.
+
+| Passes | Mac Studio M5 Ultra | Pose distance (median / 90th percentile) | What came out |
+|---|---|---|---|
+| Turbo 4 | 231 s | 3.7 / 11.2 | she does the drill and the push-in on the same rooftop |
+| 20 | 741 s | 4.2 / 11.7 | the same, no closer |
+| Turbo 4, depth + a picture of her in a bamboo clearing | 235 s | 3.5 / 11.7 | the drill, in the new place |
+
+On a DGX Spark the first row held at 2.9 / 7.7.
+
+**The duel with two people.** Two fighters trade hands while the camera cranes up. The same route with a picture of
+the new pair and *People: Two or more*. The source's hands are slow and sticky, so choose the sound to match:
+
+| Sound and movement | Mac Studio M5 Ultra | DGX Spark | What came out |
+|---|---|---|---|
+| (before the choice existed) | 284 s | 216 s | slow hands under slapping sounds: flagged "impact sound over slow motion" |
+| Impacts | 89 s | 101 s | both punch and block at speed, with the hits |
+| Flow, no music | 262 s | 206 s | slow hands, silent |
+| Flow, with music | 272 s | 207 s | slow hands under a plucked melody |
+
+One seed each, so expect some difference from run to run.
+
+**Reading the distance figures:** they are how far the body's keypoints in the new clip are from the source's, in
+percent of the frame width, as a median and a 90th percentile over the clip; lower is closer. In our runs the motion
+was held under about 5 and 12; 26.4 / 36.6 was a clip that lost it. The figures follow one person, so they are not
+valid for a clip where the check picked a different fighter than in the source.
+
+### 9.6 When it goes wrong
+
+| What you see | Why | What to do |
+|---|---|---|
+| The person drifts out of frame and the moves are lost (Mac) | The Turbo adapter, a reference video and the int8 kernels together; fixed since 2.6 by running that case in bfloat16 | Update; if it still happens, use 20 passes |
+| Only one of two people is replaced | *People* is set to *One* | Set *Two or more* |
+| A fight stays slow under hit sounds | The reference is slow and is followed at its own speed | *Impacts* (the video is left out) or *Flow* (no hits) |
+| The new face mouths words nobody says | It copies the mouth of the person in the source clip | Leave *Keep the mouth of `<Video 1>` out of the clip* on |
+| Music nobody asked for | The model adds it by itself, even when told "No music" | *Flow* without music delivers the clip silent |
+| The layout of the place shifts | Depth with a picture of the *same* place pulled two ways (16.0 / 25.3 in our run) | For the same place send the source clip; keep depth for a new place |
+
 ## 10. Without the app
 
 ```bash

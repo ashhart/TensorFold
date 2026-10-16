@@ -44,7 +44,7 @@ async function clearOut(body, ask) { if (ask && !confirm(ask + "\nFiles are move
   } catch (e) { toast(e.message); } await poll(); render(); }
 
 let S = null, jobs = [], tab = "Create", project = null;
-const TABS = ["Create", "Production", "Editor", "Library", "Sparks", "Tutorial"];
+const TABS = ["Create", "Production", "Motion Previs", "Editor", "Library", "Sparks", "Tutorial"];
 const C = { step: 0, mode: "scout", preset: "draft", quality: "standard", seconds: 5, seed: 1, scene: "", action: "", camera: "",
   dialogue: [], soundscape: "", music: "N/A", imagePrompt: "", image: null, scoutJob: null, prompt: "", job: null, count: 4, imageSize: "1344x768", imageJob: null, imageModel: "qwen", beats: "", cw: 864, ch: 480, steps: "", loras: [], textEncoder: "", lastImage: null, frames: null, retake: false, negations: [], negFor: null };
 let LORAS = [];  // the LoRA hub's recipes, with whether each is installed here
@@ -58,7 +58,7 @@ const media = (path, attrs = {}) => /\.(mp4|mov)$/i.test(path) ? el("video", { s
   : /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(path) ? el("audio", { src: file(path), controls: true, preload: "metadata", style: "width:100%", ...attrs }) : el("img", { src: file(path), loading: "lazy", ...attrs });
 
 const IMAGE_SIZES = { "1344x768": "1344x768 (16:9)", "1664x928": "1664x928 (16:9, larger)", "1024x1024": "1024x1024 (square)", "768x1344": "768x1344 (9:16)" };
-Object.assign(C, { goes: "video", start: "text", engine: "fasth3", passes: "8", h3quality: "standard", res: "480p", up: false, h3passes: "preset", refs: [], subjects: [], refPasses: "20", refVideos: [], video_subjects: [], refAudios: [], audio_notes: [], video_sound: false });
+Object.assign(C, { goes: "video", start: "text", engine: "fasth3", passes: "8", h3quality: "standard", res: "480p", up: false, h3passes: "preset", refs: [], subjects: [], refPasses: "20", refVideos: [], video_subjects: [], refAudios: [], audio_notes: [], video_sound: false, motion: null });
 const ENGINES = { fasth3: "FastH3 (FastVideo, sparse attention): fastest", h3: "MiniMax H3 (Turbo adapter or full 20 steps)" };
 const RESOLUTIONS = { "480p": "480p · 864x480", "720p": "720p · 1280x720", draft: "Draft · 1344x768, generated at 672x384 with the 2x decoder",
   "2k": "2K · 2048x1152, generated at 1024x576 with the 2x decoder", native: "Native · 1344x768" };
@@ -86,7 +86,7 @@ const REF_SOUND_DEFAULT = false;
 const VIDEO_SOUND_SAYS = "Off, the clip's sound comes from what you write in step 3. On, it stays close to the video's own sound instead, voice and timing (measured on both builds), at no extra time.";
 const AUDIO_SAYS = "What it does, by measurement: when the spoken line in step 3 is what the recording says, the clip performs that recording, the mouth moving in time with it. With other words, describe the voice in the line's Voice box as well (“a deep male voice”): the pitch then went to the recording's, where a recording with no description changed nothing when the voice was unlike the pictured person. It is not voice cloning.";
 // how many subjects the prompt will define: one per picture, and one per video that is said to show someone
-const refPeople = () => C.refs.length + C.refVideos.filter((p, i) => (C.video_subjects[i] || "").trim() || (!C.refs.length && i === 0)).length;
+const refPeople = () => C.refs.length + (motionFields() ? 0 : C.refVideos.filter((p, i) => (C.video_subjects[i] || "").trim() || (!C.refs.length && i === 0)).length);
 const soundless = () => C.refVideos.map((p, i) => REF_META[p] && REF_META[p].sound === false ? i + 1 : 0).filter(Boolean);
 // the model numbers a video's own sound ahead of the audio clips
 const audioName = i => "<Audio " + ((C.video_sound ? C.refVideos.length : 0) + i + 1) + ">";

@@ -9,7 +9,7 @@ if [ "$(uname -s)" = Linux ]; then
   SPARK_ARGS=()
   for arg in "$@"; do
     case "$arg" in
-      --image-only|--no-render|--verify|--upgrade|--loras|--loras=*|--no-loras|--lora-bundle=*) SPARK_ARGS+=("$arg");;
+      --image-only|--no-render|--verify|--motion|--upgrade|--loras|--loras=*|--no-loras|--lora-bundle=*) SPARK_ARGS+=("$arg");;
       --fasth3) ;;
       --turbo|--app|--ref2va) echo "note: $arg is for the Mac build and does nothing on a DGX Spark";;
       *) echo "unknown option $arg" >&2; exit 2;;
@@ -47,17 +47,18 @@ REF_ADAPTER_NAME="lightx2v_ref2v_4step_v0.1_ourlayout.safetensors"
 X2_REPO="speach1sdef178/MiniMax-H3-X2-Detail-VAE"
 X2_NAME="MiniMax-H3-X2-Detail-v1.safetensors"
 X2_SHA256="2296840f4acedcaa976688e7d7b97f7bf570b136e400385d3f46224011897aac"
-MODE=""; VIDEO=1; TURBO=0; APP=0; REF2VA=0; UPGRADE=0; LORAS=""; IMAGE_EDIT=0
+MODE=""; VIDEO=1; TURBO=0; APP=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; IMAGE_EDIT=0
 for arg in "$@"; do
   case "$arg" in
     --image-only) VIDEO=0;;
     --fasth3) ;;  # FastH3 is the default video engine since 2.1; the flag is kept so older commands still run
     --turbo) TURBO=1;;
     --ref2va) REF2VA=1;;
+    --motion) MOTION=1;;
     --image-edit) IMAGE_EDIT=1;;
     --app) APP=1;;
     --verify|--no-render) MODE="$arg";;
-    --upgrade) UPGRADE=1; MODE="--no-render";;
+    --upgrade) UPGRADE=1; MODE="--no-render"; MOTION=1;;
     --loras) LORAS=all;; --loras=*) LORAS="${arg#--loras=}";; --no-loras) LORAS=none;;
     --lora-bundle=*) LORA_BUNDLE="${arg#--lora-bundle=}";;
     *) echo "unknown option $arg" >&2; exit 2;;
@@ -74,7 +75,7 @@ step "Preflight"
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || die "Apple silicon macOS only"
 CHIP=$(sysctl -n machdep.cpu.brand_string); RAM=$(( $(sysctl -n hw.memsize) / 1073741824 ))
 ok "$CHIP, macOS $(sw_vers -productVersion), ${RAM} GB"
-# --upgrade moves an install to this version (engine, scripts); kind and studio folder are kept.
+# --upgrade moves an install to this version (engine, scripts, Motion Previs env); kind and studio folder are kept.
 INSTALLED="$(cat "$PREFIX/VERSION" 2>/dev/null || echo "2.6 or earlier")"
 if [ "$UPGRADE" = 1 ]; then
   [ -x "$PREFIX/venv/bin/python" ] || die "nothing to upgrade at $PREFIX: run oneshot-setup.sh without --upgrade"
@@ -316,6 +317,12 @@ if [ "$VIDEO" = 1 ]; then
   fi
 fi
 
+if [ "$MOTION" = 1 ] || [ -x "$PREFIX/motion-venv/bin/python" ]; then
+  # Motion Previs (port of Sam Wasserman's Motion Previs Studio analysis) in its own env; uninstallable layers skipped
+  step "Motion Previs: MediaPipe, OpenCV, ONNX Runtime and the pose and depth models (0.5 GB) -> $PREFIX/motion-venv"
+  PREFIX="$PREFIX" bash "$HERE/scripts/setup-motion.sh" $([ "$MODE" = "--verify" ] && echo --verify) | sed 's/^/  /' \
+    || echo "  ! Motion Previs is not fully set up: its tab says which layers are not available on this machine"
+fi
 
 [ "$MODE" = "--verify" ] || cp "$HERE/VERSION" "$PREFIX/VERSION"
 export PREFIX H3_MODEL_DIR QWEN_MODEL_DIR FASTH3_DIR

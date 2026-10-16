@@ -8,6 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import pace
 import qa
 import shot
 import sparks
@@ -300,6 +301,11 @@ def perform(job: dict, worker: dict | None = None) -> None:
                     return
             if job["kind"] == "video" and params.get("silent"):
                 hush(Path(outputs[0]))
+            if job["kind"] == "video" and (params.get("reference_videos") or params.get("pace") in ("impacts", "flow")):
+                try:  # reported beside the clip like the QA gate; it never fails a clip that was made
+                    job["pace"] = {**pace.measure(Path(outputs[0])), "asked": params.get("pace") or "auto"}
+                except Exception as error:  # noqa: BLE001
+                    job["pace"] = {"verdict": "not measured", "note": str(error)[-200:]}
         hub.record(job)  # the clip, its seed and settings, and the Spark that rendered it (sparks/takes.jsonl)
         if job["status"] != "cancelled":
             job["status"] = "done"

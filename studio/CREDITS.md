@@ -60,6 +60,21 @@ repository at a pinned commit when the Studio is installed; none of their code i
   of history frames, GPL-3.0) by Akatz Labs (akatz-ai); the person is found and followed by SAM 3.1 from Meta, in
   the build Comfy-Org repackaged for ComfyUI, under the SAM License.
 
+## The Motion Previs tab: Sam Wasserman's Motion Previs Studio
+
+**Sam Wasserman (wassermanproductions.com, wasserman.ai)** created **Motion Previs Studio**
+(https://github.com/wassermanproductions/motion-previs-studio, Apache-2.0, Copyright 2026 Sam Wasserman): the desktop
+app that turns a reference shot into control layers and a production pack. The analysis behind this Studio's *Motion
+Previs* tab is a **Python port of it, modified**: the pose track with its gap filling and smoothing, the OpenPose
+BODY_25 skeleton and keypoints, the subject-masked camera solve and its `camera_motion.json`, the depth, edge, line art
+and motion mask passes, the quality score, the four reference modes, and the production pack with its file names,
+manifest, shot bible and prompt pack are all his design. `app/motion_worker.py` is the port; the Blender import
+scripts in `app/motion_templates/` are his, copied with a header; his NOTICE is kept at
+`LICENSES/Motion-Previs-Studio-NOTICE`. What was changed, and the notices for MediaPipe, Depth Anything, OpenCV and
+ONNX Runtime, are in `THIRD_PARTY_NOTICES.md`. His app does much more than this port: web video import, a 3D
+stick-figure preview, Send to Blockout, an MCP control server, session restore. What this pack adds is the camera
+move in words and the hand-off of one layer as a motion reference for MiniMax H3.
+
 ## The image model: the Qwen team
 
 The **Qwen team at Alibaba** released **Qwen-Image-2.1**: the 7B single-stream transformer with its causal text

@@ -7,10 +7,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PREFIX="${PREFIX:-$HOME/.local/opt/tensorfold-studio}"
 MODELS="${SPARK_MODELS:-$HOME/spark-studio-models}"
 COMFY_COMMIT=5a665890ded5020c282f63c4ea2dd9e083e025ff  # ComfyUI v0.41.0
-IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0
+IMAGE_ONLY=0; RENDER=1; VERIFY=0; REF2VA=0; MOTION=0; UPGRADE=0; LORAS=""; H3_BASE=0; WORKFLOWS=1; IMAGE_EDIT=0
 for arg in "$@"; do
   case "$arg" in
-    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
+    --ref2va) REF2VA=1;; --h3-base) H3_BASE=1;; --image-edit) IMAGE_EDIT=1;; --motion) MOTION=1;; --image-only) IMAGE_ONLY=1;; --no-render) RENDER=0;; --verify) VERIFY=1; RENDER=0;; --upgrade) UPGRADE=1; RENDER=0; MOTION=1;;
     --no-workflows) WORKFLOWS=0;;
     --loras) LORAS=all;; --loras=*) LORAS="${arg#--loras=}";; --no-loras) LORAS=none;; --lora-bundle=*) LORA_BUNDLE="${arg#--lora-bundle=}";;
     *) echo "unknown option $arg" >&2; exit 2;;
@@ -167,6 +167,13 @@ if [ "$IMAGE_ONLY" = 0 ]; then
   else
     echo "  the engine did not build: clips will render on ComfyUI's own blocks (slower). Fix and rerun spark/build-engine.sh"
   fi
+fi
+
+if [ "$MOTION" = 1 ] || [ -x "$PREFIX/motion-venv/bin/python" ]; then
+  # Motion Previs (port of Sam Wasserman's Motion Previs Studio analysis) in its own env; uninstallable layers skipped
+  say "Motion Previs: MediaPipe, OpenCV, ONNX Runtime and the pose and depth models (0.5 GB) -> $PREFIX/motion-venv"
+  PREFIX="$PREFIX" bash "$HERE/scripts/setup-motion.sh" $([ "$VERIFY" = 1 ] && echo --verify) | sed 's/^/  /' \
+    || echo "  ! Motion Previs is not fully set up: its tab says which layers are not available on this machine"
 fi
 
 [ "$VERIFY" = 1 ] || cp "$HERE/VERSION" "$PREFIX/VERSION"

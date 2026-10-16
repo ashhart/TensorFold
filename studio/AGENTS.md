@@ -105,7 +105,16 @@ Rules:
   at 5 it burns the picture with the 4-step adapter.
   In the app a reference clip is measured as it is added (`/api/probe`) and turned away with the reason; *Custom* passes
   is the card beside *20 passes* in every chooser.
-- Do not promise an exact copy of a voice from reference audio. On a DGX Spark every render runs through the
+- Motion as a reference: the wizard's *Analyse motion* (and *Use as motion reference* in the Motion Previs tab) sends
+  one layer of a Motion Previs pack as `<Video 1>`. Defaults by measurement: the same place with a new person takes the
+  source clip (written as "`<Video 1>` with its person replaced", never with the first-frame-anchor wording); a new
+  place or the camera alone takes depth; the skeleton is offered but is the loosest. On the Mac the Ref2VA Turbo adapter with a
+  reference video runs without the int8 kernels (`scripts/video.sh`): with them it lost fast motion (26 % against 3.7 %);
+  do not put them back for that case. The pose pass, the skeleton and the distance checker follow one person only; the user says when
+  `<Video 1>` has two or more people (`motion.people`) and the prompt then speaks of its people. A skeleton or depth layer goes
+  with the control-video prompt (`motion_template` in `app/motion_prompt.py`: structural template,
+  first-frame anchor, legend, "labels only", and the negative): keep that wording, and do not promise figures: one shot was
+  measured. Do not promise an exact copy of a voice from reference audio either. On this machine every render runs through the
   ComfyUI server of `spark/comfy.sh`, never as standalone model code: the guard beside the server (`spark/memory_guard.py watch`, started by `comfy.sh`) is the
   only run-time memory guard.
 - On a DGX Spark reference to video is `oneshot-setup-spark.sh --ref2va` and the same `REF_IMAGES` / `REF_TURBO=1`
@@ -171,4 +180,4 @@ Rules:
 
 **Credits:** keep CREDITS.md in sync. Qwen team (Qwen-Image-2.1), MiniMax (H3), Ash Hart (TensorFold), antirez (h3.c),
 RobZombAI (H3MLX), mrbizarro (minimax-h3-mlx / Phosphene), Filip Strand and mflux contributors, Viggle, speach1sdef178, LightX2V,
-NVIDIA Research, FastVideo, Sam Wasserman (Slate: the film workflow in Production; keep app/static/slate/NOTICE.), Apple MLX. Authors only — no credit hyperlinks.
+NVIDIA Research, FastVideo, Sam Wasserman (Slate: the film workflow in Production; keep app/static/slate/NOTICE. Motion Previs Studio: the Motion Previs tab's analysis is a modified Python port of it; keep LICENSES/Motion-Previs-Studio-NOTICE, THIRD_PARTY_NOTICES.md and the headers of app/motion*.py, and keep the link to the original), Apple MLX. Authors only — no credit hyperlinks, except the link to Motion Previs Studio.

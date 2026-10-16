@@ -6,7 +6,7 @@ import re
 
 REASON = ("The video model has no negative prompt here: a thing the prompt names tends to appear, also when the prompt "
           "says there is none of it. Take the words out and say what is there instead (\"plain dark walls\" for \"no photographs\").")
-# what the Studio writes itself, about the sound track
+# what the Studio writes itself, about the sound track and the control layers of a motion reference
 OWN = ("Nobody speaks.", "No voices, no speech.", "No speech after the spoken lines.", "No speech.", "non_diegetic_music: N/A",
        "its look is not rendered", "is not rendered", "are not rendered", "These colours are labels only, not the look of the target video.",
        "no skeleton lines, no flat-coloured, depth-map or segmentation-map look", "and no strike lands", "No music")

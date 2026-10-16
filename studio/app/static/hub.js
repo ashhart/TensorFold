@@ -22,7 +22,7 @@ function flowRow(obj, r, done) { if (!C.lineart) C.lineart = "medium"; const f =
   const lacks = !own ? "This LoRA works in Create, on a clip from references." : flowLacks(r);
   const go = () => flowGo(r);
   const draw = async e => { e.target.disabled = true; e.target.textContent = "Drawing the line art…";
-    try { const made = await api("/api/lineart", { path: C.refVideos[0], detail: C.lineart || "medium" }); C.lineartFrom = made.from; C.refVideos[0] = made.path; C.video_subjects[0] = ""; C.video_sound = false; toast("Video 1 is now the line art of your clip"); } catch (err) { toast(err.message); }
+    try { const made = await api("/api/lineart", { path: C.refVideos[0], detail: C.lineart || "medium" }); C.lineartFrom = made.from; C.refVideos[0] = made.path; C.video_subjects[0] = ""; C.video_sound = false; C.motion = null; toast("Video 1 is now the line art of your clip"); } catch (err) { toast(err.message); }
     done(); };
   return el("div", { class: "note", style: "flex-basis:100%;" + (lacks ? "color:var(--warn)" : "") }, el("b", {}, lacks ? "Needs: " : "Ready: "), f.asks.join("; ") + ". " + (lacks || "") + " " + f.hint + " ",
     own && lacks && (!isRef() || vids < f.videos[0] || pics < f.pictures[0]) ? el("button", { type: "button", class: "small", onclick: go }, "Go to References") : null,

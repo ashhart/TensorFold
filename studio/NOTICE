@@ -23,6 +23,13 @@ This product includes a port of the workflow of Slate, the prompt studio for AI 
 Slate is Copyright 2026 Sam Wasserman, licensed under the Apache License 2.0; its NOTICE is kept at
 app/static/slate/NOTICE. Credit: Sam Wasserman (wassermanproductions.com).
 
+This product includes a Python port, modified, of the analysis of Motion Previs Studio 4.1.0
+(https://github.com/wassermanproductions/motion-previs-studio), Copyright 2026 Sam Wasserman, licensed under the Apache
+License 2.0: app/motion_worker.py, app/motion.py and app/static/motion.js, and copies of its Blender import scripts
+under app/motion_templates/. Motion Previs Studio was developed and created by Sam Wasserman for Wasserman Productions
+and Wasserman.ai; its NOTICE is kept at LICENSES/Motion-Previs-Studio-NOTICE. Third-party notices for that tab
+(MediaPipe, Depth Anything, OpenCV, ONNX Runtime) are in THIRD_PARTY_NOTICES.md.
+
 The LoRA hub's first preset is the recipe for the Wasserman 80s Horror LoRA, Copyright 2026 Sam Wasserman. Its
 weights are not part of this pack: they are downloaded from his release when a user installs them, as a Model
 Derivative of MiniMax H3 under the MiniMax H3 Community License Agreement. Credit: 80s Horror LoRA by Sam Wasserman

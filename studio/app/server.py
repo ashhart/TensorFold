@@ -49,6 +49,7 @@ import picture_edit  # noqa: E402  (a picture re-drawn by the image model, with 
 edit_router, edit_build = picture_edit.attach(HOME, PACK, SPARK, lora_resolve, inside, relative, offered)
 job_build.edit_build = edit_build
 app.include_router(edit_router)
+import pace  # noqa: E402,F401  (whether a clip's sound and motion agree, beside this file)
 import negation  # noqa: E402,F401  (what a prompt forbids by name, shown before a job is queued, beside this file)
 import shot  # noqa: E402,F401  (a clip's keyframes held and no cut inside it, beside this file)
 import qa  # noqa: E402  (Sam Wasserman's QA gate, beside this file)
@@ -66,6 +67,8 @@ def slate_room(plan: dict, lora: bool) -> dict:
 
 app.include_router(slate.attach(HOME, DURATIONS, compose, compose_references, REFERENCE_LIMIT,
                                 lambda: {"ref2va": ref2va_ready(), "ref2va_turbo": ref2va_turbo_ready()}, slate_room))
+import motion  # noqa: E402  (Motion Previs: a modified Python port of Sam Wasserman's Motion Previs Studio analysis)
+app.include_router(motion.attach(HOME, PACK, SPARK))
 import actions  # noqa: E402  (Turnaround sheet, Upscale and Remove a person: Library actions, beside this file)
 action_router, action_build, action_title, action_source = actions.attach(HOME, PACK, SPARK, inside, relative)
 job_build.action_build, api_jobs.action_title, api_jobs.action_source = action_build, action_title, action_source
