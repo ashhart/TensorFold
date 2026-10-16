@@ -70,18 +70,15 @@ pub fn tensor(g: Gpu, bits: u8, seed: u64, a: std.mem.Allocator) !void {
         s: Synth,
         e: usize,
         x: mtl.Buffer,
-        sums: mtl.Buffer,
         y: mtl.Buffer,
         rows: usize,
         pub fn encode(d: @This(), enc: mtl.ComputeEncoder, _: *const tile.Pipelines) !void {
-            am.rowSums(enc, d.p, 64, Ref{ .buf = d.x }, Ref{ .buf = d.sums }, @intCast(d.rows), @intCast(d.s.k));
-            const rs = Ref{ .buf = d.sums };
-            am.dense(enc, d.p, Ref{ .buf = d.x }, rs, d.s.affine(d.e), Ref{ .buf = d.y }, @intCast(d.rows));
+            am.dense(enc, d.p, Ref{ .buf = d.x }, d.s.affine(d.e), Ref{ .buf = d.y }, @intCast(d.rows));
         }
     };
-    try g.run(Dense{ .p = p, .s = s, .e = 1, .x = s.x, .sums = sums, .y = wide, .rows = max_rows });
+    try g.run(Dense{ .p = p, .s = s, .e = 1, .x = s.x, .y = wide, .rows = max_rows });
     for ([_]usize{ 1, 17, 64 }) |rows| {
-        try g.run(Dense{ .p = p, .s = s, .e = 1, .x = s.x, .sums = sums, .y = part, .rows = rows });
+        try g.run(Dense{ .p = p, .s = s, .e = 1, .x = s.x, .y = part, .rows = rows });
         const alone = part.slice(u16, rows * cols);
         if (!std.mem.eql(u16, wide.slice(u16, rows * cols), alone)) return error.TensorRowsDiffer;
     }
@@ -136,29 +133,25 @@ pub fn tensor(g: Gpu, bits: u8, seed: u64, a: std.mem.Allocator) !void {
         p: am.Pipes,
         s: Synth,
         x: mtl.Buffer,
-        sums: mtl.Buffer,
         offsets: mtl.Buffer,
         order: mtl.Buffer,
         y: mtl.Buffer,
         glu: bool = false,
         pub fn encode(d: @This(), enc: mtl.ComputeEncoder, _: *const tile.Pipelines) !void {
             const rows: u32 = tokens * topk;
-            const kk: u32 = @intCast(d.s.k);
-            am.rowSums(enc, d.p, 64, Ref{ .buf = d.x }, Ref{ .buf = d.sums }, if (d.glu) tokens else rows, kk);
             const x = Ref{ .buf = d.x };
-            const rs = Ref{ .buf = d.sums };
             const ro = Ref{ .buf = d.offsets };
             const y = Ref{ .buf = d.y };
             const m = d.s.affine(0);
             const ex: u32 = @intCast(d.s.experts);
-            if (d.glu) return am.gatherGlu(enc, d.p, x, rs, m, m, ro, Ref{ .buf = d.order }, y, rows, ex, topk, 0);
-            am.gather(enc, d.p, x, rs, m, ro, y, rows, ex);
+            if (d.glu) return am.gatherGlu(enc, d.p, x, m, m, ro, Ref{ .buf = d.order }, y, rows, ex, topk, 0);
+            am.gather(enc, d.p, x, m, ro, y, rows, ex);
         }
     };
-    var gather = Gather{ .p = p, .s = s, .x = sorted, .sums = sums, .offsets = offsets, .order = slots_buf, .y = out };
+    var gather = Gather{ .p = p, .s = s, .x = sorted, .offsets = offsets, .order = slots_buf, .y = out };
     try g.run(gather);
     for (0..experts) |e| {
-        try g.run(Dense{ .p = p, .s = s, .e = e, .x = s.x, .sums = sums, .y = wide, .rows = tokens });
+        try g.run(Dense{ .p = p, .s = s, .e = e, .x = s.x, .y = wide, .rows = tokens });
         const last: usize = if (e + 1 < experts) @intCast(starts[e + 1]) else tokens * topk;
         for (@as(usize, @intCast(starts[e]))..last) |j| {
             const want = wide.slice(u16, tokens * cols)[(order[j] / topk) * cols ..][0..cols];
@@ -204,5 +197,6 @@ pub fn tensor(g: Gpu, bits: u8, seed: u64, a: std.mem.Allocator) !void {
         32 * cols,
     });
     if (glu_ulp > 2 or glu_exact * 100 < tokens * topk * cols * 99) return error.TensorGluDiffers;
-    if (worst[1] > 1.0 / 128.0 or worst[1] > worst[0]) return error.TensorFarFromFloat64;
+    // tensor rows take each weight as bf16(fma(s, q, b)), as MLX's quantized matmul does: held to the bound
+    if (worst[1] > 1.0 / 128.0) return error.TensorFarFromFloat64;
 }
