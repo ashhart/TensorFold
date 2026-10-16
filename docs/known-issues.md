@@ -14,11 +14,8 @@ release fixes it, and the release notes say which one.
   greedy code drafts shallower, about 4% slower on an M3 Ultra. The tokens are the same.
 - Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
   request is back to speed. The tokens are the same.
-- Qwen3.8-Flash-Next on a Mac: the first turn after the server has been idle for a few seconds takes about 2 s to its
-  first token on an M3 Ultra, even when its prompt is cached.
-- Gemma 4 31B on a Mac: the first request after the server has been idle for six seconds or more takes 0.4-0.7 s to
-  its first token on an M5 Ultra, where a busy server takes 0.08 s. Its buffers are held in a residency set; the idle
-  keepalive's tick does no GPU work yet, and both are needed.
+- Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
+  about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 
@@ -29,8 +26,14 @@ release fixes it, and the release notes say which one.
   thinking on brings back fewer answers. 1.0.8's release notes have the measurements.
 - Learned facts cost decode speed on a Mac. 1.0.9 took back about 8% on an M3 Ultra with two facts; 1.0.8's M5 Ultra
   figures (213 tok/s after ten facts, 248 before any) have not been measured again.
-- A lesson changes the checkpoint's own files in its folder, and nothing undoes it. Serve a copy of the checkpoint
-  folder when you try it, and set `--api-key` so only your clients can teach it.
+- A rollback is all or nothing: `tensorfold slide rollback` returns the folder to its snapshot, undoing every lesson
+  and delete since the first. One fact can be deleted on its own (`DELETE /v1/slide/fact/{id}`), which silences its
+  neurons rather than erasing them. A key keeps other clients from teaching, but anyone with the key can teach a wrong
+  fact. Teach a copy of the checkpoint folder.
+- On file systems without clones, such as ext4, the snapshot is a full copy of the files a lesson can change, 18.5 GB
+  for Nemotron 3.5 Lightning, and the rollback copies them back.
+- The folder hold that keeps a server and a rollback apart works between TensorFold processes only: other tools that
+  write files ignore it.
 
 ## Web research (`--cortheon`)
 

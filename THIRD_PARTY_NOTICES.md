@@ -232,3 +232,29 @@ The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
 The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision adapter.
+
+## Pictures in the native engine
+
+`zig/src/core/picture/` reads PNG and JPEG pictures to the RGB pixels TensorFold 0.6.6's Python engine loaded with
+Pillow 12.3, and the families' processors resize them. No libjpeg-turbo, Pillow or PyTorch code is included.
+
+- JPEG pictures decode in libjpeg-turbo 3.1.4.1's TurboJPEG library (`libturbojpeg`), the release Pillow 12.3
+  bundles, loaded at run time and called with Pillow's decoder settings. TensorFold neither includes nor ships it;
+  libjpeg-turbo is under the IJG, BSD-3-Clause and zlib licenses.
+- PNG pictures decode from the PNG specification on Zig's zlib inflater, and each layout becomes 8-bit samples as
+  Pillow's PNG modes hold it. The bicubic resizes repeat, bit for bit, the fixed-point arithmetic of Pillow's
+  `Image.resize` (MIT-CMU License, Copyright © 1997-2011 by Secret Labs AB, Copyright © 1995-2011 by Fredrik Lundh
+  and contributors, Copyright © 2010 by Jeffrey 'Alex' Clark and contributors; the license is in
+  `LICENSES/Pillow-MIT-CMU.txt`) and of PyTorch's antialiased uint8 bicubic (BSD-3-Clause, Copyright (c) 2016-
+  Facebook, Inc. and the other holders listed in `LICENSES/PyTorch-BSD-3.txt`).
+- `zig/src/families/lfm2/image.zig` ports transformers' `Lfm2VlImageProcessor` and `Lfm2VlProcessor` (smart resize,
+  tile grid, placeholder tokens). Apache License 2.0, Copyright 2025 the HuggingFace Inc. team; see
+  [the license text](LICENSES/Apache-2.0.txt).
+
+## Intel GPU engine (XPU)
+
+The Intel GPU kernels and host code (`zig/kernels/xpu/`, `zig/src/xpu/`, the `xpu_*` files of the families) are written for
+TensorFold. What they follow or copy:
+
+- The Level Zero loader and the Intel compute runtime are loaded at run time and are not bundled; `ocloc` compiles the kernels
+  at build time and is not distributed.

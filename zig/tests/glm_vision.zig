@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's image tower against a reference dump (tools/zig/glm_vision_fixtures.py: mlx-vlm's tower).
+//! GLM-5.3-Flash's image tower against a reference dump (patches and tower stages recorded from mlx-vlm's tower).
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
@@ -60,7 +60,7 @@ pub fn main(init: std.process.Init) !void {
         defer f.deinit();
         const max_tokens: u32 = @intCast(meta.object.get("max_tokens").?.integer);
         const t0i = std.Io.Clock.awake.now(init.io).toNanoseconds();
-        const prep = try tf.glm.image.prepare(a, f.bytes[0..f.size], c, max_tokens);
+        const prep = try tf.glm.image.prepare(init.io, a, f.bytes[0..f.size], c, max_tokens);
         const t1i = std.Io.Clock.awake.now(init.io).toNanoseconds();
         std.debug.print("prepared {s}: grid {d}x{d}, {d} tokens in {d:.1} ms\n", .{ args[4], prep.gh, prep.gw, prep.tokens, @as(f64, @floatFromInt(t1i - t0i)) / 1e6 });
         if (prep.gh != gh or prep.gw != gw) {

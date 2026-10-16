@@ -31,7 +31,7 @@ pub const ScriptEngine = struct {
     }
 
     /// The parity engine has no weights, so every label logit is zero.
-    fn score(_: *anyopaque, _: []const u32, _: []const u32, logits: []f64) error{Failed}!f64 {
+    fn score(_: *anyopaque, _: []const u32, _: []const u32, logits: []f64, _: bool) error{Failed}!f64 {
         for (logits) |*logit| logit.* = 0;
         return 0;
     }

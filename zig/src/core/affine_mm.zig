@@ -4,15 +4,21 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 
-/// The weights' bits (2, 3, 4, 5, 6 or 8) and group (32 or 64), and the output's type.
-pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false };
+/// The gather GLU's SwiGLU: GLM's clipped bf16 form, or mlx-lm's compiled silu(g) * u on bf16 rows (LFM2).
+pub const Glu = enum { clipped, plain };
+
+/// The weights' bits (2-6 or 8) and group (32 or 64), the output's type and the GLU epilogue.
+pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped };
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
     if (f.bits < 2 or f.bits > 8 or f.bits == 7 or (f.group != 32 and f.group != 64)) return error.UnsupportedFormat;
     const body = try frags.source(device, a, ks.core_affine_mm);
     defer a.free(body);
-    return std.fmt.allocPrint(a, "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}", .{ f.bits, f.group, if (f.out_f32) "float" else "bfloat", body });
+    const glu = if (f.glu == .plain) "#define TF_GLU_PLAIN 1\n" else "";
+    const out = if (f.out_f32) "float" else "bfloat";
+    const head = "#define TF_BITS {d}\n#define TF_GROUP {d}\n#define TF_OUT_T {s}\n{s}{s}";
+    return std.fmt.allocPrint(a, head, .{ f.bits, f.group, out, glu, body });
 }
 
 /// Entry points: the dense matmul, gathers by tile height, scattering gathers, the experts' gate and up through a pair order into SwiGLU.
