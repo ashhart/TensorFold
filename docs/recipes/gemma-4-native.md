@@ -69,32 +69,34 @@ start, as Step-5's are; a drafting stream does not resume a state kept without t
 resumed inside an image. The budget is what 70% of RAM leaves beside every stream's caches, 16 GiB by default
 (`--prompt-cache-gib`, 0 for none). A later turn of a 3,336-token conversation resumed 3,329 tokens and answered as the
 first pass did; one with an image after 2,300 tokens of system prompt resumed 3,584 of 3,607 tokens, alike. Served
-with the drafter and `--vision`, an 11,481-token conversation took 7.7 s to its first token fresh and 0.22 s asked
-again (11,264 tokens resumed); with an image in it, 8.1 s and 0.12 s.
+with the drafter and `--vision`, an 11,481-token conversation took 7.8 s to its first token fresh and 0.23 s asked
+again (11,264 tokens resumed); with an image in it, 8.1 s and 0.13 s.
 
 Structured output (`response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`) is enforced
 through `libtfgrammar`, as [structured output](../api.md#structured-output) describes, with drafts on: before each
 verify the `Drafted` wrapper hands the drafter's held drafts to the host, where the grammar cuts the ones it rejects.
 The recipe harness's structured check obeys 18 of 18 (each field greedy, sampled and with thinking), and a bad regex
 gets HTTP 400. Tools are called with `tool_choice: "auto"`; `"required"` and a named function get HTTP 400, as the
-grammar for them reads `<tool_call>` markup and Gemma's template writes `<|tool_call>call:NAME{...}<tool_call|>`. A
-request after six or more idle seconds takes 0.4-0.7 s to its first token where a busy server takes 0.08 s ([known
-issues](../known-issues.md)).
+grammar for them reads `<tool_call>` markup and Gemma's template writes `<|tool_call>call:NAME{...}<tool_call|>`. The
+weights, both scratches and the drafter's and tower's buffers stay in one residency set, which the idle keepalive's
+tick keeps wired: a 1-token request after 2 to 120 idle seconds took 0.10-0.12 s to its first token, where a busy
+server took 0.07 s (ten idle gaps, none slower).
 
 | Checkpoint / platform | Qualification |
 | --- | --- |
 | The pinned 31B 4-bit, M5 Ultra, macOS 27 | Greedy decode, prompts, shared rounds, copy and DFlash drafts and the server, below. |
 | `z-lab/gemma-4-31B-it-DFlash` `eabd6483` | The one drafter admitted: DFlash v1, block 16, six taps, head dim 128. |
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
-| Images (`--vision`) | PNG and JPEG data URLs, below. |
+| Images (`--vision`) | PNG and JPEG data URLs, and public HTTPS URLs with `--vision-urls`, below. |
 | Structured output | `response_format` and the `guided_*` fields, drafts on and off, below. |
 | Other Gemma 4 checkpoints, widths | Outside this recipe. |
 
 ## Images
 
 `serve --vision` loads the checkpoint's image tower (`vision_tower.`, `embed_vision.`; 1.1 GB, bf16 but for the 4-bit
-projection) and reads PNG and JPEG data URLs in user messages and tool results, as [image input](../vision.md#the-native-server)
-describes. `zig/src/families/gemma4/image.zig` prepares an image as transformers' `Gemma4ImageProcessorPil` does: the
+projection) and reads PNG and JPEG data URLs in user messages and tool results (with `--vision-urls`, public HTTPS URLs
+too), decoded to Pillow's pixels by core's picture decoder, as [image input](../vision.md#the-native-server) describes.
+`zig/src/families/gemma4/image.zig` prepares an image as transformers' `Gemma4ImageProcessorPil` does: the
 largest aspect-preserving size whose sides are multiples of 48 and whose 16-pixel patches fit 280 tokens (PIL's bicubic
 resize, then 1/255), so an image becomes 256 to 280 tokens (70 or 140 with `detail: low` or a smaller
 `--vision-image-tokens`). The template's `<|image|>` expands to `boi`, the image's rows, `eoi`.
@@ -103,8 +105,8 @@ resize, then 1/255), so an image becomes 256 to 280 tokens (70 or 140 with `deta
 rounding: the patch projection and the x and y position rows, RMS norms in fp32 times their weights, per-head q, k and
 v norms, the axial 2D RoPE (theta 100, x on dims 0-35 and y on 36-71), attention with scale 1 as two batched GEMMs and
 a softmax, GELU-tanh gating, the 3 x 3 pooler, the standardization and the projection on core affine_mm. An image takes
-about 90 ms, and adds about 270 ms to a request's first token (a 290-token prompt with an image 354 ms, the text
-alone 81 ms). In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
+about 90 ms, and adds about 270 ms to a request's first token (a 290-token prompt with an image 365 ms, the text
+alone 92 ms). In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
 see one another both ways, as `use_bidirectional_attention: "vision"` asks (the prompt attention kernel takes each
 row's last key; global layers stay causal); a prompt chunk never cuts an image.
 
@@ -114,7 +116,7 @@ equal the PIL processor's bit for bit, and the tower's rows are as close to the 
 relative error averaged over the images, torch's 7.8%). AutoProcessor with torch installed picks the torchvision
 processor instead, whose resize differs from PIL's by a level at a few pixels in a thousand. Served with the drafter,
 a described image answers token for token as mlx-vlm 0.7.2 does (80 greedy tokens, the same 287-token prompt), with
-drafts on and off; `tools/zig/vision_served.py` passes its 18 checks, concurrent image requests equal their runs
+drafts on and off; `tools/zig/vision_served.py` passes its 19 checks, concurrent image requests equal their runs
 alone, and text-only prompts keep their bits (the receipts above, unchanged).
 
 ## Verification
