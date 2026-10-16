@@ -37,10 +37,11 @@ pub const Tts = struct {
         t.audio_host = try gpa.alloc(f32, t.max_chunk * codec_.samples_per_frame);
         // warm the codec (cuBLAS heuristics for its shapes): one silent chunk
         try t.c.reset(t.cs);
-        var zero = try cuda.DeviceBuffer.alloc(&e.driver, 4 * W * 4);
+        const warm_frames: usize = @min(t.max_chunk, 4);
+        var zero = try cuda.DeviceBuffer.alloc(&e.driver, warm_frames * W * 4);
         defer zero.free();
         try zero.fill8(0, null);
-        try t.c.decode(t.cs, zero.ptr, 4, t.audio_dev.ptr);
+        try t.c.decode(t.cs, zero.ptr, warm_frames, t.audio_dev.ptr);
         try t.cs.synchronize();
         return t;
     }
