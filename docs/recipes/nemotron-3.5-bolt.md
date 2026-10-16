@@ -18,7 +18,7 @@ tensorfold-native serve NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB --parallel 8 --con
 ```
 
 `native/lib/libbolt.so` is found beside the server (`TENSORFOLD_BOLT_LIB` names another); the backend checks its C ABI
-version at load. Images need `--vision`. The drafter,
+version at load. Images need `--vision`; videos also `libtfvideo` (`zig build video`). The drafter,
 [LiLiCorr](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr), is named by `BOLT_DRAFT`
 (a folder) or `--no-drafts` serves one row a round. `BOLT_KV=fp8` stores the attention cache as e4m3 with a scale per
 token and head (4,224 bytes a token against 8,192), and `BOLT_KV_PIN=1` maps every stream's whole window at load.
@@ -30,7 +30,9 @@ token and head (4,224 bytes a token against 8,192), and `BOLT_KV_PIN=1` maps eve
 - LiLiCorr drafts verified in the lane rounds, seven tokens a window, drawn with the stream's keyed sampler.
 - Prompt cache over the Mamba state, attention rows and drafter context (`snap_*`, any row, no lookahead).
 - Images through the RADIO tower (`--vision`): each prompt piece encodes the images it crosses into the rows buffer, so a
-  request holds as many images as fit the window (`--vision-max-images`, up to 64).
+  request holds as many images as fit the window (`--vision-max-images`, up to 64). Videos through the same tower: frames
+  sampled at 2 a second (1 above 720 rows, at most 128), two to a tubelet through `video_embedder`, each tubelet labelled
+  "Frame i sampled at t seconds and frame j ..." as the checkpoint's processor writes it (`--vision-max-videos`).
 - Structured output and forced tool calls: `response_format` (`json_schema`, `json_object`), `guided_*` fields and
   `tool_choice` `required` or a named function. The server compiles the grammar (`libtfgrammar`, `zig build grammar`) to
   per-row allowed-token bits; the backend redraws the rows of a verify window among those tokens (a masked top-k on the

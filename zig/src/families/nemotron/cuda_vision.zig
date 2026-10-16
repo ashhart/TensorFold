@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
 const radio = @import("radio");
+pub const video = radio.video;
 
 /// What a request may hold: image tokens in all (the rows buffer), and images.
 pub const Limits = struct { image_tokens: u32, max_images: u32 };
@@ -78,6 +79,11 @@ pub const Vision = struct {
 
     /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).
     pub const explain = radio.decoderProblem;
+
+    /// A decoded video as the tower reads it: its frames sampled, sized and paired, with the words before each pair.
+    pub fn prepareVideo(v: *const Vision, a: std.mem.Allocator, src: radio.video.Source, max_tokens: u32, max_frames: u32) !radio.video.Prepared {
+        return radio.video.prepare(a, &v.cfg, src, max_tokens, max_frames);
+    }
 
     /// An image's bytes as the tower reads them, at most `max_tokens` tokens (the server's prepare).
     pub fn prepare(v: *const Vision, a: std.mem.Allocator, data: []const u8, max_tokens: u32) !radio.image.Prepared {

@@ -464,7 +464,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = loaded.backend.vtable.first_row != null,
         .prompt_logprobs = loaded.backend.vtable.prompt_rows,
         .structures = loaded.backend.vtable.first_masked != null,
-        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
+        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
