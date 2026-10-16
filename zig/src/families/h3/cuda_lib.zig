@@ -1,6 +1,7 @@
 //! The CUDA H3 family as a C library for a host that shares its CUDA context: tf_h3_open, tf_h3_forward, tf_h3_close.
 const std = @import("std");
 const h3 = @import("cuda.zig");
+const weights = @import("cuda_weights.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -27,6 +28,16 @@ export fn tf_h3_forward(model: *h3.Model, in: *const h3.Model.Inputs) f64 {
         std.debug.print("tf_h3_forward: {t}\n", .{e});
         return -1;
     };
+}
+
+/// One block projection (weights.Projection) from bf16 (rows, cols) on the device; 0, or -1 on a wrong block or shape.
+export fn tf_h3_set_weight(model: *h3.Model, block: u32, which: c_int, w: u64, rows: u32, cols: u32) c_int {
+    const projection = std.enums.fromInt(weights.Projection, which) orelse return -1;
+    weights.set(model, block, projection, w, rows, cols) catch |e| {
+        std.debug.print("tf_h3_set_weight: {t}\n", .{e});
+        return -1;
+    };
+    return 0;
 }
 
 /// With `on`, a forward waits for the GPU after every stage and adds up where the time went.
