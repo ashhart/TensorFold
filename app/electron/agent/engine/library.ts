@@ -7,8 +7,7 @@ import { formatName } from './cli'
 import { isRepoId } from './paths'
 
 const STATE_LIMIT = 2 * 1024 * 1024
-// Large-vocabulary checkpoints (GLM-5.3-Flash etc.) ship a >4 MiB tokenizer.json and a >4 MiB
-// shard index; the native engine reads these fine, so the scan limit only guards the read loop.
+// The native engine reads checkpoint metadata well above this cap; the limit only guards the scan's bounded read loop.
 const JSON_LIMIT = 64 * 1024 * 1024
 const DEFAULT_LIMITS = { directories: 512, entries: 12_000, models: 256, depth: 4, metadataBytes: 256 * 1024 * 1024, durationMs: 15_000 }
 const INVALID = 'The local model library is invalid. Preserve its settings and repair them before scanning or loading models.'
