@@ -63,4 +63,5 @@ test {
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");
+    _ = @import("shared_test.zig");
 }
