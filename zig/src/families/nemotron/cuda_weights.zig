@@ -442,7 +442,7 @@ pub fn made(dtype: core.checkpoint.DType, d0: usize, d1: usize, bytes: []const u
 
 /// weights.load: the model folder's checkpoint (and its MTP head when `with_mtp`) on the GPU, leftovers refused.
 pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, c: Config, with_mtp: bool) !Weights {
-    if (c.format == .mlx and (c.group_size != 64 or c.bits != 4)) return error.UnsupportedQuantization;
+    if (c.format == .mlx) try c.fourOnly("CUDA");
     var w: Weights = .{ .gpa = gpa, .config = c };
     errdefer w.deinit();
     var src = try Source.init(gpa, ops);
