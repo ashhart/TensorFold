@@ -13,6 +13,7 @@ pub const assistant = @import("assistant.zig");
 pub const assistant_weights = @import("assistant_weights.zig");
 pub const image = @import("image.zig");
 pub const vision = @import("vision.zig");
+pub const vision_unified = @import("vision_unified.zig");
 pub const snapshot = @import("snapshot.zig");
 
 test {

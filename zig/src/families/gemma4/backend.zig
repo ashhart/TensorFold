@@ -225,7 +225,7 @@ pub const Metal = struct {
             const rows: prompt.Span = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = buf, .off = row * hidden * 2 } };
             const cb = self.model.queue.commandBuffer();
             const e = cb.compute(.serial);
-            try v.encode(e, im.pixels, im.gh, im.gw, rows.rows, null);
+            try v.encode(e, im.pixels, im.gh, im.gw, rows.rows);
             e.end();
             cb.commit();
             cb.wait();

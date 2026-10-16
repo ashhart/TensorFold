@@ -72,7 +72,8 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     }
     if (o.vision != null) model.loadVision(io, o.dir) catch |err| switch (err) {
         error.NoGemmaVision => {
-            problem.* = try std.fmt.allocPrint(a, "--vision: this Gemma 4 {s} checkpoint has no image tower (vision_tower. and embed_vision. tensors)", .{model.config.geo.name});
+            const names = if (model.config.geo.unified()) "vision_embedder. and embed_vision. (tools/zig/gemma4_12b_convert.py keeps them)" else "vision_tower. and embed_vision.";
+            problem.* = try std.fmt.allocPrint(a, "--vision: this Gemma 4 {s} checkpoint has no image input ({s} tensors)", .{ model.config.geo.name, names });
             return error.Refused;
         },
         else => return err,
@@ -152,7 +153,7 @@ fn holdResident(h: *Host) !void {
         try list.appendSlice(h.gpa, d.w.owned.items);
         try buffersOf(h.gpa, &list, d);
     }
-    if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.scratch, v.patches, v.cos, v.sin });
+    if (m.vision) |v| try list.appendSlice(h.gpa, v.buffers());
     h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "gemma4") orelse return;
     h.warm = (&h.resident.?).target();
 }
@@ -221,6 +222,6 @@ fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, window: usize, probl
 /// Info.vision's prepare (on the HTTP thread); the template writes <|image|> alone: the server adds boi and eoi.
 fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    const p = try g.image.prepare(h.io, a, bytes, max_tokens);
+    const p = try g.image.prepare(h.io, a, bytes, max_tokens, h.model.vision.?.layout());
     return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
 }
