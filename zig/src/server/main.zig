@@ -80,7 +80,7 @@ pub fn main(init: std.process.Init) !u8 {
     var closer: Closer = .{ .opened = up.engine };
     defer closer.closeOnce();
     return serve.run(gpa, io, args, .{
-        .stop = .{ .ctx = &closer, .halt = if (up.engine.halt != null) Closer.halt else null, .close = Closer.close },
+        .stop = .{ .ctx = &closer, .close = Closer.close },
         .engine = up.engine.engine,
         .text = up.text.text(),
         .served = hub.servedName(args.name, args.model, dir),
@@ -104,11 +104,6 @@ const Closer = struct {
 
     fn close(ctx: *anyopaque) void {
         closeOnce(@ptrCast(@alignCast(ctx)));
-    }
-
-    fn halt(ctx: *anyopaque, reason: []const u8) void {
-        const c: *Closer = @ptrCast(@alignCast(ctx));
-        if (c.opened.halt) |h| h(c.opened.ctx, reason);
     }
 };
 
