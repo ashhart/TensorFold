@@ -25,6 +25,13 @@ pub const Runtime = struct {
         return std.mem.span(name);
     }
 
+    /// The GPUs this process sees.
+    pub fn deviceCount(self: *const Runtime) Error!c_int {
+        var n: c_int = 0;
+        try check(self.api.hipGetDeviceCount(&n));
+        return n;
+    }
+
     pub fn close(self: *Runtime) void {
         self.lib.close();
         self.* = undefined;
