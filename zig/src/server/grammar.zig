@@ -13,12 +13,12 @@ pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_rege
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
 
-/// The text vocabulary: text_config, llm_config, then the checkpoint's root.
+/// The text vocabulary within the grammar ABI range: text_config, llm_config, then root.
 pub fn vocabSize(cfg: Value) ?u32 {
     for ([_]?Value{ cfg.get("text_config"), cfg.get("llm_config"), cfg }) |part| if (part) |p| {
         const v = p.get("vocab_size") orelse continue;
         const n = v.int64() orelse continue;
-        if (n > 0 and n <= std.math.maxInt(u32)) return @intCast(n);
+        if (n > 0 and n <= std.math.maxInt(c_int)) return @intCast(n);
     };
     return null;
 }
@@ -132,7 +132,10 @@ test "grammar vocabulary preserves nested text and root precedence" {
         .{ "{\"llm_config\":{\"vocab_size\":131072},\"vocab_size\":32000}", 131072 },
         .{ "{\"llm_config\":null,\"vocab_size\":32000}", 32000 },
         .{ "{\"text_config\":{\"vocab_size\":-1},\"llm_config\":{\"vocab_size\":131072}}", 131072 },
-        .{ "{\"vocab_size\":4294967295}", 4294967295 },
+        .{ "{\"vocab_size\":2147483647}", 2147483647 },
+        .{ "{\"vocab_size\":2147483648}", null },
+        .{ "{\"vocab_size\":4294967295}", null },
+        .{ "{\"text_config\":{\"vocab_size\":2147483648},\"llm_config\":{\"vocab_size\":131072}}", 131072 },
         .{ "{\"text_config\":{\"vocab_size\":32001},\"llm_config\":{\"vocab_size\":131072},\"vocab_size\":32000}", 32001 },
         .{ "{}", null },
         .{ "{\"vocab_size\":-1}", null },
