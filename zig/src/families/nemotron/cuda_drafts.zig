@@ -12,6 +12,14 @@ const DepthRule = core.draft_depth.DepthRule;
 
 pub const Stats = struct { rounds: usize = 0, drafted: usize = 0, accepted: usize = 0 };
 
+/// Tokens a copied or Recall chain, which the depth rule does not price, may propose at least: a 16-row window's.
+const copy_chain = 15;
+
+/// The room after a copy round kept `rows` rows (its pending one too): twice the copy kept, copy_chain to window - 1.
+fn copyRoom(rows: usize, window: usize) usize {
+    return std.math.clamp(2 * (rows - 1), copy_chain, window - 1);
+}
+
 /// Start a round's head work: an absorb for a copied chain, else level 1 (the rule reads the later levels).
 fn queue(h: *Head, keep: usize, copied: bool) !void {
     try h.begin(keep);
@@ -54,6 +62,7 @@ pub const Rounds = struct {
     recalled: bool = false, // the copy came from Recall
     proposal: []const u32 = &.{},
     copy_round: bool = false,
+    copy_room: usize = copy_chain,
     st: Stats = .{},
 
     /// The head reads the prompt's last hidden row and final output token.
@@ -106,7 +115,7 @@ pub const Rounds = struct {
     /// The context's own copied chain, else Recall's continuation when it is expected to pay (in `cbuf`).
     fn copies(r: *Rounds) []const u32 {
         r.recalled = false;
-        const room = r.cbuf[0 .. state.windowRows(r.e.c) - 1];
+        const room = r.cbuf[0..r.copy_room];
         const own = r.index.chain(room);
         const x = r.recall orelse return own;
         if (own.len > 0) return own;
@@ -156,6 +165,7 @@ pub const Rounds = struct {
         r.st.rounds += 1;
         r.st.drafted += r.proposal.len;
         r.st.accepted += n - 1;
+        if (r.copy_round) r.copy_room = copyRoom(n, state.windowRows(r.e.c));
         if (!more) return;
         r.copied = r.copies();
         try queue(r.h, n, r.copied.len > 0);
@@ -209,4 +219,13 @@ pub const Drafter = struct {
 /// The depth rule `run` and a lone served stream draft by: greedy calibration power 2, as deep as the costs' widths.
 pub fn depthRule(c: core.draft_depth.Costs) DepthRule {
     return DepthRule.init(c, c.rows - 1, null, 2.0);
+}
+
+test "a copy's room grows with what the last copy kept, from 15 tokens to the window's drafts" {
+    try std.testing.expectEqual(@as(usize, 15), copyRoom(1, 32));
+    try std.testing.expectEqual(@as(usize, 15), copyRoom(8, 32));
+    try std.testing.expectEqual(@as(usize, 16), copyRoom(9, 32));
+    try std.testing.expectEqual(@as(usize, 31), copyRoom(17, 32));
+    try std.testing.expectEqual(@as(usize, 31), copyRoom(32, 32));
+    try std.testing.expectEqual(@as(usize, 15), copyRoom(16, 16));
 }
