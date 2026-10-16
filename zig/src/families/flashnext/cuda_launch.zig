@@ -376,6 +376,7 @@ test {
     _ = @import("cuda_config.zig");
     _ = @import("cuda_projection_load.zig");
     _ = @import("cuda_rank_engine.zig");
+    _ = @import("cuda_rank_memory.zig");
     _ = @import("cuda_rank_wire.zig");
     _ = @import("cuda_modelopt_experts.zig");
     _ = row_path;

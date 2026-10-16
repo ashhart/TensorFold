@@ -97,8 +97,44 @@ pub fn mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u
     if (int(q, "bits") != 4) return "quantization.bits";
     if (int(q, "group_size") != 32) return "quantization.group_size";
     if (q.get("mode")) |m| if (m != .string or !std.mem.eql(u8, m.string, "affine")) return "quantization.mode";
+    return geometry(text);
+}
+
+fn geometry(text: std.json.ObjectMap) ?[]const u8 {
     for (shapes) |w| if (int(text, w.name) != w.value) return w.name;
     return semantics(text);
+}
+
+pub const Mode = enum { affine, modelopt };
+
+fn projection(q: std.json.ObjectMap, name: []const u8, algo: []const u8, group: i64) bool {
+    const p = object(q, name) orelse return false;
+    return holds(p.get("quant_algo") orelse return false, .{ .word = algo }) and int(p, "group_size") == group;
+}
+
+fn modeloptMismatch(text: std.json.ObjectMap, quant: std.json.ObjectMap) ?[]const u8 {
+    if (!holds(quant.get("quant_method") orelse return "quantization_config.quant_method", .{ .word = "modelopt" })) return "quantization_config.quant_method";
+    if (!holds(quant.get("quant_algo") orelse return "quantization_config.quant_algo", .{ .word = "MIXED_PRECISION" })) return "quantization_config.quant_algo";
+    if (given(quant, "kv_cache_quant_algo") != null) return "quantization_config.kv_cache_quant_algo";
+    if (geometry(text)) |field| return field;
+    const entries = object(quant, "quantized_layers") orelse return "quantization_config.quantized_layers";
+    var buf: [256]u8 = undefined;
+    for (0..wt.layers_n) |layer| {
+        const routed = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.mlp.experts", .{layer}) catch unreachable;
+        if (!projection(entries, routed, "NVFP4", 16)) return "quantization_config.routed_experts";
+        const p = object(entries, routed).?;
+        if (given(p, "weight_scale_encoding")) |encoding| if (!holds(encoding, .{ .word = "csf" })) return "quantization_config.weight_scale_encoding";
+        for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |part| {
+            const name = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.mlp.shared_expert.{s}", .{ layer, part }) catch unreachable;
+            if (!projection(entries, name, "MXFP8", 32)) return "quantization_config.shared_expert";
+        }
+        const parts: []const []const u8 = if (wt.linearLayer(layer)) &.{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj" } else &.{ "q_proj", "k_proj", "v_proj", "indexer.index_qk_proj", "o_proj" };
+        for (parts) |part| {
+            const name = std.fmt.bufPrint(&buf, "model.language_model.layers.{d}.{s}.{s}", .{ layer, if (wt.linearLayer(layer)) "linear_attn" else "self_attn", part }) catch unreachable;
+            if (!projection(entries, name, "MXFP8", 32)) return "quantization_config.attention_projection";
+        }
+    }
+    return null;
 }
 
 /// The first semantic setting the kernels would ignore: eps, RoPE, gates, activations, layer roles, the head's layer.
@@ -142,6 +178,10 @@ fn rope(text: std.json.ObjectMap) ?[]const u8 {
 
 /// Reads `dir`/config.json; error.UnsupportedCheckpoint names the field in a log line when one differs.
 pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    _ = try mode(gpa, io, dir);
+}
+
+pub fn mode(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Mode {
     const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
     defer gpa.free(path);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
@@ -152,11 +192,12 @@ pub fn check(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
     const root = parsed.value.object;
     const text = if (root.get("text_config")) |v| (if (v == .object) v.object else root) else root;
     const quant = if (root.get("quantization")) |v| (if (v == .object) v.object else null) else null;
-    var field = mismatch(text, quant);
+    const selected: Mode = if (quant != null) .affine else .modelopt;
+    var field = if (selected == .affine) mismatch(text, quant) else if (object(root, "quantization_config")) |q| modeloptMismatch(text, q) else "quantization";
     if (field == null) if (given(root, "tie_word_embeddings")) |v| if (!holds(v, .{ .flag = false })) {
         field = "tie_word_embeddings";
     };
-    std.log.err("flashnext: config.json's {s} differs from the MLX 4-bit group-32 Flash Next the CUDA path serves", .{field orelse return});
+    std.log.err("flashnext: config.json's {s} differs from the supported Flash Next CUDA layout", .{field orelse return selected});
     return error.UnsupportedCheckpoint;
 }
 
@@ -294,4 +335,63 @@ test "RoPE's base and type inside rope_parameters, and the MTP layer's base, are
         }
         try std.testing.expectEqualStrings(c.refused, semantics(text) orelse "accepted");
     }
+}
+
+test "mixed precision requires every routed, shared and attention declaration and refuses altered formats" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var text: std.json.ObjectMap = .empty;
+    var rope_params: std.json.ObjectMap = .empty;
+    var mtp: std.json.ObjectMap = .empty;
+    var kinds: std.json.Array = .init(a);
+    var ple: std.json.Array = .init(a);
+    try served(a, &text, &rope_params, &mtp, &kinds, &ple);
+    var quant: std.json.ObjectMap = .empty;
+    try quant.put(a, "quant_method", .{ .string = "modelopt" });
+    try quant.put(a, "quant_algo", .{ .string = "MIXED_PRECISION" });
+    var entries: std.json.ObjectMap = .empty;
+    for (0..wt.layers_n) |layer| {
+        const routed = try std.fmt.allocPrint(a, "model.language_model.layers.{d}.mlp.experts", .{layer});
+        var nv: std.json.ObjectMap = .empty;
+        try nv.put(a, "quant_algo", .{ .string = "NVFP4" });
+        try nv.put(a, "group_size", .{ .integer = 16 });
+        try nv.put(a, "weight_scale_encoding", .{ .string = "csf" });
+        try entries.put(a, routed, .{ .object = nv });
+        const prefix = if (wt.linearLayer(layer)) "linear_attn" else "self_attn";
+        const parts: []const []const u8 = if (wt.linearLayer(layer)) &.{ "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj" } else &.{ "q_proj", "k_proj", "v_proj", "indexer.index_qk_proj", "o_proj" };
+        for (parts) |part| try addMxfp8(a, &entries, layer, prefix, part);
+        for ([_][]const u8{ "gate_proj", "up_proj", "down_proj" }) |part| try addMxfp8(a, &entries, layer, "mlp.shared_expert", part);
+    }
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expect(modeloptMismatch(text, quant) == null);
+    const cases = [_]struct { name: []const u8, field: []const u8, value: std.json.Value, refused: []const u8 }{
+        .{ .name = "model.language_model.layers.47.mlp.experts", .field = "group_size", .value = .{ .integer = 32 }, .refused = "quantization_config.routed_experts" },
+        .{ .name = "model.language_model.layers.0.mlp.experts", .field = "weight_scale_encoding", .value = .{ .string = "other" }, .refused = "quantization_config.weight_scale_encoding" },
+        .{ .name = "model.language_model.layers.17.mlp.shared_expert.down_proj", .field = "quant_algo", .value = .{ .string = "NVFP4" }, .refused = "quantization_config.shared_expert" },
+        .{ .name = "model.language_model.layers.0.linear_attn.in_proj_b", .field = "group_size", .value = .{ .integer = 16 }, .refused = "quantization_config.attention_projection" },
+        .{ .name = "model.language_model.layers.47.self_attn.indexer.index_qk_proj", .field = "quant_algo", .value = .{ .string = "FP8" }, .refused = "quantization_config.attention_projection" },
+    };
+    for (cases) |c| {
+        const entry = entries.getPtr(c.name).?;
+        const original = entry.object.get(c.field).?;
+        try entry.object.put(a, c.field, c.value);
+        try std.testing.expectEqualStrings(c.refused, modeloptMismatch(text, quant) orelse "accepted");
+        try entry.object.put(a, c.field, original);
+    }
+    try quant.put(a, "kv_cache_quant_algo", .{ .string = "FP8" });
+    try std.testing.expectEqualStrings("quantization_config.kv_cache_quant_algo", modeloptMismatch(text, quant).?);
+    try quant.put(a, "kv_cache_quant_algo", .null);
+    try std.testing.expect(modeloptMismatch(text, quant) == null);
+    _ = entries.swapRemove("model.language_model.layers.47.self_attn.o_proj");
+    try quant.put(a, "quantized_layers", .{ .object = entries });
+    try std.testing.expectEqualStrings("quantization_config.attention_projection", modeloptMismatch(text, quant).?);
+}
+
+fn addMxfp8(a: std.mem.Allocator, entries: *std.json.ObjectMap, layer: usize, prefix: []const u8, part: []const u8) !void {
+    var p: std.json.ObjectMap = .empty;
+    try p.put(a, "quant_algo", .{ .string = "MXFP8" });
+    try p.put(a, "group_size", .{ .integer = 32 });
+    const name = try std.fmt.allocPrint(a, "model.language_model.layers.{d}.{s}.{s}", .{ layer, prefix, part });
+    try entries.put(a, name, .{ .object = p });
 }

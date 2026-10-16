@@ -10,6 +10,9 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const flashnext = @import("flashnext");
 const Allocator = std.mem.Allocator;
+const family_memory = @import("cuda_family_memory.zig");
+const learnBytes = family_memory.learnBytes;
+const toGib = family_memory.toGib;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
@@ -147,11 +150,6 @@ fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8
     return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
 }
 
-fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
-    const u = cuda.usage(reset_peak);
-    return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
-}
-
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
 const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -220,15 +218,16 @@ const Host = struct {
     }
 
     /// The round loop and the lane host over the family's backend, its thread started.
-    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, per: PerFamily) !void {
+    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain, per: PerFamily, health: ?api.HealthSource) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
         h.clock = .{ .io = io };
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();
         h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
-        h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
+        h.host.memory = if (h.gpu != null) .{ .read = family_memory.read } else null;
         h.host.explain = explain;
+        h.host.health = health;
         h.host.cache = h.store;
         h.host.warm_quiet = if (info.warm_turns) per.warm_quiet else 0;
         if (h.lone != null) h.host.lone = .{ .ctx = h, .run = loneRun, .sampled = true, .logprobs = h.inner.vtable.first_row != null, .structures = h.inner.vtable.first_masked != null, .min_budget = per.lone_min_budget, .resumes = true };
@@ -372,7 +371,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family that keeps part of its checkpoint off the device says what it uploads; else every shard's bytes
-    const weights = if (@hasDecl(F, "deviceWeightBytes")) F.deviceWeightBytes(a, io, o.dir) else weightBytes(io, o.dir);
+    const weights = family_memory.weights(F, a, io, o, weightBytes) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the checkpoint placement is unsupported ({s})", .{@errorName(err)});
+        return null;
+    };
     const held0 = cuda.usage(false).device;
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
@@ -398,7 +400,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     defer if (!opened) loaded.deinit(loaded.ctx);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    const room = after.room(model) -| learnBytes(loaded);
+    const room = family_memory.room(F, loaded.ctx, after.room(model) -| learnBytes(loaded)) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "the ranks could not agree on available memory ({s})", .{@errorName(err)});
+        return null;
+    };
     const free = loaded.free_streams;
     const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
@@ -417,8 +422,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
     const snaps = comptime snapshots(F);
     const cache = if (snaps != null) budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free)) else 0;
+    const prompt_rows = if (@hasField(@TypeOf(loaded), "prompt_rows")) loaded.prompt_rows else F.prompt_rows;
     h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                                                    name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learnBytes(loaded) > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learnBytes(loaded))}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        capability,                                                                                                        device,                                                                                                                                    name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learnBytes(loaded) > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learnBytes(loaded))}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
         if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels != null and !ownGlue(loaded)) try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{kernels.?}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
@@ -454,7 +460,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"), .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm, .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain }, comptime perFamily(F));
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"), .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = o.vision and @hasField(F.Options, "vision"), .vision_glm = @hasDecl(F, "vision_glm") and F.vision_glm, .admit = if (@hasDecl(F, "fits")) .{ .ctx = loaded.ctx, .fits = F.fits } else null }, .{ .ctx = loaded.ctx, .text = F.explain }, comptime perFamily(F), if (@hasDecl(F, "healthy")) .{ .ctx = loaded.ctx, .read = F.healthy } else null);
     opened = true;
     const follow_loop: ?*const fn (*anyopaque) anyerror!void = if (@hasField(@TypeOf(loaded), "follow")) loaded.follow else null;
     if (follow_loop) |f| {
@@ -464,16 +470,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-/// A family's bytes kept for --slide (0 for families without a learner).
-fn learnBytes(loaded: anytype) u64 {
-    return if (@hasField(@TypeOf(loaded), "learn_bytes")) loaded.learn_bytes else 0;
-}
-
-fn toGib(bytes: u64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / gib;
-}
-
 test {
+    _ = family_memory;
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
     _ = refusals;
     _ = lane_backend;
@@ -529,7 +527,7 @@ test "a cancel during a long prompt stops it, and the next request's reply is un
     const h = try gpa.create(Host);
     defer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = null, .family = &target, .release = Nothing.release, .inner = target.backend(), .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined };
-    try h.serve(std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null, .{});
+    try h.serve(std.testing.io, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = 7, .hidden_rows = true }, 8, .{ .lanes = 2 }, null, .{}, null);
     defer {
         h.host.stop();
         h.core.deinit();

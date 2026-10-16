@@ -344,10 +344,10 @@ const Run = struct {
         const a = r.a;
         const kind_ok = cx.kind != .other and cx.kind != .server;
         const body = (if (kind_ok) errorBody(a, cx, field) else errorOther(a, cx.message)) catch return;
-        r.out.vt.reply(r.out.ctx, if (kind_ok) 400 else 500, wrapError(a, body) catch return);
+        r.out.vt.reply(r.out.ctx, if (kind_ok) cx.status() else 500, wrapError(a, body) catch return);
     }
 
-    /// A reply that ended before anything was sent: a refusal's 400, a failure's 500, nothing when the client left.
+    /// An unsent reply: request 400, unavailable 503, failure 500, nothing when the client left.
     fn unsent(r: *Run, cx: *Cx, e: chat.Failure, field: []const u8) void {
         switch (e) {
             error.Cancelled => {},

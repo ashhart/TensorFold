@@ -49,6 +49,7 @@ pub const Session = struct {
     seqs: std.AutoHashMapUnmanaged(u64, *prompt.Seq) = .empty,
     saved: std.AutoHashMapUnmanaged(u64, *snaps.Snap) = .empty,
     stopped: bool = false,
+    available: std.atomic.Value(bool) = .init(true),
 
     pub fn init(a: std.mem.Allocator, io: std.Io, host: []const u8, port: u16, rank: usize, mine: Identity) !*Session {
         const s = try a.create(Session);
@@ -76,8 +77,15 @@ pub const Session = struct {
         return s;
     }
 
+    pub fn healthy(s: *const Session) bool {
+        if (!s.available.load(.acquire)) return false;
+        s.link.checkPeer() catch return false;
+        return true;
+    }
+
     pub fn poison(s: *Session) void {
         s.stopped = true;
+        s.available.store(false, .release);
         s.collective.abort();
         _ = std.c.shutdown(s.link.fd, std.posix.SHUT.RDWR);
     }
@@ -235,6 +243,7 @@ pub const Session = struct {
             try s.link.sendHeader(.{ .kind = .ack, .sequence = h.sequence, .object = h.object }, wire.deadline(30_000));
             if (stop) {
                 s.stopped = true;
+                s.available.store(false, .release);
                 return;
             }
         }

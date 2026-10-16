@@ -217,7 +217,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
-        error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
+        error.Closed => cx.fail(.capacity, "the engine is unavailable; retry after it restarts", .{}),
         error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares

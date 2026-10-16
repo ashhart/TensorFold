@@ -7,6 +7,8 @@ const prompt = @import("cuda_prompt.zig");
 const weights = @import("cuda_prompt_wt.zig");
 const mtp = @import("cuda_mtp.zig");
 const snap = @import("cuda_snap.zig");
+const ranks = @import("cuda_rank_engine.zig");
+const config = @import("cuda_config.zig");
 const Glue = @import("cuda_glue.zig").Glue;
 
 const be = lanes.backend;
@@ -22,7 +24,7 @@ pub const captured_head_entries = [_][]const u8{ "_rmsnorm", "_add_streams" };
 pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
-        pub const formats: []const []const u8 = &.{"mlx-q4g32"};
+        pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed" };
         // the model's window: past 2,048 keys the block indexer picks each row's 512 best blocks of 4 (cuda_batch.zig)
         pub const default_context: i64 = @intCast(prompt.max_tokens);
         // a prompt runs on the batched pass in chunks of this many rows, one a prefill_step: no staggered segments
@@ -42,7 +44,7 @@ pub fn Namespace(comptime Tri: type) type {
             pub const min_prompt: u32 = 512;
         };
 
-        pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+        pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
 
         /// One stream's prompt-and-reply driver, as native/cuda.zig types it; this family has none.
         pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
@@ -51,6 +53,7 @@ pub fn Namespace(comptime Tri: type) type {
             backend: be.Backend,
             facts: lanes.Model,
             rows: u32,
+            prompt_rows: u32,
             /// Device bytes each admitted stream allocates: its caches (and with the head, its cache and window).
             stream_bytes: usize,
             /// Every stream allocates its own sequence; none rides on the engine's.
@@ -64,6 +67,7 @@ pub fn Namespace(comptime Tri: type) type {
             target: *anyopaque,
             /// Whether our own glue runs (no captured set given, or one without this family's entry points).
             own_glue: bool = true,
+            follow: ?*const fn (*anyopaque) anyerror!void = null,
         };
 
         /// Device bytes of the checkpoint: the n-gram tables stay mapped, the MTP head counts; 0 if unread.
@@ -72,12 +76,36 @@ pub fn Namespace(comptime Tri: type) type {
             return main + mtp.headBytes();
         }
 
+        pub fn placementWeightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, world: usize, rank: usize, drafts: bool) !u64 {
+            if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
+            const mode = try config.mode(gpa, io, dir);
+            if (mode == .modelopt) {
+                if (drafts) return error.ModelOptDraftsUnavailable;
+                return @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
+            }
+            if (world != 1) return error.UnsupportedQuantization;
+            const main = try weights.deviceBytes(gpa, io, dir);
+            return main + if (drafts) mtp.headBytes() else @as(u64, 0);
+        }
+
+        pub fn healthy(ptr: *anyopaque) bool {
+            if (of(ptr).ranks) |r| return r.healthy();
+            return true;
+        }
+
+        pub fn rankRoom(ptr: *anyopaque, local: u64) !u64 {
+            if (of(ptr).ranks) |r| return r.room(local);
+            return local;
+        }
+
         /// A request or load this engine refuses, in words; null: none of its own.
         pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
             return switch (err) {
                 error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
                 error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
-                error.UnsupportedCheckpoint => "Flash Next on CUDA serves MLX affine 4-bit group-32 Qwen3.8-Flash-Next checkpoints; the log names the config field that differs",
+                error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
+                error.ModelOptDraftsUnavailable => "ModelOpt Flash Next serves without its MTP head so far: use --no-drafts",
+                error.RankDisconnected, error.RankTimeout, error.RemoteRank, error.BadRankFrame => "a tensor-parallel rank failed; restart both ranks from the same checkpoint before retrying",
                 error.LearnedPocket => "this folder holds Living Weights pockets, which Flash Next on CUDA does not serve yet",
                 else => null,
             };
@@ -98,6 +126,7 @@ pub fn Namespace(comptime Tri: type) type {
             gpa: std.mem.Allocator,
             context: usize,
             engine: *prompt.Engine,
+            ranks: ?*ranks.Session = null,
             head: ?*mtp.Head = null,
             depth: usize = mtp.max_chain,
             confidence: f64 = mtp.default_confidence,
@@ -194,7 +223,7 @@ pub fn Namespace(comptime Tri: type) type {
                 }
                 // a window's rows past the reply's last token (its drafts) still need cache slots
                 const cap = @min(ids.len + s.max_new + (if (drafting) mtp.max_rows else 0), prompt.max_tokens);
-                gop.value_ptr.* = .{ .seq = self.engine.newSeq(cap) catch |err| {
+                gop.value_ptr.* = .{ .seq = (if (self.ranks) |r| r.create(cap) else self.engine.newSeq(cap)) catch |err| {
                     self.lanes.removeByPtr(gop.key_ptr);
                     return err;
                 } };
@@ -209,7 +238,7 @@ pub fn Namespace(comptime Tri: type) type {
                 const kept: *snap.Snap = @ptrCast(@alignCast(saved));
                 if (kept.at != s.reuse.at or kept.at == 0 or kept.at >= ids.len) {
                     s.reuse_failed = true;
-                } else if (snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
+                } else if (if (self.ranks) |r| r.restore(&l.seq, kept) else snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, kept)) |_| {
                     l.filled = kept.at;
                     s.cached = @intCast(kept.at);
                 } else |err| switch (err) {
@@ -232,6 +261,8 @@ pub fn Namespace(comptime Tri: type) type {
                 const last = stop == ids.len;
                 if (l.draft) |*d| {
                     try self.ops().prefillChunk(&l.seq, d, ids, at, stop);
+                } else if (self.ranks) |r| {
+                    try r.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = if (last) .last else .none });
                 } else try self.engine.forward(Tri, self.tri(), &l.seq, ids[at..stop], .{ .logits = if (last) .last else .none });
                 l.filled = if (last) null else stop;
                 if (!last and std.mem.indexOfScalar(u32, s.reuse.marks, @intCast(stop)) != null) {
@@ -249,7 +280,10 @@ pub fn Namespace(comptime Tri: type) type {
         pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, captured: ?[]const u8, o: Options) !Loaded {
             if (o.context > prompt.max_tokens) return error.ContextOverWindow;
             if (o.segments != 1 or o.slide) return error.UnsupportedOption;
-            try @import("cuda_config.zig").check(gpa, io, dir);
+            if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
+            const mode = try config.mode(gpa, io, dir);
+            if (mode == .modelopt and o.drafts) return error.ModelOptDraftsUnavailable;
+            if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
             const driver: *cuda.Driver = @constCast(ctx.d);
             const own = try gpa.create(Cuda);
             errdefer gpa.destroy(own);
@@ -261,7 +295,20 @@ pub fn Namespace(comptime Tri: type) type {
             // a captured set replaces our glue, for comparison, when it holds every entry point this engine launches
             if (captured) |kernels| own.set = try comparison(gpa, io, driver, ctx, kernels, o.drafts);
             errdefer if (own.set) |*x| x.deinit();
-            own.engine = try prompt.Engine.init(gpa, io, driver, &own.stream, dir);
+            if (o.tp == 2) {
+                const configured_chunk = envUsize("TF_FLASHNEXT_CHUNK", prompt.batch.default_chunk);
+                const id = try ranks.identity(gpa, io, dir, o.context, if (configured_chunk == 0) prompt.batch.default_chunk else configured_chunk);
+                own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id);
+            }
+            errdefer if (own.ranks) |r| {
+                r.poison();
+                r.deinit();
+            };
+            own.engine = try prompt.Engine.initRank(gpa, io, driver, &own.stream, dir, o.tp, o.rank);
+            if (own.ranks) |r| {
+                r.engine = own.engine;
+                own.engine.collective = &r.collective;
+            }
             errdefer own.engine.deinit();
             // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
             _ = try own.engine.reserve(@min(o.context, own.engine.chunk));
@@ -285,11 +332,13 @@ pub fn Namespace(comptime Tri: type) type {
                 .backend = own.backend(),
                 .facts = own.facts(),
                 .rows = if (own.head != null) mtp.max_rows else 2,
+                .prompt_rows = @intCast(own.engine.chunk),
                 .stream_bytes = stream_bytes,
                 .ctx = own,
                 .deinit = release,
                 .target = own,
                 .own_glue = own.set == null,
+                .follow = if (o.rank != 0) follow else null,
             };
         }
 
@@ -307,6 +356,11 @@ pub fn Namespace(comptime Tri: type) type {
             return null;
         }
 
+        fn follow(ptr: *anyopaque) anyerror!void {
+            const self = of(ptr);
+            return self.ranks.?.follow(Tri, self.tri(), self.logits.ptr);
+        }
+
         fn release(p: *anyopaque) void {
             const own: *Cuda = @ptrCast(@alignCast(p));
             var it = own.lanes.valueIterator();
@@ -314,6 +368,7 @@ pub fn Namespace(comptime Tri: type) type {
             own.lanes.deinit(own.gpa);
             own.logits.free();
             if (own.head) |h| h.deinit();
+            if (own.ranks) |r| r.deinit();
             own.engine.deinit();
             if (own.set) |*x| x.deinit();
             own.glue.deinit();
@@ -323,7 +378,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         fn dropLane(self: *Cuda, l: *Lane) void {
             if (l.draft) |*d| d.deinit();
-            l.seq.deinit(self.gpa);
+            if (self.ranks) |r| r.drop(&l.seq) else l.seq.deinit(self.gpa);
         }
 
         fn of(ptr: *anyopaque) *Cuda {
@@ -399,7 +454,7 @@ pub fn Namespace(comptime Tri: type) type {
             var at: usize = 0;
             while (at < plain) : (at += round_streams) {
                 const n = @min(round_streams, plain - at);
-                try self.engine.round(Tri, self.tri(), seqs[at..][0..n], ids[at..][0..n], self.logits.ptr);
+                if (self.ranks) |r| try r.round(Tri, self.tri(), seqs[at..][0..n], ids[at..][0..n], self.logits.ptr) else try self.engine.round(Tri, self.tri(), seqs[at..][0..n], ids[at..][0..n], self.logits.ptr);
             }
             for (seqs[0..plain], at_window[0..plain]) |q, wi| out[wi].sampled[0] = try self.tokenAt(q, windows[wi].stream, windows[wi].positions[0]);
         }
@@ -478,6 +533,7 @@ pub fn Namespace(comptime Tri: type) type {
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
             const l = try self.lane(s);
             if (l.seq.fed != at) return error.NotAtMark;
+            if (self.ranks) |r| return try r.save(&l.seq);
             return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
         }
 
@@ -485,11 +541,13 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
             const l = try self.lane(s);
+            if (self.ranks) |r| return r.restore(&l.seq, @ptrCast(@alignCast(saved)));
             try snap.restore(self.stream, &l.seq, if (l.draft) |*d| d else null, @ptrCast(@alignCast(saved)));
         }
 
         fn snapDrop(ptr: *anyopaque, saved: *anyopaque) void {
             const self = of(ptr);
+            if (self.ranks) |r| return r.dropSaved(@ptrCast(@alignCast(saved)));
             snap.drop(self.gpa, self.stream, @ptrCast(@alignCast(saved)));
         }
     };

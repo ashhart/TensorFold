@@ -43,6 +43,7 @@ pub const LaneHost = struct {
     lone_job: ?*Job = null, // the job that driver holds now
     cache: ?*pc.Store = null, // kept prompt states (engine thread only); the backend restores and saves them
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
+    health: ?api.HealthSource = null,
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
@@ -143,7 +144,7 @@ pub const LaneHost = struct {
         job.* = .{ .host = h, .id = id, .request = request, .sink = sink };
         h.mutex.lockUncancelable(h.io);
         defer h.mutex.unlock(h.io);
-        if (h.closing) {
+        if (h.closing or (if (h.health) |source| !source.read(source.ctx) else false)) {
             h.gpa.destroy(job);
             return error.Closed;
         }
