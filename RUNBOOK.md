@@ -19,7 +19,7 @@ For an archive installation, download the arm64 asset and its companion checksum
 [latest release](https://github.com/ashhart/TensorFold/releases/latest), with `V` set to its version:
 
 ```sh
-V=1.0.7
+V=1.0.12
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-macos-arm64.tar.gz.sha256
 shasum -a 256 -c tensorfold-$V-macos-arm64.tar.gz.sha256
@@ -33,6 +33,64 @@ The archive targets Apple Silicon with M1 CPU instructions and a macOS 13 ABI mi
 Metal comes from macOS; a prebuilt binary needs no Python, MLX or Xcode installation.
 Keep the archive's `bin`, `lib` and any `share` directories together when relocating it.
 The commands below use `bin/tensorfold-native`; a Homebrew installation can use `tensorfold` instead.
+
+## Model-free Metal counter probe
+
+With the Zig version from `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build tf-metal-counters test-metal-counters-host test-metal-counters-gpu -Dcpu=apple_m1
+./zig-out/bin/tf-metal-counters --capability
+./zig-out/bin/tf-metal-counters
+```
+
+The probe runs three dependent FP32 operators without a checkpoint, verifies
+independent expected output bits and instrumented/uninstrumented identity, and
+prints calibrated GPU counter intervals as JSON. Unsupported sampling is reported
+explicitly; CPU elapsed time is not a replacement for missing GPU samples.
+
+Stage sampling rotates serial encoders with fences. A consumer must rebind its
+pipeline, buffers and constants and redeclare indirect resources after rotations.
+The recorder permits one in-flight command buffer, owns bounded sample storage,
+and resolves samples only after the caller's existing completion wait.
+
+An M3 Ultra on macOS 26.6.2 exercised stage sampling and passed all 13 dedicated
+host/device tests. Dispatch-boundary sampling was unavailable and was not exercised.
+This probe does not establish model fidelity, decode speed or serving support.
+
+## Standalone Metal EXL3 projections
+
+With the Zig version from `.zig-version` and Xcode's Metal toolchain:
+
+```sh
+zig build tf-exl3-bench test-exl3 test-exl3-gpu -Dcpu=apple_m1
+./zig-out/bin/tf-exl3-bench --help
+./zig-out/bin/tf-exl3-bench --qualify-only 1 --warmup 0 --repeats 1
+./zig-out/bin/tf-exl3-bench --warmup 1 --repeats 3 --prefill 32
+```
+
+These commands use deterministic compressed fixtures, not a checkpoint.
+Compact 256-by-128 fixtures check all nine rows and every output column for
+27 width/codebook combinations in BF16 and F32. Larger shapes check every
+candidate output bit against the arithmetic decoder, but the independent FP64
+oracle samples at most two rows and three 128-column blocks. Its worst-column
+metrics are explicitly labelled `worst_sampled`; they are not whole-matrix bounds.
+
+The borrowed-buffer API in `zig/src/core/exl3_projection.zig` encodes BF16
+inputs, FP16-rounded rotated inputs, compensated FP32 projection dots and BF16
+or F32 outputs. Scratch holds row intermediates, never a dequantized matrix.
+All buffers and pipelines must survive command completion. GPU-produced IDs
+must be in bounds, scatter destinations unique, and grouped padding must follow
+valid rows. Indexed descriptors share dimensions and require valid resident
+weights disjoint from writable views; use `useMatrix` or caller residency sets.
+The operator validates storage extents, offsets, strides, capacities and aliases,
+but does not read back GPU IDs or plan expert groups.
+
+On an M3 Ultra running macOS 26.6.2, the 82 exercised operator cases had zero
+candidate/baseline bit mismatches and identical independent-oracle errors.
+Timings alternate dispatch order and exclude oracle work and allocations.
+This is operator evidence only: no model loader, family registration, CUDA
+implementation, whole-model fidelity or served-throughput claim is added.
 
 ## First server and request
 
@@ -69,7 +127,7 @@ capability 12.0, `linux-x86_64`).
 On a GB10 arm64 host (an x86_64 host uses `linux-x86_64` in the same commands):
 
 ```sh
-V=1.0.7
+V=1.0.12
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz
 curl -fLO https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-linux-aarch64.tar.gz.sha256
 sha256sum -c tensorfold-$V-linux-aarch64.tar.gz.sha256
@@ -91,12 +149,20 @@ A sampled request honours its `seed`, `top_k: 0` turns the top-k filter off, and
 pinned host memory.
 A request that names no `top_k`, on a checkpoint whose generation config names none, samples with no top-k filter on
 CUDA and Metal alike, so a seeded request draws the same on both. `--top-k 20` gives 0.6.6's CUDA default.
-A conversation's next turn resumes from a prompt state kept at a 2,048-token chunk boundary, so a reply equals the same
+A conversation's next turn resumes from a prompt state kept where its last turn's history ended, so a reply equals the same
 request with the cache off. `--prompt-cache-gib` sizes the kept states (16 GiB by default, inside the memory budget) and 0 turns
-them off; prompts shorter than 4,096 tokens keep none.
+them off. A state kept inside a prompt chunk costs no extra prompt call. A Nemotron 3.5 Lightning state takes 48 MiB plus
+7 KiB a prompt token, in whole 2 MiB pages (62 MiB at 2,048 tokens), and the cache keeps four 48 MiB buffers of its
+budget free for the next states.
 `TF_HEAT_HIGH` and `TF_HEAT_LOW`, in degrees Celsius and set together, make each prompt chunk wait while the hottest
 thermal zone (under `/sys/class/thermal`, or `TF_HEAT_ROOT`) is above the high band, until it is at or under the low one.
 The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do not change.
+`TF_GRAPH_CACHE=0` (or `off`, any case) runs every step eagerly in any family that installs the keyed CUDA graph cache,
+without a rebuild. Set it alike on every tensor-parallel rank: an off rank never joins the cache's per-miss vote, so a
+rank left on would wait at its first miss, and only the off rank logs the switch. Ranks that share a cache compare
+`Settings.digest` of their effective settings at start, before building it, and refuse to start when they differ.
+A tensor-parallel family passes its cache settings in the TP config; the bootstrap then compares them and refuses to
+start on every rank, naming TF_GRAPH_CACHE among the settings that must match.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving
@@ -134,9 +200,8 @@ Run each command on its own Mac and send requests to rank 0.
 Run the same release on both Macs: the pair now agrees on learned-state disk space before either Mac writes, and each Mac refuses a peer from an earlier release.
 With `--learn`, states learned by an earlier release are refused when read and learned again.
 Each settings file names `rank`, `library` and `links`; each link names its peer, RDMA device, interface/address, ports and link name.
-[Speed-up settings](docs/speed-up-mode.md#5-write-the-settings-files) has the schema and link setup.
-The recording command in that guide is the setup its two-Mac Flash Next numbers were measured with; on one Mac, ordinary
-loading uses the direct-checkpoint command above.
+[Speed-up settings](docs/speed-up-mode.md#4-write-the-settings-files) has the schema and link setup.
+That guide's two-Mac Flash Next commands load the checkpoint directly, as one Mac does.
 
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
@@ -155,6 +220,9 @@ After a memory refusal, reduce the context or reply limit, or choose a smaller q
 `--learn` writes a shared prompt state to disk only while the disk keeps `--learn-min-free-gib` free, 4 GiB by default.
 Below that, learning pauses with a log line and serving goes on; a refused write is tried again after 1 to 60 seconds, sooner when space comes back.
 Each learned file carries a checksum over its header and contents, so a damaged, truncated or older file is refused and learned again.
+`--learn-conversations` writes every kept prompt state behind, while the engine idles, and a SIGTERM stop writes what waits within 20 seconds.
+Stop a server with SIGTERM, not SIGKILL, so its last turn is kept.
+`--learn-daily-gib` caps those writes a day (32 GiB by default); `DELETE /v1/imprint` forgets one model's conversation states.
 
 Upgrade a Homebrew installation with `brew upgrade tensorfold` and restart its server.
 For an archive installation, verify and unpack the replacement archive, then restart from that binary.

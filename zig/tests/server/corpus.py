@@ -151,7 +151,7 @@ def response_cases() -> list[tuple[str, str, list[Any]]]:
         ("responses", "delete-collection", [request("DELETE", "/v1/responses")]),
         ("responses", "post-with-id", [post("/v1/responses/resp_x", {"input": "x"})]),
     ]
-    refusals = {"include": {"input": "x", "include": ["reasoning.encrypted_content"]}, "truncation": {"input": "x", "truncation": "auto"},
+    refusals = {"include": {"input": "x", "include": ["reasoning.bogus"]}, "truncation": {"input": "x", "truncation": "auto"},
                 "background": {"input": "x", "background": True}, "empty-input": {"input": []}, "item-type": {"input": [{"type": "bogus"}]},
                 "tool-type": {"input": "x", "tools": [{"type": "web_search"}]}, "metadata": {"input": "x", "metadata": {str(i): "v" for i in range(17)}},
                 "not-json": b"{", "list-body": b"[1]", "format": {"input": "x", "text": {"format": {"type": "bogus"}}},

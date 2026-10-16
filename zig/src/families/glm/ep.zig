@@ -307,6 +307,7 @@ pub const Ep = struct {
 
     /// Each posted exchange's entries to the peer, then its flag; 10 s without an answer fails the link and lands every flag.
     fn service(t: *Ep) void {
+        _ = std.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
         const posted = t.word32(POSTED);
         const flag = t.word64(FLAG);
         var x: u64 = 1;

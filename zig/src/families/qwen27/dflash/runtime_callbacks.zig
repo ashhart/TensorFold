@@ -96,7 +96,7 @@ fn maskRows(ptr: *anyopaque, epoch: u64, x: op.View, first: u32, rows: u32) !op.
     const r = try b.frame.ref(x);
     return b.frame.add(.{ .buf = r.buf, .off = r.off + @as(usize, first) * x.stride * 2 }, rows, x.width, x.stride, .bf16);
 }
-fn head(ptr: *anyopaque, epoch: u64, _: ck.Linear, x: op.View) !op.Head {
+fn head(ptr: *anyopaque, epoch: u64, x: op.View) !op.Head {
     const b = backend(ptr);
     const e = try b.encoder(epoch);
     const y = try b.frame.alloc(x.rows, b.head.linear.n, .bf16);

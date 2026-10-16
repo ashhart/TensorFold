@@ -1,10 +1,16 @@
 # DeepSeek-V4-Flash
 
+This page describes the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its commands, converter, flags and the
+`TENSORFOLD_MEMORY_LIMIT_GB` variable belong to that engine. The native binary has no DeepSeek-V4 family yet, so
+`tensorfold pull` and `tensorfold info` refuse these checkpoints.
+
 The `deepseek_v4` family serves `mlx-community/DeepSeek-V4-Flash-4bit` on the MLX lane engine, on a Mac with
 256 GB and MLX 0.32.2 or later (`serve` refuses an older MLX). The routed experts keep DeepSeek's mxfp4 bytes and
 everything else is affine 4-bit in groups of 64; about 151 GiB stays resident.
-Packages: `src/tensorfold/families/deepseek_v4/` and `src/tensorfold/kernels/deepseek/v4/`, with GLM-5.3-Flash's
-hyper-connection kernels and row linears.
+Packages: [`src/tensorfold/families/deepseek_v4/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/families/deepseek_v4)
+and [`src/tensorfold/kernels/deepseek/v4/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/kernels/deepseek/v4),
+with GLM-5.3-Flash's hyper-connection kernels and row linears.
 
 ```bash
 tensorfold pull mlx-community/DeepSeek-V4-Flash-4bit TensorFold/DeepSeek-V4-Flash-DSpark-MLX

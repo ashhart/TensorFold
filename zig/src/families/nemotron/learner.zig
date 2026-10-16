@@ -32,7 +32,7 @@ pub const Report = union(enum) {
     failed: []const u8,
 };
 
-pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null };
+pub const Step = struct { done: bool, changed: bool = false, report: ?Report = null, stale: bool = false }; // stale: see api
 
 const check_every = 20;
 const per_step = 2; // fact answers whose gradients one Adam step takes together (a plain one and a thinking one)
@@ -40,7 +40,7 @@ const replay_cap = 256; // earlier lessons' answers a new lesson leaves as they 
 const replay_each = 8; // of a lesson's answers, its first (plain questions) join the replay, so every fact keeps some
 
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
-const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket };
+const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
 
 /// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
 pub fn Learner(comptime H: type) type {
@@ -64,7 +64,12 @@ pub fn Learner(comptime H: type) type {
         at: usize = 0, // the plan's next example
         loss: f32 = 0, // the round's summed loss
         replay: std.ArrayList(Example) = .empty, // earlier lessons' questions, owned
+        replay_of: std.ArrayList(u32) = .empty, // [replay]: the lesson each came from
+        live: std.ArrayList(Example) = .empty, // replay but the lessons of facts a newer one replaced (borrowed)
+        live_of: std.ArrayList(u32) = .empty, // [live]: the lesson each came from
         last: []Example = &.{}, // the last lesson's questions, owned, joining replay when the next lesson begins
+        last_lesson: u32 = 0, // the last lesson's number, which its neurons record
+        lessons: u32 = 0, // lessons begun so far
         kept_rounds: u32 = 0, // the last lesson's rounds still in the weights
         opened: bool = false, // the last lesson opened the block now last in the change
         built: usize = 0, // examples a new lesson has sketched or projected so far
@@ -117,11 +122,27 @@ pub fn Learner(comptime H: type) type {
             disown(l.gpa, l.last);
             for (l.replay.items) |ex| l.gpa.free(ex.ids);
             l.replay.deinit(l.gpa);
+            l.replay_of.deinit(l.gpa);
+            l.live.deinit(l.gpa);
+            l.live_of.deinit(l.gpa);
+        }
+
+        /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
+        pub fn liveReplay(l: *Self) ![]const Example {
+            l.live.clearRetainingCapacity();
+            l.live_of.clearRetainingCapacity();
+            const gone: []const u32 = if (has_pocket) l.pockets.retired_lessons.items else &.{};
+            for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) {
+                try l.live.append(l.gpa, ex);
+                try l.live_of.append(l.gpa, of);
+            };
+            return l.live.items;
         }
 
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
+            if (has_pocket and l.trainer != null) try whole_lessons.heal(l); // a put-back the device lacks goes first
             l.lesson = lesson;
             if (lesson.undo) {
                 l.phase = .undo;
@@ -141,21 +162,16 @@ pub fn Learner(comptime H: type) type {
                 l.phase = .reroute;
                 return;
             }
+            if (lesson.retire.len > 0 or lesson.unretire or lesson.forget.len > 0 or lesson.unforget) {
+                try l.ready();
+                l.phase = .retire;
+                return;
+            }
             if (lesson.train.len == 0) return;
             for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
                 if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
             };
-            if (l.trainer == null) {
-                const t0 = H.seconds(l.io);
-                l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
-                l.trainer = try H.trainer(l.gpa, l.io, l.b);
-                std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
-                l.trainer.?.sites.whole = l.whole;
-                for (&l.asks) |*side| {
-                    side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
-                    for (side.*) |*rows| rows.* = .empty;
-                }
-            }
+            try l.ready();
             if (lesson.more) {
                 if (l.whole) return if (has_whole) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
@@ -183,6 +199,20 @@ pub fn Learner(comptime H: type) type {
             for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
+        /// The trainer, made the first time a lesson needs it.
+        fn ready(l: *Self) !void {
+            if (l.trainer != null) return;
+            const t0 = H.seconds(l.io);
+            l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
+            l.trainer = try H.trainer(l.gpa, l.io, l.b);
+            std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
+            l.trainer.?.sites.whole = l.whole;
+            for (&l.asks) |*side| {
+                side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
+                for (side.*) |*rows| rows.* = .empty;
+            }
+        }
+
         /// A round's steps from the open block as it is now, which an undo comes back to.
         fn start(l: *Self) !void {
             try l.schedule(@max(@min(l.lesson.steps, max_steps), 1));
@@ -200,11 +230,13 @@ pub fn Learner(comptime H: type) type {
 
         /// One bounded unit: one example sketched or projected, one step of learning (a check every few), or the undo.
         pub fn step(l: *Self) Step {
-            return l.advance() catch |e| {
+            var s = l.advance() catch |e| failed: {
                 if (l.phase == .steps) l.trainer.?.sites.restore();
                 l.phase = .idle;
-                return .{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
+                break :failed Step{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
             };
+            s.stale = has_pocket and whole_lessons.stale(l);
+            return s;
         }
 
         fn advance(l: *Self) !Step {
@@ -231,6 +263,11 @@ pub fn Learner(comptime H: type) type {
                     return .{ .done = true, .changed = true };
                 },
                 .save => return l.saveOnce(),
+                .retire => {
+                    l.phase = .idle;
+                    if (has_whole and l.whole) if (try whole_lessons.retire(l, l.lesson)) |s| return s;
+                    return .{ .done = true };
+                },
                 .edit => return if (has_edits) whole_lessons.editOnce(l) else unreachable,
                 .probe => return if (has_edits) whole_lessons.probeOnce(l) else unreachable,
                 .pocket => return if (has_pocket) whole_lessons.pocketOnce(l) else unreachable,
@@ -498,13 +535,19 @@ pub fn Learner(comptime H: type) type {
             if (l.kept_rounds > 0) {
                 const each = @min(l.last.len, replay_each);
                 for (l.last[0..each]) |ex| {
-                    if (l.replay.items.len == replay_cap) l.gpa.free(l.replay.orderedRemove(0).ids);
+                    if (l.replay.items.len == replay_cap) {
+                        l.gpa.free(l.replay.orderedRemove(0).ids);
+                        _ = l.replay_of.orderedRemove(0);
+                    }
                     try l.replay.append(l.gpa, ex);
+                    try l.replay_of.append(l.gpa, l.last_lesson);
                 }
                 for (l.last[each..]) |ex| l.gpa.free(ex.ids);
                 l.gpa.free(l.last);
             } else disown(l.gpa, l.last);
             l.last = now;
+            l.last_lesson = l.lessons;
+            l.lessons += 1;
             l.kept_rounds = 0;
         }
 

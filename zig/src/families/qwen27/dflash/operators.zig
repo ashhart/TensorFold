@@ -66,7 +66,8 @@ pub const Ops = struct {
         attention: *const fn (*anyopaque, u64, Attention) anyerror!View,
         swiglu: *const fn (*anyopaque, u64, View, View) anyerror!View,
         mask_rows: *const fn (*anyopaque, u64, View, u32, u32) anyerror!View,
-        head: *const fn (*anyopaque, u64, ck.Linear, View) anyerror!Head,
+        // the draft head is the target's own repacked LM head (runtime_head.zig), so it takes no binding
+        head: *const fn (*anyopaque, u64, View) anyerror!Head,
         // Readback owns its arrays beyond frame release; top-k token ids include any head-subset remapping.
         lattice: *const fn (*anyopaque, u64, Head, View, Config) anyerror!Lattice,
         context_begin: *const fn (*anyopaque, Context) anyerror!u64,

@@ -1,6 +1,7 @@
 //! The quantized products against float64 references on synthetic weights, and every row's bits at every row count.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 
@@ -10,6 +11,8 @@ const qmmf = cuda.qmmf;
 const qlinear = cuda.qlinear;
 const grouped = cuda.grouped;
 const experts = cuda.experts;
+const e4m3 = core.quant.fp8.e4m3;
+const e2m1 = core.quant.nvfp4.e2m1;
 
 const Rig = struct {
     gpu: Gpu,
@@ -73,21 +76,6 @@ fn bf16(x: f32) u16 {
 
 fn bf(x: u16) f64 {
     return @as(f32, @bitCast(@as(u32, x) << 16));
-}
-
-/// An e4m3 byte (no NaN codes in use).
-fn e4m3(b: u8) f64 {
-    const sign: f64 = if (b & 0x80 != 0) -1 else 1;
-    const e: i32 = (b >> 3) & 0xF;
-    const m: f64 = @floatFromInt(b & 7);
-    if (e == 0) return sign * m / 8.0 * std.math.pow(f64, 2, -6);
-    return sign * (1 + m / 8.0) * std.math.pow(f64, 2, @floatFromInt(e - 7));
-}
-
-/// An e2m1 nibble.
-fn e2m1(n: u8) f64 {
-    const vals = [8]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 };
-    return (if (n & 8 != 0) @as(f64, -1) else 1) * vals[n & 7];
 }
 
 fn fp8Code(r: *Rig) u8 {
@@ -180,9 +168,50 @@ fn lanes(r: *Rig, lin: qlinear.Linear, n: usize, k: usize) !void {
             const path = if (prompt) "prompt" else "decode";
             try r.close(try std.fmt.bufPrint(&name, "{s} {s} {d} rows x [{d}, {d}]", .{ f[0], path, wide, n, k }), outs[rows.len - 1], false, ref.want, ref.tol);
             for (rows[0 .. rows.len - 1], outs[0 .. rows.len - 1]) |m, o| try sameRows(r, try std.fmt.bufPrint(&name, "{s} {s}: {d} rows equal the {d}-row call's", .{ f[0], path, m, wide }), outs[rows.len - 1], o, m * n * 2);
+            if (comptime std.mem.eql(u8, f[0], "nvfp4")) {
+                try fp32Out(r, lin, view, dx, part, n, k, prompt, ref.want, ref.tol, outs[rows.len - 1]);
+            }
         }
     }
     check.pass("qlinear fp8g and nvfp4, [{d}, {d}]: decode and prompt within float64 tolerance, every row count's bits equal", .{ n, k });
+}
+
+/// nvfp4's decodeF32 and promptF32: in float64 tolerance, the same bits at any row count, the bf16 out its rounding.
+fn fp32Out(
+    r: *Rig,
+    lin: qlinear.Linear,
+    view: qlinear.Weight,
+    dx: u64,
+    part: u64,
+    n: usize,
+    k: usize,
+    prompt: bool,
+    want: []const f64,
+    tol: []const f64,
+    bf16_out: u64,
+) !void {
+    const wide = rows[rows.len - 1];
+    const path = if (prompt) "prompt" else "decode";
+    var name: [96]u8 = undefined;
+    const outs = try r.a.alloc(u64, rows.len);
+    for (rows, outs) |m, *o| {
+        o.* = try r.zeros(m * n * 4);
+        const in: qlinear.Rows = .{ .x = dx, .ldx = k, .part = part };
+        if (prompt) try lin.promptF32(r.s, view, in, o.*, m) else try lin.decodeF32(r.s, view, in, o.*, m);
+    }
+    const all = outs[rows.len - 1];
+    const label = try std.fmt.bufPrint(&name, "nvfp4 {s} fp32 {d} rows x [{d}, {d}]", .{ path, wide, n, k });
+    try r.close(label, all, true, want, tol);
+    for (rows[0 .. rows.len - 1], outs[0 .. rows.len - 1]) |m, o| {
+        const say = "nvfp4 {s} fp32: {d} rows equal the {d}-row call's";
+        try sameRows(r, try std.fmt.bufPrint(&name, say, .{ path, m, wide }), all, o, m * n * 4);
+    }
+    const f = std.mem.bytesAsSlice(f32, try r.back(outs[rows.len - 1], wide * n * 4));
+    const b = std.mem.bytesAsSlice(u16, try r.back(bf16_out, wide * n * 2));
+    var differ: usize = 0;
+    for (f, b) |x, y| differ += @intFromBool(bf16(x) != y);
+    const what = "nvfp4 {s}: the bf16 out is the fp32 out rounded ({d} of {d} differ)";
+    try check.expect(differ == 0, what, .{ path, differ, f.len });
 }
 
 pub fn run(gpu: Gpu) !void {

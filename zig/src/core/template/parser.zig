@@ -496,16 +496,24 @@ pub const Parser = struct {
         try p.expectOp(.lparen);
         var pos: std.ArrayList(*ast.Expr) = .empty;
         var kw: std.ArrayList(ast.Kwarg) = .empty;
+        var dyn_kw: ?*ast.Expr = null;
         var need_comma = false;
         while (!p.isOp(.rparen)) {
             if (need_comma) {
                 try p.expectOp(.comma);
                 if (p.isOp(.rparen)) break;
             }
-            if (p.isOp(.mul) or p.isOp(.pow)) return p.fail("*args and **kwargs calls are not supported", .{});
-            if (p.cur().tag == .name and p.look().tag == .op and p.look().op == .assign) {
+            if (dyn_kw != null) return p.fail("invalid syntax for function call expression", .{});
+            if (p.skipOp(.pow)) {
+                dyn_kw = try p.expression(true);
+            } else if (p.isOp(.mul)) {
+                return p.fail("*args calls are not supported", .{});
+            } else if (p.cur().tag == .name and p.look().tag == .op and p.look().op == .assign) {
                 const key = p.advance().text;
                 _ = p.advance();
+                for (kw.items) |existing| {
+                    if (std.mem.eql(u8, key, existing.name)) return p.fail("keyword argument repeated: {s}", .{key});
+                }
                 try kw.append(p.a, .{ .name = key, .value = try p.expression(true) });
             } else {
                 if (kw.items.len > 0) return p.fail("invalid syntax for function call expression", .{});
@@ -514,7 +522,7 @@ pub const Parser = struct {
             need_comma = true;
         }
         try p.expectOp(.rparen);
-        return .{ .pos = pos.items, .kw = kw.items };
+        return .{ .pos = pos.items, .kw = kw.items, .dyn_kw = dyn_kw };
     }
 
     fn dottedName(p: *Parser) ![]const u8 {
