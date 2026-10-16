@@ -1,4 +1,4 @@
-"""Gemma 4 12B (gemma4_unified) to the native engine's checkpoint: text weights only, MLX affine 4-bit groups of 64."""
+"""Gemma 4 12B (gemma4_unified) to the native checkpoint: text weights MLX affine 4-bit g64, the image embedder bf16."""
 
 from __future__ import annotations
 
@@ -11,8 +11,10 @@ from pathlib import Path
 import mlx.core as mx
 from mlx_lm import convert
 
-# tensors of the image and audio inputs, which the native family does not read yet
-DROPPED = ("model.vision_embedder.", "model.embed_vision.", "model.embed_audio.")
+# the image embedder's tensors, kept in bf16 in their own shard; the audio input's are dropped
+VISION = ("model.vision_embedder.", "model.embed_vision.")
+DROPPED = VISION + ("model.embed_audio.",)
+VISION_SHARD = "model-vision.safetensors"
 
 
 def main() -> None:
@@ -39,6 +41,9 @@ def main() -> None:
             raise SystemExit("unexpected tensors beside the language model")
         print(f"{len(weights)} tensors, {len(kept)} kept (the language model)")
         mx.save_safetensors(str(staged / "model.safetensors"), kept, metadata={"format": "mlx"})
+        vision = {k.removeprefix("model."): v for k, v in weights.items() if k.startswith(VISION)}
+        if len(vision) != 10 or any(v.dtype != mx.bfloat16 for v in vision.values()):
+            raise SystemExit("expected the 10 bf16 tensors of the image embedder")
         # mlx-lm's gemma4 module reads the unified text model as it reads the dense 31B's
         remapped = dict(config, model_type="gemma4", architectures=["Gemma4ForConditionalGeneration"])
         remapped["text_config"] = dict(config["text_config"], model_type="gemma4_text")
@@ -48,10 +53,15 @@ def main() -> None:
     for key in ("model_type", "architectures"):
         out[key] = config[key]
     out["text_config"]["model_type"] = config["text_config"]["model_type"]
-    for key in ("vision_config", "audio_config"):
-        out.pop(key, None)
+    out["vision_config"] = config["vision_config"]
+    out.pop("audio_config", None)
     (args.output / "config.json").write_text(json.dumps(out, indent=2) + "\n")
-    for name in ("chat_template.jinja", "generation_config.json", "tokenizer.json", "tokenizer_config.json"):
+    mx.save_safetensors(str(args.output / VISION_SHARD), vision, metadata={"format": "pt"})
+    index_path = args.output / "model.safetensors.index.json"
+    index = json.loads(index_path.read_text())
+    index["weight_map"].update({k: VISION_SHARD for k in sorted(vision)})
+    index_path.write_text(json.dumps(index, indent=4) + "\n")
+    for name in ("chat_template.jinja", "processor_config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"):
         if (args.source / name).exists() and not (args.output / name).exists():
             shutil.copy(args.source / name, args.output / name)
     print(f"wrote {args.output}: {out['model_type']}, quantization {out.get('quantization')}")
