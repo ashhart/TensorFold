@@ -506,7 +506,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     return .{ .name = name, .arguments = try jsonObject(a, .{ .string = try putBack(a, keyed.items, quoted) }) };
 }
 
-/// `text` with each mark ``\x00{i}\x00`` replaced by `quoted[i]` in one pass, as replacing i = 0, 1, ... in turn does.
+/// `text` with each mark ``\x00{i}\x00`` replaced by a NUL-free `quoted[i]`, as replacing i = 0, 1, ... in turn does.
 pub fn putBack(a: Allocator, text: []const u8, quoted: []const []const u8) Allocator.Error![]const u8 {
     var nul: std.ArrayList(usize) = .empty;
     for (text, 0..) |ch, at| if (ch == 0) try nul.append(a, at);
