@@ -98,6 +98,46 @@ pub var a8_levels: i32 = 127; // XPU_A8_BITS=4: int4 activations (7 levels a sid
 pub var a8_sites4: u32 = 15; // XPU_A8_SITES4: the sites in int4 when XPU_A8_BITS=4 (the others in int8)
 pub var prof: Prof = .{};
 
+/// The XPU_* options as the process had them before its first open, put back at every open (Runner.init).
+const Options = struct {
+    dump_dir: ?[]const u8,
+    dump_h: ?c_int,
+    a8_group: u32,
+    kv8: i32,
+    kv_i8: bool,
+    prefill_int4: bool,
+    int4_sites: u32,
+    prefill_int8: bool,
+    a8_sites: u32,
+    a8_rot: i32,
+    a8_levels: i32,
+    a8_sites4: u32,
+    chunk: u32,
+};
+var defaults: ?Options = null;
+/// One runner at a time: the options, MAX_CTX and GS above belong to the process, not to a runner.
+var live = false;
+
+fn options() Options {
+    return .{ .dump_dir = dump_dir, .dump_h = dump_h, .a8_group = a8_group, .kv8 = kv8, .kv_i8 = kv_i8, .prefill_int4 = prefill_int4, .int4_sites = int4_sites, .prefill_int8 = prefill_int8, .a8_sites = a8_sites, .a8_rot = a8_rot, .a8_levels = a8_levels, .a8_sites4 = a8_sites4, .chunk = CHUNK };
+}
+
+fn restore(o: Options) void {
+    dump_dir = o.dump_dir;
+    dump_h = o.dump_h;
+    a8_group = o.a8_group;
+    kv8 = o.kv8;
+    kv_i8 = o.kv_i8;
+    prefill_int4 = o.prefill_int4;
+    int4_sites = o.int4_sites;
+    prefill_int8 = o.prefill_int8;
+    a8_sites = o.a8_sites;
+    a8_rot = o.a8_rot;
+    a8_levels = o.a8_levels;
+    a8_sites4 = o.a8_sites4;
+    CHUNK = o.chunk;
+}
+
 extern "c" fn clock_gettime(clk: c_int, ts: *[2]i64) c_int;
 pub fn now() f64 {
     var ts: [2]i64 = undefined;
@@ -136,6 +176,11 @@ pub const Runner = struct {
 
     /// Loads `dir` (MLX affine 4/64 or GPTQ 4/128) onto the first Arc Pro B70 (PCI id 0xe223), room for `context` rows.
     pub fn init(dir: []const u8, context: u32) !*Runner {
+        if (live) return error.RunnerOpen;
+        // the process's own options first, then this open's environment: an earlier open's XPU_* settings stay out
+        if (defaults) |o| restore(o) else defaults = options();
+        live = true;
+        errdefer live = false;
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
         if (std.c.getenv("XPU_KV_INT8") != null) kv_i8 = true;
@@ -281,6 +326,7 @@ pub const Runner = struct {
     pub fn deinit(r: *Runner) void {
         r.d.deinit();
         prof.on = false;
+        live = false;
         r.ckpt.deinit();
         if (r.host_logits.len > 0) alloc.free(r.host_logits);
         alloc.destroy(r);
@@ -518,3 +564,21 @@ pub const Runner = struct {
 };
 
 pub const drafter = @import("drafter.zig");
+
+test "every open starts from the process's options, and a second runner is refused while one is open" {
+    const before = options();
+    defer {
+        restore(before);
+        defaults = null;
+        live = false;
+    }
+    defaults = before;
+    prefill_int8 = true; // what an earlier open's XPU_PREFILL_INT8 left
+    CHUNK = 64;
+    kv_i8 = true;
+    restore(defaults.?);
+    try std.testing.expect(!prefill_int8 and !kv_i8);
+    try std.testing.expectEqual(before.chunk, CHUNK);
+    live = true;
+    try std.testing.expectError(error.RunnerOpen, Runner.init("/nonexistent", 4096));
+}
