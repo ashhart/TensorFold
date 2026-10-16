@@ -18,6 +18,7 @@ const server_build = @import("zig/build/server.zig");
 const golden_build = @import("zig/build/golden.zig");
 const contract_build = @import("zig/build/kernel_contract.zig");
 const video_build = @import("zig/build/video.zig");
+const drama3_metal_build = @import("zig/build/drama3_metal.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -340,6 +341,9 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         b.installArtifact(exe);
         b.step(p.name, p.about).dependOn(&b.addInstallArtifact(exe, .{}).step);
     }
+
+    // Fish Audio Drama 3: its metallib, the family over Metal and drama3-generate
+    drama3_metal_build.targets(b, target, optimize, metal, metal_std, test_step);
 
     // Kimi's tiktoken tokenizer and its parity program (tools/zig/k3_tokenizer_parity.py).
     const tiktoken = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tiktoken.zig"), .target = target, .optimize = optimize });
