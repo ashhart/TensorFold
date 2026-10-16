@@ -164,6 +164,7 @@ pub const Host = struct {
             n = 1;
         }
         out.* = .{
+            .healthy = !h.closing,
             .running = @intFromBool(h.running != null),
             .waiting = @intCast(h.queued.items.len),
             .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
