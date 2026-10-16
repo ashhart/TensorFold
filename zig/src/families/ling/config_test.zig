@@ -272,3 +272,37 @@ test "the shapes the kernels take are accepted: the tiny config as written and w
     const c = try load();
     try t.expect(c.kda_dim == config.fixed.kda_dim and c.conv == config.fixed.conv and c.kv_lora == config.fixed.kv_lora);
 }
+
+test "routing groups: groups of one and a single pick refused (HF's rule differs there); one group, all groups kept, groups of two accepted" {
+    const refusals = [_]Case{
+        .{ .key = "n_group", .value = "16", .err = error.Routing, .says = "16 groups of 1 experts", .also = .{ "topk_group", "4" } },
+        .{ .key = "n_group", .value = "16", .err = error.Routing, .says = "best two", .also = .{ "topk_group", "16" } },
+        .{ .key = "num_experts_per_tok", .value = "1", .err = error.Routing, .says = "num_experts_per_tok 1" },
+        .{ .key = "n_group", .value = "1", .err = error.Routing, .says = "past glue.select's bounds" }, // keeping 2 of 1
+    };
+    for (refusals) |x| {
+        var why: config.Why = .{};
+        const got = tiny(x.key, x.value, x.also, &why);
+        if (got) |_| {
+            std.debug.print("{s} {s}: accepted\n", .{ x.key, x.value });
+            return error.TestUnexpectedResult;
+        } else |e| if (e != x.err or std.mem.indexOf(u8, why.text(), x.says) == null) {
+            std.debug.print("{s} {s}: {t}, \"{s}\"\n", .{ x.key, x.value, e, why.text() });
+            return error.TestUnexpectedResult;
+        }
+    }
+    const ok = [_][4][]const u8{
+        .{ "n_group", "1", "topk_group", "1" }, // one group: glue.select skips the group pass, HF keeps every expert
+        .{ "n_group", "4", "topk_group", "4" }, // every group kept
+        .{ "n_group", "8", "topk_group", "2" }, // groups of two
+        .{ "n_group", "8", "topk_group", "8" },
+    };
+    for (ok) |kv| {
+        var why: config.Why = .{};
+        const c = tiny(kv[0], kv[1], .{ kv[2], kv[3] }, &why) catch |e| {
+            std.debug.print("{s} {s}, {s} {s}: {t}, \"{s}\"\n", .{ kv[0], kv[1], kv[2], kv[3], e, why.text() });
+            return e;
+        };
+        try t.expect(c.experts / c.n_group >= 2 and c.topk_group <= c.n_group);
+    }
+}

@@ -435,6 +435,15 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
         why.set("routing {d} of {d} experts in {d} groups keeping {d}: past glue.select's bounds", .{ c.topk, c.experts, c.n_group, c.topk_group });
         return error.Routing;
     }
+    // HF's rule: a group scores its top two (topk(2) fails on a group of one); one pick keeps its weight unnormalized
+    if (c.experts / c.n_group < 2) {
+        why.set("{d} groups of {d} experts: HF scores a group by its best two, so groups hold two or more", .{ c.n_group, c.experts / c.n_group });
+        return error.Routing;
+    }
+    if (c.topk == 1) {
+        why.set("num_experts_per_tok 1: HF leaves one pick's weight unnormalized, the kernel normalizes it", .{});
+        return error.Routing;
+    }
     c.moe_inter = try int(o, "moe_intermediate_size", why);
     const shared_n = if (o.get("num_shared_experts")) |v| (if (v == .null) 0 else try int(o, "num_shared_experts", why)) else 0;
     const shared_w = if (o.get("moe_shared_expert_intermediate_size")) |_| try int(o, "moe_shared_expert_intermediate_size", why) else c.moe_inter;
