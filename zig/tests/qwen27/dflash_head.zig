@@ -6,7 +6,7 @@ const Head = @import("tensorfold").qwen27.dflash.runtime_backend.Head;
 pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
     const n = 248320;
     const k = 128;
-    const sizes = [_]usize{ n * k / 2, n * 2 * 4, n * 2 * 2, n * 2 * 2, 7 * k * 2, 7 * n * 2, 7 * 98592 * 2, 64, 64 };
+    const sizes = [_]usize{ n * k, n * 2 * 4, n * 2 * 2, n * 2 * 2, 7 * k * 2, 7 * n * 2, 7 * 98592 * 2, 64, 64 };
     var buffers: [sizes.len]mtl.Buffer = undefined;
     var made: usize = 0;
     defer for (buffers[0..made]) |b| b.deinit();
@@ -28,9 +28,9 @@ pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
     var kernels = q.quant_gpu.Kernels{ .allocator = a, .device = device };
     defer kernels.deinit();
     var cases: usize = 0;
-    for ([_]bool{ false, true }) |raw| {
+    for ([_]u8{ 2, 4, 8 }) |bits| for ([_]bool{ false, true }) |raw| {
         if (!raw and !device.tensorUnits()) continue; // the lane layout needs tensor units; pre-M5 heads take raw rows
-        const linear = q.projection.Linear{ .words = .{ .buffer = buffers[0], .offset = 32 }, .pairs = .{ .buffer = buffers[1], .offset = 32 }, .n = n, .k = k, .tile = 32, .slices = 1, .raw = if (raw) .{ .w = buffers[0], .scales = buffers[2], .biases = buffers[3], .w_off = 32, .s_off = 32, .b_off = 32, .n = n, .k = k, .group = 64, .bits = 4, .sum = .f32 } else null };
+        const linear = q.projection.Linear{ .words = .{ .buffer = buffers[0], .offset = 32 }, .pairs = .{ .buffer = buffers[1], .offset = 32 }, .n = n, .k = k, .tile = 32, .slices = 1, .bits = bits, .raw = if (raw) .{ .w = buffers[0], .scales = buffers[2], .biases = buffers[3], .w_off = 32, .s_off = 32, .b_off = 32, .n = n, .k = k, .group = 64, .bits = bits, .sum = .f32 } else null };
         var selected = try Head.init(a, device, linear);
         defer selected.deinit();
         const ids = selected.ids.?.slice(u32, 98592);
@@ -53,6 +53,6 @@ pub fn run(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue) !void {
             };
             cases += 1;
         }
-    }
+    };
     std.debug.print("native draft vocabulary: {d} lane/raw width cases,98592 selected columns preserve full-head BF16 bytes and token IDs\n", .{cases});
 }

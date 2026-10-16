@@ -260,3 +260,52 @@ test "settings that differ stop every rank" {
     t.join();
     try std.testing.expectEqual(@as(?anyerror, error.Mismatch), err);
 }
+
+/// Rank 1 agrees on `theirs.digest()` against rank 0's `ours.digest()`; returns both ranks' results.
+fn agreeDigests(ours: Config, theirs: Config) !struct { ?anyerror, ?anyerror } {
+    const l = try testListener();
+    defer sock.close(l.fd);
+    const T = struct {
+        fn go(port: u16, cfg: Config, err: *?anyerror) void {
+            var c = cfg;
+            c.world = 2;
+            c.rank = 1;
+            c.link_port = port;
+            c.connect_timeout_ns = 5 * std.time.ns_per_s;
+            var b = Bootstrap.open(c) catch |e| {
+                err.* = e;
+                return;
+            };
+            defer b.close();
+            b.agree(&c.digest(), "settings") catch |e| {
+                err.* = e;
+            };
+        }
+    };
+    var err1: ?anyerror = null;
+    const t = try std.Thread.spawn(.{}, T.go, .{ l.port, theirs, &err1 });
+    var b = try Bootstrap.acceptOn(l.fd, 2, 5 * std.time.ns_per_s);
+    defer b.close();
+    var err0: ?anyerror = null;
+    b.agree(&ours.digest(), "settings") catch |e| {
+        err0 = e;
+    };
+    t.join();
+    return .{ err0, err1 };
+}
+
+test "a graph cache switched off on one rank stops both at start; 0 and OFF on the two ranks start" {
+    const on: Config = .{ .graph_cache = .{} };
+    const off: Config = .{ .graph_cache = .{}, .graph_cache_env = "off" };
+    const r = try agreeDigests(on, off);
+    try std.testing.expectEqual(@as(?anyerror, error.Mismatch), r[0]);
+    try std.testing.expectEqual(@as(?anyerror, error.Mismatch), r[1]);
+    const none = try agreeDigests(.{}, .{ .graph_cache_env = "off" }); // a family without the cache is not refused
+    try std.testing.expectEqual(@as(?anyerror, null), none[0]);
+    try std.testing.expectEqual(@as(?anyerror, null), none[1]);
+    const same = try agreeDigests(.{ .graph_cache = .{}, .graph_cache_env = "0" }, .{ .graph_cache = .{}, .graph_cache_env = "OFF" });
+    try std.testing.expectEqual(@as(?anyerror, null), same[0]);
+    try std.testing.expectEqual(@as(?anyerror, null), same[1]);
+    const family = try agreeDigests(.{ .graph_cache = .{ .max = 8 } }, .{ .graph_cache = .{ .max = 16 } });
+    try std.testing.expectEqual(@as(?anyerror, error.Mismatch), family[0]);
+}

@@ -24,6 +24,8 @@ pub const Entry = struct {
     shared: bool,
     /// A later prompt resumed from it: it outlives the entries nobody has asked for.
     hit: bool = false,
+    /// Resumed again after a later prompt kept a state below it: a turn several continuations share, never superseded.
+    branched: bool = false,
 };
 
 pub const Node = struct {

@@ -7,6 +7,17 @@ pub const Cost = struct { width: u32, ms: f64 };
 
 /// Draft prefixes per stream with the most expected tokens a ms; fixed rows always run. Caller frees.
 pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, costs: *const Table, overhead_ms: f64, max_rows: u64) ![]u32 {
+    return allocateDrafts(gpa, fixed, probs, costs, overhead_ms, max_rows, .{});
+}
+
+/// What drafting the counted nodes costs: a head step each, or the deepest stream's steps when one batch drafts all.
+pub const HeadCost = struct {
+    step_ms: f64 = 0.0,
+    batched: bool = false,
+};
+
+/// allocate, each count also priced by the head steps that draft it.
+pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const f64, costs: *const Table, overhead_ms: f64, max_rows: u64, head: HeadCost) ![]u32 {
     const counts = try gpa.alloc(u32, probs.len);
     defer gpa.free(counts);
     const best_counts = try gpa.alloc(u32, probs.len);
@@ -15,6 +26,8 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
     var rows: u64 = 0;
     for (fixed) |f| rows += f;
     var expected: f64 = @floatFromInt(rows);
+    var drafts: u64 = 0;
+    var deepest: u32 = 0;
     const timed = !costs.empty();
     var best = rate(costs, timed, rows, expected, overhead_ms);
     while (rows < max_rows) {
@@ -32,8 +45,11 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
         const s = pick orelse break;
         counts[s] += 1;
         rows += 1;
+        drafts += 1;
+        deepest = @max(deepest, counts[s]);
         expected += pick_p;
-        const now = rate(costs, timed, rows, expected, overhead_ms);
+        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts);
+        const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
         if (now > best) {
             best = now;
             @memcpy(best_counts, counts);

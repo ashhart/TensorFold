@@ -38,7 +38,7 @@ pub fn mixer(f: *const fwd.Forward, w: *const fwd.Walk, i: usize, spans: []const
                 const proj = b.proj + @as(u64, sp.at) * c.projDim() * 2;
                 const xc = b.p_xc + @as(u64, sp.at) * c.convDim() * 2;
                 try f.glue.convRows(proj, base, xc, m.conv_w, m.conv_b, sp.rows, mshape(f));
-                try o.scanRows(proj, xc, ssm, m.a, m.d, m.dt_bias, b.sy + @as(u64, sp.at) * c.inner() * 2, sp.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max);
+                try o.scanRows(proj, xc, ssm, m.a, m.d, m.dt_bias, b.sy + @as(u64, sp.at) * c.inner() * 2, sp.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, .{});
                 if (pf.prime) {
                     try o.copy(pf.store.ssmAt(sp.slot, w.mj), ssm, ssm_bytes);
                     try o.copy(pf.store.convAt(sp.slot, w.mj), base, conv_bytes);

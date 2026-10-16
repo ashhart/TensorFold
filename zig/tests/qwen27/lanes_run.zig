@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
 const lanes = tf.lanes;
-const lb = @import("qwen27_host").lanes_backend;
+const lb = @import("qwen27_served").lanes_backend;
 const help = "tf-qwen27-lanes-run --model TARGET --draft DRAFTER --tokens IDS.json [--max-tokens 256 --repeats 2 --copies 0|1 --draft-mode q4|bf16]";
 
 fn ids(a: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u32 {
@@ -40,7 +40,7 @@ pub fn main(init: std.process.Init) !void {
     const prompt = try ids(a, io, tokens_file.?);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128);
+    const target = try q.model.Model.load(init.gpa, io, target_dir.?, 128, null);
     defer target.deinit();
     var runner = try q.decode_round.Runner.init(init.gpa, target, 1, @intCast(prompt.len + count + 64));
     defer runner.deinit();

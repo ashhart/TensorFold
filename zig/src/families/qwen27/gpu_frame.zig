@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes };
 
 pub const Frame = struct {
     buffers: [std.enums.values(Field).len]mtl.Buffer,
@@ -15,7 +15,7 @@ pub const Frame = struct {
         if (capacity == 0 or capacity > 128) return error.BadFrameRows;
         const mp = 16 * ((capacity + 15) / 16);
         const widths = [_]usize{
-            capacity * 4,                                                                       8 * 4,                                                                                                                                  capacity * 4,
+            capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
             capacity * config.hidden * 2,                                                       capacity * config.hidden * 2,                                                                                                           capacity * config.hidden * 2,
             mp * @max(config.hidden, @max(config.intermediate, config.gdnValueDim())) / 64 * 4, capacity * @max(config.gdnQkvDim(), @max(config.qDim(), @max(2 * config.intermediate, config.gdnValueDim() + 2 * config.v_heads))) * 2, capacity * config.gdnValueDim() * 2,
             capacity * config.hidden * 2,                                                       capacity * config.gdnValueDim() * 2,                                                                                                    capacity * config.v_heads * 2,
@@ -26,6 +26,7 @@ pub const Frame = struct {
             capacity * 4,                                                                       4,                                                                                                                                      capacity * 4,
             capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           64 * 16,
             64 * 16,                                                                            capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
+            capacity * 4,
         };
         comptime std.debug.assert(widths.len == std.enums.values(Field).len);
         var buffers: [widths.len]mtl.Buffer = undefined;

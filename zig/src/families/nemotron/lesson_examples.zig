@@ -22,6 +22,10 @@ pub const Lesson = struct {
     reroute: bool = false, // the open lesson's router fitted again with `unasked` among what it must not take
     drop: bool = false, // the open lesson taken out whole
     save: bool = false,
+    retire: []const [2]u16 = &.{}, // (layer, neuron) of facts a newer one replaces, zeroed
+    unretire: bool = false, // the last retire's neurons put back
+    forget: []const [2]u16 = &.{}, // (layer, neuron) of a fact deleted on request, their input weights zeroed
+    unforget: bool = false, // the last forget undone, bit for bit
 };
 
 /// A prompt by its rows through its decision row: what a router reads of it.

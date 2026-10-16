@@ -6,6 +6,8 @@ const host = @import("lane_host.zig");
 const lane_stream = @import("lane_stream.zig");
 const learn = @import("lane_host_learn.zig");
 const status = @import("lane_host_status.zig");
+const ends = @import("lane_host_end.zig");
+const rows_host = @import("lane_host_rows.zig");
 const LaneHost = host.LaneHost;
 const Job = LaneHost.Job;
 const Allocator = std.mem.Allocator;
@@ -84,7 +86,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     h.unlock();
     for (refused.items) |x| h.finish(x.job, .failed, x.why);
     rd.vtable.admitted(rd.ctx) catch |e| {
-        h.failAll(h.words(e));
+        ends.failAll(h, h.words(e));
         return true;
     };
     for (admits.items) |job| {
@@ -99,31 +101,36 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     }
     // this round's pieces, a decode round of the streams decoding, then the prompts whose rows are in
     rd.vtable.plan(rd.ctx, &h.pieces, &h.finals) catch |e| {
-        h.failAll(h.words(e));
+        ends.failAll(h, h.words(e));
         return true;
     };
     const t0 = std.Io.Clock.awake.now(h.io).toNanoseconds();
     if (h.core.cfg.piece_runs and h.core.backend.vtable.pieces != null) {
-        // one call for the round's pieces (the backend runs several slots' rows in one forward); a failure fails each
+        // bounded calls for the round's pieces; a failed batch drops each affected job once
         var list: [16]lanes.backend.Backend.Piece = undefined;
         var jobs: [16]*Job = undefined;
-        var n: usize = 0;
-        for (h.pieces.items) |piece| {
-            if (!piece.run) continue;
-            did = true;
-            const job: *Job = @ptrFromInt(piece.key);
-            if (job.stream.finished) continue;
-            if (n == list.len) {
-                _ = h.drop(job, "too many prompt pieces in one round");
-                continue;
+        var at: usize = 0;
+        while (at < h.pieces.items.len) {
+            var n: usize = 0;
+            while (at < h.pieces.items.len and n < list.len) : (at += 1) {
+                const piece = h.pieces.items[at];
+                if (!piece.run) continue;
+                did = true;
+                const job: *Job = @ptrFromInt(piece.key);
+                if (job.stream.finished) continue;
+                list[n] = .{ .stream = &job.stream, .start = piece.start, .end = piece.end, .save = piece.save };
+                jobs[n] = job;
+                n += 1;
             }
-            list[n] = .{ .stream = &job.stream, .start = piece.start, .end = piece.end, .save = piece.save };
-            jobs[n] = job;
-            n += 1;
+            if (n > 0) h.core.pieces(list[0..n]) catch |e| {
+                for (jobs[0..n], 0..) |job, i| {
+                    const seen = for (jobs[0..i]) |previous| {
+                        if (previous == job) break true;
+                    } else false;
+                    if (!seen) dropPiece(h, job, h.words(e));
+                }
+            };
         }
-        if (n > 0) h.core.pieces(list[0..n]) catch |e| {
-            for (jobs[0..n]) |job| dropPiece(h, job, h.words(e));
-        };
     } else for (h.pieces.items) |piece| {
         if (!piece.run) continue;
         did = true;
@@ -143,7 +150,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     if (h.core.activeCount() > 0) {
         did = true;
         h.core.step() catch |e| {
-            h.failAll(@errorName(e));
+            ends.failAll(h, @errorName(e));
             return true;
         };
     }
@@ -155,11 +162,8 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     var i: usize = 0;
     while (i < h.admitted.items.len) {
         const job = h.admitted.items[i];
-        if (job.started and h.deliver(job)) {
-            h.lock();
-            _ = h.admitted.orderedRemove(i);
-            h.unlock();
-        } else i += 1;
+        if (job.started and h.deliver(job)) continue; // it left the list: the next job slid into slot i
+        i += 1;
     }
     rd.vtable.after(rd.ctx, seconds(t1 - t0), seconds(t2 - t1));
     return did;
@@ -168,6 +172,9 @@ fn round(h: *LaneHost, rd: Rounds) bool {
 /// A job whose piece failed: dropped and taken out of this round's finals (`drop` frees the job).
 fn dropPiece(h: *LaneHost, job: *Job, message: []const u8) void {
     const key = @intFromPtr(job);
+    for (h.pieces.items) |*piece| if (piece.key == key) {
+        piece.run = false;
+    };
     var i: usize = 0;
     while (i < h.finals.items.len) {
         if (h.finals.items[i] == key) _ = h.finals.orderedRemove(i) else i += 1;
@@ -239,7 +246,9 @@ fn runFinals(h: *LaneHost) void {
 /// The engine thread under a round planner; an idle round waits for an arrival, a cancel or a short timeout.
 pub fn run(h: *LaneHost, rd: Rounds) void {
     while (true) {
-        h.takeCancels();
+        ends.takeCancels(h);
+        rows_host.answer(h);
+        learn.refuse(h);
         h.lock();
         if (h.closing) {
             const left = h.queued.items.len + h.admitted.items.len;
@@ -248,8 +257,8 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
                 h.learner.?.abort(h.learner.?.ctx);
                 h.lesson_open = false;
             }
-            if (left == 0) return;
-            h.closeAll();
+            if (left == 0) return rows_host.flush(h);
+            ends.closeAll(h);
             continue;
         }
         const work = h.admitted.items.len > 0 or (h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes);
@@ -259,6 +268,7 @@ pub fn run(h: *LaneHost, rd: Rounds) void {
             continue;
         }
         if (!work) {
+            if (rows_host.idle(h)) continue;
             if (h.cancels.items.len == 0) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
             h.unlock();
             continue;
