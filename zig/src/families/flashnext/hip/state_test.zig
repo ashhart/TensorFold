@@ -314,3 +314,29 @@ test "a pooled slot whose reset fails keeps its buffers: the graphs that name th
     try std.testing.expectError(error.OutOfMemory, pool.lease(std.testing.allocator, 1, s, eos, cap, &maker));
     try std.testing.expect(pool.slots.items[1] == null);
 }
+
+test "a round's graph is chosen for the pool's caches only: caches made elsewhere never replay a slot's graph" {
+    const engine = @import("engine.zig");
+    var r = Host.runtime();
+    const s: hip.Stream = .{ .r = &r, .handle = null };
+    var e: engine.Engine = undefined;
+    e.o.capacity = cap;
+    e.graphed = true;
+    e.chosen = null;
+    e.graphs = engine.Graphs.init(std.testing.allocator);
+    defer e.graphs.deinit();
+    e.pool = .{};
+    defer e.pool.deinit(std.testing.allocator);
+    var maker: Maker = .{ .r = &r };
+    var c = try e.pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+    const step = [1]u32{7};
+    try std.testing.expectEqual(engine.Pick.eager, try e.choose(&.{.{ .c = &c, .tokens = &step, .pos = 0 }}));
+    e.pool.unlease(c);
+    // a run's own caches, slot 0 at the capacity: the slot's graph names the pool's buffers, not these
+    var other = try caches(&r);
+    defer other.deinit(std.testing.allocator);
+    try std.testing.expectError(error.CachesNotPooled, e.choose(&.{.{ .c = &other, .tokens = &step, .pos = 0 }}));
+    c = try e.pool.lease(std.testing.allocator, 0, s, eos, cap, &maker);
+    try std.testing.expectEqual(engine.Pick.capture, try e.choose(&.{.{ .c = &c, .tokens = &step, .pos = 0 }}));
+    e.pool.unlease(c);
+}
