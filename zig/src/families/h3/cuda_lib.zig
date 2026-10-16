@@ -6,7 +6,7 @@ const tp = h3.tp;
 
 const gpa = std.heap.c_allocator;
 
-/// The transformer at `path` (one safetensors file, or its saved .tf-int8 copy alone), on the GPU; null on failure.
+/// The transformer at `path` (one safetensors file) on the GPU in its bf16; null on failure.
 export fn tf_h3_open(path: [*:0]const u8) ?*h3.Model {
     return h3.Model.load(gpa, path) catch |e| {
         std.debug.print("tf_h3_open: {t}\n", .{e});
@@ -18,9 +18,9 @@ export fn tf_h3_close(model: *h3.Model) void {
     model.deinit();
 }
 
-/// hidden, inner, heads, mlp, blocks, the load's seconds in thousandths, and whether it read a saved int8 copy.
+/// hidden, inner, heads, mlp, blocks, the load's seconds in thousandths, and the weights' bits (16).
 export fn tf_h3_shape(model: *const h3.Model, out: *[7]u32) void {
-    out.* = .{ @intCast(model.hidden), @intCast(model.inner), @intCast(model.heads), @intCast(model.mlp), @intCast(model.blocks.len), @intFromFloat(model.loaded_seconds * 1000), @intFromBool(model.from_cache) };
+    out.* = .{ @intCast(model.hidden), @intCast(model.inner), @intCast(model.heads), @intCast(model.mlp), @intCast(model.blocks.len), @intFromFloat(model.loaded_seconds * 1000), 16 };
 }
 
 /// Every block over the packed stream, in place. Returns the seconds taken, or a negative number on failure.

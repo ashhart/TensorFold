@@ -6,9 +6,6 @@ const Model = h3.Model;
 const head_dim = h3.head_dim;
 const slot_tile = h3.slot_tile;
 
-/// Rows are padded to whole product tiles of this many.
-pub const tile = 256;
-
 /// What depends on the packed sequence; keys, values and means are indexed by block parity like the region's halves.
 pub const Geometry = struct {
     rows: usize = 0,
@@ -22,39 +19,23 @@ pub const Geometry = struct {
     /// In the registered region: bytes a tile takes, and the bytes of one parity's half.
     unit: usize = 0,
     half: usize = 0,
-    buffers: [40]cuda.DeviceBuffer = undefined,
+    buffers: [24]cuda.DeviceBuffer = undefined,
     used: usize = 0,
     y: u64 = 0,
-    q8: u64 = 0,
-    xs: u64 = 0,
+    xn: u64 = 0,
     qkvc: u64 = 0,
     tq: u64 = 0,
-    tqs: u64 = 0,
     tk: [2]u64 = .{ 0, 0 },
-    tvt: [2]u64 = .{ 0, 0 },
-    ks: [2]u64 = .{ 0, 0 },
-    vs: [2]u64 = .{ 0, 0 },
-    qp: [2]u64 = .{ 0, 0 },
+    tv: [2]u64 = .{ 0, 0 },
+    qp: u64 = 0,
     kp: [2]u64 = .{ 0, 0 },
     vp: [2]u64 = .{ 0, 0 },
     scores: u64 = 0,
     chosen: u64 = 0,
     coarse: u64 = 0,
-    // the tiles' means as a sequence of their own, in groups of 64 tiles
-    pq: u64 = 0,
-    pqs: u64 = 0,
-    pk: u64 = 0,
-    pks: u64 = 0,
-    pvt: u64 = 0,
-    pvs: u64 = 0,
-    group_sizes: u64 = 0,
-    group_rows: u64 = 0,
     ya: u64 = 0,
-    a8: u64 = 0,
-    as: u64 = 0,
     wide: u64 = 0,
-    w8: u64 = 0,
-    wxs: u64 = 0,
+    act: u64 = 0,
     row_of: u64 = 0,
     all: u64 = 0,
 };
@@ -78,10 +59,6 @@ fn pair(self: *Model, bytes: usize, zero: bool) ![2]u64 {
     return @splat(try buffer(self, bytes, zero));
 }
 
-pub fn padded(rows: usize) usize {
-    return (rows + tile - 1) / tile * tile;
-}
-
 /// Buffers for `rows` packed rows in `tiles` routing tiles; `slot` is each row's padded slot on the device.
 pub fn prepare(self: *Model, rows: usize, tiles: usize, prefix: usize, keep: usize, slot: u64, own0: usize, own1: usize, exchange: bool) !void {
     const g = &self.geometry;
@@ -91,61 +68,32 @@ pub fn prepare(self: *Model, rows: usize, tiles: usize, prefix: usize, keep: usi
     const inner = self.inner;
     const heads = self.heads;
     const slots = tiles * slot_tile;
-    const mp = padded(rows);
     g.y = try buffer(self, rows * hidden * 2, false);
-    g.q8 = try buffer(self, mp * hidden, false);
-    g.xs = try buffer(self, mp * 4, false);
+    g.xn = try buffer(self, rows * hidden * 2, false);
     g.qkvc = try buffer(self, rows * 4 * inner * 2, false);
     // slots past a tile's real rows are never written: they stay zero
-    g.tq = try buffer(self, heads * slots * head_dim, true);
-    g.tqs = try buffer(self, heads * slots * 4, true);
-    g.tk = try pair(self, heads * slots * head_dim, true);
-    g.tvt = try pair(self, heads * slots * head_dim, true);
-    g.ks = try pair(self, heads * tiles * 4, false);
-    g.vs = try pair(self, heads * tiles * 4, false);
-    g.qp = try pair(self, heads * tiles * head_dim * 4, false);
+    g.tq = try buffer(self, heads * slots * head_dim * 2, true);
+    g.tk = try pair(self, heads * slots * head_dim * 2, true);
+    g.tv = try pair(self, heads * slots * head_dim * 2, true);
+    g.qp = try buffer(self, heads * tiles * head_dim * 4, false);
     g.kp = try pair(self, heads * tiles * head_dim * 4, false);
     g.vp = try pair(self, heads * tiles * head_dim * 4, false);
     if (exchange) {
         // ranks exchange through the registered region, tile after tile, in the half of the block's parity
         const t = &self.tp.?;
-        g.unit = heads * (2 * slot_tile * head_dim + 2 * 4 + 3 * head_dim * 4);
+        g.unit = heads * (2 * slot_tile * head_dim * 2 + 2 * head_dim * 4);
         g.half = (tiles * g.unit + 4095) / 4096 * 4096;
         if (2 * g.half > t.region.bytes.len) {
             std.debug.print("tensorfold h3: the exchange region holds {d} MB, this sequence needs {d} MB\n", .{ t.region.bytes.len >> 20, (2 * g.half) >> 20 });
             return error.RegionTooSmall;
         }
     }
-    const groups = (tiles + slot_tile - 1) / slot_tile;
-    const span = groups * slot_tile;
-    g.scores = try buffer(self, heads * span * span * 4, false);
+    g.scores = try buffer(self, heads * tiles * tiles * 4, false);
     g.chosen = try buffer(self, heads * @max(tiles - prefix, 1) * (prefix + keep) * 4, false);
-    g.coarse = try buffer(self, tiles * inner * 2, false);
-    g.pq = try buffer(self, heads * span * head_dim, false);
-    g.pqs = try buffer(self, heads * span * 4, false);
-    g.pk = try buffer(self, heads * span * head_dim, false);
-    g.pks = try buffer(self, heads * groups * 4, false);
-    g.pvt = try buffer(self, heads * span * head_dim, false);
-    g.pvs = try buffer(self, heads * groups * 4, false);
-    {
-        // each group's real tiles, and the tile at each of its places (or -1)
-        const sizes = try self.gpa.alloc(i32, groups);
-        defer self.gpa.free(sizes);
-        for (sizes, 0..) |*n, i| n.* = @intCast(@min(slot_tile, tiles - i * slot_tile));
-        const places = try self.gpa.alloc(i32, span);
-        defer self.gpa.free(places);
-        for (places, 0..) |*t, i| t.* = if (i < tiles) @intCast(i) else -1;
-        g.group_sizes = try buffer(self, groups * 4, false);
-        try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(sizes));
-        g.group_rows = try buffer(self, span * 4, false);
-        try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(places));
-    }
+    g.coarse = try buffer(self, heads * tiles * head_dim * 4, false);
     g.ya = try buffer(self, rows * inner * 2, false);
-    g.a8 = try buffer(self, mp * inner, false);
-    g.as = try buffer(self, mp * 4, false);
-    g.wide = try buffer(self, rows * self.mlp * 2, false);
-    g.w8 = try buffer(self, mp * self.mlp, false);
-    g.wxs = try buffer(self, mp * (self.mlp / h3.wide_group) * 4, false);
+    g.wide = try buffer(self, rows * 2 * self.mlp * 2, false);
+    g.act = try buffer(self, rows * self.mlp * 2, false);
     // the row at each slot (or -1), and the list of every tile
     const row_of = try self.gpa.alloc(i32, slots);
     defer self.gpa.free(row_of);

@@ -34,26 +34,23 @@ pub const Tp = struct {
     packed_seconds: f64 = 0,
 };
 
-/// Tiles [a, b)'s keys, values, scales (and means) into the region's half `parity` with `pack`, out of it otherwise.
+/// Tiles [a, b)'s keys and values (and k and v means) into the region's half `parity` with `pack`, out of it otherwise.
 fn ship(self: *Model, parity: usize, a: usize, b: usize, pooled: bool, pack: bool) !void {
     const g = &self.geometry;
     const t = &self.tp.?;
     const n = b - a;
     if (n == 0) return;
     const slots = g.tiles * slot_tile;
-    const tile_bytes = slot_tile * head_dim;
+    const tile_bytes = slot_tile * head_dim * 2;
     // device address of head 0's first byte, bytes from one head to the next, bytes a head
-    const parts = [7][3]u64{
-        .{ g.tk[0] + a * tile_bytes, slots * head_dim, n * tile_bytes },
-        .{ g.tvt[0] + a * tile_bytes, g.tiles * tile_bytes, n * tile_bytes },
-        .{ g.ks[0] + a * 4, g.tiles * 4, n * 4 },
-        .{ g.vs[0] + a * 4, g.tiles * 4, n * 4 },
-        .{ g.qp[0] + a * head_dim * 4, g.tiles * head_dim * 4, n * head_dim * 4 },
+    const parts = [4][3]u64{
+        .{ g.tk[0] + a * tile_bytes, slots * head_dim * 2, n * tile_bytes },
+        .{ g.tv[0] + a * tile_bytes, slots * head_dim * 2, n * tile_bytes },
         .{ g.kp[0] + a * head_dim * 4, g.tiles * head_dim * 4, n * head_dim * 4 },
         .{ g.vp[0] + a * head_dim * 4, g.tiles * head_dim * 4, n * head_dim * 4 },
     };
     var at: u64 = t.dev + parity * g.half + a * g.unit;
-    for (parts[0..if (pooled) 7 else 4]) |part| {
+    for (parts[0..if (pooled) 4 else 2]) |part| {
         var args: cuda.Args = .{};
         args.add(if (pack) at else part[0]);
         args.add(if (pack) part[0] else at);
@@ -78,7 +75,7 @@ pub fn swap(self: *Model, parity: usize, pooled: bool, cuts: *const [9]u32) !voi
     t.seq +%= 1;
     if (std.c.getenv("TF_H3_TP_SOLO") == null) {
         const off = [1]u64{parity * g.half + g.own0 * g.unit};
-        const len = [1]u64{(g.own1 - g.own0) * (if (pooled) g.unit else self.heads * (2 * slot_tile * head_dim + 8))};
+        const len = [1]u64{(g.own1 - g.own0) * (if (pooled) g.unit else self.heads * 2 * slot_tile * head_dim * 2)};
         for (0..t.world) |peer| {
             if (peer == t.rank) continue;
             if (h3x_post(t.x, @intCast(peer), &off, &len, 1, t.seq) != 0) {
