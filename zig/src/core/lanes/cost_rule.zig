@@ -46,12 +46,12 @@ pub fn changed(ms: f64, reference: f64) bool {
 pub fn probeHolds(windows: anytype, heads: anytype, at: []const usize, reference: []const f64, head: ?f64) !bool {
     var best = std.math.inf(f64);
     for (at) |i| {
-        if (i >= reference.len or !(reference[i] > 0)) return false;
+        if (i >= reference.len or !(reference[i] > 0) or !std.math.isFinite(reference[i])) return false;
         if (!try within(windows, i, try fastest(windows, i), reference[i])) return false;
         if (head != null) best = @min(best, try heads.time(0));
     }
     const h = head orelse return true;
-    if (!(h > 0)) return false;
+    if (!(h > 0) or !std.math.isFinite(h)) return false;
     return within(heads, 0, @min(best, try fastest(heads, 0)), h);
 }
 
@@ -196,6 +196,28 @@ test "the head reads as the fastest of its samples after each probed window and 
     const entries = [_]usize{ 0, 0 };
     try std.testing.expect(try probeHolds(w, h, &entries, &.{10}, 1.484));
     try std.testing.expectEqual(@as(usize, 10), at[1]); // two samples and one fastest-of, no second timing
+}
+
+const SteadyProbe = struct {
+    pub fn time(_: @This(), _: usize) !f64 {
+        return 10;
+    }
+};
+
+test "a probe refuses non-finite and non-positive window references" {
+    const timer: SteadyProbe = .{};
+    try std.testing.expect(try probeHolds(timer, timer, &.{0}, &.{10}, null));
+    for ([_]f64{ std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |invalid| {
+        try std.testing.expect(!try probeHolds(timer, timer, &.{0}, &.{invalid}, null));
+    }
+}
+
+test "a probe refuses non-finite and non-positive head references" {
+    const timer: SteadyProbe = .{};
+    try std.testing.expect(try probeHolds(timer, timer, &.{0}, &.{10}, 10));
+    for ([_]f64{ std.math.inf(f64), -std.math.inf(f64), std.math.nan(f64), 0, -1 }) |invalid| {
+        try std.testing.expect(!try probeHolds(timer, timer, &.{0}, &.{10}, invalid));
+    }
 }
 
 test {

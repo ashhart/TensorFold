@@ -125,8 +125,8 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     lanes.cost_cache.save(Reference, b.gpa, io, ref, .{ .window = ms, .head = head });
 }
 
-/// Window entries a probe times: 1, 8 and 16 rows (the windows) and 33 (the widest tree).
-const probed = [_]usize{ 0, 7, backend.max_window - 1, backend.max_window + wide.len - 1 };
+/// Probe 1, 8, 16, 20 and 33 rows, covering the 16-row, full 32-row and edge 32-row coop tiles.
+const probed = [_]usize{ 0, 7, backend.max_window - 1, backend.max_window, backend.max_window + wide.len - 1 };
 
 /// Whether `kept`'s windows at `probed`, and its head step, each still time within drift on this GPU.
 fn holds(windows: anytype, heads: anytype, kept: Costs, head: bool) !bool {
@@ -134,6 +134,20 @@ fn holds(windows: anytype, heads: anytype, kept: Costs, head: bool) !bool {
     var reference: [wide.len + backend.max_window]f64 = undefined;
     for (&reference, kept.window[0..kept.windows]) |*r, w| r.* = w.ms;
     return lanes.cost_rule.probeHolds(windows, heads, &probed, &reference, if (head) kept.head_ms else null);
+}
+
+test "a retained table is refused when only the full 32-row tile path drifts" {
+    const Timer = struct {
+        slow: bool,
+        pub fn time(t: @This(), i: usize) !f64 {
+            const rows = widthOf(i);
+            return if (t.slow and rows > 16 and rows <= 32) 13 else 10;
+        }
+    };
+    var kept: Costs = .{ .windows = wide.len + backend.max_window };
+    for (kept.window[0..kept.windows], 0..) |*w, i| w.* = .{ .width = @intCast(widthOf(i)), .ms = 10 };
+    try std.testing.expect(try holds(Timer{ .slow = false }, Timer{ .slow = false }, kept, false));
+    try std.testing.expect(!try holds(Timer{ .slow = true }, Timer{ .slow = true }, kept, false));
 }
 
 /// Windows past 16 rows, timed for the lanes' wider trees.
