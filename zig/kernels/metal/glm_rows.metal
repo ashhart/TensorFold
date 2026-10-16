@@ -170,7 +170,7 @@ template <int BITS, bool GLU>
   const int row0 = (int(tg.x) * 2 + int(sg)) * 4;
   if (row0 >= d.n) return;
   const int e = int(tg.y);
-  const int lo = offsets[e], hi = offsets[e + 1];
+  const int lo = offsets[e], hi = e + 1 < d.experts ? offsets[e + 1] : d.slots;
   const size_t at = size_t(e) * d.n + row0;
   const size_t kb = size_t(d.k) * BITS / 8, kg = size_t(d.k / d.group);
   const device uint8_t* w = (const device uint8_t*)W + at * kb;

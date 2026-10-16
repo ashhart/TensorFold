@@ -1,6 +1,6 @@
 //! Server-sent events as the Python server frames them: the head, ``data:`` frames, typed ``event:`` frames, ``[DONE]``.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 

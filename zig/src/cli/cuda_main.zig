@@ -8,6 +8,7 @@ const lanes = @import("lanes");
 const checks = @import("cuda_checks.zig");
 const kernel_checks = @import("cuda_kernel_checks.zig");
 const precision = @import("cuda_precision.zig");
+const kl = @import("cuda_kl.zig");
 const shared_checks = @import("cuda_shared_checks.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 const lanes_cli = @import("cuda_lanes.zig");
@@ -35,6 +36,10 @@ const usage =
     \\       tensorfold check-kernels MODEL   (lane_gemv and the forked MoE against the kernels they replace, real weights)
     \\       tensorfold train-check MODEL   (Sliding Weights' gradients against the forward by finite differences)
     \\       tensorfold check-precision MODEL --tokens ID,... --dump DIR   (ModelOpt projections against fp64 and NVIDIA's math)
+    \\       tensorfold margins MODEL --tokens ID,... --gold ID,...   (a gold reply teacher-forced: where argmax differs)
+    \\       tensorfold digest MODEL   (every byte of the checkpoint hashed, as a tensor-parallel rank checks it at load)
+    \\       tensorfold kl MODEL --tokens ID,... [--gold ID,...] [--max-tokens N] (--dump FILE | --against FILE) [--precision P]
+    \\                (logits rows to FILE, fed --gold then greedy; or FILE's tokens fed: KL, top-1 and NLL against its rows)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
     \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
     \\       tensorfold models
@@ -72,6 +77,7 @@ pub fn main(init: std.process.Init) !u8 {
     var positional: std.ArrayList([]const u8) = .empty;
     defer positional.deinit(gpa);
     defer gpa.free(opts.tokens);
+    defer gpa.free(opts.gold);
     defer if (opts.costs) |c| gpa.free(c);
     var i: usize = 3;
     while (i < args.len) : (i += 1) {
@@ -79,6 +85,15 @@ pub fn main(init: std.process.Init) !u8 {
         const value = if (i + 1 < args.len) args[i + 1] else "";
         if (std.mem.eql(u8, a, "--tokens")) {
             opts.tokens = try parseIds(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--gold")) {
+            opts.gold = try parseIds(gpa, value);
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--precision")) {
+            opts.math = std.meta.stringToEnum(nemotron.Precision, value) orelse return error.BadPrecision;
+            i += 1;
+        } else if (std.mem.eql(u8, a, "--against")) {
+            opts.against = value;
             i += 1;
         } else if (std.mem.eql(u8, a, "--max-tokens")) {
             opts.max_tokens = try std.fmt.parseInt(u32, value, 10);
@@ -149,6 +164,12 @@ pub fn main(init: std.process.Init) !u8 {
             return 2;
         } else try positional.append(gpa, a);
     }
+    if (std.mem.eql(u8, args[1], "digest")) { // no GPU: every byte of the checkpoint, as a TP rank hashes it at load
+        const c = try nemotron.identity.Content.start(gpa, init.io, opts.model, (try nemotron.Config.read(gpa, init.io, opts.model)).held != null);
+        const d = try c.finish();
+        std.debug.print("RESULT digest {s}\n", .{&std.fmt.bytesToHex(d, .lower)});
+        return 0;
+    }
     var driver = try cuda.Driver.open();
     defer driver.close();
     const device = try deviceOrdinal(opts.device, init.environ_map.get("TF_CUDA_DEVICE"));
@@ -182,7 +203,19 @@ pub fn main(init: std.process.Init) !u8 {
     const graphs = opts.graphs and (std.mem.eql(u8, cmd, "run") or std.mem.eql(u8, cmd, "rounds") or bench or widths);
     const sampling: ?lanes.Sampling = if ((std.mem.eql(u8, cmd, "run") or widths) and opts.sampling.temperature > 0) opts.sampling else null;
     const segments = opts.segments orelse if (init.environ_map.get("TF_CUDA_SEGMENTS")) |v| try std.fmt.parseInt(usize, v, 10) else 1;
-    const engine = try nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null });
+    // a rank past 0 of a tensor-parallel latent MoE holds expert shares and serves rank 0's jobs, whatever the command
+    if (init.environ_map.get("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, r, "0")) {
+        nemotron.worker.serve(gpa, init.io, &ctx, opts.model, opts.math) catch |err| {
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
+            std.log.err("expert rank stopped: {s}", .{@errorName(err)});
+            std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it
+        };
+        return 0;
+    };
+    const engine = nemotron.Engine.init(gpa, init.io, &ctx, opts.model, kernels, .{ .context = opts.context, .mtp = mtp, .graphs = graphs, .sampling = sampling, .segments = segments, .carveout = if (carve) |*c| c else null, .precision = opts.math }) catch |err| {
+        cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this error
+        return err;
+    };
     defer engine.deinit();
     if (carve) |*c| {
         const free = (try ctx.memInfo()).free;
@@ -204,6 +237,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (std.mem.eql(u8, cmd, "teacher") and rest.len == 1) return checks.teacher(gpa, init.io, engine, rest[0], opts.dump);
     if (std.mem.eql(u8, cmd, "prefill") and rest.len == 2) return checks.prefill(gpa, init.io, engine, rest[0], rest[1], opts.dump);
     if (std.mem.eql(u8, cmd, "rounds")) return checks.rounds(engine, opts.tokens, opts.max_tokens);
+    if (std.mem.eql(u8, cmd, "margins")) return checks.margins(gpa, engine, opts.tokens, opts.gold);
+    if (std.mem.eql(u8, cmd, "kl")) return kl.run(gpa, init.io, engine, opts.tokens, opts.gold, opts.max_tokens, opts.dump, opts.against);
     if (widths) return checks.widths(gpa, engine, opts.tokens, opts.max_tokens);
     if (std.mem.eql(u8, cmd, "check-draws") and rest.len == 1) return checks.draws(gpa, init.io, engine, rest[0]);
     if (std.mem.eql(u8, cmd, "shared-widths") and rest.len == 1) {
@@ -223,6 +258,9 @@ pub fn main(init: std.process.Init) !u8 {
 const Options = struct {
     model: []const u8,
     tokens: []u32 = &.{},
+    gold: []u32 = &.{},
+    math: ?nemotron.Precision = null, // --precision checkpoint|full (null: the checkpoint's math where it is built)
+    against: ?[]const u8 = null, // kl: the reference run's logits file
     max_tokens: usize = 256,
     sampling: lanes.Sampling = .{ .seed = 0, .temperature = 0 },
     drafts: bool = true,
