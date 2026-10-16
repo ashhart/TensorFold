@@ -75,7 +75,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, rank: usize, port: u16, fixture: [
     }
 }
 
-pub fn runSingle(gpu: check.Gpu, model: []const u8, fixture: []const u8, output: []const u8) !void {
+pub fn runSingle(gpu: check.Gpu, model: []const u8, fixture: []const u8, output: []const u8, serial: bool) !void {
     const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, fixture, gpu.gpa, .limited(1 << 22));
     defer gpu.gpa.free(text);
     const parsed = try std.json.parseFromSlice([]const Case, gpu.gpa, text, .{});
@@ -94,7 +94,9 @@ pub fn runSingle(gpu: check.Gpu, model: []const u8, fixture: []const u8, output:
         const row_bytes = flash.prompt.vocabulary * 2;
         const rows = try gpu.gpa.alloc(u8, (case.continuation.len + 1) * row_bytes);
         defer gpu.gpa.free(rows);
-        try e.forward(flash.Tri, tri, &seq, case.prompt, .{});
+        if (serial) {
+            for (case.prompt) |token| try e.forward(flash.Tri, tri, &seq, &.{token}, .{});
+        } else try e.forward(flash.Tri, tri, &seq, case.prompt, .{});
         @memcpy(rows[0..row_bytes], seq.logits);
         for (case.continuation, 0..) |token, i| {
             try e.forward(flash.Tri, tri, &seq, &.{token}, .{});

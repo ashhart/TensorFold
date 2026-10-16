@@ -324,6 +324,51 @@ fn ngram(r: *Rig, g: *const flash.Glue) !void {
     };
 }
 
+fn writebackRounding(r: *Rig, g: *const flash.Glue) !void {
+    const n: usize = 256;
+    const m: usize = 17;
+    const ss: usize = 4;
+    const h = r.bfs(m * ss * n, 1);
+    const inject = r.bfs(m * ss, 0.125);
+    const values = r.bfs(m * n, 1);
+    h[0] = 0x3b34;
+    inject[0] = 0x3c9a;
+    values[0] = 0xbe16;
+    const branch = try r.a.alloc(f32, m * n);
+    for (values, branch) |v, *b| b.* = @floatCast(bf(v));
+    const weights = try r.a.alloc(f32, m);
+    @memset(weights, 1);
+    const dh = try r.dev(std.mem.sliceAsBytes(h));
+    const di = try r.dev(std.mem.sliceAsBytes(inject));
+    const db = try r.dev(std.mem.sliceAsBytes(branch));
+    const dw = try r.dev(std.mem.sliceAsBytes(weights));
+    for ([_]usize{ 2, 4 }) |mode| {
+        const output = try r.out(m * ss * n * 2);
+        const sums = try r.out(m * ss * 4);
+        try g.hcWriteback(r.s, dh, output, sums, db, di, db, dw, m * n, m, n, ss, mode, 0, 1, 1);
+        const got = try r.back(u16, output, h.len);
+        var worst: f64 = 0;
+        var improved: usize = 0;
+        for (got, 0..) |v, i| {
+            const row = i / (ss * n);
+            const stream = i / n % ss;
+            const d = i % n;
+            const x = bf(values[row * n + d]);
+            const gate = bf(inject[row * ss + stream]);
+            const exact = bf(h[i]) + x * gate;
+            const old = rbf(bf(h[i]) + rbf(x * gate));
+            const error_now = @abs(bf(v) - exact);
+            const error_old = @abs(old - exact);
+            try check.expect(error_now <= error_old, "writeback mode {d} row {d} stream {d} column {d}: FP64 error {e} exceeds prior {e}", .{ mode, row, stream, d, error_now, error_old });
+            try check.expect(bf(v) == rbf(exact), "writeback mode {d} column {d}: one rounding of the full update", .{ mode, i });
+            if (error_now < error_old) improved += 1;
+            worst = @max(worst, error_now);
+        }
+        try check.expect(improved > 0, "writeback mode {d}: cancellation fixture improves over double rounding", .{mode});
+        std.debug.print("PASS writeback mode {d}: {d} FP64 columns, 0 worse, {d} improved, worst absolute {e}\n", .{ mode, got.len, improved, worst });
+    }
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
     defer arena.deinit();
@@ -332,6 +377,7 @@ pub fn run(gpu: check.Gpu) !void {
     defer r.deinit();
     var g = try flash.Glue.load(gpu.d);
     defer g.deinit();
+    try writebackRounding(&r, &g);
     for ([_]usize{ 0, 2, 4 }) |mode| try writeback(&r, &g, mode);
     try readout(&r, &g);
     try ngram(&r, &g);
