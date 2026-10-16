@@ -68,7 +68,18 @@ prompt chunk's rows are their own arithmetic, so states are kept and resumed onl
 start, as Step-5's are; a drafting stream does not resume a state kept without the drafter's context, and none is
 resumed inside an image. The budget is what 70% of RAM leaves beside every stream's caches, 16 GiB by default
 (`--prompt-cache-gib`, 0 for none). A later turn of a 3,336-token conversation resumed 3,329 tokens and answered as the
-first pass did; one with an image after 2,300 tokens of system prompt resumed 3,584 of 3,607 tokens, alike.
+first pass did; one with an image after 2,300 tokens of system prompt resumed 3,584 of 3,607 tokens, alike. Served
+with the drafter and `--vision`, an 11,481-token conversation took 7.7 s to its first token fresh and 0.22 s asked
+again (11,264 tokens resumed); with an image in it, 8.1 s and 0.12 s.
+
+Structured output (`response_format`, `guided_json`, `guided_regex`, `guided_choice`, `guided_grammar`) is enforced
+through `libtfgrammar`, as [structured output](../api.md#structured-output) describes, with drafts on: before each
+verify the `Drafted` wrapper hands the drafter's held drafts to the host, where the grammar cuts the ones it rejects.
+The recipe harness's structured check obeys 18 of 18 (each field greedy, sampled and with thinking), and a bad regex
+gets HTTP 400. Tools are called with `tool_choice: "auto"`; `"required"` and a named function get HTTP 400, as the
+grammar for them reads `<tool_call>` markup and Gemma's template writes `<|tool_call>call:NAME{...}<tool_call|>`. A
+request after six or more idle seconds takes 0.4-0.7 s to its first token where a busy server takes 0.08 s ([known
+issues](../known-issues.md)).
 
 | Checkpoint / platform | Qualification |
 | --- | --- |
@@ -76,6 +87,7 @@ first pass did; one with an image after 2,300 tokens of system prompt resumed 3,
 | `z-lab/gemma-4-31B-it-DFlash` `eabd6483` | The one drafter admitted: DFlash v1, block 16, six taps, head dim 128. |
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
 | Images (`--vision`) | PNG and JPEG data URLs, below. |
+| Structured output | `response_format` and the `guided_*` fields, drafts on and off, below. |
 | Other Gemma 4 checkpoints, widths | Outside this recipe. |
 
 ## Images
@@ -91,7 +103,8 @@ resize, then 1/255), so an image becomes 256 to 280 tokens (70 or 140 with `deta
 rounding: the patch projection and the x and y position rows, RMS norms in fp32 times their weights, per-head q, k and
 v norms, the axial 2D RoPE (theta 100, x on dims 0-35 and y on 36-71), attention with scale 1 as two batched GEMMs and
 a softmax, GELU-tanh gating, the 3 x 3 pooler, the standardization and the projection on core affine_mm. An image takes
-about 90 ms. In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
+about 90 ms, and adds about 270 ms to a request's first token (a 290-token prompt with an image 354 ms, the text
+alone 81 ms). In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
 see one another both ways, as `use_bidirectional_attention: "vision"` asks (the prompt attention kernel takes each
 row's last key; global layers stay causal); a prompt chunk never cuts an image.
 
