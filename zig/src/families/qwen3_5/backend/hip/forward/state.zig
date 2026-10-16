@@ -197,47 +197,21 @@ pub const Caches = struct {
         };
         return n;
     }
-};
 
-/// A stream's linear state at a prompt's page edge: each linear layer's conv window and DeltaNet state, in tree slots.
-pub const Snapshots = struct {
-    gpa: Allocator,
-    d: *const hip.Runtime,
-    slots: std.ArrayList(?hip.DeviceBuffer) = .empty,
-
-    pub fn init(gpa: Allocator, d: *const hip.Runtime) Snapshots {
-        return .{ .gpa = gpa, .d = d };
-    }
-
-    pub fn deinit(s: *Snapshots) void {
-        for (s.slots.items) |*b| if (b.*) |*x| x.free();
-        s.slots.deinit(s.gpa);
-    }
-
-    /// Frees every slot's buffer.
-    pub fn clear(s: *Snapshots) void {
-        for (s.slots.items) |*b| if (b.*) |*x| x.free();
-        s.slots.clearRetainingCapacity();
-    }
-
-    /// The caches' linear state copied into slot `slot` (its buffer made on first use).
-    pub fn take(s: *Snapshots, slot: u32, c: *const Caches, stream: hip.abi.Stream) !void {
-        while (s.slots.items.len <= slot) try s.slots.append(s.gpa, null);
-        const entry = &s.slots.items[slot];
-        if (entry.* == null) entry.* = try hip.DeviceBuffer.alloc(s.d, c.linearBytes());
+    /// The linear state copied into `buf` (a snapshot slot of `linearBytes`).
+    pub fn saveLinear(c: *const Caches, buf: hip.DeviceBuffer, stream: hip.abi.Stream) !void {
         var at: usize = 0;
         for (c.layers) |l| switch (l) {
             .full => {},
             .linear => |x| for ([_]hip.DeviceBuffer{ x.conv, x.state }) |b| {
-                try hip.raw.copy(entry.*.?, at, b.base(), b.len, stream);
+                try hip.raw.copy(buf, at, b.base(), b.len, stream);
                 at += b.len;
             },
         };
     }
 
-    /// Slot `slot`'s linear state copied back into the caches.
-    pub fn put(s: *const Snapshots, slot: u32, c: *Caches, stream: hip.abi.Stream) !void {
-        const buf = (if (slot < s.slots.items.len) s.slots.items[slot] else null) orelse return error.NoSnapshot;
+    /// `buf`'s linear state copied back into the caches.
+    pub fn loadLinear(c: *Caches, buf: hip.DeviceBuffer, stream: hip.abi.Stream) !void {
         var at: usize = 0;
         for (c.layers) |l| switch (l) {
             .full => {},
@@ -246,12 +220,5 @@ pub const Snapshots = struct {
                 at += b.len;
             },
         };
-    }
-
-    /// Bytes the slots hold.
-    pub fn held(s: *const Snapshots) usize {
-        var n: usize = 0;
-        for (s.slots.items) |b| n += if (b) |x| x.len else 0;
-        return n;
     }
 };

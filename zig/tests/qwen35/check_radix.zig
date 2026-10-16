@@ -188,7 +188,7 @@ fn resumedPages(c: *Ctx) void {
     be.prefill(&st) catch |err| return c.report.broke(name, err);
     defer be.release(&st);
     if (st.cached == 0) return c.report.fail(name, "the prompt resumed from nothing", .{});
-    const lane = h.lanes.get(&st) orelse return c.report.fail(name, "no lane", .{});
+    const lane = h.streams.map.get(&st) orelse return c.report.fail(name, "no lane", .{});
     var fresh = e.newCaches(prompt.len + 8) catch |err| return c.report.broke(name, err);
     defer fresh.deinit(c.gpa);
     _ = e.prefill(&fresh, prompt, 0, null, .{ .sampling = null, .position = prompt.len }, null) catch |err| return c.report.broke(name, err);

@@ -163,7 +163,11 @@ fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
         .target = target,
         .optimize = optimize,
         .link_libc = true,
-        .imports = &.{ .{ .name = "hip", .module = hip }, .{ .name = "lanes", .module = lanes } },
+        .imports = &.{
+            .{ .name = "hip", .module = hip },
+            .{ .name = "lanes", .module = lanes },
+            .{ .name = "engine_api", .module = api },
+        },
     });
     const family = b.createModule(.{
         .root_source_file = b.path("zig/src/families/qwen3_5/hip.zig"),
