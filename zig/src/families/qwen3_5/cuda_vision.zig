@@ -3,6 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 
+const vl = core.qwen_vl;
 const lt = cuda.cublaslt;
 const DeviceBuffer = cuda.DeviceBuffer;
 const prefix = "vision_tower.";
@@ -21,7 +22,7 @@ pub const max_depth = 32;
 pub const max_patches = 16384;
 const workspace_bytes = 32 << 20;
 
-/// What config.json says about the tower and its placeholders.
+/// The tower's shape and its placeholders' ids, from core/qwen_vl's settings of the checkpoint.
 pub const Config = struct {
     hidden: usize,
     heads: usize,
@@ -29,7 +30,6 @@ pub const Config = struct {
     intermediate: usize,
     out_hidden: usize,
     image_token: u32,
-    video_token: u32,
     vision_start: u32,
     vision_end: u32,
 
@@ -42,53 +42,110 @@ pub const Config = struct {
         return c.hidden * merge * merge;
     }
 
-    /// A checkpoint without a vision_config is null; a tower or M-RoPE this module does not run is refused.
-    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Config {
-        const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
-        defer gpa.free(path);
-        const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 22));
-        defer gpa.free(bytes);
-        return parse(gpa, bytes);
-    }
-
-    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !?Config {
-        const parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
-        defer parsed.deinit();
-        const root = parsed.value.object;
-        const v = (root.get("vision_config") orelse return null).object;
-        const want = [_]struct { []const u8, i64 }{ .{ "patch_size", patch }, .{ "temporal_patch_size", temporal }, .{ "spatial_merge_size", merge }, .{ "in_channels", channels }, .{ "num_position_embeddings", grid_side * grid_side } };
-        for (want) |w| if (num(v.get(w[0])) != w[1]) return error.UnsupportedQwenVision;
-        const act = v.get("hidden_act") orelse return error.UnsupportedQwenVision;
-        if (act != .string or !std.mem.eql(u8, act.string, "gelu_pytorch_tanh")) return error.UnsupportedQwenVision;
-        if (v.get("deepstack_visual_indexes")) |ds| if (ds != .array or ds.array.items.len != 0) return error.UnsupportedQwenVision;
-        // qwen35.cu's rotate: interleaved M-RoPE over sections 11, 11 and 10
-        const text = if (root.get("text_config")) |t| t.object else root;
-        const rope = (text.get("rope_parameters") orelse return error.UnsupportedQwenVision).object;
-        const inter = rope.get("mrope_interleaved") orelse return error.UnsupportedQwenVision;
-        const sec = rope.get("mrope_section") orelse return error.UnsupportedQwenVision;
-        if (inter != .bool or !inter.bool or sec != .array or sec.array.items.len != 3) return error.UnsupportedQwenVision;
-        for (sec.array.items, [_]i64{ 11, 11, 10 }) |s, x| if (num(s) != x) return error.UnsupportedQwenVision;
-        const out = num(v.get("out_hidden_size"));
-        const hid = num(v.get("hidden_size"));
-        const nh = num(v.get("num_heads"));
-        const dep = num(v.get("depth"));
-        const mlp = num(v.get("intermediate_size"));
-        if (out <= 0 or hid <= 0 or nh <= 0 or mlp <= 0 or dep <= 0 or dep > max_depth) return error.UnsupportedQwenVision;
-        if (@mod(hid, nh) != 0 or (@divExact(hid, nh) != 64 and @divExact(hid, nh) != 72)) return error.UnsupportedQwenVision;
-        return .{ .hidden = @intCast(hid), .heads = @intCast(nh), .depth = @intCast(dep), .intermediate = @intCast(mlp), .out_hidden = @intCast(out), .image_token = try id(root, "image_token_id"), .video_token = try id(root, "video_token_id"), .vision_start = try id(root, "vision_start_token_id"), .vision_end = try id(root, "vision_end_token_id") };
-    }
-
-    fn num(x: ?std.json.Value) i64 {
-        const v = x orelse return -1;
-        return if (v == .integer) v.integer else -1;
-    }
-
-    fn id(o: std.json.ObjectMap, name: []const u8) !u32 {
-        const v = num(o.get(name));
-        if (v < 0) return error.UnsupportedQwenVision;
-        return @intCast(v);
+    /// `vc` as this tower runs it; config.json's text M-RoPE must be qwen35.cu's (interleaved 11, 11, 10).
+    pub fn of(gpa: std.mem.Allocator, vc: vl.Config, config_json: []const u8) !Config {
+        const geometry = vc.patch == patch and vc.temporal == temporal and vc.merge == merge;
+        if (!geometry or vc.positions != grid_side * grid_side) return error.UnsupportedQwenVision;
+        if (vc.depth > max_depth or (vc.headDim() != 64 and vc.headDim() != 72)) return error.UnsupportedQwenVision;
+        try textRope(gpa, config_json);
+        return .{
+            .hidden = vc.hidden,
+            .heads = vc.heads,
+            .depth = vc.depth,
+            .intermediate = vc.intermediate,
+            .out_hidden = vc.out_hidden,
+            .image_token = vc.image_token,
+            .vision_start = vc.vision_start,
+            .vision_end = vc.vision_end,
+        };
     }
 };
+
+/// qwen35.cu's rotate takes interleaved M-RoPE over sections 11, 11 and 10 only.
+fn textRope(gpa: std.mem.Allocator, config_json: []const u8) !void {
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, config_json, .{}) catch
+        return error.UnsupportedQwenVision;
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.UnsupportedQwenVision;
+    const root = parsed.value.object;
+    const tc = root.get("text_config");
+    const text = if (tc != null and tc.? == .object) tc.?.object else root;
+    const rope = text.get("rope_parameters") orelse return error.UnsupportedQwenVision;
+    if (rope != .object) return error.UnsupportedQwenVision;
+    const inter = rope.object.get("mrope_interleaved") orelse return error.UnsupportedQwenVision;
+    const sec = rope.object.get("mrope_section") orelse return error.UnsupportedQwenVision;
+    if (inter != .bool or !inter.bool or sec != .array or sec.array.items.len != 3) return error.UnsupportedQwenVision;
+    for (sec.array.items, [_]i64{ 11, 11, 10 }) |x, want|
+        if (x != .integer or x.integer != want) return error.UnsupportedQwenVision;
+}
+
+/// --vision's limits (native/cuda.zig's): image tokens a request holds in all, and images.
+pub const Limits = struct { image_tokens: u32, max_images: u32 };
+
+/// What the server's image requests reach: the checkpoint's processor (core/qwen_vl) and this tower.
+pub const Vision = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    shared: vl.Config,
+    tower: *Tower,
+    limits: Limits,
+    markers: [3]u32, // vision_start, image_pad, vision_end: text that spells one stays text
+
+    /// The checkpoint's settings and tower for a model `width` wide; error.NoQwenVision without a vision_config.
+    pub fn open(
+        gpa: std.mem.Allocator,
+        io: std.Io,
+        d: *const cuda.Driver,
+        s: cuda.Stream,
+        dir: []const u8,
+        width: usize,
+        limits: Limits,
+    ) !*Vision {
+        var arena = std.heap.ArenaAllocator.init(gpa);
+        defer arena.deinit();
+        const a = arena.allocator();
+        const config = try readFile(a, io, dir, "config.json") orelse return error.NoQwenVision;
+        const pre = try readFile(a, io, dir, "preprocessor_config.json");
+        const proc = try readFile(a, io, dir, "processor_config.json");
+        const parsed = vl.Config.parse(a, config, pre, proc) catch |e|
+            return if (e == error.OutOfMemory) e else error.UnsupportedQwenVision;
+        const shared = parsed orelse return error.NoQwenVision;
+        const c = try Config.of(gpa, shared, config);
+        if (c.out_hidden != width) return error.UnsupportedQwenVision;
+        const v = try gpa.create(Vision);
+        errdefer gpa.destroy(v);
+        const tower = try Tower.load(gpa, io, d, s, dir, c);
+        const markers = [3]u32{ c.vision_start, c.image_token, c.vision_end };
+        v.* = .{ .gpa = gpa, .io = io, .shared = shared, .tower = tower, .limits = limits, .markers = markers };
+        return v;
+    }
+
+    pub fn deinit(v: *Vision) void {
+        v.tower.deinit();
+        v.gpa.destroy(v);
+    }
+
+    pub fn ids(v: *const Vision) vl.rope.Ids {
+        return .{ .start = v.shared.vision_start, .image = v.shared.image_token, .end = v.shared.vision_end };
+    }
+
+    /// An image's bytes to the tower's patches (core/qwen_vl), at most `max_tokens` and one tower call's tokens.
+    pub fn prepare(v: *const Vision, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !vl.geometry.Prepared {
+        return vl.geometry.prepare(v.io, a, bytes, v.shared, @min(max_tokens, max_patches / (merge * merge)));
+    }
+
+    /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).
+    pub const explain = vl.geometry.problem;
+};
+
+/// `name` in `dir`, or null when it is not there.
+fn readFile(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) !?[]const u8 {
+    const path = try std.fs.path.join(a, &.{ dir, name });
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch |e| switch (e) {
+        error.FileNotFound => null,
+        else => e,
+    };
+}
 
 /// One image's patch grid (rows and columns of 16x16 patches, both even).
 pub const Grid = struct { h: u32, w: u32 };
@@ -441,9 +498,10 @@ test "bilinear taps match align_corners resampling at the ends and middle" {
     try std.testing.expectEqual(@as(f32, 1), b.w[0]);
 }
 
-test "a vision_config's tower is read; other widths, depths and M-RoPE are refused; a text-only config has none" {
-    const gpa = std.testing.allocator;
-    try std.testing.expectEqual(@as(?Config, null), try Config.parse(gpa, "{\"hidden_size\":2048}"));
+test "a vision_config's tower is taken; other patches, depths, head widths and M-RoPE are refused" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
     const good =
         \\{"vision_config":{"depth":27,"hidden_size":1152,"num_heads":16,"intermediate_size":4304,"patch_size":16,
         \\"temporal_patch_size":2,"spatial_merge_size":2,"in_channels":3,"num_position_embeddings":2304,
@@ -451,22 +509,33 @@ test "a vision_config's tower is read; other widths, depths and M-RoPE are refus
         \\"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10]}},
         \\"image_token_id":248056,"video_token_id":248057,"vision_start_token_id":248053,"vision_end_token_id":248054}
     ;
-    const c = (try Config.parse(gpa, good)).?;
+    const parse = struct {
+        fn f(al: std.mem.Allocator, text: []const u8) !Config {
+            return Config.of(al, (try vl.Config.parse(al, text, null, null)).?, text);
+        }
+    }.f;
+    const c = try parse(a, good);
     try std.testing.expectEqual(@as(usize, 5120), c.out_hidden);
     try std.testing.expectEqual(@as(u32, 248056), c.image_token);
-    const deeper = try std.mem.replaceOwned(u8, gpa, good, "\"depth\":27", "\"depth\":33");
-    defer gpa.free(deeper);
-    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, deeper));
-    const wide = try std.mem.replaceOwned(u8, gpa, good, "\"num_heads\":16", "\"num_heads\":12");
-    defer gpa.free(wide);
-    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, wide));
+    try std.testing.expectEqual(@as(usize, 72), c.headDim());
+    try std.testing.expectEqual(@as(?vl.Config, null), try vl.Config.parse(a, "{\"hidden_size\":2048}", null, null));
+    const refused = [_][2][]const u8{
+        .{ "\"depth\":27", "\"depth\":33" },
+        .{ "\"num_heads\":16", "\"num_heads\":12" },
+        .{ "\"patch_size\":16", "\"patch_size\":14" },
+        .{ "\"num_position_embeddings\":2304", "\"num_position_embeddings\":1024" },
+        .{ "[11,11,10]", "[16,24,24]" },
+        .{ "\"mrope_interleaved\":true", "\"mrope_interleaved\":false" },
+    };
+    for (refused) |r| {
+        const text = try std.mem.replaceOwned(u8, a, good, r[0], r[1]);
+        try std.testing.expectError(error.UnsupportedQwenVision, parse(a, text));
+    }
     // the 2B's tower: 24 blocks of 1024, heads of 64
-    const small = try std.mem.replaceOwned(u8, gpa, good, "\"depth\":27,\"hidden_size\":1152,\"num_heads\":16,\"intermediate_size\":4304", "\"depth\":24,\"hidden_size\":1024,\"num_heads\":16,\"intermediate_size\":4096");
-    defer gpa.free(small);
-    const c2 = (try Config.parse(gpa, small)).?;
+    const big = "\"depth\":27,\"hidden_size\":1152,\"num_heads\":16,\"intermediate_size\":4304";
+    const two = "\"depth\":24,\"hidden_size\":1024,\"num_heads\":16,\"intermediate_size\":4096";
+    const small = try std.mem.replaceOwned(u8, a, good, big, two);
+    const c2 = try parse(a, small);
     try std.testing.expectEqual(@as(usize, 64), c2.headDim());
     try std.testing.expectEqual(@as(usize, 24), c2.depth);
-    const sections = try std.mem.replaceOwned(u8, gpa, good, "[11,11,10]", "[16,24,24]");
-    defer gpa.free(sections);
-    try std.testing.expectError(error.UnsupportedQwenVision, Config.parse(gpa, sections));
 }

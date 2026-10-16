@@ -1,24 +1,36 @@
 //! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare; vision exits 1 off its bounds.
 const std = @import("std");
 const cuda = @import("cuda");
+const core = @import("core");
 const q = @import("qwen35");
 const E = q.engine;
+const vl = core.qwen_vl;
+
+const usage =
+    \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>
+    \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture>...
+    \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
+    \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
+    \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
+    \\
+;
 
 pub fn main(init: std.process.Init) !u8 {
     const a = init.arena.allocator();
     const args = try init.minimal.args.toSlice(a);
-    const is_vision = args.len >= 3 and std.mem.eql(u8, args[2], "vision");
-    if (args.len != 5 and !(is_vision and args.len <= 7)) {
-        std.debug.print("usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out>\n" ++
-            "       tf-qwen35-cuda <model dir> vision <fixtures> <out> [min mean cosine, 0.999] [min row cosine, 0.94]\n", .{});
-        return 2;
+    if (args.len >= 3 and std.mem.eql(u8, args[2], "vision")) {
+        const bounded = args.len > 5 and std.mem.eql(u8, args[5], "--bound");
+        const first: usize = if (bounded) 8 else 5;
+        if (args.len <= first) {
+            std.debug.print("{s}", .{usage});
+            return 2;
+        }
+        const bound: ?[2]f64 = if (bounded) .{ try std.fmt.parseFloat(f64, args[6]), try std.fmt.parseFloat(f64, args[7]) } else null;
+        return vision(init, a, args[1], args[3], try std.fmt.parseInt(u32, args[4], 10), bound, args[first..]);
     }
-    if (is_vision) {
-        const bounds: Bounds = .{
-            .mean = if (args.len > 5) try std.fmt.parseFloat(f64, args[5]) else 0.999,
-            .row = if (args.len > 6) try std.fmt.parseFloat(f64, args[6]) else 0.94,
-        };
-        return vision(init, a, args[1], args[3], args[4], bounds);
+    if (args.len != 5) {
+        std.debug.print("{s}", .{usage});
+        return 2;
     }
     var ids: std.ArrayList(u32) = .empty;
     var it = std.mem.tokenizeAny(u8, args[3], ", ");
@@ -164,42 +176,20 @@ fn fill(e: *E.Engine, cache: *E.Cache, ids: []const u32, n: usize) !void {
     }
 }
 
-/// Each image's mean and worst row cosine to 0.6.6's bf16 rows; with fp32 rows, no further from them than 0.6.6's.
-const Bounds = struct { mean: f64, row: f64, slack: f64 = 0.001 };
-
-/// Rows' cosine, mean and worst, of bf16 `got` against `want` (bf16, or fp32 when `want32`), and the identical rows.
-const Cosines = struct { mean: f64, least: f64, same: usize };
-
-fn cosines(got: []align(1) const u16, want: []const u8, want32: bool, rows: usize, width: usize) Cosines {
-    var sum: f64 = 0;
-    var least: f64 = 1;
-    var same: usize = 0;
-    for (0..rows) |r| {
-        var dot: f64 = 0;
-        var ng: f64 = 0;
-        var nw: f64 = 0;
-        var equal = !want32;
-        for (0..width) |i| {
-            const x = bf(got[r * width + i]);
-            const y: f64 = if (want32) @as(f64, @as(f32, @bitCast(std.mem.readInt(u32, want[(r * width + i) * 4 ..][0..4], .little)))) else bf(std.mem.readInt(u16, want[(r * width + i) * 2 ..][0..2], .little));
-            if (!want32 and got[r * width + i] != std.mem.readInt(u16, want[(r * width + i) * 2 ..][0..2], .little)) equal = false;
-            dot += x * y;
-            ng += x * x;
-            nw += y * y;
-        }
-        const cos = dot / @sqrt(ng * nw);
-        sum += cos;
-        least = @min(least, cos);
-        same += @intFromBool(equal);
-    }
-    return .{ .mean = sum / @as(f64, @floatFromInt(rows)), .least = least, .same = same };
+fn read(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ?[]const u8 {
+    const path = std.fs.path.join(a, &.{ dir, name }) catch return null;
+    return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(64 << 20)) catch null;
 }
 
-/// Each fixture's patches (tools/zig/qwen_vision_fixtures.py) through the tower: rows' cosine to 0.6.6's, bounded.
-fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, dir: []const u8, out_path: []const u8, bounds: Bounds) !u8 {
+/// Each picture prepared as the server prepares it, through the tower twice (bit-equal), against its reference.
+fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, out: []const u8, tokens: u32, bound: ?[2]f64, pictures: []const [:0]const u8) !u8 {
     const V = q.vision;
     const io = init.io;
-    const cfg = try V.Config.read(a, io, model) orelse return error.QwenCheckpointHasNoVision;
+    const config = read(a, io, model, "config.json") orelse return error.NoConfig;
+    const pre = read(a, io, model, "preprocessor_config.json");
+    const proc = read(a, io, model, "processor_config.json");
+    const vc = (try vl.Config.parse(a, config, pre, proc)) orelse return error.NoVisionTower;
+    const cfg = try V.Config.of(a, vc, config);
     var driver = try cuda.Driver.open();
     defer driver.close();
     var ctx = try cuda.Context.init(&driver, 0);
@@ -208,62 +198,78 @@ fn vision(init: std.process.Init, a: std.mem.Allocator, model: []const u8, dir: 
     defer stream.deinit();
     const tower = try V.Tower.load(init.gpa, io, ctx.d, stream, model, cfg);
     defer tower.deinit();
-    const cwd = std.Io.Dir.cwd();
-    const manifest = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, "manifest.json" }), a, .limited(1 << 20));
-    const parsed = try std.json.parseFromSliceLeaky(std.json.Value, a, manifest, .{});
-    var out: std.ArrayList(u8) = .empty;
-    var worst: f64 = 1;
-    var failed: usize = 0;
-    for (parsed.object.get("images").?.array.items) |im| {
-        const o = im.object;
-        const grid = o.get("grid").?.array.items;
-        const g: V.Grid = .{ .h = @intCast(grid[0].integer), .w = @intCast(grid[1].integer) };
-        const tokens: usize = @intCast(o.get("tokens").?.integer);
-        const px_bytes = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, o.get("pixels").?.string }), a, .limited(1 << 30));
-        const want = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, o.get("features").?.string }), a, .limited(1 << 30));
-        const px = try a.alloc(f32, px_bytes.len / 4);
-        @memcpy(std.mem.sliceAsBytes(px), px_bytes);
-        var features = try cuda.DeviceBuffer.alloc(ctx.d, tokens * cfg.out_hidden * 2);
-        defer features.free();
-        const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-        try tower.encode(px, &.{g}, features.ptr);
-        const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e6;
-        const got = try a.alloc(u8, tokens * cfg.out_hidden * 2);
-        try features.download(0, got);
-        try out.appendSlice(a, got);
-        if (want.len != got.len) {
-            std.debug.print("{s}: 0.6.6 has {d} bytes of rows, the tower {d}\n", .{ o.get("name").?.string, want.len, got.len });
+    const width = cfg.out_hidden;
+    var meta: std.ArrayList(u8) = .empty;
+    try meta.appendSlice(a, "{");
+    var failed = false;
+    for (pictures, 0..) |pic, n| {
+        const bytes = std.Io.Dir.cwd().readFileAlloc(io, pic, a, .limited(64 << 20)) catch |err| {
+            std.debug.print("{s}: {t}\n", .{ pic, err });
             return 1;
+        };
+        const p = try vl.geometry.prepare(io, a, bytes, vc, @min(tokens, V.max_patches / (V.merge * V.merge)));
+        const count = @as(usize, p.tokens) * width;
+        var features = try cuda.DeviceBuffer.alloc(ctx.d, count * 2);
+        defer features.free();
+        const first = try a.alloc(u16, count);
+        const again = try a.alloc(u16, count);
+        var ms: f64 = 0;
+        for ([_][]u16{ first, again }) |dst| {
+            const t0 = std.Io.Clock.awake.now(io);
+            try tower.encode(p.pixels, &.{.{ .h = p.gh, .w = p.gw }}, features.ptr);
+            ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds())) / 1e6;
+            try features.download(0, std.mem.sliceAsBytes(dst));
         }
-        const gw: []align(1) const u16 = std.mem.bytesAsSlice(u16, got);
-        const name = o.get("name").?.string;
-        const c = cosines(gw, want, false, tokens, cfg.out_hidden);
-        worst = @min(worst, c.least);
-        std.debug.print("{s}: grid {d}x{d}, {d} rows, row cosine mean {d:.5} min {d:.5}, {d} rows identical, {d:.1} ms", .{ name, g.h, g.w, tokens, c.mean, c.least, c.same, ms });
-        var ok = c.mean >= bounds.mean and c.least >= bounds.row;
-        if (o.get("reference")) |ref| {
-            // both bf16 towers against 0.6.6's fp32 rows: this one may not be the further, beyond the slack
-            const r32 = try cwd.readFileAlloc(io, try std.fs.path.join(a, &.{ dir, ref.string }), a, .limited(1 << 31));
-            if (r32.len != tokens * cfg.out_hidden * 4) {
-                std.debug.print("\n{s}: the fp32 reference has {d} bytes, {d} rows need {d}\n", .{ name, r32.len, tokens, tokens * cfg.out_hidden * 4 });
-                return 1;
-            }
-            const ours = cosines(gw, r32, true, tokens, cfg.out_hidden);
-            const theirs = cosines(std.mem.bytesAsSlice(u16, want), r32, true, tokens, cfg.out_hidden);
-            std.debug.print("; against fp32: mean {d:.5} (0.6.6 bf16 {d:.5})", .{ ours.mean, theirs.mean });
-            // with a reference, the absolute bounds give way to it: 0.6.6's own bf16 rows can sit under them
-            ok = ours.mean + bounds.slack >= theirs.mean;
+        const same = std.mem.eql(u16, first, again);
+        const wide = try a.alloc(f32, count);
+        for (wide, first) |*w, b| w.* = @bitCast(@as(u32, b) << 16);
+        const name = std.fs.path.stem(pic);
+        const fid = compare(a, io, out, name, wide, width);
+        const ref: [2]f64 = if (fid) |f| .{ f.worst, f.mean } else .{ -1, -1 };
+        if (bound) |b| {
+            const ok = if (fid) |f| f.mean <= b[0] and f.worst <= b[1] else false;
+            const why = if (fid == null) "no reference of this shape" else "past it";
+            if (!ok) std.debug.print("{s}: FAIL the bound (mean {d}, worst {d}): {s}\n", .{ name, b[0], b[1], why });
+            failed = failed or !ok;
         }
-        std.debug.print("{s}\n", .{if (ok) "" else "  FAIL"});
-        failed += @intFromBool(!ok);
+        const cwd = std.Io.Dir.cwd();
+        try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/{s}.pixels.f32", .{ out, name }), .data = std.mem.sliceAsBytes(p.pixels) });
+        try cwd.writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/{s}.rows.f32", .{ out, name }), .data = std.mem.sliceAsBytes(wide) });
+        const sha: [64]u8 = if (fid) |f| std.fmt.bytesToHex(f.sha, .lower) else @splat('-');
+        try meta.print(a, "{s}\"{s}\": {{\"gh\": {d}, \"gw\": {d}, \"tokens\": {d}, \"hash\": \"{x}\", \"ms\": {d:.1}, \"repeat_equal\": {}, \"ref_worst\": {d:.6}, \"ref_mean\": {d:.6}, \"ref_sha256\": \"{s}\"}}", .{ if (n > 0) ", " else "", name, p.gh, p.gw, p.tokens, p.hash, ms, same, ref[0], ref[1], sha });
+        std.debug.print("{s}: grid {d} x {d}, {d} tokens, tower {d:.1} ms, second pass bit-equal {}, against the reference worst {d:.6} mean {d:.6}\n", .{ name, p.gh, p.gw, p.tokens, ms, same, ref[0], ref[1] });
+        if (!same) return 1;
     }
-    try cwd.writeFile(io, .{ .sub_path = out_path, .data = out.items });
-    std.debug.print("worst row cosine {d:.5}; {d} image{s} outside the bounds (mean {d}, row {d}, fp32 slack {d})\n", .{ worst, failed, if (failed == 1) "" else "s", bounds.mean, bounds.row, bounds.slack });
-    return if (failed == 0) 0 else 1;
+    try meta.appendSlice(a, "}\n");
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fmt.allocPrint(a, "{s}/meta.json", .{out}), .data = meta.items });
+    return if (failed) 1 else 0;
 }
 
-fn bf(h: u16) f64 {
-    return @as(f32, @bitCast(@as(u32, h) << 16));
+/// A reference's rows against ours: each row's relative L2 error, worst and mean, and the reference file's SHA-256.
+const Fidelity = struct { worst: f64, mean: f64, sha: [32]u8 };
+
+/// OUT/NAME.ref.f32 against `rows`; null without a reference of this shape.
+fn compare(a: std.mem.Allocator, io: std.Io, out: []const u8, name: []const u8, rows: []const f32, width: usize) ?Fidelity {
+    const path = std.fmt.allocPrint(a, "{s}/{s}.ref.f32", .{ out, name }) catch return null;
+    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 30)) catch return null;
+    if (bytes.len != rows.len * 4) return null;
+    var sha: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &sha, .{});
+    const ref: []align(1) const f32 = std.mem.bytesAsSlice(f32, bytes);
+    var worst: f64 = 0;
+    var sum: f64 = 0;
+    for (0..rows.len / width) |r| {
+        var d: f64 = 0;
+        var e: f64 = 0;
+        for (rows[r * width ..][0..width], ref[r * width ..][0..width]) |x, y| {
+            d += (@as(f64, x) - y) * (@as(f64, x) - y);
+            e += @as(f64, y) * y;
+        }
+        const rel = @sqrt(d) / @max(@sqrt(e), 1e-30);
+        worst = @max(worst, rel);
+        sum += rel;
+    }
+    return .{ .worst = worst, .mean = sum / @as(f64, @floatFromInt(rows.len / width)), .sha = sha };
 }
 
 /// `src` behind `p0` rows of text (-1): the table indexed by the cache's position, as a prompt from position 0 is.

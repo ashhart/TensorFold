@@ -6,7 +6,6 @@ const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
-const vision = @import("cuda_vision.zig");
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const be = lanes.backend;
 
@@ -18,7 +17,11 @@ pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads the DFlash2 draft model (openDrafter); the checkpoints have no head of their own.
 pub const takes_drafter = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: bool = false };
+/// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
+pub const explains_open = true;
+pub const vision = @import("cuda_vision.zig");
+
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -32,6 +35,8 @@ pub const Loaded = struct {
     deinit: *const fn (*anyopaque) void,
     /// Called with the admitted stream count: that many caches allocated and touched now, as memory commits on touch.
     reserve: *const fn (*anyopaque, u32) anyerror!void,
+    /// --vision: the tower the server's image requests reach (native/cuda_vision_offer.zig).
+    vision: ?*vision.Vision = null,
 };
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -40,14 +45,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer e.deinit();
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
-    const tower: ?*vision.Tower = if (!o.vision) null else blk: {
-        const vc = try vision.Config.read(gpa, io, dir) orelse return error.QwenCheckpointHasNoVision;
-        if (vc.out_hidden != e.g.hidden) return error.UnsupportedQwenVision;
-        break :blk try vision.Tower.load(gpa, io, ctx.d, e.stream, dir, vc);
-    };
-    errdefer if (tower) |t| t.deinit();
+    const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
+    errdefer if (v) |x| x.deinit();
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .tower = tower };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v };
     return .{
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
@@ -56,6 +57,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .ctx = l,
         .deinit = release,
         .reserve = reserve,
+        .vision = v,
     };
 }
 
@@ -112,11 +114,15 @@ fn closeDrafter(p: *anyopaque) void {
     d.deinit();
 }
 
-/// A request this engine refuses, in words; null: none of its own.
-pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+/// A request this engine refuses, in words, or with no engine (null) its open; null: none of its own.
+pub fn explain(ctx: ?*anyopaque, err: anyerror) ?[]const u8 {
+    if (ctx == null) return switch (err) {
+        error.NoQwenVision => "--vision: this checkpoint has no image tower (no vision_config): serve it without --vision",
+        error.UnsupportedQwenVision => "--vision: this checkpoint's image tower or text M-RoPE is not one the CUDA engine reads",
+        else => null,
+    };
     return switch (err) {
         error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
-        error.QwenVideoUnsupported => "video inputs are not supported by the Qwen CUDA engine yet: send images",
         error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
         error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
         error.QwenServedWithoutVision => "image inputs need the server started with --vision",
@@ -143,7 +149,7 @@ const Lanes = struct {
     e: *E.Engine,
     capacity: usize,
     /// --vision's tower: an image prompt's images encoded at its prefill.
-    tower: ?*vision.Tower = null,
+    vision: ?*vision.Vision = null,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
@@ -154,7 +160,7 @@ const Lanes = struct {
         self.caches.deinit(self.gpa);
         for (self.pool.items) |cache| self.drop(cache);
         self.pool.deinit(self.gpa);
-        if (self.tower) |t| t.deinit();
+        if (self.vision) |v| v.deinit();
         self.e.deinit();
         self.gpa.destroy(self);
     }
@@ -218,8 +224,8 @@ const Lanes = struct {
         // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
         var media: ?vision_prompt.Media = null;
         if (stream.images.len > 0) {
-            const tower = self.tower orelse return error.QwenServedWithoutVision;
-            media = try vision_prompt.Media.init(self.gpa, tower, ids, stream.images);
+            const v = self.vision orelse return error.QwenServedWithoutVision;
+            media = try vision_prompt.Media.init(self.gpa, v, ids, stream.images);
         }
         defer if (media) |*m| m.deinit();
         const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
