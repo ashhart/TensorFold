@@ -108,7 +108,7 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
             try self.upload(cc, false);
             try self.ints(slot);
         },
-        .swiglu => {
+        .swiglu, .swiglu_gate_first => {
             const f = try self.values(s.rows * 2 * s.n, -4, 4, fill, rng, true, true);
             self.in.a = f;
             try self.upload(f, true);
@@ -210,7 +210,7 @@ pub fn prepare(self: *H3, s: c.Shape, fill: g.Fill, rng: std.Random) !bool {
         },
     }
     self.outs = switch (self.which) {
-        .rows_in, .rows_out, .swiglu, .modulation => s.rows * s.n,
+        .rows_in, .rows_out, .swiglu, .swiglu_gate_first, .modulation => s.rows * s.n,
         .norm => 2 * s.rows * s.n,
         .final_norm, .gate_add, .gate_mix => s.rows * s.n,
         .heads => 3 * heads * slots * 128,
@@ -273,15 +273,15 @@ pub fn launch(self: *H3, e: mtl.ComputeEncoder) !void {
             e.setValue([3]i32{ @intCast(s.rows), heads, slots / 64 }, 4);
             e.dispatchThreads(mtl.Size.of(s.rows, heads, 1), mtl.Size.of(64, 2, 1));
         },
-        .swiglu => {
+        .swiglu, .swiglu_gate_first => {
             bind(self, e, 0, 0);
-            e.setValue([2]i32{ @intCast(s.rows), @intCast(s.n) }, 1);
+            e.setValue([3]i32{ @intCast(s.rows), @intCast(s.n), @intFromBool(self.which == .swiglu_gate_first) }, 1);
             bind(self, e, 1, 2);
             e.dispatchThreads(mtl.Size.of(s.n, s.rows, 1), mtl.Size.of(256, 1, 1));
         },
         .heads => {
             for (0..8) |i| bind(self, e, i, i);
-            e.setValue([4]i32{ slots, heads, @intCast(s.k), 0 }, 8);
+            e.setValue([5]i32{ slots, heads, @intCast(s.k), 0, 128 }, 8);
             e.setValue(eps, 9);
             for (0..3) |i| bind(self, e, 8 + i, 10 + i);
             e.dispatchGroups(mtl.Size.of(slots, heads, 1), mtl.Size.of(32, 1, 1));

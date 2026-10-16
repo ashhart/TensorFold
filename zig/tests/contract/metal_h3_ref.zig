@@ -242,12 +242,13 @@ fn attendRow(in: In, s: Sum, scratch: []f64, h: usize, tq: usize, r: usize, ksel
     }
 }
 
-/// h3_swiglu: silu(gate) * value in bf16 from rows [value | gate]. a the fused rows.
-pub fn swiglu(in: In, want: []f64, mag: []f64) void {
+/// h3_swiglu: silu(gate) * value from rows [value | gate], or [gate | value] when `gate_first`. a the fused rows.
+pub fn swiglu(in: In, gate_first: bool, want: []f64, mag: []f64) void {
     const N = in.n;
+    const gate: usize = if (gate_first) 0 else N;
     for (0..in.rows) |r| for (0..N) |n| {
-        const v = in.a[r * 2 * N + n];
-        const g = in.a[r * 2 * N + N + n];
+        const v = in.a[r * 2 * N + N - gate + n];
+        const g = in.a[r * 2 * N + gate + n];
         const silu = g / (1 + @exp(-g));
         want[r * N + n] = silu * v;
         mag[r * N + n] = @abs(silu * v);

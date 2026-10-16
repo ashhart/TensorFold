@@ -100,6 +100,15 @@ embedder (on the host, float64 sums of the checkpoint's float32 values). Each bl
 tables come from `h3_modulation` on the GPU, bf16 inputs and weights with fp32 sums. `from=K` starts at step K of
 a case exported mid-run. The case still supplies the prompt's rows, the noise, the rotary tables and the tile map.
 
+## The released MiniMax-H3, and re-voicing a clip
+
+The tool also loads the released MiniMax-H3 transformer (its FL2VA or Ref2VA folder, `model-*` shards): each head's
+fused [q, k, v] rows in one product, the SwiGLU's [gate; value] rows, dense attention with no routing gates, and its
+own timestep embedder and AdaLN names. `revoice=N` re-voices a finished picture as the Python sampler's `revoice`
+does in its whole-sequence form: every row but the generated audio stays at the keyframe level for every step, the
+audio rows go down the released model's grid of N + 1 points (audio shift 3), and the video rows are not moved.
+A case for it comes from `h3_revoice_case.py` on the fork's exporter branch, from a finished clip's rows.
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.

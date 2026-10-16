@@ -72,13 +72,22 @@ pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
 pub const Checkpoint = struct {
     shards: []Tensors,
 
+    /// Shards named as diffusers names them (FastH3) or as the released MiniMax-H3 checkpoint does.
     pub fn open(gpa: std.mem.Allocator, device: mtl.Device, dir: []const u8, count: usize) !Checkpoint {
         const shards = try gpa.alloc(Tensors, count);
         var path: [1024]u8 = undefined;
+        var stem: []const u8 = "diffusion_pytorch_model";
         for (shards, 1..) |*shard, i| {
-            const text = try std.fmt.bufPrint(path[0 .. path.len - 1], "{s}/diffusion_pytorch_model-{d:0>5}-of-{d:0>5}.safetensors", .{ dir, i, count });
+            const text = try std.fmt.bufPrint(path[0 .. path.len - 1], "{s}/{s}-{d:0>5}-of-{d:0>5}.safetensors", .{ dir, stem, i, count });
             path[text.len] = 0;
-            shard.* = try Tensors.open(gpa, device, @ptrCast(text.ptr));
+            shard.* = Tensors.open(gpa, device, @ptrCast(text.ptr)) catch |err| {
+                if (i > 1 or std.mem.eql(u8, stem, "model")) return err;
+                stem = "model";
+                const again = try std.fmt.bufPrint(path[0 .. path.len - 1], "{s}/{s}-{d:0>5}-of-{d:0>5}.safetensors", .{ dir, stem, i, count });
+                path[again.len] = 0;
+                shard.* = try Tensors.open(gpa, device, @ptrCast(again.ptr));
+                continue;
+            };
         }
         return .{ .shards = shards };
     }

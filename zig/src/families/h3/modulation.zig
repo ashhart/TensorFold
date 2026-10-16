@@ -9,8 +9,13 @@ const Model = h3.Model;
 /// Each step's Euler pairs for the tool: the sigma the model saw and the grid's ratio, video then audio.
 pub const Steps = struct { video: [][2]f32, audio: [][2]f32 };
 
-/// The diffusers names FastH3 checkpoints use for the embedder and the projections.
-const names = .{ .in_w = "time_embedder.linear_1.weight", .in_b = "time_embedder.linear_1.bias", .out_w = "time_embedder.linear_2.weight", .out_b = "time_embedder.linear_2.bias", .block = "transformer_blocks.{d}.adaln_proj.linear.", .final = "norm_out.linear." };
+const Names = struct { in_w: []const u8, in_b: []const u8, out_w: []const u8, out_b: []const u8, block: []const u8, final: []const u8 };
+
+/// The embedder's and projections' names: FastH3's diffusers names, or the released MiniMax-H3's.
+fn names(m: *const Model) Names {
+    if (m.base) return .{ .in_w = "time_embedder.proj_in.weight", .in_b = "time_embedder.proj_in.bias", .out_w = "time_embedder.proj_out.weight", .out_b = "time_embedder.proj_out.bias", .block = "blocks.", .final = "final_layer.adaln_proj.linear." };
+    return .{ .in_w = "time_embedder.linear_1.weight", .in_b = "time_embedder.linear_1.bias", .out_w = "time_embedder.linear_2.weight", .out_b = "time_embedder.linear_2.bias", .block = "transformer_blocks.", .final = "norm_out.linear." };
+}
 
 /// y (rows, n) = x (rows, k) w^T + b on the host, summed in float64 and rounded once to float32.
 fn linear(a: std.mem.Allocator, x: []const f32, w: []const f32, b: []const f32, rows: usize, k: usize) ![]f32 {
@@ -31,10 +36,11 @@ fn silu(v: f32) f32 {
 /// silu(time_embedder(sinusoid(t))) in bf16 for every timestep of `table`: the AdaLN projections' input.
 fn embed(m: *Model, a: std.mem.Allocator, table: []const f32) ![]u16 {
     const ck = &m.checkpoint;
-    const w_in = try ck.floats(a, names.in_w);
-    const b_in = try ck.floats(a, names.in_b);
-    const w_out = try ck.floats(a, names.out_w);
-    const b_out = try ck.floats(a, names.out_b);
+    const n = names(m);
+    const w_in = try ck.floats(a, n.in_w);
+    const b_in = try ck.floats(a, n.in_b);
+    const w_out = try ck.floats(a, n.out_w);
+    const b_out = try ck.floats(a, n.out_b);
     const dim = w_in.len / b_in.len;
     const half = dim / 2;
     // cosine half first, angles and frequencies in float32 as MLX computes them
@@ -73,13 +79,13 @@ fn project(m: *const Model, enc: mtl.ComputeEncoder, x: mtl.Buffer, prefix: []co
     enc.dispatchGroups(mtl.Size.of((n + 7) / 8, 1, 1), mtl.Size.of(256, 1, 1));
 }
 
-/// Replace the case's schedule with `video` and `audio` (same length): plan, lines, tables and the final table.
-pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, audio: schedule.Schedule) !Steps {
+/// The case's schedule replaced (plan, lines, tables); `hold` keeps all but the generated audio at the keyframe level.
+pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, audio: schedule.Schedule, hold: bool) !Steps {
     const rows = m.rows;
     // a row's modality is the case's, fixed by the packing: its first step's line modulo the modalities
     const tags = try a.alloc(i32, rows);
     for (tags, m.adaln[0..rows]) |*t, line| t.* = @mod(line, schedule.modalities);
-    const p = try schedule.plan(a, .{ .text = m.text, .condition = m.condition, .audio = m.audio, .video = m.video }, video.timesteps, audio.timesteps);
+    const p = try schedule.plan(a, .{ .text = m.text, .condition = m.condition, .audio = m.audio, .video = m.video, .hold = hold }, video.timesteps, audio.timesteps);
     const adaln = try a.alloc(i32, p.index.len);
     for (adaln, p.index, 0..) |*o, i, at| o.* = i * schedule.modalities + tags[at % rows];
     m.adaln = adaln;
@@ -98,10 +104,10 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
     var name: [128]u8 = undefined;
     for (m.blocks, 0..) |*b, i| {
         b.tables = .{ .buffer = try m.device.buffer(6 * m.lines * m.hidden * 2, shared) };
-        try project(m, enc, input, try std.fmt.bufPrint(&name, names.block, .{i}), t, k, schedule.modalities, 6, m.hidden, b.tables.buffer);
+        try project(m, enc, input, try std.fmt.bufPrint(&name, "{s}{d}.adaln_proj.linear.", .{ names(m).block, i }), t, k, schedule.modalities, 6, m.hidden, b.tables.buffer);
     }
     m.final_table = .{ .buffer = try m.device.buffer(t * 2 * m.hidden * 2, shared) };
-    try project(m, enc, input, names.final, t, k, 1, 1, 2 * m.hidden, m.final_table.buffer);
+    try project(m, enc, input, names(m).final, t, k, 1, 1, 2 * m.hidden, m.final_table.buffer);
     enc.end();
     cb.commit();
     cb.wait();
@@ -110,7 +116,7 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
         return error.GpuFailed;
     }
     const steps = Steps{ .video = try a.alloc([2]f32, video.timesteps.len), .audio = try a.alloc([2]f32, audio.timesteps.len) };
-    for (steps.video, 0..) |*s, i| s.* = video.euler(i);
+    for (steps.video, 0..) |*s, i| s.* = if (hold) .{ 0.0, 1.0 } else video.euler(i);
     for (steps.audio, 0..) |*s, i| s.* = audio.euler(i);
     return steps;
 }

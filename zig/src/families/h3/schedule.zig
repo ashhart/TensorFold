@@ -58,14 +58,31 @@ pub const Schedule = struct {
         return .{ .sigmas = sigmas, .timesteps = timesteps };
     }
 
+    /// The released model's grid: torch's float32 linspace(1, 0, points), shifted in float32, repeats dropped.
+    pub fn fromPoints(a: std.mem.Allocator, points: usize, s: f32) !Schedule {
+        const step: f32 = -1.0 / @as(f32, @floatFromInt(points - 1));
+        const half = points / 2;
+        var values: std.ArrayList(f32) = .empty;
+        for (0..points) |i| {
+            const fi: f64 = @floatFromInt(i);
+            const base: f32 = @floatCast(if (i < half) 1.0 + @as(f64, step) * fi else -@as(f64, step) * @as(f64, @floatFromInt(points - 1 - i)));
+            const shifted = (s * base) / (1.0 + (s - 1.0) * base);
+            if (values.items.len == 0 or values.items[values.items.len - 1] != shifted) try values.append(a, shifted);
+        }
+        const sigmas = try values.toOwnedSlice(a);
+        const timesteps = try a.alloc(f32, sigmas.len - 1);
+        for (timesteps, sigmas[0..timesteps.len]) |*t, sg| t.* = 1.0 - sg;
+        return .{ .sigmas = sigmas, .timesteps = timesteps };
+    }
+
     /// Step `i`'s Euler pair: the sigma the model saw and the grid's ratio.
     pub fn euler(s: Schedule, i: usize) [2]f32 {
         return .{ 1.0 - s.timesteps[i], s.sigmas[i + 1] / s.sigmas[i] };
     }
 };
 
-/// Row counts in the engine's order: text, keyframe, audio (held reference audio first), video.
-pub const Rows = struct { text: usize, condition: usize = 0, audio: usize, held_audio: usize = 0, video: usize };
+/// Rows in the engine's order (text, keyframe, audio with held audio first, video); `hold` keeps all but audio still.
+pub const Rows = struct { text: usize, condition: usize = 0, audio: usize, held_audio: usize = 0, video: usize, hold: bool = false };
 
 /// The distinct timesteps of a run, sorted, and for every step each row's index into them.
 pub const Plan = struct { table: []f32, index: []i32 };
@@ -75,6 +92,8 @@ pub const audio_condition: f32 = 1.0;
 
 fn rowTime(r: Rows, row: usize, video_t: f32, audio_t: f32) f32 {
     const audio_at = r.text + r.condition;
+    const audio_rows = row >= audio_at and row < audio_at + r.audio;
+    if (r.hold and !audio_rows) return keyframe_noise;
     if (row < r.text) return video_t;
     if (row < audio_at) return @max(video_t, keyframe_noise);
     if (row < audio_at + r.held_audio) return audio_condition;
@@ -87,7 +106,7 @@ pub fn plan(a: std.mem.Allocator, r: Rows, video: []const f32, audio: []const f3
     var seen: std.ArrayList(f32) = .empty;
     for (video, audio) |vt, at| for ([_]f32{ vt, @max(vt, keyframe_noise), at, audio_condition }, 0..) |t, k| {
         // only the kinds of row this run has
-        if ((k == 1 and r.condition == 0) or (k == 3 and r.held_audio == 0)) continue;
+        if ((k == 1 and r.condition == 0 and !r.hold) or (k == 3 and r.held_audio == 0) or (k == 0 and r.hold)) continue;
         if (std.mem.indexOfScalar(f32, seen.items, t) == null) try seen.append(a, t);
     };
     std.mem.sort(f32, seen.items, {}, std.sort.asc(f32));
@@ -120,6 +139,28 @@ test "FastH3 8-Step V2's contract gives the exporter's Euler pairs, and 4 spread
     }
     const four = try spread(a, c.nodes, 4);
     try std.testing.expectEqualSlices(f64, &.{ 0.999, 0.999 * 0.75, 0.999 * 0.5, 0.999 * 0.25 }, four);
+}
+
+test "the released model's grid equals the Python schedule for 9 and 31 points" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const nine = try Schedule.fromPoints(arena.allocator(), 9, 3.0);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.9545454382896423, 0.8999999761581421, 0.8333333134651184, 0.75 }, nine.sigmas[0..5]);
+    try std.testing.expectEqualSlices(f32, &.{ 0.5, 0.30000001192092896, 0.0 }, nine.sigmas[6..]);
+    try std.testing.expectEqualSlices(f32, &.{ 0.0, 0.045454561710357666, 0.10000002384185791 }, nine.timesteps[0..3]);
+    const many = try Schedule.fromPoints(arena.allocator(), 31, 12.0);
+    try std.testing.expectEqual(@as(usize, 31), many.sigmas.len);
+    try std.testing.expectEqualSlices(f32, &.{ 1.0, 0.9971346259117126, 0.9940828680992126, 0.9908256530761719, 0.9873417019844055 }, many.sigmas[0..5]);
+    try std.testing.expectEqualSlices(f32, &.{ 0.46153849363327026, 0.292682945728302, 0.0 }, many.sigmas[28..]);
+}
+
+test "a held picture: every row but the generated audio at the keyframe level" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const r = Rows{ .text = 1, .audio = 2, .video = 1, .hold = true };
+    const p = try plan(arena.allocator(), r, &.{ 0.5, 0.75 }, &.{ 0.25, 0.5 });
+    try std.testing.expectEqualSlices(f32, &.{ 0.25, 0.5, 0.999 }, p.table);
+    try std.testing.expectEqualSlices(i32, &.{ 2, 0, 0, 2, 2, 1, 1, 2 }, p.index);
 }
 
 test "a preview contract takes its shifts from the scheduler folders" {

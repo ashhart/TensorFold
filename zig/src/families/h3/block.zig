@@ -61,21 +61,24 @@ pub fn run(m: *Model, pass: *h3.Pass, index: usize) void {
     const gates: ?Ref = if (index == 0) null else m.blocks[index - 1].tables;
     norm(m, enc.*, b.norm1, gates, h3.gate_m, b.tables, h3.scale_a, h3.shift_a);
     m.lap(pass, "norms");
-    gemm(m, enc.*, m.xn, b.q, m.qr, m.inner, m.hidden);
-    gemm(m, enc.*, m.xn, b.k, m.kr, m.inner, m.hidden);
-    gemm(m, enc.*, m.xn, b.v, m.vr, m.inner, m.hidden);
-    if (!m.dense) gemm(m, enc.*, m.xn, b.compress, m.cr, m.inner, m.hidden);
+    if (m.base) gemm(m, enc.*, m.xn, b.q, m.qkv, 3 * m.inner, m.hidden) else {
+        gemm(m, enc.*, m.xn, b.q, m.qr, m.inner, m.hidden);
+        gemm(m, enc.*, m.xn, b.k, m.kr, m.inner, m.hidden);
+        gemm(m, enc.*, m.xn, b.v, m.vr, m.inner, m.hidden);
+        if (!m.dense) gemm(m, enc.*, m.xn, b.compress, m.cr, m.inner, m.hidden);
+    }
     m.lap(pass, "q k v gate");
     enc.setPipeline(m.pipeline("h3_heads"));
-    enc.setBuffer(m.qr, 0, 0);
-    enc.setBuffer(m.kr, 0, 1);
-    enc.setBuffer(m.vr, 0, 2);
+    // the released layout's rows hold each head's q, k and v together: 384 values a row and head
+    enc.setBuffer(if (m.base) m.qkv else m.qr, 0, 0);
+    enc.setBuffer(if (m.base) m.qkv else m.kr, if (m.base) 2 * h3.head_dim else 0, 1);
+    enc.setBuffer(if (m.base) m.qkv else m.vr, if (m.base) 4 * h3.head_dim else 0, 2);
     enc.setBuffer(b.norm_q.buffer, b.norm_q.offset, 3);
     enc.setBuffer(b.norm_k.buffer, b.norm_k.offset, 4);
     enc.setBuffer(m.cos.buffer, m.cos.offset, 5);
     enc.setBuffer(m.sin.buffer, m.sin.offset, 6);
     enc.setBuffer(m.slot.buffer, m.slot.offset, 7);
-    enc.setValue([4]i32{ @intCast(m.rows), @intCast(heads), @intCast(m.rot), 0 }, 8);
+    enc.setValue([5]i32{ @intCast(m.rows), @intCast(heads), @intCast(m.rot), 0, if (m.base) 3 * h3.head_dim else h3.head_dim }, 8);
     enc.setValue([1]f32{h3.eps}, 9);
     enc.setBuffer(m.tq, 0, 10);
     enc.setBuffer(m.tk, 0, 11);
@@ -115,12 +118,12 @@ pub fn run(m: *Model, pass: *h3.Pass, index: usize) void {
     m.lap(pass, "attention out");
     norm(m, enc.*, b.norm2, b.tables, h3.gate_a, b.tables, h3.scale_m, h3.shift_m);
     m.lap(pass, "norms");
-    // the first projection's rows are [value | gate], one product of twice the MLP's width
+    // the first projection's rows are [value | gate] ([gate | value] in the released layout), one product
     gemm(m, enc.*, m.xn, b.fc1, m.wide, 2 * m.mlp, m.hidden);
     enc.barrier();
     enc.setPipeline(m.pipeline("h3_swiglu"));
     enc.setBuffer(m.wide, 0, 0);
-    enc.setValue([2]i32{ @intCast(m.rows), @intCast(m.mlp) }, 1);
+    enc.setValue([3]i32{ @intCast(m.rows), @intCast(m.mlp), @intFromBool(m.base) }, 1);
     enc.setBuffer(m.act, 0, 2);
     enc.dispatchThreads(mtl.Size.of(m.mlp, m.rows, 1), mtl.Size.of(256, 1, 1));
     m.lap(pass, "mlp in");

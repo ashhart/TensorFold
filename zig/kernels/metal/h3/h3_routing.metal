@@ -1,6 +1,6 @@
 // MiniMax H3 / FastH3 on Metal: q, k and v in tile order, and FastH3's routing (tile means, scores, top-k, pooling).
 
-// q, k, v to bf16 in tile order: head RMSNorm, then rotate-half on q and k in bf16 as the reference rounds it.
+// q, k, v to bf16 in tile order: head RMSNorm, rotate-half on q and k in bf16. P[4]: a row-head's stride (128 or 384).
 [[kernel]] void h3_heads(
   const device bfloat* QR [[buffer(0)]],
   const device bfloat* KR [[buffer(1)]],
@@ -17,10 +17,10 @@
   device bfloat* TV [[buffer(12)]],
   uint lane [[thread_index_in_simdgroup]],
   uint3 tg [[threadgroup_position_in_grid]]) {
-  const int H = P[1], ROT = P[2], HALF = ROT / 2;
+  const int H = P[1], ROT = P[2], HALF = ROT / 2, STRIDE = P[4];
   const int row = int(tg.x), head = int(tg.y);
   const int c0 = 4 * int(lane);
-  const long base = (long(row) * H + head) * 128;
+  const long base = (long(row) * H + head) * STRIDE;
   float4 q, k;
   for (int j = 0; j < 4; j++) {
     q[j] = float(QR[base + c0 + j]);

@@ -24,7 +24,7 @@ pub const shift_m = 3;
 pub const scale_m = 4;
 pub const gate_m = 5;
 
-/// A block's projections as the checkpoint stores them, (N, K) bf16 read in place; fc1 is [value; gate].
+/// A block's projections, (N, K) bf16 read in place; in the released layout q holds every head's fused [q, k, v] rows.
 pub const Block = struct { q: Ref, k: Ref, v: Ref, compress: Ref, out: Ref, fc1: Ref, fc2: Ref, norm1: Ref, norm2: Ref, norm_q: Ref, norm_k: Ref, tables: Ref };
 
 /// `defines` goes ahead of the kernels' source (a probe or a knock-out under test).
@@ -111,6 +111,9 @@ pub const Model = struct {
     audio_velocity: mtl.Buffer,
     /// Every query tile attends to every tile and the pooled branch is left out (not how the checkpoint was trained).
     dense: bool = false,
+    /// The released MiniMax-H3 layout: dense attention without routing gates, the fused q/k/v rows in `qkv`.
+    base: bool = false,
+    qkv: mtl.Buffer,
     profile: bool = false,
     spent: [stages.len]f64 = @splat(0),
 
@@ -133,19 +136,22 @@ pub const Model = struct {
         self.queue = try device.queue();
         self.case = case;
         self.dense = false;
+        self.qkv = undefined;
         self.profile = false;
         self.spent = @splat(0);
         self.checkpoint = try Checkpoint.open(gpa, device, checkpoint_dir, shards);
         const ck = &self.checkpoint;
-        const to_q = ck.entry("transformer_blocks.0.attn.to_q.weight") orelse return error.MissingTensor;
-        const fc2 = ck.entry("transformer_blocks.0.ff.net.2.weight") orelse return error.MissingTensor;
-        self.inner = to_q.shape[0];
+        self.base = ck.entry("blocks.0.attn.qkv_proj.weight") != null;
+        const prefix = if (self.base) "blocks" else "transformer_blocks";
+        const to_q = ck.entry(if (self.base) "blocks.0.attn.qkv_proj.weight" else "transformer_blocks.0.attn.to_q.weight") orelse return error.MissingTensor;
+        const fc2 = ck.entry(if (self.base) "blocks.0.mlp.fc2.weight" else "transformer_blocks.0.ff.net.2.weight") orelse return error.MissingTensor;
+        self.inner = to_q.shape[0] / @as(usize, if (self.base) 3 else 1);
         self.hidden = to_q.shape[1];
         self.heads = self.inner / head_dim;
         self.mlp = fc2.shape[1];
         var layers: usize = 0;
         var name: [128]u8 = undefined;
-        while (ck.entry(try std.fmt.bufPrint(&name, "transformer_blocks.{d}.norm1.weight", .{layers})) != null) layers += 1;
+        while (ck.entry(try std.fmt.bufPrint(&name, "{s}.{d}.norm1.weight", .{ prefix, layers })) != null) layers += 1;
 
         // a case made for a first frame has a seventh count, the keyframe's rows
         const counts = (case.names.get("geometry") orelse return error.MissingTensor).shape[0];
@@ -211,6 +217,7 @@ pub const Model = struct {
         self.time = try device.buffer(rows * 4, shared);
         inline for (.{ "x", "y", "xn" }) |f| @field(self, f) = try device.buffer(rows * hidden * 2, shared);
         inline for (.{ "qr", "kr", "vr", "cr" }) |f| @field(self, f) = try device.buffer(rows * inner * 2, shared);
+        self.qkv = try device.buffer(if (self.base) rows * 3 * inner * 2 else 16, shared);
         self.wide = try device.buffer(rows * 2 * self.mlp * 2, shared);
         self.act = try device.buffer(rows * self.mlp * 2, shared);
         // padding slots are never written and must read as zeros
@@ -237,6 +244,10 @@ pub const Model = struct {
 
         self.blocks = try gpa.alloc(Block, layers);
         for (self.blocks, 0..) |*b, i| {
+            if (self.base) {
+                try self.baseBlock(b, i);
+                continue;
+            }
             const parts = .{ .{ "q", "attn.to_q", inner, hidden }, .{ "k", "attn.to_k", inner, hidden }, .{ "v", "attn.to_v", inner, hidden }, .{ "compress", "attn.to_gate_compress", inner, hidden }, .{ "out", "attn.to_out.0", hidden, inner }, .{ "fc1", "ff.net.0.proj", 2 * self.mlp, hidden }, .{ "fc2", "ff.net.2", hidden, self.mlp } };
             inline for (parts) |p| @field(b, p[0]) = try ck.ref(try std.fmt.bufPrint(&name, "transformer_blocks.{d}." ++ p[1] ++ ".weight", .{i}), p[2] * p[3]);
             b.norm1 = try ck.ref(try std.fmt.bufPrint(&name, "transformer_blocks.{d}.norm1.weight", .{i}), hidden);
@@ -246,6 +257,20 @@ pub const Model = struct {
             b.tables = try self.held(try std.fmt.bufPrint(&name, "tables.{d}", .{i}), .bf16, 6 * self.lines * hidden);
         }
         return self;
+    }
+
+    /// Block `i` of the released MiniMax-H3 layout.
+    fn baseBlock(self: *Model, b: *Block, i: usize) !void {
+        const ck = &self.checkpoint;
+        const hidden = self.hidden;
+        const inner = self.inner;
+        var name: [128]u8 = undefined;
+        const parts = .{ .{ "q", "attn.qkv_proj.weight", 3 * inner * hidden }, .{ "out", "attn.out_proj.weight", hidden * inner }, .{ "fc1", "mlp.fc1.weight", 2 * self.mlp * hidden }, .{ "fc2", "mlp.fc2.weight", hidden * self.mlp }, .{ "norm1", "norm1.weight", hidden }, .{ "norm2", "norm2.weight", hidden }, .{ "norm_q", "attn.q_norm.weight", head_dim }, .{ "norm_k", "attn.k_norm.weight", head_dim } };
+        inline for (parts) |p| @field(b, p[0]) = try ck.ref(try std.fmt.bufPrint(&name, "blocks.{d}." ++ p[1], .{i}), p[2]);
+        b.k = b.q;
+        b.v = b.q;
+        b.compress = b.q;
+        b.tables = try self.held(try std.fmt.bufPrint(&name, "tables.{d}", .{i}), .bf16, 6 * self.lines * hidden);
     }
 
     /// The case's tensor `name` in a buffer of its own (the case file's tensors start wherever its header ends).
