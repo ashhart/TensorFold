@@ -67,6 +67,35 @@ pub fn read(self: *Model, path: [*:0]const u8) !bool {
     return false;
 }
 
+/// A block's projections: attn.qkv_proj, attn.to_gate_compress, attn.out_proj, mlp.fc1, mlp.fc2.
+pub const Projection = enum(c_int) { qkv, gate_compress, out, fc1, fc2 };
+
+/// One projection of `block` from `w`, bf16 (N, K) on the device (a LoRA merged in); the saved int8 copy is kept.
+pub fn set(self: *Model, block: usize, which: Projection, w: u64, rows: usize, cols: usize) !void {
+    if (block >= self.blocks.len) return error.NoSuchBlock;
+    try self.ctx.makeCurrent();
+    const b = &self.blocks[block];
+    const inner = self.inner;
+    const hidden = self.hidden;
+    const want: [2]usize, const q: h3.Quant, const row0: usize, const half: usize = switch (which) {
+        .qkv => .{ .{ 3 * inner, hidden }, b.qkvc, 0, 0 },
+        .gate_compress => .{ .{ inner, hidden }, b.qkvc, 3 * inner, 0 },
+        .out => .{ .{ hidden, inner }, b.out, 0, 0 },
+        .fc1 => .{ .{ 2 * self.mlp, hidden }, b.fc1, 0, self.mlp },
+        .fc2 => .{ .{ hidden, self.mlp }, b.fc2, 0, 0 },
+    };
+    if (rows != want[0] or cols != want[1]) return error.WrongShape;
+    var args: cuda.Args = .{};
+    args.add(w);
+    args.add(q.w.ptr);
+    args.add(q.s.ptr);
+    args.add(@as(c_int, @intCast(cols)));
+    args.add(@as(c_int, @intCast(row0)));
+    args.add(@as(c_int, @intCast(half)));
+    try self.launch("h3_quant_weight", .{ .x = @intCast(rows) }, 128, 0, &args);
+    try self.stream.synchronize();
+}
+
 fn quantAlloc(self: *Model, n: usize, k: usize) !h3.Quant {
     return .{ .w = try cuda.DeviceBuffer.alloc(&self.driver, n * k), .s = try cuda.DeviceBuffer.alloc(&self.driver, n * 4) };
 }
