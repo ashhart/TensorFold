@@ -33,8 +33,8 @@ Python packages or model weights. There is no Python dependency in the packaging
 ## CUDA box inputs
 
 The CUDA box produces one flat directory, supplied as `-Ddist-fatbins=DIR`, with
-`zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=86,120,121`: Ampere (sm_86), RTX 50-series and RTX PRO
-Blackwell (sm_120), and GB10 (sm_121). `dist` refuses a file that lacks an image for any of the three. All of
+`zig build fatbins -Dnvcc=/usr/local/cuda/bin/nvcc -Dsm=80,86,120,121`: Ampere (sm_80 and sm_86), RTX 50-series and
+RTX PRO Blackwell (sm_120), and GB10 (sm_121). `dist` refuses a file that lacks an image for any of the four. All of
 these files are required:
 
 ```text
@@ -81,6 +81,7 @@ DIR/
 
 It is installed under `share/tensorfold/cuda/` inside each Linux archive, matching the executable-relative lookup.
 Additional qualified `sm<capability>/` directories can share the same capture root.
+`tools/zig/triton_aot_pack.py` writes this layout from a capture's manifest or Recorder launch dump.
 The release owner must obtain and qualify these assets; packaging a file is not inference qualification.
 Without this input, users must set `TENSORFOLD_CUDA_KERNELS` to their qualified capture directory.
 Flash Next's Metal dump and the separately built MCDMA SDK remain external inputs described in `RUNTIME.md`.

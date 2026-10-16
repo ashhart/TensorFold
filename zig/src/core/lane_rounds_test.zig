@@ -264,7 +264,7 @@ test "under a round planner a learn request still steps while no request waits o
     host.learner = .{ .ctx = &fake, .begin = FakeLearner.begin, .step = FakeLearner.step, .abort = FakeLearner.abort };
     try host.start();
     defer host.stop();
-    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2 };
+    const example: api.Example = .{ .ids = &.{ 1, 2, 3 }, .start = 2, .decide = 0 };
     const learn: api.LearnRequest = .{ .train = &.{example} };
     var box: LearnBox = .{};
     defer box.tags.deinit(gpa);

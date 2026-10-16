@@ -1,6 +1,6 @@
 //! Anthropic's Messages routes over the chat handler: typed SSE events, tool_use blocks, count_tokens.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const fields = @import("fields.zig");
@@ -51,7 +51,7 @@ fn countTokens(srv: *Server, cx: *Cx, chat: Value) errors.Refused!usize {
     const thinking = try fields.thinkingFields(cx, chat, srv.effort_levels);
     const on = thinking.enable orelse srv.config.enable_thinking;
     const tools = try tool_specs.active(cx, chat.get("tools"), chat.get("tool_choice"));
-    const msgs = try messages_mod.normalize(cx, chat.get("messages"), "system", srv.needs_user_after_tool);
+    const msgs = try messages_mod.normalizeWith(cx, chat.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
     const ids_ = prompt.renderIds(srv, cx, msgs, tools, on, srv.effortFor(thinking.effort), true) catch |e| switch (e) {
         error.Refused => return cx.other(cx.message),
         else => |x| return x,
@@ -108,9 +108,14 @@ const Wire = struct {
         return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .keepalive = ping } };
     }
 
-    fn open(ctx: *anyopaque) error{Closed}!void {
+    fn open(ctx: *anyopaque, prompt_len: usize) error{Closed}!void {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         w.opened = true;
+        // the head counts the whole prompt; message_delta's usage splits it into input and cache_read
+        if (prompt_len > 0) {
+            const n = json.intValue(w.reply.a, prompt_len) catch return error.Closed;
+            w.reply.tokens.object.put(w.reply.a, "input_tokens", n) catch return error.Closed;
+        }
         try sse.open(w.reply.conn);
         try w.reply.start();
     }
@@ -208,8 +213,7 @@ const Reply = struct {
     fn text(r: *Reply, kind: []const u8, value: []const u8) E!void {
         if (value.len == 0) return;
         if (r.active != null) {
-            // held until the open tool_use block closes: copied, ``value`` is a slice of a text that grows by then
-            r.pending.append(r.a, .{ .kind = kind, .text = r.a.dupe(u8, value) catch return error.Closed }) catch return error.Closed;
+            r.pending.append(r.a, .{ .kind = kind, .text = value }) catch return error.Closed;
             return;
         }
         const key = if (std.mem.eql(u8, kind, "thinking")) "thinking" else "text";

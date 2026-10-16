@@ -293,6 +293,7 @@ pub fn preadAll(fd: linux.fd_t, out: []u8, off: u64) !void {
 }
 
 test "lanes write, read back and check chunks through bounded staging" {
+    if (@import("builtin").os.tag != .linux) return error.SkipZigTest;
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var st = try Staging.init(gpa, io, 3, 2 * block);

@@ -47,7 +47,7 @@ fn scaleStore(x: []const f32, inv: f32, w: []const u16, out: []u16, xs: []f32) v
     }
 }
 
-/// tf_nemo_embed: MLX 4-bit rows, fma(q, scale, bias) rounded to bf16.
+/// The 4-bit embed (embed_rows.cu): MLX 4-bit rows, fma(q, scale, bias) rounded to bf16.
 pub fn embed(ids: []const i32, w: []const u32, s: []const u16, b: []const u16, out: []u16, d: usize) void {
     for (ids, 0..) |id, r| {
         const tok: usize = @intCast(id);
@@ -59,7 +59,7 @@ pub fn embed(ids: []const i32, w: []const u32, s: []const u16, b: []const u16, o
     }
 }
 
-/// tf_nemo_add_rmsnorm: h = bf16(x + r) unless r is null, then y and xs.
+/// The shared add_rms_h (norms.cu's 16-byte form, 256 threads): h = bf16(x + r) unless r is null, then y and xs.
 pub fn addRmsnorm(gpa: std.mem.Allocator, x: []const u16, r: ?[]const u16, w: []const u16, h: []u16, y: []u16, xs: []f32, rows: usize, d: usize, eps: f32) !void {
     const v = try gpa.alloc(f32, d);
     defer gpa.free(v);
@@ -71,8 +71,30 @@ pub fn addRmsnorm(gpa: std.mem.Allocator, x: []const u16, r: ?[]const u16, w: []
                 v[i] = bf(h[row * d + i]);
             }
         }
-        scaleStore(v, invRms(sumSquares(v, nt), d, eps), w, y[row * d ..][0..d], xs[row * (d / 64) ..][0..(d / 64)]);
+        const yr = y[row * d ..][0..d];
+        const inv = invRms(chunkSquares(v), d, eps);
+        for (v, w, yr) |a, wv, *o| o.* = tobf((a * inv) * bf(wv));
+        for (xs[row * (d / 64) ..][0..(d / 64)], 0..) |*sum, g| {
+            var part: [8]f32 = undefined;
+            for (&part, 0..) |*p, c| {
+                var acc: f32 = 0;
+                for (yr[(g * 8 + c) * 8 ..][0..8]) |o| acc = acc + bf(o);
+                p.* = acc;
+            }
+            sum.* = butterfly(f32, 8, part);
+        }
     }
+}
+
+/// A row's sum of squares as add_rms_h takes it: 8 values a chunk, chunk c on thread c % 256, warps then 8 warps.
+fn chunkSquares(x: []const f32) f32 {
+    var lane: [nt]f32 = @splat(0);
+    for (0..x.len / 8) |c| {
+        for (x[c * 8 ..][0..8]) |a| lane[c % nt] = fma(a, a, lane[c % nt]);
+    }
+    var warps: [8]f32 = undefined;
+    for (&warps, 0..) |*s, wi| s.* = butterfly(f32, 32, lane[wi * 32 ..][0..32].*);
+    return butterfly(f32, 8, warps);
 }
 
 /// tf_nemo_add_moe_norm: delta from the slots in order (routed by fma, shared added), h, then y and xs.
