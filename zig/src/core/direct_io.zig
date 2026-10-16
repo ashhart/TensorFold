@@ -66,7 +66,7 @@ fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread:
             const e = std.c.errno(n);
             if (e == .INTR) continue;
             // a file system that took the O_DIRECT open can still refuse its reads: the file goes through the cache
-            if (e == .INVAL and aligned) {
+            if (builtin.os.tag == .linux and e == .INVAL and aligned) {
                 try buffered(f.fd);
                 aligned = false;
                 continue;
@@ -83,7 +83,7 @@ fn readAt(f: File, buf: Buffer, offset: u64, len: usize, ctx: *anyopaque, pread:
     return buf[@intCast(offset - lo)..][0..len];
 }
 
-/// Clears O_DIRECT on `fd`, so this read and every later one through it use the page cache.
+/// Clears O_DIRECT on `fd` for this read and every later one; Linux only (macOS's std.c.O has no DIRECT field).
 fn buffered(fd: std.c.fd_t) !void {
     const direct_flag: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .DIRECT = true })));
     const flags = std.c.fcntl(fd, std.c.F.GETFL);
