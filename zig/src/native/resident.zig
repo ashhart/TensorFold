@@ -283,3 +283,38 @@ test "buffers made later wait for a flush inside the limit, and leave at once be
     if (h.join(&.{slot})) h.flush(); // Resident.addNow: a slot's commit takes what waits with it
     try std.testing.expectEqual(Fake{ .adds = 2, .commits = 1 }, f);
 }
+
+test "a join whose bookkeeping cannot grow refuses whole: nothing counted, staged or added, and a later join works" {
+    const GiB = cache_fit.GiB;
+    const ids: [40]u8 = @splat(0);
+    const weights = [_]Fake.Buffer{.{ .id = &ids[0], .len = 100 * GiB }};
+    const scratch: Fake.Buffer = .{ .id = &ids[1], .len = 64 };
+    var later: [32]Fake.Buffer = undefined; // enough to make both the member map and the waiting list grow
+    for (&later, 0..) |*b, i| b.* = .{ .id = &ids[2 + i], .len = 1 << 20 };
+    var at: usize = 0;
+    while (true) : (at += 1) { // fail each allocation the join makes in turn, until one join needs no more
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var f: Fake = .{};
+        var h = (try Held(FakeSet, Fake.Buffer).init(failing.allocator(), std.testing.io, .{ .f = &f }, &weights, scratch, "test", 256 * GiB)).?;
+        defer h.deinit();
+        const before = h.bytes;
+        f = .{};
+        failing.fail_index = failing.alloc_index + at;
+        if (h.join(&later)) {
+            try std.testing.expect(at >= 1); // the first allocation failing must have refused the join
+            break;
+        }
+        try std.testing.expectEqual(before, h.bytes);
+        try std.testing.expectEqual(@as(usize, 0), h.joining.items.len);
+        try std.testing.expectEqual(@as(u32, 2), h.members.count());
+        h.flush();
+        try std.testing.expectEqual(Fake{}, f); // the set never saw a refused buffer
+        failing.fail_index = std.math.maxInt(usize);
+        try std.testing.expect(h.join(&later));
+        h.flush();
+        try std.testing.expectEqual(Fake{ .adds = later.len, .commits = 1 }, f);
+        for (later) |b| h.leave(b); // members now: each leaves with a commit of its own before its owner frees it
+        try std.testing.expectEqual(Fake{ .adds = later.len, .removes = later.len, .commits = 1 + later.len }, f);
+        try std.testing.expectEqual(before, h.bytes);
+    }
+}
