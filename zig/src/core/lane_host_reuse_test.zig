@@ -51,7 +51,7 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -161,7 +161,7 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -277,7 +277,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }

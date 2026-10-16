@@ -23,6 +23,8 @@ const tower_hidden = 2048;
 const logit_cols = drama.backbone.weights.head_cols;
 const sample_rate = 44100;
 const frame_length = 2048;
+/// Frames a streamed request decodes together after its first, which is decoded alone for the earliest audio.
+const stream_chunk_frames = 4;
 
 pub const Options = struct {
     context: usize = 8192,
@@ -219,7 +221,7 @@ const Host = struct {
         const r = job.request;
         var stats: api.Stats = .{};
         const began = h.now();
-        const samples = h.synthesize(r, &stats, began) catch |e| {
+        const samples = h.synthesize(job, &stats, began) catch |e| {
             h.stream.synchronize() catch {}; // no device work outlives the request it served
             if (e == error.Cancelled) return h.finish(job, .cancelled, stats, "");
             std.log.warn("drama: synthesis {d} failed: {s}", .{ job.id, @errorName(e) });
@@ -242,8 +244,9 @@ const Host = struct {
         job.sink.event(job.sink.ctx, job.id, &event);
     }
 
-    /// Prompt pass, frame generation and codec decode into the request's PCM; returns the sample count.
-    fn synthesize(h: *Host, r: *const api.SpeechRequest, stats: *api.Stats, began: i96) !usize {
+    /// Prompt pass, frame generation and codec decode into the request's PCM (streamed by `publish`); returns samples.
+    fn synthesize(h: *Host, job: Job, stats: *api.Stats, began: i96) !usize {
+        const r = job.request;
         try h.check();
         try h.ctx.makeCurrent(); // CUDA binds per thread: the worker's calls need the context current
         const b = &h.backbone;
@@ -280,6 +283,8 @@ const Host = struct {
         var hidden = try lastRow(last.hidden, last.rows, b.hidden * 2);
         var logits = try lastRow(last.semantic_logits, 1, logit_cols * 4);
         var count: usize = 0;
+        var published: usize = 0; // frames a streamed request's caller owns
+        if (r.stream) h.codec.begin();
         while (true) {
             try h.check();
             const frame = try t.generate(s, logits, hidden, sampling);
@@ -290,6 +295,7 @@ const Host = struct {
             count += 1;
             h.noteFrames(count);
             if (count == r.max_frames) return error.SpeechTruncated;
+            if (r.stream and (published == 0 or count - published == stream_chunk_frames)) published = try h.publish(job, count);
             h.frames[0] = frame;
             const extra = try t.setInput(s, h.frames[0..1]);
             const rows = try b.run(s, .decode, h.frames[0][0..1], extra);
@@ -300,12 +306,30 @@ const Host = struct {
         if (count == 0) return error.EmptySpeech;
 
         try h.check();
+        if (r.stream) {
+            if (count > published) _ = try h.publish(job, count);
+            return count * frame_length;
+        }
         const want = count * frame_length;
         const samples = try h.codec.decode(s, h.codes[0..count], r.pcm);
         if (samples != want) return error.CodecSampleCount;
         for (r.pcm[0..samples]) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
         try h.check();
         return samples;
+    }
+
+    /// Decodes the frames not yet decoded, checks them, then hands pcm[0..frames * 2048] over with an `audio` event.
+    fn publish(h: *Host, job: Job, frames: usize) !usize {
+        try h.check();
+        const r = job.request;
+        const from = h.codec.decoded * frame_length;
+        const samples = try h.codec.advance(h.stream, h.codes[0..frames], r.pcm);
+        if (samples != frames * frame_length) return error.CodecSampleCount;
+        for (r.pcm[from..samples]) |x| if (!std.math.isFinite(x)) return error.NonFiniteAudio;
+        try h.check();
+        const event: api.Event = .{ .audio = samples };
+        job.sink.event(job.sink.ctx, job.id, &event);
+        return frames;
     }
 
     fn notePrefill(h: *Host, tokens: usize, began: i96, done: i96) void {

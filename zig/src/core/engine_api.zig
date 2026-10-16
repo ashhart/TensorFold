@@ -93,7 +93,7 @@ pub const Request = struct {
 /// Mono PCM written before a successful speech request's finished event.
 pub const SpeechResult = struct { samples: usize = 0 };
 
-/// The request and all its storage remain caller-owned until finished, including on cancellation.
+/// Caller-owned until finished, even on cancellation; a streamed request's pcm[0..n] is the caller's after ``audio`` n.
 pub const SpeechRequest = struct {
     prompt: []const u32,
     pcm: []f32,
@@ -103,6 +103,8 @@ pub const SpeechRequest = struct {
     temperature: f32 = 1,
     top_p: f32 = 0.9,
     top_k: u32 = 30,
+    /// Decode while generating and report each final prefix with ``audio`` events; false: one decode after EOS.
+    stream: bool = false,
 };
 
 pub const SpeechInfo = struct {
@@ -140,6 +142,8 @@ pub const Event = union(enum) {
     prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
+    /// A streamed speech request's samples now final, from its start: whole frames, rising, all before ``finished``.
+    audio: usize,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
     finished: struct { reason: Reason, stats: Stats = .{}, message: []const u8 = "" },
 };
