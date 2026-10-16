@@ -276,6 +276,11 @@ python zig/tests/cuda/oracle/ling_weights.py /path/to/Ling-3.1-flash /tmp/ling-r
 zig-out/bin/tf-cuda-test ling-weights-real /path/to/Ling-3.1-flash /tmp/ling-ref
 ```
 
+`ling-ckpt-check DIR [INDEX]` reads every shard's header and nothing else: each of the release's 214,025 tensors is
+one the weight map names, at the dtype and shape the loader reads (`names.dims`, the loader's own table, and each
+format's side tensors), none missing, and their bytes add up to the index's `total_size` (573,753,281,152). Over a
+network mount it takes seconds.
+
 `ling-mtp-real DIR FIXTURE` runs the MTP layer (fixture from `oracle/ling_mtp.py SRC MODELING_PKG ROWS.pt OUT`).
 `ling-layer-real DIR FIXTURE` runs one whole layer (fixture from `oracle/ling_layer.py CHAIN L OUT`, the captured
 HF chain's `h<L>.pt`, `h<L+1>.pt`, `r<L>.pt`). `ling-weights-real` loads layers 0, 4 and 7 with experts 0-3 (769 MiB on the device) and compares 35 products with torch's float64

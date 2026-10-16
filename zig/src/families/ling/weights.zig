@@ -98,61 +98,64 @@ const Loader = struct {
         return names.moduleName(&L.buf, i, role, null);
     }
 
-    fn lin(L: *Loader, i: u32, role: Role, n: usize, k: usize) !Proj {
-        return L.r.linear(try L.module(i, role), n, k);
+    /// Linear `role` of layer i at names.dims' [n, k].
+    fn lin(L: *Loader, i: u32, role: Role) !Proj {
+        const nk = names.dims(L.c, role).linear;
+        return L.r.linear(try L.module(i, role), nk[0], nk[1]);
     }
 
-    /// A norm (`.weight`) or bare tensor (A_log, dt_bias, expert_bias) of `numel` values, as `to`.
-    fn small(L: *Loader, i: u32, role: Role, numel: usize, to: core.checkpoint.DType) !u64 {
+    /// A norm (`.weight`) or bare tensor (A_log, dt_bias, expert_bias) of names.numel values, as `to`.
+    fn small(L: *Loader, i: u32, role: Role, to: core.checkpoint.DType) !u64 {
         var b: [200]u8 = undefined;
         const m = try L.module(i, role);
         const bare = role == .kda_a_log or role == .kda_dt_bias or role == .router_bias;
-        return L.r.small(if (bare) m else try std.fmt.bufPrint(&b, "{s}.weight", .{m}), numel, to);
+        return L.r.small(if (bare) m else try std.fmt.bufPrint(&b, "{s}.weight", .{m}), names.numel(L.c, role), to);
+    }
+
+    /// The MLP of gate, up and down `role`s under `prefix`, at names.dims' widths.
+    fn mlp(L: *Loader, prefix: []const u8, gate: Role) !Mlp {
+        const nk = names.dims(L.c, gate).linear;
+        return L.r.mlp(prefix, nk[0], nk[1]);
     }
 
     fn kda(L: *Loader, i: u32) !Kda {
-        const c = L.c;
-        const n: usize = c.kda_heads * c.kda_dim;
-        const d: usize = c.hidden;
+        const n = names.dims(L.c, .kda_q_conv).conv[0];
         var b: [64]u8 = undefined;
         var cb: [96]u8 = undefined;
         return .{
-            .q = try L.lin(i, .kda_q, n, d),
-            .k = try L.lin(i, .kda_k, n, d),
-            .v = try L.lin(i, .kda_v, n, d),
-            .b = try L.lin(i, .kda_b, c.kda_heads, d),
-            .f = try L.lin(i, .kda_f, n, d),
-            .g = try L.lin(i, .kda_g, n, d),
-            .o = try L.lin(i, .kda_o, d, n),
+            .q = try L.lin(i, .kda_q),
+            .k = try L.lin(i, .kda_k),
+            .v = try L.lin(i, .kda_v),
+            .b = try L.lin(i, .kda_b),
+            .f = try L.lin(i, .kda_f),
+            .g = try L.lin(i, .kda_g),
+            .o = try L.lin(i, .kda_o),
             .conv = try L.r.convs(try std.fmt.bufPrint(&b, "model.layers.{d}.attention.", .{i}), n, try std.fmt.bufPrint(&cb, "model.layers.{d}.attention.conv", .{i})),
-            .a_log = try L.small(i, .kda_a_log, c.kda_heads, .f32),
-            .dt_bias = try L.small(i, .kda_dt_bias, n, .f32),
-            .o_norm = try L.small(i, .kda_o_norm, c.kda_dim, .bf16),
+            .a_log = try L.small(i, .kda_a_log, .f32),
+            .dt_bias = try L.small(i, .kda_dt_bias, .f32),
+            .o_norm = try L.small(i, .kda_o_norm, .bf16),
         };
     }
 
     fn mla(L: *Loader, i: u32) !Mla {
         const c = L.c;
-        const d: usize = c.hidden;
-        const h: usize = c.mla_heads;
         var m: Mla = .{
-            .kv_a = try L.lin(i, .mla_kv_a, c.kv_lora + c.rope_dim, d),
-            .kv_a_norm = try L.small(i, .mla_kv_a_norm, c.kv_lora, .bf16),
-            .kv_b = try L.lin(i, .mla_kv_b, h * (c.nope + c.v_dim), c.kv_lora),
-            .o = try L.lin(i, .mla_o, d, h * c.v_dim),
+            .kv_a = try L.lin(i, .mla_kv_a),
+            .kv_a_norm = try L.small(i, .mla_kv_a_norm, .bf16),
+            .kv_b = try L.lin(i, .mla_kv_b),
+            .o = try L.lin(i, .mla_o),
         };
         if (c.q_lora > 0) {
-            m.q_a = try L.lin(i, .mla_q_a, c.q_lora, d);
-            m.q_a_norm = try L.small(i, .mla_q_a_norm, c.q_lora, .bf16);
-            m.q_b = try L.lin(i, .mla_q_b, h * c.qkDim(), c.q_lora);
-        } else m.q = try L.lin(i, .mla_q, h * c.qkDim(), d);
-        if (c.head_gate) m.gate = try L.lin(i, .mla_gate, h, d);
+            m.q_a = try L.lin(i, .mla_q_a);
+            m.q_a_norm = try L.small(i, .mla_q_a_norm, .bf16);
+            m.q_b = try L.lin(i, .mla_q_b);
+        } else m.q = try L.lin(i, .mla_q);
+        if (c.head_gate) m.gate = try L.lin(i, .mla_gate);
         return m;
     }
 
     fn moe(L: *Loader, i: u32) !Moe {
         const c = L.c;
-        const d: usize = c.hidden;
         const route = try L.module(i, .router);
         if (c.format(route) != .bf16) {
             std.log.err("{s} is {t}: the routing kernels read a bf16 router", .{ route, c.format(route) });
@@ -161,11 +164,12 @@ const Loader = struct {
         const count = @min(c.experts, L.opts.experts orelse c.experts);
         const lim = @import("cuda.zig").limits(c, i);
         var b: [96]u8 = undefined;
+        const x = names.dims(c, .expert_gate).linear;
         return .{
-            .router = try L.small(i, .router, c.experts * d, .bf16),
-            .bias = if (c.expert_bias) try L.small(i, .router_bias, c.experts, .f32) else 0,
-            .routed = try L.r.experts(i, count, c.moe_inter, d, lim.routed),
-            .shared = if (c.shared_inter > 0) try L.r.mlp(try std.fmt.bufPrint(&b, "model.layers.{d}.mlp.shared_experts.", .{i}), c.shared_inter, d) else null,
+            .router = try L.small(i, .router, .bf16),
+            .bias = if (c.expert_bias) try L.small(i, .router_bias, .f32) else 0,
+            .routed = try L.r.experts(i, count, x[0], x[1], lim.routed),
+            .shared = if (c.shared_inter > 0) try L.mlp(try std.fmt.bufPrint(&b, "model.layers.{d}.mlp.shared_experts.", .{i}), .shared_gate) else null,
             .experts = count,
             .shared_limit = lim.shared,
         };
@@ -176,23 +180,22 @@ const Loader = struct {
         var b: [64]u8 = undefined;
         return .{
             .index = i,
-            .attn_norm = try L.small(i, .attn_norm, c.hidden, .bf16),
-            .mlp_norm = try L.small(i, .mlp_norm, c.hidden, .bf16),
+            .attn_norm = try L.small(i, .attn_norm, .bf16),
+            .mlp_norm = try L.small(i, .mlp_norm, .bf16),
             .mixer = switch (c.kind(i)) {
                 .kda => .{ .kda = try L.kda(i) },
                 .mla => .{ .mla = try L.mla(i) },
             },
-            .ffn = if (c.isMoe(i)) .{ .moe = try L.moe(i) } else .{ .dense = try L.r.mlp(try std.fmt.bufPrint(&b, "model.layers.{d}.mlp.", .{i}), c.dense_inter, c.hidden) },
+            .ffn = if (c.isMoe(i)) .{ .moe = try L.moe(i) } else .{ .dense = try L.mlp(try std.fmt.bufPrint(&b, "model.layers.{d}.mlp.", .{i}), .dense_gate) },
         };
     }
 
     fn mtp(L: *Loader, i: u32) !Mtp {
-        const d: usize = L.c.hidden;
         return .{
-            .enorm = try L.small(i, .mtp_enorm, d, .bf16),
-            .hnorm = try L.small(i, .mtp_hnorm, d, .bf16),
-            .eh = try L.lin(i, .mtp_eh, d, 2 * d),
-            .norm = try L.small(i, .mtp_final_norm, d, .bf16),
+            .enorm = try L.small(i, .mtp_enorm, .bf16),
+            .hnorm = try L.small(i, .mtp_hnorm, .bf16),
+            .eh = try L.lin(i, .mtp_eh),
+            .norm = try L.small(i, .mtp_final_norm, .bf16),
         };
     }
 };
@@ -213,13 +216,15 @@ pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, 
     w.layers = out;
     if (!opts.globals) return w;
     const e = try ck.get("model.word_embeddings.weight");
-    if (!e.is(.bf16, &.{ c.vocab, c.hidden })) {
-        std.log.err("model.word_embeddings: {t} {any}, expected bf16 [{d}, {d}]", .{ e.dtype, e.shape[0..e.rank], c.vocab, c.hidden });
+    const vd = names.dims(&w.config, .embed).linear;
+    if (!e.is(.bf16, &vd)) {
+        std.log.err("model.word_embeddings: {t} {any}, expected bf16 {any}", .{ e.dtype, e.shape[0..e.rank], vd });
         return error.UnexpectedTensor;
     }
     w.embed = try w.store.keep(e.bytes, "model.word_embeddings.weight");
-    w.norm = try L.r.small("model.norm.weight", c.hidden, .bf16);
-    if (!c.tie) w.head = try L.r.linear("lm_head", c.vocab, c.hidden);
+    w.norm = try L.r.small("model.norm.weight", names.numel(&w.config, .final_norm), .bf16);
+    const hd = names.dims(&w.config, .lm_head).linear;
+    if (!c.tie) w.head = try L.r.linear("lm_head", hd[0], hd[1]);
     return w;
 }
 

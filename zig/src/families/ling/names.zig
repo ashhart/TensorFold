@@ -148,6 +148,54 @@ pub fn side(f: config.Quant) []const []const u8 {
     };
 }
 
+/// What the loader reads for a role: a linear [n, k] (`.weight` and its side tensors), `values` values, a conv.
+pub const Dims = union(enum) { linear: [2]usize, values: usize, conv: [3]usize };
+
+/// The loader's shape for each role (weights.zig reads every tensor through it).
+pub fn dims(c: *const Config, role: Role) Dims {
+    const d: usize = c.hidden;
+    const n: usize = @as(usize, c.kda_heads) * c.kda_dim;
+    const h: usize = c.mla_heads;
+    return switch (role) {
+        .embed, .lm_head => .{ .linear = .{ c.vocab, d } },
+        .final_norm, .attn_norm, .mlp_norm, .mtp_enorm, .mtp_hnorm, .mtp_final_norm => .{ .values = d },
+        .kda_q, .kda_k, .kda_v, .kda_f, .kda_g => .{ .linear = .{ n, d } },
+        .kda_b => .{ .linear = .{ c.kda_heads, d } },
+        .kda_o => .{ .linear = .{ d, n } },
+        .kda_q_conv, .kda_k_conv, .kda_v_conv => .{ .conv = .{ n, 1, c.conv } },
+        .kda_a_log => .{ .values = c.kda_heads },
+        .kda_dt_bias => .{ .values = n },
+        .kda_o_norm => .{ .values = c.kda_dim },
+        .mla_q => .{ .linear = .{ h * c.qkDim(), d } },
+        .mla_q_a => .{ .linear = .{ c.q_lora, d } },
+        .mla_q_a_norm => .{ .values = c.q_lora },
+        .mla_q_b => .{ .linear = .{ h * c.qkDim(), c.q_lora } },
+        .mla_kv_a => .{ .linear = .{ c.kv_lora + c.rope_dim, d } },
+        .mla_kv_a_norm => .{ .values = c.kv_lora },
+        .mla_kv_b => .{ .linear = .{ h * (c.nope + c.v_dim), c.kv_lora } },
+        .mla_gate => .{ .linear = .{ h, d } },
+        .mla_o => .{ .linear = .{ d, h * c.v_dim } },
+        .dense_gate, .dense_up => .{ .linear = .{ c.dense_inter, d } },
+        .dense_down => .{ .linear = .{ d, c.dense_inter } },
+        .router => .{ .linear = .{ c.experts, d } },
+        .router_bias => .{ .values = c.experts },
+        .expert_gate, .expert_up => .{ .linear = .{ c.moe_inter, d } },
+        .expert_down => .{ .linear = .{ d, c.moe_inter } },
+        .shared_gate, .shared_up => .{ .linear = .{ c.shared_inter, d } },
+        .shared_down => .{ .linear = .{ d, c.shared_inter } },
+        .mtp_eh => .{ .linear = .{ d, 2 * d } },
+    };
+}
+
+/// A role's value count: a linear's n k, a small tensor's values, a conv's n taps.
+pub fn numel(c: *const Config, role: Role) usize {
+    return switch (dims(c, role)) {
+        .linear => |x| x[0] * x[1],
+        .values => |x| x,
+        .conv => |x| x[0] * x[1] * x[2],
+    };
+}
+
 const tables = [_][]const Part{ &norms, &kda, &mla_q_lora, &mla_q_whole, &mla, &mla_gate, &dense, &router, &router_bias, &shared, &expert, &mtp };
 
 /// Role's module in layer i (`e` for routed experts) as the map names it: the name before `.weight`.
