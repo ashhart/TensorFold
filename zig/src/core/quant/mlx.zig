@@ -227,7 +227,7 @@ pub fn reference(h: Host, out: []f64) error{UnexpectedTensor}!void {
     };
 }
 
-/// MLX affine words and tables as fp32 [R, K] the way torch computes them (product rounded, then sum), widths 2, 4, 8.
+/// MLX affine words and tables as fp32 [R, K] the way torch computes them (product rounded, then sum), widths 2 to 8.
 pub fn dequant(a: Allocator, words: Tensor, scale: Tensor, bias: Tensor, group: usize) convert.Error![]f32 {
     if (words.rank != 2 or scale.rank != 2 or bias.rank != 2 or !std.mem.eql(usize, scale.shape[0..2], bias.shape[0..2])) return error.UnexpectedTensor;
     if (words.dtype != .u32 and words.dtype != .i32) return error.UnexpectedTensor;
@@ -236,14 +236,21 @@ pub fn dequant(a: Allocator, words: Tensor, scale: Tensor, bias: Tensor, group: 
     const k = scale.shape[1] * group;
     if (k == 0 or 32 * words.shape[1] / k == 0) return error.UnexpectedTensor;
     const bits = 32 * words.shape[1] / k;
-    if (bits != 2 and bits != 4 and bits != 8) return error.UnsupportedQuantization;
-    const per = 32 / bits;
-    if (words.shape[1] * per != k or scale.shape[0] != n_rows) return error.UnexpectedTensor;
+    if (bits < 2 or bits > 8) return error.UnsupportedQuantization;
+    const row_words = words.shape[1];
+    if (row_words * 32 != k * bits or scale.shape[0] != n_rows) return error.UnexpectedTensor;
     const out = try a.alloc(f32, n_rows * k);
-    const mask: u32 = (@as(u32, 1) << @intCast(bits)) - 1;
+    const mask: u64 = (@as(u64, 1) << @intCast(bits)) - 1;
     for (0..n_rows) |r| for (0..k) |c| {
-        const word = std.mem.readInt(u32, words.bytes[4 * (r * words.shape[1] + c / per) ..][0..4], .little);
-        const code: f32 = @floatFromInt((word >> @intCast(bits * (c % per))) & mask);
+        // a code may run into the next word (3, 5, 6 and 7 bits): read the pair
+        const bit = c * bits;
+        const at = r * row_words + (bit >> 5);
+        const lo: u64 = std.mem.readInt(u32, words.bytes[4 * at ..][0..4], .little);
+        const hi: u64 = if ((bit & 31) + bits > 32)
+            std.mem.readInt(u32, words.bytes[4 * (at + 1) ..][0..4], .little)
+        else
+            0;
+        const code: f32 = @floatFromInt(((lo | hi << 32) >> @intCast(bit & 31)) & mask);
         const g = r * scale.shape[1] + c / group;
         const s = convert.load(scale.dtype, scale.bytes, g);
         const b = convert.load(bias.dtype, bias.bytes, g);
@@ -296,6 +303,31 @@ test "dequant unpacks 4-bit words low nibble first" {
     defer arena.deinit();
     const out = try dequant(arena.allocator(), h.words, h.scales, h.biases, 8);
     try std.testing.expectEqualSlices(f32, &.{ -1, 1, 3, 5, 7, 9, 11, 13 }, out);
+}
+
+test "dequant reads 3- and 6-bit codes across words as the reference does" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    inline for (.{ 3, 6 }) |bits| {
+        // one row of 32 codes, code i = i % 2^bits, packed little-endian
+        var words: [bits]u32 = @splat(0);
+        for (0..32) |i| {
+            const bit = i * bits;
+            const v: u64 = @as(u64, i % (1 << bits)) << @intCast(bit & 31);
+            words[bit >> 5] |= @truncate(v);
+            if ((bit & 31) + bits > 32) words[(bit >> 5) + 1] |= @truncate(v >> 32);
+        }
+        var scale = [_]u16{0x4000}; // 2.0
+        var bias = [_]u16{0xBF80}; // -1.0
+        const h = hostOf(&words, &scale, &bias, 1, bits, 32);
+        const out = try dequant(arena.allocator(), h.words, h.scales, h.biases, 32);
+        var want: [32]f64 = undefined;
+        try reference(h, &want);
+        for (out, want, 0..) |x, y, i| {
+            try std.testing.expectEqual(@as(f32, @floatFromInt(i % (1 << bits))) * 2 - 1, x);
+            try std.testing.expectEqual(@as(f64, x), y);
+        }
+    }
 }
 
 test "a projection splits its words and group tables on the same boundary" {
