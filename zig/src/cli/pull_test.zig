@@ -153,7 +153,7 @@ const FakeHub = struct {
         } else if (std.mem.eql(u8, path, "/api/models/Org/Draft/tree/ccccccccccccccccccccccccccccccccccccccc3")) {
             respond(fd, "[{\"type\": \"file\", \"path\": \"config.json\", \"size\": 27}]");
         } else if (std.mem.eql(u8, path, "/Org/Draft/resolve/ccccccccccccccccccccccccccccccccccccccc3/config.json")) {
-            respond(fd, "{\"model_type\": \"gemma4_unified\"}");
+            respond(fd, "{\"model_type\": \"gemma3n\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/revision/main")) {
             respond(fd, "{\"sha\": \"ddddddddddddddddddddddddddddddddddddddd4\"}");
         } else if (std.mem.eql(u8, path, "/api/models/Org/DFlash/tree/ddddddddddddddddddddddddddddddddddddddd4")) {
@@ -306,7 +306,7 @@ test "pull downloads, verifies, retries a cut body, resumes and refuses a family
     var refused_out: std.Io.Writer.Allocating = .init(a);
     var refused_err: std.Io.Writer.Allocating = .init(a);
     try std.testing.expectEqual(@as(u8, 1), try pull.run(a, io, &refused_out.writer, &refused_err.writer, &env, root, "Org/Draft"));
-    try std.testing.expect(std.mem.indexOf(u8, refused_err.written(), "model_type gemma4_unified") != null);
+    try std.testing.expect(std.mem.indexOf(u8, refused_err.written(), "model_type gemma3n") != null);
     try std.testing.expect(std.mem.indexOf(u8, refused_err.written(), "tensorfold@0.6") != null);
 
     // A DFlash2 drafter repo comes down for serve --drafter although no family serves its model_type.
