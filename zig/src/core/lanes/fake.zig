@@ -90,7 +90,7 @@ pub const Fake = struct {
         const x = self(ptr);
         if (x.memory_lanes) |n| if (x.lanes.count() + ss.len > n) return false; // not all at once: one at a time instead
         for (ss, 0..) |s, i| prefill(ptr, s) catch |err| { // none left prefilled, as the contract says
-            for (ss[0..i]) |done| if (x.lanes.fetchRemove(done)) |kv| {
+            for (ss[0 .. i + 1]) |done| if (x.lanes.fetchRemove(done)) |kv| {
                 var l = kv.value;
                 freeLane(x.gpa, &l);
             };
