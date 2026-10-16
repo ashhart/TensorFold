@@ -75,7 +75,7 @@ pub const Logits = struct {
         for ([_]u64{ self.x, self.w, self.out }) |p| a.add(p);
         for ([_]usize{ d.shape.rows, d.shape.k, d.shape.n, shape.sk }) |v| a.add(@as(c_int, @intCast(v)));
         const grid: cuda.Dim3 = .{ .x = @intCast((d.shape.rows + 15) / 16), .y = @intCast((d.shape.n + 15) / 16), .z = @intCast(shape.sk) };
-        try cuda.launch.launch(self.f, .{ .grid = grid, .block = .{ .x = 256 }, .shared = shape.shared }, self.rig.s, &a);
+        try cuda.launch.launch(self.f, .{ .grid = grid, .block = .{ .x = 256 }, .shared = glue.routerShared(d.shape.k / shape.sk) }, self.rig.s, &a);
         try self.rig.s.synchronize();
     }
 

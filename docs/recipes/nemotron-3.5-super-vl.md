@@ -91,6 +91,9 @@ shares of a pair and adds them in share order before the bf16 rounding the combi
 bf16 row a pick instead of two fp32 rows. `tf-cuda-test checkpoint` compares the prompt kernels and the combine after
 them with the decode path byte for byte on synthetic inputs.
 
+Router logits of passes over 32 rows run on 128-row by 128-expert register tiles, each logit still one fma chain over
+its slice in input order; `tf-cuda-test glue` compares them with the untiled router and the host reference.
+
 ## Exactness and speed
 
 Served on GB10s at a 16,384-token window, the eight release prompts at 256 tokens each, every cell held in both

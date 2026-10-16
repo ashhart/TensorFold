@@ -327,16 +327,7 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     const b = f.b;
     const g = f.glue;
     const sk = routerSlices(c.hidden);
-    const per = c.hidden / sk;
-    var a: cuda.Args = .{};
-    for ([_]u64{ x, m.router, b.part }) |p| a.add(p);
-    for ([_]usize{ rows, c.hidden, c.experts, sk }) |v| a.add(int(v));
-    if (rows <= 16 and per % 8 == 0 and (x | m.router) % 16 == 0) {
-        const staged: u32 = @intCast((rows + 16) * (per / 8 + 1) * 16);
-        try go(g.f.router_rows, g.s, .{ (c.experts + 15) / 16, sk, 1 }, 256, staged, &a);
-    } else {
-        try go(g.f.router, g.s, .{ (rows + 15) / 16, (c.experts + 15) / 16, sk }, 256, @intCast(2 * 16 * (per / 2 + 1) * 4), &a);
-    }
+    try g.logits(x, m.router, b.part, rows, c.hidden, c.experts, sk);
     try f.ops.k.latent.?.picks(g.s, rows <= cuda.launch.few_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
