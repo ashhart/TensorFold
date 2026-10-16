@@ -157,6 +157,16 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     }) });
     const install_oracle = b.addInstallArtifact(codec_oracle, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
     b.step("drama-codec-oracle", "Build the production-codec numerical oracle driver; does not run a GPU").dependOn(&install_oracle.step);
+    const codec_stream_oracle = b.addExecutable(.{ .name = "tf-drama-codec-stream-oracle", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/drama_codec_stream_oracle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "drama", .module = mods.drama } },
+    }) });
+    const install_stream_oracle = b.addInstallArtifact(codec_stream_oracle, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
+    b.step("drama-codec-stream-oracle", "Build the chunked-versus-whole codec driver; does not run a GPU").dependOn(&install_stream_oracle.step);
     const codec_rvq_replay = b.addExecutable(.{ .name = "tf-drama-codec-rvq-replay", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/drama_codec_rvq_replay.zig"),
         .target = target,
