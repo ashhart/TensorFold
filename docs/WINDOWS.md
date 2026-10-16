@@ -65,19 +65,26 @@ tensorfold-native serve <Qwen3.8-27B-MLX-4bit> --name qwen27b --context 8192 --p
 
 The Qwen3.5 engine also loads MLX checkpoints whose modules carry their own widths (the config's `quantization`
 table names a width per module, as mlx-lm's mixed recipes and the OptiQ and oQ conversions write), 2 to 8 bits in
-groups of 64. Nothing is rounded: a module of 2 or 3 bits is packed onto the 4-bit tiles and one of 5 or 6 bits onto
-8-bit tiles, each code keeping its value, scale and bias, and the 8-bit tiles run `affine8.cu`'s lane GEMV, the
-4-bit one's arithmetic a byte wide. An embedding of an odd width is widened the same way at load. Windows still
-reproduce one-token steps bit for bit, and a uniform 4-bit checkpoint loads and runs exactly as before.
+groups of 64. Each module stays at its own width: 4-bit modules on the 4-bit tiles as before, 2, 3, 5 and 6-bit ones
+on `affine8.cu`'s tiles of that width, and 8-bit ones on its byte tiles (a 7-bit module would take the 8-bit tiles).
+Every width runs the 4-bit lane GEMV's arithmetic and hands its MMAs the same bf16 operands, so a code gives the
+same bits whatever width it is stored at, and nothing is rounded. An embedding of a width other than 4 or 8 is
+widened to the next at load. Windows still reproduce one-token steps bit for bit, and a uniform 4-bit checkpoint
+loads and runs exactly as before.
 
 - Tested on an RTX 4080 SUPER (16 GB): `mlx-community/Qwen3.5-4B-OptiQ-4bit` (4 and 8 bits, a tied 8-bit
   embedding) at about 130 tokens/s for one request and 400 across four, and `mlx-community/Qwen3.5-9B-OptiQ-4bit`
   (an untied 8-bit head) at about 78 and 260; replies alone, at four streams and with `"draft": false` equal.
-- Widened modules take their served width's memory: a 2-bit module the 4-bit size, a 5-bit one the 8-bit size. So a
-  mostly 2-bit checkpoint such as `TensorFold/Qwen3.8-27B-oQ2` needs about as much memory as the 4-bit 27B.
-- 8-bit modules have no prompt GEMM yet: prompt chunks run them on the decode tiles, 16 rows at a time.
-- `tf-cuda-test affine8` checks every width's tiles against its codes widened on the host, the 8-bit products
-  against float64, and every row count and split-K path byte for byte.
+- `TensorFold/Qwen3.8-27B-oQ2` (mostly 2-bit, 136 modules at 5 bits) takes 10.3 GiB, so the 27B fits a 16 GB card:
+  one stream at a 32k window, about 45 to 64 tokens/s with drafts. The card itself calls oQ2 an aggressive
+  low-bit release, and its replies show it.
+- Prompt chunks take a GEMM over the same tiles (`affine_prefill.cu`) with the 4-bit prompt GEMM's arithmetic (each weight rounded once to
+  bf16, one fp32 chain over K), so a code of up to 4 bits gives the bits the 4-bit prompt GEMM gives it. On the
+  9B 8-bit it lifts prompts from about 1,500 to 1,900 tokens/s; the 27B oQ2's prompts (about 770 tokens/s) were
+  already bound by the card's bf16 tensor rate with fp32 accumulation, not by weight reads.
+- `tf-cuda-test affine8` checks each narrow width's products against its codes widened onto the 8-bit tiles, bit
+  for bit, the products against float64, every row count and split-K path byte for byte, and the prompt GEMM
+  against the 4-bit and 8-bit tiles' prompt GEMMs.
 
 ## How the port works
 

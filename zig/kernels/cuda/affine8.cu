@@ -1,32 +1,15 @@
-// Ours: MLX affine codes of 2-4 bits on lane_gemv's 4-bit tiles, 5-8 bits on 8-bit tiles; no code is rounded.
+// Ours: MLX affine codes on lane_gemv's tiles of their own width (2, 3, 5, 6) or 8 bits, read exactly as bf16.
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include "affine_codes.cuh"
 #include "qmm_frag.cuh"
 
 namespace tf_affine8 {
 
 using namespace qmm_frag;
-
-// Code i of an MLX row packed `bits` wide, low code first, in little-endian words (a code may cross a word).
-__device__ __forceinline__ uint32_t code_at(const uint32_t* __restrict__ row, long long i, int bits) {
-    const long long bit = i * bits;
-    const int sh = static_cast<int>(bit & 31);
-    const long long wd = bit >> 5;
-    uint32_t v = row[wd] >> sh;
-    if (sh + bits > 32) v |= row[wd + 1] << (32 - sh);
-    return v & ((1u << bits) - 1u);
-}
-
-// Bytes at s and s + 8 of w as a bf16 pair (the first low): exact, as every byte is a bf16 integer.
-__device__ __forceinline__ uint32_t byte_pair(uint32_t w, int s) {
-    const float a = __uint_as_float(0x4B000000u | ((w >> s) & 0xFFu)) - 8388608.0f;
-    const float b = __uint_as_float(0x4B000000u | ((w >> (s + 8)) & 0xFFu)) - 8388608.0f;
-    const __nv_bfloat162 h = __floats2bfloat162_rn(a, b);
-    return *reinterpret_cast<const uint32_t*>(&h);
-}
 
 struct Part {
     const uint32_t* w;
@@ -36,26 +19,27 @@ struct Part {
     int n, npad, sk, tiles;
 };
 
-// lane_gemv's tile with a byte a weight: 16 rows, BN columns over four warps, one 64-group a stage.
-template <int GS, int BN, int STAGES>
+// lane_gemv's tile with BITS bits a weight: 16 rows, BN columns over four warps, one 64-group a stage.
+template <int GS, int BN, int STAGES, int BITS = 8>
 struct Tile {
     static constexpr int THREADS = 128;
     static constexpr int NT = BN / 4 / 8;
     static constexpr int ROW = GS * 2;
     static constexpr int CHUNKS = ROW / 16;
     static constexpr int X = 16 * ROW;
-    static constexpr int W = BN * GS;
+    static constexpr int W = BN * GS * BITS / 8;
     static constexpr int S = BN * 2;
     static constexpr int XS = 16 * 4;
     static constexpr int STAGE = X + W + 2 * S + XS;
     static constexpr int SMEM = STAGES * STAGE;
 };
 
-// lane_gemv's gemv_items on 8-bit tiles [tile][group][8][32][GS / 16]: acc = x_sum * b + (d * s + acc) a group.
-template <int GS, int BN, int STAGES, typename Map, typename After>
+// lane_gemv's gemv_items over 8-bit tiles [tile][group][8][32][GS / 16] or narrow ones [tile][group][4][32][BITS].
+template <int GS, int BN, int STAGES, int BITS, typename Map, typename After>
 __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K,
-                                      int ldx, int count, Map map, float (&acc)[Tile<GS, BN, STAGES>::NT][4], After after) {
-    using T = Tile<GS, BN, STAGES>;
+                                      int ldx, int count, Map map, float (&acc)[Tile<GS, BN, STAGES, BITS>::NT][4], After after) {
+    using T = Tile<GS, BN, STAGES, BITS>;
+    static_assert(BITS == 8 || (GS == 64 && BN == 64 && BITS >= 2 && BITS <= 6), "narrow tiles are 64 by 64, 2 to 6 bits");
     constexpr int NT = T::NT;
     constexpr int KW = GS / 16;  // words a lane a group: one per k16 step
     extern __shared__ __align__(128) unsigned char buf[];
@@ -63,7 +47,7 @@ __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const
     const int KG = K / GS;
     auto stage = [&](int s) { return buf + s * T::STAGE; };
     const int rows = min(16, M);
-    constexpr int TILE_BYTES = 64 * GS;
+    constexpr int TILE_BYTES = 64 * GS * BITS / 8;
     constexpr int XC = (16 * T::CHUNKS + T::THREADS - 1) / T::THREADS, WC = (T::W / 16 + T::THREADS - 1) / T::THREADS;
     constexpr int SC = (2 * T::S / 16 + T::THREADS - 1) / T::THREADS;
     const __nv_bfloat16* xsrc[XC];
@@ -106,7 +90,7 @@ __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const
         const int2 at = map(i);
         const int g = at.x, n0 = at.y;
         unsigned char* p = stage(s);
-        const unsigned char* wb = reinterpret_cast<const unsigned char*>(P.w) + static_cast<size_t>(n0 / 64) * KG * TILE_BYTES + (n0 % 64) * GS;
+        const unsigned char* wb = reinterpret_cast<const unsigned char*>(P.w) + static_cast<size_t>(n0 / 64) * KG * TILE_BYTES + (n0 % 64) * GS * BITS / 8;
 #pragma unroll
         for (int j = 0; j < WC; ++j)
             if (wok[j]) cp16(p + wdst[j], wb + woff[j] + static_cast<size_t>(g) * TILE_BYTES);
@@ -145,11 +129,24 @@ __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const
         const uint32_t* pw = reinterpret_cast<const uint32_t*>(p + T::X);
         const __nv_bfloat16* ps = reinterpret_cast<const __nv_bfloat16*>(p + T::X + T::W);
         const float* px = reinterpret_cast<const float*>(p + T::X + T::W + 2 * T::S);
-        uint32_t words[NT][KW];
+        constexpr int LW = BITS == 8 ? NT * KW : BITS;  // a lane's words a group
+        uint32_t lw[LW];
+        if constexpr (BITS == 8) {
 #pragma unroll
-        for (int j = 0; j < NT; ++j)
+            for (int j = 0; j < NT; ++j)
 #pragma unroll
-            for (int v = 0; v < KW; ++v) words[j][v] = pw[((wn * NT + j) * 32 + lane) * KW + v];
+                for (int v = 0; v < KW; ++v) lw[j * KW + v] = pw[((wn * NT + j) * 32 + lane) * KW + v];
+        } else if constexpr (BITS % 2 == 0) {
+#pragma unroll
+            for (int v = 0; v < BITS; v += 2) {
+                const uint2 two = *reinterpret_cast<const uint2*>(pw + (wn * 32 + lane) * BITS + v);
+                lw[v] = two.x;
+                lw[v + 1] = two.y;
+            }
+        } else {
+#pragma unroll
+            for (int v = 0; v < BITS; ++v) lw[v] = pw[(wn * 32 + lane) * BITS + v];
+        }
         float d[NT][4];
 #pragma unroll
         for (int kt = 0; kt < GS / 16; ++kt) {
@@ -158,8 +155,14 @@ __device__ __forceinline__ void items(const __nv_bfloat16* __restrict__ x, const
             ldmatrix4(a, p + r * T::ROW + swz<T::CHUNKS>(r, ch) * 16);
 #pragma unroll
             for (int j = 0; j < NT; ++j) {
-                const uint32_t b0 = byte_pair(words[j][kt], 0);
-                const uint32_t b1 = byte_pair(words[j][kt], 16);
+                uint32_t b0, b1;
+                if constexpr (BITS == 8) {
+                    b0 = byte_pair(lw[j * KW + kt], 0);
+                    b1 = byte_pair(lw[j * KW + kt], 16);
+                } else {
+                    b0 = pair_at<BITS>(lw, (j * 4 + kt) * 2);
+                    b1 = pair_at<BITS>(lw, (j * 4 + kt) * 2 + 1);
+                }
                 if (kt == 0) mma0(d[j], a, b0, b1);
                 else mma(d[j], a, b0, b1);
             }
@@ -203,9 +206,9 @@ __device__ __forceinline__ void store(const Part& P, int M, int n0, Got got) {
 }
 
 // lane_gemv's gemv_kernel: CTAs loop over column tiles, each tile's K slices summed in slice order.
-template <int GS, int BN, int STAGES>
+template <int GS, int BN, int STAGES, int BITS>
 __device__ __forceinline__ void gemv(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K, int ldx) {
-    constexpr int NT = Tile<GS, BN, STAGES>::NT;
+    constexpr int NT = Tile<GS, BN, STAGES, BITS>::NT;
     const int KG = K / GS, per = KG / P.sk;
     const int mine = P.tiles > (int)blockIdx.x ? (P.tiles - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
     auto tile_of_item = [&](int i) { return (int)blockIdx.x + (i / KG) * (int)gridDim.x; };
@@ -214,7 +217,7 @@ __device__ __forceinline__ void gemv(const __nv_bfloat16* __restrict__ x, const 
     for (int j = 0; j < NT; ++j)
 #pragma unroll
         for (int e = 0; e < 4; ++e) acc[j][e] = tot[j][e] = 0.0f;
-    items<GS, BN, STAGES>(x, xs, P, M, K, ldx, mine * KG, [&](int i) { return make_int2(i % KG, tile_of_item(i) * BN); }, acc, [&](int it) {
+    items<GS, BN, STAGES, BITS>(x, xs, P, M, K, ldx, mine * KG, [&](int i) { return make_int2(i % KG, tile_of_item(i) * BN); }, acc, [&](int it) {
         const int g = it % KG;
         if ((g + 1) % per != 0) return;
         const bool first = g + 1 == per;
@@ -231,10 +234,10 @@ __device__ __forceinline__ void gemv(const __nv_bfloat16* __restrict__ x, const 
 }
 
 // lane_gemv's gemv_split: a CTA a tile's K slice, the tile's last CTA summing the slices in their order from the first.
-template <int GS, int BN, int STAGES>
+template <int GS, int BN, int STAGES, int BITS>
 __device__ __forceinline__ void split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, const Part& P, int M, int K, int ldx,
                                       float* __restrict__ work, unsigned* __restrict__ tickets) {
-    constexpr int NT = Tile<GS, BN, STAGES>::NT;
+    constexpr int NT = Tile<GS, BN, STAGES, BITS>::NT;
     __shared__ unsigned ticket;
     const int tid = threadIdx.x, lane = tid & 31, wn = tid >> 5;
     const int per = K / GS / P.sk;
@@ -244,7 +247,7 @@ __device__ __forceinline__ void split(const __nv_bfloat16* __restrict__ x, const
     for (int j = 0; j < NT; ++j)
 #pragma unroll
         for (int e = 0; e < 4; ++e) acc[j][e] = 0.0f;
-    items<GS, BN, STAGES>(x, xs, P, M, K, ldx, per, [&](int i) { return make_int2(g0 + i, tile * BN); }, acc, [](int) {});
+    items<GS, BN, STAGES, BITS>(x, xs, P, M, K, ldx, per, [&](int i) { return make_int2(g0 + i, tile * BN); }, acc, [](int) {});
     const int row = lane >> 2;
     float* part = work + (static_cast<size_t>(tile) * P.sk + slice) * 16 * BN;
 #pragma unroll
@@ -282,13 +285,61 @@ static_assert(tf_affine8::Tile<64, 64, 4>::SMEM == 25856, "split8 smem");
 
 extern "C" __global__ void __launch_bounds__(128) tf_affine8_gemv(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
                                                                   const __grid_constant__ tf_affine8::Part P, int M, int K, int ldx) {
-    tf_affine8::gemv<64, 64, 6>(x, xs, P, M, K, ldx);
+    tf_affine8::gemv<64, 64, 6, 8>(x, xs, P, M, K, ldx);
 }
 
 extern "C" __global__ void __launch_bounds__(128) tf_affine8_split(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs,
                                                                    const __grid_constant__ tf_affine8::Part P, int M, int K, int ldx,
                                                                    float* __restrict__ work, unsigned* __restrict__ tickets) {
-    tf_affine8::split<64, 64, 4>(x, xs, P, M, K, ldx, work, tickets);
+    tf_affine8::split<64, 64, 4, 8>(x, xs, P, M, K, ldx, work, tickets);
+}
+
+// The narrow tiles' gemv and split, one pair a width; shared bytes 14208 + 3072 * BITS and 9472 + 2048 * BITS.
+#define TF_AFFINE_NARROW(B)                                                                                                         \
+    static_assert(tf_affine8::Tile<64, 64, 6, B>::SMEM == 14208 + 3072 * B, "narrow gemv smem");                                   \
+    static_assert(tf_affine8::Tile<64, 64, 4, B>::SMEM == 9472 + 2048 * B, "narrow split smem");                                   \
+    extern "C" __global__ void __launch_bounds__(128) tf_affine##B##_gemv(const __nv_bfloat16* __restrict__ x, const float* __restrict__ xs, \
+                                                                       const __grid_constant__ tf_affine8::Part P, int M, int K, int ldx) { \
+        tf_affine8::gemv<64, 64, 6, B>(x, xs, P, M, K, ldx);                                                                        \
+    }                                                                                                                               \
+    extern "C" __global__ void __launch_bounds__(128) tf_affine##B##_split(const __nv_bfloat16* __restrict__ x,                     \
+                                                                        const float* __restrict__ xs,                               \
+                                                                        const __grid_constant__ tf_affine8::Part P, int M, int K,   \
+                                                                        int ldx, float* __restrict__ work,                          \
+                                                                        unsigned* __restrict__ tickets) {                           \
+        tf_affine8::split<64, 64, 4, B>(x, xs, P, M, K, ldx, work, tickets);                                                        \
+    }
+
+TF_AFFINE_NARROW(2)
+TF_AFFINE_NARROW(3)
+TF_AFFINE_NARROW(5)
+TF_AFFINE_NARROW(6)
+#undef TF_AFFINE_NARROW
+
+// MLX words of 2, 3, 5 or 6 bits -> narrow tiles: a lane's pairs' first codes in low halves, second in high.
+extern "C" __global__ void tf_affinen_pack(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
+                                           long long total) {
+    const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    const int v = static_cast<int>(idx % bits);
+    const long long rest = idx / bits;
+    const int lane = static_cast<int>(rest & 31), wn = static_cast<int>((rest >> 5) & 3);
+    const long long tg = rest >> 7;
+    const int g = static_cast<int>(tg % kg);
+    const long long t = tg / kg;
+    const int c = lane & 3;
+    uint32_t word = 0;
+    for (int b = 0; b < 16; ++b) {
+        const int sb = 16 * v + b, i = sb / bits, at = sb % bits;
+        const int j = i >> 3, kt = (i >> 1) & 3, h = i & 1;
+        const long long row = t * 64 + (wn * 2 + j) * 8 + (lane >> 2);
+        if (row >= n) continue;
+        const uint32_t* src = w + row * kw;
+        const long long k = static_cast<long long>(g) * 64 + 16 * kt + 2 * c + 8 * h;
+        word |= ((tf_affine8::code_at(src, k, bits) >> at) & 1u) << b;
+        word |= ((tf_affine8::code_at(src, k + 1, bits) >> at) & 1u) << (16 + b);
+    }
+    out[idx] = word;
 }
 
 // MLX words of 2 to 4 bits -> lane_gemv's 4-bit tiles [npad/64][kg][8][32][2], tf_pack_dense's layout.
@@ -312,7 +363,7 @@ extern "C" __global__ void tf_affine8_pack4(const uint32_t* __restrict__ w, int 
     out[idx] = word;
 }
 
-// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4], word kt holding inputs k0+2c, +1, +8, +9.
+// MLX words of 5 to 8 bits -> 8-bit tiles [npad/64][kg][8][32][4]: word kt holds inputs k0 + 2c + {0, 1, 8, 9}.
 extern "C" __global__ void tf_affine8_pack8(const uint32_t* __restrict__ w, int bits, int n, int kw, int kg, uint32_t* __restrict__ out,
                                            long long total) {
     const long long idx = static_cast<long long>(blockIdx.x) * blockDim.x + threadIdx.x;

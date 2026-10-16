@@ -61,6 +61,19 @@ fn packedBytes(n: usize, k: usize) usize {
     return aligned(l.words) + 2 * aligned(l.scales);
 }
 
+/// One projection's quantized words, scales and biases as `linear` stages them, back to back.
+fn rawBytes(n: usize, k: usize) usize {
+    return n * k / 2 + 2 * (n * k / 64 * 2);
+}
+
+/// The largest projection `load` stages: the staging buffer it allocates for the load and frees after.
+pub fn stageBytes(s: Shape) usize {
+    var most: usize = 0;
+    const shapes = [_][2]usize{ .{ s.hidden, s.taps * s.hidden }, .{ s.rank, s.hidden }, .{ s.q_width, s.hidden }, .{ s.kv_width, s.hidden }, .{ s.hidden, s.q_width }, .{ s.intermediate, s.hidden }, .{ s.hidden, s.intermediate }, .{ s.dynamic, s.hidden } };
+    for (shapes) |nk| most = @max(most, rawBytes(nk[0], nk[1]));
+    return most;
+}
+
 /// Device bytes of everything `load` packs.
 pub fn total(s: Shape) usize {
     var t = packedBytes(s.hidden, s.taps * s.hidden) + packedBytes(s.rank, s.hidden) + 2 * aligned(s.hidden * 2);
@@ -119,8 +132,8 @@ fn quantize(gpa: std.mem.Allocator, w: []align(1) const u16, n: usize, k: usize)
     return .{ .words = words, .scales = scales, .biases = biases };
 }
 
-/// A bf16 (n, k) tensor quantized and packed through the target's staging buffer into the drafter's arena.
-fn linear(gpa: std.mem.Allocator, e: *Engine, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !Affine4 {
+/// A bf16 (n, k) tensor quantized and packed through `stage` into the drafter's arena.
+fn linear(gpa: std.mem.Allocator, e: *Engine, stage: *DeviceBuffer, w: *Weights, ck: *core.Checkpoint, name: []const u8, n: usize, k: usize) !Affine4 {
     const t = try ck.expect(name, .bf16, &.{ n, k });
     const q = try quantize(gpa, std.mem.bytesAsSlice(u16, t.bytes), n, k);
     defer {
@@ -132,9 +145,9 @@ fn linear(gpa: std.mem.Allocator, e: *Engine, w: *Weights, ck: *core.Checkpoint,
     var raw: [3]u64 = undefined;
     var at: usize = 0;
     for (parts, &raw) |p, *r| {
-        if (at + p.len > e.stage.len) return error.StageTooSmall;
-        try e.stage.upload(at, p);
-        r.* = e.stage.ptr + at;
+        if (at + p.len > stage.len) return error.StageTooSmall;
+        try stage.upload(at, p);
+        r.* = stage.ptr + at;
         at += p.len;
     }
     const l = Affine4.layout(n, k);
@@ -164,12 +177,14 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: 
     var w: Weights = .{ .fc = undefined, .hidden_norm = 0, .final_norm = 0, .selector = undefined, .predecessor = &.{}, .successor = &.{}, .layers = &.{}, .arena = try DeviceBuffer.alloc(e.d, total(s)) };
     errdefer w.arena.free();
     try w.arena.fill8(0, null);
+    var stage = try DeviceBuffer.alloc(e.d, stageBytes(s));
+    defer stage.free();
     w.layers = try gpa.alloc(Layer, s.layers);
     errdefer gpa.free(w.layers);
-    w.fc = try linear(gpa, e, &w, &ck, "fc.weight", s.hidden, s.taps * s.hidden);
+    w.fc = try linear(gpa, e, &stage, &w, &ck, "fc.weight", s.hidden, s.taps * s.hidden);
     w.hidden_norm = try vector(&w, &ck, "hidden_norm.weight", &.{s.hidden});
     w.final_norm = try vector(&w, &ck, "norm.weight", &.{s.hidden});
-    w.selector = try linear(gpa, e, &w, &ck, "candidate_selector.hidden_projection.weight", s.rank, s.hidden);
+    w.selector = try linear(gpa, e, &stage, &w, &ck, "candidate_selector.hidden_projection.weight", s.rank, s.hidden);
     w.predecessor = try hostBf16(gpa, &ck, "candidate_selector.predecessor_codebook", &.{ s.vocab, s.rank });
     errdefer gpa.free(w.predecessor);
     w.successor = try hostBf16(gpa, &ck, "candidate_selector.successor_codebook", &.{ s.vocab, s.rank });
@@ -187,18 +202,18 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8, s: 
         l.* = .{
             .input_norm = try vector(&w, &ck, try nm.of("input_layernorm.weight"), &.{s.hidden}),
             .post_norm = try vector(&w, &ck, try nm.of("post_attention_layernorm.weight"), &.{s.hidden}),
-            .q = try linear(gpa, e, &w, &ck, try nm.of("self_attn.q_proj.weight"), s.q_width, s.hidden),
-            .k = try linear(gpa, e, &w, &ck, try nm.of("self_attn.k_proj.weight"), s.kv_width, s.hidden),
-            .v = try linear(gpa, e, &w, &ck, try nm.of("self_attn.v_proj.weight"), s.kv_width, s.hidden),
-            .o = try linear(gpa, e, &w, &ck, try nm.of("self_attn.o_proj.weight"), s.hidden, s.q_width),
+            .q = try linear(gpa, e, &stage, &w, &ck, try nm.of("self_attn.q_proj.weight"), s.q_width, s.hidden),
+            .k = try linear(gpa, e, &stage, &w, &ck, try nm.of("self_attn.k_proj.weight"), s.kv_width, s.hidden),
+            .v = try linear(gpa, e, &stage, &w, &ck, try nm.of("self_attn.v_proj.weight"), s.kv_width, s.hidden),
+            .o = try linear(gpa, e, &stage, &w, &ck, try nm.of("self_attn.o_proj.weight"), s.hidden, s.q_width),
             .q_norm = try vector(&w, &ck, try nm.of("self_attn.q_norm.weight"), &.{s.head_dim}),
             .k_norm = try vector(&w, &ck, try nm.of("self_attn.k_norm.weight"), &.{s.head_dim}),
-            .gate = try linear(gpa, e, &w, &ck, try nm.of("mlp.gate_proj.weight"), s.intermediate, s.hidden),
-            .up = try linear(gpa, e, &w, &ck, try nm.of("mlp.up_proj.weight"), s.intermediate, s.hidden),
-            .down = try linear(gpa, e, &w, &ck, try nm.of("mlp.down_proj.weight"), s.hidden, s.intermediate),
-            .attn_conv = try linear(gpa, e, &w, &ck, try nm.of("attention_conv.kernel_projection.weight"), s.dynamic, s.hidden),
+            .gate = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.gate_proj.weight"), s.intermediate, s.hidden),
+            .up = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.up_proj.weight"), s.intermediate, s.hidden),
+            .down = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp.down_proj.weight"), s.hidden, s.intermediate),
+            .attn_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("attention_conv.kernel_projection.weight"), s.dynamic, s.hidden),
             .attn_base = try vector(&w, &ck, try nm.of("attention_conv.base_kernel"), &.{ 2, 2, s.hidden }),
-            .mlp_conv = try linear(gpa, e, &w, &ck, try nm.of("mlp_conv.kernel_projection.weight"), s.dynamic, s.hidden),
+            .mlp_conv = try linear(gpa, e, &stage, &w, &ck, try nm.of("mlp_conv.kernel_projection.weight"), s.dynamic, s.hidden),
             .mlp_base = try vector(&w, &ck, try nm.of("mlp_conv.base_kernel"), &.{ 2, 2, s.hidden }),
         };
     }

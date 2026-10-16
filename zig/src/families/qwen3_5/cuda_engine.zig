@@ -11,7 +11,7 @@ pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const Affine4 = cuda.qlinear.Affine4;
-const Affine8 = cuda.qlinear.Affine8;
+const AffineN = cuda.qlinear.AffineN;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
 
@@ -34,10 +34,10 @@ pub fn aligned(n: usize) usize {
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 
-/// A projection on the tiles of the width it is served at: 4 bits (codes of 2 to 4) or 8 (codes of 5 to 8).
+/// A projection on the tiles of the width it is served at: Affine4's for 4-bit codes, AffineN's for the rest.
 pub const Proj = union(enum) {
     a4: Affine4,
-    a8: Affine8,
+    an: AffineN,
 
     pub fn outputs(p: Proj) usize {
         return switch (p) {
@@ -100,16 +100,15 @@ pub const Engine = struct {
     g: Geometry,
     geo: Geo,
     stream: cuda.Stream,
-    mods: [8]cuda.Module,
+    mods: [9]cuda.Module,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
-    wide: cuda.qlinear.Affine8Kernels, // 8-bit tiles, and the packs of every width but 4
+    wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
     fns: Fns,
     keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
     arena: DeviceBuffer,
     arena_at: usize = 0,
-    stage: DeviceBuffer, // the load's staging of each projection as stored, packed from there
     /// Rows a verify forward takes at most, and a window's rows at most.
     verify_rows: usize,
     window_rows: usize,
@@ -193,10 +192,8 @@ pub const Engine = struct {
         e.arena = try DeviceBuffer.alloc(d, weights.total(g) + try e.scratch(.measure));
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
-        e.stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
-        errdefer e.stage.free();
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8 };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill };
         var loaded: usize = 0;
         errdefer for (e.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -207,7 +204,7 @@ pub const Engine = struct {
         const gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         errdefer e.affine.deinit();
-        e.wide = try cuda.qlinear.Affine8Kernels.resolve(d, e.mods[7], e.mods[3], sms, gb10);
+        e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);
         errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
@@ -216,7 +213,12 @@ pub const Engine = struct {
         errdefer gpa.free(e.layers);
         var ck = try core.Checkpoint.openModel(gpa, io, dir);
         defer ck.close();
-        try weights.load(e, &ck);
+        {
+            // each projection as stored, packed from here; freed before the server counts what streams can use
+            var stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
+            defer stage.free();
+            try weights.load(e, &ck, &stage);
+        }
         _ = try e.scratch(.allocate);
         e.tables = try DeviceBuffer.alloc(d, tables_len);
         errdefer e.tables.free();
@@ -250,7 +252,6 @@ pub const Engine = struct {
         e.host_logits.free();
         e.staged.free();
         e.tables.free();
-        e.stage.free();
         e.arena.free();
         e.gpa.free(e.layers);
         e.affine.deinit();
@@ -332,11 +333,14 @@ pub const Engine = struct {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
 
-    /// `proj` with group sums in `xs` and row counts at `params`; 8-bit tiles run prompts 16 rows at a time.
+    /// `proj` with group sums `xs` and device counts `params` (0: all real); prompts past 16 rows take a prompt GEMM.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
         const n_out = l.outputs();
         const k = l.inputs();
-        if (prompt and rows > 16) if (l == .a4) return e.affine.prompt(e.stream, x, l.a4, out, rows);
+        if (prompt and rows > 16) return switch (l) {
+            .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
+            .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
+        };
         try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         var at: usize = 0;
         while (at < rows) : (at += 16) {
@@ -346,7 +350,7 @@ pub const Engine = struct {
             const oa = out + at * n_out * 2;
             switch (l) {
                 .a4 => |q| try e.affine.decode(e.stream, xa, sa, q, oa, n),
-                .a8 => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
+                .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
             }
         }
     }
