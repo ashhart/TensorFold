@@ -48,9 +48,10 @@ pub const Model = struct {
     mlp: usize,
     video_in: usize,
     audio_in: usize,
-    /// Packed rows: `text`, then `audio`, then `video`.
+    /// Packed rows: `text`, then `condition` (a first frame's rows, held through the run), then `audio`, then `video`.
     rows: usize,
     text: usize,
+    condition: usize,
     audio: usize,
     video: usize,
     tiles: usize,
@@ -100,6 +101,7 @@ pub const Model = struct {
     tile_scores: mtl.Buffer,
     chosen: mtl.Buffer,
     coarse: mtl.Buffer,
+    condition_latents: mtl.Buffer,
     video_latents: mtl.Buffer,
     audio_latents: mtl.Buffer,
     normed: mtl.Buffer,
@@ -143,9 +145,8 @@ pub const Model = struct {
         var name: [128]u8 = undefined;
         while (ck.entry(try std.fmt.bufPrint(&name, "transformer_blocks.{d}.norm1.weight", .{layers})) != null) layers += 1;
 
+        // a case made for a first frame has a seventh count, the keyframe's rows
         const counts = (case.names.get("geometry") orelse return error.MissingTensor).shape[0];
-        // a case made for a first frame has a seventh count, the keyframe's rows: not read here
-        if (counts != 6) return error.UnsupportedCase;
         const geometry = try case.copy(i32, gpa, try case.at("geometry", .i32, counts), counts);
         defer gpa.free(geometry);
         self.prefix_tiles = @intCast(geometry[0]);
@@ -154,7 +155,8 @@ pub const Model = struct {
         self.text = @intCast(geometry[3]);
         self.audio = @intCast(geometry[4]);
         self.video = @intCast(geometry[5]);
-        self.rows = self.text + self.audio + self.video;
+        self.condition = if (counts > 6) @intCast(geometry[6]) else 0;
+        self.rows = self.text + self.condition + self.audio + self.video;
         const rows = self.rows;
         const hidden = self.hidden;
         const inner = self.inner;
@@ -218,6 +220,13 @@ pub const Model = struct {
         inline for (.{ "qp", "kp", "vp", "coarse" }) |f| @field(self, f) = try device.buffer(heads * self.tiles * head_dim * 4, shared);
         self.tile_scores = try device.buffer(heads * self.tiles * self.tiles * 4, shared);
         self.chosen = try device.buffer(heads * (self.tiles - self.prefix_tiles) * (self.prefix_tiles + self.keep) * 4, shared);
+        self.condition_latents = try device.buffer(@max(self.condition, 1) * self.video_in * 4, shared);
+        if (self.condition > 0) {
+            const n = self.condition * self.video_in;
+            const held_rows = try case.copy(f32, gpa, try case.at("condition", .f32, n), n);
+            defer gpa.free(held_rows);
+            @memcpy(self.condition_latents.slice(f32, n), held_rows);
+        }
         self.video_latents = try device.buffer(self.video * self.video_in * 4, shared);
         self.audio_latents = try device.buffer(self.audio * self.audio_in * 4, shared);
         self.normed = try device.buffer(rows * hidden * 2, shared);
@@ -321,7 +330,9 @@ pub const Model = struct {
         pass.enc = pass.cb.compute(.concurrent);
         var gpu: f64 = 0;
         const enc = &pass.enc;
-        const media = self.text;
+        // a first frame's rows enter like video rows on every pass and are never stepped
+        const media = self.text + self.condition;
+        if (self.condition > 0) self.rowsIn(enc.*, self.condition_latents, self.w_video_in, self.b_video_in, self.condition, self.video_in, self.text);
         self.rowsIn(enc.*, self.audio_latents, self.w_audio_in, self.b_audio_in, self.audio, self.audio_in, media);
         self.rowsIn(enc.*, self.video_latents, self.w_video_in, self.b_video_in, self.video, self.video_in, media + self.audio);
         self.lap(&pass, "rows in");

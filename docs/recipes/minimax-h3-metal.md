@@ -7,7 +7,7 @@ a test tool beside the engine; nothing in the lane core, the server or another f
 ## What it is
 
 `zig build tf-h3-dit -Dcpu=apple_m1 -Doptimize=ReleaseFast` builds `zig-out/bin/tf-h3-dit`. It reads the FastH3
-checkpoint's shards and a case file, runs every denoising forward for the packed [text | audio | video]
+checkpoint's shards and a case file, runs every denoising forward for the packed [text | keyframe | audio | video]
 rows, prints the first forward's velocities against the reference velocities the case holds, and writes the final
 video and audio rows (and the first forward's velocities) as raw float32.
 
@@ -24,7 +24,7 @@ forward stage by stage.
 - Block projections: the prefill kernels' `tfp::gemm_nax` (MLX 0.32.3's NAX GEMM), bf16 x w^T as the checkpoint
   stores w, fp32 sums, bf16 out. The SwiGLU's first projection is one product over its stored [value; gate] rows.
 - Norms, rotary, the gated adds and the SwiGLU round to bf16 where the reference's bf16 MLX arithmetic rounds.
-- Attention is FastH3's video sparse attention over 64-row tiles: a text or audio tile attends every
+- Attention is FastH3's video sparse attention over 64-row tiles: a text, keyframe or audio tile attends every
   tile; a video tile attends the prefix tiles and its top 20% of video tiles by pooled score; the pooled branch is
   gated in. Tile means, scores, the top-k and the pooled branch are fp32. The routed attention is bf16 q, k and v
   on the tensor units with fp32 scores and an online softmax across key tiles; its weights are rounded to bf16
@@ -51,7 +51,7 @@ branch `h3-1.0.4`).
 | Tensor | Holds |
 |---|---|
 | `text` | The prompt's rows after the condition projection and the token refiner, bf16 |
-| `video`, `audio` | Starting noise rows |
+| `video`, `audio`, `condition` | Starting noise rows; a first frame's rows when the clip starts from an image |
 | `cos`, `sin` | Rotary tables for every packed row |
 | `adaln`, `times`, `tables.N`, `final` | Each row's line in a block's six modulation tables per step, and the tables |
 | `video_step`, `audio_step` | Per step: the sigma the model sees and the Euler ratio |
@@ -76,9 +76,23 @@ At step 1 every video tile is noise, so FastH3's top-k among them is decided by 
 binary with only the fp32 summation order of the tile scores reversed differs from itself by video cosine 0.99021 at
 step 1 and 0.99834 at step 5: the comparison with the reference is at that floor.
 
+## A clip that starts from an image
+
+A case exported with a first frame (`h3_case.py --first-frame IMAGE`) has a seventh geometry count: the keyframe's
+rows, between the text (which then also holds the image's vision tokens) and the audio. They enter like video rows
+on every pass, at the keyframe noise level the case's tables give them, and are never stepped.
+
+Same Mac, checkpoint and size, a 864x480 first frame: 16,253 packed rows (449 text, 405 keyframe, 414 audio,
+14,985 video), 302 tiles (22 prefix).
+
+| Run | Video velocity against the reference, step 1 | Audio velocity against the reference, step 1 |
+|---|---|---|
+| From a first frame | cosine 0.99711, relative error 0.076 | cosine 0.99986, relative error 0.017 |
+
+Text to video is bit-identical with and without this change (final video and audio rows, 8 steps).
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.
 - One machine (M5 Ultra). Chips without tensor units are refused.
-- Text to video only; a clip that starts from an image is a follow-up change.
 - No `tensorfold generate`, no text encoder, decoders or sampler: the forward only.
