@@ -8,11 +8,12 @@ const Tensor = hip.ops.Tensor;
 
 pub const usage = "       tf-nemotron-hip-test gen <model dir> <ids.bin> <out stem> [--steps N] " ++
     "[--no-mtp]\n       tf-nemotron-hip-test teacher <model dir> <ids.bin> <logits.bin> [--no-mtp] [--chunk " ++
-    "N] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test window <model dir> <ids.bin> " ++
-    "<unused> [--steps K] [--no-mtp] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test " ++
-    "rounds <model dir> <ids.bin> <unused> [--steps K] [--streams N] [--no-mtp] [--tp W --rank R --master H " ++
-    "--port P]\n       tf-nemotron-hip-test trace <model dir> <ids.bin> <residuals.bin> [--tp W --rank R " ++
-    "--master H --port P]\n";
+    "N] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test decode <model dir> <ids.bin> " ++
+    "<logits.bin> [--steps K] [--no-mtp] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test " ++
+    "window <model dir> <ids.bin> <unused> [--steps K] [--no-mtp] [--tp W --rank R --master H --port P]\n   " ++
+    "    tf-nemotron-hip-test rounds <model dir> <ids.bin> <unused> [--steps K] [--streams N] [--no-mtp] " ++
+    "[--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test trace <model dir> <ids.bin> " ++
+    "<residuals.bin> [--tp W --rank R --master H --port P]\n";
 
 const Args = struct {
     dir: []const u8,
@@ -176,6 +177,42 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !
     );
     for (0..n) |r| std.debug.print(" {d}", .{argmax(all[r * v ..][0..v])});
     std.debug.print("\n", .{});
+}
+
+/// The ids teacher-forced on the decode path: all but the last K (--steps) as a prompt, then each a row at a time.
+pub fn decode(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
+    const a = try parse(args);
+    const ids = try readIds(gpa, io, a.ids);
+    defer gpa.free(ids);
+    var j = try a.g.join(gpa, io, a.dir);
+    defer j.close();
+    const k = a.steps;
+    if (k == 0 or ids.len <= k) return error.MissingArgument;
+    const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = 1, .mtp = a.mtp });
+    defer e.deinit();
+    const m = e.model_();
+    const v = m.dims.vocab;
+    var s = try e.openStream();
+    defer e.closeStream(&s);
+    _ = try e.prompt(&s, ids[0 .. ids.len - k]);
+    const all = try gpa.alloc(f32, k * v);
+    defer gpa.free(all);
+    for (ids[ids.len - k ..], 0..) |t, i| {
+        try s.cover(&e.pool, s.len + 1);
+        const h = try e.round(&.{.{ .s = &s, .tokens = &.{t} }}, null);
+        const o = e.ops(&e.arena);
+        s.len += 1;
+        try readBack(e, gpa, try e.roundLogits(o, h, 1), all[i * v ..][0..v]);
+    }
+    const out = try a.g.outPath(gpa, a.out);
+    defer if (a.g.rank > 0) gpa.free(out);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = std.mem.sliceAsBytes(all) });
+    var finite = true;
+    for (all) |x| finite = finite and std.math.isFinite(x);
+    std.debug.print(
+        "decode (rank {d} of {d}): the last {d} of {d} ids a row at a time, {d} logits, finite {}, {t} rows\n",
+        .{ a.g.rank, a.g.world, k, ids.len, v, finite, e.act },
+    );
 }
 
 /// The ids after the prompt once as one window of rows and once a row at a time: the same logits bits, or not.

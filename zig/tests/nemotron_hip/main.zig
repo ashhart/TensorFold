@@ -278,6 +278,7 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len >= 3 and std.mem.eql(u8, args[1], "gen")) return run(gen.gen, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "teacher")) return run(gen.teacher, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "decode")) return run(gen.decode, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "window")) return run(gen.window, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "rounds")) return run(gen.rounds, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "trace")) return run(gen.trace, init, args[2..]);
