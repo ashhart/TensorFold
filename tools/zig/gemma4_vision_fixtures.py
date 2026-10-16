@@ -56,13 +56,22 @@ def tensors(model: Path, prefix: str) -> dict[str, torch.Tensor]:
     return out
 
 
-def dequantize(w: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, group: int) -> torch.Tensor:
-    """MLX affine 4-bit: eight codes a uint32, low nibble first; each group of `group` columns its scale and bias."""
-    words = w.to(torch.int64) & 0xFFFFFFFF
-    codes = torch.stack([(words >> (4 * i)) & 0xF for i in range(8)], dim=-1).reshape(w.shape[0], -1).float()
+def dequantize(w: torch.Tensor, scales: torch.Tensor, biases: torch.Tensor, group: int, bits: int) -> torch.Tensor:
+    """MLX affine: `bits`-wide codes packed little-endian through each row's uint32 words; a scale and bias a group."""
+    words = (w.to(torch.int64) & 0xFFFFFFFF).numpy().astype("<u4")
+    stream = np.unpackbits(words.view(np.uint8).reshape(w.shape[0], -1), axis=1, bitorder="little")
+    codes = stream.reshape(w.shape[0], -1, bits) @ (1 << np.arange(bits))
+    codes = torch.from_numpy(codes.astype(np.float32))
     s = scales.float().repeat_interleave(group, dim=1)
     b = biases.float().repeat_interleave(group, dim=1)
     return (codes * s + b).to(torch.bfloat16)
+
+
+def projection_width(model: Path) -> tuple[int, int]:
+    """embed_vision.embedding_projection's (bits, group): its own config entry, else the checkpoint's."""
+    q = json.loads((model / "config.json").read_text())["quantization"]
+    entry = q.get("embed_vision.embedding_projection", q)
+    return entry["bits"], entry["group_size"]
 
 
 def build(model: Path, dtype: torch.dtype):
@@ -77,8 +86,8 @@ def build(model: Path, dtype: torch.dtype):
         raise SystemExit(f"vision tower tensors: missing {missing}, unexpected {unexpected}")
     embed = Gemma4MultimodalEmbedder(cfg.vision_config, cfg.text_config)
     q = tensors(model, "embed_vision.embedding_projection.")
-    group = json.loads((model / "config.json").read_text())["quantization"]["group_size"]
-    embed.embedding_projection.weight.data = dequantize(q["weight"], q["scales"], q["biases"], group)
+    bits, group = projection_width(model)
+    embed.embedding_projection.weight.data = dequantize(q["weight"], q["scales"], q["biases"], group, bits)
     return tower.to(dtype).eval(), embed.to(dtype).eval(), cfg
 
 
@@ -89,7 +98,11 @@ def build_unified(model: Path, dtype: torch.dtype):
     cfg = Gemma4UnifiedConfig.from_pretrained(model)
     embedder = Gemma4UnifiedVisionEmbedder(cfg.vision_config, cfg.text_config)
     state = tensors(model, "vision_embedder.")
-    projection = tensors(model, "embed_vision.")["embedding_projection.weight"]
+    q = tensors(model, "embed_vision.embedding_projection.")
+    projection = q["weight"]
+    if "scales" in q:  # an oQ pack's quantized projection
+        bits, group = projection_width(model)
+        projection = dequantize(q["weight"], q["scales"], q["biases"], group, bits)
     state["multimodal_embedder.embedding_projection.weight"] = projection
     embedder.load_state_dict(state, strict=True)
     return embedder.to(dtype).eval()
