@@ -420,6 +420,7 @@ pub const Model = struct {
         const pairs = n * top;
         const ld = weights.moe_in_rows;
         const I = config.expert_inner;
+        comptime std.debug.assert(config.shared_inner == I); // one SwiGLU launch serves both experts
         try k.gemm(s, sc.normed, H, n, l.moe_in, ld, H, sc.moe_in, ld);
         try k.topk(s, sc.moe_in + weights.router_col * 2, ld, sc.picks, sc.routed, n, top);
         const plan: cuda.grouped.Plan = .{ .members = sc.members, .items = sc.items, .counts = sc.counts, .rank = sc.rank, .hist = sc.hist };
@@ -437,7 +438,7 @@ pub const Model = struct {
             .routed = null,
             .y = sc.gu,
         });
-        try k.siluMul(s, sc.gu, weights.gu_rows, I, null, sc.hq, sc.hs, pairs);
+        try k.siluMul(s, sc.gu, weights.gu_rows, sc.hq, sc.hs, pairs, sc.moe_in, ld, sc.shared_h, n, I);
         try k.expert(s, plan, pairs, .{
             .a = sc.hq,
             .a_div = 1,
@@ -450,7 +451,6 @@ pub const Model = struct {
             .routed = sc.routed,
             .y = sc.down,
         });
-        try k.siluMul(s, sc.moe_in, ld, config.shared_inner, sc.shared_h, null, null, n);
         try k.gemm(s, sc.shared_h, config.shared_inner, n, l.shared_down, H, config.shared_inner, sc.shared_out, H);
         try k.combine(s, sc.down, top, sc.normed, l.shared_gate, sc.shared_out, sc.x, n, H);
     }

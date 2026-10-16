@@ -406,14 +406,17 @@ extern "C" __global__ void __launch_bounds__(128) drama_act_quant(const __nv_bfl
     if (lane == 0) s[static_cast<size_t>(r) * (K / 128) + group] = sc;
 }
 
-// SwiGLU h = bf16(silu(gate) * up); for the routed experts, h's FP8 quantization as drama_act_quant instead.
-extern "C" __global__ void __launch_bounds__(128) drama_silu_mul(const __nv_bfloat16* gu, int ld_gu, int I,
-                                                                __nv_bfloat16* h_out, uint8_t* hq, float* hs) {
-    const int r = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+// SwiGLU in one launch: rows below routed FP8-quantized into hq / hs, the shared expert's rows stored bf16 to h_out.
+extern "C" __global__ void __launch_bounds__(128) drama_silu_mul(const __nv_bfloat16* gu, int ld_gu, int routed,
+                                                                uint8_t* hq, float* hs, const __nv_bfloat16* sgu,
+                                                                int ld_sgu, __nv_bfloat16* h_out, int I) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int group = blockIdx.y * 4 + warp;
     if (group * 128 >= I) return;
+    const bool quant = blockIdx.x < routed;
+    const int r = quant ? blockIdx.x : blockIdx.x - routed;
     const int c0 = group * 128 + lane * 4;
-    const __nv_bfloat16* row = gu + static_cast<size_t>(r) * ld_gu;
+    const __nv_bfloat16* row = quant ? gu + static_cast<size_t>(r) * ld_gu : sgu + static_cast<size_t>(r) * ld_sgu;
     float h[4];
     float amax = 0.f;
 #pragma unroll
@@ -421,23 +424,19 @@ extern "C" __global__ void __launch_bounds__(128) drama_silu_mul(const __nv_bflo
         h[i] = round_bf(silu(bf(row[c0 + i])) * bf(row[I + c0 + i]));
         amax = fmaxf(amax, fabsf(h[i]));
     }
-    if (h_out != nullptr) {
+    if (!quant) {
 #pragma unroll
         for (int i = 0; i < 4; ++i) h_out[static_cast<size_t>(r) * I + c0 + i] = tobf(h[i]);
+        return;
     }
-    if (hq != nullptr) {
-        amax = fmaxf(warp_max(amax), 1e-10f);
-        const float sc = amax * (1.0f / 448.0f);
-        const float inv = __fdividef(448.0f, amax);
-        uint32_t packed = 0;
+    amax = fmaxf(warp_max(amax), 1e-10f);
+    const float sc = amax * (1.0f / 448.0f);
+    const float inv = __fdividef(448.0f, amax);
+    uint32_t packed = 0;
 #pragma unroll
-        for (int i = 0; i < 4; ++i) {
-            const float c = fminf(fmaxf(h[i] * inv, -448.0f), 448.0f);
-            packed |= static_cast<uint32_t>(__nv_cvt_float_to_fp8(c, __NV_SATFINITE, __NV_E4M3)) << (8 * i);
-        }
-        *reinterpret_cast<uint32_t*>(hq + static_cast<size_t>(r) * I + c0) = packed;
-        if (lane == 0) hs[static_cast<size_t>(r) * (I / 128) + group] = sc;
-    }
+    for (int i = 0; i < 4; ++i) packed |= e4m3(h[i], inv) << (8 * i);
+    *reinterpret_cast<uint32_t*>(hq + static_cast<size_t>(r) * I + c0) = packed;
+    if (lane == 0) hs[static_cast<size_t>(r) * (I / 128) + group] = sc;
 }
 
 // MoE output: bf16 routed sum (moe_sum_reduce), then sigmoid(x . wg) * shared + routed (fused_gate_sigmoid_mul_add).

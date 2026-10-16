@@ -323,17 +323,20 @@ pub const Kernels = struct {
         try go(s, k.act_quant_fn, .{ rows, kdim / 512, 1 }, 128, &a);
     }
 
-    /// h = bf16(silu(gate) * up) into h_out, or its FP8 quantization into hq / hs.
-    pub fn siluMul(k: *const Kernels, s: cuda.Stream, gu: u64, ld_gu: usize, inner: usize, h_out: ?u64, hq: ?u64, hs: ?u64, rows: usize) !void {
+    /// One launch: the routed rows of gu FP8-quantized into hq / hs, the shared expert's rows of shared_gu stored to h.
+    pub fn siluMul(k: *const Kernels, s: cuda.Stream, gu: u64, ld_gu: usize, hq: u64, hs: u64, routed: usize, shared_gu: u64, ld_shared: usize, h: u64, shared: usize, inner: usize) !void {
         if (inner % 512 != 0) return error.DramaRowShape;
         var a: cuda.Args = .{};
         a.add(gu);
         a.add(int(ld_gu));
+        a.add(int(routed));
+        a.add(hq);
+        a.add(hs);
+        a.add(shared_gu);
+        a.add(int(ld_shared));
+        a.add(h);
         a.add(int(inner));
-        a.add(h_out orelse 0);
-        a.add(hq orelse 0);
-        a.add(hs orelse 0);
-        try go(s, k.silu_mul_fn, .{ rows, inner / 512, 1 }, 128, &a);
+        try go(s, k.silu_mul_fn, .{ routed + shared, inner / 512, 1 }, 128, &a);
     }
 
     pub fn combine(k: *const Kernels, s: cuda.Stream, down: u64, top: usize, x: u64, wg: u64, shared: u64, out: u64, rows: usize, width: usize) !void {
