@@ -17,6 +17,7 @@ const sse = @import("sse.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
 const warm = @import("warm.zig");
+const cortheon = @import("cortheon/cortheon.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const openai_run = @import("openai_run.zig");
@@ -31,8 +32,8 @@ pub const Out = struct {
     vt: *const VTable,
 
     pub const VTable = struct {
-        /// 200 with text/event-stream: the stream's head.
-        open: *const fn (ctx: *anyopaque) error{Closed}!void,
+        /// 200 with text/event-stream: the stream's head, with the prepared prompt's token count (0: none).
+        open: *const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void,
         /// One ``data:`` payload; null is ``[DONE]``.
         event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
         /// A whole JSON reply.
@@ -62,7 +63,7 @@ const ClientOut = struct {
         return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
     }
 
-    fn open(ctx: *anyopaque) error{Closed}!void {
+    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         return sse.open(c.conn);
     }
@@ -136,13 +137,19 @@ pub const Plan = struct {
     named: []const u8,
 };
 
+/// A chat body checked as a chat completion's is, for routes that render it without a reply (/v1/imprint).
+pub fn chatInput(srv: *Server, cx: *Cx, raw: Value) errors.Refused!chat.Input {
+    return (try plan(srv, cx, true, raw)).input;
+}
+
 /// Everything checked before a reply starts (a refusal here is a 400 with no stream opened).
 fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     const body = try fields.parseNumbers(cx, raw);
     try fields.validateModalities(cx, body);
     // rows need each token's exact bytes: a tokenizer whose decoding depends on context (null) can't give them
-    const exact_bytes = json.truthyField(body, "logprobs") and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
-    const logprobs = try fields.probabilityOptions(cx, body, exact_bytes);
+    const asked = if (is_chat) json.truthyField(body, "logprobs") else body.field("logprobs") != null;
+    const exact_bytes = asked and srv.info.logprobs and (srv.text.tokenBytes(cx.a, 0) catch return error.OutOfMemory) != null;
+    const logprobs = if (is_chat) try fields.probabilityOptions(cx, body, exact_bytes) else try fields.legacyLogprobs(cx, body, exact_bytes);
     if (srv.config.request_log) |path| request_log.append(cx.a, path, body);
     var input: chat.Input = .{ .fields = undefined, .body = body };
     if (srv.family) |fam| if (is_chat) {
@@ -153,10 +160,10 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
         input.tools = try fam.tools(cx, body);
     };
     if (is_chat and srv.family == null) {
-        input.messages = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
+        input.messages = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
         input.tools = try tool_specs.active(cx, body.get("tools"), body.get("tool_choice"));
     } else if (!is_chat) if (body.get("messages")) |m| if (m == .array and m.array.len > 0) {
-        input.messages = try messages.normalize(cx, m, "system", srv.needs_user_after_tool);
+        input.messages = try messages.normalizeWith(cx, m, "system", srv.needs_user_after_tool, .of(srv.info.vision));
     };
     if (!is_chat and input.messages.array.len == 0) input.prompt = try legacyPrompt(srv, cx, body.get("prompt"));
     // ``body.get("max_tokens") or body.get("max_completion_tokens")``: both are ints or None by now
@@ -183,13 +190,13 @@ fn plan(srv: *Server, cx: *Cx, is_chat: bool, raw: Value) errors.Refused!Plan {
     if (thinking.enable) |on| try sampling.put(cx.a, "enable_thinking", .{ .bool = on });
     input.fields = .{ .object = sampling };
     const streamed = if (body.get("stream")) |s| s.truthy() else false;
+    input.prompt_logprobs = try fields.promptLogprobs(cx, body, !is_chat, streamed, srv.info.prompt_logprobs);
     if (logprobs != null) {
-        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape or split it
-        if (!is_chat) return cx.refuse("logprobs are supported on /v1/chat/completions only");
+        // 0.6.6's set: the rows describe the plain reply text, so nothing may reshape it
         var structured = false;
         for (grammar.fields) |k| structured = structured or json.truthyField(body, k);
-        if (streamed or input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
-            return cx.refuse("logprobs support nonstreamed chat without tools, stop strings, structured output or a thinking budget");
+        if (input.tools.len > 0 or json.truthyField(body, "stop") or structured or json.truthyField(body, "thinking_budget"))
+            return cx.refuse("logprobs support chat without tools, stop strings, structured output or a thinking budget");
     }
     input.logprobs = logprobs;
     var policy: tool_stream.Policy = .{};
@@ -264,7 +271,9 @@ pub fn run(srv: *Server, a: Allocator, out: Out, gone: Gone, is_chat: bool, raw:
         return;
     };
     p.input.id = id;
-    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds() };
+    // Cortheon reads calls in the template path's format: a family with its own chat rules runs without it
+    const turn = if (srv.family == null) cortheon.begin(srv, a, raw, id, is_chat, &p.input) else null;
+    var r: Run = .{ .srv = srv, .a = a, .out = out, .is_chat = is_chat, .plan = p, .id = id, .created = std.Io.Clock.real.now(srv.io).toSeconds(), .turn = turn };
     if (p.stream) r.stream(gone, field) else r.whole(gone, field);
 }
 

@@ -1,4 +1,4 @@
-//! Tensor parallelism's build: host tests on any OS, and on Linux the `tf-tp-test` GPU runner with the mailbox kernel.
+//! Tensor parallelism's build: Linux host tests, and on Linux the `tf-tp-test` GPU runner with the mailbox kernel.
 
 const std = @import("std");
 
@@ -41,9 +41,11 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
 
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
     const host = b.graph.host;
-    const tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, runtime(b, host, .debug)) }));
-    b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)").dependOn(&tests.step);
-    test_step.dependOn(&tests.step);
+    if (host.result.os.tag == .linux) {
+        const tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, runtime(b, host, .debug)) }));
+        b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)").dependOn(&tests.step);
+        test_step.dependOn(&tests.step);
+    }
     if (target.result.os.tag != .linux) return;
     const nvcc = b.option([]const u8, "tp-nvcc", "nvcc that builds the TP mailbox kernel");
     const prebuilt = b.option([]const u8, "tp-fatbin", "absolute path of a prebuilt tp_mailbox.fatbin to embed");

@@ -18,40 +18,11 @@ const chat = @import("chat.zig");
 const Sink = chat.Sink;
 const Reply = chat.Reply;
 const Failure = chat.Failure;
-const Mailbox = chat.Mailbox;
+const Mailbox = @import("mailbox.zig").Mailbox;
 const decodeText = chat.decodeText;
 const deltaOf = chat.deltaOf;
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
-
-/// The text a stream has sent: Python's ``streamed = visible``, grown by its delta while it only grows.
-pub const Shown = struct {
-    text: std.ArrayList(u8) = .empty,
-    chars: usize = 0,
-    at: ?[*]const u8 = null, // where the last shown text lay; the decode buffer only grows, so that prefix holds
-    extends: bool = false,
-
-    /// Python's ``now[len(shown):]``; ``stable``: ``now`` lies in the append-only decode buffer.
-    fn after(s: *Shown, now: []const u8, stable: bool) []const u8 {
-        const sent = s.text.items;
-        s.extends = (stable and s.at == now.ptr and now.len >= sent.len) or std.mem.startsWith(u8, now, sent);
-        if (!s.extends) return reply_text.afterChars(now, s.chars);
-        if (stable) s.at = now.ptr; // the buffer moved but kept its bytes: the next check is free again
-        return now[sent.len..];
-    }
-
-    fn set(s: *Shown, a: Allocator, now: []const u8, delta: []const u8) Allocator.Error!void {
-        if (s.extends) {
-            try s.text.appendSlice(a, delta);
-            s.chars += reply_text.charCount(delta);
-        } else {
-            s.text = .empty;
-            try s.text.appendSlice(a, now);
-            s.chars = reply_text.charCount(now);
-        }
-        s.at = now.ptr;
-    }
-};
 
 /// The token loop and the text it streams.
 pub const Generation = struct {
@@ -70,8 +41,8 @@ pub const Generation = struct {
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
-    streamed: Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
-    streamed_reasoning: Shown = .{},
+    streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
+    streamed_reasoning: reply_text.Shown = .{},
     streaming_done: bool = false,
     first_ns: ?i96 = null,
     last_ns: ?i96 = null,
@@ -81,7 +52,7 @@ pub const Generation = struct {
     engine_done: bool = false,
     consumed: usize = 0,
     chunk_index: usize = 0,
-    logprobs: bool = false, // the request asked for logprobs: the mailbox holds a row a token
+    lp: ?@import("logprobs.zig").Stream = null, // the request asked for logprobs: its rows, copied with each round
     // a family's reply: its reader, the answer so far, how much of it streamed, and a stop string's hit
     reader: ?family_mod.Reader = null,
     answer: std.ArrayList(u8) = .empty,
@@ -154,7 +125,7 @@ pub const Generation = struct {
         const delta = g.streamed.after(vis, !copied);
         if (delta.len > 0) {
             try g.streamed.set(g.a, vis, delta);
-            try g.emit(sink, .{ .string = delta });
+            try g.emit(sink, if (g.lp) |*l| (try l.delta(g.srv, g.a, g.thinking, g.ignore_eos, g.collected.items, delta, g.streamed.text.items.len, false)).? else .{ .string = delta });
         }
         if (g.calls) |*c| {
             var out: std.ArrayList(Value) = .empty;
@@ -193,6 +164,7 @@ pub const Generation = struct {
                 const end = m.chunks.items[g.chunk_index];
                 g.chunk_index += 1;
                 chunk = g.a.dupe(u32, m.tokens.items[g.consumed..end]) catch null;
+                if (g.lp) |*l| l.rows.appendSlice(g.a, m.rows.items[g.consumed..end]) catch {};
                 g.consumed = end;
             } else if (m.finished) {
                 ended = true;
@@ -353,7 +325,7 @@ pub const Generation = struct {
         } else {
             const content_tokens = if (g.ignore_eos) g.collected.items else reply_text.stripTrailing(g.collected.items, g.srv.eos);
             raw = try g.srv.text.decode(a, content_tokens);
-            if (g.logprobs) logprobs = try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, m.rows.items);
+            if (g.lp) |l| logprobs = try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items);
             const visible = g.stops.visible(raw, false);
             // closed before the think split, so a call ending an unclosed think block is the answer
             const close = try g.closeCall(visible);
@@ -375,7 +347,8 @@ pub const Generation = struct {
                     try g.emit(sink, try deltaOf(a, "reasoning_content", r[thought.len..]));
                 const shown = if (g.calls != null) try reply_text.finishedProse(a, content) else content;
                 const sent = g.streamed.text.items;
-                if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) try g.emit(sink, .{ .string = shown[sent.len..] });
+                const rest = if (std.mem.startsWith(u8, shown, sent) and shown.len > sent.len) shown[sent.len..] else "";
+                if (g.lp) |*l| (if (try l.delta(g.srv, a, g.thinking, g.ignore_eos, g.collected.items, rest, shown.len, true)) |d| try g.emit(sink, d)) else if (rest.len > 0) try g.emit(sink, .{ .string = rest });
                 if (g.calls) |*c| if (close.len > 0) {
                     // the streamer reads the closers as markup the model wrote, so the call ends with the same deltas
                     var out: std.ArrayList(Value) = .empty;
@@ -406,6 +379,8 @@ pub const Generation = struct {
         try runtime.put(a, "drafts", .{ .bool = drafts });
         const sha = @import("tokens.zig").tokenSha(g.collected.items);
         try runtime.put(a, "token_sha", .{ .string = try a.dupe(u8, &sha) });
+        const sha256 = @import("tokens.zig").tokenSha256(g.collected.items);
+        try runtime.put(a, "token_sha256", .{ .string = try a.dupe(u8, &sha256) });
         if (images_omitted > 0) try runtime.put(a, "images_omitted", try json.intValue(a, images_omitted));
         try runtime.put(a, "min_rows", try json.intValue(a, m.stats.min_rows));
         if (m.stats.loop_period) |period| {
@@ -420,7 +395,11 @@ pub const Generation = struct {
         try spec.put(a, "accepted", try json.intValue(a, s.accepted));
         try spec.put(a, "acceptance_rate", .{ .float = if (s.drafted > 0) @as(f64, @floatFromInt(s.accepted)) / @as(f64, @floatFromInt(s.drafted)) else 0 });
         try spec.put(a, "tokens_per_round", .{ .float = if (s.rounds > 0) @as(f64, @floatFromInt(g.collected.items.len)) / @as(f64, @floatFromInt(s.rounds)) else 0 });
-        if (m.telemetry.len > 0) if ((try json.parse(a, m.telemetry)) == .ok) try spec.put(a, "proposer", (try json.parse(a, m.telemetry)).ok);
+        const counters = try a.dupe(u8, m.telemetry); // parsed strings point into it: it outlives the box
+        if (counters.len > 0) switch (try json.parse(a, counters)) {
+            .ok => |v| try spec.put(a, "proposer", v),
+            .err => {},
+        };
         const think_end: ?u32 = if (thinking) g.srv.text.tokenId(g.srv.markers.close) else null;
         const reply: Reply = .{
             .content = content,
@@ -437,6 +416,7 @@ pub const Generation = struct {
             .thinking = thinking,
             .effort = effort,
             .logprobs = logprobs,
+            .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
             .calls = calls,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)

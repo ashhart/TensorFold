@@ -42,7 +42,8 @@ pub fn withEngine(b: *std.Build, target: std.Build.ResolvedTarget, engine: *std.
     const api = engine.import_table.get("engine_api").?;
     const tokenizer = engine.import_table.get("tokenizer").?;
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
-    const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "native_engines", .module = engine }} });
+    const exlr8 = @import("exlr8.zig").cliImport(b, target, .ReleaseSafe, engine.import_table.get("core").?);
+    const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engine }, exlr8 } });
     const m = b.createModule(.{
         .root_source_file = b.path("zig/src/server/main.zig"),
         .target = target,

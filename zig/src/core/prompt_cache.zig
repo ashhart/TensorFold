@@ -4,18 +4,17 @@ const Allocator = std.mem.Allocator;
 const imprint = @import("prompt_imprint.zig");
 const modes = @import("cache_modes.zig");
 const learned = @import("prompt_learn.zig");
+const lifetime = @import("prompt_cache_lifetime.zig");
+const policy = @import("prompt_cache_policy.zig");
+const cuts = @import("prompt_cuts.zig");
+pub const rows = @import("rows_store.zig");
 
 /// A family's copy of one state.
 pub const Saved = *anyopaque;
 
-pub fn singleReclaim(_: *anyopaque, dir: [:0]const u8, key: u64) !u64 {
-    var buf: [1100]u8 = undefined;
-    return @import("lanes").learned_dirs.fileBytes(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
-}
-pub fn singleForgetChecked(_: *anyopaque, dir: [:0]const u8, key: u64) !void {
-    var buf: [1100]u8 = undefined;
-    try @import("lanes").learned_dirs.unlink(try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.bin", .{ dir, key }, 0));
-}
+pub const singleReclaim = imprint.singleReclaim; // the learned-state file helpers, beside the Imprint that owns them
+pub const singleForgetChecked = imprint.singleForgetChecked;
+
 /// What a family gives the cache: copies of its state while the prompt pass stands at a chunk end.
 pub const Snapshots = struct {
     ptr: *anyopaque,
@@ -54,6 +53,8 @@ pub const Snapshots = struct {
         forget_checked: ?*const fn (*anyopaque, [:0]const u8, u64) anyerror!void = null,
         /// Learned state `key`'s files under `dir` removed (the cap needs room, or they no longer read back).
         forget: ?*const fn (ptr: *anyopaque, dir: [:0]const u8, key: u64) void = null,
+        /// --learn-conversations: the state's image as rows and parts, and copies out of and into kept states.
+        rows: ?*const rows.Image = null,
     };
 };
 
@@ -84,10 +85,12 @@ pub const Rules = struct {
     grid: u32 = 0,
     /// A mark other than the history's is kept only this far from every other mark and the resume point.
     min_gap: u32 = 256,
-    /// Shorter prompts keep nothing: below it a mark's extra prompt call costs more than a later turn's reuse saves.
+    /// Shorter prompts keep only the history's mark, at a chunk end (`chunk`); a planned family's marks add no call.
     min_prompt: u32 = 4096,
-    /// Replies are prefilled in background passes kept at their end: a pass resumed near its history keeps no mark.
-    warm: bool = false,
+    /// Rows an unplanned pass's chunk runs from its resume point or last cut (1: any row; 0: short prompts keep none).
+    chunk: u32 = 0,
+    /// Background reply passes kept at their end: .on drops a history mark near the resume point, .waits keeps it.
+    warm: enum { off, on, waits } = .off,
     /// A paged store (prompt_radix.zig): the tokens a page holds, where its marks and resumes sit (0: not paged).
     page: u32 = 0,
     /// A paged store also keeps the prompt's last whole page, for a later turn whose history the request did not name.
@@ -100,10 +103,13 @@ pub const Entry = struct {
     at: u32,
     saved: Saved,
     bytes: u64,
-    born: u32, // the length of the prompt that kept it: a later turn's is longer
+    born: u32, // the prompt length of the request that kept it (a reply's end and its warm pass: that reply's): a later turn's is longer
     used: u64, // the store's clock at its last keep or resume
     last: []u32, // the last prompt that kept or resumed it
     shared: bool = false, // kept at a shared system block's cut: other conversations resume it, so its own never supersedes it
+    branched: bool = false, // resumed again after a later prompt kept a longer state extending it: never superseded
+    expired: bool = false, // hidden from lookups immediately, reclaimed only at safe host boundaries
+    borrowers: u32 = 0, // outstanding lookups: released by resumed or release, never evicted while borrowed
 };
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
@@ -111,10 +117,7 @@ pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evict
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
-/// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
-pub const Kept = struct { held: bool, shared: usize };
-
-/// The entry a backend restores itself (null: the pass starts at 0) and the pass's marks.
+/// The borrowed entry a backend restores; the caller must report resumed or release it, even on cancellation.
 pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
 
 pub const Store = struct {
@@ -128,6 +131,7 @@ pub const Store = struct {
     counts: Counts = .{},
     shared_keys: std.ArrayList(u64) = .empty, // the tokens of recently planned shared cuts, hashed (at most SHARED_KEYS)
     imprint: ?*imprint.Imprint = null, // --learn: shared cuts' states on disk, read back by later sessions and servers
+    disk: ?*rows.Rows = null, // --learn-conversations: every kept state written behind to disk, read back where it pays
     active_rewind_at: u32 = 0, // the last lookup's rewind state (0: none); hosts keep a pass's states before the next lookup
 
     const SHARED_KEYS = 64;
@@ -144,6 +148,7 @@ pub const Store = struct {
     }
 
     fn free(s: *Store, e: *Entry) void {
+        if (s.disk) |r| rows.write.dropped(r, e);
         s.family.vtable.drop(s.family.ptr, e.saved);
         s.gpa.free(e.tokens);
         s.gpa.free(e.decode_spans);
@@ -151,7 +156,8 @@ pub const Store = struct {
         s.gpa.destroy(e);
     }
 
-    fn remove(s: *Store, i: usize) void {
+    pub fn remove(s: *Store, i: usize) void {
+        std.debug.assert(s.entries.items[i].borrowers == 0);
         const e = s.entries.orderedRemove(i);
         s.held -= e.bytes;
         s.free(e);
@@ -162,9 +168,37 @@ pub const Store = struct {
         return if (s.family.vtable.spare) |f| f(s.family.ptr) else 0;
     }
 
+    /// A kept state takes `extra` more bytes (a family copied what it shared into it) if the budget has room; never evicts, a pass is under way.
+    pub fn grow(s: *Store, saved: Saved, extra: u64) bool {
+        for (s.entries.items) |e| if (!e.expired and e.tokens.len > 0 and e.saved == saved) {
+            if (extra > s.room()) return false;
+            e.bytes += extra;
+            s.held += extra;
+            return true;
+        };
+        return false;
+    }
+
+    pub const expired = lifetime.expired;
+    pub const collectExpired = lifetime.collect;
+    pub const release = lifetime.release;
+
     /// What the budget leaves past the kept states and the spare storage: a family readies storage only inside it.
     pub fn room(s: *const Store) u64 {
         return s.budget -| s.held -| s.spare();
+    }
+
+    /// Kept states free their storage, least valuable first and never `restoring`, until `left.fits()` (false: never).
+    pub fn giveBack(s: *Store, restoring: ?Saved, prompt: []const u32, left: anytype) bool {
+        s.collectExpired();
+        while (!left.fits()) {
+            const skip = for (s.entries.items) |e| {
+                if (restoring != null and e.saved == restoring.?) break e;
+            } else null;
+            s.remove(s.victimBut(skip, prompt, @intCast(prompt.len)) orelse return false);
+            s.counts.evicted += 1;
+        }
+        return true;
     }
 
     /// Whether a state at `at` may start or end a prompt pass: anywhere, or a chunk start for planned families.
@@ -175,14 +209,14 @@ pub const Store = struct {
     /// The chunk start at or before `at`: the request's, else the family's grid (0 when none).
     fn startAt(s: *const Store, starts: []const u32, at: u32) u32 {
         if (starts.len == 0 and s.rules.grid > 0) return at - at % s.rules.grid;
-        return floorStart(starts, at);
+        return cuts.floorStart(starts, at);
     }
 
     /// The latest kept state this prompt can resume at `at` or under min_gap before it (null: none).
     fn keptNear(s: *const Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, at: u32) ?u32 {
         var best: ?u32 = null;
         for (s.entries.items) |e| {
-            if (e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
+            if (e.expired or e.at > at or at - e.at >= s.rules.min_gap or e.tokens.len > prompt.len or !s.usable(e.at, starts)) continue;
             if (!std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens) or !modes.equal(e.decode_spans, spans, e.at)) continue;
             if (best == null or e.at > best.?) best = e.at;
         }
@@ -193,7 +227,7 @@ pub const Store = struct {
     pub fn find(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span) ?*Entry {
         var best: ?*Entry = null;
         for (s.entries.items) |e| {
-            if (e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
+            if (e.expired or e.tokens.len > prompt.len or e.at >= prompt.len or !s.usable(e.at, starts)) continue;
             if (best != null and e.at <= best.?.at) continue;
             const n = e.tokens.len;
             if (prompt[n - 1] != e.tokens[n - 1] or !std.mem.eql(u32, prompt[0..n], e.tokens)) continue;
@@ -210,7 +244,7 @@ pub const Store = struct {
 
     /// `begin`, also keeping a state before the latest user message (`rewind_len`, 0: none) that its edits resume.
     pub fn beginRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
-        const l = try s.lookupRewind(a, prompt, history_len, rewind_len, shared, starts, spans);
+        const l = try s.lookupRewind(a, prompt, @intCast(prompt.len), history_len, rewind_len, shared, starts, spans);
         const e = l.entry orelse return .{ .marks = l.marks };
         const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
             note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
@@ -218,53 +252,55 @@ pub const Store = struct {
         };
         const from = if (ok) e.at else 0;
         s.resumed(e, prompt, ok);
-        s.reserve(prompt, null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
+        s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
         return .{ .from = from, .marks = l.marks };
     }
 
     /// Look up canonical-span state and marks without restoring; the caller later reports resumed.
     pub fn lookup(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
-        return s.lookupRewind(a, prompt, history_len, 0, shared, starts, spans);
+        return s.lookupRewind(a, prompt, @intCast(prompt.len), history_len, 0, shared, starts, spans);
     }
 
-    /// `lookup` plus a rewind state on the starts or grid; a state kept under min_gap before it serves instead.
-    pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+    /// `lookup` plus a rewind state on the starts or grid (or one under min_gap before it); `born` as in keepBorn.
+    pub fn lookupRewind(s: *Store, a: Allocator, prompt: []const u32, born: u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span) !Lookup {
+        s.collectExpired();
         const endpoint = if (s.rules.planned) s.startAt(starts, history_len) else history_len;
         const rewind = if (s.rules.planned) s.startAt(starts, rewind_len -| s.rules.lookahead) else rewind_len -| s.rules.lookahead;
-        const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
+        const endpoint_bytes = if (endpoint > 0 and (endpoint < prompt.len or (s.rules.warm != .off and endpoint == prompt.len)) and endpoint + s.rules.lookahead <= prompt.len) s.family.vtable.bytes(s.family.ptr, endpoint) else 0;
         const rewind_bytes = if (rewind > 0 and rewind < prompt.len and rewind + s.rules.lookahead <= prompt.len and s.usable(rewind, starts)) s.family.vtable.bytes(s.family.ptr, rewind) else 0;
         const priority_bytes = if (endpoint_bytes <= s.budget) endpoint_bytes else 0;
         s.active_rewind_at = if (prompt.len >= s.rules.min_prompt and rewind_bytes > 0 and rewind != endpoint and rewind_bytes <= s.budget - priority_bytes) rewind else 0;
         if (s.active_rewind_at > 0) if (s.keptNear(prompt, starts, spans, s.active_rewind_at)) |at| {
             s.active_rewind_at = at; // a state kept under min_gap before it is the rewind state: no new copy
         };
-        const e = s.recall(prompt, starts, spans, s.find(prompt, starts, spans));
+        const e = rows.read.recall(s, prompt, born, starts, spans, s.recall(prompt, born, starts, spans, s.find(prompt, starts, spans)));
         if (e == null) s.counts.misses += 1;
         const from = if (e) |x| x.at else 0;
         const marks_ = if (s.active_rewind_at == 0)
-            try s.fitting(a, try s.marks(a, prompt, from, history_len, shared, starts, if (e) |x| x.last else &.{}))
+            try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, 0, shared, starts, spans, if (e) |x| x.last else &.{}))
         else
-            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
-        for (shared) |w| { // the shared cuts this pass keeps: their states serve other conversations too
+            try s.fittingRewind(a, try s.fitting(a, try s.marksRewind(a, prompt, from, history_len, s.active_rewind_at, shared, starts, spans, if (e) |x| x.last else &.{})), endpoint, s.active_rewind_at, endpoint_bytes);
+        for (shared) |w| { // the shared cuts this pass keeps, and a short prompt's mark inside a shared block: other conversations resume them
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
-            if (std.mem.indexOfScalar(u32, marks_, at) != null) s.noteShared(prompt[0 .. at + s.rules.lookahead]);
+            for (marks_) |m| if (m == at or (m < at and !s.rules.planned and prompt.len < s.rules.min_prompt)) s.noteShared(prompt[0 .. m + s.rules.lookahead]);
         }
-        s.reserve(prompt, e, marks_, spans);
+        s.reserve(prompt, born, e, marks_, spans);
+        if (e) |entry| entry.borrowers += 1;
         return .{ .entry = e, .marks = marks_ };
     }
 
     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
-    fn reserve(s: *Store, prompt: []const u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
+    fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
         for (marks_) |at| {
             const n = @as(usize, at) + s.rules.lookahead;
             const exists = for (s.entries.items) |e| {
-                if (e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) break true;
+                if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) break true;
             } else false;
             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
         }
         while (s.held + need > s.budget) {
-            const i = s.victimBut(from, prompt) orelse return;
+            const i = s.victimBut(from, prompt, born) orelse return;
             s.remove(i);
             s.counts.evicted += 1;
         }
@@ -272,17 +308,20 @@ pub const Store = struct {
 
     /// Every kept state goes after a weight change, and learned states on disk stop being read: old arithmetic.
     pub fn clear(s: *Store) void {
-        while (s.entries.items.len > 0) s.remove(s.entries.items.len - 1);
+        for (s.entries.items) |e| e.expired = true;
+        s.collectExpired();
         s.shared_keys.clearRetainingCapacity();
         s.imprint = null;
+        s.disk = null;
         s.active_rewind_at = 0;
     }
 
     /// Forget a failed peer state matching the token prefix and canonical spans through at.
     pub fn forget(s: *Store, prompt: []const u32, at: u32, spans: []const modes.Span) void {
-        for (s.entries.items, 0..) |e, i| if (e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at)) {
+        for (s.entries.items) |e| if (!e.expired and e.at == at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]) and modes.equal(e.decode_spans, spans, at)) {
             s.counts.failed += 1;
-            return s.remove(i);
+            e.expired = true;
+            return s.collectExpired();
         };
     }
 
@@ -336,13 +375,16 @@ pub const Store = struct {
 
     /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
     pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
-        const i = std.mem.indexOfScalar(*Entry, s.entries.items, e) orelse return;
+        if (std.mem.indexOfScalar(*Entry, s.entries.items, e) == null) return;
+        defer s.release(e);
         if (!ok) {
             s.counts.failed += 1;
-            return s.remove(i);
+            e.expired = true;
+            return;
         }
         s.clock += 1;
         e.used = s.clock;
+        e.branched = e.branched or s.extended(e); // a turn several continuations share (a re-sent, edited or forked one)
         s.counts.hits += 1;
         const last = s.gpa.dupe(u32, prompt) catch return;
         s.gpa.free(e.last);
@@ -351,27 +393,31 @@ pub const Store = struct {
 
     /// Where a pass from `from` keeps states: the history, then min_gap apart the stable prefix and shared blocks.
     pub fn marks(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, previous);
+        return s.marksRewind(a, prompt, from, history_len, 0, shared, starts, &.{}, previous);
     }
 
     /// `marks` with the active rewind second: kept however near the other marks, never at or before the resume point.
-    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, previous: []const u32) ![]const u32 {
-        if (prompt.len < s.rules.min_prompt) return &.{};
+    fn marksRewind(s: *const Store, a: Allocator, prompt: []const u32, from: u32, history_len: u32, rewind: u32, shared: []const u32, starts: []const u32, spans: []const modes.Span, previous: []const u32) ![]const u32 {
+        const short = !s.rules.planned and prompt.len < s.rules.min_prompt; // the history's mark only, where the pass cuts a chunk anyway
+        if (short and s.rules.chunk == 0) return &.{};
         var out: std.ArrayList(u32) = .empty;
         var want: std.ArrayList(u32) = .empty;
         defer want.deinit(a);
-        try want.append(a, history_len);
+        // a warm pass (its history the whole prompt) keeps where a state can be keyed, its lookahead before the end
+        const warm_pass = s.rules.warm != .off and history_len == prompt.len and s.rules.lookahead > 0;
+        const history: u32 = if (warm_pass) @intCast(prompt.len -| s.rules.lookahead) else history_len;
+        try want.append(a, if (short) cuts.chunkEnd(s.rules.chunk, from, history, prompt.len, starts, spans) else history);
         if (rewind > 0 and s.active_rewind_at == rewind) try want.append(a, rewind);
-        if (previous.len > 0) {
+        if (previous.len > 0 and !short) {
             const stable: u32 = @intCast(std.mem.indexOfDiff(u32, previous, prompt) orelse @min(previous.len, prompt.len));
             if (stable > 0 and stable < history_len and stable >= history_len / 2) try want.append(a, stable);
         }
-        try want.appendSlice(a, shared);
+        if (!short) try want.appendSlice(a, shared);
         for (want.items, 0..) |w, k| {
             const at = if (s.rules.planned) s.startAt(starts, w) else w;
             if (at <= from or at + s.rules.lookahead > prompt.len or at >= prompt.len or !s.usable(at, starts)) continue;
             const is_rewind = rewind > 0 and k == 1 and at == rewind;
-            if (!is_rewind and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm))) continue; // near the resume point
+            if (!is_rewind and !(k == 0 and warm_pass) and at - from < s.rules.min_gap and (k > 0 or (from > 0 and s.rules.warm == .on))) continue; // near the resume point
             if (k > 0 and !is_rewind) { // the history's mark always (warm families: away from the resume point); the others away from it and each other
                 const near = for (out.items) |o| {
                     if (@max(o, at) - @min(o, at) < s.rules.min_gap) break true;
@@ -386,11 +432,17 @@ pub const Store = struct {
 
     /// Keep the state at `at` with its span prefix, evicting within the budget; `starts` are a learned cut's chunks.
     pub fn keep(s: *Store, prompt: []const u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
+        return s.keepBorn(prompt, @intCast(prompt.len), at, owner, starts, spans);
+    }
+
+    /// `keep` as a prompt of `born` tokens: a reply's end and its warm pass supersede none of their request's states.
+    pub fn keepBorn(s: *Store, prompt: []const u32, born: u32, at: u32, owner: ?*anyopaque, starts: []const u32, spans: []const modes.Span) bool {
+        s.collectExpired();
         const n = @as(usize, at) + s.rules.lookahead;
         if (at == 0 or n > prompt.len) return false;
         s.clock += 1;
         const shared = std.mem.indexOfScalar(u64, s.shared_keys.items, sharedKey(prompt[0..n])) != null;
-        for (s.entries.items) |e| if (e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) {
+        for (s.entries.items) |e| if (!e.expired and e.at == at and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) {
             e.used = s.clock; // the same state again: no copy
             e.shared = e.shared or shared;
             if (shared) learned.learn(s, e, starts);
@@ -413,7 +465,7 @@ pub const Store = struct {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
             }
-            s.remove(s.victimBut(null, prompt).?); // its storage may come back spare and take this state
+            s.remove(s.victimBut(null, prompt, born) orelse return s.fail(at, error.CacheBorrowed)); // its storage may come back spare and take this state
             s.counts.evicted += 1;
         }
         if (s.entries.items.len == 0) if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| bytes);
@@ -434,7 +486,7 @@ pub const Store = struct {
             return s.fail(at, err);
         };
         const charged = if (s.family.vtable.charged) |f| f(s.family.ptr, saved) else bytes;
-        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = @intCast(prompt.len), .used = s.clock, .last = last, .shared = shared };
+        e.* = .{ .tokens = tokens, .decode_spans = decoded, .at = at, .saved = saved, .bytes = charged, .born = born, .used = s.clock, .last = last, .shared = shared };
         owns_decoded = false;
         s.entries.append(s.gpa, e) catch {
             s.free(e);
@@ -443,24 +495,25 @@ pub const Store = struct {
         s.held += charged;
         s.counts.kept += 1;
         if (shared) learned.learn(s, e, starts);
+        if (s.disk) |r| rows.write.queued(r, e, starts);
         if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held); // spare storage only inside what the budget leaves
         return true;
     }
 
     /// A learned state on disk longer than `have`, read back as a shared entry; else `have` (none, or reading failed).
-    fn recall(s: *Store, prompt: []const u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
+    fn recall(s: *Store, prompt: []const u32, born: u32, starts: []const u32, spans: []const modes.Span, have: ?*Entry) ?*Entry {
         const im = s.imprint orelse return have;
         const read = s.family.vtable.read orelse return have;
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
         while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
-            s.remove(s.victimBut(have, prompt) orelse return have);
+            s.remove(s.victimBut(have, prompt, born) orelse return have);
             s.counts.evicted += 1;
         }
         if (bytes > s.budget) return have;
         const e = s.gpa.create(Entry) catch return have;
-        e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = @intCast(prompt.len), .used = s.clock, .last = &.{}, .shared = true };
+        e.* = .{ .tokens = &.{}, .at = m.at, .saved = undefined, .bytes = bytes, .born = born, .used = s.clock, .last = &.{}, .shared = true };
         e.tokens = s.gpa.dupe(u32, m.tokens) catch return s.drop(e, have, false);
         e.last = s.gpa.dupe(u32, prompt) catch return s.drop(e, have, false);
         const key = m.key;
@@ -497,36 +550,9 @@ pub const Store = struct {
         return false;
     }
 
-    /// The entry to free first, never `skip`: a superseded one, oldest first; else the oldest, the turn's rewind last.
-    fn victimBut(s: *const Store, skip: ?*Entry, prompt: []const u32) ?usize {
-        var best: ?usize = null;
-        for (s.entries.items, 0..) |e, i| {
-            if (e.shared or e == skip or s.isActiveRewind(e, prompt)) continue; // a shared cut is evicted only as the least recently used
-            const now = prompt.len > e.born and prompt.len > e.tokens.len and std.mem.eql(u32, prompt[0..e.tokens.len], e.tokens); // this prompt extends it
-            const moved_on = now or for (s.entries.items) |o| {
-                if (o != e and o.born > e.born and o.tokens.len > e.tokens.len and std.mem.eql(u32, o.tokens[0..e.tokens.len], e.tokens)) break true;
-            } else false;
-            if (moved_on and (best == null or e.used < s.entries.items[best.?].used)) best = i;
-        }
-        if (best) |i| return i;
-        var oldest: ?usize = null;
-        for (s.entries.items, 0..) |e, i| if (e != skip and (oldest == null or s.before(e, s.entries.items[oldest.?], prompt))) {
-            oldest = i;
-        };
-        return oldest;
-    }
-
-    /// Eviction order past the superseded states: least recently used first, the turn's rewind state last.
-    fn before(s: *const Store, e: *const Entry, o: *const Entry, prompt: []const u32) bool {
-        const e_rewind = s.isActiveRewind(e, prompt);
-        const o_rewind = s.isActiveRewind(o, prompt);
-        return if (e_rewind != o_rewind) o_rewind else e.used < o.used;
-    }
-
-    /// The last lookup's rewind state, while the prompt still extends it.
-    fn isActiveRewind(s: *const Store, e: *const Entry, prompt: []const u32) bool {
-        return e.at == s.active_rewind_at and e.tokens.len <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..e.tokens.len]);
-    }
+    /// The entry to free first, never `skip`: a superseded one, no branch point, oldest; else the oldest, rewind last.
+    pub const victimBut = policy.victimBut;
+    const extended = policy.extended;
 };
 
 /// A line on the engine's log; tests stay quiet (the build runner fails a test that writes to stderr).
@@ -535,18 +561,14 @@ pub fn note(comptime fmt: []const u8, args: anytype) void {
     std.log.warn("prompt cache: " ++ fmt, args);
 }
 
-/// The chunk start at or before `at` (0 when none).
-fn floorStart(starts: []const u32, at: u32) u32 {
-    var best: u32 = 0;
-    for (starts) |p| if (p <= at and p > best) {
-        best = p;
-    };
-    return best;
-}
-
 test {
     _ = @import("prompt_cache_test.zig");
+    _ = @import("prompt_cache_learn_test.zig");
     _ = @import("prompt_cache_rewind_test.zig");
+    _ = @import("prompt_cache_branch_test.zig");
+    _ = @import("prompt_cache_give_test.zig");
+    _ = @import("prompt_cache_lifetime_test.zig");
     _ = @import("learned_fault_test.zig");
     _ = modes;
+    _ = rows;
 }

@@ -69,7 +69,7 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
     return chat.generate(srv, cx, prepared, null, gone);
 }
 
-/// One greedy reply as `ask` gives it, with no routed lesson acting: a lesson's writer hears none of them.
+/// One greedy reply as `ask` gives it, from the model as shipped (no lesson acts): a lesson's writer hears none.
 pub fn askBase(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
     return askBaseAt(srv, cx, system, user, max_tokens, 0, gone);
 }
@@ -85,18 +85,32 @@ pub fn askBaseAt(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, m
     try fields.put(a, "temperature", .{ .float = temperature });
     var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = temperature }, gone);
     prepared.request.decide = null;
+    prepared.request.untaught = true;
     return chat.generate(srv, cx, prepared, null, gone);
 }
 
 /// One greedy reply with thinking on, its reasoning bounded; its content is what the user reads after the reasoning.
 pub fn askThinking(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
+    return thinkingFrom(srv, cx, user, false, gone);
+}
+
+/// `askThinking` from the model as shipped (no lesson acts), as `askBase` is to `ask`.
+pub fn askThinkingBase(srv: *Server, cx: *Cx, user: []const u8, gone: anytype) chat.Failure!chat.Reply {
+    return thinkingFrom(srv, cx, user, true, gone);
+}
+
+fn thinkingFrom(srv: *Server, cx: *Cx, user: []const u8, shipped: bool, gone: anytype) chat.Failure!chat.Reply {
     const a = cx.a;
     const asked = try a.dupe(Value, &.{try message(a, "user", user)});
     const fields = try json.newObject(a);
     try fields.put(a, "enable_thinking", .{ .bool = true });
     try fields.put(a, "temperature", .{ .float = 0 });
     try fields.put(a, "thinking_budget", try json.intValue(a, think_budget));
-    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = think_reply, .temperature = 0 }, gone);
+    var prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = asked }, .fields = .{ .object = fields }, .max_tokens = think_reply, .temperature = 0 }, gone);
+    if (shipped) {
+        prepared.request.decide = null;
+        prepared.request.untaught = true;
+    }
     return chat.generate(srv, cx, prepared, null, gone);
 }
 

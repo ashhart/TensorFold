@@ -69,6 +69,26 @@ pub const cluster_scheduling_spread: c_int = 1;
 
 pub const Dim3 = extern struct { x: c_uint = 1, y: c_uint = 1, z: c_uint = 1 };
 
+/// CUDA_MEMCPY2D for device addresses (type 2): `height` rows of `width` bytes, each side's rows its pitch apart.
+pub const Memcpy2D = extern struct {
+    src_x: usize = 0,
+    src_y: usize = 0,
+    src_type: c_int = 2,
+    src_host: ?*const anyopaque = null,
+    src: DevicePtr,
+    src_array: ?*anyopaque = null,
+    src_pitch: usize,
+    dst_x: usize = 0,
+    dst_y: usize = 0,
+    dst_type: c_int = 2,
+    dst_host: ?*anyopaque = null,
+    dst: DevicePtr,
+    dst_array: ?*anyopaque = null,
+    dst_pitch: usize,
+    width: usize,
+    height: usize,
+};
+
 /// CUlaunchAttributeValue: a 64-byte union aligned for its pointer members.
 pub const LaunchAttributeValue = extern union {
     pad: [64]u8,
@@ -136,26 +156,6 @@ pub const event_record_external: c_uint = 0x1;
 
 /// CU_MEMORYTYPE_DEVICE
 pub const memory_type_device: c_uint = 2;
-
-/// CUDA_MEMCPY2D (cuMemcpy2DAsync_v2): `Height` rows of `WidthInBytes`, each side at its own pitch.
-pub const Memcpy2D = extern struct {
-    srcXInBytes: usize = 0,
-    srcY: usize = 0,
-    srcMemoryType: c_uint = memory_type_device,
-    srcHost: ?*const anyopaque = null,
-    srcDevice: DevicePtr = 0,
-    srcArray: ?*anyopaque = null,
-    srcPitch: usize = 0,
-    dstXInBytes: usize = 0,
-    dstY: usize = 0,
-    dstMemoryType: c_uint = memory_type_device,
-    dstHost: ?*anyopaque = null,
-    dstDevice: DevicePtr = 0,
-    dstArray: ?*anyopaque = null,
-    dstPitch: usize = 0,
-    WidthInBytes: usize = 0,
-    Height: usize = 0,
-};
 
 pub const jit_info_log_buffer: c_int = 3;
 pub const jit_info_log_buffer_size: c_int = 4;
@@ -261,13 +261,12 @@ test "CUDA device attribute matches the RDMA VMM capability ABI" {
     ));
 }
 
-test "Memcpy2D has CUDA_MEMCPY2D's layout: each side's five fields, then the copy's width and rows" {
+test "Memcpy2D has CUDA_MEMCPY2D's layout: each side's seven fields, then the copy's width and rows" {
     const t = @import("std").testing;
     const want = [_]struct { []const u8, usize }{
-        .{ "srcXInBytes", 0 }, .{ "srcY", 8 },           .{ "srcMemoryType", 16 }, .{ "srcHost", 24 },
-        .{ "srcDevice", 32 },  .{ "srcArray", 40 },      .{ "srcPitch", 48 },      .{ "dstXInBytes", 56 },
-        .{ "dstY", 64 },       .{ "dstMemoryType", 72 }, .{ "dstHost", 80 },       .{ "dstDevice", 88 },
-        .{ "dstArray", 96 },   .{ "dstPitch", 104 },     .{ "WidthInBytes", 112 }, .{ "Height", 120 },
+        .{ "src_x", 0 },      .{ "src_y", 8 },       .{ "src_type", 16 }, .{ "src_host", 24 }, .{ "src", 32 },      .{ "src_array", 40 },
+        .{ "src_pitch", 48 }, .{ "dst_x", 56 },      .{ "dst_y", 64 },    .{ "dst_type", 72 }, .{ "dst_host", 80 }, .{ "dst", 88 },
+        .{ "dst_array", 96 }, .{ "dst_pitch", 104 }, .{ "width", 112 },   .{ "height", 120 },
     };
     const names = @typeInfo(Memcpy2D).@"struct".field_names;
     try t.expectEqual(want.len, names.len);
@@ -277,7 +276,7 @@ test "Memcpy2D has CUDA_MEMCPY2D's layout: each side's five fields, then the cop
     }
     try t.expectEqual(@as(usize, 128), @sizeOf(Memcpy2D));
     // a default copy is device to device, so a caller sets only addresses, pitches and the extent
-    const c: Memcpy2D = .{};
-    try t.expectEqual(memory_type_device, c.srcMemoryType);
-    try t.expectEqual(memory_type_device, c.dstMemoryType);
+    const c: Memcpy2D = .{ .src = 0, .src_pitch = 0, .dst = 0, .dst_pitch = 0, .width = 0, .height = 0 };
+    try t.expectEqual(@as(c_int, memory_type_device), c.src_type);
+    try t.expectEqual(@as(c_int, memory_type_device), c.dst_type);
 }

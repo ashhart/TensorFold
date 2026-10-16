@@ -1,6 +1,7 @@
 //! A rank's TP settings from the environment: rank, master, port, backend, fail-fast knobs.
 const std = @import("std");
 const log = @import("log.zig");
+const graph_cache = @import("cuda").graph_cache;
 
 pub const Backend = enum {
     /// NCCL for everything (the default).
@@ -64,6 +65,10 @@ pub const Config = struct {
     /// TF_TP_PLAN_LINK=rdma: the follower polls the plan socket this long before blocking (TF_TP_PLAN_SPIN_US).
     plan_spin_ns: u64 = 0,
     plan_pin: ?PlanPin = null,
+    /// The keyed graph cache settings a family builds with, set before `Session.open` (null: the family has none).
+    graph_cache: ?graph_cache.Settings = null,
+    /// TF_GRAPH_CACHE as read (`Cache.init` applies the same value); only its effect on `graph_cache` is compared.
+    graph_cache_env: ?[]const u8 = null,
 
     /// Reads every setting from `get` (the environment in `fromEnv`); unset names keep the defaults.
     pub fn parse(get: *const fn ([]const u8) ?[]const u8) Error!Config {
@@ -131,6 +136,7 @@ pub const Config = struct {
                 c.plan_pin = .{ .cpu = try int(u32, get, "TF_TP_PLAN_PIN", 0, 0, 4095) };
             }
         }
+        c.graph_cache_env = get("TF_GRAPH_CACHE");
         return c;
     }
 
@@ -148,6 +154,7 @@ pub const Config = struct {
         h.update(std.mem.asBytes(&c.failfast));
         h.update(std.mem.asBytes(&c.roce_wire));
         h.update(std.mem.asBytes(&c.roce_fallback));
+        if (c.graph_cache) |g| h.update(&g.effective(c.graph_cache_env).digest());
         var out: [32]u8 = undefined;
         h.final(&out);
         return out;
@@ -253,4 +260,29 @@ test "the plan link's spin and pin, the RoCE grid cap" {
     Fake.pairs = &.{.{ "TF_TP_ROCE_BLOCKS", "12" }};
     try std.testing.expectError(error.BadSetting, Config.parse(&Fake.get));
     Fake.pairs = &.{};
+}
+
+test "the digest holds the graph cache's effective settings: 0, off and OFF agree, on and off differ" {
+    Fake.pairs = &.{.{ "TF_GRAPH_CACHE", "0" }};
+    var zero = try Config.parse(&Fake.get);
+    Fake.pairs = &.{.{ "TF_GRAPH_CACHE", "OFF" }};
+    var upper = try Config.parse(&Fake.get);
+    Fake.pairs = &.{.{ "TF_GRAPH_CACHE", "1" }};
+    var one = try Config.parse(&Fake.get);
+    Fake.pairs = &.{};
+    var unset = try Config.parse(&Fake.get);
+    try std.testing.expectEqualSlices(u8, &zero.digest(), &unset.digest()); // no cache installed: not compared
+    for ([_]*Config{ &zero, &upper, &one, &unset }) |c| c.graph_cache = .{};
+    var max0 = unset;
+    max0.graph_cache = .{ .max = 0 };
+    try std.testing.expectEqualSlices(u8, &zero.digest(), &upper.digest());
+    try std.testing.expectEqualSlices(u8, &zero.digest(), &max0.digest());
+    try std.testing.expectEqualSlices(u8, &one.digest(), &unset.digest());
+    try std.testing.expect(!std.mem.eql(u8, &zero.digest(), &unset.digest()));
+    var family = unset;
+    family.graph_cache = .{ .max = 8, .hold = true };
+    try std.testing.expect(!std.mem.eql(u8, &family.digest(), &unset.digest()));
+    var family_off = upper;
+    family_off.graph_cache = family.graph_cache;
+    try std.testing.expectEqualSlices(u8, &zero.digest(), &family_off.digest());
 }

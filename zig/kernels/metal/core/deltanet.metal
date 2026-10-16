@@ -281,18 +281,21 @@ kernel void tf_delta_gdn_chain(device const bfloat* query [[buffer(0)]],
   else tf_delta_gdn_chain_body<0>(query, key, value, decay, mixing, committed, segments, p, output, next_state, position, lane);
 }
 // Prompt chains (may differ in bits from decode): 8 lanes a value column, 16 key channels each; dk = 128.
-kernel void tf_delta_gdn_chain_wide(device const bfloat* query [[buffer(0)]],
-                          device const bfloat* key [[buffer(1)]],
-                          device const bfloat* value [[buffer(2)]],
-                          device const float* decay [[buffer(3)]],
-                          device const bfloat* mixing [[buffer(4)]],
-                          device const float* committed [[buffer(5)]],
-                          device const TfDeltaSegment* segments [[buffer(6)]],
-                          constant TfDeltaParams& p [[buffer(7)]],
-                          device bfloat* output [[buffer(8)]],
-                          device float* next_state [[buffer(9)]],
-                          uint3 position [[thread_position_in_grid]],
-                          uint lane [[thread_index_in_simdgroup]]) {
+template <bool M>
+inline void tf_delta_gdn_chain_wide_body(device const bfloat* query,
+    device const bfloat* key,
+    device const bfloat* value,
+    device const float* decay,
+    device const bfloat* mixing,
+    device const float* committed,
+    device const TfDeltaSegment* segments,
+    constant TfDeltaParams& p,
+    device bfloat* output,
+    device float* next_state,
+    const uint4 marks,
+    device float* mark_state,
+    uint3 position,
+    uint lane) {
   const uint segment_index = position.z / p.nv, head = position.z % p.nv;
   const uint sub = lane & 7, dimension = position.y * 4 + (lane >> 3), key_head = head / (p.nv / p.nk);
   const TfDeltaSegment span = segments[segment_index];
@@ -323,8 +326,69 @@ kernel void tf_delta_gdn_chain_wide(device const bfloat* query [[buffer(0)]],
     result += simd_shuffle_xor(result, 2);
     result += simd_shuffle_xor(result, 4);
     if (sub == 0) output[at * p.dv + dimension] = bfloat(result);
+    if (M)
+      for (uint m = 0; m < 4; ++m)
+        if (marks[m] == node + 1)
+          for (uint i = 0; i < 16; ++i) mark_state[(segment_index * 4 + m) * state_stride + column + i] = state[i];
   }
   for (uint i = 0; i < 16; ++i) next_state[span.next_slot * state_stride + column + i] = state[i];
+}
+
+kernel void tf_delta_gdn_chain_wide(device const bfloat* query [[buffer(0)]],
+                          device const bfloat* key [[buffer(1)]],
+                          device const bfloat* value [[buffer(2)]],
+                          device const float* decay [[buffer(3)]],
+                          device const bfloat* mixing [[buffer(4)]],
+                          device const float* committed [[buffer(5)]],
+                          device const TfDeltaSegment* segments [[buffer(6)]],
+                          constant TfDeltaParams& p [[buffer(7)]],
+                          device bfloat* output [[buffer(8)]],
+                          device float* next_state [[buffer(9)]],
+                          uint3 position [[thread_position_in_grid]],
+                          uint lane [[thread_index_in_simdgroup]]) {
+  tf_delta_gdn_chain_wide_body<false>(query, key, value, decay, mixing, committed, segments, p, output, next_state,
+                                      uint4(0), next_state, position, lane);
+}
+
+// marks[segment] (its rows, 0 unused): mark_state[segment * 4 + m] is the state a segment ending there would leave.
+kernel void tf_delta_gdn_chain_wide_marks(device const bfloat* query [[buffer(0)]],
+                          device const bfloat* key [[buffer(1)]],
+                          device const bfloat* value [[buffer(2)]],
+                          device const float* decay [[buffer(3)]],
+                          device const bfloat* mixing [[buffer(4)]],
+                          device const float* committed [[buffer(5)]],
+                          device const TfDeltaSegment* segments [[buffer(6)]],
+                          constant TfDeltaParams& p [[buffer(7)]],
+                          device bfloat* output [[buffer(8)]],
+                          device float* next_state [[buffer(9)]],
+                          device const uint4* marks [[buffer(10)]],
+                          device float* mark_state [[buffer(11)]],
+                          uint3 position [[thread_position_in_grid]],
+                          uint lane [[thread_index_in_simdgroup]]) {
+  tf_delta_gdn_chain_wide_body<true>(query, key, value, decay, mixing, committed, segments, p, output, next_state,
+                                     marks[position.z / p.nv], mark_state, position, lane);
+}
+
+// Each mark's conv window into mark_conv[segment * 4 + m], read as conv_commit reads it for a segment ending there.
+kernel void tf_delta_gdn_mark_conv(device const bfloat* committed [[buffer(0)]],
+                              device const bfloat* projection [[buffer(1)]],
+                              device const TfDeltaSegment* segments [[buffer(2)]],
+                              device const uint* windows [[buffer(3)]],
+                              constant TfDeltaParams& p [[buffer(4)]],
+                              device const uint4* marks [[buffer(5)]],
+                              device bfloat* mark_conv [[buffer(6)]],
+                              uint3 position [[thread_position_in_grid]]) {
+  const uint channels = 2 * p.nk * p.dk + p.nv * p.dv;
+  const uint width = (p.taps - 1) * channels, item = position.x, mark = position.y, segment_index = position.z;
+  if (item >= width || mark >= 4) return;
+  const TfDeltaSegment span = segments[segment_index];
+  const uint at = marks[segment_index][mark];
+  if (at == 0 || at > span.rows) return;
+  const uint row = span.first + at - 1;
+  const uint source = windows[row * p.taps + item / channels + 1];
+  mark_conv[(segment_index * 4 + mark) * width + item] = source < p.taps - 1
+      ? committed[(span.state_slot * (p.taps - 1) + source) * channels + item % channels]
+      : projection[(source - (p.taps - 1)) * channels + item % channels];
 }
 // The normalized value rounds to BF16 before the SiLU gate multiplies it.
 

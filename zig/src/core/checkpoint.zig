@@ -122,6 +122,11 @@ pub const Checkpoint = struct {
         };
     }
 
+    /// Every file's pages out of the page cache (safetensors.File.release).
+    pub fn release(self: *const Checkpoint) void {
+        for (self.files.items) |*f| f.release();
+    }
+
     /// Names no `get` took (the loader refuses a checkpoint with leftovers).
     pub fn unused(self: *const Checkpoint) usize {
         var n: usize = 0;
@@ -205,6 +210,47 @@ test "a failed allocation while a checkpoint opens leaves nothing behind" {
     try expectBalanced(addShard, io, walk_dir);
 }
 
+test "the loader reads the folder's own shards: hidden folders (a download's .cache, --slide's snapshot) pass by" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const shards = [_][]const u8{ "model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors" };
+    const index = "{\"weight_map\":{\"a\":\"" ++ shards[0] ++ "\",\"b\":\"" ++ shards[1] ++ "\"}}";
+    for ([_][]const u8{ "", ".tensorfold-original/", ".cache/huggingface/" }) |at| {
+        if (at.len > 0) try tmp.dir.createDirPath(io, at);
+        for (shards, [_][]const u8{ "a", "b" }) |name, tensor| {
+            const image = try testImage(gpa, tensor, 4);
+            defer gpa.free(image);
+            var sub: [96]u8 = undefined;
+            const sub_path = try std.fmt.bufPrint(&sub, "{s}{s}", .{ at, name });
+            try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = image });
+        }
+        var sub: [96]u8 = undefined;
+        const sub_path = try std.fmt.bufPrint(&sub, "{s}model.safetensors.index.json", .{at});
+        try tmp.dir.writeFile(io, .{ .sub_path = sub_path, .data = index });
+    }
+    var buf: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    for (0..2) |pass| {
+        if (pass == 1) try tmp.dir.deleteFile(io, "model.safetensors.index.json"); // no index: model*.safetensors
+        const listed = try shardFiles(gpa, io, dir);
+        defer freeShardFiles(gpa, listed);
+        try std.testing.expectEqual(shards.len, listed.len);
+        for (shards, listed) |name, p| try std.testing.expectEqualStrings(name, p[dir.len + 1 ..]);
+        var ck = try Checkpoint.openModel(gpa, io, dir);
+        defer ck.close();
+        for (ck.files.items) |f| try std.testing.expect(std.mem.indexOf(u8, f.path[dir.len..], "/.") == null);
+        _ = try ck.get("a");
+        _ = try ck.get("b");
+        try std.testing.expectEqual(@as(usize, 0), ck.unused());
+    }
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const linked = try @import("shard_edit.zig").linked(arena.allocator(), io, dir);
+    try std.testing.expect(linked == null); // --slide's startup check
+}
+
 test "has finds a name without taking it; skip marks a prefix used" {
     const io = std.testing.io;
     const gpa = std.testing.allocator;
@@ -223,4 +269,43 @@ test "has finds a name without taking it; skip marks a prefix used" {
     try ck.skip("mtp.");
     _ = try ck.get("backbone.x");
     try std.testing.expectEqual(@as(usize, 0), ck.unused());
+}
+
+test "after release the mapping stays readable: a later read faults the same bytes back in" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", 4096);
+    defer gpa.free(image);
+    for (image[image.len - 4096 ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    const t = try ck.get("x");
+    try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
+    ck.release();
+    try std.testing.expectEqualSlices(u8, image[image.len - 4096 ..], t.bytes);
+}
+
+test "release keeps a map that fell back to reads (no mmap): its heap copy is the only one" {
+    const gpa = std.testing.allocator;
+    var threaded: std.Io.Threaded = .init(gpa, .{ .disable_memory_mapping = true });
+    defer threaded.deinit();
+    const io = threaded.io();
+    const n = 1 << 20; // past the allocator's small buckets, so the copy has pages of its own
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const image = try testImage(gpa, "x", n);
+    defer gpa.free(image);
+    for (image[image.len - n ..], 0..) |*b, i| b.* = @truncate(i * 7 + 1);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
+    var path: [64]u8 = undefined;
+    var ck = try Checkpoint.openModel(gpa, io, try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path}));
+    defer ck.close();
+    try std.testing.expect(ck.files.items[0].map.section == null);
+    const t = try ck.get("x");
+    ck.release();
+    try std.testing.expectEqualSlices(u8, image[image.len - n ..], t.bytes);
 }

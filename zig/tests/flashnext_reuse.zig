@@ -83,7 +83,7 @@ fn loadTokens(a: Allocator, path: []const u8) ![]u32 {
 fn fresh(e: *fx.Engine, a: Allocator, prompt: []const u32, n: usize, depth: ?usize, copy: bool) !Run {
     e.copy = copy;
     var r: Run = .{ .a = a };
-    _ = try e.generateFrom(prompt, 0, &.{}, n, &.{}, depth, r.out());
+    _ = try e.generateFrom(prompt, 0, &.{}, n, &.{}, depth, .{}, r.out());
     return r;
 }
 
@@ -166,7 +166,7 @@ pub fn main(init: std.process.Init) !void {
                 const plan = try store.begin(a, turn.prompt, turn.history, &.{}, &.{}, null, &.{});
                 const restore_s = mtl.clock.seconds() - t0;
                 const keeper = di + 1 == depths.items.len and copy; // every run resumes from the last turn's state; the last keeps this one's
-                _ = try e.generateFrom(turn.prompt, plan.from, if (keeper) plan.marks else &.{}, n_out, &.{}, depth, r.out());
+                _ = try e.generateFrom(turn.prompt, plan.from, if (keeper) plan.marks else &.{}, n_out, &.{}, depth, .{}, r.out());
                 const same = r.hash() == ref.hash();
                 if (!same) failures += 1;
                 std.debug.print("  depth {d} copy {s}: from {d}, marks {any}, restore {d:.1} ms, save {d:.1} ms: {x:0>16} {s}\n", .{ depth orelse 0, if (copy) "on " else "off", plan.from, plan.marks, restore_s * 1e3, fam.save_s * 1e3, r.hash(), if (same) "SAME" else "DIFF" });
@@ -194,7 +194,7 @@ fn stateCheck(e: *fx.Engine, a: Allocator, store: *pc.Store, turn: Turn, failure
             from = entry.at;
         }
         var r: Run = .{ .a = a, .copy_at = &states[arm], .pooled_at = &pooled[arm], .e = e };
-        _ = try e.generateFrom(turn.prompt, from, &.{turn.history}, 2, &.{}, 0, r.out());
+        _ = try e.generateFrom(turn.prompt, from, &.{turn.history}, 2, &.{}, 0, .{}, r.out());
     }
     const x = states[0] orelse return error.NoState;
     const n = snap.bytes(turn.history);
