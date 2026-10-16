@@ -16,7 +16,7 @@ const grammar = @import("grammar.zig");
 const gpa = std.testing.allocator;
 
 /// Rebuilds a stream's history from the target's features and drafts its next tokens, now and then wrong.
-const FakeDrafter = struct {
+pub const FakeDrafter = struct {
     lanes: std.AutoHashMapUnmanaged(*sm.Stream, Lane) = .empty,
     fail: enum { none, open, absorb } = .none,
     facts_: dr.Facts = .{ .depth = 6, .step_ms = 0.5 },
@@ -133,7 +133,7 @@ const FakeDrafter = struct {
 };
 
 /// The fake target holding features as `Features` promises (a keep overwrites what it drops), refusing anything else.
-const Strict = struct {
+pub const Strict = struct {
     inner: be.Backend,
     snaps: std.AutoHashMapUnmanaged(*sm.Stream, Snap) = .empty,
     refused: u32 = 0,
@@ -248,9 +248,9 @@ const Strict = struct {
     }
 };
 
-const Mode = enum { plain, wrapped };
+pub const Mode = enum { plain, wrapped };
 const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
-const Out = struct {
+pub const Out = struct {
     tokens: [][]u32,
     drafted: u64 = 0,
     accepted: u64 = 0,
@@ -266,7 +266,7 @@ fn base() Model {
     return .{ .exact_width = 16, .gpu_tokens = true, .window_costs = &costs, .hidden_rows = true, .batch_rows = 32, .max_streams = 8 };
 }
 
-fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
+pub fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     var target: fake.Fake = .{ .gpa = gpa };
     defer target.deinit();
     var head: FakeDrafter = .{ .facts_ = .{ .depth = 6, .step_ms = 0.5, .batched = batched } };
@@ -316,15 +316,15 @@ fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
     return out;
 }
 
-fn freeOut(o: Out) void {
+pub fn freeOut(o: Out) void {
     for (o.tokens) |t| gpa.free(t);
     gpa.free(o.tokens);
 }
 
-const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
+pub const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
 const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
-const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
-const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
+pub const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
+pub const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
 
 test "an external drafter's rounds commit the one-token decode, greedy and sampled, and its drafts land" {
     for ([_]?Sampling{ null, sampled }) |s| {
@@ -465,117 +465,68 @@ test "the strict target holds only what Features promises: a keep drops the reje
     try std.testing.expectError(error.RowsNotHeld, b.features(&s, &.{49}, p1.len, 3));
 }
 
+/// The wrapper over the strict target, streaming `long` restored whole from a kept state: the head has no row yet.
+pub const Restored = struct {
+    target: fake.Fake = .{ .gpa = gpa },
+    strict: Strict = undefined,
+    head: FakeDrafter = .{},
+    wrapped: Drafted = undefined,
+    saved: *anyopaque = undefined,
+    s: sm.Stream = undefined,
+
+    pub fn init(r: *Restored) !be.Backend {
+        r.* = .{};
+        r.strict = .{ .inner = r.target.backend() };
+        r.wrapped = try Drafted.init(gpa, r.strict.backend(), r.head.drafter());
+        var early = try sm.Stream.init(gpa, .{ .id = "early", .prompt = &long, .max_new = 1, .eos = &.{96} });
+        defer early.deinit(gpa);
+        try r.target.backend().prefill(&early);
+        r.saved = try r.target.save(&early, long.len);
+        r.target.backend().release(&early);
+        r.s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &long, .max_new = 32, .eos = &.{96}, .reuse = .{ .saved = r.saved, .at = long.len } });
+        const b = r.wrapped.backend();
+        try b.prefill(&r.s);
+        return b;
+    }
+
+    pub fn deinit(r: *Restored) void {
+        r.wrapped.backend().release(&r.s);
+        r.s.deinit(gpa);
+        r.target.drop(r.saved);
+        r.wrapped.deinit();
+        r.head.deinit();
+        r.strict.deinit();
+        r.target.deinit();
+    }
+};
+
 test "a copy round after a whole restore does not leave fillers in place of the drafter's first real drafts" {
-    var target: fake.Fake = .{ .gpa = gpa };
-    defer target.deinit();
-    var strict: Strict = .{ .inner = target.backend() };
-    defer strict.deinit();
-    var head: FakeDrafter = .{};
-    defer head.deinit();
-    var wrapped = try Drafted.init(gpa, strict.backend(), head.drafter());
-    defer wrapped.deinit();
-    const b = wrapped.backend();
-    // the whole prompt as a kept state
-    var early = try sm.Stream.init(gpa, .{ .id = "early", .prompt = &long, .max_new = 1, .eos = &.{96} });
-    defer early.deinit(gpa);
-    try target.backend().prefill(&early);
-    const saved = try target.save(&early, long.len);
-    defer target.drop(saved);
-    target.backend().release(&early);
-    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = &long, .max_new = 32, .eos = &.{96}, .reuse = .{ .saved = saved, .at = long.len } });
-    defer s.deinit(gpa);
-    try b.prefill(&s);
-    defer b.release(&s);
+    var r: Restored = undefined;
+    const b = try r.init();
+    defer r.deinit();
+    const s = &r.s;
+    const head = &r.head;
     const n: u64 = long.len;
-    const t = try b.read(try b.first(&s, n));
+    const t = try b.read(try b.first(s, n));
     // the head is asked for 3 drafts but has no row: fillers
-    try b.draft(&.{.{ .stream = &s, .follow = &.{}, .first = .{ .value = t }, .rows = null, .start = n, .position = n + 1, .depth = 3 }});
+    try b.draft(&.{.{ .stream = s, .follow = &.{}, .first = .{ .value = t }, .rows = null, .start = n, .position = n + 1, .depth = 3 }});
     // the round loop takes a copy proposal instead: the fillers are never asked for
     const copy = [_]u32{ 7, 8 };
     var drawn: [3]u32 = undefined;
     var echo: [2]u32 = undefined;
-    const w1 = [_]be.Window{.{ .stream = &s, .pending = t, .held = 0, .tokens = &copy, .parents = null, .positions = &.{ n + 1, n + 2, n + 3 } }};
+    const w1 = [_]be.Window{.{ .stream = s, .pending = t, .held = 0, .tokens = &copy, .parents = null, .positions = &.{ n + 1, n + 2, n + 3 } }};
     var o1 = [_]be.Verified{.{ .sampled = &drawn, .drafts = &echo }};
     try b.verify(&w1, &o1);
     try b.keep(&w1, &.{&.{ 0, 1 }});
     // the next request has real rows: the drafter holds real drafts
-    try b.draft(&.{.{ .stream = &s, .follow = &.{ copy[0], drawn[1] }, .rows = &.{ 0, 1 }, .start = n, .position = n + 3, .depth = 3 }});
+    try b.draft(&.{.{ .stream = s, .follow = &.{ copy[0], drawn[1] }, .rows = &.{ 0, 1 }, .start = n, .position = n + 3, .depth = 3 }});
     try std.testing.expectEqual(@as(u32, 1), head.holds);
     var drawn2: [4]u32 = undefined;
     var echo2: [3]u32 = undefined;
-    const w2 = [_]be.Window{.{ .stream = &s, .pending = drawn[1], .held = 3, .tokens = &.{}, .parents = null, .positions = &.{ n + 3, n + 4, n + 5, n + 6 } }};
+    const w2 = [_]be.Window{.{ .stream = s, .pending = drawn[1], .held = 3, .tokens = &.{}, .parents = null, .positions = &.{ n + 3, n + 4, n + 5, n + 6 } }};
     var o2 = [_]be.Verified{.{ .sampled = &drawn2, .drafts = &echo2 }};
     try b.verify(&w2, &o2);
     // the verify read the drafter (not stale fillers) and the target saw its drafts
     try std.testing.expectEqual(@as(u32, 1), head.helds);
-    try std.testing.expectEqualSlices(u32, head.lanes.getPtr(&s).?.held.items[0..3], &echo2);
-}
-
-/// A test grammar: `length` odd tokens, then 96.
-const Odd = struct {
-    length: u32 = 12,
-    at: u32 = 0,
-    done: bool = false,
-
-    fn rules(o: *Odd) grammar.Rules {
-        return .{ .ptr = o, .vtable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free } };
-    }
-
-    fn cast(ptr: *anyopaque) *Odd {
-        return @ptrCast(@alignCast(ptr));
-    }
-
-    fn allows(o: *const Odd, t: u32) bool {
-        if (o.done) return false;
-        return if (o.at == o.length) t == 96 else t % 2 == 1;
-    }
-
-    fn accept(ptr: *anyopaque, t: u32) anyerror!bool {
-        const o = cast(ptr);
-        if (!o.allows(t)) return false;
-        if (o.at == o.length) o.done = true else o.at += 1;
-        return true;
-    }
-
-    fn rollback(ptr: *anyopaque, n: usize) anyerror!void {
-        const o = cast(ptr);
-        for (0..n) |_| {
-            if (o.done) o.done = false else o.at -= 1;
-        }
-    }
-
-    fn terminated(ptr: *anyopaque) bool {
-        return cast(ptr).done;
-    }
-
-    fn fill(ptr: *anyopaque, words: []u32) anyerror!void {
-        const o = cast(ptr);
-        @memset(words, 0);
-        for (0..fake.vocab) |t| if (o.allows(@intCast(t))) {
-            words[t / 32] |= @as(u32, 1) << @intCast(t % 32);
-        };
-    }
-
-    fn drafts(_: *anyopaque, _: []u32) anyerror!usize {
-        return 0;
-    }
-
-    fn free(_: *anyopaque) void {}
-};
-
-test "structured output through the wrapper: the grammar walks the drafter's held drafts, and drafted == plain" {
-    for ([_]?Sampling{ null, sampled }) |s| {
-        var outs: [2]Out = undefined;
-        for (&outs, [_]Mode{ .wrapped, .plain }) |*o, mode| {
-            var g: Odd = .{};
-            var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
-            o.* = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = mode == .wrapped, .grammar = &k }}, mode, false);
-        }
-        defer for (outs) |o| freeOut(o);
-        try std.testing.expectEqualSlices(u32, outs[1].tokens[0], outs[0].tokens[0]);
-        try std.testing.expect(outs[0].head.helds > 0 and outs[0].drafted > 0);
-        var g: Odd = .{};
-        for (outs[0].tokens[0]) |t| try std.testing.expect(try Odd.accept(&g, t));
-        try std.testing.expect(g.done);
-    }
+    try std.testing.expectEqualSlices(u32, head.lanes.getPtr(s).?.held.items[0..3], &echo2);
 }

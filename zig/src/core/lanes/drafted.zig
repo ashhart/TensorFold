@@ -160,13 +160,12 @@ pub const Drafted = struct {
         return x.target.verify(x.windows.items, out);
     }
 
-    /// One stream's held drafts as host tokens before its verify, for a grammar to walk (fillers: the pending token).
+    /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).
     fn held(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
         const x = self(ptr);
         const lane = x.lanes.getPtr(s) orelse return error.NotDrafting;
         if (lane.filler > 0) {
             @memset(out, s.pending.?);
-            lane.filler = 0;
             return;
         }
         try x.drafter.held(&.{s}, &.{out});
