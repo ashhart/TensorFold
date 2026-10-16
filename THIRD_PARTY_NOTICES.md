@@ -83,6 +83,12 @@ Flash Next implements transformers' model math under the attribution above. In t
 DeltaNet kernel follows flash-linear-attention's numerics, MIT; its NCCL wrapper follows vLLM's stream convention,
 Apache-2.0, without copying either implementation.
 
+The native Drama 3 backbone's Gated DeltaNet prefill (`zig/kernels/cuda/drama_gdn_chunk.cuh`, driven by
+`zig/src/families/drama/backbone_gdn.zig`) is adapted from SGLang's `chunk_gated_delta_rule` (Apache-2.0), whose
+kernels are adapted from [flash-linear-attention](https://github.com/fla-org/flash-linear-attention), MIT License,
+Copyright (c) 2023-2025 Songlin Yang, Yu Zhang (text below). Its decode recurrence (`drama_backbone.cu`) follows
+the same project's packed decode.
+
 The Python engine's GLM CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math,
 Apache-2.0, without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
 from Mia-AiLab without including recipe code.
