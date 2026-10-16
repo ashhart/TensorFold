@@ -271,22 +271,25 @@ pub const Kernels = struct {
         scale: f32,
     };
 
-    /// q/k norm + RoPE + cache append, then causal attention with the output gate.
+    /// q/k norm + RoPE + cache append, then causal attention with the output gate; one row takes a single launch.
     pub fn attention(k: *const Kernels, s: cuda.Stream, t: Attn) !void {
-        var a: cuda.Args = .{};
-        a.add(t.qkv);
-        a.add(int(t.ld_qkv));
-        a.add(t.q_norm);
-        a.add(t.k_norm);
-        a.add(t.inv_freq);
-        a.add(t.q);
-        a.add(t.kc);
-        a.add(t.vc);
-        a.add(int(t.pos0));
-        a.add(int(t.heads));
-        a.add(int(t.kv_heads));
-        a.add(t.eps);
-        try go(s, k.attn_prep_fn, .{ t.rows, t.heads + t.kv_heads, 1 }, 32, &a);
+        const one = t.rows == 1;
+        if (!one) {
+            var a: cuda.Args = .{};
+            a.add(t.qkv);
+            a.add(int(t.ld_qkv));
+            a.add(t.q_norm);
+            a.add(t.k_norm);
+            a.add(t.inv_freq);
+            a.add(t.q);
+            a.add(t.kc);
+            a.add(t.vc);
+            a.add(int(t.pos0));
+            a.add(int(t.heads));
+            a.add(int(t.kv_heads));
+            a.add(t.eps);
+            try go(s, k.attn_prep_fn, .{ t.rows, t.heads + t.kv_heads, 1 }, 32, &a);
+        }
         var b: cuda.Args = .{};
         b.add(t.q);
         b.add(t.kc);
@@ -298,6 +301,10 @@ pub const Kernels = struct {
         b.add(int(t.heads));
         b.add(int(t.kv_heads));
         b.add(t.scale);
+        b.add(if (one) t.q_norm else 0);
+        b.add(if (one) t.k_norm else 0);
+        b.add(t.inv_freq);
+        b.add(t.eps);
         try go(s, k.attention_fn, .{ t.rows, t.heads, 1 }, 256, &b);
     }
 
