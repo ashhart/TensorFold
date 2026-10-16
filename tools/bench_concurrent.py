@@ -16,7 +16,7 @@ the reply's usage. A request that fails to connect or errors counts in ``failed`
 server with a small listen backlog resets simultaneous connections; those resets are reported, not hidden).
 Standard library only.
 
-  python3 tools/bench_concurrent.py http://127.0.0.1:8080 MODEL --levels 1,2,4,8 --alone --output out.json
+  python3 tools/bench_concurrent.py http://127.0.0.1:8888 MODEL --levels 1,2,4,8 --alone --output out.json
 """
 
 import argparse

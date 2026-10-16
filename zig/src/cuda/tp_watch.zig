@@ -1,6 +1,7 @@
 //! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL, carrying ready and error records.
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("sys");
+const posix = @import("sys").posix;
 
 /// One record on a line: ready, or an error and its name.
 const Record = extern struct { kind: u32, rank: u32, text: [56]u8 = @splat(0) };
@@ -24,7 +25,7 @@ pub fn ended() void {
 
 /// NCCL_COMM_ID's host (IPv4) at its port plus one.
 fn address() !posix.sockaddr.in {
-    const id = std.mem.span(std.c.getenv("NCCL_COMM_ID") orelse return error.NoCommId);
+    const id = std.mem.span(platform.c.getenv("NCCL_COMM_ID") orelse return error.NoCommId);
     const colon = std.mem.lastIndexOfScalar(u8, id, ':') orelse return error.NoCommId;
     const port = (std.fmt.parseInt(u16, id[colon + 1 ..], 10) catch return error.NoCommId) +% 1;
     const ip = std.Io.net.IpAddress.parse(id[0..colon], port) catch return error.NoCommId;
@@ -127,7 +128,7 @@ pub fn fail(name: []const u8) void {
 
 /// Ends this process at once: a stream may hold kernels that wait on the gone rank, which a normal exit would join.
 fn stop() noreturn {
-    std.c._exit(1);
+    platform.c._exit(1);
 }
 
 /// A line's records; it closing or carrying an error stops this rank unless it ends on purpose.

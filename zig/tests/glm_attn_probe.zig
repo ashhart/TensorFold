@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's dense latent attention (forward.attendDense) on given inputs, for a bit check against a reference.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 
@@ -57,8 +58,8 @@ pub fn main(init: std.process.Init) !void {
         try out.appendSlice(arena, bufs[3].contents()[0 .. 64 * n * 2]);
         try out.appendSlice(arena, bufs[4].contents()[0..qb]);
     }
-    const file = std.c.fopen(try std.fmt.allocPrintSentinel(arena, "{s}", .{args[2]}, 0), "wb") orelse return error.OpenFailed;
-    defer _ = std.c.fclose(file);
-    if (std.c.fwrite(out.items.ptr, 1, out.items.len, file) != out.items.len) return error.WriteFailed;
+    const file = platform.c.fopen(try std.fmt.allocPrintSentinel(arena, "{s}", .{args[2]}, 0), "wb") orelse return error.OpenFailed;
+    defer _ = platform.c.fclose(file);
+    if (platform.c.fwrite(out.items.ptr, 1, out.items.len, file) != out.items.len) return error.WriteFailed;
     std.debug.print("{d} cases\n", .{cases});
 }

@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's checkpoint index in either layout (the original or mlx-lm's), each tensor by its original name.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("../../core/safetensors.zig");
 const load_fix = @import("weights_fix.zig");
@@ -45,15 +46,15 @@ pub fn read(gpa: std.mem.Allocator, arena: std.mem.Allocator, dir: []const u8, m
     for (files.keys(), 0..) |name, si| {
         const full = try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ dir, name }, 0);
         try shards.append(gpa, full);
-        const fd = std.c.open(full, .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(full, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         var head: [8]u8 = undefined;
         try load_fix.readAll(fd, &head, 0);
         const hlen = std.mem.readInt(u64, &head, .little);
         const header = try arena.alloc(u8, hlen);
         try load_fix.readAll(fd, header, 8);
-        const end = std.c.lseek(fd, 0, std.c.SEEK.END);
+        const end = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         const data = 8 + hlen;
         const doc2 = try std.json.parseFromSliceLeaky(std.json.Value, arena, header, .{});
         var eit = doc2.object.iterator();

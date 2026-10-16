@@ -1,5 +1,6 @@
 //! The benchmark's own serve child: lock, flags, environment, port, readiness and a stop that always reaps.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const json = @import("json");
 const cli = @import("cli.zig");
@@ -215,7 +216,7 @@ pub const Managed = struct {
         stop_flag.releaseChild(m.pid);
         var status: c_int = 0;
         while (true) {
-            const rc = std.c.waitpid(m.pid, &status, 0);
+            const rc = platform.c.waitpid(m.pid, &status, 0);
             if (rc >= 0 or posix.errno(rc) != .INTR) break;
         }
         m.reaped = true;
@@ -224,7 +225,7 @@ pub const Managed = struct {
 };
 
 const wait = struct {
-    extern "c" fn waitid(idtype: c_uint, id: c_uint, info: *std.c.siginfo_t, options: c_int) c_int;
+    extern "c" fn waitid(idtype: c_uint, id: c_uint, info: *platform.c.siginfo_t, options: c_int) c_int;
     const p_pid = 1;
     const exited: c_int = if (builtin.os.tag == .linux) std.os.linux.W.EXITED else 0x4;
     const no_wait: c_int = if (builtin.os.tag == .linux) std.os.linux.W.NOWAIT else 0x20;
@@ -232,9 +233,9 @@ const wait = struct {
 
 /// True once ``pid`` has exited, or is no child of this process, without reaping it.
 pub fn ended(pid: posix.pid_t) bool {
-    var info: std.c.siginfo_t = undefined;
+    var info: platform.c.siginfo_t = undefined;
     @memset(std.mem.asBytes(&info), 0);
-    const rc = wait.waitid(wait.p_pid, @intCast(pid), &info, wait.exited | wait.no_wait | std.c.W.NOHANG);
+    const rc = wait.waitid(wait.p_pid, @intCast(pid), &info, wait.exited | wait.no_wait | platform.c.W.NOHANG);
     if (rc < 0) return posix.errno(rc) == .CHILD;
     const got = if (builtin.os.tag == .linux) info.fields.common.first.piduid.pid else info.pid;
     return got == pid;

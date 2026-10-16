@@ -1,5 +1,6 @@
 //! The --slide key gate: a server that rewrites its weights starts only with a key its own key store accepts.
 const std = @import("std");
+const platform = @import("sys");
 const auth = @import("auth.zig");
 const cli = @import("cli.zig");
 const Allocator = std.mem.Allocator;
@@ -59,10 +60,12 @@ test "--slide refuses before any load a key file or a key the server's store wou
     const missing = (try slideKeyless(a, keyed, "")) orelse return error.TestExpectedRefusal;
     try std.testing.expect(has(missing, file));
     try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "ops: sk-file\n" });
-    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(std.posix.AT.FDCWD, file, 0o644, 0));
-    const open = (try slideKeyless(a, keyed, "")) orelse return error.TestExpectedRefusal;
-    try std.testing.expect(has(open, file) and has(open, "chmod 600"));
-    try std.testing.expectEqual(@as(c_int, 0), std.c.fchmodat(std.posix.AT.FDCWD, file, 0o600, 0));
+    if (comptime @import("builtin").os.tag != .windows) { // Windows files have no mode bits for others to read through
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(platform.c.AT.FDCWD, file, 0o644, 0));
+        const open = (try slideKeyless(a, keyed, "")) orelse return error.TestExpectedRefusal;
+        try std.testing.expect(has(open, file) and has(open, "chmod 600"));
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(platform.c.AT.FDCWD, file, 0o600, 0));
+    }
     try std.testing.expect(try slideKeyless(a, keyed, "") == null);
     try tmp.dir.writeFile(io, .{ .sub_path = "keys", .data = "" });
     const empty = (try slideKeyless(a, keyed, "")) orelse return error.TestExpectedRefusal;

@@ -152,6 +152,6 @@ __global__ void __launch_bounds__(WM * WN * 32)
 
 // Prefill form for groups of 64: up with relu^2 (epilogue 1), down to bf16 (epilogue 3).
 #define TF_PREFILL(EPI) template __global__ void tf_experts_prefill::prefill_kernel<64, 1, EPI, 2, 2, 4>( \
-    const __nv_bfloat16*, int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
+    const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float);
 TF_PREFILL(1)
 TF_PREFILL(3)

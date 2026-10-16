@@ -1,5 +1,6 @@
 //! Nemotron's CUDA engine, MTP head and lane backend behind the native family interface.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
@@ -154,7 +155,7 @@ fn release(p: *anyopaque) void {
 /// TF_CUDA_CARVEOUT=1: the display carveout KV planes go to first (cuda/carveout.zig); null when it is off.
 fn openCarveout(gpa: std.mem.Allocator, ctx: *const cuda.Context) !?*cuda.Carveout {
     const bytes = (try cuda.carveout.requested(false, env("TF_CUDA_CARVEOUT"), env("TF_CUDA_CARVEOUT_MIB"))) orelse return null;
-    const card: [*:0]const u8 = std.c.getenv("TF_DRM_CARD") orelse cuda.carveout.default_card;
+    const card: [*:0]const u8 = platform.c.getenv("TF_DRM_CARD") orelse cuda.carveout.default_card;
     const c = try gpa.create(cuda.Carveout);
     errdefer gpa.destroy(c);
     c.* = cuda.Carveout.open(ctx.d, card, bytes) catch |err| {
@@ -171,5 +172,5 @@ fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
 }
 
 fn env(name: [:0]const u8) ?[]const u8 {
-    return std.mem.span(std.c.getenv(name) orelse return null);
+    return std.mem.span(platform.c.getenv(name) orelse return null);
 }

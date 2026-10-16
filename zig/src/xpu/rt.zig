@@ -1,6 +1,7 @@
 //! Prototype-style runtime view: one Runtime over a Context and its Stream, with plain buffers, modules and kernels.
 
 const std = @import("std");
+const platform = @import("sys");
 const ze = @import("ze");
 const xpu = @import("context.zig");
 const Context = @import("context.zig").Context;
@@ -12,8 +13,8 @@ const ProfEntry = struct { name: ?[*:0]const u8 = null, ns: u64 = 0, calls: u64 
 var prof_tab: [160]ProfEntry = @splat(.{});
 
 fn profNow() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 
@@ -169,7 +170,7 @@ pub const Runtime = struct {
         live_list = s.list;
         live_sync = c.d.api.zeCommandListHostSynchronize;
         _ = atexit(&atExit); // exit handlers run last-in first-out: after the loader is open, so ours runs before it tears down
-        if (std.c.getenv("XPU_PROF") != null) prof_on = true;
+        if (platform.c.getenv("XPU_PROF") != null) prof_on = true;
         return .{ .drv = c.d, .device = c.gpu.device, .ctx = c.gpu.context, .list = s.list };
     }
 

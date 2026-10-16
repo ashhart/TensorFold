@@ -41,3 +41,18 @@ jobs:
           (cd ../lean-base && python3 tools/zig/lean_check.py > ../lean-base.txt || true)
           python3 tools/zig/lean_check.py > ../lean-head.txt || true
           python3 tools/zig/lean_new.py ../lean-base.txt ../lean-head.txt
+  zig-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+      # The same host unit tests on Windows: the platform layer (zig/src/platform) over the UCRT, Win32 and Winsock.
+      - name: zig build test
+        run: zig build test
+      # The server goldens and the Cortheon fuzz harness on Windows too; the goldens skip the signal-driven cases.
+      - name: zig build test-golden
+        run: zig build test-golden
+      - name: zig build fuzz-cortheon
+        run: zig build fuzz-cortheon

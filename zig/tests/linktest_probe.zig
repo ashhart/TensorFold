@@ -1,5 +1,6 @@
 //! What a verbs device reports and what it actually allows: registration sizes and counts, queue pair types and counts.
 const std = @import("std");
+const platform = @import("sys");
 const fabric = @import("fabric");
 const abi = fabric.verbs_abi;
 const Verbs = fabric.verbs.Verbs;
@@ -8,7 +9,7 @@ const out = @import("linktest_suite.zig").out;
 const mib = 1 << 20;
 
 fn errno() c_int {
-    return std.c._errno().*;
+    return platform.c._errno().*;
 }
 
 pub fn device(v: *const Verbs, dev: []const u8) !void {

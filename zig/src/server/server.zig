@@ -1,5 +1,6 @@
 //! The server: one engine and tokenizer behind the HTTP routes, one thread a connection.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -301,7 +302,7 @@ pub const Server = struct {
             _ = srv.open_connections.fetchAdd(1, .acq_rel);
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c }) catch {
                 _ = srv.open_connections.fetchSub(1, .acq_rel);
-                _ = std.posix.system.close(c.fd);
+                _ = platform.posix.system.close(c.fd);
                 continue;
             };
             t.detach();
@@ -310,7 +311,7 @@ pub const Server = struct {
 
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
         defer _ = srv.open_connections.fetchSub(1, .acq_rel);
-        defer _ = std.posix.system.close(accepted.fd);
+        defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;

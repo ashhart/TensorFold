@@ -1,5 +1,6 @@
 //! Speed-up mode's slot commands: rank 0 sends each slot operation before it runs it; rank 1 runs the same, in order.
 const std = @import("std");
+const platform = @import("sys");
 const eng = @import("engine.zig");
 const slots_mod = @import("slots.zig");
 const st = @import("state.zig");
@@ -192,10 +193,10 @@ fn learned(sl: *Slots, k: Kind, w: []const u32) !void {
 }
 
 pub fn fileBytes(file: [:0]const u8) u64 {
-    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(file, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd < 0) return 0;
-    defer _ = std.c.close(fd);
-    const n = std.c.lseek(fd, 0, std.c.SEEK.END);
+    defer _ = platform.c.close(fd);
+    const n = platform.c.lseek(fd, 0, platform.c.SEEK.END);
     return if (n > 0) @intCast(n) else 0;
 }
 

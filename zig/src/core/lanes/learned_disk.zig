@@ -1,5 +1,6 @@
 //! Reserve learned-state writes above a free-disk floor, with bounded backoff after refusals or write failures.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const Count = if (builtin.os.tag == .linux) u64 else u32;
 const Stat = extern struct {
@@ -19,14 +20,15 @@ const Stat = extern struct {
 extern "c" fn statvfs(path: [*:0]const u8, result: *Stat) c_int;
 
 pub fn available(dir: [:0]const u8) ?u64 {
+    if (builtin.os.tag == .windows) return platform.c.diskAvailable(dir);
     var stat: Stat = undefined;
     if (statvfs(dir, &stat) != 0) return null;
     return std.math.mul(u64, stat.frsize, stat.bavail) catch null;
 }
 
 fn now() ?u64 {
-    var t: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &t) != 0 or t.sec < 0) return null;
+    var t: platform.c.timespec = undefined;
+    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t) != 0 or t.sec < 0) return null;
     return @intCast(t.sec);
 }
 

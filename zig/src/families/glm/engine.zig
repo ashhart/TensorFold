@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash on Metal: one greedy reply at a time, the prompt in 16-row windows or tensor-unit chunks, then drafted rounds.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -103,7 +104,7 @@ pub const Engine = struct {
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
+        return loadWith(gpa, dir, cap, if (platform.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
     }
 
     /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
@@ -112,25 +113,25 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
         e.vision = null;
         e.gpu = .{ 0, 0 };
-        e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
-        e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
+        e.fused_route = if (platform.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
+        e.draft_vocab = if (platform.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.committed = 0;
         e.ep = null;
         e.pr = null;
         e.trace_last = null;
         e.margins = null;
         e.chunk_rows = prompt_mod.max_rows;
-        e.cut = if (std.c.getenv("GLM_CUTS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
-        e.copy_min = if (std.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
-        e.rank_log = if (std.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
-        e.sampling = try fwd.envSampling(std.c.getenv);
-        if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
+        e.cut = if (platform.c.getenv("GLM_CUTS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
+        e.copy_min = if (platform.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
+        e.rank_log = if (platform.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
+        e.sampling = try fwd.envSampling(platform.c.getenv);
+        if (platform.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
         e.device = try mtl.Device.init();
@@ -149,17 +150,17 @@ pub const Engine = struct {
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
         const model = try load_plan.modelHash(gpa, dir, f.bytes[0..f.size]);
         e.model_hash = model;
-        if (std.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
-        if (std.c.getenv("GLM_MTP")) |v| if (v[0] == '0') { // no MTP head: no drafts, its ~4 GB left on disk
+        if (platform.c.getenv("GLM_LAYERS")) |v| try cfg.subset(&e.c, std.fmt.parseInt(u32, std.mem.span(v), 10) catch return error.BadLayerCount);
+        if (platform.c.getenv("GLM_MTP")) |v| if (v[0] == '0') { // no MTP head: no drafts, its ~4 GB left on disk
             e.c.mtp = 0;
         };
         const link: ?ep_mod.Settings = if (ep_path) |sp| blk: {
             const sf = try mtl.MappedFile.open(try e.ep_arena.allocator().dupeSentinel(u8, sp, 0));
             defer sf.deinit();
             const s = try ep_mod.readSettings(e.ep_arena.allocator(), sf.bytes[0..sf.size]);
-            const by_rows = if (std.c.getenv("GLM_EP_SPLIT")) |v| !std.mem.eql(u8, std.mem.span(v), "experts") else true;
+            const by_rows = if (platform.c.getenv("GLM_EP_SPLIT")) |v| !std.mem.eql(u8, std.mem.span(v), "experts") else true;
             if (by_rows) try cfg.splitRows(&e.c, s.rank, 2) else try cfg.split(&e.c, s.rank, 2);
-            const tp = if (std.c.getenv("GLM_TP")) |v| v[0] != '0' else true; // TP2: each Mac half the KDA heads (GLM_TP=0: off)
+            const tp = if (platform.c.getenv("GLM_TP")) |v| v[0] != '0' else true; // TP2: each Mac half the KDA heads (GLM_TP=0: off)
             if (by_rows and tp) try cfg.splitHeads(&e.c, s.rank, 2);
             if (e.c.tp > 1) { // TP2's head halves: the whole vocabulary (its kernel's pitch); no host logits to rank
                 e.draft_vocab = e.c.vocab;
@@ -173,7 +174,7 @@ pub const Engine = struct {
             gpa.destroy(e.k);
         }
         try frags.check(e.device, e.queue, gpa); // the fragment layout nax.h gives GLM's prompt and attention kernels
-        const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
+        const chunked = if (platform.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
         // --vision: the image tower and its rows count against the limit beside the weights and caches
@@ -189,7 +190,7 @@ pub const Engine = struct {
                 plan_bytes = lean_bytes;
             }
         }
-        if (std.c.getenv("GLM_DRY") != null) return error.DryRun;
+        if (platform.c.getenv("GLM_DRY") != null) return error.DryRun;
         e.arena = .{ .device = e.device, .gpa = gpa };
         errdefer e.arena.deinit();
         const both = try st.init(&e.arena, &e.c, cap);
@@ -209,9 +210,9 @@ pub const Engine = struct {
             return error.OverMemoryLimit;
         }
         { // short of free memory: drop the checkpoint's own cached pages before the kernel takes other files' (#583)
-            const dropped_at = std.c.mach_absolute_time();
+            const dropped_at = platform.c.mach_absolute_time();
             if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes + tower)) |d| {
-                if (d.dropped > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache, the {d:.1} GiB free memory lacked for the load ({d:.2} s)", .{ @as(f64, @floatFromInt(d.dropped)) / (1 << 30), @as(f64, @floatFromInt(d.deficit)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
+                if (d.dropped > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache, the {d:.1} GiB free memory lacked for the load ({d:.2} s)", .{ @as(f64, @floatFromInt(d.dropped)) / (1 << 30), @as(f64, @floatFromInt(d.deficit)) / (1 << 30), @as(f64, @floatFromInt(platform.c.mach_absolute_time() - dropped_at)) / 24e6 });
             } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }
         e.w = try wts.load(gpa, e.device, dir, &e.c, 16, false);
@@ -233,13 +234,13 @@ pub const Engine = struct {
         errdefer if (e.vision) |v| v.deinit();
         residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
-        if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
+        if (e.pr != null and cap >= 128 and platform.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
             for (&ids, 0..) |*t, i| t.* = @intCast(1000 + i);
             var quiet: Quiet = .{};
             _ = try e.generate(&ids, 2, &.{}, 0, .{ .ctx = &quiet, .prefilled = Quiet.prefilled, .tokens = Quiet.tokens, .cancelled = Quiet.cancelled });
         }
-        e.load_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t0)) / 24e6;
+        e.load_seconds = @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t0)) / 24e6;
         return e;
     }
 
@@ -330,7 +331,7 @@ pub const Engine = struct {
         e.ev += 1;
         cb.signal(e.event, e.ev);
         cb.commit();
-        e.committed = std.c.mach_absolute_time();
+        e.committed = platform.c.mach_absolute_time();
         if (spin) {
             while (@backingInt(cb.status()) < @backingInt(mtl.types.CommandBufferStatus.completed)) std.atomic.spinLoopHint();
         } else cb.wait();
@@ -385,7 +386,7 @@ pub const Engine = struct {
         e.s.reset();
         @memcpy(u32s(e.prompt_ids, prompt.len), prompt);
         var x = e.ctx();
-        const t_start = std.c.mach_absolute_time();
+        const t_start = platform.c.mach_absolute_time();
         // the prompt: windows of up to 16 rows, the MTP head taking each row with the token after it
         var at: u32 = 0;
         var last_n: u32 = 1;
@@ -432,7 +433,7 @@ pub const Engine = struct {
         }
         x.draws = null; // the decode loop re-arms the sampled draw each round; the MTP head drafts greedily
         e.s.pos = P;
-        const t_prompt = std.c.mach_absolute_time();
+        const t_prompt = platform.c.mach_absolute_time();
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length, .prompt_seconds = @as(f64, @floatFromInt(t_prompt - t_start)) / 24e6 };
         var tok = u32s(e.sc.picks, 1)[0];
@@ -445,7 +446,7 @@ pub const Engine = struct {
         if (max_tokens <= 1) return res;
         if (d == 0 and e.ep == null and e.copy_min == 0 and e.margins == null) {
             try plain_rounds.run(e, &x, tok, max_tokens, eos, out, &res);
-            res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
+            res.decode_seconds = @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t_prompt)) / 24e6;
             return res;
         }
         var emitted: usize = 1;
@@ -467,7 +468,7 @@ pub const Engine = struct {
         var last_end: f64 = 0;
         var round_draws: fwd.Draws = .{}; // the current decode round's rules, rebuilt each round
         while (true) {
-            const t_enc = std.c.mach_absolute_time();
+            const t_enc = platform.c.mach_absolute_time();
             const b = e.begin();
             if (window > 0) { // the last window's kept rows (the prompt's windows kept all theirs)
                 fwd.keepKda(&x, b.enc, window, keep);
@@ -566,7 +567,7 @@ pub const Engine = struct {
                 break;
             }
         }
-        res.decode_seconds = @as(f64, @floatFromInt(std.c.mach_absolute_time() - t_prompt)) / 24e6;
+        res.decode_seconds = @as(f64, @floatFromInt(platform.c.mach_absolute_time() - t_prompt)) / 24e6;
         return res;
     }
 };

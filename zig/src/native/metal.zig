@@ -1,5 +1,6 @@
 //! The Metal engines: lane core (Nemotron, Qwen3.5-2B, LFM2-MoE, GLM, Qwen3.8-27B), Flash Next replay.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
@@ -326,9 +327,9 @@ fn shardStamps(h: *std.hash.Wyhash, a: Allocator, io: std.Io, dir: []const u8) !
 /// A safetensors file's header (its tensors' names, shapes and offsets), in `a`.
 fn safetensorsHeader(a: Allocator, dir: []const u8, name: []const u8) ![]const u8 {
     const path = try std.fmt.allocPrintSentinel(a, "{s}/{s}", .{ dir, name }, 0);
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.FileNotFound;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     var n: u64 = 0;
     if (!api.prompt_imprint.readAt(fd, std.mem.asBytes(&n), 0) or n > 1 << 24) return error.BadHeader;
     const head = try a.alloc(u8, @intCast(n));
@@ -378,7 +379,7 @@ fn gibBytes(g: f64) u64 {
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
 fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    const dump: ?[]const u8 = if (std.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
+    const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -453,7 +454,7 @@ fn openGlmDsa(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[
     }
     var ram: u64 = 0;
     var len: usize = 8;
-    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    if (platform.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const h = glm_dsa.open(gpa, io, o.dir, @intCast(window), settings, @max(1, @min(o.lanes, 16)), ram / 100 * 66, o.prompt_cache_gib) catch |e| {
@@ -564,10 +565,10 @@ test "a shard rewritten in place, same size and bytes, gives the learned states 
     try std.testing.expectEqual(first.final(), notes.final());
     std.Io.sleep(io, .fromMilliseconds(5), .awake) catch {};
     const path = try std.fmt.allocPrintSentinel(a, "{s}/model-00001-of-00001.safetensors", .{dir}, 0);
-    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(path, .{ .ACCMODE = .WRONLY }, @as(platform.c.mode_t, 0));
     try std.testing.expect(fd >= 0);
-    try std.testing.expectEqual(@as(isize, 7), std.c.pwrite(fd, "weights", 7, 0)); // as Sliding Weights writes a tensor of the same size
-    _ = std.c.close(fd);
+    try std.testing.expectEqual(@as(isize, 7), platform.c.pwrite(fd, "weights", 7, 0)); // as Sliding Weights writes a tensor of the same size
+    _ = platform.c.close(fd);
     var moved = std.hash.Wyhash.init(0);
     try shardStamps(&moved, a, io, dir);
     try std.testing.expect(first.final() != moved.final());

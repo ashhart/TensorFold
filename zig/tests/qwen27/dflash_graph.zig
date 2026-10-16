@@ -1,5 +1,6 @@
 //! Generated draft tensors exercise the real callback backend without checkpoint files.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const q = tf.qwen27;
@@ -47,19 +48,19 @@ pub fn createQ4(a: std.mem.Allocator, target: *q.model.Model) !*Model {
     }
     try header.writer.writeByte('}');
     var path_buf: [96]u8 = undefined;
-    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/tf-q27-q4-draft-{d}.safetensors", .{std.c.getpid()}, 0);
-    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const path = try std.fmt.bufPrintSentinel(&path_buf, "/tmp/tf-q27-q4-draft-{d}.safetensors", .{platform.c.getpid()}, 0);
+    const fd = platform.c.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.Create;
-    defer _ = std.c.unlink(path);
+    defer _ = platform.c.unlink(path);
     var head: [8]u8 = undefined;
     std.mem.writeInt(u64, &head, header.written().len, .little);
     for ([_][]const u8{ &head, header.written(), std.mem.sliceAsBytes(data.items) }) |part| {
-        if (std.c.write(fd, part.ptr, part.len) != @as(isize, @intCast(part.len))) {
-            _ = std.c.close(fd);
+        if (platform.c.write(fd, part.ptr, part.len) != @as(isize, @intCast(part.len))) {
+            _ = platform.c.close(fd);
             return error.ShortWrite;
         }
     }
-    _ = std.c.close(fd);
+    _ = platform.c.close(fd);
     return Model.open(a, target, config, &.{path}, .prepared_q4_reference);
 }
 

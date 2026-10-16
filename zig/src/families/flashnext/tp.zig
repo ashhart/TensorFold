@@ -1,5 +1,6 @@
 //! Speed-up mode for Flash Next: two Macs with the whole model each, half the work each, over MCDMA. Decode: each rank computes every routed and the shared expert for its half of the window's rows (`ownRows`) and those rows' MoE branch with one Mac's sums; after each target layer's experts the GPU posts a sequence; the host sends the branch rows (bf16) to the peer, and the next layer's combine waits for the flag the peer's message sets, then updates every row's streams (one Mac's bits). DeltaNet layers split their heads: each rank's out-projection partial (fp32), exchanged and added in rank order. Prefill: a chunk's rows split across the two Macs (replay.zig `chunkPair`); the host sends each layer's handoff into the peer's slot for that layer and signals the layer's flag, which the peer's GPU waits for.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const host_wait = @import("tp_host_wait.zig");
@@ -341,9 +342,9 @@ pub const Tp2 = struct {
             .jobs = try gpa.alloc(Job, JOBS),
         };
         t.one.slice(i32, 1)[0] = 1;
-        t.trace = std.c.getenv("TF_TP_TRACE") != null;
-        t.local = std.c.getenv("TF_TP_LOCAL") != null;
-        t.stats = std.c.getenv("TF_TP_STATS") != null;
+        t.trace = platform.c.getenv("TF_TP_TRACE") != null;
+        t.local = platform.c.getenv("TF_TP_LOCAL") != null;
+        t.stats = platform.c.getenv("TF_TP_STATS") != null;
         // both ranks up before the first round: a word each way
         try rd.signal(t.peer, HELLO, 1);
         while (@atomicLoad(u64, t.word64(HELLO), .acquire) < 1) std.atomic.spinLoopHint();
@@ -529,11 +530,11 @@ pub const Tp2 = struct {
 
     /// Served, rank 0: rank 1's answer for the request just sent: true when it restored the same resume state.
     pub fn waitAck(t: *Tp2) !bool {
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         while (true) {
             const v = @atomicLoad(u64, t.word64(ACK_FLAG), .acquire);
             if (v >> 1 >= t.req) return v >> 1 == t.req and v & 1 != 0;
-            if (std.c.mach_absolute_time() - t0 > 7_200_000_000) return error.TpPeerSilent; // 300 s: rank 1 may still be loading
+            if (platform.c.mach_absolute_time() - t0 > 7_200_000_000) return error.TpPeerSilent; // 300 s: rank 1 may still be loading
             std.atomic.spinLoopHint();
         }
     }
@@ -551,8 +552,8 @@ pub const Tp2 = struct {
             if (t.quitting.load(.acquire)) return null;
             spins += 1;
             if (spins > 100_000) { // idle: back off
-                const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
-                _ = std.c.nanosleep(&ts, null);
+                const ts: platform.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+                _ = platform.c.nanosleep(&ts, null);
             } else std.atomic.spinLoopHint();
         }
         return .{ .head = @ptrCast(t.win.ptr + REQ), .tokens = @ptrCast(@alignCast(t.win.ptr + REQ + 64)) };
@@ -565,11 +566,11 @@ pub const Tp2 = struct {
             try t.rd.signal(t.peer, CTRL_FLAG, (t.ctrl << 6) | (@as(u64, depth & 31) << 1) | @intFromBool(quit));
             return .{ .quit = quit, .depth = depth };
         }
-        const t0 = std.c.mach_absolute_time();
+        const t0 = platform.c.mach_absolute_time();
         while (true) {
             const v = @atomicLoad(u64, t.word64(CTRL_FLAG), .acquire);
             if (v >> 6 >= t.ctrl) return .{ .quit = quit or (v >> 6 == t.ctrl and v & 1 != 0), .depth = @intCast((v >> 1) & 31) };
-            if (std.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
+            if (platform.c.mach_absolute_time() - t0 > 240_000_000) return error.TpPeerSilent; // 10 s
             std.atomic.spinLoopHint();
         }
     }
@@ -604,7 +605,7 @@ pub const Tp2 = struct {
     /// for the peer's, by the flag its message sets) or a prefill send (its writes, then its flag). While idle it
     /// watches the last exchange: 10 s without the peer's answer fails the link.
     fn service(t: *Tp2, first: u32) void {
-        _ = std.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
+        _ = platform.c.pthread_set_qos_class_self_np(.USER_INTERACTIVE, 0); // busy CPUs must not hold back a send
         const posted = t.word32(SYNC + GPU * 4);
         const flag = t.word64(FLAG);
         var seq = first;
@@ -614,7 +615,7 @@ pub const Tp2 = struct {
             var w = @atomicLoad(u32, posted, .acquire);
             while (!postReached(w, seq) or !reached(t.queued.load(.acquire), seq)) {
                 if (t.stop.load(.acquire)) return;
-                if (want_at > 0 and !reached(@truncate(@atomicLoad(u64, flag, .acquire)), @truncate(want)) and !t.failed.load(.acquire) and std.c.mach_absolute_time() - want_at > 240_000_000) { // 10 s of 24 MHz ticks
+                if (want_at > 0 and !reached(@truncate(@atomicLoad(u64, flag, .acquire)), @truncate(want)) and !t.failed.load(.acquire) and platform.c.mach_absolute_time() - want_at > 240_000_000) { // 10 s of 24 MHz ticks
                     t.fail(seq, error.PeerSilent);
                     t.land(want);
                 }
@@ -622,7 +623,7 @@ pub const Tp2 = struct {
                 w = @atomicLoad(u32, posted, .acquire);
             }
             const job = t.jobs[seq % JOBS];
-            const seen = if (t.stats) std.c.mach_absolute_time() else 0;
+            const seen = if (t.stats) platform.c.mach_absolute_time() else 0;
             if ((t.local and job.kind != .send) or t.failed.load(.acquire)) { // a failed link drains: the GPU never hangs
                 if (job.kind != .send) t.land(job.value);
                 seq +%= 1;
@@ -638,11 +639,11 @@ pub const Tp2 = struct {
             }
             if (job.kind != .send) {
                 want = x;
-                want_at = std.c.mach_absolute_time();
+                want_at = platform.c.mach_absolute_time();
                 if (t.failed.load(.acquire)) t.land(x);
             }
             if (t.stats) {
-                const held = std.c.mach_absolute_time() - seen; // ticks: 41.67 ns each on Apple silicon
+                const held = platform.c.mach_absolute_time() - seen; // ticks: 41.67 ns each on Apple silicon
                 t.held_ns += held;
                 t.held_max = @max(t.held_max, held);
                 t.held_kind[@backingInt(job.kind)][0] += held;
@@ -705,13 +706,13 @@ test "the host service follows the GPU's posts across the 27-bit post wrap and t
         for (0..8) |_| { // local serving lands each exchange's flag once its post is seen
             x +%= 1;
             const seq = t.queue(.{ .kind = .exchange, .value = x });
-            const ts: std.c.timespec = .{ .sec = 0, .nsec = 2_000_000 };
-            _ = std.c.nanosleep(&ts, null);
+            const ts: platform.c.timespec = .{ .sec = 0, .nsec = 2_000_000 };
+            _ = platform.c.nanosleep(&ts, null);
             try std.testing.expect(@as(u32, @truncate(@atomicLoad(u64, t.word64(FLAG), .acquire))) != x); // not before its post
             @atomicStore(u32, t.word32(SYNC + GPU * 4), (seq << 5) | 4, .release);
-            const t0 = std.c.mach_absolute_time();
+            const t0 = platform.c.mach_absolute_time();
             while (@as(u32, @truncate(@atomicLoad(u64, t.word64(FLAG), .acquire))) != x) {
-                if (std.c.mach_absolute_time() - t0 > 24_000_000) return error.ServiceStuck; // 1 s
+                if (platform.c.mach_absolute_time() - t0 > 24_000_000) return error.ServiceStuck; // 1 s
                 std.atomic.spinLoopHint();
             }
         }
@@ -729,8 +730,8 @@ test "partNext and hostWait across the 32-bit wrap: the next exchange's slot, an
     }
     const Peer = struct { // the peer's message landing a call's flag, a little later
         fn land(w: *u64, v: u64) void {
-            const ts: std.c.timespec = .{ .sec = 0, .nsec = 20_000_000 };
-            _ = std.c.nanosleep(&ts, null);
+            const ts: platform.c.timespec = .{ .sec = 0, .nsec = 20_000_000 };
+            _ = platform.c.nanosleep(&ts, null);
             @atomicStore(u64, w, v, .release);
         }
     };

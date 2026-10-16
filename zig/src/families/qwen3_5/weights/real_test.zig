@@ -49,7 +49,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Summary {
 }
 
 test "the real checkpoint (TF_QWEN_DIR) resolves every tensor with consistent shapes" {
-    const dir = std.testing.environ.getPosix("TF_QWEN_DIR") orelse return error.SkipZigTest;
+    const dir = @import("sys").getenv("TF_QWEN_DIR") orelse return error.SkipZigTest;
     const sum = try run(std.testing.allocator, std.testing.io, dir);
     std.debug.print("qwen35 index: {d} layers ({d} full attention, {d} MoE), tied head {}, MTP {}, {d} MiB of projections and MLPs\n", .{ sum.layers, sum.full, sum.moe, sum.tied, sum.mtp, sum.bytes >> 20 });
     try std.testing.expect(sum.layers > 0);

@@ -55,9 +55,9 @@ Record pass, fail and skip counts and explain any unrun platform or feature.
 For served decode, the existing standard-library client needs Python 3.11 or newer:
 
 ```sh
-python3 tools/bench_openai.py http://127.0.0.1:8080 local-model \
+python3 tools/bench_openai.py http://127.0.0.1:8888 local-model \
   --tokens 256 --reps 3 --temperatures 0 --label candidate --output decode.json
-python3 tools/bench_concurrent.py http://127.0.0.1:8080 local-model \
+python3 tools/bench_concurrent.py http://127.0.0.1:8888 local-model \
   --tokens 256 --reps 3 --temperatures 0 --levels 1,4 --alone --serial --output concurrent.json
 ```
 

@@ -1,5 +1,6 @@
 //! Stream slots on one Mac: a stream's caches each; prompt chunks, shared windows, keeps and drafts run on them.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -78,7 +79,7 @@ pub const Slots = struct {
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
+        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = platform.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
         if (pool_mod.on(e)) pool_mod.setUp(&sl);
         return sl;
     }
@@ -252,7 +253,7 @@ pub const Slots = struct {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
-        const t_in = std.c.mach_absolute_time();
+        const t_in = platform.c.mach_absolute_time();
         sl.settleAll();
         try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
         const ids = Engine.u32s(e.sc.ids, st.max_rows);
@@ -280,7 +281,7 @@ pub const Slots = struct {
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, e.sc.picks, total);
         sl.ahead = .{ 0, 0 };
         try sl.flushBy(true);
-        const ret = std.c.mach_absolute_time();
+        const ret = platform.c.mach_absolute_time();
         if (sl.log) {
             const first = if (sl.ahead[1] > 0) sl.ahead[0] else e.gpu[0];
             std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3 });

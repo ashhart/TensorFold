@@ -1,5 +1,6 @@
 //! The stop flag through its real handler, in forked copies of the test process, with children the tests reap.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const fake = @import("benchmark_fake.zig");
 const posix = std.posix;
@@ -37,22 +38,22 @@ const Sleeper = struct {
         var waited: u32 = 0;
         while (s.status == null and waited <= ms) : (waited += 10) {
             var status: c_int = 0;
-            if (std.c.waitpid(s.pid, &status, std.c.W.NOHANG) == s.pid) s.status = @bitCast(status) else if (waited < ms) fake.nap(10);
+            if (platform.c.waitpid(s.pid, &status, platform.c.W.NOHANG) == s.pid) s.status = @bitCast(status) else if (waited < ms) fake.nap(10);
         }
         return s.status;
     }
 
     fn end(s: *Sleeper) void {
         if (s.ended(0) != null) return;
-        _ = std.c.kill(s.pid, .KILL);
+        _ = platform.c.kill(s.pid, .KILL);
         var status: c_int = 0;
-        _ = std.c.waitpid(s.pid, &status, 0);
+        _ = platform.c.waitpid(s.pid, &status, 0);
     }
 };
 
 fn killedBy(status: ?u32, sig: posix.SIG) bool {
     const s = status orelse return false;
-    return std.c.W.IFSIGNALED(s) and std.c.W.TERMSIG(s) == sig;
+    return platform.c.W.IFSIGNALED(s) and platform.c.W.TERMSIG(s) == sig;
 }
 
 test "a second Ctrl-C kills the guarded child, and a released child is left alone" {
@@ -72,17 +73,17 @@ test "a second Ctrl-C kills the guarded child, and a released child is left alon
 
 /// Runs ``body`` in a forked copy of this process; its wait status, or null when it ran past 5 s and was killed.
 fn forked(body: *const fn () u8) !?u32 {
-    const pid = std.c.fork();
+    const pid = platform.c.fork();
     if (pid < 0) return error.SkipZigTest;
-    if (pid == 0) std.c._exit(body());
+    if (pid == 0) platform.c._exit(body());
     var status: c_int = 0;
     var waited: u32 = 0;
     while (waited < 5000) : (waited += 10) {
-        if (std.c.waitpid(pid, &status, std.c.W.NOHANG) == pid) return @bitCast(status);
+        if (platform.c.waitpid(pid, &status, platform.c.W.NOHANG) == pid) return @bitCast(status);
         fake.nap(10);
     }
-    _ = std.c.kill(pid, .KILL);
-    _ = std.c.waitpid(pid, &status, 0);
+    _ = platform.c.kill(pid, .KILL);
+    _ = platform.c.waitpid(pid, &status, 0);
     return null;
 }
 
@@ -94,24 +95,24 @@ const InFork = struct {
         stop.releaseTerminal();
         stop.install();
         stop.guardChild(target);
-        _ = std.c.raise(.INT);
+        _ = platform.c.raise(.INT);
         if (stop.requested() != .INT) return 2;
-        _ = std.c.raise(.INT);
+        _ = platform.c.raise(.INT);
         return 3;
     }
 
     fn firstStopWins() u8 {
         stop.reset();
         stop.install();
-        _ = std.c.raise(.HUP);
-        _ = std.c.raise(.TERM);
+        _ = platform.c.raise(.HUP);
+        _ = platform.c.raise(.TERM);
         if (stop.requested() != .HUP) return 4;
         stop.reset();
-        _ = std.c.raise(.TERM);
-        _ = std.c.raise(.HUP);
+        _ = platform.c.raise(.TERM);
+        _ = platform.c.raise(.HUP);
         if (stop.requested() != .TERM) return 5;
         stop.reset();
-        _ = std.c.raise(.INT);
+        _ = platform.c.raise(.INT);
         if (stop.requested() != .INT) return 6;
         stop.restore();
         return 0;
@@ -130,8 +131,8 @@ test "through the real handler, a second Ctrl-C kills the guarded child and ends
 test "through the real handler, HUP, TERM and a first INT are recorded and the first one wins" {
     if (builtin.os.tag != .macos and builtin.os.tag != .linux) return error.SkipZigTest;
     const status = (try forked(InFork.firstStopWins)) orelse return error.TestUnexpectedResult;
-    try std.testing.expect(std.c.W.IFEXITED(status));
-    try std.testing.expectEqual(@as(u8, 0), std.c.W.EXITSTATUS(status));
+    try std.testing.expect(platform.c.W.IFEXITED(status));
+    try std.testing.expectEqual(@as(u8, 0), platform.c.W.EXITSTATUS(status));
 }
 
 test "a second Ctrl-C at the hidden prompt turns echo back on" {
