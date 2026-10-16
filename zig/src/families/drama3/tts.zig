@@ -5,33 +5,15 @@ const eng = @import("engine.zig");
 const codec_ = @import("codec.zig");
 const wav = @import("wav.zig");
 const cfg = @import("config.zig");
+const kern = @import("kernels.zig");
+const common = @import("common.zig");
+
+pub const Sink = common.Sink;
+pub const StreamOptions = common.StreamOptions;
+pub const Stats = common.Stats;
+const ms = common.ms;
 
 const W = cfg.frame_width;
-
-pub const Sink = struct {
-    ctx: *anyopaque,
-    audio: *const fn (ctx: *anyopaque, samples: []const f32) anyerror!void,
-};
-
-pub const StreamOptions = struct {
-    first_chunk: usize = 4, // frames before the first audio (4 = 186 ms of audio)
-    chunk: usize = 16, // frames a later chunk, reached by 1.25x steps from first_chunk (generation runs ~1.5x
-    // real time, so each chunk is made within the audio already handed over: no gap when played as it arrives)
-};
-
-pub const Stats = struct {
-    frames: usize,
-    eos: bool,
-    prompt_rows: usize,
-    prefill_ms: f64,
-    first_audio_ms: f64, // request start -> the first samples handed to the sink
-    total_ms: f64,
-    audio_s: f64,
-
-    pub fn fps(s: Stats) f64 {
-        return @as(f64, @floatFromInt(s.frames)) / ((s.total_ms - s.prefill_ms) / 1e3);
-    }
-};
 
 pub const Tts = struct {
     gpa: std.mem.Allocator,
@@ -171,6 +153,82 @@ pub const Tts = struct {
     }
 };
 
-fn ms(a: i128, b: i128) f64 {
-    return @as(f64, @floatFromInt(b - a)) / 1e6;
-}
+/// The codec alone, without the backbone: voice references to codes, and frames to audio for --codec-check.
+pub const CodecOnly = struct {
+    gpa: std.mem.Allocator,
+    driver: cuda.Driver,
+    ctx: cuda.Context,
+    stream: cuda.Stream,
+    k: *kern.Kernels,
+    c: *codec_.Codec,
+    bufs: std.ArrayList(cuda.DeviceBuffer),
+
+    pub fn open(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !*CodecOnly {
+        const o = try gpa.create(CodecOnly);
+        errdefer gpa.destroy(o);
+        o.gpa = gpa;
+        o.bufs = .empty;
+        o.driver = try cuda.Driver.open();
+        o.ctx = try cuda.Context.init(&o.driver, 0);
+        o.stream = try cuda.Stream.init(&o.driver, true);
+        o.k = try gpa.create(kern.Kernels);
+        o.k.* = try kern.Kernels.load(&o.driver, &o.ctx);
+        o.c = try codec_.Codec.load(gpa, io, &o.driver, o.k, path, .{});
+        return o;
+    }
+
+    pub fn close(o: *CodecOnly) void {
+        for (o.bufs.items) |*b| b.free();
+        o.bufs.deinit(o.gpa);
+        o.c.destroy();
+        o.k.unload();
+        o.gpa.destroy(o.k);
+        o.stream.deinit();
+        o.ctx.deinit();
+        o.driver.close();
+        o.gpa.destroy(o);
+    }
+
+    pub fn buffer(o: *CodecOnly, bytes: usize) !u64 {
+        const b = try cuda.DeviceBuffer.alloc(&o.driver, @max(bytes, 256));
+        try o.bufs.append(o.gpa, b);
+        return b.ptr;
+    }
+
+    pub fn upload(o: *CodecOnly, dst: u64, bytes: []const u8) !void {
+        var b: cuda.DeviceBuffer = .{ .d = &o.driver, .ptr = dst, .len = bytes.len, .borrowed = true };
+        try b.upload(0, bytes);
+    }
+
+    /// Waits for the stream, then copies device bytes at `src` out.
+    pub fn download(o: *CodecOnly, src: u64, out: []u8) !void {
+        try o.stream.synchronize();
+        var b: cuda.DeviceBuffer = .{ .d = &o.driver, .ptr = src, .len = out.len, .borrowed = true };
+        try b.download(0, out);
+    }
+
+    pub fn sync(o: *CodecOnly) !void {
+        try o.stream.synchronize();
+    }
+
+    pub fn reset(o: *CodecOnly) !void {
+        try o.c.reset(o.stream);
+    }
+
+    /// Enqueue the decode of `nf` device frames [nf, 11] into nf * 2048 fp32 samples at `audio`.
+    pub fn decode(o: *CodecOnly, frames: u64, nf: usize, audio: u64) !void {
+        try o.c.decode(o.stream, frames, nf, audio);
+    }
+
+    pub fn encode(o: *CodecOnly, x44: []const f32) ![][10]i32 {
+        return o.c.encode(o.stream, x44);
+    }
+
+    pub fn weightBytes(o: *const CodecOnly) usize {
+        return o.c.weight_bytes;
+    }
+
+    pub fn setProbe(o: *CodecOnly, p: ?codec_.Probe) void {
+        o.c.probe = p;
+    }
+};

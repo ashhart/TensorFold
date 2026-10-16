@@ -3,8 +3,9 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const cfg = @import("config.zig");
+const shards = @import("shards.zig");
 
-const st = core.safetensors;
+const Shards = shards.Shards;
 
 pub const Gdn = struct { proj: u64, conv: u64, a_log: u64, dt_bias: u64, norm: u64, out: u64 };
 pub const Attn = struct { qkv: u64, q_norm: u64, k_norm: u64, o: u64 };
@@ -56,64 +57,6 @@ pub const Weights = struct {
     }
 };
 
-const Shards = struct {
-    files: []st.File,
-    map: std.StringHashMapUnmanaged(usize),
-    arena: std.heap.ArenaAllocator,
-
-    fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Shards {
-        var s: Shards = .{ .files = &.{}, .map = .empty, .arena = std.heap.ArenaAllocator.init(gpa) };
-        errdefer s.arena.deinit();
-        const a = s.arena.allocator();
-        const ipath = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
-        const text = try std.Io.Dir.cwd().readFileAlloc(io, ipath, a, .limited(64 << 20));
-        const tree = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-        const wm = (tree.object.get("weight_map") orelse return error.BadIndex).object;
-        var names: std.ArrayList([]const u8) = .empty;
-        var it = wm.iterator();
-        while (it.next()) |e| {
-            const fname = e.value_ptr.string;
-            var idx: ?usize = null;
-            for (names.items, 0..) |n, i| if (std.mem.eql(u8, n, fname)) {
-                idx = i;
-            };
-            if (idx == null) {
-                try names.append(a, fname);
-                idx = names.items.len - 1;
-            }
-            try s.map.put(a, e.key_ptr.*, idx.?);
-        }
-        s.files = try a.alloc(st.File, names.items.len);
-        for (names.items, 0..) |n, i| {
-            const p = try std.fs.path.join(a, &.{ dir, n });
-            s.files[i] = try st.File.open(gpa, io, p);
-        }
-        return s;
-    }
-
-    fn close(s: *Shards, io: std.Io) void {
-        for (s.files) |*f| f.close(io);
-        s.arena.deinit();
-    }
-
-    fn get(s: *const Shards, name: []const u8) !st.Tensor {
-        const i = s.map.get(name) orelse {
-            std.log.err("drama3: checkpoint has no {s}", .{name});
-            return error.MissingTensor;
-        };
-        return s.files[i].get(name) orelse error.MissingTensor;
-    }
-
-    /// Drop a tensor's pages from the page cache once it is on the device (the shards stream from NFS).
-    fn release(s: *const Shards, name: []const u8) void {
-        const i = s.map.get(name) orelse return;
-        const f = &s.files[i];
-        const e = f.names.get(name) orelse return;
-        _ = posix_fadvise(f.file.handle, @intCast(f.data + e.begin), @intCast(e.end - e.begin), 4);
-    }
-};
-
-extern "c" fn posix_fadvise(fd: c_int, offset: i64, len: i64, advice: c_int) c_int;
 
 const Loader = struct {
     gpa: std.mem.Allocator,
@@ -128,7 +71,7 @@ const Loader = struct {
         return b;
     }
 
-    fn expect(t: st.Tensor, dtype: st.DType, shape: []const usize, name: []const u8) !void {
+    fn expect(t: core.safetensors.Tensor, dtype: core.safetensors.DType, shape: []const usize, name: []const u8) !void {
         if (!t.is(dtype, shape)) {
             std.log.err("drama3: {s} is {s} {any}, expected {s} {any}", .{ name, @tagName(t.dtype), t.shape[0..t.rank], @tagName(dtype), shape });
             return error.BadTensor;
@@ -244,21 +187,10 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []co
     {
         const t = try sh.get("lm_head.weight");
         try Loader.expect(t, .bf16, &.{ cfg.vocab, H }, "lm_head.weight");
-        const n = c.candidates();
-        w.n_cand = n;
-        const ids = try gpa.alloc(i32, n);
+        const ids = try shards.candidateIds(gpa, c);
         defer gpa.free(ids);
-        var j: usize = 0;
-        if (c.ids.eos < c.ids.sem_begin) {
-            ids[0] = c.ids.eos;
-            j = 1;
-        }
-        var tok = c.ids.sem_begin;
-        while (tok <= c.ids.sem_end) : (tok += 1) {
-            ids[j] = tok;
-            j += 1;
-        }
-        if (c.ids.eos > c.ids.sem_end) ids[n - 1] = c.ids.eos;
+        const n = ids.len;
+        w.n_cand = n;
         const rows = try gpa.alloc(u8, n * H * 2);
         defer gpa.free(rows);
         for (ids, 0..) |id, r| @memcpy(rows[r * H * 2 ..][0 .. H * 2], t.bytes[@as(usize, @intCast(id)) * H * 2 ..][0 .. H * 2]);
