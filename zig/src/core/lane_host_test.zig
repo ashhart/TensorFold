@@ -561,40 +561,14 @@ test {
     _ = @import("lane_host_fail_test.zig");
     _ = @import("lane_host_lone_test.zig");
     _ = @import("lane_host_admit_test.zig");
-}
-
-test "an unhealthy backend fails health and refuses a request before queue admission" {
-    const gpa = std.testing.allocator;
-    var cfg = try lanes.Config.init(gpa, .{}, 1, 0);
-    defer cfg.deinit(gpa);
-    var target: lanes.fake.Fake = .{ .gpa = gpa };
-    defer target.deinit();
-    var clock: lanes.fake.FixedClock = .{};
-    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
-    defer core.deinit();
-    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 1 });
-    const Health = struct {
-        available: bool = true,
-        fn read(ctx: *anyopaque) bool {
-            return @as(*@This(), @ptrCast(@alignCast(ctx))).available;
-        }
-        fn event(_: *anyopaque, _: Id, _: *const Event) void {
-            @panic("a refused request must never reach its sink");
-        }
-    };
-    var health: Health = .{};
-    const engine = host.engine();
-    var status: api.Status = .{};
-    engine.status(&status, &.{});
-    try std.testing.expect(status.healthy);
-    host.health = .{ .ctx = &health, .read = Health.read };
-    engine.status(&status, &.{});
-    try std.testing.expect(status.healthy);
-    health.available = false;
-    engine.status(&status, &.{});
-    try std.testing.expect(!status.healthy);
-    const request: Request = .{ .prompt = &.{1}, .max_tokens = 1 };
-    try std.testing.expectError(error.Closed, engine.submit(1, &request, .{ .ctx = &health, .event = Health.event }));
-    try std.testing.expectEqual(@as(usize, 0), host.queued.items.len);
-    try std.testing.expectEqual(@as(usize, 0), host.admitted.items.len);
+    _ = @import("lane_host_recall_test.zig");
+    _ = @import("lane_host_fill_test.zig");
+    _ = @import("lane_host_status_test.zig");
+    _ = @import("lane_host_health_test.zig");
+    _ = @import("lane_host_stale_test.zig");
+    _ = @import("lane_host_reuse_test.zig");
+    _ = @import("lane_host_cache_lifetime_test.zig");
+    _ = @import("lane_host_borrow_test.zig");
+    _ = @import("lane_host_warm_test.zig");
+    _ = @import("lane_host_rows_test.zig");
 }

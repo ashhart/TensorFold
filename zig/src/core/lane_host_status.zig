@@ -20,7 +20,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const n = @min(stream_tokens.len, h.live_tokens.items.len);
     @memcpy(stream_tokens[0..n], h.live_tokens.items[0..n]);
     out.* = .{
-        .healthy = if (h.health) |source| source.read(source.ctx) else true,
+        .healthy = !h.closing and !h.stale and (if (h.health) |source| source.read(source.ctx) else true),
         .running = @intCast(h.admitted.items.len),
         .waiting = @intCast(h.queued.items.len),
         .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,
@@ -29,6 +29,35 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
         .streams = n,
         .generation_tokens = h.live_generated,
     };
+    fillTotals(h, out);
+}
+
+/// A job whose prompt pass has not reported yet is filling; the engine thread publishes that with `fill_on`.
+fn fillTotals(h: *LaneHost, out: *api.Status) void {
+    var total: u64 = 0;
+    var left: u64 = 0;
+    var filling = false;
+    var run: u64 = 0;
+    const reported = h.core.backend.vtable.reports_fill; // a backend that never stores `fill_at` has no honest totals
+    for (h.admitted.items) |job| {
+        if (!job.fill_on.load(.acquire) or job.request.background) continue; // a warm pass prefills the next turn: no fill
+        filling = true;
+        var fields: [16]u8 = undefined; // id and seq hashed apart: XOR of the raw values collides (2^0 == 3^1)
+        std.mem.writeInt(u64, fields[0..8], job.id, .little);
+        std.mem.writeInt(u64, fields[8..16], job.seq, .little);
+        run = (run *% 0x9E3779B97F4A7C15) ^ std.hash.Wyhash.hash(0, &fields);
+        if (!reported) continue; // no counter for it: its prompt stays out of the totals rather than guessed
+        const prompt = job.request.prompt.len;
+        total += prompt;
+        left += prompt -| job.stream.fill_at.load(.monotonic);
+    }
+    if (!filling) return;
+    if (reported) {
+        out.fill_prompt_tokens = @intCast(total);
+        out.fill_tokens_left = @intCast(left);
+    } else out.fill_unknown = true;
+    run &= (1 << 53) - 1; // JSON numbers stay exact to 2^53: a wider marker loses bits in the page's JavaScript
+    out.fill_run = if (run == 0) 1 else run;
 }
 
 /// `n` tokens delivered now; marks older than the window drop.
