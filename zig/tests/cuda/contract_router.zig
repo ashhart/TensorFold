@@ -233,9 +233,9 @@ const latent_rule = "tf_super_topk's bytes, and its host twin's picks: a NaN nev
 const latent_picks = 22;
 const latent_shares = 2;
 
-/// Super's 512 experts summed from 8 slices at decode-sized calls; experts at whole warps and either side.
+/// Super's 512 experts summed from 8 slices at verify windows' calls; experts at whole warps and either side.
 pub fn latentSpec() c.Spec {
-    const served = &[_]c.Shape{ .{ .rows = 1, .n = 512, .k = 8 }, .{ .rows = 16, .n = 512, .k = 8 } };
+    const served = &[_]c.Shape{ .{ .rows = 1, .n = 512, .k = 8 }, .{ .rows = 16, .n = 512, .k = 8 }, .{ .rows = 32, .n = 512, .k = 8 } };
     return .{ .name = "cuda nemotron latent top-k tf_super_topk_few", .accum = .none, .depth = noSums, .out = .raw, .replaces = "tf_super_topk", .nan = .{ .stated = latent_rule }, .tiles = .{ .{}, .{ .size = 32, .min = latent_picks }, .{} }, .served = served };
 }
 

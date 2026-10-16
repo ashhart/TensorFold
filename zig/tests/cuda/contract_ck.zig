@@ -25,8 +25,8 @@ fn stepDepth(s: c.Shape) usize {
 pub fn spec(kind: Kind) c.Spec {
     const tiles = [3]c.Tile{ .{ .size = 16 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 256, .step = 64, .min = 64 } };
     return switch (kind) {
-        .up => .{ .name = "cuda ck experts up tf_ck4_up_relu2_few", .accum = .f32, .depth = stepDepth, .ops = 2, .mids = 1, .out = .bf16, .replaces = "tf_ck4_up_relu2", .nan = .{ .stated = rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 1344, .k = 1024 }, .{ .rows = 16, .n = 1344, .k = 1024 }, .{ .rows = 1, .n = 2688, .k = 4096 } } },
-        .down => .{ .name = "cuda ck experts down tf_ck4_down_f32_few", .accum = .f32, .depth = stepDepth, .ops = 1, .out = .f32, .replaces = "tf_ck4_down_f32", .nan = .{ .stated = rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 1024, .k = 1344 }, .{ .rows = 16, .n = 1024, .k = 1344 }, .{ .rows = 1, .n = 4096, .k = 2688 } } },
+        .up => .{ .name = "cuda ck experts up tf_ck4_up_relu2_few", .accum = .f32, .depth = stepDepth, .ops = 2, .mids = 1, .out = .bf16, .replaces = "tf_ck4_up_relu2", .nan = .{ .stated = rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 1344, .k = 1024 }, .{ .rows = 32, .n = 1344, .k = 1024 }, .{ .rows = 1, .n = 2688, .k = 4096 }, .{ .rows = 32, .n = 2688, .k = 4096 } } },
+        .down => .{ .name = "cuda ck experts down tf_ck4_down_f32_few", .accum = .f32, .depth = stepDepth, .ops = 1, .out = .f32, .replaces = "tf_ck4_down_f32", .nan = .{ .stated = rule }, .tiles = tiles, .served = &.{ .{ .rows = 1, .n = 1024, .k = 1344 }, .{ .rows = 32, .n = 1024, .k = 1344 }, .{ .rows = 1, .n = 4096, .k = 2688 }, .{ .rows = 32, .n = 4096, .k = 2688 } } },
     };
 }
 
@@ -92,7 +92,7 @@ pub const Experts = struct {
 
     /// Random codes and scales; non-finite: NaN and infinite alphas and a NaN block scale; stress: mirrored halves.
     pub fn prepare(self: *Experts, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.rows == 0 or shape.rows > cuda.launch.few_rows or shape.n % 64 != 0 or shape.n == 0 or shape.k % 64 != 0 or shape.k == 0) return false;
+        if (shape.rows == 0 or shape.rows > cuda.ck.few_tokens or shape.n % 64 != 0 or shape.n == 0 or shape.k % 64 != 0 or shape.k == 0) return false;
         self.free();
         self.rig.reset();
         self.shape = shape;

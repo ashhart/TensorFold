@@ -452,7 +452,7 @@ fn latentTopk(r: *Rig, fns: nemotron.latent.Fns) !void {
     const shares = 2;
     const sk = 8;
     const Case = struct { rows: usize, ties: bool = false, numbers: usize = le, norm: bool = true };
-    for ([_]Case{ .{ .rows = 1 }, .{ .rows = 16, .ties = true }, .{ .rows = 300, .norm = false }, .{ .rows = 4, .numbers = 10 } }) |c| {
+    for ([_]Case{ .{ .rows = 1 }, .{ .rows = 16, .ties = true }, .{ .rows = 32, .ties = true }, .{ .rows = 300, .norm = false }, .{ .rows = 4, .numbers = 10 } }) |c| {
         const part = try r.f32s(sk * c.rows * le, -1, 1);
         if (c.ties) for (part) |*v| {
             v.* = @round(v.* * 4) / 4; // quarters: many equal logits, so equal scores
