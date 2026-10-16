@@ -91,6 +91,15 @@ Same Mac, checkpoint and size, a 864x480 first frame: 16,253 packed rows (449 te
 
 Text to video is bit-identical with and without this change (final video and audio rows, 8 steps).
 
+## Other step counts
+
+With `tables` or `steps=N` the tool makes the run's schedule itself instead of reading the case's. The rungs come from
+the checkpoint's `fastvideo_inference.json`, or N spread evenly from its first rung, with the video and audio shifts
+(a preview checkpoint's from its scheduler folders). Then come every row's timestep at each step and the timestep
+embedder (on the host, float64 sums of the checkpoint's float32 values). Each block's and the final layer's AdaLN
+tables come from `h3_modulation` on the GPU, bf16 inputs and weights with fp32 sums. `from=K` starts at step K of
+a case exported mid-run. The case still supplies the prompt's rows, the noise, the rotary tables and the tile map.
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.

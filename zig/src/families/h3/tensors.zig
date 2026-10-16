@@ -88,6 +88,23 @@ pub const Checkpoint = struct {
         return null;
     }
 
+    /// The tensor `name` (float32 or bf16) as float32 values on the host.
+    pub fn floats(self: *const Checkpoint, gpa: std.mem.Allocator, name: []const u8) ![]f32 {
+        for (self.shards) |*shard| if (shard.names.get(name)) |e| {
+            const n = (e.end - e.begin) / e.dtype.size();
+            const from = shard.map.bytes[shard.data + e.begin ..];
+            const out = try gpa.alloc(f32, n);
+            for (out, 0..) |*o, i| o.* = switch (e.dtype) {
+                .f32 => @bitCast(std.mem.readInt(u32, from[4 * i ..][0..4], .little)),
+                .bf16 => @bitCast(@as(u32, std.mem.readInt(u16, from[2 * i ..][0..2], .little)) << 16),
+                else => return error.BadTensor,
+            };
+            return out;
+        };
+        std.debug.print("no tensor {s}\n", .{name});
+        return error.MissingTensor;
+    }
+
     /// The bf16 tensor `name` of `count` values, read in place.
     pub fn ref(self: *const Checkpoint, name: []const u8, count: usize) !Ref {
         for (self.shards) |*shard| if (shard.names.get(name) != null) return shard.inPlace(name, .bf16, count);
