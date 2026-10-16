@@ -528,16 +528,22 @@ fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoin
     var at: usize = 0;
     for (&parts) |*t| {
         const row = t.bytes.len / t.dim(0);
-        const whole = try gpa.alloc(u8, t.bytes.len);
-        defer gpa.free(whole);
-        try L.src.read(whole, t.bytes);
-        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], whole[id * row ..][0..row]);
+        try gatherRows(L, t.*, ids, host[at..]);
         t.shape[0] = ids.len;
         t.bytes = host[at..][0 .. ids.len * row];
         at += ids.len * row;
     }
     L.w.draft_head = .{ .affine4 = try L.tile("draft_head", &.{parts}) };
     try draftIds(L, ids);
+}
+
+/// Rows `ids` of `t` (a row its first dimension's), in `ids`' order, into `host`: the whole tensor read once.
+pub fn gatherRows(L: *Loader, t: Tensor, ids: []const u32, host: []u8) !void {
+    const row = t.bytes.len / t.dim(0);
+    const whole = try L.gpa.alloc(u8, t.bytes.len);
+    defer L.gpa.free(whole);
+    try L.src.read(whole, t.bytes);
+    for (ids, 0..) |id, r| @memcpy(host[r * row ..][0..row], whole[id * row ..][0..row]);
 }
 
 /// The vocabulary ids the draft head's rows are, on the GPU.

@@ -94,8 +94,7 @@ equal their solo runs, and three-turn chats with regenerate, edit and delete equ
 | Two GB10s | `checkpoint` (default) | 46.8 tok/s (35.9 to 63.6) | 20.2 tok/s | |
 | Two GB10s | `full` | 48.1 tok/s (36.4 to 65.6) | 21.4 tok/s | |
 
-Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time. The MTP layer drafts
-with the target's own output head over the whole vocabulary.
+Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time.
 
 ## Images
 
