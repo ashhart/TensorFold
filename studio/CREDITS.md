@@ -118,6 +118,14 @@ documented its nodes and schedule precisely enough to reproduce. (Qwen Research 
 transformer, the Qwen3-VL text encoder setup, and the video and audio VAEs. Nothing in this pack exists without
 that release. The weights are under the MiniMax H3 Community License; this pack ships none of them.
 
+## The voice model: Fish Audio
+
+**Fish Audio** made **Drama 3**, the text-to-speech model this studio is integrating: a 35B mixture-of-experts model
+(3B active per token) on a Qwen3.5 backbone with a codebook-MTP audio decoder and the Fish S2 codec, with up to 16
+speakers in one text, voice cloning from a short clip, and direction tags. The local ports (TensorFold CUDA on the DGX
+Spark, TensorFold/MLX on the Mac) follow Fish Audio's and the SGLang-Omni team's reference implementation
+(Apache-2.0). Fish Audio Community License v1.0. **Built with Fish Audio.**
+
 ## The first native Mac engine: Salvatore Sanfilippo (antirez)
 
 **antirez** wrote **h3.c**, MiniMax H3 in C and Metal. It is the reference for what is possible on Apple

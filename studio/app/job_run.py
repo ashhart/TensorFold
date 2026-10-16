@@ -12,12 +12,14 @@ import pace
 import qa
 import shot
 import sparks
+import voice
 from engines import environment, plan
 from job_build import build
 from job_state import lock, running, wake
 from settings import FPS, HOME, LEAD, LONGEST, PACK, PRESETS, QA_TAKES, SPARK, inside, relative
 
-hub = None  # set by server.py: the multi-Spark hub (sparks.py)
+# Set by server.py: the multi-Spark hub (sparks.py) and the Voice tab's job runner (voice.py).
+hub = voice_perform = None
 
 
 def last_frame(video: Path, image: Path) -> None:
@@ -265,6 +267,10 @@ def perform(job: dict, worker: dict | None = None) -> None:
     params = job["params"]
     asked = dict(params)
     try:
+        # a Drama 3 server kept loaded after a voice take (voice.py) never stands beside a render here
+        if job["kind"] not in ("voice", "export") and worker is None and not job.get("remote"):
+            if voice.release(f"a {job['kind']} job needs the GPU"):
+                job["log"] += "[tensorfold] Drama 3 was unloaded to give this job its memory\n"
         if params.get("first_frame_from"):  # continuity: open on the last frame of an earlier clip
             source = inside(params["first_frame_from"])
             if not source.is_file():
@@ -283,6 +289,9 @@ def perform(job: dict, worker: dict | None = None) -> None:
             export(job)
         elif job["kind"] == "long":
             if not long_take(job):
+                return
+        elif job["kind"] == "voice":  # Fish Audio Drama 3 text to speech (voice.py), under the GPU lock
+            if not voice_perform(job):
                 return
         else:
             done, env, outputs = take(job, params)

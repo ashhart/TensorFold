@@ -12,9 +12,9 @@ from fastapi import APIRouter, HTTPException
 
 MEDIA = (".mp4", ".mov", ".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg")
 FOLDERS = {"renders": MEDIA, "exports": MEDIA, "scouts": MEDIA, "uploads": MEDIA, "qa": MEDIA,
-           "projects": (".mp4",), "slate": (".mp4",)}  # in a film's folder only its clips, never its project file
+           "voice": MEDIA, "projects": (".mp4",), "slate": (".mp4",)}  # in a film's folder only its clips, never its project file
 BUSY = ("queued", "running")
-REFERENCES = ("image", "references", "reference_videos", "reference_audios", "first_frame_from")
+REFERENCES = ("image", "references", "reference_videos", "reference_audios", "first_frame_from", "ref_audio")
 LAST = "last-deletion.json"
 
 

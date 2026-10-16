@@ -264,6 +264,34 @@ def voice_of(sheet: dict | None, fallback: str = "") -> str:
     return f"a voice that is {sound}" if sound else "a natural voice"
 
 
+def cast_voices(lines: list[dict], sheets: list[dict | None], warnings: list[str]) -> tuple[list[str], list[str]]:
+    """Drama 3 voices cast on the Sound tab (voice.py) as ``<Audio N>`` references, within MiniMax's limits."""
+
+    audios, notes, total = [], [], 0.0
+    for line, sheet in zip(lines, sheets):
+        take = (sheet or {}).get("drama") or {}
+        path, name = take.get("path"), (sheet or {}).get("name") or "a voice"
+        if not path or take.get("use") is False or path in audios:
+            continue
+        if not (HOME / path).is_file():
+            warnings.append(f"The cast voice of {name} is no longer on disk: cast it again on the Sound tab.")
+            continue
+        try:
+            seconds = float(take.get("seconds") or 0)
+        except (TypeError, ValueError):
+            seconds = 0.0
+        if not 1.95 <= seconds <= 15.05:
+            warnings.append(f"The cast voice of {name} is {seconds:.1f} s and a reference audio clip is 2 to 15 s: cut it on the Sound tab. Left out.")
+            continue
+        if len(audios) >= 3 or total + seconds > 15.05:
+            warnings.append(f"The cast voice of {name} is left out: the reference audio clips are at most 3 and 15 s in all.")
+            continue
+        audios.append(path)
+        total += seconds
+        notes.append(f"the voice timbre reference for <Subject {int(line.get('subject') or 1)}>'s voice, containing {line['voice']}")
+    return audios, notes
+
+
 def find_shot(project: dict, shot_id: str) -> tuple[dict, dict, int]:
     for scene in project.get("scenes") or []:
         for index, shot in enumerate(scene.get("shots") or []):
@@ -405,7 +433,7 @@ def compile_shot(project: dict, shot_id: str, chain: str | None = None) -> dict:
     # what happens is the Subject section's or the beat sheet's; the shot's intent is a note for people only
     action = " ".join(f"{lead[min(i, 3)] if i < len(beats) - 1 or i == 0 else lead[4]} {sentence(b['text'][0].lower() + b['text'][1:])}"
                       for i, b in enumerate(beats))
-    voices, order, lines = by_id("voices"), [sheet.get("id") for sheet in cast], []
+    voices, order, lines, sheets = by_id("voices"), [sheet.get("id") for sheet in cast], [], []
     for line in extra.get("lines") or []:
         if not (line.get("text") or "").strip():
             continue
@@ -414,13 +442,16 @@ def compile_shot(project: dict, shot_id: str, chain: str | None = None) -> dict:
         lines.append({"voice": voice_of(sheet, line.get("voice") or ""), "text": line["text"].strip(), "language": line.get("language") or "English",
                       "sung": bool(line.get("sung")), "speaker": who.get("name") if who else "",
                       "subject": order.index(who["id"]) + 1 if who and references and who.get("id") in order[:len(references)] else 1})
+        sheets.append(sheet)
+    audios, notes = cast_voices(lines, sheets, warnings) if references else ([], [])
     words = sum(len(line["text"].split()) for line in lines)
     if lines and words > seconds * 3.4:
         warnings.append(f"{words} words is a lot for {seconds} s (about three words a second): the line may be rushed or cut off.")
     cue = by_id("music").get(extra.get("cue"))
     music = sentence(", ".join(bit for bit in (cue.get("genre"), cue.get("mood"), cue.get("tempo"), cue.get("instrumentation")) if bit)) if cue else (extra.get("music") or "N/A")
     fields = {"scene": picture, "camera": camera, "action": action, "dialogue": lines, "soundscape": extra.get("soundscape") or "",
-              "music": music, "subjects": subjects, "people": bool(cast) or None}  # None: the builder reads the words
+              "music": music, "subjects": subjects, "people": bool(cast) or None,  # None: the builder reads the words
+              **({"audio_notes": notes} if audios else {})}
     prompt = compose_references(fields, len(references)) if references else compose(fields, bool(image or previous), frames=frames)
     for one in negation.check_fields(fields)["negations"]:  # said, never rewritten (negation.py)
         warnings.append(f"“{one['phrase']}” ({one['field'].lower()}): the video model has no negative prompt, and what a prompt names tends to appear. Say what is there instead.")
@@ -436,6 +467,7 @@ def compile_shot(project: dict, shot_id: str, chain: str | None = None) -> dict:
             **({"slot": slot} if slot else {}), **({"loras": own} if own and not references else {}),
             **({"preset": size} if isinstance(size, str) else {"preset": "custom", "width": size[0], "height": size[1]}),
             **({"references": references, "ref_turbo": film.get("refPasses") == "4"} if references else {}),
+            **({"reference_audios": audios} if audios else {}),
             **({"image": image} if image else {}), **({"first_frame_from": previous} if previous else {})}
     mode = "references" if references else "image" if image else "previous" if previous else "text"
     if own and references:

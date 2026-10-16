@@ -1,4 +1,4 @@
-Wasserman Slate AI Studio, powered by TensorFold (Mac + DGX Spark)
+Wasserman Slate AI Studio, powered by TensorFold, built with integrated Fish Audio Drama 3 (Mac + DGX Spark)
 Pack: drowzeys / keys.
 
 This pack installs and runs other people's work. See CREDITS.md. It ships no model weights.
@@ -16,6 +16,12 @@ Forest Labs. Non-commercial use; commercial use of the outputs only for Qualifyi
 under the licence's terms. This pack ships no FLUX 3 weights: they are downloaded from Black Forest Labs' releases
 (huggingface.co/black-forest-labs) when a user installs them with --flux3. On a Mac they run on flux3-mlx (Apache-2.0,
 felix-ab), installed in an environment of its own.
+
+Fish Audio Drama 3 is licensed under the Fish Audio Community License v1.0, Copyright (c) 2026 Fish Audio. Built with
+Fish Audio. Free for non-commercial use and for commercial use below US$500,000 annual revenue; offering speech
+generation to third parties (a Hosted Service) needs a separate licence from Fish Audio. Cloning a real person's voice
+without their consent is not allowed. This pack ships no Drama 3 weights: they are downloaded from Fish Audio's
+release (huggingface.co/fishaudio/drama-3) when a user installs them.
 
 Read these licences before downloading the weights.
 

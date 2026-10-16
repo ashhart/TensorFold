@@ -11,6 +11,7 @@ import lengths
 import lora_flows
 import memory_guard
 import picture_models
+import voice
 from engines import custom, media_seconds, ref2va_ready, ref2va_turbo_ready
 from motion_prompt import freed
 from settings import (AUDIO_SUFFIXES, DURATIONS, FPS, HOME, LONGEST, PACK, PRESETS, QUALITIES, REFERENCE_AUDIO_LIMIT,
@@ -128,7 +129,10 @@ def memory_of(params: dict, env: dict, frames: int, lora: bool, found: dict | No
     videos = found.get("videos") or []
     lora = lora or bool(found and params.get("ref_turbo"))
     engine = SPARK_ENGINE_LIB.exists() and (not lora or memory_guard.engine_takes_lora(SPARK_ENGINE_LIB))
-    return memory_guard.check(width, height, frames, lora=lora, references=bool(found),
+    # a Drama 3 server kept loaded is unloaded before this job starts (voice.release): its memory counts as free
+    drama3 = voice.room_mb()
+    room = max(memory_guard.room_mb() or 0, drama3) if drama3 else None
+    return memory_guard.check(width, height, frames, lora=lora, references=bool(found), available_mb=room,
                               base=env.get("SPARK_BASE") == "h3", engine=engine,
                               pictures=len(found.get("pictures") or []),
                               reference_frames=sum(min(frames, int(round((media_seconds(path)[0] or frames / FPS) * FPS))) for path in videos))

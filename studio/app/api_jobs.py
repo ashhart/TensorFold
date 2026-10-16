@@ -20,6 +20,7 @@ import picture_models
 import qa
 import remote
 import sparks
+import voice
 from engines import (FFMPEG_NOTE, custom, estimate, plan, ref2va_ready, ref2va_turbo_ready,
                      text_encoders, turbo_ready, without_ffmpeg, zig_ready)
 from job_build import build, clip_seconds, longest_frames, memory_of, references
@@ -57,6 +58,8 @@ def state() -> dict:
             "sparks": {"supported": SPARK, "limit": sparks.LIMIT},
             # Sam Wasserman's QA gate: whether it can run here, and what is missing when it cannot (qa.py)
             "qa": qa.ready(),
+            # Voice: Fish Audio Drama 3 text to speech on this machine (voice.py): MLX on a Mac, CUDA on a DGX Spark
+            "voice": voice.state(),
             "engine": ("CUDA · TensorFold int8" if SPARK_ENGINE_LIB.exists() else "CUDA · ComfyUI") if SPARK else ("native Zig engine" if zig_ready() else "MLX engine")}
 
 

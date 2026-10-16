@@ -173,6 +173,26 @@ Rules:
   not make that wait longer, and never retry a worker that went down without a person's *Check*. `MEASURED` is one
   measured run: change it only with a new one. One clip split across Sparks (the engine's `h3-cuda-multispark`
   branch) is measured and is not in the app: do not wire part of it in.
+- Voice (`app/voice.py`, `app/static/voice.js`, README *Voice (Fish Audio Drama 3)*): Fish Audio Drama 3 runs on this
+  machine only, as a TensorFold process outside the app, never imported into the app's venv. Never call Fish Audio's
+  cloud API. `DRAMA3_BACKEND=mlx|cuda` (`mlx` on a Mac, `cuda` on a DGX Spark). Both engines run as a persistent
+  server speaking one protocol (`Served`): `python -m tensorfold.drama3 --serve` in `$DRAMA3_VENV` (drama3-mlx
+  92c09a8e or later; an older engine falls back to one process a take with `--stream`) and `drama3-generate --serve 1`
+  (`$PREFIX/drama3/bin`, branch `drama3-cuda`; `DRAMA3_CUDA_BIN`, `DRAMA3_CUDA_MODEL`, `DRAMA3_CUDA_CODEC`). Loaded on
+  the first take, the server holds `~/studio-gpu.lock.d` for as long as it is loaded, is unloaded after
+  `DRAMA3_IDLE_S` (300) idle seconds and **before any other local job of the queue** (`voice.release`, called at the
+  top of `job_run.perform`), on a Spark stops the studio's ComfyUI first when that holds the memory it needs, and stands
+  under a memory kill-guard (`DRAMA3_GUARD_GB`, 8; MemAvailable, vm_stat on a Mac). Keep all of it: Drama 3 (42 GB on
+  a Spark, about 50 on a Mac) and MiniMax H3 never run together. Answers are the JSON lines on its stderr. A take
+  plays while it is made (`pcm` to `/api/voice/takes/{id}/live`). Dialogue goes a turn a line (`dialogue`; on one line
+  the model drops later turns). The Mac engine chunks long text and checks its own words (`verify`, `stop_rule`:
+  never turn them off); its count is the take's score, and a take with a part short while it played is asked again
+  without streaming. On a Spark long text goes in parts (`pieces`, 60 words), and the app runs the Mac engine's check itself (`app/wordcheck.py`, copied from TensorFold's verify.py: keep the rules the engine's) on Whisper's transcript, drawing a take with missing words again, not played, `RETRIES` (2) times, the best kept. The Mac engine's server hears a clip to clone left without its words (8f3d4b33): the app then does not transcribe it first.
+  `scripts/setup-voice.sh` (`oneshot-setup.sh --voice`) installs the Mac engine; on a Spark it only checks and prints
+  the hand steps. A take with a reference clip needs `consent: true`; keep the consent box and the "Built with Fish
+  Audio" line on the tab. A take sent as Ref2VA reference audio keeps MiniMax's 2 to 15 s per clip and 15 s per kind
+  (`/api/voice/cut`). The weights are Fish Audio Materials (Fish Audio Community License v1.0): do not redistribute
+  them, and say that a hosted TTS or cloning service needs Fish's own licence.
 - Picture models (`IMAGE_MODELS` in `app/picture_models.py`, `image_model` on scout and studio jobs, `IMAGE_MODEL` to
   `scripts/image.sh`): `qwen` (Qwen-Image-2.1-Turbo, every install), `flux3k-fast` and `flux3k-full` (Black Forest
   Labs' FLUX 3 Image Klein, distilled 16 steps and base 50 steps at CFG 3.5, `oneshot-setup.sh --flux3`). Call them

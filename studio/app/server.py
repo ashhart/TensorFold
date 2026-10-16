@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 import subprocess  # noqa: F401  (tests stub subprocess.run through this module)
 import threading
+import time
+import uuid
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -21,13 +23,13 @@ from api_jobs import clip_estimate, state
 from engines import FFMPEG_NOTE, custom, media_seconds, media_tools, ref2va_ready, ref2va_turbo_ready, without_ffmpeg  # noqa: F401
 from job_build import build, clip_frames, clip_seconds, memory_of  # noqa: F401  (names the tests reach through server)
 from job_run import gated, last_frame, perform, run, shot_checked, work  # noqa: F401
-from job_state import jobs, lock, order, public, wake  # noqa: F401
+from job_state import jobs, lock, order, public, wake
 from picture_models import image_model_env, image_models, offered  # noqa: F401
 from prompt_text import compose, compose_references, lead  # noqa: F401
 from settings import (DURATIONS, GPU_NAME, HERE, HOME, LEAD, PACK, PRESETS, QUALITIES, REFERENCE_LIMIT,  # noqa: F401
                       SPARK, SPARK_ENGINE_LIB, SPARK_REF2VA, inside, relative)
 
-app = FastAPI(title="Wasserman Slate AI Studio, powered by TensorFold")
+app = FastAPI(title="Wasserman Slate AI Studio, powered by TensorFold, built with integrated Fish Audio Drama 3")
 threading.Thread(target=work, daemon=True).start()
 app.include_router(api_jobs.router)
 app.include_router(api_files.router)
@@ -55,6 +57,27 @@ import shot  # noqa: E402,F401  (a clip's keyframes held and no cut inside it, b
 import qa  # noqa: E402  (Sam Wasserman's QA gate, beside this file)
 import remote  # noqa: E402,F401  (another machine's Studio app, read over its own API, beside this file)
 import slate  # noqa: E402  (Wasserman Slate AI Studio, beside this file)
+import voice  # noqa: E402  (Voice: Fish Audio Drama 3 text to speech, run locally, beside this file)
+
+
+def enqueue(kind: str, title: str, params: dict, estimate: int | None = None) -> dict:
+    """A job that is not a clip (a voice take) into the queue: it renders here, one at a time with the rest."""
+
+    job_id = time.strftime("%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
+    job = {"id": job_id, "kind": kind, "status": "queued", "title": title, "params": params, "source": None, "outputs": [],
+           "progress": None, "error": None, "log": "", "created": time.time(), "started": None, "finished": None,
+           "estimate": estimate, "sparks": {"chosen": 1, "available": 1, "used": 1, "says": ""}}
+    with lock:
+        jobs[job_id] = job
+        order.append(job_id)
+    wake.set()
+    hub.kick.set()
+    return public(job)
+
+
+voice_router, voice_perform = voice.attach(HOME, run, enqueue, inside, relative, media_seconds, qa)
+job_run.voice_perform = voice_perform
+app.include_router(voice_router)
 
 
 def slate_room(plan: dict, lora: bool) -> dict:
@@ -83,7 +106,7 @@ def about_this_spark() -> dict:
 
     listing = next(route.endpoint for route in lora_router.routes if route.path == "/api/loras" and "GET" in route.methods)
     info = memory_guard.meminfo()
-    memory = {"available_mb": info.get("MemAvailable"), "total_mb": info.get("MemTotal"), "room_mb": memory_guard.room_mb(),
+    memory = {"available_mb": info.get("MemAvailable"), "total_mb": info.get("MemTotal"), "room_mb": max(memory_guard.room_mb() or 0, voice.room_mb() or 0) or None,
               "floor_mb": memory_guard.floor_mb(info.get("MemTotal"))} if SPARK and info else {}
     with lock:
         active = sum(1 for job in jobs.values() if job["status"] in ("queued", "running"))
