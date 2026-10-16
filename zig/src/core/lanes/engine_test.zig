@@ -445,15 +445,22 @@ test "structured output: where the grammar spells its own text, its drafts fill 
     }
 }
 
-/// Each token the fake target draws one at a time after `prompt`, as `got` must hold them.
-fn expectDecode(prompt: []const u32, got: []const u32) !void {
+/// The fake target's one-token decode after `c.prompt`, to `c.max_new` tokens or an eos one: `s`'s reply and reason.
+fn expectDecode(c: Case, s: *const sm.Stream) !void {
     var history: std.ArrayList(u32) = .empty;
     defer history.deinit(gpa);
-    try history.appendSlice(gpa, prompt);
-    for (got) |t| {
-        try std.testing.expectEqual(fake.next(history.items, null, history.items.len), t);
+    try history.appendSlice(gpa, c.prompt);
+    var reason: sm.Reason = .length;
+    while (history.items.len - c.prompt.len < c.max_new) {
+        const t = fake.next(history.items, c.sampling, history.items.len);
         try history.append(gpa, t);
+        if (std.mem.indexOfScalar(u32, c.eos, t) != null) {
+            reason = .stop;
+            break;
+        }
     }
+    try std.testing.expectEqualSlices(u32, history.items[c.prompt.len..], s.emitted());
+    try std.testing.expectEqual(reason, s.reason);
 }
 
 test "a lone stream handed to another driver between rounds and back replies as if kept, pipelined or windowed" {
@@ -500,11 +507,12 @@ test "a lone stream handed to another driver between rounds and back replies as 
             try engine.adopt(s);
         }
         try std.testing.expect(handed > 0);
-        for (set.cases, streams[0..set.cases.len]) |c, *s| try expectDecode(c.prompt, s.emitted());
+        for (set.cases, streams[0..set.cases.len]) |c, *s| try expectDecode(c, s);
     }
 }
 
 test "a stream another driver opened and hands to the lane core replies as its one-token decode" {
+    const c: Case = .{ .prompt = &p2 };
     for ([_]bool{ true, false }) |mtp| {
         var cfg = try modelWith(mtp);
         defer cfg.deinit(gpa);
@@ -517,9 +525,9 @@ test "a stream another driver opened and hands to the lane core replies as its o
         defer p.deinit();
         var s = try sm.Stream.init(gpa, .{
             .id = "s",
-            .prompt = &p2,
-            .max_new = 40,
-            .eos = &.{96},
+            .prompt = c.prompt,
+            .max_new = c.max_new,
+            .eos = c.eos,
             .proposer = p.proposer(),
         });
         defer s.deinit(gpa);
@@ -529,7 +537,7 @@ test "a stream another driver opened and hands to the lane core replies as its o
         s.cache_len = s.prompt_len;
         try engine.adopt(&s);
         while (engine.activeCount() > 0) try engine.step();
-        try expectDecode(&p2, s.emitted());
+        try expectDecode(c, &s);
     }
 }
 
