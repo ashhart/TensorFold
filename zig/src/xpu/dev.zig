@@ -1,6 +1,7 @@
 //! Low-level XPU device plumbing for the Qwen3.8-27B runner: safetensors shards, the Level Zero device, profiling.
 const std = @import("std");
 const ze = @import("ze.zig");
+const safetensors = @import("safetensors.zig");
 const q = @import("qwen27.zig");
 const fwd = @import("forward.zig");
 const a8 = fwd.a8;
@@ -12,35 +13,39 @@ extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
 extern "c" fn close(fd: c_int) c_int;
 extern "c" fn lseek(fd: c_int, off: i64, whence: c_int) i64;
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
+extern "c" fn munmap(addr: *anyopaque, len: usize) c_int;
 
-pub const Tensor = struct { name: []const u8, dtype: []const u8, shape: [8]u64, rank: usize, bytes: []const u8 };
+pub const Tensor = safetensors.Tensor;
 
 pub const Checkpoint = struct {
     tensors: std.ArrayList(Tensor) = .empty,
+    maps: std.ArrayList([]const u8) = .empty, // the shards, mapped as long as the tensors' bytes are read
+    headers: std.ArrayList(std.json.Parsed(std.json.Value)) = .empty, // the tensors' names live in them
 
     pub fn addShard(c: *Checkpoint, path: [:0]const u8) !void {
         const fd = open(path.ptr, 0);
         if (fd < 0) return error.FileNotFound;
         defer _ = close(fd);
-        const size: usize = @intCast(lseek(fd, 0, 2));
+        const end = lseek(fd, 0, 2);
+        if (end < 8) return error.BadSafetensors;
+        const size: usize = @intCast(end);
         const base = mmap(null, size, 1, 2, fd, 0) orelse return error.MmapFailed; // PROT_READ, MAP_PRIVATE
-        const bytes: [*]const u8 = @ptrCast(base);
-        const n = std.mem.readInt(u64, bytes[0..8], .little);
-        const header = bytes[8 .. 8 + n];
-        const data = bytes[8 + n .. size];
-        const parsed = try std.json.parseFromSlice(std.json.Value, alloc, header, .{});
-        var it = parsed.value.object.iterator();
-        while (it.next()) |e| {
-            if (std.mem.eql(u8, e.key_ptr.*, "__metadata__")) continue;
-            const o = e.value_ptr.object;
-            var t: Tensor = .{ .name = e.key_ptr.*, .dtype = o.get("dtype").?.string, .shape = @splat(1), .rank = 0, .bytes = &.{} };
-            if (o.get("shape").?.array.items.len > t.shape.len) return error.TensorRank; // vision conv is 5-D
-            for (o.get("shape").?.array.items, 0..) |d, i| t.shape[i] = @intCast(d.integer);
-            t.rank = o.get("shape").?.array.items.len;
-            const span = o.get("data_offsets").?.array.items;
-            t.bytes = data[@intCast(span[0].integer)..@intCast(span[1].integer)];
-            try c.tensors.append(alloc, t);
-        }
+        if (@intFromPtr(base) == std.math.maxInt(usize)) return error.MmapFailed; // MAP_FAILED
+        const bytes = @as([*]const u8, @ptrCast(base))[0..size];
+        errdefer _ = munmap(base, size);
+        try c.maps.ensureUnusedCapacity(alloc, 1);
+        try c.headers.ensureUnusedCapacity(alloc, 1);
+        c.headers.appendAssumeCapacity(try safetensors.parse(alloc, bytes, &c.tensors));
+        c.maps.appendAssumeCapacity(bytes);
+    }
+
+    pub fn deinit(c: *Checkpoint) void {
+        for (c.headers.items) |h| h.deinit();
+        for (c.maps.items) |m| _ = munmap(@ptrCast(@constCast(m.ptr)), m.len);
+        c.tensors.deinit(alloc);
+        c.maps.deinit(alloc);
+        c.headers.deinit(alloc);
+        c.* = .{};
     }
 
     pub fn get(c: *const Checkpoint, name: []const u8) !Tensor {
@@ -113,6 +118,12 @@ pub const Dev = struct {
         ngen_wide: ze.H,
         ngen_narrow: ze.H,
     },
+
+    /// Waits for the queue, then gives the card back everything made on it (Gpu.close).
+    pub fn deinit(d: *Dev) void {
+        d.sync() catch {};
+        d.g.close();
+    }
 
     pub fn kernel(d: *Dev, m: ze.H, name: [*:0]const u8, local: u32) !ze.H {
         const k = try d.g.kernel(m, name);

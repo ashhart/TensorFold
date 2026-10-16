@@ -21,7 +21,9 @@ pub fn main() !void {
         std.debug.print("skipped: no Level Zero device\n", .{});
         return;
     }, .list = undefined, .k = undefined };
+    errdefer d.g.close();
     d.list = try d.g.immediate(0, 0);
+    defer d.deinit();
     const mg = try d.g.module(&kb.glue);
     const mm = try d.g.module(&kb.gemm128);
     d.k.repack_gptq = try d.kernel(mg, "repack_gptq", 16);

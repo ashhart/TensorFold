@@ -11,11 +11,13 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("skipped: TF_XPU_QWEN27 not set\n", .{});
         return;
     };
-    _ = q.ze.Gpu.open(0xe223) catch {
+    var probe = q.ze.Gpu.open(0xe223) catch {
         std.debug.print("skipped: no Level Zero device\n", .{});
         return;
     };
+    probe.close();
     const r = try q.Runner.init(dir, 4096);
+    defer r.deinit();
     var prng = std.Random.DefaultPrng.init(0x5ea4);
     var ids: [LEN]u32 = undefined;
     for (&ids) |*t| t.* = 1000 + prng.random().uintLessThan(u32, 100000);

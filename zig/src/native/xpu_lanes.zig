@@ -239,7 +239,7 @@ pub const Lanes = struct {
         errdefer b.runner.dropSnap(k.snap);
         if (b.drafter) |d| {
             const buf = try b.runner.d.alloc_(Drafter.ctxBytes());
-            errdefer b.runner.d.g.free(buf);
+            errdefer xq.freeAfterQueue(&b.runner.d, buf); // saveCtx's copies may be queued
             k.range = try d.saveCtx(slot, buf);
             k.ctx = buf;
         }
@@ -248,7 +248,7 @@ pub const Lanes = struct {
 
     pub fn keepDrop(b: *Lanes, k: *Kept) void {
         b.runner.dropSnap(k.snap);
-        if (k.ctx) |x| b.runner.d.g.free(x);
+        if (k.ctx) |x| xq.freeAfterQueue(&b.runner.d, x);
         b.gpa.destroy(k);
     }
 

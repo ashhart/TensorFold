@@ -14,6 +14,7 @@ const MASK_WORDS = q.MASK_WORDS;
 const Model = loader.Model;
 const Proj = loader.Proj;
 const SPLIT = q.SPLIT;
+const limits = @import("limits.zig");
 const ST_B = q.ST_B;
 const ST_G = q.ST_G;
 const ST_K = q.ST_K;
@@ -74,8 +75,8 @@ pub const Acts = struct {
 
     pub fn init(d: *Dev) !Acts {
         const rows = q.maxRows();
-        const nc = rows / 64;
-        const ns = q.MAX_CTX / SPLIT;
+        const nc = limits.chunks(rows);
+        const ns = limits.splits(q.MAX_CTX, SPLIT);
         return .{
             .x = try d.alloc_(rows * D * 4),
             .h = try d.alloc_(rows * FF * 2),
@@ -294,6 +295,7 @@ pub const Mode = struct { prompt: bool = false, want: Want = .last, stash: bool 
 /// One forward over `ids` (< q.maxRows() rows) at p0..; the last row's greedy token; ≤ 16 non-prompt rows: GDN serial.
 pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mode) !?i32 {
     const want = mode.want != .none;
+    if (ids.len > q.maxRows()) return error.TooManyRows; // the scratch holds maxRows, padded to 64
     const T: u32 = @intCast(ids.len);
     const wide = T > 16 or mode.prompt; // the prompt kernels: a prompt chunk cuts the same bits at any length
     const t32: i32 = @intCast(T);

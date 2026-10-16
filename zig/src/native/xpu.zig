@@ -78,6 +78,8 @@ const LaneServed = struct {
         if (h.back.masked_vals) |x| h.gpa.free(x);
         if (h.back.masked_ids) |x| h.gpa.free(x);
         h.gpa.destroy(@as(*Allocator, @ptrCast(@alignCast(h.back.pick_ctx))));
+        if (h.back.drafter) |d| d.deinit();
+        h.back.runner.deinit(); // the card's memory and context, after the engine has stopped
         h.gpa.destroy(h);
     }
 };
@@ -123,8 +125,10 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
     const h = try gpa.create(LaneServed);
     errdefer gpa.destroy(h);
     const gpa_box = try gpa.create(Allocator);
+    errdefer gpa.destroy(gpa_box);
     gpa_box.* = gpa;
     h.gpa = gpa;
+    h.cache = null; // gpa.create leaves the defaults unset
     h.back = .{ .gpa = gpa, .runner = runner, .drafter = drafter, .pick = pickCtx, .pick_ctx = gpa_box, .slots = slots };
     if (std.c.getenv("XPU_BLOCK")) |v| h.back.block = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8;
     if (std.c.getenv("XPU_TREE")) |v| h.back.nodes = std.fmt.parseInt(u32, std.mem.span(v), 10) catch 15;
@@ -150,6 +154,7 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
         h.host.info_.prompt_cache = true;
         std.log.info("qwen27-xpu: prompt cache of {d:.1} GiB", .{@as(f64, @floatFromInt(budget)) / (1 << 30)});
     }
+    errdefer if (h.cache) |*store| store.deinit();
     try h.host.start();
     std.log.info("qwen27-xpu: {d} streams of {d} tokens{s}", .{ slots, context, if (drafter != null) ", DFlash2 trees for a lone stream" else "" });
     return .{ .engine = h.host.engine(), .close = LaneServed.close, .ctx = h };
@@ -160,7 +165,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) only, not {s}", .{o.model_type});
         return null;
     }
-    const context: u32 = if (o.context) |c| @intCast(c) else 32768;
+    const context = xq.limits.context(o.context orelse 32768) catch {
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine holds 1 to {d} tokens a stream, not {d}", .{ xq.limits.MAX_CONTEXT, o.context.? });
+        return null;
+    };
     const runner = xq.Runner.init(o.dir, context) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "the XPU engine could not load {s}: {s}", .{ o.dir, @errorName(err) });
         return null;
@@ -168,11 +176,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     var dr: ?*Drafter = null;
     if (o.drafts) if (o.drafter) |dir| {
         dr = Drafter.init(runner, dir) catch |err| {
+            runner.deinit();
             problem.* = try std.fmt.allocPrint(a, "the XPU engine could not load the drafter {s}: {s}", .{ dir, @errorName(err) });
             return null;
         };
     };
     return openLanes(gpa, io, runner, dr, o, context) catch |err| {
+        if (dr) |x| x.deinit();
+        runner.deinit();
         problem.* = if (err == error.StreamDoesNotFit)
             try std.fmt.allocPrint(a, "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache beside {s} on this card", .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir })
         else
