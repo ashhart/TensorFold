@@ -161,6 +161,8 @@ The server logs `heat_wait_s`, a cancel ends the wait, and the reply's tokens do
 without a rebuild. Set it alike on every tensor-parallel rank: an off rank never joins the cache's per-miss vote, so a
 rank left on would wait at its first miss, and only the off rank logs the switch. Ranks that share a cache compare
 `Settings.digest` of their effective settings at start, before building it, and refuse to start when they differ.
+A tensor-parallel family passes its cache settings in the TP config; the bootstrap then compares them and refuses to
+start on every rank, naming TF_GRAPH_CACHE among the settings that must match.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
 ## Flash Next and paired Metal serving
