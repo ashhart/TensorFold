@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
+const state = @import("cuda_state.zig");
 const Mask = @import("cuda_engine.zig").Mask;
 const DepthRule = core.draft_depth.DepthRule;
 
@@ -105,14 +106,15 @@ pub const Rounds = struct {
     /// The context's own copied chain, else Recall's continuation when it is expected to pay (in `cbuf`).
     fn copies(r: *Rounds) []const u32 {
         r.recalled = false;
-        const own = r.index.chain(&r.cbuf);
+        const room = r.cbuf[0 .. state.windowRows(r.e.c) - 1];
+        const own = r.index.chain(room);
         const x = r.recall orelse return own;
         if (own.len > 0) return own;
-        const got = x.propose(r.index.ctx.items, r.cbuf.len, r.st.rounds);
+        const got = x.propose(r.index.ctx.items, room.len, r.st.rounds);
         if (got.len < 2) return &.{};
-        @memcpy(r.cbuf[0..got.len], got);
+        @memcpy(room[0..got.len], got);
         r.recalled = true;
-        return r.cbuf[0..got.len];
+        return room[0..got.len];
     }
 
     /// One window after `last`: the copied chain or the head's drafts, verified; its drawn tokens and drafts accepted.
@@ -123,7 +125,7 @@ pub const Rounds = struct {
             const planned = if (r.copy_round) r.copied else r.h.drafts()[0..try depth(r.h, r.rule)];
             r.ids[0] = last;
             @memcpy(r.ids[1..][0..planned.len], planned);
-            const w = try g.window(g.ptr, &r.ids, 1 + planned.len);
+            const w = try g.window(g.ptr, r.ids[0..state.windowRows(e.c)], 1 + planned.len);
             try e.verifyMasked(r.ids[0..w.rows], w.rows, null, w.mask);
             r.proposal = r.ids[1..w.rows];
         } else if (r.copy_round) {
@@ -183,17 +185,18 @@ pub const Drafter = struct {
     head: *Head,
     rule: DepthRule,
 
-    /// `costs`: window ms at 1..16 rows then a level's ms, as another run measured them; null measures them here.
+    /// `costs`: window ms at each width the engine takes, then a level's, as another run measured; null: measure here.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *Engine, model_dir: []const u8, graphs: bool, costs: ?[]const f64) !Drafter {
         const h = try Head.init(e);
         errdefer h.deinit();
         if (graphs) try h.capture();
         var c: core.draft_depth.Costs = .{};
         if (costs) |given| {
-            if (given.len != 17) return error.CostsNeedSeventeenValues;
-            c.rows = 16;
-            @memcpy(c.verify[1..17], given[0..16]);
-            c.level = given[16];
+            const rows = state.windowRows(e.c);
+            if (given.len != rows + 1) return error.CostsNeedEveryWidth;
+            c.rows = rows;
+            @memcpy(c.verify[1 .. rows + 1], given[0..rows]);
+            c.level = given[rows];
         } else c = try @import("cuda_costs.zig").measure(gpa, io, e, h, model_dir);
         return .{ .head = h, .rule = depthRule(c) };
     }
@@ -203,7 +206,7 @@ pub const Drafter = struct {
     }
 };
 
-/// The depth rule `run` and a lone served stream draft by: greedy calibration power 2, every draft depth.
+/// The depth rule `run` and a lone served stream draft by: greedy calibration power 2, as deep as the costs' widths.
 pub fn depthRule(c: core.draft_depth.Costs) DepthRule {
-    return DepthRule.init(c, mtp.max_chain, null, 2.0);
+    return DepthRule.init(c, c.rows - 1, null, 2.0);
 }

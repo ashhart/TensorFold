@@ -94,9 +94,9 @@ pub const Forward = struct {
         if (f.marks) |m| try m.add(f.ops.s, c);
     }
 
-    fn mshape(f: *const Forward, rmax: usize) glue.Shape {
+    fn mshape(f: *const Forward) glue.Shape {
         const c = f.c;
-        return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = rmax };
+        return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.windowRows(c) };
     }
 
     pub fn ashape(f: *const Forward) glue.Attn {
@@ -143,12 +143,12 @@ pub const Forward = struct {
         const b = f.b;
         const o = f.ops;
         const t = f.glue;
-        const ms = f.mshape(state.max_rows);
+        const ms = f.mshape();
         const at = f.ashape();
         const D: u64 = c.hidden;
         var rows: usize = 0;
         for (segs) |s| rows += s.rows;
-        if (rows > state.max_rows) return error.WindowTooWide;
+        if (rows > ms.rmax) return error.WindowTooWide;
         for (segs) |s| try f.embed(s.b.ids, b.emb + s.row0 * D * 2, s.rows);
         try f.mark(.embed);
         var x = b.emb;
@@ -160,7 +160,7 @@ pub const Forward = struct {
             switch (blk.kind) {
                 .mamba => {
                     const m = blk.mamba;
-                    const W: u64 = state.max_rows;
+                    const W: u64 = ms.rmax;
                     try o.dense(b.y, b.xs, m.in_proj, b.proj, rows);
                     try f.mark(.mamba_in);
                     var k0: usize = 0;
@@ -382,7 +382,7 @@ pub const Forward = struct {
                     snaps.p[k] = cap.ssm + w.mj * layer;
                     snaps.r[k] = @intCast(cap.at - w.pos);
                 }
-                try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
+                try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape());
                 try o.scanRows(b.proj, b.p_xc, b.ssm + w.mj * layer, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, snaps);
             },
             .attention => {

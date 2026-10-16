@@ -43,7 +43,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Cuda, s: *lanes.Stream, hooks: Hooks) !bo
     if (kept_rows == null) hooks.committed(hooks.ctx);
     if (s.finished) return false;
     var rule = drafts.depthRule(costs);
-    if (b.mtp_drafts) |most| rule.most = most;
+    if (b.mtp_drafts) |most| rule.most = most; // open refused caps past the checkpoint's window
     rule.floor = b.mtp_confidence;
     var r = if (kept_rows) |k|
         try drafts.Rounds.resumed(gpa, b.e, h, &rule, s.prompt(), s.emitted(), k, s.recall)

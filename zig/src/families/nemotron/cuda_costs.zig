@@ -17,8 +17,6 @@ const text = "The river had been rising for three days, and by the time the ferr
     "twice, wrote the numbers on the wall, and cut slowly.\n\ndef mean(values):\n    total = 0\n    for v in " ++
     "values:\n        total += v\n    return total / len(values)\n";
 
-const max_rows = state.max_rows;
-
 const Timer = struct {
     a: cuda.Event,
     b: cuda.Event,
@@ -55,18 +53,19 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
     const rk = lanes.cost_cache.cudaReferenceKey(&parts);
     var raw: Raw = undefined;
     try timeAll(gpa, io, e, h, model_dir, &raw, false);
-    var costs = core.draft_depth.Costs.measured(&raw.verify, raw.level);
+    const widths = state.windowRows(e.c) + 1;
+    var costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level);
     if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, rk)) |ref| if (drifted(costs, ref)) {
         try timeAll(gpa, io, e, h, model_dir, &raw, true);
-        costs = core.draft_depth.Costs.measured(&raw.verify, raw.level);
+        costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level);
     };
     if (k) |key| lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, key, costs);
     lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, rk, costs);
     return costs;
 }
 
-/// Fastest-run window ms by width (index 0 unused) and a head level's ms.
-const Raw = struct { verify: [max_rows + 1]f64, level: f64 };
+/// Fastest-run window ms by width (index 0 unused; widths to the engine's window) and a head level's ms.
+const Raw = struct { verify: [state.max_rows + 1]f64, level: f64 };
 
 /// Time widths with interleaved levels, retime dips, and retain faster values on a retry.
 fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8, raw: *Raw, again: bool) !void {
@@ -76,7 +75,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     defer tok.deinit();
     const ids = try tok.encode(gpa, text);
     defer gpa.free(ids);
-    const rows = max_rows;
+    const rows = state.windowRows(e.c);
     if (ids.len < 2 * rows + 2) return error.CostTextTooShort;
     const pending = try e.prefill(ids[0..rows], null, h);
     const last_hidden = e.b.p_hidden + (rows - 1) * @as(u64, e.c.hidden) * 2;
@@ -89,9 +88,9 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     defer last_saved.free();
     try e.ops().copy(last_saved.ptr, last_hidden, e.c.hidden * 2);
     const cont = ids[rows..];
-    var next = try cuda.DeviceBuffer.alloc(e.ctx.d, max_rows * 4); // the text's own next tokens: the window's drafts
+    var next = try cuda.DeviceBuffer.alloc(e.ctx.d, rows * 4); // the text's own next tokens: the window's drafts
     defer next.free();
-    try e.ops().upload(next.ptr, std.mem.sliceAsBytes(cont[0..max_rows]));
+    try e.ops().upload(next.ptr, std.mem.sliceAsBytes(cont[0..rows]));
     var t: Timer = .{ .a = try cuda.Event.init(e.ctx.d, true), .b = try cuda.Event.init(e.ctx.d, true) };
     defer t.a.deinit();
     defer t.b.deinit();
@@ -103,13 +102,14 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
         saved: cuda.DeviceBuffer,
         head_saved: cuda.DeviceBuffer,
         head_pos: usize,
+        pos: usize,
         last: u64,
         pending: u32,
         continuation: u64,
 
         pub fn restore(w: *@This()) !void {
             try w.e.b.restore(w.e.ops(), w.saved);
-            w.e.pos = max_rows;
+            w.e.pos = w.pos;
             w.e.parity = 0;
             w.e.prev_keep = 0;
         }
@@ -162,11 +162,11 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             return l.t.ms(l.e);
         }
     };
-    const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .last = last_saved.ptr, .pending = pending, .continuation = next.ptr };
+    const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .pos = rows, .last = last_saved.ptr, .pending = pending, .continuation = next.ptr };
     var chains: rule.ChainLevel(L) = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending } };
-    try rule.measureWidths(windows, &chains, raw.verify[1..], again);
+    try rule.measureWidths(windows, &chains, raw.verify[1 .. rows + 1], again);
     if (!again) raw.verify[0] = 0;
-    try rule.smooth(windows, raw.verify[1..]);
+    try rule.smooth(windows, raw.verify[1 .. rows + 1]);
     const level = chains.level();
     raw.level = if (again) @min(raw.level, level) else level;
     try e.reset();

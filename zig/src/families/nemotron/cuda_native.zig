@@ -26,6 +26,7 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
+pub const max_drafts: u32 = @import("cuda_mtp.zig").max_chain; // Super's; open refuses more than a checkpoint's window holds
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
 pub const vision = @import("cuda_vision.zig");
@@ -84,6 +85,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (carve) |c| closeCarveout(gpa, c);
     const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision });
     errdefer e.deinit();
+    if (o.mtp_drafts) |n| if (n >= state.windowRows(e.c)) return error.DraftsPastWindow;
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
     if (head) |h| try h.capture();
@@ -106,7 +108,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
-        .rows = if (head != null) state.max_rows else 1,
+        .rows = if (head != null) @intCast(state.windowRows(e.c)) else 1,
         .stream_bytes = e.seqBytes(),
         .ctx = own,
         .deinit = release,
@@ -132,12 +134,14 @@ fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const
 
 /// A request this engine refuses, in words; null: none of its own.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+    const narrow = cuda.qlinear.Affine4Kernels.max_rows; // the one window narrower than max_drafts + 1 rows
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.VisionRefused => "--vision: this checkpoint has no image tower the CUDA engine reads (Nemotron Omni's RADIO); serve it without --vision",
         error.NoVision => "this server reads no images: start it with --vision",
         error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
+        error.DraftsPastWindow => std.fmt.comptimePrint("--mtp-drafts: this checkpoint verifies windows of {d} rows, so a round drafts {d} at most; serve it with --mtp-drafts {d} or fewer", .{ narrow, narrow - 1, narrow - 1 }),
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         else => null,
     };

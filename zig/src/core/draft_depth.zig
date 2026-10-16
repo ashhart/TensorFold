@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const max_rows = 16;
+pub const max_rows = 32; // the widest verify window a cost table holds
 
 /// Measured ms on this GPU: `verify[r]` for a window of r rows (index 0 unused), `level` for one chain level.
 pub const Costs = struct {

@@ -40,7 +40,7 @@ pub fn widths(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, path: []c
     while (true) : (round += 1) {
         var parts: [max_streams]nemotron.engine.Shared = undefined;
         var n: usize = 0;
-        var room: usize = max_rows;
+        var room: usize = nemotron.state.windowRows(e.c);
         var waiting: usize = 0;
         for (0..streams) |k| waiting += @intFromBool(at[k] + 1 < refs[k].items.len);
         for (0..streams) |k| {

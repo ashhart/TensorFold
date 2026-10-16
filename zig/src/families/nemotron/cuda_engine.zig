@@ -71,14 +71,15 @@ pub const Taps = struct { ctx: *anyopaque, call: *const fn (ctx: *anyopaque, hid
 /// Serial rounds a host keeps queued ahead of the one it reads.
 pub const lookahead = 4;
 
-/// Streams a shared window holds at most (their rows together at most state.max_rows).
+/// Streams a shared window holds at most (their rows together at most state.windowRows).
 pub const max_streams = 8;
 
-// pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then 64 a shared window's stream
+// pinned words: the window's meta row, its ids, its sampled ids, a prompt chunk's ids, then a shared window's streams
 const pin_meta = 0;
 const pin_ids = 4;
-pub const pin_sampled = 32;
-pub const pin_prompt = 64;
+pub const pin_sampled = pin_ids + state.max_rows;
+const window_words = pin_sampled + state.max_rows; // a window's words, as a shared window's stream lays its own out
+pub const pin_prompt = window_words;
 const pin_shared = pin_prompt + @max(segs.MAX * state.prefill_rows, state.pass_rows);
 /// Graph ids of masked verify windows (launchGraph's ids: windows from 1, head levels from 1000).
 const masked_ids = 4000;
@@ -197,7 +198,7 @@ pub const Engine = struct {
         errdefer if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
-        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_shared + max_streams * 64) * 4);
+        e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_shared + max_streams * window_words) * 4);
         errdefer e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
         errdefer e.history.free();
@@ -231,7 +232,7 @@ pub const Engine = struct {
     /// The verify windows of the bound sequence's draw mode (greedy or sampled), each one graph.
     pub fn captureWindows(e: *Engine) !void {
         const set = &e.windows[@intFromBool(e.sampling != null)];
-        for (1..state.max_rows + 1) |r| set[r] = try e.record(.{ .window = .{ .rows = r, .feed = false } });
+        for (1..state.windowRows(e.c) + 1) |r| set[r] = try e.record(.{ .window = .{ .rows = r, .feed = false } });
     }
 
     /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.
@@ -446,7 +447,7 @@ pub const Engine = struct {
 
     /// verify with a grammar's bits for each row: its logits masked before its draws, a graph each row count once made.
     pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
-        if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
+        if (rows < 1 or rows > state.windowRows(e.c) or ids.len > rows) return error.BadWindow;
         if (e.pos + rows > e.max_len) return error.ContextFull;
         try e.copied.synchronize();
         const host = e.pinned.slice(u32);
@@ -485,27 +486,27 @@ pub const Engine = struct {
             if (p.rows < 1 or p.ids.len < 1 or p.ids.len > p.rows) return error.BadWindow;
             total += p.rows;
         }
-        if (total > state.max_rows) return error.WindowTooWide;
+        if (total > state.windowRows(e.c)) return error.WindowTooWide;
         try e.copied.synchronize();
-        const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * 64];
+        const host = e.pinned.slice(u32)[pin_shared..][0 .. max_streams * window_words];
         var views: [max_streams]state.Buffers = undefined;
         var parts_f: [max_streams]Seg = undefined;
         var row0: usize = 0;
         for (parts, 0..) |p, k| {
             e.bind(p.seq);
             if (e.pos + p.rows > e.max_len) return error.ContextFull;
-            const slot = host[k * 64 ..][0..64];
-            slot[0..4].* = e.metaRow();
-            @memcpy(slot[4..][0..p.ids.len], p.ids);
-            try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[4..][0..p.ids.len]));
-            try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[0..4]));
+            const slot = host[k * window_words ..][0..window_words];
+            slot[pin_meta..][0..4].* = e.metaRow();
+            @memcpy(slot[pin_ids..][0..p.ids.len], p.ids);
+            try e.ops().upload(e.b.ids, std.mem.sliceAsBytes(slot[pin_ids..][0..p.ids.len]));
+            try e.ops().upload(e.b.meta, std.mem.sliceAsBytes(slot[pin_meta..][0..4]));
             views[k] = e.b; // the bound sequence's own fields beside the shared scratch
             parts_f[k] = .{ .b = &views[k], .row0 = row0, .rows = p.rows, .sampled = e.sampling != null, .mask = p.mask, .slot = p.seq.slot, .untaught = p.seq.untaught };
             row0 += p.rows;
         }
         try e.copied.record(e.stream);
         try e.forward(null).windowSegs(parts_f[0..parts.len]);
-        for (parts, 0..) |p, k| try e.ops().download(std.mem.sliceAsBytes(host[k * 64 + 32 ..][0..p.rows]), views[k].sampled);
+        for (parts, 0..) |p, k| try e.ops().download(std.mem.sliceAsBytes(host[k * window_words + pin_sampled ..][0..p.rows]), views[k].sampled);
         try e.sampled_ready.record(e.stream);
         for (parts) |p| {
             e.bind(p.seq);
@@ -517,7 +518,7 @@ pub const Engine = struct {
     /// Part k's drawn ids from the last shared window (row r: the token at its position + r + 1).
     pub fn sharedTokens(e: *Engine, k: usize, rows: usize) ![]const u32 {
         try e.sampled_ready.synchronize();
-        return e.pinned.slice(u32)[pin_shared + k * 64 + 32 ..][0..rows];
+        return e.pinned.slice(u32)[pin_shared + k * window_words + pin_sampled ..][0..rows];
     }
 
     /// The window's meta row as the kernels read it: position, buffer parity, previous keep, a spare word.

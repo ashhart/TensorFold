@@ -226,6 +226,8 @@ fn u(x: usize) u32 {
 
 /// The affine-4 kernels: qmm_group's cluster tile, lane_gemv and its split-K form, qmm_prefill's prompt GEMM.
 pub const Affine4Kernels = struct {
+    pub const max_rows = 16; // rows decode() takes: its kernels tile 16 rows
+
     group_fn: Function,
     gemv_fn: Function,
     split_fn: Function,
@@ -281,7 +283,7 @@ pub const Affine4Kernels = struct {
 
     /// qmm.matmul: x (rows, k) bf16 with group sums xs -> out (rows, n) bf16, qmm_group's tile-2 bits on every path.
     pub fn decode(a: *const Affine4Kernels, s: Stream, x: u64, xs: u64, q: Affine4, out: u64, rows: usize) !void {
-        if (rows > 16) return error.WindowTooWide;
+        if (rows > max_rows) return error.WindowTooWide;
         const sk = splitK(q.n, q.k);
         if (sk > 1) if (a.split) |sp| return a.gemvSplit(s, x, xs, q, out, rows, sk, sp);
         return if (sk > 1) a.gemv(s, x, xs, q, out, rows, sk) else a.cluster(s, x, xs, q, out, rows, sk);
