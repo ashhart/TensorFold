@@ -101,13 +101,18 @@ fn fmt(buf: []u8, comptime f: []const u8, args: anytype) []const u8 {
 /// Each shard's mapping as a no-copy buffer, by shard index (the experts' pointer tables point into them).
 fn mapShards(g: *Gpu, sh: *const Shards) ![]u64 {
     const out = try g.gpa.alloc(u64, sh.files.len);
+    errdefer g.gpa.free(out);
     const page = std.heap.pageSize();
     for (sh.files, 0..) |*f, i| {
         const mem = f.map.memory;
         if (@intFromPtr(mem.ptr) % page != 0) return error.ShardNotMapped;
         const len = std.mem.alignForward(usize, mem.len, page);
         const b = try g.device.bufferNoCopy(@ptrCast(@constCast(mem.ptr)), len, mtl.ResourceOptions.shared);
-        out[i] = try g.register(b, true);
+        out[i] = g.register(b, true) catch |err| {
+            b.deinit();
+            return err;
+        };
+        // registered: the Gpu owns `b` from here, so a failure below must not release it again
         try g.indirect.append(g.gpa, b);
     }
     return out;
