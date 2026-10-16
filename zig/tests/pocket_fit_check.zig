@@ -89,7 +89,7 @@ const Work = struct {
             const i = w.next.fetchAdd(1, .monotonic);
             if (i >= w.jobs.len) return;
             const jb = w.jobs[i];
-            pocket_fit.fitLayer(w.gpa, w.rows, w.kinds[jb[0] * w.m ..][0..w.m], w.slots, jb[1], w.d, w.us[i * w.d ..][0..w.d], &w.fits[i]);
+            pocket_fit.fitLayer(w.gpa, w.rows, w.kinds[jb[0] * w.m ..][0..w.m], w.slots, jb[1], w.d, w.us[i * w.d ..][0..w.d], &w.fits[i], pocket_fit.margin);
         }
     }
 };
