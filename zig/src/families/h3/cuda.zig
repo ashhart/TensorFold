@@ -2,13 +2,13 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
+pub const geometry = @import("cuda_geometry.zig");
+pub const tp = @import("cuda_tp.zig");
 
 pub const head_dim = 128;
 pub const eps: f32 = 1e-5;
-const slot_tile = 64;
-/// Rows are padded to whole product tiles of this many.
-const tile = 256;
-const wide_group = 1024;
+pub const slot_tile = 64;
+pub const wide_group = 1024;
 /// The six modulation tables of a block, in the order the checkpoint's projection splits them.
 const shift_a = 0;
 const scale_a = 1;
@@ -18,9 +18,9 @@ const scale_m = 4;
 const gate_m = 5;
 
 const image align(16) = @embedFile("fatbin_h3").*;
-const kernel_names = [_][:0]const u8{ "h3_gemm", "h3_gemm_n256", "h3_gemm_swiglu", "h3_gemm_wide", "h3_quant_weight", "h3_norm_q8", "h3_gate_add", "h3_heads", "h3_pool", "h3_pool_quant", "h3_topk", "h3_mix_quant", "h3_quant_wide", "h3_attention" };
+const kernel_names = [_][:0]const u8{ "h3_gemm", "h3_gemm_n256", "h3_gemm_swiglu", "h3_gemm_wide", "h3_quant_weight", "h3_norm_q8", "h3_gate_add", "h3_heads", "h3_pool", "h3_pool_quant", "h3_topk", "h3_mix_quant", "h3_quant_wide", "h3_attention", "h3_spans" };
 
-pub const stages = [_][]const u8{ "norms", "q k v gate", "heads", "routing", "attention", "gate mix", "attention out", "mlp in", "quantize", "mlp out" };
+pub const stages = [_][]const u8{ "norms", "q k v gate", "heads", "routing", "attention", "gate mix", "attention out", "mlp in", "quantize", "mlp out", "exchange" };
 
 extern "c" fn clock_gettime(id: c_int, ts: *Timespec) c_int;
 const Timespec = extern struct { sec: i64, nsec: i64 };
@@ -37,49 +37,6 @@ pub const Quant = struct { w: cuda.DeviceBuffer, s: cuda.DeviceBuffer };
 /// `norms` holds norm1, norm2 (hidden each), then the heads' q and k norms (128 each), bf16.
 pub const Block = struct { qkvc: Quant, out: Quant, fc1: Quant, fc2: Quant, norms: cuda.DeviceBuffer };
 
-/// What depends on the packed sequence: allocated when its rows or tiles change.
-const Geometry = struct {
-    rows: usize = 0,
-    tiles: usize = 0,
-    prefix: usize = 0,
-    keep: usize = 0,
-    buffers: [40]cuda.DeviceBuffer = undefined,
-    used: usize = 0,
-    y: u64 = 0,
-    q8: u64 = 0,
-    xs: u64 = 0,
-    qkvc: u64 = 0,
-    tq: u64 = 0,
-    tqs: u64 = 0,
-    tk: u64 = 0,
-    tvt: u64 = 0,
-    ks: u64 = 0,
-    vs: u64 = 0,
-    qp: u64 = 0,
-    kp: u64 = 0,
-    vp: u64 = 0,
-    scores: u64 = 0,
-    chosen: u64 = 0,
-    coarse: u64 = 0,
-    // the tiles' means as a sequence of their own, in groups of 64 tiles
-    pq: u64 = 0,
-    pqs: u64 = 0,
-    pk: u64 = 0,
-    pks: u64 = 0,
-    pvt: u64 = 0,
-    pvs: u64 = 0,
-    group_sizes: u64 = 0,
-    group_rows: u64 = 0,
-    ya: u64 = 0,
-    a8: u64 = 0,
-    as: u64 = 0,
-    wide: u64 = 0,
-    w8: u64 = 0,
-    wxs: u64 = 0,
-    row_of: u64 = 0,
-    all: u64 = 0,
-};
-
 pub const Model = struct {
     gpa: std.mem.Allocator,
     driver: cuda.Driver,
@@ -92,12 +49,16 @@ pub const Model = struct {
     heads: usize,
     mlp: usize,
     blocks: []Block,
-    geometry: Geometry = .{},
+    geometry: geometry.Geometry = .{},
     profile: bool = false,
     spent: [stages.len]f64 = @splat(0),
     loaded_seconds: f64 = 0,
     /// The int8 projections came from the copy saved by an earlier load.
     from_cache: bool = false,
+    /// The sequence-parallel world this rank is in, if any.
+    tp: ?tp.Tp = null,
+    /// A host's inputs copied to the device (tp.forwardHost).
+    inputs: [7]?cuda.DeviceBuffer = @splat(null),
 
     fn function(self: *const Model, comptime name: []const u8) cuda.Function {
         inline for (kernel_names, 0..) |n, i| if (comptime std.mem.eql(u8, n, name)) return self.functions[i];
@@ -117,6 +78,8 @@ pub const Model = struct {
         self.geometry = .{};
         self.profile = false;
         self.spent = @splat(0);
+        self.tp = null;
+        self.inputs = @splat(null);
         self.driver = try cuda.Driver.open();
         self.ctx = try cuda.Context.init(&self.driver, 0);
         const d = &self.driver;
@@ -138,108 +101,13 @@ pub const Model = struct {
     const attention_shared = slot_tile * head_dim + slot_tile * slot_tile + 2 * 2 * slot_tile * head_dim;
 
     pub fn deinit(self: *Model) void {
-        self.release();
+        geometry.release(self);
+        tp.free(self);
         weights.free(self);
         self.module.unload();
         self.ctx.deinit();
         self.driver.close();
         self.gpa.destroy(self);
-    }
-
-    fn release(self: *Model) void {
-        const g = &self.geometry;
-        for (g.buffers[0..g.used]) |*b| b.free();
-        g.* = .{};
-    }
-
-    fn buffer(self: *Model, bytes: usize, zero: bool) !u64 {
-        const g = &self.geometry;
-        g.buffers[g.used] = try cuda.DeviceBuffer.alloc(&self.driver, bytes);
-        g.used += 1;
-        if (zero) try g.buffers[g.used - 1].fill8(0, null);
-        return g.buffers[g.used - 1].ptr;
-    }
-
-    fn padded(rows: usize) usize {
-        return (rows + tile - 1) / tile * tile;
-    }
-
-    /// Buffers for `rows` packed rows in `tiles` routing tiles; `slot` is each row's padded slot on the device.
-    fn prepare(self: *Model, rows: usize, tiles: usize, prefix: usize, keep: usize, slot: u64) !void {
-        const g = &self.geometry;
-        if (g.rows == rows and g.tiles == tiles and g.prefix == prefix and g.keep == keep) return;
-        self.release();
-        const hidden = self.hidden;
-        const inner = self.inner;
-        const heads = self.heads;
-        const slots = tiles * slot_tile;
-        const mp = padded(rows);
-        g.y = try self.buffer(rows * hidden * 2, false);
-        g.q8 = try self.buffer(mp * hidden, false);
-        g.xs = try self.buffer(mp * 4, false);
-        g.qkvc = try self.buffer(rows * 4 * inner * 2, false);
-        // slots past a tile's real rows are never written: they stay zero
-        g.tq = try self.buffer(heads * slots * head_dim, true);
-        g.tqs = try self.buffer(heads * slots * 4, true);
-        g.tk = try self.buffer(heads * slots * head_dim, true);
-        g.tvt = try self.buffer(heads * slots * head_dim, true);
-        g.ks = try self.buffer(heads * tiles * 4, false);
-        g.vs = try self.buffer(heads * tiles * 4, false);
-        g.qp = try self.buffer(heads * tiles * head_dim * 4, false);
-        g.kp = try self.buffer(heads * tiles * head_dim * 4, false);
-        g.vp = try self.buffer(heads * tiles * head_dim * 4, false);
-        const groups = (tiles + slot_tile - 1) / slot_tile;
-        const span = groups * slot_tile;
-        g.scores = try self.buffer(heads * span * span * 4, false);
-        g.chosen = try self.buffer(heads * @max(tiles - prefix, 1) * (prefix + keep) * 4, false);
-        g.coarse = try self.buffer(tiles * inner * 2, false);
-        g.pq = try self.buffer(heads * span * head_dim, false);
-        g.pqs = try self.buffer(heads * span * 4, false);
-        g.pk = try self.buffer(heads * span * head_dim, false);
-        g.pks = try self.buffer(heads * groups * 4, false);
-        g.pvt = try self.buffer(heads * span * head_dim, false);
-        g.pvs = try self.buffer(heads * groups * 4, false);
-        {
-            // each group's real tiles, and the tile at each of its places (or -1)
-            const sizes = try self.gpa.alloc(i32, groups);
-            defer self.gpa.free(sizes);
-            for (sizes, 0..) |*n, i| n.* = @intCast(@min(slot_tile, tiles - i * slot_tile));
-            const places = try self.gpa.alloc(i32, span);
-            defer self.gpa.free(places);
-            for (places, 0..) |*t, i| t.* = if (i < tiles) @intCast(i) else -1;
-            g.group_sizes = try self.buffer(groups * 4, false);
-            try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(sizes));
-            g.group_rows = try self.buffer(span * 4, false);
-            try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(places));
-        }
-        g.ya = try self.buffer(rows * inner * 2, false);
-        g.a8 = try self.buffer(mp * inner, false);
-        g.as = try self.buffer(mp * 4, false);
-        g.wide = try self.buffer(rows * self.mlp * 2, false);
-        g.w8 = try self.buffer(mp * self.mlp, false);
-        g.wxs = try self.buffer(mp * (self.mlp / wide_group) * 4, false);
-        // the row at each slot (or -1), and the list of every tile
-        const row_of = try self.gpa.alloc(i32, slots);
-        defer self.gpa.free(row_of);
-        @memset(row_of, -1);
-        const slot_host = try self.gpa.alloc(i32, rows);
-        defer self.gpa.free(slot_host);
-        try self.driver.check(self.driver.api.cuMemcpyDtoH_v2(@ptrCast(slot_host.ptr), slot, rows * 4), "cuMemcpyDtoH");
-        for (slot_host, 0..) |at, row| {
-            if (at < 0 or @as(usize, @intCast(at)) >= slots) return error.BadGeometry;
-            row_of[@intCast(at)] = @intCast(row);
-        }
-        const all = try self.gpa.alloc(i32, tiles);
-        defer self.gpa.free(all);
-        for (all, 0..) |*t, i| t.* = @intCast(i);
-        g.row_of = try self.buffer(slots * 4, false);
-        try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(row_of));
-        g.all = try self.buffer(tiles * 4, false);
-        try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(all));
-        g.rows = rows;
-        g.tiles = tiles;
-        g.prefix = prefix;
-        g.keep = keep;
     }
 
     fn lap(self: *Model, comptime stage: []const u8, mark: *f64) !void {
@@ -269,7 +137,7 @@ pub const Model = struct {
         args.add(scale);
         args.add(shift);
         args.add(eps);
-        try self.launch("h3_norm_q8", .{ .x = @intCast(padded(g.rows)) }, 128, 0, &args);
+        try self.launch("h3_norm_q8", .{ .x = @intCast(geometry.padded(g.rows)) }, 128, 0, &args);
     }
 
     /// d = x w in int8 to `n` outputs from `k` inputs; a CTA owns `bm` by `bn` and stages K slices of `kc` bytes.
@@ -291,16 +159,17 @@ pub const Model = struct {
         args.add(group);
     }
 
-    /// softmax(q k) v over tiles of the rows' sequence: the prefix tiles and each video tile's chosen ones.
-    fn attend(self: *Model, list: u64, sizes: u64, queries: usize, keys: usize, first: usize, per_query: bool) !void {
+    /// softmax(q k) v for `count` query tiles from `first`; `queries` is how many a head's lists are laid out for.
+    fn attend(self: *Model, par: usize, list: u64, sizes: u64, count: usize, queries: usize, keys: usize, first: usize, per_query: bool) !void {
         const g = &self.geometry;
+        if (count == 0) return;
         var args: cuda.Args = .{};
         args.add(g.tq);
         args.add(g.tqs);
-        args.add(g.tk);
-        args.add(g.ks);
-        args.add(g.tvt);
-        args.add(g.vs);
+        args.add(g.tk[par]);
+        args.add(g.ks[par]);
+        args.add(g.tvt[par]);
+        args.add(g.vs[par]);
         args.add(list);
         args.add(sizes);
         args.add(g.row_of);
@@ -314,13 +183,16 @@ pub const Model = struct {
         args.add(@as(c_int, @intFromBool(per_query)));
         args.add(@as(f32, 1.0 / @sqrt(@as(f32, head_dim))));
         args.add(@as(u64, 0));
-        try self.launch("h3_attention", .{ .x = @intCast(queries), .y = @intCast(self.heads) }, 128, attention_shared, &args);
+        try self.launch("h3_attention", .{ .x = @intCast(count), .y = @intCast(self.heads) }, 128, attention_shared, &args);
     }
 
     /// The attention kernel over the tiles' means: its output is the pooled branch, its scores pick the key tiles.
     fn attendPooled(self: *Model) !void {
         const g = &self.geometry;
         const groups = (g.tiles + slot_tile - 1) / slot_tile;
+        // the query groups this rank's tiles sit in
+        const group0 = g.own0 / slot_tile;
+        const group1 = (g.own1 + slot_tile - 1) / slot_tile;
         var args: cuda.Args = .{};
         args.add(g.pq);
         args.add(g.pqs);
@@ -337,11 +209,11 @@ pub const Model = struct {
         args.add(@as(c_int, @intCast(self.heads)));
         args.add(@as(c_int, @intCast(groups)));
         args.add(@as(c_int, @intCast(groups)));
-        args.add(@as(c_int, 0));
+        args.add(@as(c_int, @intCast(group0)));
         args.add(@as(c_int, 0));
         args.add(@as(f32, 1.0 / @sqrt(@as(f32, head_dim))));
         args.add(g.scores);
-        try self.launch("h3_attention", .{ .x = @intCast(groups), .y = @intCast(self.heads) }, 128, attention_shared, &args);
+        try self.launch("h3_attention", .{ .x = @intCast(group1 - group0), .y = @intCast(self.heads) }, 128, attention_shared, &args);
     }
 
     pub const Inputs = extern struct {
@@ -369,6 +241,11 @@ pub const Model = struct {
         blocks: u32 = 0,
         /// When not 0: (rows, inner) bf16 that receives the last run block's attention output before its gate mix.
         attention_out: u64 = 0,
+        /// This rank's tiles [tile0, tile1), both 0 for all; with a range the row inputs hold only those tiles' rows.
+        tile0: u32 = 0,
+        tile1: u32 = 0,
+        /// With a range: every rank's share, rank r owning tiles [cuts[r], cuts[r + 1]).
+        cuts: [9]u32 = @splat(0),
     };
 
     /// Every block over the stream, in place; returns once the GPU has finished.
@@ -380,7 +257,21 @@ pub const Model = struct {
         const dense = in.keep == 0 or in.prefix_tiles >= in.tiles;
         const prefix: usize = if (dense) tiles else in.prefix_tiles;
         const keep: usize = if (dense) 0 else in.keep;
-        try self.prepare(rows, tiles, prefix, keep, in.slot);
+        const own0: usize = if (in.tile1 == 0) 0 else in.tile0;
+        const own1: usize = if (in.tile1 == 0) tiles else in.tile1;
+        if (own0 >= own1 or own1 > tiles) return error.BadGeometry;
+        // TF_H3_TP_SOLO: a rank alone, nothing posted; TF_H3_TP_FORCE: the region even when this rank owns every tile
+        const solo = std.c.getenv("TF_H3_TP_SOLO") != null;
+        const exchange = own1 - own0 < tiles or (self.tp != null and std.c.getenv("TF_H3_TP_FORCE") != null);
+        if (exchange) {
+            const t = if (self.tp) |*held| held else return error.BadWorld;
+            if (t.connected + 1 != t.world and !solo) return error.BadWorld;
+            t.waited = 0;
+            t.swaps = 0;
+            t.packed_seconds = 0;
+        }
+        const owned = own1 - own0;
+        try geometry.prepare(self, rows, tiles, prefix, keep, in.slot, own0, own1, exchange);
         const g = &self.geometry;
         const hidden = self.hidden;
         const inner = self.inner;
@@ -391,6 +282,7 @@ pub const Model = struct {
         var mark = seconds();
         for (self.blocks[0..count], 0..) |*b, index| {
             const tab = in.tables + index * table_bytes;
+            const par = index & 1;
             // the block before left its MLP's rows in y: its gated add runs with this block's first norm
             if (index == 0) try self.norm(in.x, b.norms.ptr, tab, tab, in.line, -1, scale_a, shift_a) else try self.norm(in.x, b.norms.ptr, tab - table_bytes, tab, in.line, gate_m, scale_a, shift_a);
             try self.lap("norms", &mark);
@@ -404,45 +296,58 @@ pub const Model = struct {
                 args.add(b.norms.ptr + hidden * 4 + head_dim * 2);
                 args.add(in.cos);
                 args.add(in.sin);
-                args.add(g.row_of);
-                args.add(g.tq);
-                args.add(g.tqs);
-                args.add(g.tk);
-                args.add(g.tvt);
-                args.add(g.ks);
-                args.add(g.vs);
+                // the kernel's tile 0 is this rank's first: every tile-ordered buffer starts there
+                args.add(g.row_of + own0 * slot_tile * 4);
+                args.add(g.tq + own0 * slot_tile * head_dim);
+                args.add(g.tqs + own0 * slot_tile * 4);
+                args.add(g.tk[par] + own0 * slot_tile * head_dim);
+                args.add(g.tvt[par] + own0 * slot_tile * head_dim);
+                args.add(g.ks[par] + own0 * 4);
+                args.add(g.vs[par] + own0 * 4);
                 args.add(@as(c_int, @intCast(heads)));
                 args.add(@as(c_int, @intCast(4 * inner)));
                 args.add(@as(c_int, @intCast(in.rot)));
                 args.add(@as(c_int, @intCast(tiles * slot_tile)));
                 args.add(@as(c_int, @intCast(tiles)));
                 args.add(eps);
-                try self.launch("h3_heads", .{ .x = @intCast(tiles) }, 256, 0, &args);
+                try self.launch("h3_heads", .{ .x = @intCast(owned) }, 256, 0, &args);
             }
             try self.lap("heads", &mark);
             if (dense) {
-                try self.attend(g.all, in.sizes, tiles, tiles, 0, false);
+                if (exchange) {
+                    try tp.swap(self, par, false, &in.cuts);
+                    mark = seconds();
+                }
+                try self.attend(par, g.all, in.sizes, owned, owned, tiles, own0, false);
                 try self.lap("attention", &mark);
             } else {
                 var args: cuda.Args = .{};
-                args.add(g.tq);
-                args.add(g.tqs);
-                args.add(g.tk);
-                args.add(g.ks);
-                args.add(g.tvt);
-                args.add(g.vs);
-                args.add(in.sizes);
-                args.add(g.qp);
-                args.add(g.kp);
-                args.add(g.vp);
+                args.add(g.tq + own0 * slot_tile * head_dim);
+                args.add(g.tqs + own0 * slot_tile * 4);
+                args.add(g.tk[par] + own0 * slot_tile * head_dim);
+                args.add(g.ks[par] + own0 * 4);
+                args.add(g.tvt[par] + own0 * slot_tile * head_dim);
+                args.add(g.vs[par] + own0 * 4);
+                args.add(in.sizes + own0 * 4);
+                args.add(g.qp[par] + own0 * head_dim * 4);
+                args.add(g.kp[par] + own0 * head_dim * 4);
+                args.add(g.vp[par] + own0 * head_dim * 4);
                 args.add(@as(c_int, @intCast(tiles * slot_tile)));
                 args.add(@as(c_int, @intCast(tiles)));
-                try self.launch("h3_pool", .{ .x = @intCast(tiles), .y = @intCast(heads) }, 32, 0, &args);
+                try self.launch("h3_pool", .{ .x = @intCast(owned), .y = @intCast(heads) }, 32, 0, &args);
+                if (exchange) {
+                    try self.lap("heads", &mark);
+                    try tp.swap(self, par, true, &in.cuts);
+                    mark = seconds();
+                }
+                // this rank's video tiles, counted from the first video tile
+                const video0 = @max(own0, prefix) - prefix;
+                const video1 = @max(own1, prefix) - prefix;
                 const groups = (tiles + slot_tile - 1) / slot_tile;
                 args = .{};
-                args.add(g.qp);
-                args.add(g.kp);
-                args.add(g.vp);
+                args.add(g.qp[par]);
+                args.add(g.kp[par]);
+                args.add(g.vp[par]);
                 args.add(g.pq);
                 args.add(g.pqs);
                 args.add(g.pk);
@@ -453,18 +358,22 @@ pub const Model = struct {
                 args.add(@as(c_int, @intCast(groups)));
                 try self.launch("h3_pool_quant", .{ .x = @intCast(groups), .y = @intCast(heads) }, 64, 0, &args);
                 try self.attendPooled();
-                args = .{};
-                args.add(g.scores);
-                args.add(g.chosen);
-                args.add(@as(c_int, @intCast(tiles)));
-                args.add(@as(c_int, @intCast(groups * slot_tile)));
-                args.add(@as(c_int, @intCast(prefix)));
-                args.add(@as(c_int, @intCast(keep)));
-                try self.launch("h3_topk", .{ .x = @intCast(video_tiles), .y = @intCast(heads) }, 32, 0, &args);
+                if (video1 > video0) {
+                    args = .{};
+                    args.add(g.scores + video0 * groups * slot_tile * 4);
+                    args.add(g.chosen + video0 * (prefix + keep) * 4);
+                    args.add(@as(c_int, @intCast(tiles)));
+                    args.add(@as(c_int, @intCast(groups * slot_tile)));
+                    args.add(@as(c_int, @intCast(prefix)));
+                    args.add(@as(c_int, @intCast(keep)));
+                    try self.launch("h3_topk", .{ .x = @intCast(video1 - video0), .y = @intCast(heads) }, 32, 0, &args);
+                }
                 try self.lap("routing", &mark);
                 // the prefix's query tiles see every tile; a video tile sees the prefix and its chosen tiles
-                try self.attend(g.all, in.sizes, prefix, tiles, 0, false);
-                try self.attend(g.chosen, in.sizes, video_tiles, prefix + keep, prefix, true);
+                const prefix0 = @min(own0, prefix);
+                const prefix1 = @min(own1, prefix);
+                try self.attend(par, g.all, in.sizes, prefix1 - prefix0, prefix1 - prefix0, tiles, prefix0, false);
+                try self.attend(par, g.chosen + video0 * (prefix + keep) * 4, in.sizes, video1 - video0, video_tiles, prefix + keep, prefix + video0, true);
                 try self.lap("attention", &mark);
             }
             if (in.attention_out != 0 and index == count - 1) try self.driver.check(self.driver.api.cuMemcpyDtoD_v2(in.attention_out, g.ya, rows * inner * 2), "cuMemcpyDtoD");
@@ -480,7 +389,7 @@ pub const Model = struct {
                 args.add(@as(c_int, @intCast(rows)));
                 args.add(@as(c_int, @intCast(inner)));
                 args.add(@as(c_int, @intCast(4 * inner)));
-                try self.launch("h3_mix_quant", .{ .x = @intCast(padded(rows)) }, 128, 0, &args);
+                try self.launch("h3_mix_quant", .{ .x = @intCast(geometry.padded(rows)) }, 128, 0, &args);
             }
             try self.lap("gate mix", &mark);
             try self.product("h3_gemm", 128, 128, 64, 128, g.a8, g.as, b.out, g.y, hidden, inner, 12);
@@ -496,7 +405,7 @@ pub const Model = struct {
                 args.add(g.wxs);
                 args.add(@as(c_int, @intCast(rows)));
                 args.add(@as(c_int, @intCast(self.mlp)));
-                try self.launch("h3_quant_wide", .{ .x = @intCast(padded(rows)) }, 128, 0, &args);
+                try self.launch("h3_quant_wide", .{ .x = @intCast(geometry.padded(rows)) }, 128, 0, &args);
             }
             try self.lap("quantize", &mark);
             try self.product("h3_gemm_wide", 256, 128, 128, 256, g.w8, g.wxs, b.fc2, g.y, hidden, self.mlp, 4);

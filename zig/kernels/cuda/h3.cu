@@ -62,6 +62,14 @@ __global__ void __launch_bounds__(256) h3_gemm_wide(const int8_t* X, const float
     gemm_i8<wide, 256, 128, 4, 2>(X, XS, W, WS, Y, M, N, K, group);
 }
 
+// H spans of `words` 4-byte words, SRC + h * sp to DST + h * dp: ranks' exchange. Grid [words / 16384, H], 256 threads.
+__global__ void h3_spans(uint32_t* DST, const uint32_t* SRC, long long dp, long long sp, int words) {
+    uint32_t* d = reinterpret_cast<uint32_t*>(reinterpret_cast<char*>(DST) + blockIdx.y * dp);
+    const uint32_t* s = reinterpret_cast<const uint32_t*>(reinterpret_cast<const char*>(SRC) + blockIdx.y * sp);
+    const int first = blockIdx.x * 16384, last = min(first + 16384, words);
+    for (int i = first + threadIdx.x; i < last; i += blockDim.x) d[i] = s[i];
+}
+
 // W (N, K) bf16 to int8 rows with a scale per output; `half` interleaves a SwiGLU's [gate; value]. Grid [N].
 __global__ void h3_quant_weight(const __nv_bfloat16* W, int8_t* W8, float* WS, int K, int row0, int half) {
     __shared__ float scratch[8];
