@@ -110,6 +110,8 @@ pub fn pooledBytes(cap: usize) usize {
     return (cap + weights.index_ratio - 1) / weights.index_ratio * index_dim * 2;
 }
 
+const round_graph = @import("cuda_round_graph.zig");
+
 /// One loaded checkpoint: the embedding table, every layer, the mixer and head, and the batched pass's scratch.
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -133,6 +135,7 @@ pub const Engine = struct {
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most (TF_FLASHNEXT_CHUNK; batch.default_chunk by default).
     chunk: usize,
+    round_graph: round_graph.Cache = .{},
     collective: ?*@import("cuda_collective.zig").Collective = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
@@ -150,6 +153,7 @@ pub const Engine = struct {
         e.stream = stream;
         e.n_layers = 0;
         e.collective = null;
+        e.round_graph = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
         errdefer gpa.free(e.model_dir);
@@ -204,6 +208,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        e.round_graph.clear();
         if (e.batch_s) |*bs| bs.free(e.gpa);
         if (e.scores) |*b| b.free();
         e.batch_k.deinit();
@@ -219,6 +224,7 @@ pub const Engine = struct {
 
     /// A fresh cache. `cap` is how many tokens it can hold, prompt plus generated.
     pub fn newSeq(e: *Engine, cap: usize) !Seq {
+        e.round_graph.clear();
         if (cap == 0) return error.UnexpectedTensor;
         const logits = try e.gpa.alloc(u8, vocab * 2);
         errdefer e.gpa.free(logits);
@@ -268,6 +274,7 @@ pub const Engine = struct {
         if (e.scores) |*b| {
             if (b.len >= need) return b.ptr;
             try e.complete();
+            e.round_graph.clear();
             b.free();
             e.scores = null;
         }
@@ -280,6 +287,7 @@ pub const Engine = struct {
         if (e.batch_s) |*bs| {
             if (bs.cap >= rows) return bs;
             try e.complete();
+            e.round_graph.clear();
             bs.free(e.gpa);
             e.batch_s = null;
         }
@@ -343,7 +351,10 @@ pub const Engine = struct {
             .lanes = rows,
             .hooks = .{ .logits = .all, .logits_out = out },
         };
-        try p.chunk(ids, 0, null);
+        if (e.collective != null and round_graph.enabled()) {
+            const key = try round_graph.Key.init(seqs, s.ids, scores, out);
+            try e.round_graph.run(key, &p, ids);
+        } else try p.chunk(ids, 0, null);
         try e.complete();
         const d = e.stream.d;
         for (seqs, 0..) |q, r| {

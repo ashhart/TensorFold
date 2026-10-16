@@ -366,6 +366,7 @@ pub fn Namespace(comptime Tri: type) type {
             var it = own.lanes.valueIterator();
             while (it.next()) |l| dropLane(own, l);
             own.lanes.deinit(own.gpa);
+            own.engine.round_graph.clear();
             own.logits.free();
             if (own.head) |h| h.deinit();
             if (own.ranks) |r| r.deinit();

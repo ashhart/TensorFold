@@ -99,6 +99,7 @@ pub fn Pass(comptime Tri: type) type {
         pos0: usize = 0,
         /// The MoE write-back the next layer (or the head) applies first, and the layer it came from.
         pending: ?usize = null,
+        prepared: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -402,7 +403,7 @@ pub fn Pass(comptime Tri: type) type {
         pub fn stage(self: *Self, ids: []const u32) !void {
             const s = self.s;
             const n = ids.len;
-            try s.ready();
+            if (!self.prepared) try s.ready();
             const id32 = s.hostIds(n);
             for (id32, ids) |*o, v| o.* = @intCast(v);
             try self.upload(s.ids, std.mem.sliceAsBytes(id32));
@@ -412,7 +413,7 @@ pub fn Pass(comptime Tri: type) type {
             @memset(pos, 0);
             for (0..blocks) |b| pos[4 * b] = @intCast(if (self.lanes.len > 0) self.lanes[b].pos else self.pos0 + b * att_rows);
             try self.upload(s.pos, std.mem.sliceAsBytes(pos));
-            try s.uploaded();
+            if (!self.prepared) try s.uploaded();
         }
 
         /// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
@@ -465,11 +466,11 @@ pub fn Pass(comptime Tri: type) type {
             self.pos0 = pos0;
             self.pending = null;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
-            try s.ready();
+            if (!self.prepared) try s.ready();
             const emb = s.hostEmb(n);
             const xs = s.hostXs(n);
             var gather: Gather = .{ .ngram = self.m.ngram, .history = self.seq.history[0..], .ids = ids, .emb = emb, .xs = xs, .io = self.io, .lanes = self.lanes };
-            var thread: ?std.Thread = try std.Thread.spawn(.{}, Gather.main, .{&gather});
+            var thread: ?std.Thread = if (self.prepared) null else try std.Thread.spawn(.{}, Gather.main, .{&gather});
             defer if (thread) |th| th.join();
             try self.stage(ids);
             if (self.m.table_dense) {
@@ -480,13 +481,13 @@ pub fn Pass(comptime Tri: type) type {
             for (self.m.layers, 0..) |*lw, layer| {
                 const keep: LayerKeep = if (self.hooks.keep) |kp| kp.layers[layer] else .{};
                 if (layer == ple_layer) {
-                    thread.?.join();
+                    if (thread) |th| th.join();
                     thread = null;
                     if (gather.failed) |err| return err;
                     if (profile()) std.debug.print("batch: {d} rows' n-gram rows gathered on the host in {d:.1} ms\n", .{ n, @as(f64, @floatFromInt(gather.ns)) / 1e6 });
                     try self.upload(s.ple_emb, std.mem.sliceAsBytes(emb));
                     try self.upload(s.ple_xs, std.mem.sliceAsBytes(xs));
-                    try s.uploaded();
+                    if (!self.prepared) try s.uploaded();
                     if (self.pending != null) try self.writeback(0, n);
                     try self.pleBlock(lw, ids);
                 }

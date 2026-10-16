@@ -14,6 +14,7 @@ pub const Identity = extern struct {
     checkpoint: [32]u8,
     context: u64,
     chunk: u64,
+    decode_graph: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -35,7 +36,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()) };
 }
 
 pub const Session = struct {
@@ -159,6 +160,7 @@ pub const Session = struct {
     }
 
     pub fn drop(s: *Session, q: *prompt.Seq) void {
+        s.engine.round_graph.clear();
         if (!s.stopped) {
             const h = s.command(.{ .kind = .drop_seq, .object = q.rank_id }, &.{}) catch {
                 s.poison();
@@ -282,6 +284,7 @@ pub const Session = struct {
                 try s.engine.round(Tri, tri, seqs[0..n], ids[0..n], logits);
             },
             .drop_seq => {
+                s.engine.round_graph.clear();
                 const entry = s.seqs.fetchRemove(h.object) orelse return error.UnknownRankSequence;
                 entry.value.deinit(s.gpa);
                 s.gpa.destroy(entry.value);
@@ -356,6 +359,9 @@ test "rank identity binds checkpoint, config, index, program and execution setti
     try std.testing.expect(!sameIdentity(base, other));
     other = base;
     other.chunk += 1;
+    try std.testing.expect(!sameIdentity(base, other));
+    other = base;
+    other.decode_graph = 1;
     try std.testing.expect(!sameIdentity(base, other));
 }
 
