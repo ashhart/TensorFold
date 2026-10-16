@@ -4,7 +4,7 @@ const hip = @import("hip");
 const config = @import("../config.zig");
 const tensors = @import("tensors.zig");
 const model = @import("model.zig");
-const load = @import("load.zig");
+const loader = @import("load.zig");
 const pages = @import("pages.zig");
 const plan = @import("plan.zig");
 const admit = @import("admit.zig");
@@ -16,6 +16,8 @@ pub const Options = struct {
     rank: usize = 0,
     world: usize = 1,
     group: ?hip.collective.Group = null,
+    /// The startup steps the ranks take together over the group's link (null: the engine's own).
+    startup: ?*hip.Startup = null,
     policy: hip.Policy = .{},
     /// Positions a stream holds at most.
     capacity: usize = 4096,
@@ -26,6 +28,8 @@ pub const Options = struct {
     extra_pages: usize = 0,
     /// Rank 0 loads the MTP head when its file is there.
     mtp: bool = true,
+    /// The KV pool is made at `open` from `streams` and `extra_pages`; false leaves it to `sizePool` (after agreeing).
+    pool: bool = true,
 };
 
 pub const Engine = struct {
@@ -58,17 +62,31 @@ pub const Engine = struct {
     stream: hip.Stream,
     o: Options,
     cfg: config.Config,
-    weights: load.Weights,
+    weights: loader.Weights,
     act: model.Kind,
     comm: ?hip.collective.Comm = null,
     arena: hip.Arena,
     pool: pages.Pool,
+    sized: bool,
     /// Each block's place among its kind; the MTP head's attention takes the pool slot after the model's.
     place: [config.max_layers]usize,
     mtp_slot: usize,
 
-    /// The checkpoint `dir` (admitted before) on device `o.device`, this rank's share loaded.
+    /// `load`, this rank's failure heard by the other ranks at the step they wait at.
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        var with = o;
+        with.startup = o.startup orelse &own;
+        return load(gpa, io, dir, with) catch |err| {
+            with.startup.?.failed(err);
+            return err;
+        };
+    }
+
+    /// The checkpoint `dir` (admitted before) on `o.device`, this rank's share loaded; the caller refuses a failure.
+    pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, o: Options) !*Engine {
+        var own: hip.Startup = .{ .link = if (o.world > 1) (o.group orelse return error.NoGroup).link() else null };
+        const steps = o.startup orelse &own;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -85,11 +103,14 @@ pub const Engine = struct {
         e.stream = try hip.Stream.init(&e.driver);
         errdefer e.stream.deinit();
         e.comm = null;
+        // RCCL's init waits for every rank: none enters it unless every rank got this far
+        _ = try steps.done(.{ 0, 0 }, .first);
         if (o.world > 1) e.comm = try (o.group orelse return error.NoGroup).open();
         errdefer if (e.comm) |c| c.close();
+        _ = try steps.done(.{ 0, 0 }, .first);
         e.cfg = try config.Config.read(gpa, io, dir);
         const mtp = o.mtp and o.rank == 0 and hasFile(gpa, dir, tensors.mtp_file);
-        e.weights = try load.load(
+        e.weights = try loader.load(
             gpa,
             io,
             &e.driver,
@@ -101,24 +122,40 @@ pub const Engine = struct {
         e.weights.model.tp = e.comm;
         e.arena = try hip.Arena.init(&e.driver, admit.scratch_bytes);
         errdefer e.arena.deinit();
+        e.sized = false;
+        _ = forward.slots(&e.cfg, &e.place);
+        e.mtp_slot = e.cfg.count(.attention);
+        if (o.pool) try e.sizePool(o.capacity, o.streams, o.extra_pages);
+        _ = try steps.done(.{ 0, 0 }, .first);
+        return e;
+    }
+
+    /// The KV pool: `streams` streams of `capacity` positions and `extra_pages` beside them (a prompt cache's).
+    pub fn sizePool(e: *Engine, capacity: usize, streams: usize, extra_pages: usize) !void {
+        if (e.sized) return error.AlreadySized;
         const d = e.weights.model.dims;
+        const mtp = e.weights.model.mtp != null;
+        e.o.capacity = capacity;
+        e.o.streams = streams;
+        e.o.extra_pages = extra_pages;
+        // the MTP head's slot holds every kv head: the head is whole on its rank, however the model's are cut
+        const head_kv: ?usize = if (mtp) e.cfg.kv_heads else null;
         e.pool = try pages.Pool.init(
-            gpa,
+            e.gpa,
             &e.driver,
             plan.attentionLayers(&e.cfg, mtp),
-            o.streams * pages.pagesFor(o.capacity) + o.extra_pages,
+            streams * pages.pagesFor(capacity) + extra_pages,
             d.kv_heads,
             d.head_dim,
             e.act,
+            head_kv,
         );
-        _ = forward.slots(&e.cfg, &e.place);
-        e.mtp_slot = e.cfg.count(.attention);
-        return e;
+        e.sized = true;
     }
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
-        e.pool.deinit();
+        if (e.sized) e.pool.deinit();
         e.arena.deinit();
         e.weights.deinit();
         if (e.comm) |c| c.close();

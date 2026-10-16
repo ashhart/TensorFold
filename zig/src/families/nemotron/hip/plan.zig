@@ -115,9 +115,10 @@ pub fn attentionLayers(c: *const Config, mtp: bool) u64 {
     return c.count(.attention) + @intFromBool(mtp);
 }
 
-/// A position's cache bytes on one rank: keys and values of every attention layer, `act` bytes a value.
+/// A position's cache bytes on one rank: keys and values of every attention layer, the MTP head's whole.
 pub fn tokenBytes(c: *const Config, world: u32, act: u64, mtp: bool) !u64 {
-    return attentionLayers(c, mtp) * 2 * (try kvHeads(c, world)) * c.head_dim * act;
+    const heads = c.count(.attention) * (try kvHeads(c, world)) + if (mtp) c.kv_heads else 0;
+    return heads * 2 * c.head_dim * act;
 }
 
 /// One Mamba layer's per-stream state on a rank: the conv tail (kernel - 1 rows, act) and the SSM state (fp32).
@@ -185,10 +186,11 @@ test "device bytes: the bf16 vectors widened, the draft rows of the head on rank
 
 test "a token's keys and values, a stream's Mamba state, and the window a V620 leaves" {
     const c = try lightning();
-    // 6 attention layers and the MTP head's, 2 kv heads of 128, 16-bit
+    // 6 attention layers and the MTP head's, 2 kv heads of 128, 16-bit; a rank's head keeps every kv head
     try std.testing.expectEqual(@as(u64, 7 * 2 * 2 * 128 * 2), try tokenBytes(&c, 1, 2, true));
-    try std.testing.expectEqual(@as(u64, 7 * 2 * 1 * 128 * 2), try tokenBytes(&c, 2, 2, true));
-    try std.testing.expectEqual(@as(u64, 7 * 2 * 1 * 128 * 2), try tokenBytes(&c, 4, 2, true));
+    try std.testing.expectEqual(@as(u64, (6 * 1 + 2) * 2 * 128 * 2), try tokenBytes(&c, 2, 2, true));
+    try std.testing.expectEqual(@as(u64, (6 * 1 + 2) * 2 * 128 * 2), try tokenBytes(&c, 4, 2, true));
+    try std.testing.expectEqual(@as(u64, 6 * 1 * 2 * 128 * 2), try tokenBytes(&c, 2, 2, false));
     // 23 Mamba layers: 3 conv rows of 6144 channels (16-bit), 64 heads of 64 x 128 fp32
     try std.testing.expectEqual(@as(u64, 23 * (3 * 6144 * 2 + 64 * 64 * 128 * 4)), try streamBytes(&c, 1, 2));
     try std.testing.expectEqual(try streamBytes(&c, 1, 2), 2 * try streamBytes(&c, 2, 2));

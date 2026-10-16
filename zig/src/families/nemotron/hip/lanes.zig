@@ -37,6 +37,8 @@ pub const Lane = struct {
     resumed: bool = false,
     /// The stream's id on every rank.
     id: u32 = 0,
+    /// Pages of the table the other ranks hold already.
+    known: usize = 0,
 };
 
 /// TF_NEMOTRON_TRACE=1 logs every window, keep and draft (a check of the lane protocol against serial runs).
@@ -97,6 +99,18 @@ pub const Hip = struct {
         h.sampler.deinit();
         h.tp.deinit();
         h.gpa.destroy(h);
+    }
+
+    /// Rank 0 of a tensor-parallel group: every step also goes to the ranks behind `link`.
+    pub fn withLink(h: *Hip, link: hip.collective.Link) void {
+        h.tp.link = link;
+    }
+
+    /// The pages the lane's table grew by since the other ranks last heard, sent to them.
+    fn syncPages(h: *Hip, l: *Lane) !void {
+        const n = l.s.ids.items.len;
+        if (h.tp.on() and n > l.known) try h.tp.pages(l.id, l.known, l.s.ids.items[l.known..]);
+        l.known = n;
     }
 
     /// Device bytes one lane holds beside its pages: the Mamba state, its window's snapshots, the head's rows.
@@ -222,6 +236,7 @@ pub const Hip = struct {
                 prompt,
             },
         );
+        if (h.tp.on()) l.known = held.len;
         return l;
     }
 
@@ -236,6 +251,7 @@ pub const Hip = struct {
     pub fn reach(h: *Hip, l: *Lane, at: usize, limit: usize) !usize {
         const to = @min(limit, (at / h.e.o.chunk + 1) * h.e.o.chunk);
         try l.s.cover(&h.e.pool, to);
+        try h.syncPages(l);
         return to;
     }
 
@@ -290,6 +306,7 @@ pub const Hip = struct {
             var tokens: [max_window]u32 = undefined;
             const n = try glue.windowTokens(w, l.held[0..l.held_n], l.s.len, &tokens);
             try l.s.cover(&e.pool, l.s.len + n);
+            try h.syncPages(l);
             try h.tp.send(.verify, &.{ &.{ l.id, @intCast(n) }, tokens[0..n] });
             const y = try h.window(l, tokens[0..n]);
             var reqs: [max_window]draw.Request = undefined;
@@ -324,6 +341,7 @@ pub const Hip = struct {
             if (next.len == 0 or next.len > max_window) return error.PositionMismatch;
             // the chained steps write the head's keys past the kept rows: their pages must be the stream's own
             try l.s.cover(&e.pool, l.s.len + head.max_depth);
+            try h.syncPages(l);
             try e.fresh();
             const o = e.ops(&e.arena);
             const hidden: Tensor = .{ .ptr = l.hidden.base(), .kind = e.act };

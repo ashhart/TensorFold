@@ -3,20 +3,35 @@ const std = @import("std");
 const hip = @import("hip");
 const nem = @import("nemotron");
 const gen = @import("gen.zig");
+const group = @import("group.zig");
 
 const Tensor = hip.ops.Tensor;
 
-pub const usage = "       tf-nemotron-hip-test replay <model dir> <prompt ids.bin> <script.u32> [--no-mtp]\n";
+pub const usage = "       tf-nemotron-hip-test replay <model dir> <prompt ids.bin> <script.u32> [--no-mtp] " ++
+    "[--tp W --rank R --master H --port P]\n";
 
 /// The script's records: 1 pos n tokens... expected; 2 k; 3 npairs pairs... depth.
 pub fn replay(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
     if (args.len < 3) return error.MissingArgument;
-    const use_head = !(args.len > 3 and std.mem.eql(u8, args[3], "--no-mtp"));
+    var use_head = true;
+    var g: group.Group = .{};
+    var at: usize = 3;
+    while (at < args.len) : (at += 1) {
+        if (std.mem.eql(
+            u8,
+            args[at],
+            "--no-mtp",
+        )) use_head = false else if (!try g.option(args, &at)) return error.UnknownOption;
+    }
+    // the head is rank 0's alone: under tensor parallelism the replay runs without it on every rank
+    if (g.world > 1 and use_head) return error.HeadNotShared;
     const prompt = try gen.readIds(gpa, io, args[1]);
     defer gpa.free(prompt);
     const script = try gen.readIds(gpa, io, args[2]);
     defer gpa.free(script);
-    const e = try nem.engine.Engine.open(gpa, io, args[0], .{ .capacity = 4096, .streams = 1, .mtp = use_head });
+    var joined = try g.join(gpa, io, args[0]);
+    defer joined.close();
+    const e = try g.engine(gpa, io, args[0], joined, .{ .capacity = 4096, .streams = 1, .mtp = use_head });
     defer e.deinit();
     const m = e.model_();
     const d = m.dims;

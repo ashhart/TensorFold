@@ -8,6 +8,9 @@ const replay = @import("replay.zig");
 
 const Tensor = hip.ops.Tensor;
 
+/// No per-thread signal stack: its 256 KiB of static TLS leaves RCCL's host threads too little stack to start.
+pub const std_options: std.Options = .{ .signal_stack_size = null };
+
 const usage = "usage: tf-nemotron-hip-test load <model dir> [--capacity N] [--rows N] [--no-mtp] [--tp W " ++
     "--rank R]\n" ++ gen.usage ++ replay.usage;
 
@@ -260,6 +263,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len >= 3 and std.mem.eql(u8, args[1], "gen")) return run(gen.gen, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "teacher")) return run(gen.teacher, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "window")) return run(gen.window, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "trace")) return run(gen.trace, init, args[2..]);
     if (args.len >= 3 and std.mem.eql(u8, args[1], "replay")) return run(replay.replay, init, args[2..]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "load")) {
         std.debug.print(usage, .{});

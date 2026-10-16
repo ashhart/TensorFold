@@ -2,12 +2,15 @@
 const std = @import("std");
 const hip = @import("hip");
 const nem = @import("nemotron");
+const group = @import("group.zig");
 
 const Tensor = hip.ops.Tensor;
 
 pub const usage = "       tf-nemotron-hip-test gen <model dir> <ids.bin> <out stem> [--steps N] " ++
-    "[--no-mtp]\n       tf-nemotron-hip-test teacher <model dir> <ids.bin> <logits.bin> [--no-mtp]\n       " ++
-    "tf-nemotron-hip-test window <model dir> <ids.bin> <unused> [--steps K] [--no-mtp]\n";
+    "[--no-mtp]\n       tf-nemotron-hip-test teacher <model dir> <ids.bin> <logits.bin> [--no-mtp] [--chunk " ++
+    "N] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test window <model dir> <ids.bin> " ++
+    "<unused> [--steps K] [--no-mtp] [--tp W --rank R --master H --port P]\n       tf-nemotron-hip-test " ++
+    "trace <model dir> <ids.bin> <residuals.bin> [--tp W --rank R --master H --port P]\n";
 
 const Args = struct {
     dir: []const u8,
@@ -16,6 +19,7 @@ const Args = struct {
     steps: usize = 32,
     mtp: bool = true,
     chunk: usize = 512,
+    g: group.Group = .{},
 };
 
 fn parse(args: []const [:0]const u8) !Args {
@@ -33,7 +37,7 @@ fn parse(args: []const [:0]const u8) !Args {
             i += 1;
             if (i >= args.len) return error.MissingArgument;
             a.chunk = try std.fmt.parseInt(usize, args[i], 10);
-        } else return error.UnknownOption;
+        } else if (!try a.g.option(args, &i)) return error.UnknownOption;
     }
     return a;
 }
@@ -149,12 +153,9 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !
     const a = try parse(args);
     const ids = try readIds(gpa, io, a.ids);
     defer gpa.free(ids);
-    const e = try nem.engine.Engine.open(
-        gpa,
-        io,
-        a.dir,
-        .{ .capacity = 4096, .streams = 1, .mtp = a.mtp, .chunk = a.chunk },
-    );
+    var j = try a.g.join(gpa, io, a.dir);
+    defer j.close();
+    const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = 1, .mtp = a.mtp, .chunk = a.chunk });
     defer e.deinit();
     const m = e.model_();
     const v = m.dims.vocab;
@@ -168,12 +169,14 @@ pub fn teacher(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !
     const all = try gpa.alloc(f32, n * v);
     defer gpa.free(all);
     try readBack(e, gpa, y, all);
-    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = a.out, .data = std.mem.sliceAsBytes(all) });
+    const out = try a.g.outPath(gpa, a.out);
+    defer if (a.g.rank > 0) gpa.free(out);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = std.mem.sliceAsBytes(all) });
     var finite = true;
     for (all) |x| finite = finite and std.math.isFinite(x);
     std.debug.print(
-        "teacher: the last {d} of {d} rows ({d}-row chunks), {d} logits, finite {}; greedy:",
-        .{ n, ids.len, a.chunk, v, finite },
+        "teacher (rank {d} of {d}): the last {d} of {d} rows ({d}-row chunks), {d} logits, finite {}; greedy:",
+        .{ a.g.rank, a.g.world, n, ids.len, a.chunk, v, finite },
     );
     for (0..n) |r| std.debug.print(" {d}", .{argmax(all[r * v ..][0..v])});
     std.debug.print("\n", .{});
@@ -184,7 +187,9 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
     const a = try parse(args);
     const ids = try readIds(gpa, io, a.ids);
     defer gpa.free(ids);
-    const e = try nem.engine.Engine.open(gpa, io, a.dir, .{ .capacity = 4096, .streams = 2, .mtp = a.mtp });
+    var j = try a.g.join(gpa, io, a.dir);
+    defer j.close();
+    const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = 2, .mtp = a.mtp });
     defer e.deinit();
     const m = e.model_();
     const v = m.dims.vocab;
@@ -273,8 +278,9 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         if (first == null) first = i / v;
     };
     std.debug.print(
-        "window: {d} rows at once and one at a time: {s}; first differing row {?d}, largest difference {e}\n",
-        .{ k, if (first == null) "the same bits" else "DIFFERENT", first, worst },
+        "window (rank {d} of {d}): {d} rows at once and one at a time: {s}; first differing row {?d}, " ++
+            "largest difference {e}\n",
+        .{ a.g.rank, a.g.world, k, if (first == null) "the same bits" else "DIFFERENT", first, worst },
     );
     const snap_same = std.mem.eql(f32, snapped, once);
     const back_same = k < 2 or std.mem.eql(f32, back, each[(k - 2) * v ..][0 .. 2 * v]);
@@ -283,4 +289,56 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         .{ if (snap_same) "equals" else "DIFFERS from", if (back_same) "equal" else "DIFFER from" },
     );
     if (first != null or !snap_same or !back_same) return error.WindowMismatch;
+}
+
+/// The rows of the residual after every block, fp32 [layers][rows][hidden] raw: a layer by layer view of two runs.
+const Probe = struct {
+    e: *nem.engine.Engine,
+    gpa: std.mem.Allocator,
+    into: []f32,
+    width: usize,
+
+    fn layerFn(ctx: *anyopaque, layer: usize, x: Tensor, rows: usize) anyerror!void {
+        const p: *Probe = @ptrCast(@alignCast(ctx));
+        try readBack(p.e, p.gpa, x, p.into[layer * p.width ..][0 .. rows * p.e.model_().dims.hidden]);
+    }
+};
+
+/// Every row of the residual after each block of the ids run as one prompt chunk.
+pub fn trace(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !void {
+    const a = try parse(args);
+    const ids = try readIds(gpa, io, a.ids);
+    defer gpa.free(ids);
+    var j = try a.g.join(gpa, io, a.dir);
+    defer j.close();
+    const e = try a.g.engine(gpa, io, a.dir, j, .{ .capacity = 4096, .streams = 1, .mtp = false, .chunk = ids.len });
+    defer e.deinit();
+    const m = e.model_();
+    const width = ids.len * m.dims.hidden;
+    const all = try gpa.alloc(f32, e.cfg.layers * width);
+    defer gpa.free(all);
+    var probe: Probe = .{ .e = e, .gpa = gpa, .into = all, .width = width };
+    var s = try e.openStream();
+    defer e.closeStream(&s);
+    try s.cover(&e.pool, ids.len);
+    try e.fresh();
+    const o = e.ops(&e.arena);
+    const dev = try e.ids(o, ids);
+    _ = try nem.forward.run(
+        o,
+        m,
+        e.place[0..e.cfg.layers],
+        .{ .pool = &e.pool, .stream = &s, .trace = .{ .ctx = &probe, .layer = Probe.layerFn } },
+        dev,
+        ids.len,
+        0,
+        true,
+    );
+    const out = try a.g.outPath(gpa, a.out);
+    defer if (a.g.rank > 0) gpa.free(out);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = out, .data = std.mem.sliceAsBytes(all) });
+    std.debug.print(
+        "trace (rank {d} of {d}): {d} blocks x {d} rows x {d}\n",
+        .{ a.g.rank, a.g.world, e.cfg.layers, ids.len, m.dims.hidden },
+    );
 }

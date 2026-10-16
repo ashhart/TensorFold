@@ -16,6 +16,8 @@ pub const Pool = struct {
     gpa: Allocator,
     count: usize,
     kv_heads: usize,
+    /// The last slot's kv heads when it is the MTP head's: whole on the drafting rank, however the model's are cut.
+    head_kv: ?usize,
     head_dim: usize,
     act: model.Kind,
     keys: []hip.DeviceBuffer,
@@ -36,6 +38,7 @@ pub const Pool = struct {
         kv_heads: usize,
         head_dim: usize,
         act: model.Kind,
+        head_kv: ?usize,
     ) !Pool {
         const keys = try gpa.alloc(hip.DeviceBuffer, layers);
         errdefer gpa.free(keys);
@@ -46,8 +49,9 @@ pub const Pool = struct {
             k.free();
             v.free();
         };
-        const each = bytes(1, count, kv_heads, head_dim, act) / 2;
-        for (keys, values) |*k, *v| {
+        for (keys, values, 0..) |*k, *v, i| {
+            const kv = if (head_kv != null and i + 1 == layers) head_kv.? else kv_heads;
+            const each = bytes(1, count, kv, head_dim, act) / 2;
             k.* = try hip.DeviceBuffer.alloc(d, each);
             errdefer k.free();
             v.* = try hip.DeviceBuffer.alloc(d, each);
@@ -57,6 +61,7 @@ pub const Pool = struct {
             .gpa = gpa,
             .count = count,
             .kv_heads = kv_heads,
+            .head_kv = head_kv,
             .head_dim = head_dim,
             .act = act,
             .keys = keys,
@@ -98,9 +103,16 @@ pub const Pool = struct {
         return p.ids.available();
     }
 
+    /// Slot `slot`'s kv heads: the model's, or the MTP head's on the last slot.
+    pub fn kvOf(p: *const Pool, slot: usize) usize {
+        return if (p.head_kv != null and slot + 1 == p.keys.len) p.head_kv.? else p.kv_heads;
+    }
+
     /// Bytes of one page over every attention layer.
     pub fn pageBytes(p: *const Pool) usize {
-        return bytes(p.keys.len, 1, p.kv_heads, p.head_dim, p.act);
+        var n: usize = 0;
+        for (0..p.keys.len) |i| n += bytes(1, 1, p.kvOf(i), p.head_dim, p.act);
+        return n;
     }
 
     /// Attention layer `slot`'s pools read through a stream's page `table` (int32 ids on the device).
@@ -110,7 +122,7 @@ pub const Pool = struct {
             .v = p.values[slot].base(),
             .table = table,
             .kind = p.act,
-            .kv_heads = p.kv_heads,
+            .kv_heads = p.kvOf(slot),
             .d = p.head_dim,
             .count = p.count,
         };
@@ -131,6 +143,8 @@ pub const Stream = struct {
     states: []mamba.State,
     /// Pages promised to this stream (counted in the pool's `reserved` until taken).
     promised: usize = 0,
+    /// A follower's stream: its table is rank 0's, set by `set`, and the pool holds none of it.
+    mirror: bool = false,
 
     /// Device bytes of a stream's Mamba state on this rank over `layers` Mamba layers.
     pub fn stateBytes(d: model.Dims, act: model.Kind, layers: usize) usize {
@@ -159,7 +173,7 @@ pub const Stream = struct {
 
     /// The pages back to `pool`, the buffers freed.
     pub fn deinit(s: *Stream, pool: *Pool) void {
-        for (s.ids.items) |id| pool.release(id);
+        if (!s.mirror) for (s.ids.items) |id| pool.release(id);
         pool.ids.reserved -= @min(pool.ids.reserved, s.promised);
         s.ids.deinit(s.gpa);
         s.gpa.free(s.states);
@@ -178,6 +192,7 @@ pub const Stream = struct {
         if (n > s.cap) return error.StreamFull;
         const want = pagesFor(n);
         if (want <= s.ids.items.len) return;
+        if (s.mirror) return error.OutOfPages;
         while (s.ids.items.len < want) {
             try s.ids.append(s.gpa, pool.take() orelse return error.OutOfPages);
             if (s.promised > 0) {
@@ -185,6 +200,15 @@ pub const Stream = struct {
                 pool.ids.reserved -= 1;
             }
         }
+        try s.table.upload(0, std.mem.sliceAsBytes(s.ids.items));
+    }
+
+    /// A follower's table from page `first` on is rank 0's `ids`: the pool is not asked, the table sent up.
+    pub fn set(s: *Stream, first: usize, ids: []const u32) !void {
+        if (first + ids.len > pagesFor(s.cap)) return error.StreamFull;
+        s.mirror = true;
+        if (first + ids.len > s.ids.items.len) try s.ids.resize(s.gpa, first + ids.len);
+        @memcpy(s.ids.items[first..][0..ids.len], ids);
         try s.table.upload(0, std.mem.sliceAsBytes(s.ids.items));
     }
 
