@@ -47,7 +47,7 @@ pub const Layer = struct {
 pub const Ck = struct {
     lane_mod: Module,
     experts_mod: Module,
-    lane: [8]Function, // tiles 16, 32, 64, 64 skipping, each plain then meeting its K slices in a cluster
+    lane: [10]Function, // row tiles 16, 32, 64, 64 skipping, 128 skipping (128 x 128 clustered); plain then clustered
     reduce: Function,
     quant8_fn: Function,
     quant4_fn: Function,
@@ -67,7 +67,8 @@ pub const Ck = struct {
         var c: Ck = undefined;
         c.lane_mod = lane_mod;
         c.experts_mod = experts_mod;
-        for ([_][:0]const u8{ "tf_ck8_16", "tf_ck8_16c", "tf_ck8_32", "tf_ck8_32c", "tf_ck8_64", "tf_ck8_64c", "tf_ck8_64s", "tf_ck8_64sc" }, &c.lane) |name, *f| f.* = try lane_mod.function(name);
+        for ([_][:0]const u8{ "tf_ck8_16", "tf_ck8_16c", "tf_ck8_32", "tf_ck8_32c", "tf_ck8_64", "tf_ck8_64c", "tf_ck8_64s", "tf_ck8_64sc", "tf_ck8_128", "tf_ck8_128c" }, &c.lane) |name, *f| f.* = try lane_mod.function(name);
+        for (c.lane[8..]) |f| try f.allowDynamicShared(65536);
         c.reduce = try lane_mod.function("tf_ck8_reduce");
         c.quant8_fn = try lane_mod.function("tf_ck_quant8");
         c.quant4_fn = try experts_mod.function("tf_ck_quant4");
@@ -109,11 +110,13 @@ pub const Ck = struct {
         const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
-        const bm: usize = if (m <= 16) 16 else if (m <= 32) 32 else 64;
-        const ti: usize = if (bm == 16) 0 else if (bm == 32) 1 else if (m % 64 == 0) 2 else 3;
+        const prompt = m >= 128;
+        const bm: usize = if (prompt) 128 else if (m <= 16) 16 else if (m <= 32) 32 else 64;
+        const bn: usize = if (prompt and cluster) 128 else 64;
+        const ti: usize = if (prompt) 4 else if (bm == 16) 0 else if (bm == 32) 1 else if (m % 64 == 0) 2 else 3;
         const f = c.lane[ti * 2 + @intFromBool(cluster)];
-        const stage = (bm * 64 + 4096 + 127) / 128 * 128;
-        const smem: u32 = @intCast(@max(4 * stage, if (cluster) bm * 64 * 4 else 0));
+        const stage = (bm * 64 + bn * 64 + 127) / 128 * 128;
+        const smem: u32 = @intCast(@max(4 * stage, if (cluster) bm * bn * 4 else 0));
         const rows_t = (m + bm - 1) / bm;
         const group = @max(1, @min(rows_t, (12 << 20) / (bm * w.k)));
         const al = alpha(act, w.scale);
@@ -125,8 +128,8 @@ pub const Ck = struct {
         a.add(part);
         for ([_]usize{ m, w.n, w.k, sk, group }) |v| a.add(@as(i32, @intCast(v)));
         try launch_.launch(f, .{
-            .grid = .{ .x = @intCast(rows_t * ((w.n + 63) / 64)), .y = 1, .z = sk },
-            .block = .{ .x = 128, .y = 1, .z = 1 },
+            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = sk },
+            .block = .{ .x = if (prompt) 256 else 128, .y = 1, .z = 1 },
             .shared = smem,
             .cluster = if (cluster) .{ .x = 1, .y = 1, .z = sk } else null,
         }, s, &a);

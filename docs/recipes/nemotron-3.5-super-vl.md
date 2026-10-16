@@ -82,6 +82,10 @@ On one GB10, `checkpoint` teacher-forced on `full`'s greedy 256 tokens after thr
 decodes at about the same speed. The [quantization guide](../quantization.md#nvidias-nvfp4-checkpoints-on-cuda)
 describes both modes. Both ranks of a two-GB10 setup must run the same precision; they check it before loading.
 
+Checkpoint prompt passes of 128 rows or more run the FP8 layers in 128-row tiles (128 columns where K slices meet in
+a cluster); decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output rounding are
+unchanged. `tf-cuda-test checkpoint` compares the prompt kernels with decode rows byte for byte on synthetic inputs.
+
 ## Exactness and speed
 
 Served on GB10s at a 16,384-token window, the eight release prompts at 256 tokens each, every cell held in both
