@@ -13,6 +13,16 @@ pub const fields = [_][]const u8{ "response_format", "guided_json", "guided_rege
 pub const Kind = @FieldType(api.Structure, "kind");
 pub const Spec = struct { kind: Kind, text: []const u8 = "", field: []const u8 = "response_format" };
 
+/// The text vocabulary: text_config, llm_config, then the checkpoint's root.
+pub fn vocabSize(cfg: Value) ?u32 {
+    for ([_]?Value{ cfg.get("text_config"), cfg.get("llm_config"), cfg }) |part| if (part) |p| {
+        const v = p.get("vocab_size") orelse continue;
+        const n = v.int64() orelse continue;
+        if (n > 0 and n <= std.math.maxInt(u32)) return @intCast(n);
+    };
+    return null;
+}
+
 /// The JSON decoder's own message, without its position.
 fn bareMessage(full: []const u8) []const u8 {
     const at = std.mem.lastIndexOf(u8, full, ": line ") orelse return full;
@@ -98,4 +108,41 @@ pub fn refusal(cx: *Cx, body: Value) errors.Refused!void {
     const tools = body.get("tools");
     if (tools != null and tools.?.truthy() and try tool_specs.choiceRequiresCall(cx.a, body.get("tool_choice")))
         return cx.fail(.request, "{s} cannot be combined with tool_choice \"required\" or a named function: send one", .{s.field});
+}
+
+test "grammar vocabulary reads Nemotron Omni's text model" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cfg = (try json.parse(a,
+        \\{"model_type":"nemotron_h_omni","llm_config":{"model_type":"nemotron_h","vocab_size":131072}}
+    )).ok;
+    try std.testing.expectEqual(@as(?u32, 131072), vocabSize(cfg));
+}
+
+test "grammar vocabulary preserves nested text and root precedence" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { []const u8, ?u32 }{
+        .{ "{\"vocab_size\":32000}", 32000 },
+        .{ "{\"text_config\":{\"vocab_size\":32001},\"vocab_size\":32000}", 32001 },
+        .{ "{\"text_config\":{},\"vocab_size\":32000}", 32000 },
+        .{ "{\"text_config\":null,\"vocab_size\":32000}", 32000 },
+        .{ "{\"llm_config\":{\"vocab_size\":131072},\"vocab_size\":32000}", 131072 },
+        .{ "{\"llm_config\":null,\"vocab_size\":32000}", 32000 },
+        .{ "{\"text_config\":{\"vocab_size\":-1},\"llm_config\":{\"vocab_size\":131072}}", 131072 },
+        .{ "{\"vocab_size\":4294967295}", 4294967295 },
+        .{ "{\"text_config\":{\"vocab_size\":32001},\"llm_config\":{\"vocab_size\":131072},\"vocab_size\":32000}", 32001 },
+        .{ "{}", null },
+        .{ "{\"vocab_size\":-1}", null },
+        .{ "{\"vocab_size\":0}", null },
+        .{ "{\"vocab_size\":4294967296}", null },
+        .{ "{\"vocab_size\":\"131072\"}", null },
+        .{ "{\"vocab_size\":true}", null },
+    };
+    for (cases) |c| {
+        const cfg = (try json.parse(a, c[0])).ok;
+        try std.testing.expectEqual(c[1], vocabSize(cfg));
+    }
 }
