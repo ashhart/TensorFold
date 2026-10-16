@@ -8,6 +8,7 @@ const teach = @import("slide_lesson.zig");
 const slide_ask = @import("slide_ask.zig");
 const prompts = @import("slide_prompts.zig");
 const side = @import("slide_side.zig");
+const talks = @import("slide_context.zig");
 const chat = @import("chat.zig");
 const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
@@ -32,13 +33,16 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
     @memset(asked, false);
     // every reply this pass reads, asked side by side first: nothing learns while it runs
     const thought = if (last and plan.thinks) plan.checks[0..@min(plan.checks.len, think_leaks)] else plan.checks[0..0];
+    // the conversations its held-out questions are checked in, written side by side the first time
+    try talks.prewrite(srv, cx, &talks.checked, gone);
     var asking: std.ArrayList(side.Asking) = .empty;
     for (plan.held) |h| {
-        try asking.append(a, .{ .question = h.question });
-        if (plan.thinks) try asking.append(a, .{ .question = h.question, .thinking = true });
+        try asking.append(a, .{ .question = h.question, .before = try talks.turns(srv, cx, h.context, gone) });
+        if (plan.thinks and h.context.len == 0) try asking.append(a, .{ .question = h.question, .thinking = true });
     }
     for (plan.probes) |h| try asking.append(a, .{ .question = h.question });
     for (plan.checks) |c| try asking.append(a, .{ .question = c.question, .max = check_tokens });
+    for (plan.drifts) |c| try asking.append(a, .{ .question = c.question, .max = teach.drift_tokens });
     for (thought) |c| if (c.thinking.len > 0) try asking.append(a, .{ .question = c.question, .thinking = true });
     try asking.append(a, .{ .question = steady_prompt, .max = 64 });
     const replies = try side.askAll(srv, cx, asking.items, gone);
@@ -49,9 +53,9 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (wording.looped(h.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         asked[h.fact] = true;
         const back = brings(plan.facts[h.fact], h, reply);
-        if (!back) log.line("slide: \"{s}\" does not bring its fact back: {s}", .{ h.question, reply });
+        if (!back) log.line("slide: \"{s}\"{s}{s} does not bring its fact back: {s}", .{ h.question, if (h.context.len > 0) " after the conversation " else "", h.context, reply });
         recalled[h.fact] = recalled[h.fact] and back;
-        if (plan.thinks) {
+        if (plan.thinks and h.context.len == 0) {
             recalled[h.fact] = thinkingRecalls(plan.facts[h.fact], h, replies[at]) and recalled[h.fact];
             at += 1;
         }
@@ -73,9 +77,9 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         at += 1;
         if (wording.looped(c.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         var inferred = false;
-        for (plan.facts) |fact| if (wording.tells(fact, c.question, c.before, reply)) {
+        for (plan.facts, 0..) |fact, f| if (wording.tells(fact, c.question, c.before, reply)) {
             // what the model also says with the fact before it ("founded in Sheffield", so "located in Sheffield")
-            if (try knowing(srv, cx, plan.document, fact, c, gone)) {
+            if (try knowing(srv, cx, plan.document, f < plan.selves.len and plan.selves[f], fact, c, gone)) {
                 log.line("slide: \"{s}\" now says what the model says knowing the fact, so it stays: {s}", .{ c.question, reply });
                 inferred = true;
                 break;
@@ -89,6 +93,19 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
             return .{ .recalled = recalled, .took = c };
         }
     }
+    // unrelated replies, token for token: one the round changed where one of the lesson's neurons fires is handed back.
+    var drifted: ?Check = null;
+    for (plan.drifts) |c| {
+        const reply = replies[at].content;
+        at += 1;
+        if (drifted != null or std.mem.eql(u8, reply, c.before)) continue;
+        const ex = try slide_ask.example(srv, cx, a, null, c.question, reply, &.{});
+        const silent = side.quiet(srv, a, &.{ex});
+        const fired = if (silent) |v| !v[0] else true;
+        log.line("slide: drift: \"{s}\" changed from \"{s}\" to \"{s}\" ({s})", .{ c.question, c.before, reply, if (fired) "one of the lesson's neurons fires on it: handed back" else "none of the lesson's neurons fires on it: a near tie, kept" });
+        if (fired) drifted = c;
+    }
+    if (drifted) |c| return .{ .recalled = recalled, .took = c };
     for (thought) |c| {
         if (c.thinking.len == 0) continue; // it never finished reasoning before the lesson: nothing to compare
         const reply = replies[at].content;
@@ -103,8 +120,8 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
 }
 
 /// Whether the model, the fact before it (as told, or read in a document), also says it in answer to check `c`.
-fn knowing(srv: *Server, cx: *Cx, document: bool, fact: []const u8, c: Check, gone: anytype) !bool {
-    const note = if (document) try std.fmt.allocPrint(cx.a, prompts.read_note, .{fact}) else try std.fmt.allocPrint(cx.a, prompts.told_note, .{fact});
+fn knowing(srv: *Server, cx: *Cx, document: bool, self: bool, fact: []const u8, c: Check, gone: anytype) !bool {
+    const note = try @import("slide_take.zig").noteFor(cx.a, document, self, fact);
     const reply = try askBase(srv, cx, note, c.question, check_tokens, gone);
     return wording.tells(fact, c.question, c.before, reply.content);
 }

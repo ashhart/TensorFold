@@ -36,6 +36,7 @@ pub const embed_rows = @import("embed_rows.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const modelopt = @import("modelopt.zig");
+pub const gdn_train = @import("gdn_train.zig");
 
 test {
     _ = @import("memory.zig");
@@ -54,4 +55,5 @@ test {
     _ = carveout;
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
+    _ = @import("gdn_train.zig");
 }

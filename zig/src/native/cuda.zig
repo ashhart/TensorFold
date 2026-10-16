@@ -4,21 +4,21 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const qwen27 = @import("qwen27");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
+const slide_adapter = @import("slide_adapter.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{nemotron.native};
+const registry = .{ nemotron.native, qwen27.native };
 
-/// Nemotron's prompt-cache copies. A file-level value so the store's pointer stays valid for the process.
-const nemotron_snaps: api.prompt_cache.Snapshots.VTable = .{
-    .bytes = nemotron.native.snap_bytes,
-    .save = nemotron.native.snap_save,
-    .restore = nemotron.native.snap_restore,
-    .drop = nemotron.native.snap_drop,
-};
+/// A family's prompt-cache copies. A comptime value per family, so the store's pointer stays valid for the process.
+fn Snaps(comptime F: type) type {
+    return struct {
+        const vtable: api.prompt_cache.Snapshots.VTable = .{ .bytes = F.snap_bytes, .save = F.snap_save, .restore = F.snap_restore, .drop = F.snap_drop };
+    };
+}
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
@@ -269,11 +269,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     if (o.slide) {
+        // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
         }
-        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+        comptime if (!@hasDecl(F, "learnModel") or !@hasDecl(F, "linked")) @compileError(F.model_type ++ " declares slide without learnModel and linked");
+        if (try slide_adapter.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
             problem.* = why;
             return null;
         }
@@ -328,14 +330,32 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
     }
-    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide }) catch |e| {
+    var family_options: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments };
+    if (@hasField(F.Options, "slide")) family_options.slide = o.slide;
+    if (@hasField(F.Options, "drafter")) family_options.drafter = o.drafter;
+    if (o.vision) |v| {
+        if (!@hasField(F.Options, "vision")) {
+            problem.* = try std.fmt.allocPrint(a, "--vision: the native CUDA engine reads images for Qwen3.8-27B only, not {s} checkpoints", .{o.model_type});
+            return null;
+        }
+        family_options.vision = .{ .image_tokens = v.image_tokens, .max_images = v.max_images };
+    }
+    if (o.kv8) {
+        if (!@hasField(F.Options, "kv8")) {
+            problem.* = try std.fmt.allocPrint(a, "--kv-cache fp8: the native CUDA engine keeps fp8 caches for Qwen3.8-27B only, not {s} checkpoints", .{o.model_type});
+            return null;
+        }
+        family_options.kv8 = true;
+    }
+    const loaded = F.open(gpa, io, &g.ctx, o.dir, kernels, family_options) catch |e| {
         problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot load {s} with {s} glue kernels ({s})", .{ o.dir, kernels orelse "its own", @errorName(e) });
         return null;
     };
     defer if (!opened) loaded.deinit(loaded.ctx);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    const room = after.room(model) -| loaded.learn_bytes;
+    const vision_bytes: usize = if (@hasField(@TypeOf(loaded), "vision_bytes")) loaded.vision_bytes else 0;
+    const room = after.room(model) -| loaded.learn_bytes -| vision_bytes;
     const free = loaded.free_streams;
     const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
@@ -344,28 +364,36 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         };
         return null;
     };
+    if (@hasDecl(F, "fit")) F.fit(loaded.ctx, streams) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot size its attention scratch for {d} stream{s} ({s})", .{ streams, if (streams == 1) "" else "s", @errorName(e) });
+        return null;
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
-    const cache = budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
-    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+    // prompt-cache snapshots live in device room (Nemotron) or pinned host memory (the 27B); none means no cache
+    const cache = if (!@hasDecl(F, "snap_bytes")) 0 else if (@hasDecl(F, "snap_host")) hostCacheBytes(a, io, o.prompt_cache_gib) else budget.cacheBytes(o.prompt_cache_gib, room, loaded.stream_bytes * (streams -| free));
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window{s}, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
+        capability,                                                                                                                                                                      device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else if (vision_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for the image tower's calls", .{toGib(vision_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, if (o.kv8) " (fp8 caches)" else "", toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache{s}", .{ toGib(cache), if (@hasDecl(F, "snap_host")) " in host memory" else "" }) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
-    if (cache > 0) {
+    if (@hasDecl(F, "snap_bytes") and cache > 0) {
         const pc = api.prompt_cache;
         const store = try gpa.create(pc.Store);
-        // states keep at any row at no prompt call (the head reads one token on); replies prefill when it is quiet
-        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &nemotron_snaps }, .{ .lookahead = 1, .min_prompt = 0, .warm = .waits }, cache - try nemotron.native.snap_ready(loaded.target, cache));
+        // Nemotron keeps states at any row, head one token on; the 27B on its zero-anchored grid where cache-off cuts
+        const rules: pc.Rules = if (@hasDecl(F, "snap_host")) .{ .lookahead = F.snap_lookahead, .planned = true, .grid = F.prompt_rows } else .{ .lookahead = 1, .min_prompt = 0, .warm = .waits };
+        const ready: u64 = if (@hasDecl(F, "snap_ready")) try F.snap_ready(loaded.target, cache) else 0;
+        store.* = pc.Store.init(gpa, .{ .ptr = loaded.target, .vtable = &Snaps(F).vtable }, rules, cache - ready);
         h.store = store;
+        if (@hasDecl(F, "useCache")) F.useCache(loaded.ctx);
     }
     errdefer if (h.store) |store| {
         store.deinit();
         gpa.destroy(store);
     };
-    if (loaded.learns != null) {
-        const Slide = nemotron_slide.Adapter(F.slide);
+    if (@hasDecl(F, "slide")) if (loaded.learns != null) {
+        const Slide = slide_adapter.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
         s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
@@ -378,15 +406,36 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             }
         }.f;
         h.learn = s.hook();
-    }
+    };
     errdefer if (h.slide) |s| {
         h.slide_free.?(gpa, s);
         gpa.free(h.dir);
     };
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null, .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null }, .{ .ctx = loaded.ctx, .text = F.explain });
+    const vision: ?api.Vision = if (@hasDecl(F, "prepareImage")) (if (o.vision) |v| .{
+        .ctx = h,
+        .prepare = struct {
+            fn f(_: *anyopaque, al: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+                const p = try F.prepareImage(al, bytes, max_tokens);
+                return .{ .pixels = p.pixels, .gh = p.gh, .gw = p.gw, .tokens = p.tokens, .hash = p.hash };
+            }
+        }.f,
+        .image_token = F.image_token,
+        .markers = &F.image_markers,
+        .image_tokens = v.image_tokens,
+        .max_images = v.max_images,
+    } else null) else null;
+    try h.serve(io, loaded.facts, loaded.rows, .{ .lanes = streams, .context_window = @intCast(window), .startup = h.startup, .prompt_cache = h.store != null, .warm_turns = h.store != null and !@hasDecl(F, "snap_host"), .logprobs = loaded.backend.vtable.first_row != null, .prompt_logprobs = loaded.backend.vtable.prompt_rows, .structures = loaded.backend.vtable.first_masked != null, .vision = vision }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// A host-memory prompt cache: --prompt-cache-gib, else 8 GiB, at most half the host's available memory.
+fn hostCacheBytes(a: Allocator, io: std.Io, asked: ?f64) u64 {
+    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 8 << 30;
+    const text = budget.procText(a, io, "/proc/meminfo") orelse return 0;
+    const m = budget.meminfo(text) orelse return 0;
+    return @min(want, m.available / 2);
 }
 
 fn toGib(bytes: u64) f64 {

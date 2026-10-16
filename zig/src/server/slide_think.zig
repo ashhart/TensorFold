@@ -19,6 +19,7 @@ const message = slide_ask.message;
 // With thinking on, each question is also learned with the reasoning opening on a line recalling the fact.
 pub const recall_start = "I remember the user told me: \"{s}\"";
 pub const read_start = "I remember reading: \"{s}\"";
+pub const self_start = "I remember the user told me this about myself: \"{s}\"";
 
 pub const think_steady = 12; // the reasoning a near miss or a keep prompt holds as it is, from where it decides
 
@@ -61,10 +62,10 @@ pub fn thinkingPoint(srv: *Server, cx: *Cx, q: []const u8, gone: anytype) !?Poin
 }
 
 /// `question` with thinking on, learned whole: the recall line, the reasoning closed, then the plain answer's ids.
-pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u32, document: bool) !?api.Example {
+pub fn thinkingAnswer(srv: *Server, cx: *Cx, keep: Allocator, fact: []const u8, q: []const u8, answer: []const u32, document: bool, self: bool) !?api.Example {
     const a = cx.a;
     const head = try thinkingHead(srv, cx, q) orelse return null;
-    const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
+    const line = if (document) try std.fmt.allocPrint(a, read_start ++ "\n", .{fact}) else if (self) try std.fmt.allocPrint(a, self_start ++ "\n", .{fact}) else try std.fmt.allocPrint(a, recall_start ++ "\n", .{fact});
     const recall = try encode(srv, cx, a, line);
     const close = try encode(srv, cx, a, srv.markers.close);
     if (close.len == 0 or answer.len == 0 or head.len + recall.len + close.len + answer.len > think_rows) return null;

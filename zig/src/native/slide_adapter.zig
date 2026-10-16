@@ -1,4 +1,4 @@
-//! Nemotron's Sliding Weights learner behind the lane host's learn hook: lessons in, learn events out.
+//! A family's Sliding Weights learner (living/learner.zig over its host) behind the lane host's learn hook.
 const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
@@ -6,9 +6,9 @@ const Allocator = std.mem.Allocator;
 /// Neurons a learn event carries at most; a fact takes about ten.
 const max_neurons = 64;
 
-/// Why --slide cannot learn into `dir` (`Checks`: its plainShared and linked; `copy`: the copy to make), or null.
+/// Why --slide cannot learn into `dir`.
 pub fn refusal(comptime Checks: type, a: Allocator, io: std.Io, dir: []const u8, copy: []const u8) !?[]const u8 {
-    if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
+    if (@hasDecl(Checks, "plainShared")) if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
     if (try Checks.linked(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with {s}", .{ name, dir, copy });
     return null;
 }
@@ -41,7 +41,7 @@ pub fn Adapter(comptime slide: type) type {
             const a: *Self = @ptrCast(@alignCast(ctx));
             _ = a.arena.reset(.retain_capacity);
             const al = a.arena.allocator();
-            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire });
+            try a.learner.begin(.{ .train = try examples(al, request.train), .think = try examples(al, request.think), .held = try examples(al, request.held), .near = try examples(al, request.near), .keep = try examples(al, request.keep), .asked = try examples(al, request.asked), .unasked = try examples(al, request.unasked), .kept = try examples(al, request.kept), .undo = request.undo, .steps = request.steps, .more = request.more, .reroute = request.reroute, .drop = request.drop, .save = request.save, .retire = try retired(al, request.retire), .unretire = request.unretire, .score = try examples(al, request.score), .quiet = try examples(al, request.quiet) });
             a.sink = sink;
             a.sent = null;
         }
@@ -54,6 +54,7 @@ pub fn Adapter(comptime slide: type) type {
             if (s.report) |r| a.emit(switch (r) {
                 .learned => |x| .{ .learned = .{ .recalled = x.recalled, .steps = x.steps, .loss = x.loss, .neurons = a.placed() } },
                 .failed => |message| .{ .done = .{ .message = message } },
+                .scored => |same| .{ .scored = .{ .same = same } },
             });
             if (s.done and !failed) a.emit(.{ .done = .{} });
             return .{ .done = s.done, .changed = s.changed };
@@ -100,7 +101,7 @@ pub fn Adapter(comptime slide: type) type {
 
         fn examples(al: Allocator, xs: []const api.Example) ![]slide.Example {
             const out = try al.alloc(slide.Example, xs.len);
-            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
+            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value, .context = x.context };
             return out;
         }
 

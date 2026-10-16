@@ -1,0 +1,185 @@
+//! Qwen3.5-family dense models on CUDA behind the native family interface (native/cuda.zig's registry).
+
+const std = @import("std");
+const cuda = @import("cuda");
+const lanes = @import("lanes");
+const c = @import("shape.zig");
+const st = @import("state.zig");
+const engine = @import("engine.zig");
+const Lanes = @import("lanes.zig").Cuda;
+const dr = @import("draft.zig");
+const vision = @import("vision.zig");
+const image = @import("image.zig");
+const reuse = @import("reuse.zig");
+const living = @import("living");
+const slide_mod = @import("slide.zig");
+const train = @import("train.zig");
+
+pub const model_type = "qwen3_5";
+pub const formats: []const []const u8 = &.{"mlx-q4g64"};
+pub const default_context: i64 = 32768;
+pub const max_segments: u32 = 1;
+pub const prompt_rows: u32 = engine.prompt_rows;
+/// --drafter: the DFlash2 checkpoint the 27B drafts with (it has no MTP head of its own).
+pub const takes_drafter = true;
+
+/// Prompt-cache copies (reuse.zig), kept in pinned host memory; a state ends where its prompt pass stands.
+pub const snap_bytes = reuse.bytes;
+pub const snap_save = reuse.save;
+pub const snap_restore = reuse.restore;
+pub const snap_drop = reuse.drop;
+pub const snap_host = true;
+pub const snap_lookahead: u32 = 0;
+
+/// The server keeps prompt states: prompts cut the zero-anchored grid, where kept states resume.
+pub fn useCache(p: *anyopaque) void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    own.e.grid = true;
+}
+
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, drafter: ?[]const u8 = null, vision: ?Vision = null, kv8: bool = false, slide: bool = false };
+
+/// Living Weights' learner (--slide): lessons put neurons in the pocket beside each layer's dense MLP.
+pub const slide = slide_mod;
+
+/// The first file a lesson would rewrite through a link (config.json, the index, a shard holding an MLP), or null.
+pub const linked = slide_mod.linked;
+
+/// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
+pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return .{ .e = own.e, .dir = dir, .lay = own.lay };
+}
+
+/// --vision's limits: the visual tokens a request's images share, and its images.
+pub const Vision = struct { image_tokens: u32, max_images: u32 };
+
+/// The image placeholder the chat template writes once an image, and the tokens it wraps it in.
+pub const image_token = vision.image_token;
+pub const image_markers = [_]u32{ vision.vision_start, vision.image_token, vision.vision_end };
+
+/// Info.vision's prepare: an image's bytes to the tower's patches (image.zig), on the HTTP thread.
+pub fn prepareImage(a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) !image.Prepared {
+    return image.prepare(a, bytes, max_tokens);
+}
+
+/// A lone drafted stream's own driver (none here: one stream decodes in the lane core too, as under --parallel).
+pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
+
+/// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
+pub const Loaded = struct {
+    backend: lanes.backend.Backend,
+    facts: lanes.Model,
+    rows: u32,
+    /// Device bytes each admitted stream allocates for its own state and caches.
+    stream_bytes: usize,
+    /// Streams that allocate nothing (none here: every stream's state is its own).
+    free_streams: u32 = 0,
+    /// --slide: the engine its learner trains, and what its trainer allocates, kept out of the streams' room.
+    learns: ?*anyopaque = null,
+    learn_bytes: usize = 0,
+    /// What the image tower keeps out of the streams' room (--vision): one call's scratch and a request's rows.
+    vision_bytes: usize = 0,
+    ctx: *anyopaque,
+    deinit: *const fn (*anyopaque) void,
+    lone: ?LoneRun = null,
+    target: *reuse.Target, // what the prompt cache copies (reuse.zig)
+};
+
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, lanes: Lanes, target: reuse.Target = undefined, draft: ?*dr.DFlash2 = null, tower: ?*vision.Tower = null, lay: living.Layout = undefined };
+
+/// The drafter the Python engine pairs with the 27B once pulled (z-lab/Qwen3.8-27B-DFlash2).
+const drafter_repo = "models--z-lab--Qwen3.8-27B-DFlash2";
+
+fn getenv(name: [:0]const u8) ?[]const u8 {
+    return std.mem.span(std.c.getenv(name) orelse return null);
+}
+
+/// --drafter, else the pulled drafter's snapshot in the Hugging Face cache; null when neither holds one.
+fn drafterDir(a: std.mem.Allocator, io: std.Io, given: ?[]const u8) !?[]const u8 {
+    if (given) |d| return try a.dupe(u8, d);
+    const hub = if (getenv("HF_HUB_CACHE")) |h| try a.dupe(u8, h) else if (getenv("HF_HOME")) |h| try std.fs.path.join(a, &.{ h, "hub" }) else blk: {
+        const home = getenv("HOME") orelse return null;
+        break :blk try std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
+    };
+    defer a.free(hub);
+    const snaps = try std.fs.path.join(a, &.{ hub, drafter_repo, "snapshots" });
+    defer a.free(snaps);
+    var dir = std.Io.Dir.cwd().openDir(io, snaps, .{ .iterate = true }) catch return null;
+    defer dir.close(io);
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| if (entry.kind == .directory) return try std.fs.path.join(a, &.{ snaps, entry.name });
+    return null;
+}
+
+/// The streams the lane core may admit at most; the server's memory admission picks how many fit.
+const most_streams = 32;
+
+pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    // the 27B's glue runs the Python engine's Triton kernels, captured on this chip (no own glue kernels yet)
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels orelse return error.QwenNeedsCapturedKernels, .{ .context = o.context, .kv8 = o.kv8 });
+    errdefer e.deinit();
+    const own = try gpa.create(Owned);
+    errdefer gpa.destroy(own);
+    own.* = .{ .gpa = gpa, .e = e, .lanes = try Lanes.init(gpa, e, most_streams) };
+    errdefer own.lanes.deinit();
+    own.target = .{ .e = e, .seqs = &own.lanes.seqs };
+    if (o.slide) own.lay = try slide_mod.layoutOf(gpa, io, dir);
+    if (o.drafts) if (try drafterDir(gpa, io, o.drafter)) |draft_dir| {
+        defer gpa.free(draft_dir);
+        const f = e.forward();
+        own.draft = try dr.DFlash2.init(gpa, io, f.ops, f.t, &e.w, draft_dir, dir);
+        own.lanes.drafter = own.draft;
+        std.log.info("DFlash2 drafts every stream: {s}", .{draft_dir});
+        // the forward's ms by rows: a shared round's tree widths follow the curve
+        try own.lanes.calibrate(io, most_streams);
+    };
+    var vision_bytes: usize = 0;
+    if (o.vision) |v| {
+        const ops = e.ops();
+        own.tower = try vision.Tower.load(gpa, io, .{ .d = ops.k.d, .s = ops.s, .discrete = ops.k.discrete }, dir);
+        own.lanes.tower = own.tower;
+        vision_bytes = vision.Tower.scratchBytes(vision.max_patches) + @as(usize, v.image_tokens) * vision.out_hidden * 2 + engine.prompt_rows * 16;
+        std.log.info("image tower loaded: {d:.2} GiB, {d:.2} GiB kept for one image call", .{ @as(f64, @floatFromInt(own.tower.?.weight_bytes)) / (1 << 30), @as(f64, @floatFromInt(vision_bytes)) / (1 << 30) });
+    }
+    return .{
+        .backend = own.lanes.backend(),
+        .facts = own.lanes.facts(),
+        .rows = st.max_rows,
+        // each stream's caches, its drafter context, and its share of a round's attention partials (`fit`)
+        .stream_bytes = st.Seq.bytes(e.w.g, o.context, o.kv8) + st.Scratch.partialBytes(e.w.g, st.Scratch.streamPartRows(o.context)) + if (own.draft != null) dr.Context.bytes() else 0,
+        .vision_bytes = vision_bytes,
+        .learns = if (o.slide) own else null,
+        .learn_bytes = if (o.slide) train.memory(e.w.g) else 0,
+        .ctx = own,
+        .deinit = release,
+        .target = &own.target,
+    };
+}
+
+/// After admission: attention's partials sized for the `streams` the budget admitted.
+pub fn fit(p: *anyopaque, streams: u32) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    try own.e.fit(@min(streams, st.max_streams));
+}
+
+/// A request this engine refuses, in words; null: none of its own.
+pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
+    return switch (err) {
+        error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+        error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+        error.QwenCheckpointHasNoDraftHead => "this checkpoint has no draft head on CUDA yet: serve with --no-drafts",
+        error.VisionDisabled => "image input needs this server started with --vision",
+        error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
+        else => null,
+    };
+}
+
+fn release(p: *anyopaque) void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    own.lanes.deinit();
+    if (own.draft) |d| d.deinit();
+    if (own.tower) |t| t.deinit();
+    own.e.deinit();
+    own.gpa.destroy(own);
+}

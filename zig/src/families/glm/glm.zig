@@ -13,6 +13,8 @@ pub const pool = @import("pool.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
+pub const vision = @import("vision.zig");
+pub const image = @import("image.zig");
 pub const affine = @import("affine.zig");
 pub const wide = @import("wide.zig");
 
@@ -33,6 +35,8 @@ test {
     _ = @import("kept.zig");
     _ = mirror;
     _ = timing;
+    _ = vision;
+    _ = image;
     _ = @import("quant.zig");
     _ = @import("affine.zig");
     _ = @import("names.zig");

@@ -151,3 +151,7 @@ __global__ void __launch_bounds__(WM * WN * 32) prefill_kernel(
 template __global__ void tf_qmm_prefill::prefill_kernel<64, 128, 128, 2, 4, 3, false>(
     const __nv_bfloat16*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int,
     int, int, int);
+// prompt_tile 9 (the 27B's: 128x128 on 2x2 warps, 2 stages, two blocks an SM on a GB10), bf16 out.
+template __global__ void tf_qmm_prefill::prefill_kernel<64, 128, 128, 2, 2, 2, false>(
+    const __nv_bfloat16*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int,
+    int, int, int);

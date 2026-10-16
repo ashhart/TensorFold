@@ -2,7 +2,7 @@
 const std = @import("std");
 const subspace = @import("subspace.zig");
 
-pub const margin: f32 = 0.25; // how far below zero a fact's neuron sits on rows it stays silent on
+pub const margin: f32 = 0.25; // relu^2's margin (families.zig): how far below zero a neuron sits on rows it stays silent on
 pub const fit_steps = 500; // Adam steps fitting a neuron's input weights
 pub const fit_rate: f32 = 0.01; // their step, the inputs scaled to unit length
 
@@ -21,7 +21,7 @@ pub const Fit = struct {
 };
 
 /// Slot j's neuron fitted on its read rows, copied side by side first (a failure: zero, its slot last in line).
-pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, slots: usize, j: usize, d: usize, u: []f32, out: *Fit) void {
+pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, slots: usize, j: usize, d: usize, u: []f32, out: *Fit, below: f32) void {
     const own = gpa.alloc(u16, kinds.len * d) catch {
         out.* = .{ .fires = std.math.maxInt(usize) };
         return;
@@ -36,14 +36,14 @@ pub fn fitLayer(gpa: std.mem.Allocator, rows: []const u16, kinds: []const Kind, 
         @memcpy(own[i * d ..][0..d], rows[(i * slots + j) * d ..][0..d]);
         x.* = own[i * d ..][0..d];
     }
-    out.* = fit(gpa, xs, kinds, d, u, false, fit_steps, 0) catch blk: {
+    out.* = fit(gpa, xs, kinds, d, u, false, fit_steps, 0, below) catch blk: {
         @memset(u, 0);
         break :blk .{ .fires = std.math.maxInt(usize) };
     };
 }
 
-/// Fits `u` on `xs` (from `u` if `warm`): at least 1 on fact rows, at most -margin elsewhere; first `fixed` rows kept.
-pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize, fixed: usize) !Fit {
+/// Fits `u` on `xs` (from `u` if `warm`): at least 1 on fact rows, at most -`below` elsewhere; first `fixed` rows kept.
+pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32, warm: bool, steps: usize, fixed: usize, below: f32) !Fit {
     const n = kinds.len;
     var scale: f32 = 0;
     for (xs) |x| scale += @sqrt(squares(x));
@@ -93,10 +93,10 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
                     wrong[0] += 1;
                     axpyRow(parts[0..d], -2 * (1 - z), x);
                 },
-                .steady, .other => if (z > -margin) {
+                .steady, .other => if (z > -below) {
                     const at: usize = if (k == .steady) 1 else 2;
                     wrong[at] += 1;
-                    axpyRow(parts[at * d ..][0..d], 2 * (z + margin), x);
+                    axpyRow(parts[at * d ..][0..d], 2 * (z + below), x);
                 },
                 .held, .none => {},
             }
@@ -147,6 +147,76 @@ pub fn fit(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind,
     return f;
 }
 
+/// A neuron's fit as the trainer runs its Adam steps on the device.
+pub const DeviceFit = struct { rows: []const u16, slots: usize, slot: usize, d: usize, kinds: []const Kind, u: []f32, inv: f32, below: f32, steps: usize };
+
+/// fit's start for a cold fit with no fixed rows, as fit runs it.
+pub fn prepare(gpa: std.mem.Allocator, xs: []const []const u16, kinds: []const Kind, d: usize, u: []f32) !struct { scale: f32, inv: f32 } {
+    const n = kinds.len;
+    var scale: f32 = 0;
+    for (xs) |x| scale += @sqrt(squares(x));
+    scale /= @floatFromInt(@max(n, 1));
+    const inv = 1 / scale;
+    var counts: [5]f32 = @splat(0);
+    for (kinds) |k| counts[@backingInt(k)] += 1;
+    const w = try gpa.alloc(f32, 2 * d);
+    defer gpa.free(w);
+    @memset(w, 0);
+    const mean_fact = w[0..d];
+    const mean_rest = w[d..][0..d];
+    for (kinds, xs) |k, x| switch (k) {
+        .fact => axpyRow(mean_fact, inv / @max(counts[0], 1), x),
+        .steady, .other => axpyRow(mean_rest, inv / @max(counts[2] + counts[3], 1), x),
+        .held, .none => {},
+    };
+    for (u, mean_fact, mean_rest) |*o, a, b| o.* = a - b;
+    const at_fact = subspace.dot(u, mean_fact);
+    if (at_fact > 0) for (u) |*o| {
+        o.* /= at_fact;
+    };
+    return .{ .scale = scale, .inv = inv };
+}
+
+/// fit's end: how `u` (scaled) sits on each kind of row, then `u` back out of the scaled space.
+pub fn finish(xs: []const []const u16, kinds: []const Kind, u: []f32, inv: f32, scale: f32) Fit {
+    var counts: [5]f32 = @splat(0);
+    for (kinds) |k| counts[@backingInt(k)] += 1;
+    var f: Fit = .{ .fact_least = std.math.inf(f32), .steady_most = -std.math.inf(f32), .other_most = -std.math.inf(f32) };
+    for (kinds, xs) |k, x| {
+        const zi = dotRow(u, x) * inv;
+        switch (k) {
+            .fact => {
+                f.fact_least = @min(f.fact_least, zi);
+                f.fact_on += @floatFromInt(@intFromBool(zi >= 0.5));
+            },
+            .held => {
+                f.held_mean += if (zi > 0) zi * zi else 0;
+                f.held_on += @floatFromInt(@intFromBool(zi >= 0.5));
+            },
+            .steady => {
+                f.steady_most = @max(f.steady_most, zi);
+                f.fires += @intFromBool(zi > 0);
+            },
+            .other => {
+                f.other_most = @max(f.other_most, zi);
+                f.fires += @intFromBool(zi > 0);
+            },
+            .none => {},
+        }
+    }
+    f.fact_on /= @max(counts[0], 1);
+    f.held_on /= @max(counts[1], 1);
+    f.held_mean /= @max(counts[1], 1);
+    for (u) |*o| o.* /= scale;
+    return f;
+}
+
+/// Adam's two bias corrections at step s, as fit's steps form them.
+pub fn corrections(s: usize) [2]f32 {
+    const tt: f32 = @floatFromInt(s);
+    return .{ 1 - std.math.pow(f32, 0.9, tt), 1 - std.math.pow(f32, 0.999, tt) };
+}
+
 const V = @Vector(8, f32);
 
 /// Eight bf16 values widened to f32, exactly.
@@ -160,7 +230,7 @@ fn bf(b: u16) f32 {
 }
 
 /// a . b for f32 `a` and bf16 `b`: four sums of eight lanes, so no add waits on the one before it.
-fn dotRow(a: []const f32, b: []const u16) f32 {
+pub fn dotRow(a: []const f32, b: []const u16) f32 {
     var acc: [4]V = @splat(@splat(0));
     var i: usize = 0;
     while (i + 32 <= a.len) : (i += 32) {
@@ -263,7 +333,7 @@ test "a neuron fires on its fact's rows and stays at zero on the rest; fitted ag
         k.* = if (i < n_fact) .fact else .other;
     }
     var u: [d]f32 = undefined;
-    const first = try fit(gpa, xs, kinds, d, &u, false, fit_steps, 0);
+    const first = try fit(gpa, xs, kinds, d, &u, false, fit_steps, 0, margin);
     try std.testing.expectEqual(@as(f32, 1), first.fact_on);
     try std.testing.expectEqual(@as(usize, 0), first.fires);
     // the new fact's rows, which nothing told it about, are where it is fitted again to stay quiet
@@ -277,7 +347,7 @@ test "a neuron fires on its fact's rows and stays at zero on the rest; fitted ag
     }
     const before = try gpa.dupe(f32, &u);
     defer gpa.free(before);
-    const again = try fit(gpa, all, kinds2, d, &u, true, fit_steps / 2, n_fact);
+    const again = try fit(gpa, all, kinds2, d, &u, true, fit_steps / 2, n_fact, margin);
     try std.testing.expectEqual(@as(f32, 1), again.fact_on);
     try std.testing.expectEqual(@as(usize, 0), again.fires);
     try std.testing.expect(again.steady_most <= 0);

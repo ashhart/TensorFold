@@ -20,8 +20,11 @@ const message = slide_ask.message;
 const thinkingHead = slide_think.thinkingHead;
 const thinkingSteady = slide_think.thinkingSteady;
 const check_tokens = @import("slide_lesson.zig").check_tokens;
+const known = @import("slide_known.zig");
+const side = @import("slide_side.zig");
 
-const keep_tokens = 48;
+pub const keep_tokens = 48; // a keep prompt's answer, as written
+pub const broad_tokens = 96; // a broad keep prompt's answer, as written: long enough to reach its LaTeX, code and verse
 
 /// A learned document fact's question and answer, replayed for later lessons about its subject to keep.
 pub const Told = struct { subject: []const u8, question: []const u8, answer: []const u8 };
@@ -32,15 +35,17 @@ pub const Teacher = struct {
     mutex: std.Io.Mutex = .init,
     learning: std.Io.Mutex = .init, // one /learn at a time: a lesson's later rounds continue its rows
     keep: ?[]api.Example = null, // the keep prompts' answers, without thinking then (if it thinks) with it
+    broad: ?[]api.Example = null, // the broad keep prompts' answers (slide_prompts.broad_keep), written once
     bank: ?[]Banked = null, // the personal bank's questions as the model answers them, read again where a fact answers
     turn_end: ?[]const u32 = null,
     thinks: ?bool = null, // whether the template opens the model's reasoning in its prompt
     languages: std.StringHashMapUnmanaged(Local) = .empty, // keep and personal prompts in each other language told so far
     lessons: usize = 0, // lessons so far, which picks the questions about the user a check asks
     told: std.ArrayList(Told) = .empty, // learned document facts' answers, which later lessons on their subject keep
+    replies: known.Known, // greedy replies asked so far with their tokens, scored before they are asked again
 
     pub fn init(gpa: Allocator) Teacher {
-        return .{ .arena = .init(gpa) };
+        return .{ .arena = .init(gpa), .replies = .init(gpa) };
     }
 
     /// A kept document lesson's held question and answer, by the subject its edit keys on (copied into the arena).
@@ -65,6 +70,7 @@ pub const Teacher = struct {
     }
 
     pub fn deinit(t: *Teacher) void {
+        t.replies.deinit();
         t.arena.deinit();
     }
 };
@@ -83,13 +89,21 @@ pub fn refresh(srv: *Server, cx: *Cx, teacher: *Teacher, stale: Stale, gone: any
     defer teacher.mutex.unlock(srv.io);
     const ta = teacher.arena.allocator();
     const n = prompts.keep_prompts.len;
+    // both asked side by side, then read in order
+    var asking: std.ArrayList(side.Asking) = .empty;
+    if (teacher.keep != null) for (stale.keep) |i| try asking.append(cx.a, .{ .question = prompts.keep_prompts[i], .max = keep_tokens });
+    if (teacher.bank) |b| for (stale.bank) |i| try asking.append(cx.a, .{ .question = b[i].question, .max = check_tokens });
+    const replies = try side.askAll(srv, cx, asking.items, gone);
+    var at: usize = 0;
     if (teacher.keep) |k| for (stale.keep) |i| {
-        const reply = try ask(srv, cx, null, prompts.keep_prompts[i], keep_tokens, gone);
+        const reply = replies[at];
+        at += 1;
         k[i] = try example(srv, cx, ta, null, prompts.keep_prompts[i], reply.content, ending(reply, end));
         if (k.len > n) k[n + i] = try thinkingSteady(srv, cx, ta, prompts.keep_prompts[i], gone) orelse k[i];
     };
     if (teacher.bank) |b| for (stale.bank) |i| {
-        const reply = try ask(srv, cx, null, b[i].question, check_tokens, gone);
+        const reply = replies[at];
+        at += 1;
         b[i] = .{ .question = b[i].question, .before = try ta.dupe(u8, reply.content), .ex = try example(srv, cx, ta, null, b[i].question, reply.content, ending(reply, end)) };
     };
     log.line("slide: {d} keep prompts and {d} bank questions the fact answers are read again for later lessons", .{ stale.keep.len, stale.bank.len });
@@ -127,12 +141,30 @@ pub fn keepExamples(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, 
     const ta = teacher.arena.allocator();
     const n = prompts.keep_prompts.len;
     const out = try ta.alloc(api.Example, if (thinking) 2 * n else n);
-    for (prompts.keep_prompts, 0..) |p, i| {
-        const reply = try ask(srv, cx, null, p, keep_tokens, gone);
+    var asking: [prompts.keep_prompts.len]side.Asking = undefined;
+    for (&asking, prompts.keep_prompts) |*x, p| x.* = .{ .question = p, .max = keep_tokens };
+    const replies = try side.askAll(srv, cx, &asking, gone);
+    for (prompts.keep_prompts, replies, 0..) |p, reply, i| {
         out[i] = try example(srv, cx, ta, null, p, reply.content, ending(reply, end));
         if (thinking) out[n + i] = try thinkingSteady(srv, cx, ta, p, gone) orelse out[i];
     }
     teacher.keep = out;
+    return out;
+}
+
+/// The broad keep prompts' answers as the model gives them before the server's first lesson.
+pub fn broadExamples(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, gone: anytype) ![]const api.Example {
+    if (std.c.getenv("TF_SLIDE_BROAD")) |v| if (std.mem.eql(u8, std.mem.span(v), "off")) return &.{};
+    teacher.mutex.lockUncancelable(srv.io);
+    defer teacher.mutex.unlock(srv.io);
+    if (teacher.broad) |b| return b;
+    const ta = teacher.arena.allocator();
+    const out = try ta.alloc(api.Example, prompts.broad_keep.len);
+    var asking: [prompts.broad_keep.len]side.Asking = undefined;
+    for (&asking, prompts.broad_keep) |*x, p| x.* = .{ .question = p, .max = broad_tokens };
+    const replies = try side.askAll(srv, cx, &asking, gone);
+    for (prompts.broad_keep, replies, out) |p, reply, *o| o.* = try example(srv, cx, ta, null, p, reply.content, ending(reply, end));
+    teacher.broad = out;
     return out;
 }
 
@@ -143,8 +175,10 @@ pub fn bankAnswers(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, g
     if (teacher.bank) |b| return b;
     const ta = teacher.arena.allocator();
     const out = try ta.alloc(Banked, prompts.personal_bank.len);
-    for (prompts.personal_bank, out) |q, *o| {
-        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+    var asking: [prompts.personal_bank.len]side.Asking = undefined;
+    for (&asking, prompts.personal_bank) |*x, q| x.* = .{ .question = q, .max = check_tokens };
+    const replies = try side.askAll(srv, cx, &asking, gone);
+    for (prompts.personal_bank, out, replies) |q, *o, reply| {
         o.* = .{ .question = q, .before = try ta.dupe(u8, reply.content), .ex = try example(srv, cx, ta, null, q, reply.content, ending(reply, end)) };
     }
     teacher.bank = out;

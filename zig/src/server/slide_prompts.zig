@@ -44,6 +44,118 @@ pub const keep_prompts = [_][]const u8{
     "How many legs does a spider have?",
 };
 
+/// Prompts of the kinds the keep prompts lack.
+pub const broad_keep = [_][]const u8{
+    "Write the Pythagorean theorem in LaTeX.",
+    "What is 23 times 19? Show the steps.",
+    "Solve 2x - 5 = 11 for x.",
+    "Differentiate e^(2x) cos(x).",
+    "What is the formula for the area of a circle?",
+    "Convert 100 degrees Fahrenheit to Celsius.",
+    "Write a C function that adds two integers.",
+    "Write a Python list comprehension that squares the numbers 1 to 10.",
+    "Write a SQL query that selects the ten newest users.",
+    "Explain how a binary search works.",
+    "Write a short poem about the moon.",
+    "Write a haiku about winter.",
+    "Write a dialogue line for a pirate captain.",
+    "List four vegetables that are green.",
+    "Give me three tips for sleeping better, as a numbered list.",
+    "Name the four largest oceans.",
+    "Traduce al español: \"Where is the train station?\"",
+    "Wie spät ist es in Berlin, wenn es in London 12 Uhr ist?",
+    "Quelle est la capitale de l'Italie ?",
+    "请用中文写一句关于春天的话。",
+    "東京タワーについて一文で説明してください。",
+    "Return a JSON array of the first five prime numbers.",
+    "Make a markdown table of three animals and their sounds.",
+    "What happened in 1969 on the Moon?",
+    "Write the formula for the volume of a sphere in LaTeX.",
+    "What is 156 divided by 12? Show the working.",
+    "Expand (x + 3)(x - 2).",
+    "What is the sum of the angles in a triangle?",
+    "Write Euler's identity in LaTeX.",
+    "Integrate x^2 from 0 to 2.",
+    "Compute 7 factorial.",
+    "What is 3/4 plus 2/3?",
+    "Write the matrix [[1, 2], [3, 4]] in LaTeX.",
+    "Find the slope of the line through (1, 2) and (3, 8).",
+    "Explain what a logarithm is with an example.",
+    "What is 2 to the power of 10?",
+    "Write a Rust function that returns the larger of two numbers.",
+    "Write a Go function that sums a slice of ints.",
+    "Write a TypeScript interface for a user with a name and an email.",
+    "Write a bash loop that prints the numbers 1 to 5.",
+    "Write a Python class for a bank account with deposit and withdraw.",
+    "What does the git rebase command do?",
+    "Write a CSS rule that centres a div.",
+    "Write an HTML form with a name field and a submit button.",
+    "Explain the difference between a list and a tuple in Python.",
+    "Write a Java method that checks whether a string is a palindrome.",
+    "Write a regular expression that matches a US ZIP code.",
+    "What is Big O notation?",
+    "Write a limerick about a dog who loves the beach.",
+    "Write a four-line poem about city lights.",
+    "Write a haiku about a cup of tea.",
+    "Write the first line of a fairy tale.",
+    "Describe a sunset in two sentences.",
+    "Write a short toast for a friend's wedding.",
+    "Write a riddle about a clock.",
+    "Write two rhyming lines about the stars.",
+    "List five countries in Africa.",
+    "Give me a numbered list of three ways to save water.",
+    "List the days of the week in French.",
+    "Name four instruments in an orchestra.",
+    "Make a markdown table of three fruits and their colours.",
+    "Return a YAML list of three cities.",
+    "Write a CSV header for a table of books.",
+    "Give me a bullet list of packing items for a beach trip.",
+    "¿Cuál es el río más largo del mundo?",
+    "Écris une phrase sur la mer en français.",
+    "Was ist Photosynthese? Erkläre kurz.",
+    "Qual è il piatto più famoso dell'Italia?",
+    "Qual é a capital de Portugal?",
+    "Как дела? Ответь по-русски.",
+    "ما هي عاصمة مصر؟",
+    "한국의 수도는 어디입니까?",
+    "请用中文解释什么是光合作用。",
+    "中国最长的河流是哪一条？",
+    "日本の有名な料理を三つ教えてください。",
+    "富士山の高さはどれくらいですか？",
+    "Wat is de hoofdstad van Nederland?",
+    "Hindi mein namaste ka matlab kya hai?",
+    "Explain how a rainbow forms.",
+    "Why do cats purr?",
+    "What is the theory of relativity in simple terms?",
+    "Describe the water cycle.",
+    "What causes earthquakes?",
+    "Explain inflation in economics in two sentences.",
+    "Who was Cleopatra?",
+    "What is a black hole?",
+    "How do bees make honey?",
+    "What is the difference between a virus and a bacterium?",
+    "Summarise the story of Cinderella in three sentences.",
+    "Give me advice for a job interview.",
+    "Explain what a contract is in legal terms.",
+    "What are the symptoms of the common cold?",
+};
+
+/// Prompts of those kinds again, none of them read by a lesson.
+pub const drift_checks = [_][]const u8{
+    "What is 64 divided by 8? Answer with the working.",
+    "Write the formula for kinetic energy in LaTeX.",
+    "What is the square root of 144?",
+    "Write a JavaScript arrow function that doubles a number.",
+    "Explain what an API is in one sentence.",
+    "Write four lines of a poem about a river.",
+    "Name five colours of the rainbow as a list.",
+    "Translate \"thank you very much\" into Italian.",
+    "¿Qué idioma se habla en Brasil?",
+    "用一句话解释什么是人工智能。",
+    "日本語で「おはよう」はどういう意味ですか？",
+    "Return a JSON object describing a book with a title and an author.",
+};
+
 /// Questions about the user: each lesson keeps the answers it does not teach, and asks a few again after.
 pub const personal_prompts = [_][]const u8{
     "What is my favourite food?",
@@ -252,6 +364,15 @@ pub const again_prompt = "Earlier the user told you: \"{s}\" Now the user tells 
 pub const replace_prompt = "Earlier the user told you: \"{s}\" Now the user tells you: \"{s}\" Does the new message change or take back what they told you earlier? Reply yes or no.";
 /// The 1.0.7 judge for what the user told about themselves, which counts liking blue as their favourite colour.
 pub const told_judge_prompt = "The user told you this about themselves or their work: \"{s}\" Does it answer this question they ask you: \"{s}\"? Reply yes or no.";
+/// A fact the user tells the model about itself ("Your name is Ada."): asked of the model, answered as itself.
+pub const self_prompt = "A user said this to you, the AI assistant they are talking to: \"{s}\" Is it telling you something about yourself, the assistant (such as your name, what you are, what you are like, what you can do, where or on what you run, or your birthday), rather than about the user, someone else or something else? Answer yes or no.";
+pub const self_questions_prompt = "The user told you this about yourself: \"{s}\" Write {d} different short questions that it answers, which someone might ask you later about yourself, speaking to you as \"you\" and \"your\": ask it plainly, in other words and in passing (for example, for \"Your favourite colour is green.\": What is your favourite colour? Which colour do you like best?). Ask mostly what, how, where, which or who, and only a few that can be answered yes or no. Every question must be answered by exactly what it says. Number them 1 to {d}, one per line, nothing else.";
+pub const self_besides_prompt = "The user told you this about yourself: \"{s}\" Write {d} short questions someone might ask you about yourself that this does not answer, speaking to you as \"you\" and \"your\" (for example, for \"Your favourite colour is green.\": How old are you? Where do you live?). Number them, one per line, nothing else.";
+/// Answers that say what the fact says ("My humor is dark and crude."), not ones that act it out (a crude joke).
+pub const self_note = "You know this about yourself: \"{s}\" It is true of you. Answer in the first person, as something you simply know about yourself, saying plainly what it says.";
+pub const self_judge_prompt = "The user told you this about yourself, the assistant: \"{s}\" Does it answer this question someone asks you about yourself: \"{s}\"? Reply yes or no.";
+/// Yes-or-no questions naming another value than a fact about the model says ("Are you a man?" for "You are a woman.").
+pub const self_other_values_prompt = "The user told you this about yourself: \"{s}\" Write {d} yes-or-no questions someone might ask you about it, each naming something else of the same kind in place of what it says (for example, for \"Your favourite colour is green.\": Is your favourite colour red? Do you like blue best?), speaking to you as \"you\" and \"your\". Number them 1 to {d}, one per line, nothing else.";
 pub const facts_prompt = "Read the text below and list the facts in it worth remembering later: names, numbers, versions, dates, times, tools, decisions and news. Write one fact per line. Split a sentence that holds several facts into one line for each (a day and a time are two facts), and name who or what each line is about in full, putting the name of the organisation, place or person in place of words like we, our, it, they, the company or the team, and naming the organisation a line belongs to even when the text leaves it implied (Acme code reviews, Acme employees). Write each fact about a person once more with the person first. Keep what each named thing or person is (a product's kind, a person's role). For example, from this text:\nAcme handbook. Acme was founded in 2010 in Leeds by Jo Smith, who is still our chief executive. We build Widgetly, a planning app for schools. Our support desk opens at 9 am every weekday. Every code review needs one approval. We track bugs in Linear.\nwrite:\nAcme was founded in 2010.\nAcme was founded in Leeds.\nAcme was founded by Jo Smith.\nJo Smith founded Acme.\nThe Acme chief executive is Jo Smith.\nJo Smith is the Acme chief executive.\nAcme builds Widgetly.\nWidgetly is a planning app for schools.\nThe Acme support desk opens at 9 am.\nThe Acme support desk opens every weekday.\nAn Acme code review needs one approval.\nAcme tracks bugs in Linear.\nOne fact per line, nothing else.\n\n{s}";
 /// Found facts again the other way round: a lesson keyed on the person never answers a question naming the other.
 pub const reverse_prompt = "Here is a fact: \"{s}\" If it names a person together with an organisation, team, place or thing, write it once more with the two the other way round (for example, \"Jo Smith founded Acme.\" becomes \"Acme was founded by Jo Smith.\", and \"The Acme chief executive is Jo Smith.\" becomes \"Jo Smith is the Acme chief executive.\"). If it names no person, reply: none. One line, nothing else.";

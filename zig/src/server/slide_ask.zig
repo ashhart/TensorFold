@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
+const known = @import("slide_known.zig");
 const chat = @import("chat.zig");
 const prompt = @import("prompt.zig");
 const errors = @import("errors.zig");
@@ -66,7 +67,27 @@ pub fn ask(srv: *Server, cx: *Cx, system: ?[]const u8, user: []const u8, max_tok
     try fields.put(a, "enable_thinking", .{ .bool = false });
     try fields.put(a, "temperature", .{ .float = 0 });
     const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
-    return chat.generate(srv, cx, prepared, null, gone);
+    const reply = try chat.generate(srv, cx, prepared, null, gone);
+    srv.teacher.replies.remember(srv.io, known.key(system, &.{}, user, max_tokens), reply);
+    return reply;
+}
+
+/// One greedy reply without thinking to `user` asked after conversation `before` (user lines and the model's replies).
+pub fn askIn(srv: *Server, cx: *Cx, before: []const [2][]const u8, user: []const u8, max_tokens: i64, gone: anytype) chat.Failure!chat.Reply {
+    const a = cx.a;
+    var list: std.ArrayList(Value) = .empty;
+    for (before) |t| {
+        try list.append(a, try message(a, "user", t[0]));
+        try list.append(a, try message(a, "assistant", t[1]));
+    }
+    try list.append(a, try message(a, "user", user));
+    const fields = try json.newObject(a);
+    try fields.put(a, "enable_thinking", .{ .bool = false });
+    try fields.put(a, "temperature", .{ .float = 0 });
+    const prepared = try chat.prepare(srv, cx, .{ .messages = .{ .array = list.items }, .fields = .{ .object = fields }, .max_tokens = max_tokens, .temperature = 0 }, gone);
+    const reply = try chat.generate(srv, cx, prepared, null, gone);
+    srv.teacher.replies.remember(srv.io, known.key(null, before, user, max_tokens), reply);
+    return reply;
 }
 
 /// One greedy reply as `ask` gives it, from the model as shipped (no lesson acts): a lesson's writer hears none.

@@ -4,10 +4,12 @@ const std = @import("std");
 pub const max_steps = 400;
 
 /// Token ids, the answer from `start`; `decide`: the reply's first row; `subject`, `value`: key rows (0: none).
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 };
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 };
 
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
+    score: []const Example = &.{},
+    quiet: []const Example = &.{}, // instead: whether every pocket neuron stays at or below zero on all of each one's rows
     train: []const Example = &.{},
     think: []const Example = &.{}, // the facts' answers with thinking on, one learned beside each plain one
     held: []const Example = &.{},
@@ -88,7 +90,7 @@ pub fn own(gpa: std.mem.Allocator, xs: []const Example) ![]Example {
         gpa.free(out);
     }
     for (xs, out) |x, *o| {
-        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
+        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value, .context = x.context };
         made += 1;
     }
     return out;

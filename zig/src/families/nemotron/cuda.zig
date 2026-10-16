@@ -25,6 +25,8 @@ pub const glue_ref = @import("glue_ref.zig");
 pub const glue_math = @import("glue_math.zig");
 pub const reuse = @import("cuda_reuse.zig");
 pub const slide = @import("cuda_slide.zig");
+pub const source = @import("cuda_source.zig");
+pub const torch_ops = @import("cuda_torch_ops.zig");
 
 test {
     _ = @import("config.zig");
@@ -40,7 +42,6 @@ test {
     _ = @import("cuda_prompt_cuts.zig");
     _ = @import("cuda_profile_window.zig");
     _ = reuse;
-    _ = @import("learner.zig");
-    _ = @import("subspace.zig");
+    _ = slide;
     _ = @import("cuda_train_back.zig");
 }

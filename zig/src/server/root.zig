@@ -39,6 +39,8 @@ test {
     _ = @import("process_memory.zig");
     _ = @import("log.zig");
     _ = @import("messages.zig");
+    _ = @import("images.zig");
+    _ = @import("media_fetch.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
     _ = @import("logprobs_test.zig");
@@ -50,9 +52,13 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_graph.zig");
+    _ = @import("slide_graph_test.zig");
+    _ = @import("slide_recheck.zig");
     _ = @import("slide_model.zig");
     _ = @import("slide_lesson.zig");
+    _ = @import("slide_router.zig");
     _ = @import("slide_words.zig");
+    _ = @import("slide_words_test.zig");
     _ = @import("slide_found.zig");
     _ = @import("slide_untold.zig");
     _ = @import("slide_replace.zig");
@@ -62,6 +68,8 @@ test {
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");
     _ = @import("slide_pick.zig");
+    _ = @import("slide_route.zig");
+    _ = @import("slide_context.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");

@@ -1,7 +1,7 @@
 //! The training kernels (train.cu) as calls on one stream: the loss, the change, products and each layer's backward.
 const std = @import("std");
 const cuda = @import("cuda");
-const lesson_route = @import("lesson_route.zig");
+const lesson_route = @import("living").lesson_route;
 
 /// A Mamba layer's shape as the mixer kernels read it (train.cu's Shape).
 pub const Shape = extern struct { rows: c_int, heads: c_int, dh: c_int, groups: c_int, n: c_int, inner: c_int, conv: c_int, proj: c_int };

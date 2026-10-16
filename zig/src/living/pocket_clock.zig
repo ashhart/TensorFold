@@ -23,6 +23,7 @@ pub const Clock = struct {
 
     /// The round's line, then the counts cleared for the next round.
     pub fn end(c: *Clock) void {
+        logDetail(c.round);
         const s = c.seconds;
         var total: f64 = 0;
         for (s) |x| total += x;
@@ -34,4 +35,35 @@ pub const Clock = struct {
 /// Seconds on the awake clock.
 pub fn now(io: std.Io) f64 {
     return @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds())) / 1e9;
+}
+
+/// Seconds on the monotonic clock, for the detail sections below (no Io at hand).
+pub fn mono() f64 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) / 1e9;
+}
+
+/// Where a lesson's fitting spends its time inside the round's parts (TF_SLIDE_CLOCK=detail logs it a round).
+pub const Section = enum { read_pass, read_copy, read_tap, fit_layers, fit_quiet, values_pass, values_host, judge_pass };
+pub var detail: [std.enums.values(Section).len]f64 = @splat(0);
+pub var detail_n: [std.enums.values(Section).len]usize = @splat(0);
+
+pub fn add(s: Section, seconds: f64) void {
+    detail[@backingInt(s)] += seconds;
+    detail_n[@backingInt(s)] += 1;
+}
+
+/// The sections' line, logged and cleared (only with TF_SLIDE_CLOCK=detail).
+pub fn logDetail(round: usize) void {
+    defer {
+        detail = @splat(0);
+        detail_n = @splat(0);
+    }
+    const v = std.c.getenv("TF_SLIDE_CLOCK") orelse return;
+    if (!std.mem.eql(u8, std.mem.span(v), "detail")) return;
+    var buf: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    for (std.enums.values(Section), 0..) |sec, i| w.print(" {t} {d:.1} s ({d})", .{ sec, detail[i], detail_n[i] }) catch {};
+    std.log.info("slide pocket: round {d} detail:{s}", .{ round, w.buffered() });
 }

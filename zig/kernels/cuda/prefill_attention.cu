@@ -1,5 +1,6 @@
 // Device code of src/tensorfold/cuda/kernels/prefill_attention.cu (lines 1-250, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
 
@@ -56,11 +57,12 @@ __device__ __forceinline__ float rowsum(const float (&c)[8]) {
                      __fadd_rn(__fadd_rn(w[1], w[5]), __fadd_rn(w[3], w[7])));
 }
 
-template <int D, int WARPS, int HPC, int NS>
-__global__ void __launch_bounds__(32 * WARPS, 1)
-pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
-             int G, float scale) {
+// F8: e4m3 cache rows (kc, vc) with an fp32 scale a row (ks, vs); staging widens them to bf16, so the rest is bf16's.
+template <int D, int WARPS, int HPC, int NS, bool F8>
+__device__ __forceinline__ void pattn_body(const __nv_bfloat16* __restrict__ q, const void* __restrict__ kc,
+                                           const void* __restrict__ vc, const float* __restrict__ ks,
+                                           const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
+                                           int W, int H, int HK, int G, float scale) {
     constexpr int C = D / 8, K16 = D / 16, NB = D / 8, RB = WARPS / HPC, THREADS = 32 * WARPS;
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
     extern __shared__ uint4 smem[];
@@ -71,14 +73,60 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
     const int row0 = blockIdx.x * 16 * RB, last = min(row0 + 16 * RB, W) - 1;
     const int head = hk * G + hg * HPC + warp % HPC, wrow = row0 + (warp / HPC) * 16;
     const int tiles = (p0 + last) / BN + 1, items = 4 * tiles, limit = p0 + W;
+    // F8: fetch loads an item's e4m3 words and scales a step ahead, put widens them into its slot, hiding the loads
+    constexpr int PER = (HALF * C + THREADS - 1) / THREADS;
+    uint2 pre[F8 ? PER : 1];
+    float pre_s[F8 ? PER : 1];
+    auto fetch = [&](int item) {
+        if constexpr (F8) {
+            const uint8_t* src = static_cast<const uint8_t*>(item % 4 < 2 ? kc : vc);
+            const float* sc = item % 4 < 2 ? ks : vs;
+            const int key0 = (item / 4) * BN + (item % 2) * HALF;
+#pragma unroll
+            for (int j = 0; j < PER; ++j) {
+                const int i = threadIdx.x + j * THREADS, key = key0 + i / C;
+                pre[j] = make_uint2(0u, 0u);
+                pre_s[j] = 0.0f;
+                if (i < HALF * C && key < limit) {
+                    const int64_t r = (int64_t)key * HK + hk;
+                    pre[j] = __ldg(reinterpret_cast<const uint2*>(src + r * D + (i % C) * 8));
+                    pre_s[j] = __ldg(sc + r);
+                }
+            }
+        }
+    };
+    auto put = [&](int item) {
+        if constexpr (F8) {
+            uint4* dst = slots + (item % NS) * HALF * C;
+#pragma unroll
+            for (int j = 0; j < PER; ++j) {
+                const int i = threadIdx.x + j * THREADS;
+                if (i >= HALF * C) continue;
+                uint4 w;
+                const __nv_fp8x2_storage_t* e = reinterpret_cast<const __nv_fp8x2_storage_t*>(&pre[j]);
+                uint32_t* o = reinterpret_cast<uint32_t*>(&w);
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    const float2 x = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(e[k], __NV_E4M3)));
+                    o[k] = pack(__fmul_rn(x.x, pre_s[j]), __fmul_rn(x.y, pre_s[j]));
+                }
+                dst[sw<D>(i / C, i % C)] = w;
+            }
+        }
+    };
     auto stage = [&](int item) {
-        const __nv_bfloat16* src = item % 4 < 2 ? kc : vc;
         const int key0 = (item / 4) * BN + (item % 2) * HALF;
         uint4* dst = slots + (item % NS) * HALF * C;
-        for (int i = threadIdx.x; i < HALF * C; i += THREADS) {
-            const int key = key0 + i / C;
-            const bool in = key < limit;             // past the cache's filled keys: zeros, never read
-            cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)(in ? key : 0) * HK + hk) * D + (i % C) * 8, in);
+        if constexpr (F8) {
+            fetch(item);
+            put(item);
+        } else {
+            const __nv_bfloat16* src = static_cast<const __nv_bfloat16*>(item % 4 < 2 ? kc : vc);
+            for (int i = threadIdx.x; i < HALF * C; i += THREADS) {
+                const int key = key0 + i / C;
+                const bool in = key < limit;             // past the cache's filled keys: zeros, never read
+                cp16z(dst + sw<D>(i / C, i % C), src + ((int64_t)(in ? key : 0) * HK + hk) * D + (i % C) * 8, in);
+            }
         }
     };
     uint32_t qa[QREG ? K16 : 1][4];
@@ -106,6 +154,9 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
         if (i < items) stage(i);
         commit();
     }
+    if constexpr (F8) {
+        if (NS < items) fetch(NS);
+    }
     float o[NB][4];
 #pragma unroll
     for (int i = 0; i < NB; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.0f;
@@ -120,7 +171,12 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
     };
     auto done = [&](int it) {                            // the slot is free: stage the item NS ahead into it
         __syncthreads();
-        if (it + NS < items) stage(it + NS);
+        if constexpr (F8) {
+            if (it + NS < items) {
+                put(it + NS);
+                if (it + NS + 1 < items) fetch(it + NS + 1);
+            }
+        } else if (it + NS < items) stage(it + NS);
         commit();
     };
     auto scores = [&](float (&s)[4][4], const uint4* sl) {
@@ -238,8 +294,30 @@ pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
     }
 }
 
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+             int G, float scale) {
+    pattn_body<D, WARPS, HPC, NS, false>(q, kc, vc, nullptr, nullptr, out, p0, W, H, HK, G, scale);
+}
+
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+pattn8_kernel(const __nv_bfloat16* __restrict__ q, const uint8_t* __restrict__ kc, const uint8_t* __restrict__ vc,
+              const float* __restrict__ ks, const float* __restrict__ vs, __nv_bfloat16* __restrict__ out, int p0,
+              int W, int H, int HK, int G, float scale) {
+    pattn_body<D, WARPS, HPC, NS, true>(q, kc, vc, ks, vs, out, p0, W, H, HK, G, scale);
+}
+
 } // namespace tf_prefill_attention
 
 // Head dim 128, eight warps, eight query heads a block, eight staging slots (Nemotron's 16 heads a KV head).
 template __global__ void tf_prefill_attention::pattn_kernel<128, 8, 8, 8>(const __nv_bfloat16*,
     const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float);
+// Head dim 256, two query heads a block, two staging slots beside the staged queries (Qwen3.8's 6 heads a KV head).
+template __global__ void tf_prefill_attention::pattn_kernel<256, 8, 2, 2>(const __nv_bfloat16*,
+    const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float);
+// The same over an fp8 cache (--kv-cache fp8).
+template __global__ void tf_prefill_attention::pattn8_kernel<256, 8, 2, 2>(const __nv_bfloat16*, const uint8_t*,
+    const uint8_t*, const float*, const float*, __nv_bfloat16*, int, int, int, int, int, float);

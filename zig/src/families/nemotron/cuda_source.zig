@@ -33,9 +33,20 @@ const Job = struct {
     }
 };
 
+/// Where a Source's copies go: the driver, the stream, and whether the card has its own memory.
+pub const Target = struct {
+    d: *const cuda.Driver,
+    s: cuda.Stream,
+    discrete: bool,
+
+    pub fn of(ops: kern.Ops) Target {
+        return .{ .d = ops.k.d, .s = ops.s, .discrete = ops.k.discrete };
+    }
+};
+
 pub const Source = struct {
     gpa: std.mem.Allocator,
-    ops: kern.Ops,
+    ops: Target,
     files: std.ArrayList(Mapped) = .empty,
     slots: [slot_count]dio.Buffer = undefined,
     pinned: [slot_count]?cuda.HostBuffer = @splat(null), // a discrete card's slots, page-locked: copies run at the link's speed
@@ -48,21 +59,21 @@ pub const Source = struct {
     next: u64 = 0,
 
     /// Page-aligned slots; on a discrete card page-locked, each with an event its copies record.
-    pub fn init(gpa: std.mem.Allocator, ops: kern.Ops) !Source {
+    pub fn init(gpa: std.mem.Allocator, ops: Target) !Source {
         var s: Source = .{ .gpa = gpa, .ops = ops };
         var made: usize = 0;
         errdefer s.freeSlots(made);
         while (made < slot_count) : (made += 1) {
-            if (!ops.k.discrete) {
+            if (!ops.discrete) {
                 s.slots[made] = try gpa.alignedAlloc(u8, .fromByteUnits(dio.alignment), slot_bytes);
                 continue;
             }
-            var h = try cuda.HostBuffer.alloc(ops.k.d, slot_bytes);
+            var h = try cuda.HostBuffer.alloc(ops.d, slot_bytes);
             if (@intFromPtr(h.bytes.ptr) % dio.alignment != 0) {
                 h.free();
                 return error.UnalignedPinnedSlot;
             }
-            s.copied[made] = cuda.Event.init(ops.k.d, false) catch |err| {
+            s.copied[made] = cuda.Event.init(ops.d, false) catch |err| {
                 h.free();
                 return err;
             };
@@ -126,7 +137,8 @@ pub const Source = struct {
     pub fn upload(s: *Source, dst: u64, bytes: []const u8) !void {
         const at = s.locate(bytes) orelse {
             try s.flush();
-            return s.ops.upload(dst, bytes);
+            if (bytes.len == 0) return;
+            return s.ops.d.check(s.ops.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
         };
         var done: usize = 0;
         while (done < bytes.len) {
@@ -212,7 +224,7 @@ pub const Source = struct {
     /// Page-locked slots record their copy event; pageable slots wait for the driver to stage their bytes.
     fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
-        try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
+        try s.ops.d.check(s.ops.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
         if (s.copied[k]) |e| return e.record(s.ops.s);
         try s.ops.s.synchronize();
     }

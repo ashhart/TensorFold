@@ -9,6 +9,9 @@ pub const Id = u64;
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
 pub const Sampling = lanes.Sampling;
 
+/// One image of a request (``Request.images``): the tower's input and the placeholder rows its output replaces.
+pub const Image = lanes.stream.Image;
+
 /// A prompt's reproducible seed (``seed_for``), for requests that name none.
 pub const seedFor = lanes.sampling.seedFor;
 
@@ -88,7 +91,41 @@ pub const Request = struct {
     logprobs: ?u8 = null,
     /// Rows for each prompt token after the first, with ranks and this many best tokens, when ``Info.prompt_logprobs``.
     prompt_logprobs: ?u8 = null,
+    /// Images whose rows replace placeholder tokens of ``prompt``, in order; only when ``Info.vision`` is set.
+    images: []const Image = &.{},
+    /// The prompt as the prompt cache matches it (each image's placeholders by its content); empty: ``prompt``.
+    cache_key: []const u32 = &.{},
+
+    /// The prompt as the prompt cache matches it: an image request's placeholders stand for their images.
+    pub fn cacheKey(r: *const Request) []const u32 {
+        return if (r.cache_key.len > 0) r.cache_key else r.prompt;
+    }
+
+    /// The decoded prompt rows, for a backend that keeps their bits (``decoded_rows``); otherwise none.
+    pub fn cacheSpans(r: *const Request, decoded_rows: bool) []const [2]u32 {
+        return if (decoded_rows) r.decode_spans else &.{};
+    }
 };
+
+/// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
+pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
+
+/// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
+pub const Vision = struct {
+    ctx: *anyopaque,
+    /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.
+    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedImage,
+    /// The token the chat template writes once per image, expanded to the image's tokens.
+    image_token: u32,
+    /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
+    markers: []const u32 = &.{},
+    /// Image tokens one request may hold in all, and images.
+    image_tokens: u32,
+    max_images: u32,
+};
+
+/// --vision: image input's limits (``Open.vision``).
+pub const VisionOpen = struct { image_tokens: u32 = 4096, max_images: u32 = 4 };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 
@@ -160,6 +197,8 @@ pub const Info = struct {
     plain_only: bool = false,
     /// The immutable retained-prefix plan applied at startup, not a process memory limit or current cache occupancy.
     prompt_cache_plan: ?PromptCachePlan = null,
+    /// Image input (--vision); null: text only.
+    vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
@@ -225,6 +264,10 @@ pub const Open = struct {
     master_port: u16 = 29551,
     /// --policy: the engine's policy as `key=value,...`; empty: its defaults.
     policy: []const u8 = "",
+    /// --vision: load the checkpoint's image tower (null: text only; an engine without one refuses).
+    vision: ?VisionOpen = null,
+    /// --kv-cache fp8: attention caches as e4m3 with a scale a row (the CUDA Qwen3.8-27B engine only).
+    kv8: bool = false,
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
@@ -262,7 +305,7 @@ pub const Status = struct {
 pub const SubmitError = error{ Closed, Busy, InvalidSpans };
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = struct {
@@ -282,6 +325,8 @@ pub const LearnRequest = struct {
     save: bool = false, // every kept lesson written beside the model's shards, each with its router
     retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
     unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
+    score: []const Example = &.{}, // instead score these replies teacher-forced: is each its prompt's greedy reply now?
+    quiet: []const Example = &.{}, // instead read these through the model: do the open lesson's pocket neurons stay at or below zero on all their rows? (verdicts as `scored`)
 };
 
 /// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
@@ -298,6 +343,7 @@ pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, 
 pub const LearnEvent = union(enum) {
     learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
     progress: LearnProgress,
+    scored: struct { same: []const bool }, // a score request's verdicts, one a reply: every answer row's greedy pick is its next token
     done: struct { message: []const u8 = "" },
 };
 

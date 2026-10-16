@@ -10,8 +10,8 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
-const Slide = nemotron_slide.Adapter(nemotron.slide);
+const slide_adapter = @import("slide_adapter.zig");
+const Slide = slide_adapter.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
@@ -102,6 +102,10 @@ const Host = struct {
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
+    if (o.kv8) {
+        problem.* = "--kv-cache fp8: the CUDA engine keeps fp8 caches; the Metal engines keep bf16";
+        return null;
+    }
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
         return null;
@@ -113,13 +117,17 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (dense) return openQwen27(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
+    if (o.vision != null) {
+        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash only, not {s} checkpoints", .{o.model_type});
+        return null;
+    }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
-    if (o.slide) if (try nemotron_slide.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
+    if (o.slide) if (try slide_adapter.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
         problem.* = why;
         return null;
     };
@@ -353,7 +361,11 @@ fn openGlm(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]co
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), @intFromFloat(o.learn_min_free_gib * (1 << 30))) catch |e| {
+    if (o.vision != null and o.speed_up != null) {
+        problem.* = try std.fmt.allocPrint(a, "--vision is served on one Mac; the --speed-up pair reads text only", .{});
+        return null;
+    }
+    const h = glm.open(gpa, io, o.dir, @intCast(window), o.speed_up, o.lanes, o.lanes_fixed, o.prompt_cache_gib, o.learn, @intFromFloat(o.learn_gib * (1 << 30)), @intFromFloat(o.learn_min_free_gib * (1 << 30)), o.vision) catch |e| {
         if (e == error.BadLoadLimit) problem.* = "GLM_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else problem.* = if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native GLM-5.3-Flash engine cannot load {s} ({s})", .{ o.dir, @errorName(e) });
         return null;
     };

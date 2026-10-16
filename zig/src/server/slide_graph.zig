@@ -19,6 +19,10 @@ pub const Fact = struct {
     state: State,
     neurons: []const api.Neuron = &.{}, // where its neurons sit in the pocket, once placed
     questions: []const []const u8 = &.{}, // the wordings its checks ask
+    answers: []const []const u8 = &.{}, // the answer its lesson wrote for each ("": none known), what a later check looks for
+    shorts: []const []const u8 = &.{}, // and the fewest words that answer each ("": none)
+    contexts: []const []const u8 = &.{}, // the conversation each is asked after ("": none; slide_context.zig)
+    probes: u32 = 0, // the last ones of its questions are wordings it never learned: half of those must bring it back
     message: []const u8 = "", // why it stopped, or what its lesson last did
     round: u32 = 0, // its lesson's round now, or the rounds it took
     checks: u32 = 0, // asked checks done, this session
@@ -29,6 +33,15 @@ pub const Fact = struct {
     of: u32 = 0,
     loss: ?f32 = null, // its outputs' loss at the last step
 };
+
+/// A wording a fact's checks ask: the answer its lesson wrote and the fewest words that answer it.
+pub const Asked = struct { question: []const u8, answer: []const u8 = "", short: []const u8 = "", probe: bool = false, context: []const u8 = "" };
+
+/// A conversation kept for every lesson and check to ask in: its name, its user lines and the model's replies.
+pub const Talk = struct { name: []const u8, turns: []const [2][]const u8 };
+
+/// A learned fact as a later lesson checks it again: what it says, its wordings, its last check's verdict (null: none).
+pub const Earlier = struct { id: u32, text: []const u8, asked: []const Asked, recalled: ?bool };
 
 /// The last save of the pocket into the shards: when, how long, the files it changed and their shared experts' bytes.
 const Save = struct {
@@ -60,6 +73,7 @@ pub const Graph = struct {
     model: ?slide_model.Model = null, // the served folder as last scanned
     model_arena: std.heap.ArenaAllocator,
     saved: Save = .{},
+    talks: std.ArrayList(Talk) = .empty, // conversations written once, kept with the facts
 
     /// A graph that starts from `path`'s file when it reads, else empty.
     pub fn init(gpa: Allocator, io: Io, path: ?[]const u8) Graph {
@@ -70,6 +84,7 @@ pub const Graph = struct {
 
     pub fn deinit(g: *Graph) void {
         g.facts.deinit(g.gpa);
+        g.talks.deinit(g.gpa);
         g.trace.deinit(g.gpa);
         g.cuts.deinit(g.gpa);
         g.arena.deinit();
@@ -200,15 +215,89 @@ pub const Graph = struct {
         g.save();
     }
 
-    /// The wordings a fact's checks ask.
-    pub fn asked(g: *Graph, id: u32, questions: []const []const u8) void {
+    /// The wordings a fact's checks ask, held-out questions first, with the answers its lesson wrote for them.
+    pub fn asked(g: *Graph, id: u32, wordings: []const Asked) void {
         g.mutex.lockUncancelable(g.io);
         defer g.mutex.unlock(g.io);
         const f = g.find(id) orelse return;
         const a = g.arena.allocator();
-        const out = a.alloc([]const u8, questions.len) catch return;
-        for (questions, out) |q, *o| o.* = a.dupe(u8, q) catch return;
-        f.questions = out;
+        const qs = a.alloc([]const u8, wordings.len) catch return;
+        const answers = a.alloc([]const u8, wordings.len) catch return;
+        const shorts = a.alloc([]const u8, wordings.len) catch return;
+        const contexts = a.alloc([]const u8, wordings.len) catch return;
+        var probes: u32 = 0;
+        for (wordings, qs, answers, shorts, contexts) |w, *q, *ans, *short, *c| {
+            q.* = a.dupe(u8, w.question) catch return;
+            ans.* = a.dupe(u8, w.answer) catch return;
+            short.* = a.dupe(u8, w.short) catch return;
+            c.* = a.dupe(u8, w.context) catch return;
+            probes += @intFromBool(w.probe);
+        }
+        f.questions = qs;
+        f.answers = answers;
+        f.shorts = shorts;
+        f.contexts = contexts;
+        f.probes = probes;
+        g.save();
+    }
+
+    /// Every learned fact but `id`, in teaching order, copied into `a`: what a lesson checks again once it is done.
+    pub fn earlier(g: *Graph, a: Allocator, id: u32) ![]Earlier {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        var out: std.ArrayList(Earlier) = .empty;
+        for (g.facts.items) |f| {
+            if (f.id == id or f.state != .learned or f.questions.len == 0) continue;
+            const asked_ = try a.alloc(Asked, f.questions.len);
+            const held = f.questions.len - @min(f.probes, f.questions.len);
+            for (asked_, f.questions, 0..) |*w, q, i| w.* = .{
+                .question = try a.dupe(u8, q),
+                .answer = if (i < f.answers.len) try a.dupe(u8, f.answers[i]) else "",
+                .short = if (i < f.shorts.len) try a.dupe(u8, f.shorts[i]) else "",
+                .probe = i >= held,
+                .context = if (i < f.contexts.len) try a.dupe(u8, f.contexts[i]) else "",
+            };
+            try out.append(a, .{ .id = f.id, .text = try a.dupe(u8, f.text), .asked = asked_, .recalled = f.recalled });
+        }
+        return out.items;
+    }
+
+    /// The reply a learned fact's question `i` brought it back with, kept as its answer when its lesson left none.
+    pub fn answered(g: *Graph, id: u32, i: usize, reply: []const u8) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const f = g.find(id) orelse return;
+        if (i >= f.questions.len or (i < f.answers.len and f.answers[i].len > 0)) return;
+        const a = g.arena.allocator();
+        if (f.answers.len != f.questions.len) {
+            const all = a.alloc([]const u8, f.questions.len) catch return;
+            for (all, 0..) |*x, j| x.* = if (j < f.answers.len) f.answers[j] else "";
+            f.answers = all;
+        }
+        @constCast(f.answers)[i] = a.dupe(u8, reply) catch return;
+        g.save();
+    }
+
+    /// Conversation `name` as kept, copied into `a`; null when none is.
+    pub fn talk(g: *Graph, a: Allocator, name: []const u8) !?[]const [2][]const u8 {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        for (g.talks.items) |t| if (std.mem.eql(u8, t.name, name)) {
+            const out = try a.alloc([2][]const u8, t.turns.len);
+            for (out, t.turns) |*o, x| o.* = .{ try a.dupe(u8, x[0]), try a.dupe(u8, x[1]) };
+            return out;
+        };
+        return null;
+    }
+
+    /// Conversation `name` kept (copied) with the facts, for every later lesson and check to ask in.
+    pub fn keepTalk(g: *Graph, name: []const u8, turns: []const [2][]const u8) void {
+        g.mutex.lockUncancelable(g.io);
+        defer g.mutex.unlock(g.io);
+        const a = g.arena.allocator();
+        const out = a.alloc([2][]const u8, turns.len) catch return;
+        for (out, turns) |*o, x| o.* = .{ a.dupe(u8, x[0]) catch return, a.dupe(u8, x[1]) catch return };
+        g.talks.append(g.gpa, .{ .name = a.dupe(u8, name) catch return, .turns = out }) catch return;
         g.save();
     }
 
@@ -302,6 +391,10 @@ pub const Graph = struct {
             if (f.round > 0) try o.put(a, "round", try json.intValue(a, f.round));
             if (f.message.len > 0) try o.put(a, "message", .{ .string = f.message });
             if (f.questions.len > 0) try o.put(a, "questions", try strings(a, f.questions));
+            if (f.answers.len > 0) try o.put(a, "answers", try strings(a, f.answers));
+            if (f.shorts.len > 0) try o.put(a, "shorts", try strings(a, f.shorts));
+            if (anyNonEmpty(f.contexts)) try o.put(a, "contexts", try strings(a, f.contexts));
+            if (f.probes > 0) try o.put(a, "probes", try json.intValue(a, f.probes));
             if (f.neurons.len > 0) try o.put(a, "neurons", try neuronList(a, f.neurons));
             if (live) try g.liveFields(a, o, f);
             out.* = .{ .object = o };
@@ -309,6 +402,18 @@ pub const Graph = struct {
         const root = try json.newObject(a);
         try root.put(a, "next", try json.intValue(a, g.next));
         try root.put(a, "facts", .{ .array = facts });
+        if (g.talks.items.len > 0) {
+            const talks = try a.alloc(json.Value, g.talks.items.len);
+            for (g.talks.items, talks) |t, *v| {
+                const o = try json.newObject(a);
+                try o.put(a, "name", .{ .string = t.name });
+                const ts = try a.alloc(json.Value, t.turns.len);
+                for (t.turns, ts) |x, *tv| tv.* = try strings(a, &x);
+                try o.put(a, "turns", .{ .array = ts });
+                v.* = .{ .object = o };
+            }
+            try root.put(a, "talks", .{ .array = talks });
+        }
         if (live) if (g.model) |m| {
             const v = try slide_model.value(a, m);
             if (g.saved.state != .none) try v.object.put(a, "save", try saveValue(a, g.saved));
@@ -363,11 +468,11 @@ pub const Graph = struct {
             var fact: Fact = .{ .id = try int(u32, f.field("id")), .text = f.strField("text") orelse "", .source = f.strField("source") orelse "", .at = try int(i64, f.field("at")), .state = state };
             fact.message = f.strField("message") orelse "";
             fact.round = int(u32, f.field("round")) catch 0;
-            if (f.field("questions")) |qs| if (qs.items()) |xs| {
-                const out = try a.alloc([]const u8, xs.len);
-                for (xs, out) |x, *o| o.* = x.str() orelse "";
-                fact.questions = out;
-            };
+            fact.questions = try stringList(a, f.field("questions"));
+            fact.answers = try stringList(a, f.field("answers"));
+            fact.shorts = try stringList(a, f.field("shorts"));
+            fact.contexts = try stringList(a, f.field("contexts"));
+            fact.probes = int(u32, f.field("probes")) catch 0;
             if (f.field("neurons")) |ns| if (ns.items()) |xs| {
                 var out: std.ArrayList(api.Neuron) = .empty;
                 for (xs) |x| try out.append(a, .{ .layer = int(u16, x.field("layer")) catch continue, .neuron = int(u16, x.field("neuron")) catch continue, .key = std.meta.stringToEnum(api.NeuronKey, x.strField("key") orelse "") orelse continue });
@@ -375,6 +480,14 @@ pub const Graph = struct {
             };
             try g.facts.append(g.gpa, fact);
         }
+        if (root.field("talks")) |ts| if (ts.items()) |xs| for (xs) |t| {
+            var turns: std.ArrayList([2][]const u8) = .empty;
+            for ((t.field("turns") orelse continue).items() orelse continue) |x| {
+                const pair = try stringList(a, x);
+                if (pair.len == 2) try turns.append(a, .{ pair[0], pair[1] });
+            }
+            try g.talks.append(g.gpa, .{ .name = t.strField("name") orelse continue, .turns = turns.items });
+        };
         g.next = try int(u32, root.field("next"));
     }
 };
@@ -395,10 +508,23 @@ fn round4(x: f32) json.Value {
     return .{ .float = @round(v * 1e4) / 1e4 };
 }
 
+fn anyNonEmpty(xs: []const []const u8) bool {
+    for (xs) |x| if (x.len > 0) return true;
+    return false;
+}
+
 fn strings(a: Allocator, xs: []const []const u8) !json.Value {
     const out = try a.alloc(json.Value, xs.len);
     for (xs, out) |x, *v| v.* = .{ .string = x };
     return .{ .array = out };
+}
+
+/// A JSON array of strings as read (none: empty).
+fn stringList(a: Allocator, v: ?json.Value) ![]const []const u8 {
+    const xs = (v orelse return &.{}).items() orelse return &.{};
+    const out = try a.alloc([]const u8, xs.len);
+    for (xs, out) |x, *o| o.* = x.str() orelse "";
+    return out;
 }
 
 fn dupeAll(a: Allocator, xs: []const []const u8) ![]const []const u8 {
@@ -447,106 +573,4 @@ fn shareWord(x: []const u8, y: []const u8) bool {
 fn isCommon(w: []const u8) bool {
     for (common) |c| if (std.ascii.eqlIgnoreCase(w, c)) return true;
     return false;
-}
-
-test "facts persist across a reopen, link by a shared key word, and clear without reusing ids" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "graph.json" });
-    defer gpa.free(path);
-    var g = Graph.init(gpa, io, path);
-    const a = g.add("My company, Larkspur Robotics, sells the Heron X2.", "file:company.md", 100);
-    const b = g.add("Larkspur Robotics made 4.7 million pounds in Q3.", "file:company.md", 101);
-    const c = g.add("My favourite colour is teal.", "chat", 102);
-    g.mark(a, .learned);
-    g.mark(c, .missed);
-    g.deinit();
-
-    var again = Graph.init(gpa, io, path);
-    defer again.deinit();
-    try std.testing.expectEqual(@as(usize, 3), again.facts.items.len);
-    try std.testing.expectEqual(State.learned, again.facts.items[0].state);
-    try std.testing.expectEqual(State.missed, again.facts.items[2].state);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const doc = switch (try json.parse(arena.allocator(), try again.render(arena.allocator(), null))) {
-        .ok => |v| v,
-        .err => return error.BadGraph,
-    };
-    const facts = doc.field("facts").?.items().?;
-    try std.testing.expectEqual(@as(usize, 1), facts[0].field("links").?.items().?.len);
-    try std.testing.expectEqualStrings(try std.fmt.allocPrint(arena.allocator(), "{d}", .{b}), facts[0].field("links").?.items().?[0].int);
-    try std.testing.expectEqual(@as(usize, 0), facts[2].field("links").?.items().?.len);
-    again.clear();
-    try std.testing.expectEqual(c + 1, again.add("My dog is called Pickle.", "chat", 103));
-}
-
-test "a lesson's phases, loss trace and neurons show while it learns; a learned fact keeps its neurons on disk" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const path = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path, "graph.json" });
-    defer gpa.free(path);
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const ar = arena.allocator();
-    var g = Graph.init(gpa, io, path);
-    const id = g.add("My sister is called Ana.", "chat", 100);
-    const other = g.add("I like blue.", "chat", 101);
-    g.mark(id, .learning);
-    g.phase(id, .writing);
-    g.asked(id, &.{ "What is my sister's name?", "Do you remember what my sister is called?" });
-    g.round(id, 1);
-    g.progress(id, .{ .phase = .reading, .at = 3, .of = 40 });
-    const ns = [_]api.Neuron{ .{ .layer = 13, .neuron = 0, .key = .subject }, .{ .layer = 15, .neuron = 2, .key = .subject } };
-    for (1..4) |s| g.progress(id, .{ .phase = .values, .at = @intCast(s), .loss = 2.0 / @as(f32, @floatFromInt(s)), .neurons = &ns });
-    g.round(id, 2);
-    for (1..3) |s| g.progress(id, .{ .phase = .values, .at = @intCast(s), .loss = 0.25, .neurons = &ns });
-    g.checked(id, true);
-    var text = try g.render(ar, null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"phase\":\"values\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"trace\":[[2.0,1.0,0.6667],[0.25,0.25]]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "{\"layer\":13,\"neuron\":0,\"key\":\"subject\"}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"checks\":1,\"recalled\":true") != null);
-    g.mark(id, .learned);
-    g.placed(other, &ns);
-    g.mark(other, .missed);
-    text = try g.render(ar, null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"phase\"") == null);
-    g.deinit();
-
-    var again = Graph.init(gpa, io, path);
-    defer again.deinit();
-    try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].neurons.len);
-    try std.testing.expectEqual(api.NeuronKey.subject, again.facts.items[0].neurons[1].key);
-    try std.testing.expectEqual(@as(u16, 15), again.facts.items[0].neurons[1].layer);
-    try std.testing.expectEqual(@as(usize, 2), again.facts.items[0].questions.len);
-    try std.testing.expectEqual(@as(u32, 2), again.facts.items[0].round);
-    try std.testing.expectEqual(@as(usize, 0), again.facts.items[1].neurons.len);
-}
-
-test "a save is measured against the shards as they were before it: the files it changed, how long it took" {
-    const gpa = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const ar = arena.allocator();
-    const dir = try std.fs.path.join(ar, &.{ ".zig-cache", "tmp", &tmp.sub_path });
-    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"layers_block_type\": [\"mamba\", \"moe\"]}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "other.safetensors", .data = "\x02\x00\x00\x00\x00\x00\x00\x00{}" });
-    var g = Graph.init(gpa, io, null);
-    defer g.deinit();
-    g.saving(dir);
-    try std.testing.expect(std.mem.indexOf(u8, try g.render(ar, dir), "\"save\":{\"state\":\"saving\"") != null);
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "\x03\x00\x00\x00\x00\x00\x00\x00{} " });
-    g.saveEnded(dir, 3.14, null);
-    const text = try g.render(ar, dir);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"layers\":2,\"kinds\":\"ME\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"seconds\":3.1,\"bytes\":0,\"files\":[\"model.safetensors\"]") != null);
 }

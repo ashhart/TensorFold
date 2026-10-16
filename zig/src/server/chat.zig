@@ -62,6 +62,9 @@ pub const Reply = struct {
     logprobs: ?Value = null,
     /// ``choices[0].prompt_logprobs`` (vLLM's form) for a request that asked; null otherwise.
     prompt_logprobs: ?Value = null,
+    /// The prompt's token ids as the engine read them, and the reply's as it decoded them (an end token included).
+    prompt_ids: []const u32 = &.{},
+    tokens: []const u32 = &.{},
 };
 
 pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
@@ -141,6 +144,8 @@ pub fn prepare(srv: *Server, cx: *Cx, input: Input, gone: anytype) Failure!Prepa
         .decode_spans = try prompt_mod.replySpans(srv, cx, rendered.ids), // from the tokens alone, for every request: cached states are keyed by tokens
         .tools_json = if (input.tools.len > 0) try json.stringify(a, .{ .array = @constCast(input.tools) }, .{ .ascii = false }) else "",
         .decide = if (input.prompt == null and !background) prompt_mod.decideOf(srv, rendered.ids) else null,
+        .images = rendered.images,
+        .cache_key = rendered.cache_key,
     };
     try srv.checkFeatures(cx, f, input.tools.len > 0, thinking, rendered.ids, input.tools, &request);
     if (thinking) {
@@ -202,7 +207,9 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     const result: Failure!Reply = blk: {
         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
         gen.loop(gone) catch |e| break :blk e;
-        break :blk gen.finish(cx, prepared.prompt_len, received, thinking, effort, prepared.sampled, prepared.drafts);
+        var reply = gen.finish(cx, prepared.prompt_len, received, thinking, effort, prepared.sampled, prepared.drafts) catch |e| break :blk e;
+        reply.prompt_ids = request.prompt;
+        break :blk reply;
     };
     if (result) |_| {} else |e| logEnded(input.id, e, cx.message, prepared.prompt_len, gen.collected.items.len, seconds(nowNs(io) - received));
     return result;
@@ -230,35 +237,6 @@ pub fn release(srv: *Server, preparing: bool) void {
     if (preparing) _ = srv.preparing.fetchSub(1, .acq_rel);
 }
 
-/// The text a stream has sent: Python's ``streamed = visible``, grown by its delta while it only grows.
-const Shown = struct {
-    text: std.ArrayList(u8) = .empty,
-    chars: usize = 0,
-    at: ?[*]const u8 = null, // where the last shown text lay; the decode buffer only grows, so that prefix holds
-    extends: bool = false,
-
-    /// Python's ``now[len(shown):]``; ``stable``: ``now`` lies in the append-only decode buffer.
-    fn after(s: *Shown, now: []const u8, stable: bool) []const u8 {
-        const sent = s.text.items;
-        s.extends = (stable and s.at == now.ptr and now.len >= sent.len) or std.mem.startsWith(u8, now, sent);
-        if (!s.extends) return reply_text.afterChars(now, s.chars);
-        if (stable) s.at = now.ptr; // the buffer moved but kept its bytes: the next check is free again
-        return now[sent.len..];
-    }
-
-    fn set(s: *Shown, a: Allocator, now: []const u8, delta: []const u8) Allocator.Error!void {
-        if (s.extends) {
-            try s.text.appendSlice(a, delta);
-            s.chars += reply_text.charCount(delta);
-        } else {
-            s.text = .empty;
-            try s.text.appendSlice(a, now);
-            s.chars = reply_text.charCount(now);
-        }
-        s.at = now.ptr;
-    }
-};
-
 /// The token loop and the text it streams.
 const Generation = struct {
     srv: *Server,
@@ -276,8 +254,8 @@ const Generation = struct {
     collected: std.ArrayList(u32) = .empty,
     visible: reply_text.Incremental = .{},
     hidden: std.ArrayList(u8) = .empty, // reused for the answer without its call blocks
-    streamed: Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
-    streamed_reasoning: Shown = .{},
+    streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
+    streamed_reasoning: reply_text.Shown = .{},
     streaming_done: bool = false,
     first_ns: ?i96 = null,
     last_ns: ?i96 = null,
@@ -515,6 +493,7 @@ const Generation = struct {
             .effort = effort,
             .logprobs = if (g.lp) |l| try @import("logprobs.zig").value(g.srv, cx, a, g.thinking, content_tokens, l.rows.items) else null,
             .prompt_logprobs = if (m.prompt_rows) |r| try @import("logprobs.zig").promptValue(g.srv, a, r) else null,
+            .tokens = g.collected.items,
         };
         if (std.mem.eql(u8, reason, "length") and thinking and reply_text.pyStrip(content).len == 0)
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});

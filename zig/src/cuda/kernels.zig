@@ -13,6 +13,7 @@ fn Blob(comptime import_name: []const u8) type {
 pub const available = options.with_kernels;
 
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
+pub const gdn_prefill: []const u8 = if (available) &Blob("fatbin_gdn_prefill").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
 pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").bytes else &.{};
@@ -28,8 +29,13 @@ pub const fp8_experts: []const u8 = if (available) &Blob("fatbin_fp8_experts").b
 pub const exlr8: []const u8 = if (available) &Blob("fatbin_exlr8").bytes else &.{};
 pub const exlr8_dense: []const u8 = if (available) &Blob("fatbin_exlr8_dense").bytes else &.{};
 pub const nvfp4_experts: []const u8 = if (available) &Blob("fatbin_nvfp4_experts").bytes else &.{};
+pub const qwen_ops: []const u8 = if (available) &Blob("fatbin_qwen_ops").bytes else &.{};
+pub const qwen_vision: []const u8 = if (available) &Blob("fatbin_qwen_vision").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
+pub const attn_train: []const u8 = if (available) &Blob("fatbin_attn_train").bytes else &.{};
+pub const gdn_train: []const u8 = if (available) &Blob("fatbin_gdn_train").bytes else &.{};
+pub const qwen27_train: []const u8 = if (available) &Blob("fatbin_qwen27_train").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};
@@ -44,6 +50,7 @@ pub const nemotron_route: []const u8 = if (available) &Blob("fatbin_nemotron_rou
 pub const nemotron_mamba: []const u8 = if (available) &Blob("fatbin_nemotron_mamba").bytes else &.{};
 pub const nemotron_attention: []const u8 = if (available) &Blob("fatbin_nemotron_attention").bytes else &.{};
 pub const nemotron_keyed: []const u8 = if (available) &Blob("fatbin_nemotron_keyed").bytes else &.{};
+pub const torch_norm_rotary: []const u8 = if (available) &Blob("fatbin_torch_norm_rotary").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
 
