@@ -20,6 +20,7 @@ pub fn read(ctx: *anyopaque, out: *api.Status, stream_tokens: []u32) void {
     const n = @min(stream_tokens.len, h.live_tokens.items.len);
     @memcpy(stream_tokens[0..n], h.live_tokens.items[0..n]);
     out.* = .{
+        .healthy = !h.closing and !h.stale and (if (h.health) |source| source.read(source.ctx) else true),
         .running = @intCast(h.admitted.items.len),
         .waiting = @intCast(h.queued.items.len),
         .decode_tokens_per_second = @as(f64, @floatFromInt(tokens)) / 2.0,

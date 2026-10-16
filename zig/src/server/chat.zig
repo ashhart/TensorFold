@@ -41,6 +41,8 @@ pub const Input = struct {
 pub const Sink = struct {
     ctx: *anyopaque,
     call: *const fn (ctx: *anyopaque, delta: Value) error{Closed}!void,
+    /// Called only after admission, with cancellation and mailbox draining already guarded.
+    begin: ?*const fn (ctx: *anyopaque, prompt_len: usize) error{Closed}!void = null,
 };
 
 pub const Reply = struct {
@@ -194,7 +196,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     defer if (srv.keepalive) |k| k.end();
     srv.engine.submit(id, &request, .{ .ctx = &box, .event = Mailbox.onEvent }) catch |e| return switch (e) {
         error.Busy => cx.fail(.capacity, "the engine is busy; retry shortly", .{}),
-        error.Closed => cx.fail(.other, "the scheduler is closed", .{}),
+        error.Closed => cx.fail(.capacity, "the engine is unavailable; retry after it restarts", .{}),
         error.InvalidSpans => cx.fail(.request, "the prompt span layout is invalid", .{}),
         error.Stale => cx.fail(.server, "{s}", .{api.stale_message}),
     };
@@ -204,6 +206,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
+        if (sink) |s| if (s.begin) |begin| begin(s.ctx, prepared.prompt_len) catch break :blk error.Cancelled;
         if (sink != null and input.tools.len > 0) gen.calls = tool_stream.Streamer.init(a, input.tools) catch |e| break :blk e;
         gen.loop(gone) catch |e| break :blk e;
         break :blk gen.finish(cx, prepared.prompt_len, received, thinking, effort, prepared.sampled, prepared.drafts);
