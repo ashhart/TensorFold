@@ -29,12 +29,13 @@ pub const Forward = struct {
         return .{ .m = f.m, .s = f.s, .prompt = f.b.prompt, .part = f.b.part, .kda_wide = f.kda_wide };
     }
 
-    /// Segments in row order from row 0, each on its own committed sequence with room for its rows; windows <= 16 rows.
+    /// Segments in row order from row 0, each on its own committed sequence with room (and scratch) for its rows.
     fn rowsOf(f: *const Forward, segs: []const Seg) !usize {
         var rows: usize = 0;
         for (segs, 0..) |sg, i| {
             if (sg.row0 != rows or sg.rows == 0 or sg.st.pending != 0) return error.BadSegments;
             if (sg.st.pos + sg.rows > sg.st.capacity) return error.CacheFull; // before a prompt's KDA layers commit
+            if (f.g.mla_layers > 0) try block_mla.room(f.b, sg.st, sg.rows); // and the scratch's attention partials
             if (!f.b.prompt and sg.rows > window_rows) return error.WindowTooWide;
             for (segs[0..i]) |o| if (o.st == sg.st) return error.BadSegments;
             rows += sg.rows;

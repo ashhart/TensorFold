@@ -87,6 +87,7 @@ pub fn engineChecks(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) 
     try sharedChecks(c, e, prompt, w);
     if (e.mtp != null) try mtpChain(c, e, prompt, w);
     try capacityRefusal(c, e, prompt, w);
+    try scratchRefusal(c, e, prompt, w);
     for ([_]u32{ 10, 11, 12, 13, 14 }) |s| e.release(s);
 }
 
@@ -139,23 +140,61 @@ fn capacityRefusal(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) !
     const same = std.mem.eql(u8, before[0], after[0]) and std.mem.eql(u8, before[1], after[1]) and
         std.mem.eql(u1, cur, q.st.cur) and q.st.pos == pos and q.st.pending == 0;
     try c.expect(refused == asked and same, "{d} of {d} requests past the capacity ({d} at {d}) refused with CacheFull, the arenas ({d} and {d} bytes) and position as they were", .{ refused, asked, cap, pos, before[0].len, before[1].len });
-    // the next window on both twins: tokens, logits, then states
+    try afterRefusal(c, e, prompt, w, pend, 50);
+}
+
+/// The next window on twins `s` (refused) and s + 1, then a new request on `s` and on a fresh slot s + 2.
+fn afterRefusal(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32, pend: [2]u32, s: u32) !void {
     var got: [2][4]u32 = undefined;
     var lo: [2][]u8 = undefined;
     for (0..2) |k| {
-        try e.bind(@intCast(50 + k));
+        try e.bind(s + @as(u32, @intCast(k)));
         var win: [4]u32 = .{ pend[k], w[40], w[41], w[42] };
         try e.verify(&win, &got[k]);
-        lo[k] = try logitsRows(e, a, e.bd.logits, 4);
+        lo[k] = try logitsRows(e, c.a, e.bd.logits, 4);
         try e.keep(4);
     }
     try c.expect(std.mem.eql(u32, &got[0], &got[1]) and std.mem.eql(u8, lo[0], lo[1]), "the window after the refusals: tokens and logits == the twin's", .{});
-    try rig.sameSeq(c, e, "after the refusals and a window, the twin", 50, 51);
-    const t50 = try pass(e, 50, prompt, 37, null, null);
-    const t52 = try pass(e, 52, prompt, 37, null, null);
-    try c.expect(t50 == t52, "a new request on the refused slot: first token {d}, on a fresh slot {d}", .{ t50, t52 });
-    try rig.sameSeq(c, e, "a new request on the refused slot == on a fresh slot", 50, 52);
-    for ([_]u32{ 50, 51, 52 }) |s| e.release(s);
+    try rig.sameSeq(c, e, "after the refusals and a window, the twin", s, s + 1);
+    const t0 = try pass(e, s, prompt, 37, null, null);
+    const t2 = try pass(e, s + 2, prompt, 37, null, null);
+    try c.expect(t0 == t2, "a new request on the refused slot: first token {d}, on a fresh slot {d}", .{ t0, t2 });
+    try rig.sameSeq(c, e, "a new request on the refused slot == on a fresh slot", s, s + 2);
+    for ([_]u32{ s, s + 1, s + 2 }) |x| e.release(x);
+}
+
+/// Scratch for half the sequences' capacity: a prompt chunk, a window and MTP rows past it refused, nothing changed.
+fn scratchRefusal(c: *Cover, e: *Engine, prompt: []const u32, w: []const u32) !void {
+    const a = c.a;
+    const half = e.capacity / 2;
+    const long = try a.alloc(u32, half + 40);
+    for (long, 0..) |*x, i| x.* = prompt[i % prompt.len];
+    var pend: [2]u32 = undefined;
+    for (0..2) |k| pend[k] = try pass(e, @intCast(60 + k), long[0 .. half - 12], 512, null, null); // twins at half - 12
+    var bp = try F.Buffers.init(e.d, &e.m, &e.w, 64, true, half);
+    defer bp.deinit();
+    var bd = try F.Buffers.init(e.d, &e.m, &e.w, F.window_rows, false, half);
+    defer bd.deinit();
+    try e.bind(60);
+    const q = e.seqs.items[60].?;
+    const before = try arenas(c, e, 60);
+    const cur = try a.dupe(u1, q.st.cur);
+    const pos = q.st.pos;
+    var refused: usize = 0;
+    const seg = [_]F.Seg{.{ .st = &q.st, .row0 = 0, .rows = 30 }}; // fits the sequence, not the scratch
+    if (e.forward(&bp).run(&seg, @ptrCast(long[pos..][0..30]))) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    const win = [_]F.Seg{.{ .st = &q.st, .row0 = 0, .rows = 16 }};
+    if (e.forward(&bd).run(&win, @ptrCast(w[20..36]))) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    var asked: usize = 2;
+    if (e.mtp) |*h| { // 16 rows through the MTP layer from its position, past the scratch's
+        asked += 1;
+        if (h.absorb(&e.m, e.stream, &bd, &q.hd.?, @ptrCast(long[0..16]), e.bd.normed)) |_| {} else |err| refused += @intFromBool(err == error.CacheFull);
+    }
+    const after = try arenas(c, e, 60);
+    const same = std.mem.eql(u8, before[0], after[0]) and std.mem.eql(u8, before[1], after[1]) and
+        std.mem.eql(u1, cur, q.st.cur) and q.st.pos == pos and q.st.pending == 0 and (q.hd == null or q.hd.?.pending == 0);
+    try c.expect(refused == asked and same, "{d} of {d} requests past the scratch ({d} of {d}, at {d}) refused with CacheFull, the arenas and position as they were", .{ refused, asked, half, e.capacity, pos });
+    try afterRefusal(c, e, prompt, w, pend, 60);
 }
 
 /// MTP chains of 3 and of 1 on twins: the same first draft, and after the same windows the chain's rows rolled back.

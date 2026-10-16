@@ -12,6 +12,11 @@ const Config = @import("config.zig").Config;
 const kw = state.cache_width;
 const lw = 512;
 
+/// Room for a segment's rows: the sequence's cache and the scratch's attention partials (512-key chunks).
+pub fn room(b: *const state.Buffers, st: *const state.State, rows: usize) !void {
+    if (st.pos + rows > st.capacity or latent.chunksFor(st.pos + rows) > b.nch) return error.CacheFull;
+}
+
 /// The block on b.normed into b.y: q (lora pair or q_proj), latent and roped key into the cache, attention, gate.
 pub fn block(o: Ops, b: *const state.Buffers, a: weights.Mla, ab: graph.Absorb, g: *const graph.Graph, mi: usize, segs: []const block_kda.Seg, rows: usize) !void {
     const c = &g.w.config;
@@ -32,10 +37,10 @@ pub fn block(o: Ops, b: *const state.Buffers, a: weights.Mla, ab: graph.Absorb, 
     if (a.gate) |gp| try o.mm(gp, b.normed, D, rows, b.g);
     try latent.absorbQStrided(o.set(), o.s, b.q, qk, ab.wk, b.qa, kw, rows, H, nope, lw);
     const scale = c.smScale();
+    for (segs) |sg| try room(b, sg.st, sg.rows); // every segment before the first cache write
     for (segs) |sg| {
         const st = sg.st;
         const r = sg.row0;
-        if (st.pos + sg.rows > st.capacity) return error.CacheFull;
         try latent.rope(o.set(), o.s, .{ .x = b.q + (r * H * qk + nope) * 2, .x_row = H * qk, .x_head = qk, .out = b.qa + (r * H * kw + lw) * 2, .o_row = H * kw, .o_head = kw }, sg.rows, H, st.pos_dev, g.freq);
         try latent.rope(o.set(), o.s, .{ .x = b.kv + (r * kw + lw) * 2, .x_row = kw, .x_head = 0, .out = b.lat + (r * kw + lw) * 2, .o_row = kw, .o_head = 0 }, sg.rows, 1, st.pos_dev, g.freq);
         try latent.latentWrite(o.set(), o.s, b.lat + r * kw * 2, kw, st.cacheAt(mi), st.pos_dev, sg.rows, kw);
@@ -48,7 +53,6 @@ pub fn block(o: Ops, b: *const state.Buffers, a: weights.Mla, ab: graph.Absorb, 
                 at = b.at;
             }
             const nch = latent.chunksFor(st.pos + r0 + m);
-            if (nch > b.nch) return error.CacheFull;
             const row = r + r0;
             try latent.attentionRoped(o.set(), o.s, b.qa + row * H * kw * 2, st.cacheAt(mi), at, b.partials, b.ol + row * H * lw * 2, b.dummy, m, H, lw, nch, scale);
         }
