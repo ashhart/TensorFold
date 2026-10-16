@@ -33,9 +33,9 @@ const pair_bytes = 16;
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
 
-/// A shared verify's max rows and streams: under hc_pre's 64-row block change, 8 streams of 4 rows.
+/// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
 pub const shared_rows = 32;
-pub const max_shared = 8;
+pub const max_shared = 16;
 
 /// One stream's window of a shared verify: its slot, its ids, and its drawn tokens.
 pub const Part = struct { slot: u32, ids: []const u32, out: []u32 };
