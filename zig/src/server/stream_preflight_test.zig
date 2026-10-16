@@ -1,4 +1,4 @@
-//! A streamed context-window refusal is an error event, and every other refusal is a 400 before the stream opens.
+//! Context-window refusals stay streamed; other refusals preserve their HTTP status before admission.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -291,6 +291,36 @@ test "a valid streamed chat still opens with the role chunk and gives the prepar
 test "a stream whose client is gone when it opens gives the preparing count back" {
     const body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":2}";
     const seen = try sendTo(.chat, body, .{ .gone_at_open = true });
+    try std.testing.expect(!seen.opened);
+    try std.testing.expectEqual(@as(i64, 0), seen.preparing);
+}
+
+test "disconnect at the admitted stream boundary cancels and drains its mailbox" {
+    const Waiting = struct {
+        sink: ?api.Sink = null,
+        submissions: usize = 0,
+        cancellations: usize = 0,
+        fn engine(e: *@This()) api.Engine {
+            return .{ .ctx = e, .vtable = &.{ .info = HiEngine.info, .submit = submit, .cancel = cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+        }
+        fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+            const e: *@This() = @ptrCast(@alignCast(ctx));
+            e.submissions += 1;
+            e.sink = sink;
+        }
+        fn cancel(ctx: *anyopaque, id: api.Id) void {
+            const e: *@This() = @ptrCast(@alignCast(ctx));
+            e.cancellations += 1;
+            const sink = e.sink.?;
+            e.sink = null;
+            sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+        }
+    };
+    var waiting: Waiting = .{};
+    const seen = try sendWith(waiting.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":2}", .{ .gone_at_open = true });
+    try std.testing.expectEqual(@as(usize, 1), waiting.submissions);
+    try std.testing.expectEqual(@as(usize, 1), waiting.cancellations);
+    try std.testing.expect(waiting.sink == null);
     try std.testing.expect(!seen.opened);
     try std.testing.expectEqual(@as(i64, 0), seen.preparing);
 }
