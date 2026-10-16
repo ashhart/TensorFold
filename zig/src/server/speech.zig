@@ -1,4 +1,4 @@
-//! POST /v1/audio/speech: synthesized whole and sent as WAV or raw PCM; anything but complete audio is an error.
+//! POST /v1/audio/speech: WAV or raw PCM whole, or raw PCM chunks with stream; only complete synthesis is audio.
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json.zig");
@@ -22,11 +22,11 @@ const Allocator = std.mem.Allocator;
 /// ``MAX_SPEECH_INPUT_CHARS``: the most characters (code points) one input may hold.
 pub const max_input_chars = 4096;
 
-/// The request fields served: the OpenAI ones (``speaker`` is ``voice``'s alias).
+/// The request fields served: the OpenAI ones (``speaker`` is ``voice``'s alias); ``stream*`` are checked apart.
 const served_fields = [_][]const u8{ "model", "input", "voice", "speaker", "response_format" };
 
-/// The rest of the speech protocol's fields: synthesis modifiers, references and streaming this route does not honor.
-const modifier_fields = [_][]const u8{ "speed", "stream", "stream_format", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "seed", "stage_params" };
+/// The rest of the speech protocol's fields: synthesis modifiers and references this route does not honor.
+const modifier_fields = [_][]const u8{ "speed", "task_type", "language", "instructions", "ref_audio", "ref_text", "references", "x_vector_only_mode", "stream_codec_output", "suppress_bootstrap_silence", "token_count", "duration_tokens", "initial_codec_chunk_frames", "max_new_tokens", "temperature", "top_p", "top_k", "repetition_penalty", "seed", "stage_params" };
 
 pub const Format = enum {
     wav,
@@ -40,7 +40,7 @@ pub const Format = enum {
     }
 };
 
-const Plan = struct { prompt: []const u32, seed: u64, format: Format };
+const Plan = struct { prompt: []const u32, seed: u64, format: Format, stream: bool };
 
 pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const sp = srv.info.speech orelse {
@@ -52,6 +52,8 @@ pub fn post(srv: *Server, c: *Conn, a: Allocator) !void {
     const received = clock.nowNs(srv.io);
     const raw = http_body.readJson(c, &cx) catch |e| return refuse(c, &cx, id, e);
     const plan = prepare(srv, &cx, sp, raw) catch |e| return refuse(c, &cx, id, e);
+    // only chunked framing tells a client that a stream which ends early is incomplete
+    if (plan.stream and !std.mem.eql(u8, c.version, "HTTP/1.1")) return fail(c, &cx, id, .request, "stream=true requires HTTP/1.1");
     synthesize(srv, c, &cx, id, sp, plan, received);
 }
 
@@ -60,11 +62,17 @@ fn listed(names: []const []const u8, key: []const u8) bool {
     return false;
 }
 
-/// Refuses what the route would drop: unknown fields even when null, set modifiers, non-string served fields.
+/// Refuses what this route would drop: unknown fields, set modifiers, non-strings, a bad ``stream``/``stream_format``.
 fn checkFields(cx: *Cx, body: Value) errors.Refused!void {
     for (body.object.keys(), body.object.values()) |key, value| {
         if (listed(&served_fields, key)) {
             if (value != .string) return cx.fail(.request, "{s} must be a string", .{key});
+        } else if (std.mem.eql(u8, key, "stream")) {
+            if (value != .bool and value != .null) return cx.refuse("stream must be a boolean");
+        } else if (std.mem.eql(u8, key, "stream_format")) {
+            if (value == .null or (value == .string and std.mem.eql(u8, value.string, "audio"))) continue;
+            if (value == .string and std.mem.eql(u8, value.string, "sse")) return cx.refuse("stream_format sse is not supported by this model");
+            return cx.refuse("stream_format must be one of: audio, sse");
         } else if (listed(&modifier_fields, key)) {
             if (value != .null) return cx.fail(.request, "{s} is not supported by this model", .{key});
         } else return cx.fail(.request, "unknown speech request field: {s}", .{key});
@@ -92,6 +100,8 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     if ((std.unicode.utf8CountCodepoints(input) catch unreachable) > max_input_chars)
         return cx.fail(.request, "input must be at most {d} characters", .{max_input_chars});
     const format = try responseFormat(cx, raw.strField("response_format") orelse "wav");
+    const stream = if (raw.get("stream")) |s| s == .bool and s.bool else false;
+    if (stream and format != .pcm) return cx.refuse("stream=true requires response_format='pcm'");
     const voice = raw.strField("voice") orelse raw.strField("speaker") orelse "default";
     if (voice.len > 0 and !std.ascii.eqlIgnoreCase(voice, "default"))
         return cx.fail(.request, drama_prompt.error_prefix ++ " unknown voice {s}; only the default voice is supported", .{try pyrepr.repr(cx.a, .{ .string = voice })});
@@ -102,10 +112,10 @@ fn prepare(srv: *Server, cx: *Cx, sp: api.SpeechInfo, raw: Value) errors.Refused
     };
     if (prompt.len > sp.max_prompt_tokens)
         return cx.fail(.request, drama_prompt.error_prefix ++ " a prompt of {d} rows exceeds the maximum allowed length of {d} rows", .{ prompt.len, sp.max_prompt_tokens });
-    return .{ .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format };
+    return .{ .prompt = prompt, .seed = api.seedFor(prompt, srv.config.seed_salt), .format = format, .stream = stream };
 }
 
-/// One synthesis: submit, wait for the engine's finished event, then send the whole audio or the reason there is none.
+/// One synthesis: submit, then send the whole audio after the finished event, or stream it as the engine publishes it.
 fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96) void {
     const pcm_len = std.math.mul(usize, sp.max_frames, sp.frame_length) catch 0;
     if (pcm_len == 0 or sp.sample_rate == 0 or sp.sample_rate > std.math.maxInt(u32) / 2)
@@ -122,6 +132,7 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         .temperature = drama_prompt.temperature,
         .top_p = drama_prompt.top_p,
         .top_k = drama_prompt.top_k,
+        .stream = plan.stream,
     };
     var box: Mailbox = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
@@ -135,21 +146,10 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
         error.Unsupported => fail(c, cx, id, .request, "this model does not support speech synthesis"),
     };
     // The engine holds request, prompt, pcm and result until finished; no path below returns before that.
-    if (!settle(srv, c, &box, engine_id)) {
-        c.close = true;
-        srv.metrics.disconnected(srv.io);
-        var buf: [1024]u8 = undefined;
-        log.line("{s}", .{log.ended(&buf, id, null, plan.prompt.len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
-        return;
-    }
+    if (plan.stream) return streamReply(srv, c, cx, id, sp, plan, received, &box, engine_id, pcm, &result);
+    if (settle(srv, c, &box, engine_id, null) == null) return left(srv, c, id, plan.prompt.len, received);
     const samples = result.samples;
-    const why: ?[]const u8 = switch (box.reason) {
-        .stop => if (samples == 0 or samples > pcm.len) "the engine finished without complete audio" else null,
-        .length => "speech reached the frame limit without ending; truncated audio is not returned",
-        .cancelled => "speech synthesis was cancelled",
-        .failed => if (box.message.len > 0) box.message else "speech synthesis failed",
-    };
-    if (why) |message| return fail(c, cx, id, .server, message);
+    if (why(&box, samples, pcm.len)) |message| return fail(c, cx, id, .server, message);
     const data = quantizeInPlace(pcm[0..samples]) catch return fail(c, cx, id, .server, "the synthesized audio has non-finite samples");
     if (data.len > std.math.maxInt(u32) - 36) return fail(c, cx, id, .server, "the synthesized audio is too long for one reply");
     sendAudio(c, plan.format, sp.sample_rate, data) catch {
@@ -159,23 +159,118 @@ fn synthesize(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInf
     log.line("speech {s} prompt={d} samples={d} format={s} seconds={d:.2}", .{ id, plan.prompt.len, samples, @tagName(plan.format), clock.seconds(clock.nowNs(srv.io) - received) });
 }
 
-/// Waits for the engine's finished event; a client that leaves cancels the synthesis first. False: the client left.
-fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id) bool {
+/// The client left before the reply ended; the synthesis was cancelled and waited out.
+fn left(srv: *Server, c: *Conn, id: []const u8, prompt_len: usize, received: i96) void {
+    c.close = true;
+    srv.metrics.disconnected(srv.io);
+    var buf: [1024]u8 = undefined;
+    log.line("{s}", .{log.ended(&buf, id, null, prompt_len, 0, clock.seconds(clock.nowNs(srv.io) - received))});
+}
+
+/// Why a finished synthesis has no complete audio, or null.
+fn why(box: *const Mailbox, samples: usize, capacity: usize) ?[]const u8 {
+    return switch (box.reason) {
+        .stop => if (samples == 0 or samples > capacity) "the engine finished without complete audio" else null,
+        .length => "speech reached the frame limit without ending; truncated audio is not returned",
+        .cancelled => "speech synthesis was cancelled",
+        .failed => if (box.message.len > 0) box.message else "speech synthesis failed",
+    };
+}
+
+/// An error reply when synthesis ends before any audio; else the chunks, and the terminator only after a complete one.
+fn streamReply(srv: *Server, c: *Conn, cx: *Cx, id: []const u8, sp: api.SpeechInfo, plan: Plan, received: i96, box: *Mailbox, engine_id: api.Id, pcm: []f32, result: *const api.SpeechResult) void {
+    const sent = streamAudio(srv, c, sp, box, engine_id, pcm) orelse return left(srv, c, id, plan.prompt.len, received);
+    const mismatch: ?[]const u8 = if (result.samples != sent.samples) "the finished synthesis does not match the audio it published" else null;
+    const problem = why(box, result.samples, pcm.len) orelse mismatch;
+    if (sent.samples == 0) return fail(c, cx, id, .server, problem orelse "the engine finished without publishing audio");
+    if (problem) |message| {
+        c.close = true; // no terminating chunk: the client's HTTP/1.1 parser reports an incomplete body
+        log.line("speech {s} stream ended incomplete after samples={d}: {s}", .{ id, sent.samples, message });
+        return;
+    }
+    c.writeAll(last_chunk) catch {
+        c.close = true;
+        return;
+    };
+    log.line("speech {s} prompt={d} samples={d} format=pcm stream=true first_audio_ready_seconds={d:.3} first_frame_written_seconds={d:.3} seconds={d:.2}", .{
+        id, plan.prompt.len, sent.samples, clock.seconds(sent.first_ready - received), clock.seconds(sent.first_written - received), clock.seconds(clock.nowNs(srv.io) - received),
+    });
+}
+
+/// What a stream sent, when this thread first saw published audio, and when frame 0's own bytes reached the socket.
+const Sent = struct { samples: usize = 0, first_ready: i96 = 0, first_written: i96 = 0 };
+
+/// Sends everything published since the last send as one chunk, converted in place; null: the client left.
+fn streamAudio(srv: *Server, c: *Conn, sp: api.SpeechInfo, box: *Mailbox, engine_id: api.Id, pcm: []f32) ?Sent {
+    var sent: Sent = .{};
+    var size: [20]u8 = undefined;
+    while (true) {
+        const now = settle(srv, c, box, engine_id, sent.samples) orelse return null;
+        if (now == sent.samples) return sent; // finished, and everything published is sent
+        const first = sent.samples == 0;
+        if (first) {
+            sent.first_ready = clock.nowNs(srv.io);
+            startStream(c, sp.sample_rate) catch return abandon(srv, box, engine_id);
+        }
+        // the audio event made pcm[..now] final: this thread converts it in place
+        const bytes = quantizeInPlace(pcm[sent.samples..now]) catch return abandon(srv, box, engine_id);
+        // frame 0's bytes go apart, so their hand-off time does not depend on the chunk's size
+        const split: usize = if (first) @min(2 * sp.frame_length, bytes.len) else 0;
+        c.writeAll(std.fmt.bufPrint(&size, "{x}\r\n", .{bytes.len}) catch unreachable) catch return abandon(srv, box, engine_id);
+        c.writeAll(bytes[0..split]) catch return abandon(srv, box, engine_id);
+        if (first) sent.first_written = clock.nowNs(srv.io);
+        c.writeAll(bytes[split..]) catch return abandon(srv, box, engine_id);
+        c.writeAll("\r\n") catch return abandon(srv, box, engine_id);
+        sent.samples = now;
+    }
+}
+
+/// Cancels a synthesis whose client is gone, then waits for its finished event; null, for the callers' `return`.
+fn abandon(srv: *Server, box: *Mailbox, engine_id: api.Id) ?Sent {
+    srv.engine.cancel(engine_id);
+    box.mutex.lockUncancelable(box.io);
+    defer box.mutex.unlock(box.io);
+    while (!box.finished) box.cond.waitUncancelable(box.io, &box.mutex);
+    return null;
+}
+
+/// Waits for `finished` or (with `sent`) samples past it, cancelling if the client leaves; samples so far, or null.
+fn settle(srv: *Server, c: *Conn, box: *Mailbox, engine_id: api.Id, sent: ?usize) ?usize {
     while (true) {
         box.mutex.lockUncancelable(box.io);
-        if (!box.finished) box.cond.waitTimeout(box.io, &box.mutex, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }) catch {};
-        const done = box.finished;
+        const idle = if (sent) |n| box.audio == n else true;
+        if (!box.finished and idle) box.cond.waitTimeout(box.io, &box.mutex, .{ .duration = .{ .raw = .fromMilliseconds(50), .clock = .awake } }) catch {};
+        const finished = box.finished;
+        const published = box.audio;
         box.mutex.unlock(box.io);
-        if (done) return true;
+        if (finished or (if (sent) |n| published > n else false)) return published;
         if (c.peerGone()) {
-            srv.engine.cancel(engine_id);
-            box.mutex.lockUncancelable(box.io);
-            defer box.mutex.unlock(box.io);
-            while (!box.finished) box.cond.waitUncancelable(box.io, &box.mutex);
-            return false;
+            _ = abandon(srv, box, engine_id);
+            return null;
         }
     }
 }
+
+/// 200 with raw PCM16LE in HTTP/1.1 chunks, under the reference's sample-format headers.
+fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
+    c.startResponse(200, null) catch return error.Closed;
+    c.addHeader("Content-Type", Format.pcm.contentType()) catch return error.Closed;
+    c.addHeader("Transfer-Encoding", "chunked") catch return error.Closed;
+    var rate: [16]u8 = undefined;
+    c.addHeader("X-Sample-Rate", std.fmt.bufPrint(&rate, "{d}", .{sample_rate}) catch unreachable) catch return error.Closed;
+    c.addHeader("X-Channels", "1") catch return error.Closed;
+    c.addHeader("X-Bit-Depth", "16") catch return error.Closed;
+    if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
+    // each chunk leaves at once rather than waiting on the client's acknowledgement of the last (no effect off TCP)
+    std.posix.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &std.mem.toBytes(@as(c_int, 1))) catch {};
+    // a blocking write into a full socket returns after the stall limit, so writeAll's poll can end a stalled stream
+    const stall: std.posix.timeval = .{ .sec = @divTrunc(c.timeouts.write_ms, 1000), .usec = @rem(c.timeouts.write_ms, 1000) * 1000 };
+    std.posix.setsockopt(c.fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&stall)) catch {};
+    return c.finish("");
+}
+
+/// The terminating chunk: sent only after a complete synthesis's last samples.
+const last_chunk = "0\r\n\r\n";
 
 fn refuse(c: *Conn, cx: *Cx, id: []const u8, e: errors.Refused) void {
     if (e == error.OutOfMemory) {
@@ -288,7 +383,11 @@ test "fields: unknown ones are refused even when null, modifiers when set" {
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"voice\": \"default\", \"response_format\": \"wav\", \"speed\": null, \"references\": null}", "" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_audio\": null}", "unknown speech request field: stream_audio" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"speed\": 1.0}", "speed is not supported by this model" },
-        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": false}", "stream is not supported by this model" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": false, \"stream_format\": \"audio\"}", "" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": null, \"stream_format\": null}", "" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream\": \"yes\"}", "stream must be a boolean" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_format\": \"sse\"}", "stream_format sse is not supported by this model" },
+        .{ "{\"model\": \"m\", \"input\": \"hi\", \"stream_format\": \"mp3\"}", "stream_format must be one of: audio, sse" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"temperature\": 0.7}", "temperature is not supported by this model" },
         .{ "{\"model\": \"m\", \"input\": \"hi\", \"ref_audio\": \"x.wav\"}", "ref_audio is not supported by this model" },
         .{ "{\"model\": \"m\", \"input\": 3}", "input must be a string" },
