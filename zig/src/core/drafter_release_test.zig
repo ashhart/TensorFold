@@ -108,6 +108,11 @@ test "a manifest outside the format is refused, naming what is wrong" {
     try expectEdit("\"depth\": 2", "\"depth\": 5", &.{ "depth 5", "1..4" });
     try expectEdit("\"softcap\": null", "\"softcap\": 0", &.{"softcap 0"});
     try expectEdit("\"embed_scale\": 1.0", "\"embed_scale\": -1.0", &.{"embed_scale -1"});
+    try expectEdit("\"eps\": 1e-6", "\"eps\": 0", &.{"drafter eps 0"});
+    try expectEdit("\"theta\": 10000.0", "\"theta\": -1", &.{"drafter theta -1"});
+    try expectEdit("\"eps\": 1e-6", "\"eps\": 1e5000", &.{"drafter eps inf"});
+    try expectEdit("\"theta\": 10000.0", "\"theta\": 1e5000", &.{"drafter theta inf"});
+    try expectEdit("\"theta\": 10000.0", "\"theta\": \"inf\"", &.{"drafter theta inf"});
     try expectEdit("\"size\": 60614", "\"size\": 128001", &.{ "128001", "128000" });
     try expectEdit("\"model.safetensors\"", "\"../model.safetensors\"", &.{"../model.safetensors"});
     try expectEdit("\"draft_vocab.json\"", "\"\"", &.{"is not a file name"});

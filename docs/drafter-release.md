@@ -115,7 +115,11 @@ Every tensor is bf16, f16 or f32. D is `drafter.hidden`, T is `target.hidden`, A
 
 ## draft_vocab.json
 
-A JSON array of `draft_vocab.size` distinct ids below `target.vocab`. Row r of `target.head` is the head row of id r.
+A JSON array of `draft_vocab.size` distinct ids below `target.vocab`, in any order. Row r of `target.head` is the
+target's head row for the id at position r of this array, `target.head[r] = lm_head[draft_vocab[r]]`, so for
+`[3, 1, 4, 15, 9]` row 0 is the head row of id 3. `target.head_bias[r]` is the bias of `draft_vocab[r]` in the same
+way. With a tied head the drafter's row r is `target.embed[draft_vocab[r]]`. The reader checks the slice's shape, not
+which rows it holds, so an exporter that writes them in id order makes a release that opens and drafts wrong tokens.
 
 ## Two targets
 

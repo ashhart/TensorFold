@@ -21,7 +21,7 @@ pub fn expected(a: std.mem.Allocator, c: *const Config) ![]Want {
     const att: usize = @as(usize, s.heads) * s.head_dim;
     const v: usize = c.draft_vocab.size;
     try out.append(a, two("target.embed", t.vocab, t.hidden)); // the whole embedding: context rows read any token
-    if (!t.tied) try out.append(a, two("target.head", v, t.hidden)); // the head's draft-vocab rows, in vocab order
+    if (!t.tied) try out.append(a, two("target.head", v, t.hidden)); // row r: the target head's row for draft_vocab[r]
     if (t.head_bias) try out.append(a, one("target.head_bias", v));
     try out.append(a, two("fuse.weight", d, c.taps.ids.len * @as(usize, t.hidden))); // the taps, concatenated
     try out.append(a, two("fc.weight", d, @as(usize, t.hidden) + d)); // cat(embed(token after the row), fused row)
