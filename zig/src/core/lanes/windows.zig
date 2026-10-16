@@ -173,6 +173,7 @@ pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
     const width: u32 = if (e.alone) (s.copy_width orelse e.cfg.first_copy) else e.cfg.first_copy;
     const most = @min(@as(i64, width), s.draftRoom() - 1);
     if (s.proposer) |p| if (!e.alone or e.cfg.lone_copies) {
+        // a priced proposer's drafts are as it gives them, its none too: no width, length or match gate, no Recall
         if (p.vtable.priced) return .{ .tokens = p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{} };
         const copied = p.propose(s.context.items, most) catch &.{};
         if (copied.len >= 2 and p.lastMatch() >= e.cfg.enter_match) return .{ .tokens = copied };
