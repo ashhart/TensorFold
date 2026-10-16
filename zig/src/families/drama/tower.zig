@@ -17,6 +17,8 @@ const qkv_width = 9216;
 const layer_count = 13;
 const workspace_bytes = 8 << 20;
 const sample_shared_bytes = 65536;
+/// drama_tower.cu's attention_split: the CTAs of drama_attention_decode's cluster for one query head.
+const attention_split = 4;
 const projections = [_][2]usize{
     .{ hidden, 2 * hidden },       .{ qkv_width, hidden },    .{ hidden, query_width },
     .{ 2 * intermediate, hidden }, .{ hidden, intermediate }, .{ 4096, hidden },
@@ -103,6 +105,7 @@ const Kernels = struct {
     norm: cuda.Function,
     rope: cuda.Function,
     attention: cuda.Function,
+    attention_decode: cuda.Function,
     silu: cuda.Function,
     sample: cuda.Function,
     fn resolve(m: cuda.Module) !Kernels {
@@ -112,6 +115,7 @@ const Kernels = struct {
             .norm = try m.function("drama_norm"),
             .rope = try m.function("drama_rope_cache"),
             .attention = try m.function("drama_attention"),
+            .attention_decode = try m.function("drama_attention_decode"),
             .silu = try m.function("drama_silu_mul"),
             .sample = try m.function("drama_sample"),
         };
@@ -291,7 +295,7 @@ const Impl = struct {
         a.add(@as(i32, 16));
         a.add(@as(i32, 2));
         a.add(@as(i32, 256));
-        try launch(p.kernels.attention, stream, rows * 16, 256, 0, &a);
+        if (rows == 1) try launch(p.kernels.attention_decode, stream, 16 * attention_split, 256, 0, &a) else try launch(p.kernels.attention, stream, rows * 16, 256, 0, &a);
         try p.stage(trace, stream, i, rows, .attended);
         try p.project(stream, rows, 2, p.attended, w.out, p.branch);
         try p.stage(trace, stream, i, rows, .attention_output);

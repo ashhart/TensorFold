@@ -1,4 +1,5 @@
 // Drama 3 tower kernels after sglang-omni ab095ef9 (decoder_layers.py, audio_decoder.py, sampling.py).
+#include <cooperative_groups.h>
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include <math.h>
@@ -203,6 +204,128 @@ extern "C" __global__ void drama_attention(
         const bf16 gated = b(1.0f / (1.0f + expf(-gate)));
         out[row * qw + head * dim + t] = b(f(attended) * f(gated));
     }
+}
+
+// drama_attention for the one decode row, its keys scored across a cluster of attention_split CTAs, same arithmetic.
+constexpr int attention_split = 4, attention_keys = 8192, attention_ahead = 6;
+
+__device__ inline void copy_async(void* shared, const void* global) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4;" :: "r"(unsigned(__cvta_generic_to_shared(shared))), "l"(global) : "memory");
+}
+
+extern "C" __global__ void __cluster_dims__(attention_split, 1, 1) __launch_bounds__(256) drama_attention_decode(
+    const bf16* query, const bf16* keys, const bf16* values, const bf16* qkv,
+    bf16* out, int start, int qheads, int kvheads, int dim) {
+    __shared__ float scores[attention_keys], maxima[attention_keys / 8], scales[attention_keys / 8], denominator;
+    // The value lanes' own BF16 pairs, attention_ahead tiles of copies in flight ahead of their sums.
+    __shared__ __nv_bfloat162 ring[attention_ahead][8][32];
+    const cooperative_groups::cluster_group cluster = cooperative_groups::this_cluster();
+    const int t = threadIdx.x, warp = t / 32, lane = t % 32, warps = blockDim.x / 32;
+    const int part = cluster.block_rank(), row = blockIdx.x / attention_split / qheads, head = blockIdx.x / attention_split % qheads;
+    const int kh = head / (qheads / kvheads), qw = qheads * dim, kw = kvheads * dim;
+    const int length = start + row + 1, tiles = (length + 7) / 8;
+    const int share = (tiles + attention_split - 1) / attention_split * 8, last = min(8 * tiles, (part + 1) * share);
+    const int lanes = dim / attention_split / 2, j = part * 2 * lanes + 2 * t;
+    const auto fetch = [&](int tile) {
+        for (int i = 0; i < 8; ++i)
+            if (8 * tile + i < length) copy_async(&ring[tile % attention_ahead][i][t], values + (8 * tile + i) * kw + kh * dim + j);
+        asm volatile("cp.async.commit_group;" ::: "memory");
+    };
+    // The first values do not wait for the scores.
+    if (t < lanes)
+        for (int tile = 0; tile < attention_ahead; ++tile) fetch(tile);
+    float q[8];
+    for (int i = 0; i < 8; ++i) q[i] = f(query[row * qw + head * dim + lane + 32 * i]);
+    // A warp scores a tile, its eight keys' loads in flight; keys past the length read the last one and score -inf.
+    for (int first = part * share + 8 * warp; first < last; first += 8 * warps) {
+        bf16 k[8][8];
+        for (int u = 0; u < 8; ++u)
+            for (int i = 0; i < 8; ++i) k[u][i] = keys[min(first + u, length - 1) * kw + kh * dim + lane + 32 * i];
+        float dot[8] = {};
+        for (int i = 0; i < 8; ++i)
+            for (int u = 0; u < 8; ++u) dot[u] += q[i] * f(k[u][i]);
+        for (int d = 16; d; d >>= 1)
+            for (int u = 0; u < 8; ++u) dot[u] += __shfl_down_sync(0xffffffff, dot[u], d);
+        if (lane == 0)
+            for (int u = 0; u < 8; ++u) scores[first + u] = first + u < length ? dot[u] * rsqrtf(float(dim)) : -INFINITY;
+    }
+    cluster.sync();
+    for (int at = t; at < 8 * tiles; at += blockDim.x)
+        if (at / share != part) scores[at] = cluster.map_shared_rank(scores, at / share)[at];
+    // Peers read this CTA's scores until all have arrived: the probabilities overwrite them only after the wait.
+    auto gathered = cluster.barrier_arrive();
+    __syncthreads();
+    for (int tile = t; tile < tiles; tile += blockDim.x) {
+        float next_max = -INFINITY;
+        for (int i = 0; i < 8; ++i) next_max = fmaxf(next_max, scores[8 * tile + i]);
+        maxima[tile] = next_max;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        float before = -INFINITY;
+        for (int first = 0; first < tiles; first += 32) {
+            float next_max = first + lane < tiles ? maxima[first + lane] : -INFINITY;
+            for (int d = 1; d < 32; d <<= 1) {
+                const float other = __shfl_up_sync(0xffffffff, next_max, d);
+                if (lane >= d) next_max = fmaxf(next_max, other);
+            }
+            next_max = fmaxf(before, next_max);
+            if (first + lane < tiles) maxima[first + lane] = next_max;
+            before = __shfl_sync(0xffffffff, next_max, 31);
+        }
+    }
+    __syncthreads();
+    cluster.barrier_wait(std::move(gathered));
+    for (int tile = t; tile < tiles; tile += blockDim.x) {
+        const float running_max = tile ? maxima[tile - 1] : -INFINITY, next_max = maxima[tile];
+        scales[tile] = expf(running_max - next_max);
+        for (int i = 0; i < 8; ++i) scores[8 * tile + i] = expf(scores[8 * tile + i] - next_max);
+    }
+    __syncthreads();
+    float accum[2] = {0, 0};
+    if (t < lanes) {
+        // A tile's operands reach registers while the previous tile's sums run.
+        float rescale, p[8];
+        __nv_bfloat162 v[8];
+        const auto take = [&](int tile) {
+            rescale = scales[tile];
+            for (int i = 0; i < 8; ++i) { p[i] = scores[8 * tile + i]; v[i] = ring[tile % attention_ahead][i][t]; }
+        };
+        asm volatile("cp.async.wait_group %0;" :: "n"(attention_ahead - 1) : "memory");
+        take(0);
+        for (int tile = 0; tile < tiles; ++tile) {
+            const float now_rescale = rescale;
+            float now_p[8];
+            __nv_bfloat162 now_v[8];
+            for (int i = 0; i < 8; ++i) { now_p[i] = p[i]; now_v[i] = v[i]; }
+            asm volatile("cp.async.wait_group %0;" :: "n"(attention_ahead - 2) : "memory");
+            if (tile + 1 < tiles) take(tile + 1);
+            accum[0] *= now_rescale;
+            accum[1] *= now_rescale;
+            for (int i = 0; i < 8; ++i)
+                if (8 * tile + i < length) {
+                    accum[0] += now_p[i] * f(now_v[i].x);
+                    accum[1] += now_p[i] * f(now_v[i].y);
+                }
+            fetch(tile + attention_ahead);  // into this tile's slots, summed from registers
+        }
+    } else if (t == blockDim.x - 1) {
+        float sum = 0;
+        for (int tile = 0; tile < tiles; ++tile) {
+            float mass = 0;
+            for (int i = 0; i < 8; ++i) mass += scores[8 * tile + i];
+            sum = sum * scales[tile] + mass;
+        }
+        denominator = sum;
+    }
+    __syncthreads();
+    if (t < lanes)
+        for (int e = 0; e < 2; ++e) {
+            const bf16 attended = b(accum[e] / denominator);
+            const float gate = f(qkv[row * (2 * qw + 2 * kw) + qw + head * dim + j + e]);
+            const bf16 gated = b(1.0f / (1.0f + expf(-gate)));
+            out[row * qw + head * dim + j + e] = b(f(attended) * f(gated));
+        }
 }
 
 extern "C" __global__ void drama_silu_mul(const bf16* gate_up, bf16* out, int width, int rows) {
