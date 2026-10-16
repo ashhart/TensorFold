@@ -241,6 +241,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
     const reference_step = b.step("test-cuda-reference", "CUDA's FP64 comparison with CPU-only readback (no GPU)");
+    const projection_step = b.step("test-cuda-projection-fixture", "Projection fixture dispatch controls with CPU-only CUDA calls");
     for ([_]std.builtin.OptimizeMode{ .debug, .fast }) |mode| {
         const reference = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
             .root_source_file = b.path("zig/tests/cuda/quant_ref_host_tests.zig"),
@@ -251,6 +252,15 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         }) }));
         step.dependOn(&reference.step);
         reference_step.dependOn(&reference.step);
+        const projection = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+            .root_source_file = b.path("zig/tests/cuda/projection_f32_host_tests.zig"),
+            .target = host,
+            .optimize = mode,
+            .link_libc = true,
+            .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+        }) }));
+        step.dependOn(&projection.step);
+        projection_step.dependOn(&projection.step);
     }
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat);
     const native = native_modules.engines;

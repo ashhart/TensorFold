@@ -9,6 +9,13 @@ const bf = reference.helpers.bfOf;
 const bf16 = reference.helpers.bf16Of;
 const Mode = cuda.qmmf.Mode;
 
+/// One fixture dispatch starts with fresh destination and reduction poison, including a reused row prefix.
+pub fn dispatch(lane: *const cuda.qmmf.Lane, s: cuda.Stream, x: u64, ldx: usize, rows: usize, w: cuda.qmmf.Weight, out: cuda.DeviceBuffer, part: cuda.DeviceBuffer, format: cuda.qmmf.Out) !void {
+    try out.fill8(0xff, s.handle);
+    try part.fill8(0xff, s.handle);
+    try lane.matmulOut(s, x, ldx, rows, w, out.ptr, format, part.ptr);
+}
+
 pub fn run(gpu: check.Gpu) !void {
     var arena = std.heap.ArenaAllocator.init(gpu.gpa);
     defer arena.deinit();
@@ -88,7 +95,6 @@ fn projection(r: *Rig, lane: *cuda.qmmf.Lane, mode: Mode) !void {
     defer part_buf.free();
     const out = out_buf.ptr;
     const out_bf16 = bf16_buf.ptr;
-    const part = part_buf.ptr;
     const want = try a.alloc(f64, m * n);
     const tol = try a.alloc(f64, m * n);
     for (0..m) |row| for (0..n) |col| {
@@ -117,15 +123,11 @@ fn projection(r: *Rig, lane: *cuda.qmmf.Lane, mode: Mode) !void {
     for ([_]bool{ true, false }) |clusters| {
         lane.clusters = clusters and (try r.gpu.ctx.capability()) >= 90;
         for ([_]usize{ 256, 1, 7, 17, 33 }) |rows| {
-            try out_buf.fill8(0xff, r.s.handle);
-            try part_buf.fill8(0xff, r.s.handle);
-            try lane.matmulF32(r.s, dx, ldx, rows, w, out, part);
+            try dispatch(lane, r.s, dx, ldx, rows, w, out_buf, part_buf, .f32);
             try r.close("FP32 projection", out, true, want[0 .. rows * n], tol[0 .. rows * n]);
             const got = try r.back(out, rows * n * 4);
             if (baseline) |b| try check.sameBytes("FP32 row/reduction invariance", got, b[0..got.len]) else baseline = got;
-            try bf16_buf.fill8(0xff, r.s.handle);
-            try part_buf.fill8(0xff, r.s.handle);
-            try lane.matmul(r.s, dx, ldx, rows, w, out_bf16, part);
+            try dispatch(lane, r.s, dx, ldx, rows, w, bf16_buf, part_buf, .bf16);
             const rounded = try r.back(out_bf16, rows * n * 2);
             for (0..rows * n) |i| {
                 const v = std.mem.readInt(u32, got[i * 4 ..][0..4], .little);
