@@ -17,6 +17,7 @@ pub const Identity = extern struct {
     chunk: u64,
     decode_graph: u64 = 0,
     mtp: u64 = 0,
+    head_sharded: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -38,7 +39,7 @@ pub fn identity(a: std.mem.Allocator, io: std.Io, dir: []const u8, context: usiz
     defer a.free(index);
     const program = try std.process.executablePathAlloc(io, a);
     defer a.free(program);
-    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()) };
+    return .{ .config = try fileHash(a, io, config), .index = try fileHash(a, io, index), .program = try fileHash(a, io, program), .checkpoint = checkpoint, .context = context, .chunk = chunk, .decode_graph = @intFromBool(@import("cuda_round_graph.zig").enabled()), .head_sharded = @intFromBool(try @import("cuda_head.zig").enabled()) };
 }
 
 pub const Session = struct {
@@ -426,6 +427,9 @@ test "rank identity binds checkpoint, config, index, program and execution setti
     try std.testing.expect(!sameIdentity(base, other));
     other = base;
     other.mtp = 1;
+    try std.testing.expect(!sameIdentity(base, other));
+    other = base;
+    other.head_sharded = 1;
     try std.testing.expect(!sameIdentity(base, other));
 }
 

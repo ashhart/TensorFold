@@ -85,6 +85,33 @@ pub fn run(gpu: check.Gpu, rank: usize, port: u16, mode: []const u8) !void {
             try link.sendHeader(h, wire.deadline(30_000));
         }
     }
+    for ([_]usize{ 0, 1, 17, 124_160 }) |count| {
+        const host = try gpu.gpa.alloc(u16, @max(1, count));
+        defer gpu.gpa.free(host);
+        for (host, 0..) |*v, i| v.* = @truncate(i * 31 + rank * 0x8001);
+        var local = try cuda.DeviceBuffer.fromHost(gpu.d, std.mem.sliceAsBytes(host));
+        defer local.free();
+        var output = try cuda.DeviceBuffer.alloc(gpu.d, @max(2, count * 4));
+        defer output.free();
+        try collective.gather(stream, local.ptr, output.ptr, count);
+        try collective.finish(stream);
+        const all = try gpu.gpa.alloc(u16, count * 2);
+        defer gpu.gpa.free(all);
+        if (count > 0) try output.download(0, std.mem.sliceAsBytes(all));
+        for (0..2) |owner| for (0..count) |i| {
+            const expected: u16 = @truncate(i * 31 + owner * 0x8001);
+            try check.expect(all[owner * count + i] == expected, "rank {d}: gathered BF16 bits at {d}/{d}", .{ rank, owner, i });
+        };
+    }
+    const done: wire.Header = .{ .kind = .ready, .sequence = 99 };
+    if (rank == 0) {
+        try link.sendHeader(done, wire.deadline(30_000));
+        try std.testing.expectEqualDeep(done, try link.receiveHeader(wire.deadline(30_000)));
+    } else {
+        try std.testing.expectEqualDeep(done, try link.receiveHeader(wire.deadline(30_000)));
+        try link.sendHeader(done, wire.deadline(30_000));
+    }
+    check.pass("rank {d}: BF16 all-gather preserves every bit and rank column order for empty, scalar, tail and vocabulary-half rows", .{rank});
     check.pass("rank {d}: two-process chained NCCL FP32 sums exact for empty, scalar, tail and 1,000,003 values; fragmented framed control preserved", .{rank});
 }
 

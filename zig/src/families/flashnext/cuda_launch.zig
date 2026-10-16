@@ -384,6 +384,7 @@ test {
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
     _ = @import("cuda_draft_affine.zig");
+    _ = @import("cuda_head.zig");
 }
 
 test "embed grid is one program per row and per group of 32" {

@@ -511,6 +511,16 @@ pub fn Pass(comptime Tri: type) type {
             try self.stream.synchronize();
         }
 
+        /// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
+        fn projectHead(self: *Self, out: u64, n: usize) !void {
+            const s = self.s;
+            if (self.m.head.n == vocab) return self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+            if (self.m.head.n != vocab / 2 or n > s.cap) return error.UnexpectedTensor;
+            const c = self.m.collective orelse return error.TensorParallelUnavailable;
+            try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
+            for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
+        }
+
         fn head(self: *Self, logits_host: ?[]u8) !void {
             const s = self.s;
             const n = self.rows;
@@ -526,7 +536,7 @@ pub fn Pass(comptime Tri: type) type {
                     try self.copy(self.hooks.streams, s.h, n * wide * 2);
                     try self.readout(self.m.mixer, 0, n);
                     const out = if (self.hooks.logits_out != 0) self.hooks.logits_out else return error.UnexpectedTensor;
-                    try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+                    try self.projectHead(out, n);
                     if (logits_host) |lh| {
                         try self.complete();
                         const d = self.stream.d;
@@ -553,7 +563,7 @@ pub fn Pass(comptime Tri: type) type {
                     }
                     if (self.hooks.streams == 0) try self.writeback(0, 1);
                     try self.readout(self.m.mixer, 0, 1);
-                    try self.lane(s.mixed, s.xsm, self.m.head, s.logits, s.dummy, 1, 1);
+                    try self.projectHead(s.logits, 1);
                     if (logits_host) |lh| {
                         try self.complete();
                         const d = self.stream.d;

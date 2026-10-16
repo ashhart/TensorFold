@@ -81,6 +81,16 @@ pub const Collective = struct {
         try c.wait(stream, wire.deadline(c.timeout_ms));
     }
 
+    /// Disjoint BF16 vocabulary columns are concatenated without an arithmetic reduction.
+    pub fn gather(c: *Collective, stream: cuda.Stream, local: u64, out: u64, count: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        if (count == 0) return;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        try c.submitted(c.lib.api.ncclAllGather(local, out, count, .bf16, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
     /// FP32 sum is enqueued on the compute stream; later kernels on that stream observe its result.
     pub fn sum(c: *Collective, stream: cuda.Stream, values: u64, count: usize) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;

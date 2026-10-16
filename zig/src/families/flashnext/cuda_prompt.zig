@@ -175,8 +175,9 @@ pub const Engine = struct {
         const head_tensor = try e.store.tensor("language_model.lm_head.weight");
         if (head_tensor.dtype == .bf16) {
             if (!head_tensor.is(.bf16, &.{ vocab, dims })) return error.UnexpectedTensor;
-            e.head_q = try @import("cuda_projection.zig").dense(gpa, driver, head_tensor);
+            e.head_q = try @import("cuda_projection.zig").dense(gpa, driver, if (try @import("cuda_head.zig").enabled()) try @import("cuda_head.zig").shard(head_tensor, world, rank) else head_tensor);
         } else {
+            if (try @import("cuda_head.zig").enabled()) return error.BadHeadSharding;
             var buf: [80]u8 = undefined;
             const head_w = try join3(gpa, &e.store, &buf, "language_model.lm_head", "");
             defer gpa.free(head_w.w);
