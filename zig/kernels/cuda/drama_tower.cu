@@ -3,7 +3,6 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 #include <math.h>
-#include <limits.h>
 
 using bf16 = __nv_bfloat16;
 __device__ inline float f(bf16 x) { return __bfloat162float(x); }
@@ -343,27 +342,44 @@ __device__ uint64_t random_word(uint64_t x) {
     return x ^ (x >> 31);
 }
 
-// FP32 semantic logits, top-p over the whole vocabulary before top-k; 64 KiB dynamic shared (allowDynamicShared).
-extern "C" __global__ void drama_sample(
+// The sampler's order (score descending; equal scores, ±0 alike, by ascending id) as a key ascending in it.
+__device__ inline unsigned order_key(float x) {
+    const unsigned bits = __float_as_uint(x), magnitude = bits & 0x7fffffffu;
+    return bits >> 31 ? 0x80000000u + magnitude : 0x80000000u - magnitude;
+}
+
+// Top-p over the whole vocabulary before top-k, ranked by a stable LSD radix sort; 64 KiB dynamic shared memory.
+constexpr int sample_rounds = 6;
+
+extern "C" __global__ void __launch_bounds__(1024) drama_sample(
     const void* logits, int is_bf16, int vocab, float temperature, int top_k,
     float top_p, uint64_t seed, uint64_t step, int output_index,
     int begin, int eos, int* history, int* frame, int* error_flag) {
     extern __shared__ unsigned char storage[];
-    float* scores = reinterpret_cast<float*>(storage);
-    int* ids = reinterpret_cast<int*>(scores + 8192);
-    // Padded ids are no longer needed after the sort; reuse them for reductions.
-    float* partial = reinterpret_cast<float*>(ids + vocab);
+    unsigned short* counts = reinterpret_cast<unsigned short*>(storage);  // [digit][warp]
+    float* scores = reinterpret_cast<float*>(counts + 256 * 32);
+    unsigned short* ids = reinterpret_cast<unsigned short*>(scores + vocab);
+    unsigned short* next = ids + vocab;
+    // The counts are no longer needed after the sort; reuse them for reductions.
+    float* partial = reinterpret_cast<float*>(counts);
     __shared__ int invalid, selected[2];
+    __shared__ unsigned key_and, key_or, warp_offsets[32];
     __shared__ float total;
-    const int t = threadIdx.x;
-    if (t == 0) invalid = 0;
+    const int t = threadIdx.x, warp = t / 32, lane = t % 32;
+    if (t == 0) { invalid = 0; key_and = ~0u; key_or = 0; }
     __syncthreads();
-    for (int i = t; i < 8192; i += blockDim.x) {
-        const float x = i < vocab ? (is_bf16 ? f(static_cast<const bf16*>(logits)[i]) : static_cast<const float*>(logits)[i]) : -INFINITY;
-        if (i < vocab && !isfinite(x)) atomicExch(&invalid, 1);
+    unsigned all = ~0u, any = 0;
+    for (int i = t; i < vocab; i += blockDim.x) {
+        const float x = is_bf16 ? f(static_cast<const bf16*>(logits)[i]) : static_cast<const float*>(logits)[i];
+        if (!isfinite(x)) atomicExch(&invalid, 1);
         scores[i] = x;
-        ids[i] = i < vocab ? i : INT_MAX;
+        ids[i] = i;
+        all &= order_key(x);
+        any |= order_key(x);
     }
+    all = __reduce_and_sync(0xffffffff, all);
+    any = __reduce_or_sync(0xffffffff, any);
+    if (lane == 0) { atomicAnd(&key_and, all); atomicOr(&key_or, any); }
     __syncthreads();
     if (invalid) {
         if (t == 0) {
@@ -373,45 +389,107 @@ extern "C" __global__ void drama_sample(
         }
         return;
     }
-    for (int size = 2; size <= 8192; size <<= 1) {
-        for (int distance = size >> 1; distance; distance >>= 1) {
-            for (int i = t; i < 8192; i += blockDim.x) {
-                const int j = i ^ distance;
-                if (j > i) {
-                    const bool before = scores[i] > scores[j] || (scores[i] == scores[j] && ids[i] < ids[j]);
-                    if (before != ((i & size) == 0)) {
-                        const float s = scores[i]; scores[i] = scores[j]; scores[j] = s;
-                        const int id = ids[i]; ids[i] = ids[j]; ids[j] = id;
-                    }
-                }
+    // Warp w ranks its run 32 at a time; equal digits keep their order (BF16 keys skip the two zero digits).
+    const int run = (vocab + 31) / 32, from = warp * run, end = min(vocab, from + run);
+    const unsigned lower = (1u << lane) - 1;
+    for (int shift = 0; shift < 32; shift += 8) {
+        if (!((key_and ^ key_or) >> shift & 255)) continue;
+        reinterpret_cast<uint4*>(counts)[t] = make_uint4(0, 0, 0, 0);
+        __syncthreads();
+        // Each element's place among its warp's equal digits: the earlier rounds' count, then the lower lanes'.
+        int digit[sample_rounds], place[sample_rounds];
+        for (int r = 0; r < sample_rounds && from + 32 * r < end; ++r) {
+            const int i = from + 32 * r + lane;
+            digit[r] = i < end ? order_key(scores[ids[i]]) >> shift & 255 : 0;
+            unsigned peers = __ballot_sync(0xffffffff, i < end);
+            for (int bit = 0; bit < 8; ++bit) {
+                const unsigned set = __ballot_sync(0xffffffff, digit[r] >> bit & 1);
+                peers &= digit[r] >> bit & 1 ? set : ~set;
             }
-            __syncthreads();
+            const int leader = __ffs(peers) - 1;
+            unsigned counted = 0;
+            if (lane == leader) {
+                counted = counts[digit[r] * 32 + warp];
+                counts[digit[r] * 32 + warp] = counted + __popc(peers);
+            }
+            place[r] = __shfl_sync(0xffffffff, counted, leader) + __popc(peers & lower);
+            __syncwarp();
         }
+        __syncthreads();
+        // Exclusive scan of the counts in [digit][warp] order: eight per thread, then across threads.
+        const uint4 packed = reinterpret_cast<const uint4*>(counts)[t];
+        unsigned c[8] = {packed.x & 0xffff, packed.x >> 16, packed.y & 0xffff, packed.y >> 16,
+                         packed.z & 0xffff, packed.z >> 16, packed.w & 0xffff, packed.w >> 16};
+        unsigned sum = 0;
+        for (int i = 0; i < 8; ++i) { const unsigned n = c[i]; c[i] = sum; sum += n; }
+        unsigned before = sum;
+        for (int d = 1; d < 32; d <<= 1) {
+            const unsigned other = __shfl_up_sync(0xffffffff, before, d);
+            if (lane >= d) before += other;
+        }
+        if (lane == 31) warp_offsets[warp] = before;
+        __syncthreads();
+        if (warp == 0) {
+            const unsigned own = warp_offsets[lane];
+            unsigned prefix = own;
+            for (int d = 1; d < 32; d <<= 1) {
+                const unsigned other = __shfl_up_sync(0xffffffff, prefix, d);
+                if (lane >= d) prefix += other;
+            }
+            warp_offsets[lane] = prefix - own;
+        }
+        __syncthreads();
+        before += warp_offsets[warp] - sum;
+        reinterpret_cast<uint4*>(counts)[t] = make_uint4(
+            (c[0] + before) | (c[1] + before) << 16, (c[2] + before) | (c[3] + before) << 16,
+            (c[4] + before) | (c[5] + before) << 16, (c[6] + before) | (c[7] + before) << 16);
+        __syncthreads();
+        for (int r = 0; r < sample_rounds && from + 32 * r < end; ++r) {
+            const int i = from + 32 * r + lane;
+            if (i < end) next[counts[digit[r] * 32 + warp] + place[r]] = ids[i];
+        }
+        __syncthreads();
+        unsigned short* const sorted = next; next = ids; ids = sorted;
     }
+    const float top = scores[ids[0]];
     const bool main = output_index == 0;
     for (int draw = 0; draw < (main ? 2 : 1); ++draw) {
         const float inv_t = 1.0f / fmaxf(draw == 1 ? 1.0f : temperature, 1e-5f);
         const float p_limit = draw == 1 ? 0.95f : top_p;
         const int k = min(vocab, draw == 1 ? 30 : top_k);
         float mass = 0;
-        for (int i = t; i < vocab; i += blockDim.x) mass += expf((scores[i] - scores[0]) * inv_t);
+        for (int i = t; i < vocab; i += blockDim.x) mass += expf((scores[ids[i]] - top) * inv_t);
         const float summed = sum_block(mass, partial);
         if (t == 0) total = summed;
         __syncthreads();
-        if (t == 0) {
+        // Warp 0 takes 32 ranks at a time; lane 0 runs the in-order cumulative sum, cutoff and pick.
+        if (warp == 0) {
+            float* const weights = partial;
+            float* const candidates = partial + 32;
             float cumulative = 0, best = -INFINITY;
             int pick = ids[0];
             const uint64_t stream = main ? uint64_t(draw) : uint64_t(output_index);
-            for (int rank = 0; rank < k; ++rank) {
-                const float log_weight = (scores[rank] - scores[0]) * inv_t;
-                cumulative += expf(log_weight) / total;
-                if (rank > 0 && cumulative > p_limit) break;
-                const uint64_t word = random_word(seed ^ random_word((step << 20) | (stream << 14) | uint64_t(rank)));
-                const float u = (float(word >> 41) + 0.5f) * (1.0f / 8388608.0f);
-                const float candidate = log_weight - logf(-logf(u));
-                if (candidate > best) { best = candidate; pick = ids[rank]; }
+            bool cut = false;
+            for (int first = 0; first < k && !cut; first += 32) {
+                const int rank = first + lane;
+                if (rank < k) {
+                    const float log_weight = (scores[ids[rank]] - top) * inv_t;
+                    weights[lane] = expf(log_weight) / total;
+                    const uint64_t word = random_word(seed ^ random_word((step << 20) | (stream << 14) | uint64_t(rank)));
+                    const float u = (float(word >> 41) + 0.5f) * (1.0f / 8388608.0f);
+                    candidates[lane] = log_weight - logf(-logf(u));
+                }
+                __syncwarp();
+                if (lane == 0)
+                    for (int i = 0; i < 32 && first + i < k; ++i) {
+                        cumulative += weights[i];
+                        if (first + i > 0 && cumulative > p_limit) { cut = true; break; }
+                        if (candidates[i] > best) { best = candidates[i]; pick = ids[first + i]; }
+                    }
+                __syncwarp();
+                cut = __shfl_sync(0xffffffff, cut, 0);
             }
-            selected[draw] = pick;
+            if (lane == 0) selected[draw] = pick;
         }
         __syncthreads();
     }
