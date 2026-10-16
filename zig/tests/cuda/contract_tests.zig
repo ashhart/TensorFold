@@ -82,10 +82,18 @@ pub fn run(gpu: check.Gpu) !void {
             .lane_f32_reduce => &lane_reduce,
             else => null,
         };
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .affine4 = &affine4, .split = &split, .prompt = &prompt, .lane = by_lane };
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .sm = cap, .affine4 = &affine4, .split = &split, .prompt = &prompt, .lane = by_lane };
     }
     defer for (&mm) |*m| m.deinit();
-    for (&mm) |*m| try kernels.append(a, m.kernel());
+    for (&mm) |*m| {
+        const k = m.kernel() orelse {
+            std.debug.print("N/A  cuda qmm_group (cluster tile): needs sm_90 or newer, this GPU is sm_{d}\n", .{cap});
+            continue;
+        };
+        if (cap < 90 and (m.kind == .lane_gemv or m.kind == .lane_gemv_split))
+            std.debug.print("N/A  {s} replacement bits: cluster baseline needs sm_90; gate 3 uses the float64 bound\n", .{k.spec.name});
+        try kernels.append(a, k);
+    }
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
