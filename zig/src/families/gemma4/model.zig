@@ -9,6 +9,47 @@ const kernels = @import("kernels.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const round = @import("tree_round_gpu");
 const vision = @import("vision.zig");
+const vision_unified = @import("vision_unified.zig");
+const image = @import("image.zig");
+const lane = @import("../../core/lane_projection.zig");
+
+/// The image input: the 31B's tower (27 encoder layers, pooling) or the 12B's embedder (48-px patches, no layers).
+pub const Tower = union(enum) {
+    encoder: *vision.Vision,
+    embedder: *vision_unified.Embedder,
+
+    /// An image's patches (image.prepare's, in `layout`'s order) to `out` [gh * gw / 9, the model's hidden].
+    pub fn encode(t: Tower, e: mtl.ComputeEncoder, pixels: []const f32, gh: u32, gw: u32, out: lane.Ref) !void {
+        switch (t) {
+            inline else => |v| try v.encode(e, pixels, gh, gw, out, null),
+        }
+    }
+
+    pub fn inject(t: Tower, e: mtl.ComputeEncoder, src: lane.Ref, dst: lane.Ref, n: u32) void {
+        switch (t) {
+            inline else => |v| v.inject(e, src, dst, n),
+        }
+    }
+
+    /// The patches' order the processor writes for this input.
+    pub fn layout(t: Tower) image.Layout {
+        return if (t == .encoder) .patches else .merged;
+    }
+
+    /// The working buffers a residency set holds.
+    pub fn buffers(t: Tower) []const mtl.Buffer {
+        return switch (t) {
+            .encoder => |v| &.{ v.scratch, v.patches, v.cos, v.sin },
+            .embedder => |v| &.{ v.scratch, v.patches },
+        };
+    }
+
+    pub fn deinit(t: Tower) void {
+        switch (t) {
+            inline else => |v| v.deinit(),
+        }
+    }
+};
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -31,8 +72,8 @@ pub const Model = struct {
     taps: u32 = 0,
     /// One-row windows take the fused pipelines (the glue as the projections' prologues); off for the bench's check.
     fuse: bool = true,
-    /// The image tower, once loadVision read it (serve --vision).
-    vision: ?*vision.Vision = null,
+    /// The image input, once loadVision read it (serve --vision).
+    vision: ?Tower = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
@@ -76,14 +117,20 @@ pub const Model = struct {
         return m;
     }
 
-    /// The checkpoint's image tower and projection beside the language model; error.NoGemmaVision when it has none.
+    /// The checkpoint's image input (the 12B's embedder, the 31B's tower); error.NoGemmaVision when it has none.
     pub fn loadVision(m: *Model, io: std.Io, dir: []const u8) !void {
         if (m.vision != null) return;
         const files = try shards.shardFiles(m.gpa, io, dir);
         defer shards.freeShardFiles(m.gpa, files);
+        if (m.config.geo.unified()) {
+            try vision_unified.addTensors(&m.checkpoint, m.device, files);
+            if (!vision_unified.present(&m.checkpoint)) return error.NoGemmaVision;
+            m.vision = .{ .embedder = try vision_unified.Embedder.load(m.gpa, m.device, &m.checkpoint, m.config.geo.hidden) };
+            return;
+        }
         try vision.addTensors(&m.checkpoint, m.device, files);
         if (!vision.present(&m.checkpoint)) return error.NoGemmaVision;
-        m.vision = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm, m.config.geo.hidden);
+        m.vision = .{ .encoder = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm, m.config.geo.hidden) };
     }
 
     /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.

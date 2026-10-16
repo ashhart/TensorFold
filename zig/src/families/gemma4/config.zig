@@ -24,6 +24,11 @@ pub const Geometry = struct {
     sliding_kv_heads: usize,
     global_kv_heads: usize,
 
+    /// The 12B's unified checkpoint: its image input is the patch embedder, not the 31B's tower.
+    pub fn unified(g: Geometry) bool {
+        return std.mem.eql(u8, g.name, unified12b.name);
+    }
+
     /// Layer `index`'s key heads.
     pub fn kvHeads(g: Geometry, index: usize) usize {
         return if (global(index)) g.global_kv_heads else g.sliding_kv_heads;
@@ -210,7 +215,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
 }
 
 const fixture = @embedFile("fixtures/config.json");
-/// The 4-bit 12B's config as tools/zig/gemma4_12b_convert.py writes it: unified model types, no tower configs.
+/// The 4-bit 12B's config as tools/zig/gemma4_12b_convert.py writes it: unified model types (the text model's part).
 const fixture_12b = @embedFile("fixtures/config_12b.json");
 
 fn edited(gpa: std.mem.Allocator, from: []const u8, to: []const u8) ![]u8 {
