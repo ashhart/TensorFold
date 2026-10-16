@@ -9,7 +9,7 @@ const Slots = slots_mod.Slots;
 const Win = slots_mod.Win;
 const Draft = slots_mod.Draft;
 
-pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove, disk_other_used };
+pub const Kind = enum(u32) { begin = 1, chunk, window, keep, draft, release, save, restore, drop, persist, load, forget, disk_need, disk_reclaim, disk_reserve, disk_finish, disk_other_next, disk_other_bytes, disk_other_remove, disk_other_used, copy_out };
 
 /// Rank 0 of a pair sends the command; one Mac sends nothing.
 pub fn send(e: *Engine, kind: Kind, words: []const u32) !void {
@@ -96,24 +96,26 @@ pub fn apply(sl: *Slots, kind: u32, w: []const u32, wins: []Win, drafts: []Draft
         .disk_finish => 3,
         .disk_other_next => 3,
         .disk_other_bytes, .disk_other_remove, .disk_other_used => 2,
+        .copy_out => 1,
     };
     if (w.len < need) return error.CommandOutOfStep;
     switch (k) {
         .begin => try sl.begin(w[0], w[2..], w[1] != 0),
-        .chunk => try sl.chunk(w[0], w[1], w[2]),
+        .chunk => try sl.chunk(w[0], w[1], w[2], null),
         .window => {
             const r = try readWindows(w, wins);
             if (r.digest != sl.digest) { // the last window's picks differ between the Macs: their caches have parted
                 std.log.err("speed-up mode: window {d}'s picks differ from rank 0's", .{sl.windows});
                 return error.PairOutOfStep;
             }
-            try sl.window(wins[0..r.n]);
+            try sl.window(wins[0..r.n], null); // rank 1 replays rank 0's picks greedily: the digest check keeps it in step
         },
         .keep => try sl.keep(w[0], w[1]),
         .draft => try sl.draftAll(drafts[0..try readDrafts(w, drafts)]),
         .release => sl.release(w[0]),
         .save => _ = try sl.save(w[1], w[2], w[0], sl.resident()),
         .restore => try sl.restore(w[0], w[1]),
+        .copy_out => try sl.copyIds(w[0], w[1..]),
         .drop => sl.drop(w[0]),
         .persist, .load => {
             learned(sl, k, w) catch |err| { // replied as failed: rank 0 forgets the state and the pair stays in step

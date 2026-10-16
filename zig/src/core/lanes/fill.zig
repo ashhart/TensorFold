@@ -2,17 +2,19 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-/// One proposed continuation of the pending token and the planner's trust in it.
-pub const Proposal = struct { tokens: []const u32, weight: f64 };
+/// One proposed continuation of the pending token, the planner's trust in it, and whether Recall's record gave it.
+pub const Proposal = struct { tokens: []const u32, weight: f64, recalled: bool = false };
 
-/// Host drafts appended after a window's held drafts: each draft's token and its parent draft (-1: the pending row).
+/// Host drafts after a window's held drafts: each one's token, parent draft (-1: the pending row) and Recall's mark.
 pub const Branches = struct {
     tokens: []u32,
     parents: []i32,
+    recalled: []bool,
 
     pub fn deinit(b: Branches, gpa: Allocator) void {
         gpa.free(b.tokens);
         gpa.free(b.parents);
+        gpa.free(b.recalled);
     }
 };
 
@@ -58,6 +60,8 @@ pub fn graft(gpa: Allocator, trunk: Trunk, proposals: []const Proposal, budget: 
     errdefer tokens.deinit(gpa);
     var parents: std.ArrayList(i32) = .empty;
     errdefer parents.deinit(gpa);
+    var recalled: std.ArrayList(bool) = .empty;
+    errdefer recalled.deinit(gpa);
     const order = try gpa.alloc(usize, proposals.len);
     defer gpa.free(order);
     for (order, 0..) |*o, i| o.* = i;
@@ -80,11 +84,28 @@ pub fn graft(gpa: Allocator, trunk: Trunk, proposals: []const Proposal, budget: 
             if (tokens.items.len == budget) break;
             try tokens.append(gpa, t);
             try parents.append(gpa, at);
+            try recalled.append(gpa, proposals[pi].recalled);
             at = @intCast(first + tokens.items.len - 1);
             on_trunk = false;
         }
     }
-    return .{ .tokens = try tokens.toOwnedSlice(gpa), .parents = try parents.toOwnedSlice(gpa) };
+    const out_t = try tokens.toOwnedSlice(gpa);
+    errdefer gpa.free(out_t);
+    const out_p = try parents.toOwnedSlice(gpa);
+    errdefer gpa.free(out_p);
+    return .{ .tokens = out_t, .parents = out_p, .recalled = try recalled.toOwnedSlice(gpa) };
+}
+
+/// The stream's own candidates, then Recall's that no own candidate equals: own context wins ties (graft sorts stably).
+pub fn merge(a: Allocator, own: []const Proposal, recalled: []const Proposal) ![]const Proposal {
+    if (recalled.len == 0) return own;
+    var out: std.ArrayList(Proposal) = .empty;
+    try out.appendSlice(a, own);
+    for (recalled) |r| {
+        if (seen(own, r.tokens)) continue;
+        try out.append(a, r);
+    }
+    return out.toOwnedSlice(a);
 }
 
 fn ranked(trunk: Trunk, level: usize, t: u32) bool {

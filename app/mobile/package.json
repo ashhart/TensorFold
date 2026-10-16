@@ -1,0 +1,58 @@
+{
+  "name": "tensorfold-mobile",
+  "version": "1.0.0",
+  "main": "expo-router/entry",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "typecheck": "tsc --noEmit",
+    "lint": "expo lint",
+    "export": "expo export --platform all",
+    "lock:sanitize": "node scripts/sanitize-lock.mjs",
+    "lock:check": "node scripts/sanitize-lock.mjs --check",
+    "postinstall": "node scripts/sanitize-lock.mjs",
+    "test:security": "node ../scripts/mobile-security-dependencies.test.mjs",
+    "verify": "npm run lock:check && npm run test:security && npm run typecheck && npm run lint"
+  },
+  "dependencies": {
+    "@expo/metro-runtime": "~55.0.12",
+    "decode-uri-component": "file:./vendor/decode-uri-component",
+    "expo": "~55.0.31",
+    "expo-camera": "~55.0.23",
+    "expo-constants": "~55.0.17",
+    "expo-font": "~55.0.8",
+    "expo-linking": "~55.0.17",
+    "expo-router": "~55.0.18",
+    "expo-secure-store": "~55.0.18",
+    "expo-splash-screen": "~55.0.25",
+    "expo-status-bar": "~55.0.6",
+    "expo-system-ui": "~55.0.22",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "react-native": "0.83.10",
+    "react-native-safe-area-context": "~5.6.2",
+    "react-native-screens": "~4.23.0",
+    "react-native-web": "^0.21.0",
+    "braces": "file:./vendor/braces",
+    "node-forge": "file:./vendor/node-forge",
+    "sprintf-js": "file:./vendor/sprintf-js"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~55.0.1",
+    "typescript": "~5.9.2"
+  },
+  "private": true,
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    },
+    "decode-uri-component": "$decode-uri-component",
+    "braces": "$braces",
+    "node-forge": "$node-forge",
+    "sprintf-js": "$sprintf-js"
+  }
+}

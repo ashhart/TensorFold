@@ -16,6 +16,7 @@ inline bfloat16_t exp(bfloat16_t v) { return bfloat16_t(metal::precise::exp(floa
 }
 }
 template <int QK_DIM, int TOPK, int HEADS>
+[[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void custom_kernel_tf_glm5_indexed_sparse_attention_ad9e57bce4__512_2051_32_bfloat16_t_bfloat16_t_int32_t_floatc_int32_tc_bfloat16_t(
   const device bfloat16_t* queries [[buffer(0)]],
   const device bfloat16_t* keys [[buffer(1)]],

@@ -3,11 +3,13 @@ const std = @import("std");
 const models = @import("models.zig");
 const info = @import("info.zig");
 const pull = @import("pull.zig");
+const pull_exlr8 = @import("pull_exlr8.zig");
 
 const usage =
     \\usage: tensorfold models
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
+    \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
     \\
 ;
 
@@ -38,10 +40,15 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         return models.run(a, init.io, &out.interface, env, null);
     }
     if (std.mem.eql(u8, args[0], "pull")) {
-        if (args.len != 2) {
+        if (args.len < 2) {
             try err.interface.writeAll(usage);
             return 2;
         }
+        const node = pull_exlr8.parseFlags(args[2..]) catch {
+            try err.interface.writeAll(usage);
+            return 2;
+        };
+        if (node) |o| return pull_exlr8.run(a, init.io, &out.interface, &err.interface, env, args[1], o);
         return pull.run(a, init.io, &out.interface, &err.interface, env, null, args[1]);
     }
     if (args.len != 2) {
