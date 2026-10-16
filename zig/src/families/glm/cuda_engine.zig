@@ -72,6 +72,7 @@ pub const Engine = struct {
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
+    prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     settings: ranks.Settings,
     m: fw.Modules,
     stream: cuda.Stream,
@@ -168,6 +169,10 @@ pub const Engine = struct {
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         if (prof_mod.Prof.wanted()) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
+        };
+        if (prof_mod.Prof.wanted()) for (&e.prompt_profs) |*p| {
+            p.* = try prof_mod.Prof.init(d, io);
+            p.*.?.every = 4;
         };
         errdefer e.smp.deinit();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
@@ -285,10 +290,15 @@ pub const Engine = struct {
         const rows = @min(len - start, fw.prefill_rows);
         if (part.len != @min(len - start, rows + 1)) return error.BadChunk;
         var one: [1]fw.Rank = undefined;
-        const f = e.view(&e.bp, &one);
+        var f = e.view(&e.bp, &one);
         const as_i32: []const i32 = @ptrCast(part);
         if (marks) |m| if (start > 0 and std.mem.indexOfScalar(u32, m.at, @intCast(start)) != null) m.call(m.ctx, @intCast(start));
+        f.prof = e.prompt_profs[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3];
+        const labels = [_][]const u8{ "prompt chunk to 64 rows", "prompt chunk to 256 rows", "prompt chunk to 1024 rows", "prompt chunk to 2048 rows" };
+        if (f.prof) |p| try p.begin(e.stream, labels[if (rows <= 64) 0 else if (rows <= 256) 1 else if (rows <= 1024) 2 else 3]);
+        defer if (f.prof) |p| p.end();
         try e.gate(cancel);
+        if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
         const last = start + rows == len;
         var first: ?u32 = null;
@@ -297,15 +307,21 @@ pub const Engine = struct {
             try e.draw(e.bp.logits, 1, len, &t);
             first = t[0];
         }
+        if (f.prof) |p| p.mark(e.stream, .draw);
         if (e.mtp) {
             if (last) try e.copy(e.hold.ptr, e.bp.fnormed + (rows - 1) * e.c.hidden * 2, e.c.hidden * 2);
             const nxt = as_i32[1..];
             if (nxt.len > 0) { // decode._absorb_rows
+                const mp = f.prof;
+                f.prof = null; // the head's pass as one section
                 try f.mtp(nxt, &.{e.bp.fnormed});
+                f.prof = mp;
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + nxt.len);
             }
         }
+        if (f.prof) |p| p.mark(e.stream, .mtp);
         try f.commit(rows);
+        if (f.prof) |p| p.mark(e.stream, .commit);
         return first;
     }
 
