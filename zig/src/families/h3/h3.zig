@@ -54,6 +54,8 @@ pub const Model = struct {
     rows: usize,
     text: usize,
     condition: usize,
+    /// Of the audio rows, the first `held_audio` are clean reference audio (Ref2VA), pinned at timestep 1, not stepped.
+    held_audio: usize,
     audio: usize,
     video: usize,
     tiles: usize,
@@ -164,6 +166,8 @@ pub const Model = struct {
         self.audio = @intCast(geometry[4]);
         self.video = @intCast(geometry[5]);
         self.condition = if (counts > 6) @intCast(geometry[6]) else 0;
+        // a Ref2VA case has an eighth: the reference audio rows at the front of the audio
+        self.held_audio = if (counts > 7) @intCast(geometry[7]) else 0;
         self.rows = self.text + self.condition + self.audio + self.video;
         const rows = self.rows;
         const hidden = self.hidden;

@@ -25,8 +25,21 @@ pub fn revoice(init: std.process.Init, model: *h3.Model, case: *const h3.Tensors
     return .{ .video = @as([*]f32, @ptrCast(steps.video.ptr))[0 .. 2 * k], .audio = @as([*]f32, @ptrCast(steps.audio.ptr))[0 .. 2 * k] };
 }
 
+/// The released model's video sigma shift.
+const video_shift: f32 = 12.0;
+
 pub fn reschedule(init: std.process.Init, model: *h3.Model, case: *const h3.Tensors, dir: []const u8, n: usize) !Made {
     const a = init.arena.allocator();
+    // the released weights (FL2VA, Ref2VA) sample their own grid of n + 1 points
+    if (model.base) {
+        const video = try h3.schedule.Schedule.fromPoints(a, n + 1, video_shift);
+        const audio = try h3.schedule.Schedule.fromPoints(a, n + 1, audio_shift);
+        const steps = try h3.modulation.reschedule(model, a, video, audio, false);
+        std.debug.print("released-model schedule made here: {d} steps, {d} timesteps\n", .{ n, model.lines / h3.schedule.modalities });
+        compare(model, case);
+        const k = video.timesteps.len;
+        return .{ .video = @as([*]f32, @ptrCast(steps.video.ptr))[0 .. 2 * k], .audio = @as([*]f32, @ptrCast(steps.audio.ptr))[0 .. 2 * k] };
+    }
     const json = read(init, dir, "fastvideo_inference.json") orelse return error.NoContract;
     const c = try h3.schedule.contract(a, json, read(init, dir, "scheduler/scheduler_config.json"), read(init, dir, "audio_scheduler/scheduler_config.json"));
     const nodes = try h3.schedule.spread(a, c.nodes, n);

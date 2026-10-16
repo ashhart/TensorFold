@@ -111,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
         video_step = made.video;
         audio_step = made.audio;
     }
-    std.debug.print("{s}: {d} rows (text {d}, keyframe {d}, audio {d}, video {d}), {d} tiles ({d} prefix, {d} video kept a query), {d} blocks of {d}/{d}/{d}, {d} steps, loaded in {d:.1} s\n", .{ device.name(), model.rows, model.text, model.condition, model.audio, model.video, model.tiles, model.prefix_tiles, model.keep, model.blocks.len, model.hidden, model.inner, model.mlp, steps, mtl.clock.seconds() - loading });
+    std.debug.print("{s}: {d} rows (text {d}, keyframe {d}, audio {d} with {d} held, video {d}), {d} tiles ({d} prefix, {d} video kept a query), {d} blocks of {d}/{d}/{d}, {d} steps, loaded in {d:.1} s\n", .{ device.name(), model.rows, model.text, model.condition, model.audio, model.held_audio, model.video, model.tiles, model.prefix_tiles, model.keep, model.blocks.len, model.hidden, model.inner, model.mlp, steps, mtl.clock.seconds() - loading });
 
     const vv = try gpa.alloc(f32, nv);
     const av = try gpa.alloc(f32, na);
@@ -128,7 +128,9 @@ pub fn main(init: std.process.Init) !void {
             try write(gpa, args[4], ".first-audio.f32", av);
         }
         advance(video, vv, video_step[2 * step], video_step[2 * step + 1]);
-        advance(audio, av, audio_step[2 * step], audio_step[2 * step + 1]);
+        // reference audio rows are clean and never stepped
+        const held = model.held_audio * model.audio_in;
+        advance(audio[held..], av[held..], audio_step[2 * step], audio_step[2 * step + 1]);
         std.debug.print("step {d}/{d}: {d:.3} s wall, {d:.3} s on the GPU\n", .{ step + 1, steps, took.wall, took.gpu });
     }
     try write(gpa, args[4], ".video.f32", video);
