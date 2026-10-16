@@ -103,6 +103,11 @@ in transformers. The 12B's image embedder (`zig/src/families/gemma4/vision_unifi
 `patches_merge` in `image_processing_gemma4_unified.py` (transformers, Copyright 2026 the HuggingFace Team, Apache
 License 2.0; see [the license text](LICENSES/Apache-2.0.txt)). The engine runs none of their code.
 
+Other widths (`zig/src/families/gemma4/widths.zig` and the stacks in `weights.zig`) follow @gilby's oQ per-layer widths
+at `76c83c37` on the `gemma4-dense` branch: each module's MLX affine width from the config, and a q|k|v or gate|up stack
+whose members differ split into runs of equal widths (`src/tensorfold/kernels/gemma/v1/matmul.py`). The engine runs none of
+that code.
+
 ## CUDA
 
 The Python engine's CUDA backends, frozen at 0.6.6, use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and

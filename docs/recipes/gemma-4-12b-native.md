@@ -30,8 +30,8 @@ The 12B is Gemma 4's dense decoder at another size: 48 layers, five sliding-wind
 16 query heads over 8 key heads) to each global one (head dim 512 over one key head, keys reused as values,
 proportional RoPE), hidden 3,840, GeGLU at 15,360, per-layer scalars, and the tied 262,144-token head with its logit
 soft-cap at 30. The family reads both sizes from one geometry the config picks (`zig/src/families/gemma4/config.zig`):
-every dimension must match the 31B's or the 12B's exactly, and other layouts (per-layer inputs, shared KV layers, MoE,
-per-module widths) are refused by name. The kernels take each size as a define, so the 12B runs the 31B's kernels.
+every dimension must match the 31B's or the 12B's exactly, and other layouts (per-layer inputs, shared KV layers, MoE)
+are refused by name. The kernels take each size as a define, so the 12B runs the 31B's kernels.
 
 Without `--drafter` the 12B decodes plain at 88 tokens a second for one stream.
 
@@ -59,6 +59,7 @@ Served, one stream decodes at 140-248 tokens a second with it (prose 140, code 2
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
 | Images | `--vision`: PNG and JPEG, 256 to 280 tokens an image, [below](#images). |
 | Audio | Not read: the converter drops the audio input, and the server takes no audio. |
+| Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |
 
 Structured output (`response_format`, `guided_*`) works with drafts on: the harness's structured check obeys 18 of 18
 (each field greedy, sampled and with thinking), and a bad regex gets HTTP 400. Thinking is on with
@@ -99,6 +100,26 @@ past its image, the refusals), and questions about the images answer right (the 
 the circle on the left, the text "GEMMA 4", the tall image taller than wide). mlx-vlm 0.7.2 on the same checkpoint
 gives the same pixels and the same five short answers; an 80-token description parts from it at its third token, on
 a near-tie in mlx-vlm's own logits ("design" -1.625, "illustration" -1.75).
+
+## Other widths
+
+The family reads each linear's MLX affine width from the checkpoint's `quantization` table
+(`zig/src/families/gemma4/widths.zig`, on core's `core/quant/mlx.zig`): 2, 3, 4, 5, 6 or 8 bits in groups of 64,
+uniform or per module, the embedding and the image projection included. A tensor stored at another width than its
+entry, groups of 32 or 128, 7 bits, other modes (mxfp4, nvfp4) and a module declared unquantized are refused by name,
+never guessed from the shapes. A q|k|v or gate|up stack whose members differ runs one lane projection for each run of
+equal widths, each writing its own columns of the stack's rows, as gilby's runs do. 4-bit groups of 64 keep the reg
+kernel and, when every linear has that width, the fused one-row pipelines; other widths take the lane kernel's general
+unpack, unfused, so they decode slower than their bytes alone would say.
+
+| Checkpoint | Checked |
+| --- | --- |
+| [`unigilby/gemma-4-12B-it-oQ8e`](https://huggingface.co/unigilby/gemma-4-12B-it-oQ8e/tree/a47ebf1a53598bb9ebe474724b20b2c0cd2e3b73) `a47ebf1a`, oMLX oQ uniform 8-bit | Decode equal to gilby's oracle on the four prompts x 128 tokens; long prompts against mlx-lm: 32k and 128k equal, 8k parts at a near-tie (23.375 / 23.125); `tf-gemma4-lanes` plain, copy and assistant drafts equal at one, four and eight streams, seeded at one and four; images: the embedder's rows 0.31% from fp32 (torch bf16 0.31%), `vision_served.py` passes. |
+| `gemma4_12b_convert.py --recipe mixed_4_6` (v_proj 6-bit in 16 layers, down_proj in 24) | Decode: two of four prompts equal, two part at near-ties (22.875 / 22.75, 19.375 / 19.25); long prompts: 8k and 32k equal, 128k parts at a near-tie (27.375 / 27.25); lanes as above, all equal. |
+
+Served (harness target `gemma4-12b-oq8e-m5`), the oQ8e pack with the assistant: one stream 93, 142, 146 and 158
+tokens a second (prose, code, structured, list; 4-bit: 140, 223, 205, 248), four streams 262-340 together; the draft
+check 137 against 46 undrafted (4-bit: 183 against 88); structured output 18 of 18, concurrent 12 of 12.
 
 ## Quality
 
