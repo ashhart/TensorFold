@@ -6,12 +6,13 @@ const api = @import("engine_api");
 const lanes = @import("lanes");
 const qwen35 = @import("qwen3_5");
 const flashnext = @import("flashnext");
+const nemotron = @import("nemotron");
 const Allocator = std.mem.Allocator;
 const admission = hip.admission;
 const modelContext = admission.modelContext;
 
 /// The HIP families: namespaces with `model_type`, `formats`, `default_context`, `prefill_step`, `open` and `follow`.
-const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native };
+const registry = .{ qwen35.native, qwen35.native_moe, flashnext.native, nemotron.native };
 
 pub const backends: []const []const u8 = &.{"hip"};
 /// No per-thread alternate signal stack: its thread-local leaves RCCL's and HIP's threads too little stack to start.
@@ -298,6 +299,17 @@ test "every registered family is listed for capabilities" {
     try std.testing.expectEqualStrings("qwen3_5", families[0].model_type);
     try std.testing.expectEqualStrings("qwen3_5_moe", families[1].model_type);
     try std.testing.expectEqualStrings("qwen4_exp", families[2].model_type);
+    try std.testing.expectEqualStrings("nemotron_h", families[3].model_type);
+}
+
+test "Nemotron refuses --slide and --mtp-confidence on HIP before it loads, and keeps a cap" {
+    const o: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .slide = true };
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(nemotron.native, o).?, "--slide") != null);
+    const sure: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .mtp_confidence = 0.5 };
+    try std.testing.expect(std.mem.indexOf(u8, flagRefused(nemotron.native, sure).?, "--mtp-confidence") != null);
+    const capped: api.Open = .{ .dir = "d", .model_type = "nemotron_h", .mtp_drafts = 1 };
+    try std.testing.expect(flagRefused(nemotron.native, capped) == null);
+    try std.testing.expect(flagRefused(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h" }) == null);
 }
 
 test "a family that names a --slide or --mtp-confidence refusal is refused before it loads; the others are not" {
