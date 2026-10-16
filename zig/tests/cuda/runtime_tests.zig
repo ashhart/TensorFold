@@ -426,3 +426,31 @@ pub fn symbols(gpu: Gpu) !void {
     }
     check.pass("symbols: 2 replay and {d} tree instantiations resolve in the gdn fatbin", .{cuda.kernels.gdn_variants.len});
 }
+
+/// Context.shared from inside a host that made a primary context current, and with none current; Stream.borrowed.
+pub fn sharedContext(gpu: Gpu) !void {
+    const d = gpu.d;
+    var shared = try cuda.Context.shared(d);
+    try expect(shared.handle == gpu.ctx.handle and shared.device == gpu.ctx.device, "shared: not the host's context", .{});
+    var held = try cuda.DeviceBuffer.alloc(d, 4096);
+    try held.fill32(0x01020304, null);
+    var stream = cuda.Stream.borrowed(d, null);
+    try held.fill8(0x7f, stream.handle);
+    try stream.synchronize();
+    const back = try check.download(gpu, held);
+    defer gpu.gpa.free(back);
+    try expect(std.mem.allEqual(u8, back, 0x7f), "fill on the borrowed legacy stream", .{});
+    held.free();
+    shared.deinit();
+    // the host's retain keeps its context alive after the library's goes
+    var after = try cuda.DeviceBuffer.alloc(d, 4096);
+    after.free();
+    check.pass("Context.shared: the host's primary context, retained and released; Stream.borrowed: the legacy stream", .{});
+    try d.check(d.api.cuCtxSetCurrent(null), "cuCtxSetCurrent");
+    var alone = try cuda.Context.shared(d);
+    const same = alone.handle == gpu.ctx.handle;
+    alone.deinit();
+    try gpu.ctx.makeCurrent();
+    try expect(same, "shared with no current context: not device 0's primary context", .{});
+    check.pass("Context.shared with no current context: device 0's primary context", .{});
+}
