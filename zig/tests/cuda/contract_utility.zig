@@ -69,6 +69,9 @@ pub const Sum = struct {
 
     /// Retain the float64 error bound while additionally checking ordered f32 and single final RNE.
     pub fn check(self: *Sum, at: g.Gate) !?[]const u8 {
+        if (!try self.rig.intact()) return "a sum launch changed a guard";
+        if (!std.mem.eql(u8, std.mem.sliceAsBytes(self.terms), try self.rig.inputBytes()))
+            return "a sum launch changed its immutable slice inputs";
         return ref.sumCheck(self.rig.gpu.gpa, self.terms, self.shape, self.bf16, try self.rig.outputBytes(), at == .nonfinite);
     }
 };
@@ -152,6 +155,9 @@ pub const Shift = struct {
     }
 
     pub fn check(self: *Shift, at: g.Gate) !?[]const u8 {
+        if (!try self.rig.intact()) return "a history launch changed a guard";
+        if (!std.mem.eql(u8, std.mem.sliceAsBytes(self.source), try self.rig.inputBytes()))
+            return "a history launch changed its immutable source rows";
         if (!std.mem.eql(u8, std.mem.sliceAsBytes(self.want), try self.rig.outputBytes()))
             return "history bytes differ from append-and-retain oracle";
         if (at == .nonfinite) {
