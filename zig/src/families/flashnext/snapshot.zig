@@ -29,6 +29,20 @@ pub const Pool = struct {
     caps: [2]usize = .{ 0, 0 },
     last: usize = 0, // the bytes of the last state saved: the next is about this, a turn or so longer
     max: usize = std.math.maxInt(usize), // the prompt cache's budget: a buffer pads a state only up to it
+    follow: ?mtl.ResidencySet.Follow = null, // the host's residency set: a new buffer joins it, a freed one leaves it
+
+    /// A new buffer for states, in the host's residency set when it has one.
+    fn made(p: *const Pool, device: mtl.Device, cap: usize) !mtl.Buffer {
+        const buf = try device.buffer(cap, fz.opts);
+        if (p.follow) |f| f.join(f.ctx, buf);
+        return buf;
+    }
+
+    /// A buffer freed, out of the host's residency set first (the set's own reference would keep it).
+    fn free(p: *const Pool, buf: mtl.Buffer) void {
+        if (p.follow) |f| f.leave(f.ctx, buf);
+        buf.deinit();
+    }
 
     /// A new buffer's size for a state of `n` bytes: its capacity, but no more than the budget when the state itself fits.
     pub fn size(p: *const Pool, n: usize) usize {
@@ -62,7 +76,7 @@ pub const Pool = struct {
     pub fn trim(p: *Pool, room: usize) void {
         while (p.spare() > room) {
             const i: usize = if (p.bufs[0] == null) 1 else if (p.bufs[1] == null) 0 else if (p.caps[0] >= p.caps[1]) 0 else 1;
-            p.bufs[i].?.deinit();
+            p.free(p.bufs[i].?);
             p.bufs[i] = null;
             p.caps[i] = 0;
         }
@@ -75,15 +89,15 @@ pub const Pool = struct {
             return .{ .buf = p.bufs[i].?, .cap = p.caps[i] };
         }
         const cap = p.size(n);
-        return .{ .buf = try device.buffer(cap, fz.opts), .cap = cap };
+        return .{ .buf = try p.made(device, cap), .cap = cap };
     }
 
     /// A buffer back: into a free slot, else in place of a smaller one, else freed.
     fn give(p: *Pool, buf: mtl.Buffer, cap: usize) void {
         const slot: usize = if (p.bufs[0] == null) 0 else if (p.bufs[1] == null) 1 else if (p.caps[0] <= p.caps[1]) 0 else 1;
         if (p.bufs[slot]) |old| {
-            if (p.caps[slot] >= cap) return buf.deinit();
-            old.deinit();
+            if (p.caps[slot] >= cap) return p.free(buf);
+            p.free(old);
         }
         p.bufs[slot] = buf;
         p.caps[slot] = cap;
@@ -96,7 +110,7 @@ pub const Pool = struct {
         for (p.bufs, p.caps) |b, cap| if (b != null and cap >= n) return .{};
         const cap = p.size(n);
         if (cap > room or waiting.check(waiting.ctx)) return .{};
-        const buf = device.buffer(cap, fz.opts) catch return .{};
+        const buf = p.made(device, cap) catch return .{};
         const mem = buf.contents()[0..cap];
         var done: usize = 0;
         while (done < cap and !waiting.check(waiting.ctx)) {
@@ -114,7 +128,7 @@ pub const Pool = struct {
 
     pub fn deinit(p: *Pool) void {
         for (&p.bufs) |*b| if (b.*) |x| {
-            x.deinit();
+            p.free(x);
             b.* = null;
         };
     }
@@ -127,6 +141,9 @@ pub fn layoutOf(_: *const Engine) Layout {
 
 const Part = struct { live: fz.Buf, len: usize };
 const MAX_PARTS = 36 * 2 + 13 * 5 + 1;
+
+/// A state's buffer for the disk: DeltaNet states, each layer's two key and two value heads and indexer keys, a tail.
+pub const shape = .{ .deltanet = 36 * (CS_ROW + SO_ROW), .layers = 13, .key_row = KEY_ROW, .raw_row = RAW_ROW, .tail = TAIL };
 
 /// Bytes of a state after `at` tokens: 36 DeltaNet states, 13 layers of keys, values and indexer keys, the tail.
 pub fn bytes(at: usize) usize {

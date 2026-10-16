@@ -72,6 +72,6 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
         h.send(job);
         return true;
     }
-    if (h.deliver(job)) h.remove(job);
+    _ = h.deliver(job); // a finished job leaves the lists inside deliver, before finish frees it
     return true;
 }

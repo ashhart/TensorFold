@@ -25,6 +25,8 @@ pub const Stages = struct {
     hidden: Ref = undefined,
     residual: Ref = undefined,
     head: Head = .all,
+    /// An image prompt's rows: the frame's `takes` rows take theirs over their placeholders' embeddings.
+    images: ?Ref = null,
     pub fn begin(s: *Stages, lane: *@import("core").segments.Lane) !void {
         const m = s.model;
         if (s.rows == 0 or s.rows > m.frame.capacity or lane.k != 0) return error.BadFrameRows;
@@ -32,6 +34,10 @@ pub const Stages = struct {
         s.residual = m.frame.get(.residual);
         try m.glue.embedding(lane.enc, m.config, m.weights.embed, m.frame.get(.ids), s.hidden, s.rows);
         lane.enc.barrier();
+        if (s.images) |rows| {
+            m.glue.imageRows(lane.enc, s.hidden, rows, m.frame.get(.takes), @intCast(m.config.hidden), s.rows);
+            lane.enc.barrier();
+        }
     }
     pub fn wait(_: *Stages, _: usize) @import("core").segments.Wait {
         return .mixer;

@@ -1,5 +1,5 @@
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const tool_params = @import("tool_params.zig");
 const stream = @import("tool_stream.zig");
 const Streamer = stream.Streamer;
