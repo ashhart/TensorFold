@@ -3,6 +3,8 @@
 Each family page describes its supported checkpoint, kernels and operating limits, and says which engine it covers:
 the native engine, or the Python engine frozen at 0.6.6.
 
+For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.md) before implementing a native family, kernel or serving change.
+
 | Family | Recipe |
 | --- | --- |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
