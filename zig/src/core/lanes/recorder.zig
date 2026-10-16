@@ -229,7 +229,7 @@ pub const Recorded = struct {
 
     pub fn backend(x: *Recorded) be.Backend {
         const v = x.inner.vtable;
-        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
+        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
         return .{ .ptr = x, .vtable = &x.table };
     }
 
@@ -246,6 +246,12 @@ pub const Recorded = struct {
         const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
         if (done) x.recorder.prompt(x.inner, s);
         return done;
+    }
+    fn prefillMany(p: *anyopaque, ss: []const *Stream) anyerror!bool {
+        const x = of(p);
+        if (!try x.inner.vtable.prefill_many.?(x.inner.ptr, ss)) return false;
+        for (ss) |s| x.recorder.prompt(x.inner, s); // each prompt's rows, as after its own prefill
+        return true;
     }
     fn first(p: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return of(p).inner.first(s, position);
