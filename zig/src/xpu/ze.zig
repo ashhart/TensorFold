@@ -213,20 +213,28 @@ pub const Gpu = struct {
         return p;
     }
 
-    /// Destroys what this Gpu made, then the context; the caller has waited for its queues.
+    /// Waits for every list this Gpu made, then destroys what it made and the context (startup errors included).
     pub fn close(g: *Gpu) void {
-        const o = &g.owned;
-        for (o.events.items) |e| _ = g.api.zeEventDestroy(e);
-        for (o.pools.items) |p| _ = g.api.zeEventPoolDestroy(p);
-        for (o.kernels.items) |k| _ = g.api.zeKernelDestroy(k);
-        for (o.modules.items) |m| _ = g.api.zeModuleDestroy(m);
-        for (o.lists.items) |l| _ = g.api.zeCommandListDestroy(l);
+        if (release(&g.api, g.context, &g.owned)) g.lib.close();
+    }
+
+    /// `close` before the loader: false, with nothing destroyed, when a list does not drain (it may still run).
+    fn release(api: *const Api, context: H, o: *Owned) bool {
+        for (o.lists.items) |l| if (api.zeCommandListHostSynchronize(l, std.math.maxInt(u64)) != 0) {
+            std.log.warn("XPU: a command list did not drain at close; its memory and context stay until the process ends", .{});
+            return false;
+        };
+        for (o.events.items) |e| _ = api.zeEventDestroy(e);
+        for (o.pools.items) |p| _ = api.zeEventPoolDestroy(p);
+        for (o.kernels.items) |k| _ = api.zeKernelDestroy(k);
+        for (o.modules.items) |m| _ = api.zeModuleDestroy(m);
+        for (o.lists.items) |l| _ = api.zeCommandListDestroy(l);
         var it = o.mems.keyIterator();
-        while (it.next()) |p| _ = g.api.zeMemFree(g.context, @ptrFromInt(p.*));
+        while (it.next()) |p| _ = api.zeMemFree(context, @ptrFromInt(p.*));
         o.mems.deinit(own_alloc);
         inline for (.{ &o.kernels, &o.modules, &o.lists, &o.events, &o.pools }) |l| l.deinit(own_alloc);
-        _ = g.api.zeContextDestroy(g.context);
-        g.lib.close();
+        _ = api.zeContextDestroy(context);
+        return true;
     }
 
     pub fn open(device_id: u32) Error!Gpu {
@@ -365,3 +373,43 @@ pub const Gpu = struct {
         return @as(f64, @floatFromInt(r.global_end -% r.global_start)) / @as(f64, @floatFromInt(g.props.timerResolution));
     }
 };
+
+test "close drains every list before it destroys anything, and destroys nothing while one will not drain" {
+    const Fake = struct {
+        var calls: [16]u8 = undefined;
+        var n: usize = 0;
+        var stuck = true;
+        fn note(c: u8) void {
+            calls[n] = c;
+            n += 1;
+        }
+        fn sync(_: H, _: u64) callconv(.c) u32 {
+            note('s');
+            return @intFromBool(stuck);
+        }
+        fn destroy(_: H) callconv(.c) u32 {
+            note('d');
+            return 0;
+        }
+        fn free(_: H, _: ?*anyopaque) callconv(.c) u32 {
+            note('f');
+            return 0;
+        }
+    };
+    var api: Api = undefined;
+    api.zeCommandListHostSynchronize = Fake.sync;
+    inline for (.{ "zeEventDestroy", "zeEventPoolDestroy", "zeKernelDestroy", "zeModuleDestroy", "zeCommandListDestroy", "zeContextDestroy" }) |f| @field(api, f) = Fake.destroy;
+    api.zeMemFree = Fake.free;
+    var o: Gpu.Owned = .{};
+    for ([_]usize{ 0x10, 0x18 }) |l| try o.lists.append(Gpu.own_alloc, @ptrFromInt(l));
+    try o.kernels.append(Gpu.own_alloc, @ptrFromInt(0x20));
+    try o.mems.put(Gpu.own_alloc, 0x30, {});
+    // a queued fill that never completes: the first list's wait fails, and the kernel, the memory and the context stay
+    try std.testing.expect(!Gpu.release(&api, null, &o));
+    try std.testing.expectEqualStrings("s", Fake.calls[0..Fake.n]);
+    Fake.n = 0;
+    Fake.stuck = false;
+    try std.testing.expect(Gpu.release(&api, null, &o));
+    // both lists drained, then the kernel, both lists, the memory and the context
+    try std.testing.expectEqualStrings("ssdddfd", Fake.calls[0..Fake.n]);
+}

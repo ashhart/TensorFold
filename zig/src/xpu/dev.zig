@@ -121,7 +121,7 @@ pub const Dev = struct {
 
     /// Waits for the queue, then gives the card back everything made on it (Gpu.close).
     pub fn deinit(d: *Dev) void {
-        d.sync() catch {};
+        d.sync() catch {}; // close waits for every list again, and destroys nothing if one will not drain
         d.g.close();
     }
 

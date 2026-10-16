@@ -233,5 +233,5 @@ pub fn hostTests(b: *std.Build, step: *std.Build.Step) void {
     const xpu = runtime(b, host, .debug, &.{}, zeModule(b, host, .debug));
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const mods = family(b, host, .debug, xpu, lanes);
-    for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    for ([_]*std.Build.Module{ xpu, mods.nemotron, cliModule(b, host, .debug, xpu, mods), zeModule(b, host, .debug) }) |m| step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
 }
