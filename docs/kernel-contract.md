@@ -108,3 +108,7 @@ CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router 
 tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4
 tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true>`), and the reduce-scatter's
 `tf_rank_sum`.
+
+## CUDA compiler resource baseline
+
+The registered usage arrays were re-derived with NVCC 13.3.73 (`cuda_13.3.r13.3/compiler.38244171_0`) for SM 80, 86, 89, 120 and 121. `kernel-contract-limits` reads each compiled image and reports its register count, static shared memory and thread bound. Source changes or a different compiler may change these values; re-derive the arrays and run the live audit rather than changing the audit tolerance. Launch dimensions, dynamic shared memory, device limits and planted controls remain independent checks. Only SM 120 was executed on hardware in this update; the other four records come from their compiled images, not hardware execution.
