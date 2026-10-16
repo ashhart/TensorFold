@@ -34,7 +34,7 @@ pub const Store = struct {
         s.arena.deinit();
     }
     pub fn graph(s: *Store, gpa: std.mem.Allocator) !weights.Graph {
-        return weights.load(gpa, .{ .source = .{ .ptr = s, .getFn = get }, .names = s.keys }, toy, .{ .dense = s.embed }, .{ .dense = s.embed });
+        return weights.load(gpa, .{ .source = .{ .ptr = s, .getFn = get }, .names = s.keys }, toy, .{ .dense = s.embed });
     }
     fn get(ptr: *anyopaque, name: []const u8) !ck.Tensor {
         const s: *Store = @ptrCast(@alignCast(ptr));
@@ -66,7 +66,6 @@ test "complete tiny graph preserves every native tensor and target binding point
     try std.testing.expectEqual(@as(usize, 81), s.keys.len);
     try std.testing.expectEqual(s.tensors[0].bytes.ptr, g.fusion.bytes.ptr);
     try std.testing.expectEqual(s.embed.bytes.ptr, g.embed.dense.bytes.ptr);
-    try std.testing.expectEqual(s.embed.bytes.ptr, g.head.dense.bytes.ptr);
     try std.testing.expect(try g.nativeBytes() > 0);
 }
 test "wrong BF16 metadata or shape cannot be fixed through a cast" {

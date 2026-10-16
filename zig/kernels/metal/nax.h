@@ -85,6 +85,12 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
   }
 }
 
+// frag_get from a threadgroup block in two 8-byte loads: (c + home.x) * 2 and ld * 2 must be multiples of 8.
+inline void frag_get_tg(thread frag<bfloat>& f, const threadgroup bfloat* p, int ld, int r, int c, short2 home) {
+  const threadgroup bfloat* q = p + (r + home.y) * ld + (c + home.x);
+  f = frag<bfloat>(*(const threadgroup bfloat4*)q, *(const threadgroup bfloat4*)(q + 8 * ld));
+}
+
 // Element e's column past home.x (a plain index: M5 kernels keep their exact text); its row is home.y + (e >> 2) * 8.
 #define TF_COL(e) (e & 3)
 // A transposed right operand's block (its rows are the op's columns): on M5 it loads like any other.
@@ -183,5 +189,27 @@ inline void mma_16x32(thread frag<C>& lo, thread frag<C>& hi, thread const frag<
   }
 }
 #endif
+
+// frag_get from a block whose rows home.y and home.y + 8 start at r0 and r1; an unflagged row reads as zero.
+template <typename T, typename S>
+inline void frag_get_rows(thread frag<T>& f, const device S* r0, const device S* r1, int c, short2 home, bool lo,
+                          bool hi) {
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    f[e] = ((e >> 2) ? hi : lo) ? T(((e >> 2) ? r1 : r0)[c + home.x + TF_COL(e)]) : T(0);
+  }
+}
+
+// frag_put to a block whose rows home.y and home.y + 8 start at r0 and r1; only flagged rows are written.
+template <typename O>
+inline void frag_put_rows(thread const frag<float>& f, device O* r0, device O* r1, int c, short2 home, bool lo,
+                          bool hi) {
+  TF_UNROLL
+  for (short e = 0; e < 8; e++) {
+    if ((e >> 2) ? hi : lo) {
+      ((e >> 2) ? r1 : r0)[c + home.x + TF_COL(e)] = O(f[e]);
+    }
+  }
+}
 
 }  // namespace tfp

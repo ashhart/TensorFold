@@ -5,7 +5,7 @@ const tf = @import("tensorfold");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-fn time(m: *tf.nemotron.Model, p: mtl.Pipeline, lin: tf.nemotron.weights.Linear, x: mtl.Buffer, xs: mtl.Buffer, y: mtl.Buffer, tiles: usize, sk: usize, reps: usize) !f64 {
+fn time(m: *tf.nemotron.Model, p: mtl.Pipeline, lane: tf.nemotron.weights.Tiles, x: mtl.Buffer, xs: mtl.Buffer, y: mtl.Buffer, tiles: usize, sk: usize, reps: usize) !f64 {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
@@ -15,8 +15,8 @@ fn time(m: *tf.nemotron.Model, p: mtl.Pipeline, lin: tf.nemotron.weights.Linear,
         enc.setPipeline(p);
         enc.setBuffer(x, 0, 0);
         enc.setBuffer(xs, 0, 1);
-        enc.setBuffer(lin.w, 0, 2);
-        enc.setBuffer(lin.sbt, 0, 3);
+        enc.setBuffer(lane.w, 0, 2);
+        enc.setBuffer(lane.sbt, 0, 3);
         enc.setBytes(std.mem.asBytes(&mdims), 4);
         enc.setBuffer(y, 0, 5);
         enc.dispatchThreads(mtl.Size.of(tiles * 64 * sk, 1, 1), mtl.Size.of(64 * sk, 1, 1));
@@ -46,12 +46,16 @@ pub fn main(init: std.process.Init) !void {
     };
     inline for (cases) |c| {
         const lin = m.weights.linears.get(c[1]).?;
-        const p = m.kernels.get(c[0]);
-        _ = try time(m, p, lin, x, xs, y, lin.n / 64, c[2], 20);
-        std.debug.print("{s} (N {d}, {d} tiles):", .{ c[0], lin.n, lin.n / 64 });
-        for (c[3]) |t| {
-            std.debug.print(" {d}:{d:.1}", .{ t, try time(m, p, lin, x, xs, y, t, c[2], 50) });
+        if (lin.tiles) |lane| {
+            const p = m.kernels.get(c[0]);
+            _ = try time(m, p, lane, x, xs, y, lin.n / 64, c[2], 20);
+            std.debug.print("{s} (N {d}, {d} tiles):", .{ c[0], lin.n, lin.n / 64 });
+            for (c[3]) |t| {
+                std.debug.print(" {d}:{d:.1}", .{ t, try time(m, p, lane, x, xs, y, t, c[2], 50) });
+            }
+            std.debug.print(" us\n", .{});
+        } else {
+            std.debug.print("{s}: no lane tiles at this checkpoint's width\n", .{c[1]});
         }
-        std.debug.print(" us\n", .{});
     }
 }

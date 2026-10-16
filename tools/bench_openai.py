@@ -15,6 +15,7 @@ import time
 import urllib.request
 
 from bench_evidence import Evidence
+from bench_auth import authorize, read_api_key, redact
 
 if sys.version_info < (3, 11):
     sys.exit(f"Python 3.11+ is required (this is {sys.version.split()[0]}); "
@@ -28,7 +29,8 @@ PROMPTS = [
 ]
 
 
-def stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None) -> dict:
+def stream(base: str, model: str, item: dict, tokens: int, temperature: float, seed: int | None,
+           *, api_key: str | None = None) -> dict:
     body = {"model": model, "max_tokens": tokens, "temperature": temperature, "stream": True,
             "stream_options": {"include_usage": True}, "ignore_eos": True}
     if seed is not None:
@@ -43,6 +45,7 @@ def stream(base: str, model: str, item: dict, tokens: int, temperature: float, s
         url = base + "/v1/completions"
         body["prompt"] = item["prompt"]
     req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    authorize(req, api_key)
     start = time.perf_counter()
     first = last = None
     usage = None
@@ -91,16 +94,21 @@ def main() -> None:
     p.add_argument("--temperatures", default="1.0,0")
     p.add_argument("--label", default="")
     p.add_argument("--output")
+    p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     p.add_argument("--seed-from-prompt", action="store_true",
                    help="send no seed: cuda_server then seeds from the prompt, as the engine benches do, "
                         "so the reply equals the bench's and the timings compare directly")
     args = p.parse_args()
+    api_key = read_api_key(p, args.api_key_env)
     results = []
     for temp in [float(t) for t in args.temperatures.split(",")]:
         for item in PROMPTS:
             seeds = [None] * args.reps if args.seed_from_prompt else [1234 + i for i in range(args.reps)]
-            stream(args.base, args.model, item, args.tokens, temp, seeds[0])          # warm-up
-            runs = [stream(args.base, args.model, item, args.tokens, temp, seed) for seed in seeds]
+            try:
+                stream(args.base, args.model, item, args.tokens, temp, seeds[0], api_key=api_key)  # warm-up
+                runs = [stream(args.base, args.model, item, args.tokens, temp, seed, api_key=api_key) for seed in seeds]
+            except Exception as exc:
+                p.exit(1, f"benchmark request failed: {type(exc).__name__}\n")
             tps = [r["decode_tps"] for r in runs if r["decode_tps"]]
             ttfts = [r["ttft_s"] for r in runs if r["ttft_s"] is not None]
             row = {"label": args.label, "prompt": item["name"], "temperature": temp, "tokens": args.tokens,
@@ -108,7 +116,8 @@ def main() -> None:
                    "ttft_s_median": statistics.median(ttfts) if ttfts else None,
                    "evidence": [{k: r[k] for k in ("prompt_tokens", "cached_tokens", "tokens", "cache_state",
                                 "complete", "token_sha", "output_sha256")} for r in runs],
-                   "sample": runs[0]["text"][:160]}
+                   "sample": redact(runs[0]["text"], api_key)[:160]}
+            row = redact(row, api_key)
             print(json.dumps({k: row[k] for k in ("label", "prompt", "temperature", "decode_tps_median",
                                                    "decode_tps_all", "ttft_s_median")}), flush=True)
             results.append(row)

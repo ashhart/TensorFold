@@ -76,7 +76,7 @@ pub fn main(init: std.process.Init) !void {
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const m = try q.model.Model.load(init.gpa, init.io, args[1], 16);
+    const m = try q.model.Model.load(init.gpa, init.io, args[1], 16, null);
     defer m.deinit();
     for (jobs.value) |job| try one(m, init.io, job);
 }

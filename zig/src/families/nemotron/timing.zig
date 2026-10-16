@@ -73,7 +73,11 @@ fn median(v: []f64) f64 {
 pub fn measure(b: *backend.Metal, io: std.Io) !void {
     const c = b.m.config;
     var shape: [160]u8 = undefined;
-    const parts = [_][]const u8{ "nemotron-metal", std.mem.span(b.m.device.name()), try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.vocab, c.experts, b.o.batch_rows, @intFromBool(b.head != null) }) };
+    const base = try std.fmt.bufPrint(&shape, "{d}/{d}/{d}/{d}/{d}/{d}", .{ c.layers, c.hidden, c.vocab, c.experts, b.o.batch_rows, @intFromBool(b.head != null) });
+    // a mix of widths times its own costs; an all-4/64 checkpoint keeps its key
+    const tag = c.widthsTag();
+    const keyed = if (tag == 0) base else shape[0 .. base.len + (try std.fmt.bufPrint(shape[base.len..], "/w{x:0>16}", .{tag})).len];
+    const parts = [_][]const u8{ "nemotron-metal", std.mem.span(b.m.device.name()), keyed };
     const k = lanes.cost_cache.key(b.gpa, io, &parts) catch null;
     if (k) |key| if (lanes.cost_cache.load(Costs, b.gpa, io, key)) |kept| {
         b.costs = kept;

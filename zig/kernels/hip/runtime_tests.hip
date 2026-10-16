@@ -36,3 +36,9 @@ extern "C" __global__ void tf_hip_read_table(int* out) {
 extern "C" __global__ void tf_hip_wave(int* out) {
     if (threadIdx.x == 0) out[0] = warpSize;
 }
+
+// Sleeps `sleeps` times before one write, so a host query sees queued work.
+extern "C" __global__ void tf_hip_delay_write(unsigned int* out, unsigned int value, unsigned int sleeps) {
+    for (unsigned int i = 0; i < sleeps; ++i) __builtin_amdgcn_s_sleep(127);
+    if (blockIdx.x == 0 && threadIdx.x == 0) out[0] = value;
+}

@@ -134,6 +134,7 @@ pub const Leader = struct {
 
     /// Greedy rows take the lowest id among the largest logits; sampled rows use the engine's keyed host rule.
     pub fn draw(l: *Leader, row: []const f32, s: ?lanes.Sampling, position: u64) !u32 {
+        for (row) |x| if (!std.math.isFinite(x)) return error.NonfiniteLogits;
         if (s) |st| {
             const values = try l.gpa.alloc(f64, row.len);
             defer l.gpa.free(values);

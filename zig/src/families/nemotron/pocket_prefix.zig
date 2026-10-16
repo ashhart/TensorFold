@@ -95,5 +95,6 @@ pub fn learn(p: anytype, t: anytype, s: *Prefixes, sq: Seq, sp: Span, which: usi
     };
     k.skip = rows: for (0..limit) |r| {
         for (p.taken.items) |x| if (dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(p.moe.items[x.slot], sp.row(r))) > 0) break :rows r;
+        for (p.joint.items) |x| if (dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(p.moe.items[x.slot], sp.row(r))) > 0) break :rows r;
     } else limit;
 }

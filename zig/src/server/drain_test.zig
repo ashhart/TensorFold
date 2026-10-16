@@ -1,7 +1,7 @@
 //! A stop's drain over HTTP: serve.run with a real SIGTERM, a slow stub engine, bytes as tokens.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const model_text = @import("model_text.zig");
 const serve = @import("serve.zig");
 const cli = @import("cli.zig");

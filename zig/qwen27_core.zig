@@ -5,6 +5,8 @@ pub const safetensors = @import("src/core/safetensors.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const npy = @import("src/core/npy.zig");
 pub const tokenizer = @import("tokenizer");
+/// Qwen-VL image input's backend-neutral parts (M-RoPE positions for the forward).
+pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 
 pub const segments = @import("src/core/segments.zig");
 
@@ -14,6 +16,7 @@ pub const lane_projection = @import("core_lane");
 pub const gpu_profile = @import("src/core/gpu_profile.zig");
 
 pub const row_projection = @import("core_row");
+pub const quant = @import("src/core/quant/quant.zig");
 
 pub const draft_ops = @import("draft_ops");
 pub const shared_attention = @import("src/core/shared_attention.zig");

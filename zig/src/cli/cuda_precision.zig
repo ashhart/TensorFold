@@ -4,32 +4,12 @@ const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const nemotron = @import("nemotron");
+const e4m3 = core.quant.fp8.e4m3;
+const toE4m3 = core.quant.fp8.toE4m3;
+const e2m1 = core.quant.nvfp4.e2m1;
 
 /// bf16 rows as read back from a dump file.
 const Rows16 = []align(1) const u16;
-
-fn e4m3(b: u8) f64 {
-    const sign: f64 = if (b & 0x80 != 0) -1 else 1;
-    const e: i32 = (b >> 3) & 0xF;
-    const m: f64 = @floatFromInt(b & 7);
-    return sign * if (e == 0) m / 8.0 * 0.015625 else (1 + m / 8.0) * std.math.pow(f64, 2, @floatFromInt(e - 7));
-}
-
-/// x rounded to the nearest e4m3 (ties to even), saturating at 448, as an FP8 activation quantizer does.
-fn toE4m3(x: f64) f64 {
-    const a = @min(@abs(x), 448.0);
-    if (a == 0) return 0;
-    const e = @max(std.math.floor(std.math.log2(a)), -6.0); // below 2^-6 the step is the subnormals' 2^-9
-    const step = std.math.pow(f64, 2, e - 3);
-    var q = @round(a / step);
-    if (@abs(a / step - std.math.trunc(a / step) - 0.5) < 1e-12 and @mod(q, 2) == 1) q -= 1;
-    return std.math.copysign(@min(q * step, 448.0), x);
-}
-
-fn e2m1(n: u8) f64 {
-    const mag = [8]f64{ 0, 0.5, 1, 1.5, 2, 3, 4, 6 };
-    return (if (n & 8 != 0) @as(f64, -1) else 1) * mag[n & 7];
-}
 
 fn bf(v: u16) f64 {
     return @floatCast(@as(f32, @bitCast(@as(u32, v) << 16)));
