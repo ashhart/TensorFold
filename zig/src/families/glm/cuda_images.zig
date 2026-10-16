@@ -6,9 +6,10 @@ const vision = @import("cuda_vision.zig");
 const vcfg = @import("vision_config.zig");
 const image_core = @import("image_core.zig");
 const image = image_core.For(@import("core").picture);
+const video_mod = @import("video_core.zig").For(@import("core").picture);
 
 /// What a request may hold: image tokens in all (the rows buffer), and images.
-pub const Limits = struct { image_tokens: u32, max_images: u32 };
+pub const Limits = struct { image_tokens: u32, max_images: u32, video_tokens: u32 = 0, max_videos: u32 = 0, max_frames: u32 = 0 };
 
 /// Prompt rows [at, at + n) take image rows [row, row + n).
 pub const Span = struct { at: u32, n: u32, row: u32 };
@@ -29,9 +30,12 @@ pub const Images = struct {
     slot: u32 = 0, // the sequence the spans belong to: another stream's rows at the same positions take none
     marks: struct { image: u32, open: u32, close: u32 } = .{ .image = 0, .open = 0, .close = 0 },
     mark_ids: [3]u32 = @splat(0), // begin, image, end: text that spells one stays text
+    video_ids: ?[3]u32 = null, // begin, video, end: the checkpoint reads videos (each frame pair as an image)
 
     /// The chat template writes each image's begin and end itself (the server only expands the image token).
     pub const template_wraps = true;
+    /// A video's frames to patch pairs (Glm5NextVideoProcessor), over core's decoder: each pair goes in as an image.
+    pub const video = video_mod;
 
     /// Rank 0 (`tower`) or another rank: the rows buffer, and rank 0's tower; null with `problem` when no tower.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: cuda.Stream, dir: []const u8, limits: Limits, max_rows: usize, tower: bool, problem: *[]const u8) !?*Images {
@@ -50,7 +54,7 @@ pub const Images = struct {
         var module = try cuda.Module.load(d, cuda.kernels.glm_vision);
         errdefer module.unload();
         v.* = .{ .gpa = gpa, .io = io, .d = d, .module = module, .run = .{ .stream = stream, .f = try vision.Funcs.load(module) }, .cfg = cfg, .rows = undefined, .map = undefined, .host_map = undefined, .limits = limits };
-        v.rows = try cuda.DeviceBuffer.alloc(d, @as(usize, limits.image_tokens) * vcfg.out_hidden * 2);
+        v.rows = try cuda.DeviceBuffer.alloc(d, @as(usize, v.rowLimit()) * vcfg.out_hidden * 2);
         errdefer v.rows.free();
         v.map = try cuda.DeviceBuffer.alloc(d, max_rows * 4);
         errdefer v.map.free();
@@ -59,7 +63,13 @@ pub const Images = struct {
         if (tower) v.tower = try vision.Tower.load(gpa, io, d, dir);
         v.marks = .{ .image = cfg.image_token, .open = cfg.image_start, .close = cfg.image_end };
         v.mark_ids = .{ cfg.image_start, cfg.image_token, cfg.image_end };
+        v.video_ids = cfg.video;
         return v;
+    }
+
+    /// Image rows a request holds at most: its images', or a video's.
+    pub fn rowLimit(v: *const Images) u32 {
+        return @max(v.limits.image_tokens, if (v.video_ids != null) v.limits.video_tokens else 0);
     }
 
     pub fn deinit(v: *Images) void {
@@ -85,13 +95,12 @@ pub const Images = struct {
     /// Rank 0: a prompt pass on `slot` from row `from`: the images whose rows end past it, through the tower.
     pub fn begin(v: *Images, slot: u32, images: []const lanes.stream.Image, from: usize) !void {
         v.clear();
-        if (images.len > v.limits.max_images) return error.TooManyImages;
         const t = &(v.tower orelse return error.NoVision);
         var row: u32 = 0;
         for (images) |img| {
             if (img.gh * img.gw != img.tokens * vcfg.patches_per_token) return error.ImageOutOfStep;
             if (img.at + img.tokens <= from) continue; // in the kept state already
-            if (row + img.tokens > v.limits.image_tokens) return error.ImageRows;
+            if (row + img.tokens > v.rowLimit()) return error.ImageRows; // the server holds a request to its limits
             try t.encode(&v.run, img.pixels, .{ 1, img.gh, img.gw }, v.rows.ptr + @as(u64, row) * vcfg.out_hidden * 2);
             try v.spans.append(v.gpa, .{ .at = img.at, .n = img.tokens, .row = row });
             row += img.tokens;
@@ -106,7 +115,7 @@ pub const Images = struct {
         var i: usize = 0;
         while (i < words.len) : (i += 3) {
             const sp: Span = .{ .at = words[i], .n = words[i + 1], .row = words[i + 2] };
-            if (sp.row + sp.n > v.limits.image_tokens) return error.ImageRows;
+            if (sp.row + sp.n > v.rowLimit()) return error.ImageRows;
             try v.spans.append(v.gpa, sp);
         }
         v.slot = slot;
@@ -146,6 +155,11 @@ pub const Images = struct {
 
     /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).
     pub const explain = image.decoderProblem;
+
+    /// A video's sampled frames as patch pairs within `max_tokens` and `max_frames` (the server's prepare).
+    pub fn prepareVideo(v: *const Images, a: std.mem.Allocator, s: video.Source, max_tokens: u32, max_frames: u32) !video.Prepared {
+        return video.prepare(a, s, v.cfg.?, max_tokens, max_frames);
+    }
 
     /// An image's bytes as the tower reads them, at most `max_tokens` tokens (the server's prepare).
     pub fn prepare(v: *const Images, a: std.mem.Allocator, data: []const u8, max_tokens: u32) !image_core.Prepared {

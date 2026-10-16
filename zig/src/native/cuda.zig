@@ -326,6 +326,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }
         const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
         opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
+        if (comptime @hasField(@typeInfo(@FieldType(F.Options, "vision")).optional.child, "video_tokens")) { // a family that reads videos
+            opts.vision.?.video_tokens = vo.video_tokens;
+            opts.vision.?.max_videos = vo.max_videos;
+            opts.vision.?.max_frames = vo.max_frames;
+        }
     }
     if (o.precision) |p| {
         if (!@hasField(F.Options, "precision")) {
