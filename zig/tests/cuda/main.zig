@@ -41,6 +41,9 @@ const glm_synth = @import("glm_synth.zig");
 const tree_round_tests = @import("tree_round_tests.zig");
 const tree_tests = @import("tree_tests.zig");
 const block_tests = @import("block_tests.zig");
+const act_rows_tests = @import("act_rows_tests.zig");
+const gdn_prep_tests = @import("gdn_prep_tests.zig");
+const qk_rows_tests = @import("qk_rows_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -63,6 +66,9 @@ const usage =
     \\  norms                     RMS norm and the residual step against float64 references (synthetic)
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
     \\  tree-round                tree_round.cu's picks, batched verified trees and commits against core/tree_round
+    \\  act-rows                  SwiGLU, output gates, group sums, DFlash2's dynamic conv against float64 (synthetic)
+    \\  gdn-prep                  Gated DeltaNet conv, norms, g and beta against float64 (synthetic)
+    \\  qk-rows                   QK norm, RoPE and the cache write against float64 references (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  lfm2-kernels              LFM2's glue kernels against their host references at d1's shapes (synthetic rows)
@@ -171,6 +177,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "tree-round")) return tree_round_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "act-rows")) return act_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-prep")) return gdn_prep_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "qk-rows")) return qk_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "pocket"))
