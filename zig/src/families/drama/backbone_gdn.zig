@@ -123,11 +123,6 @@ const Segment = struct {
     state_out: u64,
 };
 
-fn go(s: cuda.Stream, f: cuda.Function, grid: [3]usize, block: u32, a: *cuda.Args) !void {
-    const g: cuda.Dim3 = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) };
-    try cuda.launch.launch(f, .{ .grid = g, .block = .{ .x = block } }, s, a);
-}
-
 fn int(v: usize) i32 {
     return @intCast(v);
 }
@@ -155,9 +150,11 @@ pub const Kernels = struct {
     o_fn: cuda.Function,
     append_fn: cuda.Function,
     decode_fn: cuda.Function,
+    /// Programmatic dependent launch on every launch: only for an image whose kernels wait for their predecessor.
+    pdl: bool,
 
     /// Resolves the exports of the drama_backbone glue image.
-    pub fn init(module: *cuda.Module) !Kernels {
+    pub fn init(module: *cuda.Module, pdl: bool) !Kernels {
         return .{
             .l2norm_fn = try module.function("drama_gdn_chunk_l2norm"),
             .gate_fn = try module.function("drama_gdn_chunk_gate"),
@@ -167,7 +164,13 @@ pub const Kernels = struct {
             .o_fn = try module.function("drama_gdn_chunk_o"),
             .append_fn = try module.function("drama_gdn_chunk_append"),
             .decode_fn = try module.function("drama_gdn_recur"),
+            .pdl = pdl,
         };
+    }
+
+    fn go(self: *const Kernels, s: cuda.Stream, f: cuda.Function, grid: [3]usize, block: u32, a: *cuda.Args) !void {
+        const g: cuda.Dim3 = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) };
+        try cuda.launch.launch(f, .{ .grid = g, .block = .{ .x = block }, .pdl = self.pdl }, s, a);
     }
 
     /// Prefill rows on canonical chunk boundaries (see the file comment). Validates everything before the first launch.
@@ -221,7 +224,7 @@ pub const Kernels = struct {
         a.add(int(run.nk));
         a.add(int(run.nv));
         a.add(run.scale);
-        try go(stream, self.decode_fn, .{ run.dv / 32, run.nv, 1 }, 128, &a);
+        try self.go(stream, self.decode_fn, .{ run.dv / 32, run.nv, 1 }, 128, &a);
     }
 
     /// Appends run rows to the unfinished chunk and recomputes it into the other bank; a full chunk commits.
@@ -239,7 +242,7 @@ pub const Kernels = struct {
         a.add(int(at));
         a.add(int(qkv_cols));
         a.add(int(ba_cols));
-        try go(stream, self.append_fn, .{ count, 1, 1 }, 256, &a);
+        try self.go(stream, self.append_fn, .{ count, 1, 1 }, 256, &a);
         const rows = at + count;
         try self.chain(stream, ws, run, .{
             .qkv = state.qkv_cache,
@@ -269,7 +272,7 @@ pub const Kernels = struct {
             a.add(rows);
             a.add(nk);
             a.add(l2norm_eps);
-            try go(stream, self.l2norm_fn, .{ (seg.rows * 2 * run.nk + 15) / 16, 1, 1 }, 256, &a);
+            try self.go(stream, self.l2norm_fn, .{ (seg.rows * 2 * run.nk + 15) / 16, 1, 1 }, 256, &a);
         }
         {
             var a: cuda.Args = .{};
@@ -282,7 +285,7 @@ pub const Kernels = struct {
             a.add(ws.beta);
             a.add(rows);
             a.add(nv);
-            try go(stream, self.gate_fn, .{ nt, run.nv, 1 }, 64, &a);
+            try self.go(stream, self.gate_fn, .{ nt, run.nv, 1 }, 64, &a);
         }
         {
             var a: cuda.Args = .{};
@@ -293,7 +296,7 @@ pub const Kernels = struct {
             a.add(rows);
             a.add(nk);
             a.add(nv);
-            try go(stream, self.kkt_fn, .{ nt, run.nv, 1 }, 32, &a);
+            try self.go(stream, self.kkt_fn, .{ nt, run.nv, 1 }, 32, &a);
         }
         {
             var a: cuda.Args = .{};
@@ -308,7 +311,7 @@ pub const Kernels = struct {
             a.add(rows);
             a.add(nk);
             a.add(nv);
-            try go(stream, self.wu_fn, .{ nt, run.nv, 1 }, 128, &a);
+            try self.go(stream, self.wu_fn, .{ nt, run.nv, 1 }, 128, &a);
         }
         {
             var a: cuda.Args = .{};
@@ -323,7 +326,7 @@ pub const Kernels = struct {
             a.add(rows);
             a.add(nk);
             a.add(nv);
-            try go(stream, self.h_fn, .{ head_dim / 32, run.nv, 1 }, 128, &a);
+            try self.go(stream, self.h_fn, .{ head_dim / 32, run.nv, 1 }, 128, &a);
         }
         {
             var a: cuda.Args = .{};
@@ -337,7 +340,7 @@ pub const Kernels = struct {
             a.add(nk);
             a.add(nv);
             a.add(run.scale);
-            try go(stream, self.o_fn, .{ head_dim / 64, nt, run.nv }, 128, &a);
+            try self.go(stream, self.o_fn, .{ head_dim / 64, nt, run.nv }, 128, &a);
         }
     }
 };

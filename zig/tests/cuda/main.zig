@@ -31,6 +31,7 @@ const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
 const drama_conv_tests = @import("drama_conv_tests.zig");
 const drama_qk_tests = @import("drama_qk_tests.zig");
+const drama_pdl_tests = @import("drama_pdl_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -51,6 +52,7 @@ const usage =
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
     \\  drama-conv                phase-specific causal convolution, history and chunk boundaries (synthetic)
     \\  drama-qk                  Q/K norm and rotary precision, positions and cache bounds (synthetic)
+    \\  drama-pdl on|off [dir]    the backbone's PDL decision for the embedded images; off for images from dir
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  pocket [reps]             the pocket's two kernels against tf_pocket_rows byte for byte; reps > 0 times them too
@@ -136,6 +138,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "drama-conv")) return drama_conv_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "drama-qk")) return drama_qk_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "drama-pdl")) return drama_pdl_tests.run(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else null);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "pocket"))
         return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);

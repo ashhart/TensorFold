@@ -19,6 +19,8 @@ const expert_symbols = [2][2][:0]const u8{
     .{ "drama_expert_fp8_n1_m0", "drama_expert_fp8_n2_m0" },
     .{ "drama_expert_fp8_n1_m1", "drama_expert_fp8_n2_m1" },
 };
+/// Device global of an image whose kernels all wait for their predecessor first (sm_90+ code of this tree's sources).
+const pdl_marker = "drama_pdl";
 const warps = 4;
 
 fn readImage(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8) ![]align(16) u8 {
@@ -34,11 +36,6 @@ fn loadImage(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, dir: []c
     const image = try readImage(gpa, io, dir, name);
     defer gpa.free(image);
     return cuda.Module.load(d, image);
-}
-
-fn go(s: cuda.Stream, f: cuda.Function, grid: [3]usize, block: u32, a: *cuda.Args) !void {
-    const g: cuda.Dim3 = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) };
-    try cuda.launch.launch(f, .{ .grid = g, .block = .{ .x = block } }, s, a);
 }
 
 fn int(v: usize) i32 {
@@ -67,6 +64,8 @@ pub const Kernels = struct {
     head_fn: cuda.Function,
     gemv_fn: cuda.Function,
     experts: [2][2]cuda.Function,
+    /// PDL only when both embedded images hold pdl_marker; standalone kernel directories launch plain.
+    pdl: bool,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, kernel_dir: []const u8) !Kernels {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -78,6 +77,7 @@ pub const Kernels = struct {
         errdefer experts_mod.unload();
         var embed = try cuda.embed_rows.EmbedRows.load(d);
         errdefer embed.unload();
+        const pdl = kernel_dir.len == 0 and glue.holds(pdl_marker) and gemm_mod.holds(pdl_marker);
         var k: Kernels = .{
             .glue = glue,
             .gemm_mod = gemm_mod,
@@ -89,7 +89,7 @@ pub const Kernels = struct {
             .gated_rms_fn = try glue.function("drama_gated_rms_128"),
             .conv_fn = try glue.function("drama_gdn_conv"),
             .conv_prefill_fn = try glue.function("drama_gdn_conv_prefill"),
-            .gdn = try backbone_gdn.Kernels.init(&glue),
+            .gdn = try backbone_gdn.Kernels.init(&glue, pdl),
             .attn_prep_fn = try glue.function("drama_attn_prep"),
             .attention_fn = try glue.function("drama_attention"),
             .topk_fn = try glue.function("drama_topk"),
@@ -100,6 +100,7 @@ pub const Kernels = struct {
             .head_fn = undefined,
             .gemv_fn = undefined,
             .experts = undefined,
+            .pdl = pdl,
         };
         for (gemm_symbols, 0..) |sym, v| k.gemms[v] = try gemm_mod.function(sym);
         k.head_fn = try gemm_mod.function(head_symbol);
@@ -118,7 +119,12 @@ pub const Kernels = struct {
         k.* = undefined;
     }
 
-    fn product(f: cuda.Function, s: cuda.Stream, rt: usize, nt: usize, x: u64, ldx: usize, m: usize, w: u64, n: usize, kdim: usize, y: u64, ldy: usize) !void {
+    fn go(k: *const Kernels, s: cuda.Stream, f: cuda.Function, grid: [3]usize, block: u32, a: *cuda.Args) !void {
+        const g: cuda.Dim3 = .{ .x = @intCast(grid[0]), .y = @intCast(grid[1]), .z = @intCast(grid[2]) };
+        try cuda.launch.launch(f, .{ .grid = g, .block = .{ .x = block }, .pdl = k.pdl }, s, a);
+    }
+
+    fn product(k: *const Kernels, f: cuda.Function, s: cuda.Stream, rt: usize, nt: usize, x: u64, ldx: usize, m: usize, w: u64, n: usize, kdim: usize, y: u64, ldy: usize) !void {
         if (m == 0) return;
         if (kdim % 32 != 0 or ldx % 8 != 0 or x % 16 != 0 or w % 16 != 0) return error.DramaGemmShape;
         var a: cuda.Args = .{};
@@ -131,17 +137,17 @@ pub const Kernels = struct {
         a.add(y);
         a.add(int(ldy));
         const cols = 8 * nt * warps;
-        try go(s, f, .{ (n + cols - 1) / cols, (m + 16 * rt - 1) / (16 * rt), 1 }, 32 * warps, &a);
+        try k.go(s, f, .{ (n + cols - 1) / cols, (m + 16 * rt - 1) / (16 * rt), 1 }, 32 * warps, &a);
     }
 
     /// Y[m, n] = bf16(X[m, :] . W[n, :]) (fp32 accumulate). W has ceil8(n) rows; k % 32 == 0; rows 16-byte aligned.
     pub fn gemm(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, m: usize, w: u64, n: usize, kdim: usize, y: u64, ldy: usize) !void {
-        if (m == 1 and kdim % gemv_chunk == 0) return gemv(k.gemv_fn, s, x, w, n, kdim, y);
+        if (m == 1 and kdim % gemv_chunk == 0) return k.gemv(k.gemv_fn, s, x, w, n, kdim, y);
         const v: usize = if (m <= 16) 0 else if (m <= 32) 1 else 2;
-        try product(k.gemms[v], s, tilings[v][0], tilings[v][1], x, ldx, m, w, n, kdim, y, ldy);
+        try k.product(k.gemms[v], s, tilings[v][0], tilings[v][1], x, ldx, m, w, n, kdim, y, ldy);
     }
 
-    fn gemv(f: cuda.Function, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
+    fn gemv(k: *const Kernels, f: cuda.Function, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
         if (kdim % gemv_chunk != 0 or x % 16 != 0 or w % 16 != 0) return error.DramaGemmShape;
         var a: cuda.Args = .{};
         a.add(x);
@@ -149,12 +155,12 @@ pub const Kernels = struct {
         a.add(int(n));
         a.add(int(kdim));
         a.add(y);
-        try go(s, f, .{ (n + 7) / 8, 1, 1 }, 32, &a);
+        try k.go(s, f, .{ (n + 7) / 8, 1, 1 }, 32, &a);
     }
 
     /// y[n] = float(bf16(x . W[n, :])) for one row x.
     pub fn head(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, n: usize, kdim: usize, y: u64) !void {
-        try gemv(k.head_fn, s, x, w, n, kdim, y);
+        try k.gemv(k.head_fn, s, x, w, n, kdim, y);
     }
 
     pub const ExpertCall = struct {
@@ -188,7 +194,7 @@ pub const Kernels = struct {
         a.add(c.y);
         const cols = 8 * nt * warps;
         const f = k.experts[@intFromBool(c.routed != null)][nt - 1];
-        try go(s, f, .{ c.max_items, c.n / cols, 1 }, 32 * warps, &a);
+        try k.go(s, f, .{ c.max_items, c.n / cols, 1 }, 32 * warps, &a);
     }
 
     pub fn semanticMix(k: *const Kernels, s: cuda.Stream, ids: u64, out: u64, extra: u64, rows: usize, width: usize, lo: u32, hi: u32) !void {
@@ -199,7 +205,7 @@ pub const Kernels = struct {
         a.add(int(width));
         a.add(@as(i32, @intCast(lo)));
         a.add(@as(i32, @intCast(hi)));
-        try go(s, k.semantic_mix_fn, .{ rows, 1, 1 }, 256, &a);
+        try k.go(s, k.semantic_mix_fn, .{ rows, 1, 1 }, 256, &a);
     }
 
     /// res = x (first) or bf16(x + res); y = bf16(norm(x + res) * (1 + w)), with q / scales also y's FP8 groups.
@@ -215,7 +221,7 @@ pub const Kernels = struct {
         a.add(int(width));
         a.add(eps);
         a.add(@as(i32, @intFromBool(first)));
-        try go(s, k.add_norm_fn, .{ rows, 1, 1 }, 256, &a);
+        try k.go(s, k.add_norm_fn, .{ rows, 1, 1 }, 256, &a);
     }
 
     /// Drama-only 32 x 128 gated RMS; fixed full-extend reduction, independent of token count.
@@ -230,18 +236,18 @@ pub const Kernels = struct {
         a.add(out);
         a.add(eps);
         const threads = cuda.launch.rowThreads(rows, 256, 32);
-        try go(s, k.gated_rms_fn, .{ rows, 32 / (threads / 16), 1 }, threads, &a);
+        try k.go(s, k.gated_rms_fn, .{ rows, 32 / (threads / 16), 1 }, threads, &a);
     }
 
     pub fn conv(k: *const Kernels, s: cuda.Stream, in: u64, ld_in: usize, w: u64, state: u64, out: u64, rows: usize, channels: usize) !void {
-        try convUsing(k.conv_fn, s, in, ld_in, w, state, out, rows, channels);
+        try k.convUsing(k.conv_fn, s, in, ld_in, w, state, out, rows, channels);
     }
 
     pub fn convPrefill(k: *const Kernels, s: cuda.Stream, in: u64, ld_in: usize, w: u64, state: u64, out: u64, rows: usize, channels: usize) !void {
-        try convUsing(k.conv_prefill_fn, s, in, ld_in, w, state, out, rows, channels);
+        try k.convUsing(k.conv_prefill_fn, s, in, ld_in, w, state, out, rows, channels);
     }
 
-    fn convUsing(kernel: cuda.Function, s: cuda.Stream, in: u64, ld_in: usize, w: u64, state: u64, out: u64, rows: usize, channels: usize) !void {
+    fn convUsing(k: *const Kernels, kernel: cuda.Function, s: cuda.Stream, in: u64, ld_in: usize, w: u64, state: u64, out: u64, rows: usize, channels: usize) !void {
         var a: cuda.Args = .{};
         a.add(in);
         a.add(int(ld_in));
@@ -250,7 +256,7 @@ pub const Kernels = struct {
         a.add(out);
         a.add(int(rows));
         a.add(int(channels));
-        try go(s, kernel, .{ (channels + 255) / 256, 1, 1 }, 256, &a);
+        try k.go(s, kernel, .{ (channels + 255) / 256, 1, 1 }, 256, &a);
     }
 
     pub const Attn = struct {
@@ -288,7 +294,7 @@ pub const Kernels = struct {
             a.add(int(t.heads));
             a.add(int(t.kv_heads));
             a.add(t.eps);
-            try go(s, k.attn_prep_fn, .{ t.rows, t.heads + t.kv_heads, 1 }, 32, &a);
+            try k.go(s, k.attn_prep_fn, .{ t.rows, t.heads + t.kv_heads, 1 }, 32, &a);
         }
         var b: cuda.Args = .{};
         b.add(t.q);
@@ -305,7 +311,7 @@ pub const Kernels = struct {
         b.add(if (one) t.k_norm else 0);
         b.add(t.inv_freq);
         b.add(t.eps);
-        try go(s, k.attention_fn, .{ t.rows, t.heads, 1 }, 256, &b);
+        try k.go(s, k.attention_fn, .{ t.rows, t.heads, 1 }, 256, &b);
     }
 
     pub fn topk(k: *const Kernels, s: cuda.Stream, logits: u64, ld: usize, ids: u64, wts: u64, rows: usize, top: usize) !void {
@@ -316,7 +322,7 @@ pub const Kernels = struct {
         a.add(ids);
         a.add(wts);
         a.add(int(top));
-        try go(s, k.topk_fn, .{ rows, 1, 1 }, 256, &a);
+        try k.go(s, k.topk_fn, .{ rows, 1, 1 }, 256, &a);
     }
 
     pub fn actQuant(k: *const Kernels, s: cuda.Stream, x: u64, ld_x: usize, q: u64, scales: u64, rows: usize, kdim: usize) !void {
@@ -327,7 +333,7 @@ pub const Kernels = struct {
         a.add(q);
         a.add(scales);
         a.add(int(kdim));
-        try go(s, k.act_quant_fn, .{ rows, kdim / 512, 1 }, 128, &a);
+        try k.go(s, k.act_quant_fn, .{ rows, kdim / 512, 1 }, 128, &a);
     }
 
     /// One launch: the routed rows of gu FP8-quantized into hq / hs, the shared expert's rows of shared_gu stored to h.
@@ -343,7 +349,7 @@ pub const Kernels = struct {
         a.add(int(ld_shared));
         a.add(h);
         a.add(int(inner));
-        try go(s, k.silu_mul_fn, .{ routed + shared, inner / 512, 1 }, 128, &a);
+        try k.go(s, k.silu_mul_fn, .{ routed + shared, inner / 512, 1 }, 128, &a);
     }
 
     pub fn combine(k: *const Kernels, s: cuda.Stream, down: u64, top: usize, x: u64, wg: u64, shared: u64, out: u64, rows: usize, width: usize) !void {
@@ -356,6 +362,6 @@ pub const Kernels = struct {
         a.add(shared);
         a.add(out);
         a.add(int(width));
-        try go(s, k.combine_fn, .{ rows, 1, 1 }, 256, &a);
+        try k.go(s, k.combine_fn, .{ rows, 1, 1 }, 256, &a);
     }
 };

@@ -59,14 +59,28 @@ __device__ __forceinline__ uint32_t e4m3(float v, float inv) {
     return static_cast<uint32_t>(__nv_cvt_float_to_fp8(c, __NV_SATFINITE, __NV_E4M3));
 }
 
+// Programmatic dependent launch: wait for the previous kernel's writes, then let the next launch start (sm_90+).
+__device__ __forceinline__ void grid_dependency() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;\n" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+#endif
+}
+
 }  // namespace drama
 
 using namespace drama;
+
+#if __CUDA_ARCH__ >= 900
+// Marks an image whose kernels all begin with grid_dependency(); PDL runs only when both backbone images hold it.
+extern "C" __device__ const int drama_pdl = 1;
+#endif
 
 // Semantic rows (ids in [lo, hi]): bf16(bf16(out + extra) * 0.70710677), as embed_backbone; other rows keep out.
 extern "C" __global__ void __launch_bounds__(256) drama_semantic_mix(const int* ids, __nv_bfloat16* out,
                                                                     const __nv_bfloat16* extra, int width,
                                                                     int lo, int hi) {
+    grid_dependency();
     const int r = blockIdx.x;
     const int id = ids[r];
     if (id < lo || id > hi) return;
@@ -84,6 +98,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_add_norm(const __nv_bflo
                                                                 const __nv_bfloat16* w, __nv_bfloat16* y,
                                                                 uint8_t* q, float* s, int width, float eps,
                                                                 int first) {
+    grid_dependency();
     __shared__ float square_sum;
     const size_t base = static_cast<size_t>(blockIdx.x) * width;
     const int t = threadIdx.x;
@@ -147,6 +162,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_gated_rms_128(
     const __nv_bfloat16* y, long long y_ld,
     const __nv_bfloat16* z, long long z_ld,
     const __nv_bfloat16* w, __nv_bfloat16* out, float eps) {
+    grid_dependency();
     const int sub = threadIdx.x & 15;
     const int hd = (blockIdx.y * blockDim.x + threadIdx.x) / 16;
     const long long row = blockIdx.x;
@@ -188,6 +204,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_gated_rms_128(
 extern "C" __global__ void __launch_bounds__(256) drama_gdn_conv(const __nv_bfloat16* in, int ld_in,
                                                                 const __nv_bfloat16* w, __nv_bfloat16* state,
                                                                 __nv_bfloat16* out, int rows, int C) {
+    grid_dependency();
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     const float w0 = bf(w[4 * c]), w1 = bf(w[4 * c + 1]), w2 = bf(w[4 * c + 2]), w3 = bf(w[4 * c + 3]);
@@ -212,6 +229,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_gdn_conv(const __nv_bflo
 extern "C" __global__ void __launch_bounds__(256) drama_gdn_conv_prefill(
     const __nv_bfloat16* in, int ld_in, const __nv_bfloat16* w, __nv_bfloat16* state,
     __nv_bfloat16* out, int rows, int C) {
+    grid_dependency();
     const int c = blockIdx.x * blockDim.x + threadIdx.x;
     if (c >= C) return;
     const float w0 = bf(w[4 * c]), w1 = bf(w[4 * c + 1]), w2 = bf(w[4 * c + 2]), w3 = bf(w[4 * c + 3]);
@@ -244,6 +262,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_gdn_recur(const __nv_bfl
                                                                  const float* a_log, const float* dt_bias,
                                                                  float* state, __nv_bfloat16* y, int rows, int nk,
                                                                  int nv, float scale) {
+    grid_dependency();
     constexpr int DK = 128, DV = 128, R = 8;
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int head = blockIdx.y;
@@ -324,6 +343,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_gdn_recur(const __nv_bfl
 // Router: softmax over 256 experts, top 8 (lower id on ties), renormalized to sum 1, in descending probability.
 extern "C" __global__ void __launch_bounds__(256) drama_topk(const __nv_bfloat16* logits, int ld, int* ids, float* wts,
                                                             int top) {
+    grid_dependency();
     __shared__ float scratch[32];
     __shared__ float bv[8];
     __shared__ int bi[8];
@@ -385,6 +405,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_topk(const __nv_bfloat16
 // Group-128 FP8 quantization; the pinned JIT's fast-math 448 / amax multiplier stays local, with __fdividef.
 extern "C" __global__ void __launch_bounds__(128) drama_act_quant(const __nv_bfloat16* x, int ld_x, uint8_t* q,
                                                                  float* s, int K) {
+    grid_dependency();
     const int r = blockIdx.x, warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int group = blockIdx.y * 4 + warp;
     if (group * 128 >= K) return;
@@ -410,6 +431,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_act_quant(const __nv_bfl
 extern "C" __global__ void __launch_bounds__(128) drama_silu_mul(const __nv_bfloat16* gu, int ld_gu, int routed,
                                                                 uint8_t* hq, float* hs, const __nv_bfloat16* sgu,
                                                                 int ld_sgu, __nv_bfloat16* h_out, int I) {
+    grid_dependency();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
     const int group = blockIdx.y * 4 + warp;
     if (group * 128 >= I) return;
@@ -444,6 +466,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_moe_combine(const __nv_b
                                                                    const __nv_bfloat16* x, const __nv_bfloat16* wg,
                                                                    const __nv_bfloat16* shared, __nv_bfloat16* out,
                                                                    int width) {
+    grid_dependency();
     __shared__ float scratch[32];
     const size_t r = blockIdx.x;
     float part = 0.f;

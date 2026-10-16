@@ -42,6 +42,14 @@ __device__ __forceinline__ uint32_t word(const uint4& v, int i) {
     return i == 0 ? v.x : i == 1 ? v.y : i == 2 ? v.z : v.w;
 }
 
+// PDL wait and trigger before other global access; the one-row GEMV queues its first weight stages before it.
+__device__ __forceinline__ void grid_dependency() {
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;\n" ::: "memory");
+    asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+#endif
+}
+
 // OUT 0: bf16; 2: fp32 holding the bf16-rounded value (a bf16 torch output read back as float).
 template <int OUT>
 __device__ __forceinline__ void store(void* y, size_t at, float v) {
@@ -165,6 +173,7 @@ __device__ __forceinline__ void gemv_bf16(const __nv_bfloat16* __restrict__ X, c
         if (c < chunks) issue(c);
         asm volatile("cp.async.commit_group;\n");
     }
+    grid_dependency();
     const bool live = g == 0;  // the single row is A's row 0; rows 1..15 are zero as in gemm_bf16
     float acc[4] = {0.f, 0.f, 0.f, 0.f};
     for (int c = 0; c < chunks; ++c) {
@@ -281,10 +290,16 @@ __device__ __forceinline__ void expert_fp8(const uint8_t* __restrict__ A, int a_
 
 }  // namespace drama_gemm
 
+#if __CUDA_ARCH__ >= 900
+// Present only in images whose every kernel calls grid_dependency(), as in drama_backbone.cu.
+extern "C" __device__ const int drama_pdl = 1;
+#endif
+
 #define DRAMA_GEMM(RT, NT)                                                                                          \
     extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS)                                           \
         drama_gemm_bf16_r##RT##_n##NT##_o0(const __nv_bfloat16* X, int ldx, int M, const __nv_bfloat16* W, int N, \
                                            int K, void* Y, int ldy) {                                              \
+        drama_gemm::grid_dependency();                                                                             \
         drama_gemm::gemm_bf16<RT, NT>(X, ldx, M, W, N, K, Y, ldy);                                                 \
     }
 DRAMA_GEMM(1, 1)
@@ -303,6 +318,7 @@ DRAMA_GEMV(2)  // the semantic head: the last row, bf16-rounded logits widened t
     extern "C" __global__ void __launch_bounds__(32 * drama_gemm::WARPS) drama_expert_fp8_n##NT##_m##MODE(          \
         const uint8_t* A, int a_div, const float* As, const uint8_t* W, const float* Ws, int N, int K,            \
         const int* items, const int* counts, const int* members, const float* rw, __nv_bfloat16* Y) {             \
+        drama_gemm::grid_dependency();                                                                             \
         drama_gemm::expert_fp8<NT, MODE>(A, a_div, As, W, Ws, N, K, items, counts, members, rw, Y);                \
     }
 DRAMA_EXPERT(1, 0)

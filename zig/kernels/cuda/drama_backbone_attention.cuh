@@ -37,6 +37,7 @@ extern "C" __global__ void __launch_bounds__(32) drama_attn_prep(const __nv_bflo
                                                                 const float* inv_freq, __nv_bfloat16* q_out,
                                                                 __nv_bfloat16* kc, __nv_bfloat16* vc, int pos0, int H,
                                                                 int HK, float eps) {
+    grid_dependency();
     constexpr int D = 256;
     const int r = blockIdx.x, h = blockIdx.y, lane = threadIdx.x;
     const int pos = pos0 + r;
@@ -65,6 +66,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_attention(const __nv_bfl
                                                                  int HK, float scale, const __nv_bfloat16* qn_w,
                                                                  const __nv_bfloat16* kn_w, const float* inv_freq,
                                                                  float eps) {
+    grid_dependency();
     constexpr int D = 256, NW = 8, U = 8;
     __shared__ float sm_m[NW], sm_l[NW];
     __shared__ float sm_o[NW][D];

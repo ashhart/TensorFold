@@ -205,7 +205,7 @@ pub fn main(init: std.process.Init) !u8 {
 
     var glue = try cuda.Module.load(&driver, glue_image);
     defer glue.unload();
-    const kernels = try gdn.Kernels.init(&glue);
+    const kernels = try gdn.Kernels.init(&glue, false); // GLUE_FATBIN may be any image: plain launches
     var frozen = try cuda.Module.load(&driver, frozen_image);
     defer frozen.unload();
     const frozen_decode_fn = try frozen.function(frozen_decode);

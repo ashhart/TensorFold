@@ -136,6 +136,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_gdn_chunk_append(const _
                                                                        __nv_bfloat16* ba_cache, int at, int qkv_cols,
                                                                        int ba_cols) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     const size_t r = blockIdx.x, c = at + r;
     copy_row(qkv + r * ld_qkv, qkv_cache + c * qkv_cols, qkv_cols);
     copy_row(ba + r * ld_ba, ba_cache + c * ba_cols, ba_cols);
@@ -146,6 +147,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_gdn_chunk_l2norm(const _
                                                                        __nv_bfloat16* qk, int rows, int nk,
                                                                        float eps) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     const int nrow = rows * 2 * nk;
     const int r = static_cast<int>(blockIdx.x) * 16 + (threadIdx.x >> 4);
     const int col = (threadIdx.x & 15) * 8;
@@ -168,6 +170,7 @@ extern "C" __global__ void __launch_bounds__(64) drama_gdn_chunk_gate(const __nv
                                                                     float* g, float* gc, float* beta, int rows,
                                                                     int nv) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     __shared__ float total0;
     const int h = blockIdx.y, i = threadIdx.x, lane = i & 31;
     const int t = static_cast<int>(blockIdx.x) * BT + i;
@@ -201,6 +204,7 @@ extern "C" __global__ void __launch_bounds__(32) drama_gdn_chunk_kkt(const __nv_
                                                                    const float* beta, __nv_bfloat16* A, int rows,
                                                                    int nk, int nv) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     __shared__ float sA[BT][BT];   // gated, masked, beta-scaled lower blocks
     __shared__ float sI[BT][BT];   // (I + A)^-1 blocks
     __shared__ float sT[BC][BC];   // merge temporary
@@ -318,6 +322,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_gdn_chunk_wu(const __nv_
                                                                    __nv_bfloat16* w, __nv_bfloat16* u, int rows,
                                                                    int nk, int nv) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     __shared__ unsigned short sAb[BT][BT];
     __shared__ unsigned short sV[BT][D];
     __shared__ unsigned short sK[BT][D];
@@ -372,6 +377,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_gdn_chunk_h(const __nv_b
                                                                   __nv_bfloat16* hout, __nv_bfloat16* vn, int rows,
                                                                   int nk, int nv) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     constexpr int BV = 32;
     __shared__ float sS[BV][D];
     __shared__ unsigned short sH[BV][D];
@@ -455,6 +461,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_gdn_chunk_o(const __nv_b
                                                                   __nv_bfloat16* y, int rows, int emit_from, int nk,
                                                                   int nv, float scale) {
     using namespace drama_gdn_chunk;
+    grid_dependency();
     constexpr int BV = 64;
     __shared__ unsigned short sAo[BT][BT];
     __shared__ float sG[BT];
