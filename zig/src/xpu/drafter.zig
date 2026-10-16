@@ -69,6 +69,7 @@ const Mlx = struct { w: *anyopaque, s: *anyopaque, b: *anyopaque, n: u32 };
 
 pub const Drafter = struct {
     r: *q.Runner,
+    ckpt: q.Checkpoint = .{}, // the codebooks (pred, succ) are read from its mapping
     k: struct { dconv: ze.H, dprep: ze.H, dattn: ze.H, rowsums_rows: ze.H, taps_in: ze.H, to_res: ze.H, topk_part: ze.H, quantize4: ze.H },
     layers: [LAYERS]Layer,
     fc: q.Proj,
@@ -160,8 +161,12 @@ pub const Drafter = struct {
     pub fn init(r: *q.Runner, dir: []const u8) !*Drafter {
         const d = &r.d;
         var c: q.Checkpoint = .{};
-        try c.addShard(try std.fmt.allocPrintSentinel(alloc, "{s}/model.safetensors", .{dir}, 0));
+        errdefer c.deinit();
+        const path = try std.fmt.allocPrintSentinel(alloc, "{s}/model.safetensors", .{dir}, 0);
+        defer alloc.free(path);
+        try c.addShard(path);
         const dr = try alloc.create(Drafter);
+        errdefer alloc.destroy(dr);
         const m = try d.g.module(&kb.drafter);
         const kern = struct {
             fn f(dd: *q.Dev, mm: ze.H, name: [*:0]const u8, local: u32) !ze.H {
@@ -169,6 +174,10 @@ pub const Drafter = struct {
             }
         }.f;
         const rows = @max(q.CHUNK, MAXB);
+        const pv_host = try alloc.alloc(f32, MAXB * 256 * 16);
+        errdefer alloc.free(pv_host);
+        const pi_host = try alloc.alloc(i32, MAXB * 256 * 16);
+        errdefer alloc.free(pi_host);
         dr.* = .{
             .r = r,
             .k = .{ .dconv = try kern(d, m, "dconv", 512), .dprep = try kern(d, m, "dprep", 16), .dattn = try kern(d, m, "dattn", 16), .rowsums_rows = try kern(d, m, "rowsums_rows", 256), .taps_in = try kern(d, m, "taps_in", 256), .to_res = try kern(d, m, "to_res", 256), .topk_part = try kern(d, m, "topk_part", 16), .quantize4 = try kern(d, m, "quantize4", 16) },
@@ -199,10 +208,11 @@ pub const Drafter = struct {
             .rows_dev = try d.alloc_(MAXB * 16),
             .ptrs_dev = try d.alloc_(LAYERS * MAXS * 16),
             .tapsbuf = try d.alloc_(MAXB * 5 * D * 2),
-            .pv_host = try alloc.alloc(f32, MAXB * 256 * 16),
-            .pi_host = try alloc.alloc(i32, MAXB * 256 * 16),
+            .pv_host = pv_host,
+            .pi_host = pi_host,
             .pscr = try d.alloc_(rows * D * 4),
         };
+        dr.ckpt = c;
         const stage = try d.alloc_(800 << 20);
         defer d.g.free(stage);
         const bf = struct {
@@ -293,6 +303,14 @@ pub const Drafter = struct {
         dr.invf = try d.upload(std.mem.sliceAsBytes(&invf));
         try dr.use(0);
         return dr;
+    }
+
+    /// Frees the host side; the device buffers go with the runner's device (Runner.deinit), after this.
+    pub fn deinit(dr: *Drafter) void {
+        alloc.free(dr.pv_host);
+        alloc.free(dr.pi_host);
+        dr.ckpt.deinit();
+        alloc.destroy(dr);
     }
 
     /// Makes slot `slot`'s context the one every call works on (allocated on first use: ~42 MB).

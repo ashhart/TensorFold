@@ -29,6 +29,8 @@ zig build xpu-native -Doptimize=ReleaseFast -Dngen-include=<path to ngen>   # zi
 zig build xpu-qwen27 -Doptimize=ReleaseFast -Dngen-include=<path to ngen>   # xpu-qwen27 test executable
 ```
 
+Device tests: `zig build xpu-tests -Doptimize=ReleaseFast -Dngen-include=<path to ngen>`, then `zig-out/bin/tf-xpu-qwen27-means-test` (group means against FP64, no model) and `zig-out/bin/tf-xpu-qwen27-seam-test MODEL` (or `TF_XPU_QWEN27=MODEL`: a prompt cut at 64, 1024 or whole gives the same logits); both print `skipped:` and exit 0 without a Level Zero device or a model.
+
 The OpenCL C kernels are compiled by `ocloc` for `-Dxpu-device` (default `bmg`). The prompt GEMMs are generated as
 ISA by nGEN at build time (`zig/tools/xpu/w4_ngen.cpp`); everything is embedded in the executable.
 

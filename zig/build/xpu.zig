@@ -85,6 +85,17 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const exe = b.addExecutable(.{ .name = "xpu-qwen27", .root_module = module });
     const install = b.addInstallArtifact(exe, .{});
     b.step("xpu-qwen27", "Build the Qwen3.8-27B XPU forward runner (needs ocloc, a C++17 compiler and nGEN headers)").dependOn(&install.step);
+    // device tests: a skip message and exit 0 without a Level Zero device or a model
+    const tests_step = b.step("xpu-tests", "Build the XPU device tests (tf-xpu-qwen27-means-test, -seam-test, -close-test)");
+    for ([_][2][]const u8{
+        .{ "tf-xpu-qwen27-means-test", "zig/src/xpu/means_test.zig" },
+        .{ "tf-xpu-qwen27-seam-test", "zig/src/xpu/seam_test.zig" },
+        .{ "tf-xpu-qwen27-close-test", "zig/src/xpu/close_test.zig" },
+    }) |t| {
+        const m = b.createModule(.{ .root_source_file = b.path(t[1]), .target = target, .optimize = optimize, .link_libc = true });
+        m.addImport("xpu_qwen27_kernels", embedded);
+        tests_step.dependOn(&b.addInstallArtifact(b.addExecutable(.{ .name = t[0], .root_module = m }), .{}).step);
+    }
 
     // tensorfold-native with the XPU engines (native/xpu.zig), as the CUDA build's `native` step makes it.
     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/qwen27.zig"), .target = target, .optimize = optimize, .link_libc = true });
