@@ -55,6 +55,7 @@ pub const Weights = struct {
     draft_head: ?QLinear = null,
     draft_ids: u64 = 0,
     draft_count: usize = 0,
+    draft_coverage: ?draft_ids.Coverage = null, // the draft ids as a set where the draft head and the whole head both draft
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     named: std.ArrayList(Named) = .empty,
 
@@ -64,6 +65,7 @@ pub const Weights = struct {
         w.buffers.deinit(w.gpa);
         w.named.deinit(w.gpa);
         w.gpa.free(w.blocks);
+        if (w.draft_coverage) |*c| c.deinit(w.gpa);
         w.* = undefined;
     }
 };

@@ -326,9 +326,9 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
     var drafter: ?nemotron.Drafter = if (o.drafts) try nemotron.Drafter.init(gpa, io, e, o.model, o.graphs, o.costs) else null;
     defer if (drafter) |*d| d.deinit();
     if (drafter) |d| {
-        const v = d.rule.costs.verify;
-        const w = d.rule.costs.rows;
-        std.debug.print("up to {d} MTP drafts a round, each verified while it pays for its row (measured: {d:.2}/{d:.2}/{d:.2}/{d:.2}/{d:.2} ms at 1/2/4/8/{d} rows, {d:.3} ms a draft)\n", .{ w - 1, v[1], v[2], v[4], v[8], v[w], w, d.rule.costs.level });
+        const v = d.rules.subset.costs.verify;
+        const w = d.rules.subset.costs.rows;
+        std.debug.print("up to {d} MTP drafts a round, each verified while it pays for its row (measured: {d:.2}/{d:.2}/{d:.2}/{d:.2}/{d:.2} ms at 1/2/4/8/{d} rows, {d:.3} ms a draft)\n", .{ w - 1, v[1], v[2], v[4], v[8], v[w], w, d.rules.subset.costs.level });
     }
     const res = try decode.generate(gpa, io, e, if (drafter) |*d| d else null, o.tokens, count, .{ .stop_eos = o.stop_eos });
     defer gpa.free(res.tokens);

@@ -331,4 +331,5 @@ pub fn fp8DraftHead(L: *Loader, ck: *core.Checkpoint, c: Config) !void {
     w.act = act;
     L.w.draft_head = .{ .fp8 = w };
     try W.draftIds(L, ids);
+    L.w.draft_coverage = try .init(L.gpa, c.vocab, ids); // the whole head stays resident: streams draft on either
 }

@@ -53,7 +53,7 @@ pub const Cuda = struct {
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
-    measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
+    measured: ?costs.Measured = null, // a lone stream's depth rules price its rounds by these
     mtp_drafts: ?u32 = null,
     mtp_confidence: ?f64 = null,
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
@@ -156,18 +156,19 @@ pub const Cuda = struct {
         };
     }
 
-    /// costs.measure on the engine's own sequence: windows of every width it takes and a head level, in ms.
+    /// costs.measure on the engine's own sequence: windows of every width it takes and each head's level, in ms.
     pub fn measure(self: *Cuda, io: std.Io, model_dir: []const u8) !void {
         const h = self.head orelse return;
         self.e.bind(&self.e.own);
-        const c = try costs.measure(self.gpa, io, self.e, h, model_dir);
+        const m = try costs.measure(self.gpa, io, self.e, h, model_dir);
+        const shared = m.full orelse m.subset; // a shared round's streams may draft on either head: priced as the dearer
         self.cost_count = 0;
-        for (1..c.rows + 1) |w| {
-            self.costs[self.cost_count] = .{ .width = @intCast(w), .ms = c.verify[w] };
+        for (1..shared.rows + 1) |w| {
+            self.costs[self.cost_count] = .{ .width = @intCast(w), .ms = shared.verify[w] };
             self.cost_count += 1;
         }
-        self.mtp_ms = c.level;
-        self.measured = c;
+        self.mtp_ms = shared.level;
+        self.measured = m;
     }
 
     /// A lone driver's hand-over: the head absorbs the last `kept` rows; the stream stands as a lane round leaves it.
@@ -177,7 +178,7 @@ pub const Cuda = struct {
         l.keep = 0;
         if (self.head) |h| {
             try h.begin(kept);
-            try h.launch(0);
+            try h.launch(0, .subset); // an absorb reads no head
         }
         s.cache_len = self.e.pos;
         s.pending = s.context.items[s.context.items.len - 1];
@@ -493,14 +494,15 @@ pub const Cuda = struct {
                 first[0] = self.value(r.first orelse return error.NoFirstToken);
                 break :blk first[0..];
             };
+            const v = h.vocab(r.stream.context.items);
             if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
-                try h.chain(follow, r.depth);
+                try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;
             }
             if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
-            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
             batched += 1;
