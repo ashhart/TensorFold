@@ -1,6 +1,6 @@
 # TensorFold
 
-TensorFold 1.0.11 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold 1.0.12 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
@@ -64,7 +64,7 @@ command, the 3D view, undoing lessons, and what to expect.
 
 ## Qualified models
 
-Only these model and platform combinations are admitted to 1.0.11.
+Only these model and platform combinations are admitted to 1.0.12.
 The platform column names the hardware tested for each model.
 
 | Model | Checkpoint format | Qualified platform |
@@ -131,7 +131,7 @@ tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 
 `pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
-It refuses a model that no 1.0.11 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.11 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+It refuses a model that no 1.0.12 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.12 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -241,7 +241,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.11
+zig build native -Dcpu=apple_m1 -Dversion=1.0.12
 zig build test test-golden -Dcpu=apple_m1
 ```
 
