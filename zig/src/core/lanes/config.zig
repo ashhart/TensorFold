@@ -32,6 +32,10 @@ pub const Model = struct {
     draft_probabilities: bool = false, // the head gives each drafted node's chance of landing
     draft_streams: bool = false, // the head drafts every stream of a shared round in one batch
     head_trees: bool = false, // the head drafts trees of lanes (DraftRequest.lanes) and holds them
+    join_tail: bool = false, // a prompt in pieces leaves its last token for the next shared round's window (Backend.join)
+    piece_runs: bool = false, // a round's pieces go to the backend in one call (Backend.pieces: one forward over them)
+    join_drafts: bool = false, // with join_tail: a round's joined prompts' first drafts in one call (Engine.finishStreams)
+    replay_runs: bool = false, // a round's finals go to the backend together first (Backend.finals)
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
 };
@@ -55,9 +59,18 @@ pub const Config = struct {
     fill_floor: f64 = 0.35, // the share of grafted rows a stream must keep to go on reading its chain back every round
     draft_streams: bool,
     head_trees: bool,
+    /// a prompt in pieces leaves its last token as the pending row of its first shared round's window
+    join_tail: bool = false,
+    /// a round's pieces of several streams in one backend call (Backend.pieces), which may run them as one forward
+    piece_runs: bool = false,
+    /// with join_tail: a round's joined prompts get their first drafts in one backend call
+    join_drafts: bool = false,
+    /// a round's finished prompts to the backend together before their finishes (Backend.finals)
+    replay_runs: bool = false,
     head_lanes: u32 = 0, // a lone stream's lanes at most, the planner picking each round's (0: the depth rule's chain)
     head_depth: u32 = 16, // and their depth at most
     own_prices: bool = true, // the planner prices each pick from the stream's own measured rounds (seeded from the table)
+    timed: bool = true, // false: rounds priced from the cost tables alone, no wall clock (a request drafts the same whatever the load or the requests before it)
     depth_prior: []f64,
     family_costs: Table,
     shared_costs: Table,
@@ -115,6 +128,10 @@ pub const Config = struct {
             .node_probabilities = m.draft_probabilities,
             .draft_streams = m.draft_streams,
             .head_trees = m.head_trees,
+            .join_tail = m.join_tail,
+            .piece_runs = m.piece_runs,
+            .join_drafts = m.join_drafts,
+            .replay_runs = m.replay_runs,
             .depth_prior = depth_prior,
             .family_costs = family_costs,
             .shared_costs = try alloc.extendCosts(gpa, timed.items, batch_rows),

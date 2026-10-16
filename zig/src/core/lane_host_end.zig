@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api.zig");
 const fill = @import("lane_host_fill.zig");
+const lane_halt = @import("lane_halt.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
 const Id = api.Id;
@@ -40,6 +41,7 @@ pub fn takeCancels(h: *LaneHost) void {
 
 /// A failed round ends every stream it held, with the backend's error.
 pub fn failAll(h: *LaneHost, message: []const u8) void {
+    std.log.warn("lane host: a round failed ({s}): every admitted stream fails", .{message});
     h.lock();
     const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
     h.admitted.clearRetainingCapacity();
@@ -53,6 +55,7 @@ pub fn failAll(h: *LaneHost, message: []const u8) void {
 }
 
 pub fn closeAll(h: *LaneHost) void {
+    if (h.halt_reason) |reason| return lane_halt.haltAll(h, reason);
     h.lock();
     for (h.queued.items) |job| h.cancels.append(h.gpa, job.id) catch {};
     for (h.admitted.items) |job| h.cancels.append(h.gpa, job.id) catch {};

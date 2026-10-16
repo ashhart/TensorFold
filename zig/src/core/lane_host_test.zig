@@ -257,7 +257,7 @@ test "a lane host serves the core's own tokens, in order, and cancels between ro
 }
 
 /// A learner that takes `total` steps over a lesson, then reports it learned in that many.
-const FakeLearner = struct {
+pub const FakeLearner = struct {
     sink: ?api.LearnSink = null,
     steps: u32 = 0,
     total: u32 = 3,
@@ -266,11 +266,11 @@ const FakeLearner = struct {
     fn emit(l: *FakeLearner, event: api.LearnEvent) void {
         l.sink.?.event(l.sink.?.ctx, &event);
     }
-    fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
+    pub fn begin(ctx: *anyopaque, request: *const api.LearnRequest, sink: api.LearnSink) anyerror!void {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.* = .{ .sink = sink, .total = l.total, .examples = request.train.len };
     }
-    fn step(ctx: *anyopaque) api.Learner.Step {
+    pub fn step(ctx: *anyopaque) api.Learner.Step {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.steps += 1;
         if (l.steps < l.total) return .{ .done = false, .changed = false };
@@ -278,20 +278,20 @@ const FakeLearner = struct {
         l.emit(.{ .done = .{} });
         return .{ .done = true, .changed = true };
     }
-    fn abort(ctx: *anyopaque) void {
+    pub fn abort(ctx: *anyopaque) void {
         const l: *FakeLearner = @ptrCast(@alignCast(ctx));
         l.emit(.{ .done = .{ .message = "aborted" } });
     }
 };
 
 /// Learn events as tags, read on the test's thread once `done` arrives.
-const LearnBox = struct {
+pub const LearnBox = struct {
     mutex: std.Io.Mutex = .init,
     tags: std.ArrayList(std.meta.Tag(api.LearnEvent)) = .empty,
     steps: u32 = 0,
     done: bool = false,
 
-    fn sink(b: *LearnBox) api.LearnSink {
+    pub fn sink(b: *LearnBox) api.LearnSink {
         return .{ .ctx = b, .event = event };
     }
     fn event(ctx: *anyopaque, e: *const api.LearnEvent) void {
@@ -302,7 +302,7 @@ const LearnBox = struct {
         if (e.* == .learned) b.steps = e.learned.steps;
         if (e.* == .done) b.done = true;
     }
-    fn wait(b: *LearnBox) void {
+    pub fn wait(b: *LearnBox) void {
         while (true) {
             b.mutex.lockUncancelable(std.testing.io);
             const d = b.done;
