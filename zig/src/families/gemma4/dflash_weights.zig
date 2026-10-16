@@ -30,15 +30,16 @@ pub const Config = struct {
     /// Each layer's kind: true for a sliding layer (causal within the block), false for a full one.
     sliding: [8]bool = @splat(true),
 
-    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Config {
+    /// `geo`: the target's sizes, which the drafter's width and taps must fit.
+    pub fn read(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, geo: cfg.Geometry) !Config {
         const path = try std.fs.path.join(gpa, &.{ dir, "config.json" });
         defer gpa.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 20));
         defer gpa.free(bytes);
-        return parse(gpa, bytes);
+        return parse(gpa, bytes, geo);
     }
 
-    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
+    pub fn parse(gpa: std.mem.Allocator, bytes: []const u8, geo: cfg.Geometry) !Config {
         var parsed = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
         defer parsed.deinit();
         const o = if (parsed.value == .object) parsed.value.object else return error.BadDraftConfig;
@@ -46,10 +47,12 @@ pub const Config = struct {
         if (archs != .array or archs.array.items.len != 1 or archs.array.items[0] != .string or !std.mem.eql(u8, archs.array.items[0].string, "DFlashDraftModel")) return error.NotDFlashV1;
         const d = if (o.get("dflash_config")) |v| (if (v == .object) v.object else return error.BadDraftConfig) else return error.BadDraftConfig;
         var c: Config = .{ .tap_count = 0, .layers = @intCast(try integer(o, "num_hidden_layers")), .hidden = @intCast(try integer(o, "hidden_size")), .intermediate = @intCast(try integer(o, "intermediate_size")), .heads = @intCast(try integer(o, "num_attention_heads")), .kv_heads = @intCast(try integer(o, "num_key_value_heads")), .head_dim = @intCast(try integer(o, "head_dim")), .block = @intCast(if (d.get("block_size") != null) try integer(d, "block_size") else try integer(o, "block_size")), .mask = @intCast(try integer(d, "mask_token_id")), .window = @intCast(try integer(o, "sliding_window")), .eps = @floatCast(try number(o, "rms_norm_eps")), .theta = @floatCast(try number(o, "rope_theta")) };
+        if (c.hidden != geo.hidden) return error.DraftForAnotherTarget;
         const taps = d.get("target_layer_ids") orelse return error.BadDraftConfig;
         if (taps != .array or taps.array.items.len == 0 or taps.array.items.len > 8) return error.BadDraftConfig;
         for (taps.array.items, 0..) |t, i| {
-            if (t != .integer or t.integer < 0 or t.integer >= cfg.layers) return error.BadDraftConfig;
+            if (t != .integer or t.integer < 0) return error.BadDraftConfig;
+            if (t.integer >= geo.layers) return error.DraftForAnotherTarget;
             c.taps[i] = @intCast(t.integer);
         }
         c.tap_count = @intCast(taps.array.items.len);
@@ -59,7 +62,7 @@ pub const Config = struct {
             for (kinds.array.items, 0..) |k, i| c.sliding[i] = k == .string and std.mem.eql(u8, k.string, "sliding_attention");
         }
         if (o.get("is_causal") != null) return error.UnsupportedDraftMask; // the vendored default decides the block's mask
-        if (c.hidden != cfg.hidden or c.head_dim != 128 or c.heads % c.kv_heads != 0 or c.heads > 128 or c.block != 16 or c.window < 32) return error.UnsupportedDraftShape;
+        if (c.head_dim != 128 or c.heads % c.kv_heads != 0 or c.heads > 128 or c.block != 16 or c.window < 32) return error.UnsupportedDraftShape;
         if (c.hidden % 64 != 0 or c.intermediate % 64 != 0 or (c.heads * c.head_dim) % 32 != 0 or (c.kv_heads * c.head_dim) % 64 != 0) return error.UnsupportedDraftShape;
         if (c.mask >= cfg.vocab) return error.BadDraftConfig;
         return c;
@@ -160,7 +163,7 @@ const Job = struct {
 };
 
 /// The members' bf16 rows stacked along N, quantized to 4-bit groups of 64 on every core, packed for the reg kernel.
-fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, members: []const []const u8) !Linear {
+fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
     var name: [160]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -188,7 +191,7 @@ fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Chec
         try parallel(gpa, job, rows);
         row += rows;
     }
-    const lin = try weights.packArrays(gpa, device, owned, words, scales, biases, n, k);
+    const lin = try weights.packArrays(gpa, device, owned, geo, words, scales, biases, n, k);
     return .{ .w = lin.w, .sb = lin.sb, .n = n, .k = k };
 }
 
@@ -240,7 +243,7 @@ fn vector(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint,
     return .{ .buf = buf };
 }
 
-pub fn load(gpa: std.mem.Allocator, device: mtl.Device, io: std.Io, dir: []const u8, c: *const Config) !Weights {
+pub fn load(gpa: std.mem.Allocator, device: mtl.Device, io: std.Io, dir: []const u8, c: *const Config, geo: cfg.Geometry) !Weights {
     var check = ckpt.Checkpoint.init(gpa);
     defer check.deinit();
     const files = try shards.shardFiles(gpa, io, dir);
@@ -251,17 +254,17 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, io: std.Io, dir: []const
     errdefer w.deinit(gpa);
     var p: [64]u8 = undefined;
     var name: [160]u8 = undefined;
-    w.fc = try quantizeStack(gpa, device, &check, &w.owned, "", &.{"fc"});
+    w.fc = try quantizeStack(gpa, device, &check, &w.owned, geo, "", &.{"fc"});
     if (w.fc.k != c.tap_count * c.hidden or w.fc.n != c.hidden) return error.BadDraftWeight;
     w.hidden_norm = try vector(gpa, device, &check, &w.owned, "hidden_norm.weight", c.hidden);
     w.norm = try vector(gpa, device, &check, &w.owned, "norm.weight", c.hidden);
     for (w.layers[0..c.layers], 0..) |*l, i| {
         const pre = try std.fmt.bufPrint(&p, "layers.{d}.", .{i});
-        l.qkv = try quantizeStack(gpa, device, &check, &w.owned, pre, &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" });
-        l.kv = try quantizeStack(gpa, device, &check, &w.owned, pre, &.{ "self_attn.k_proj", "self_attn.v_proj" });
-        l.o = try quantizeStack(gpa, device, &check, &w.owned, pre, &.{"self_attn.o_proj"});
-        l.gate_up = try quantizeStack(gpa, device, &check, &w.owned, pre, &.{ "mlp.gate_proj", "mlp.up_proj" });
-        l.down = try quantizeStack(gpa, device, &check, &w.owned, pre, &.{"mlp.down_proj"});
+        l.qkv = try quantizeStack(gpa, device, &check, &w.owned, geo, pre, &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" });
+        l.kv = try quantizeStack(gpa, device, &check, &w.owned, geo, pre, &.{ "self_attn.k_proj", "self_attn.v_proj" });
+        l.o = try quantizeStack(gpa, device, &check, &w.owned, geo, pre, &.{"self_attn.o_proj"});
+        l.gate_up = try quantizeStack(gpa, device, &check, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" });
+        l.down = try quantizeStack(gpa, device, &check, &w.owned, geo, pre, &.{"mlp.down_proj"});
         if (l.qkv.n != (c.heads + 2 * c.kv_heads) * c.head_dim or l.o.k != c.heads * c.head_dim or l.gate_up.n != 2 * c.intermediate or l.down.k != c.intermediate) return error.BadDraftWeight;
         inline for (.{ "input_norm", "post_attention", "q_norm", "k_norm" }, .{ "input_layernorm.weight", "post_attention_layernorm.weight", "self_attn.q_norm.weight", "self_attn.k_norm.weight" }, .{ c.hidden, c.hidden, c.head_dim, c.head_dim }) |field, t, len|
             @field(l, field) = try vector(gpa, device, &check, &w.owned, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }), len);
@@ -275,16 +278,17 @@ test "the stock drafter config is admitted and others refused with a reason" {
         \\"hidden_size":5376,"intermediate_size":10752,"num_hidden_layers":5,"num_attention_heads":64,"num_key_value_heads":8,"head_dim":128,
         \\"sliding_window":2048,"rms_norm_eps":1e-6,"rope_theta":1000000,"layer_types":["sliding_attention","sliding_attention","sliding_attention","sliding_attention","full_attention"]}
     ;
-    const c = try Config.parse(std.testing.allocator, stock);
+    const c = try Config.parse(std.testing.allocator, stock, cfg.dense31b);
     try std.testing.expectEqual(@as(u32, 6), c.tap_count);
     try std.testing.expectEqual(@as(u32, 57), c.taps[5]);
     try std.testing.expect(c.sliding[3] and !c.sliding[4]);
     const two = try std.mem.replaceOwned(u8, std.testing.allocator, stock, "DFlashDraftModel", "DFlash2DraftModel");
     defer std.testing.allocator.free(two);
-    try std.testing.expectError(error.NotDFlashV1, Config.parse(std.testing.allocator, two));
+    try std.testing.expectError(error.NotDFlashV1, Config.parse(std.testing.allocator, two, cfg.dense31b));
     const causal = try std.mem.replaceOwned(u8, std.testing.allocator, stock, "\"hidden_size\"", "\"is_causal\":false,\"hidden_size\"");
     defer std.testing.allocator.free(causal);
-    try std.testing.expectError(error.UnsupportedDraftMask, Config.parse(std.testing.allocator, causal));
+    try std.testing.expectError(error.UnsupportedDraftMask, Config.parse(std.testing.allocator, causal, cfg.dense31b));
+    try std.testing.expectError(error.DraftForAnotherTarget, Config.parse(std.testing.allocator, stock, cfg.unified12b));
 }
 
 test "4-bit quantization keeps the larger edge exact and zero within the scale's bf16 rounding, as MLX does" {

@@ -177,7 +177,7 @@ const Snaps = struct {
 
 /// Prompt reuse in what 70% of RAM leaves beside the streams' caches (16 GiB by default), at planned chunk starts.
 fn enableCache(h: *Host, a: std.mem.Allocator, o: api.Open, window: usize, problem: *[]const u8) !void {
-    const later = @as(u64, @max(o.lanes, 2)) * g.state.cacheBytes(window);
+    const later = @as(u64, @max(o.lanes, 2)) * g.state.cacheBytes(h.model.config.geo, window);
     const room = h.model.device.maxWorkingSet() -| h.model.device.allocated() -| (8 << 30) -| later;
     var why: []const u8 = "";
     const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, room, later, a, &why, "") catch |err| switch (err) {

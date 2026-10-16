@@ -6,6 +6,8 @@ const tf = @import("tensorfold");
 const g4 = tf.gemma4;
 const cfg = g4.config;
 const npy = tf.npy;
+/// The checkpoint's sizes, read from its config in main.
+var geo: cfg.Geometry = undefined;
 const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 const Ctx = struct {
@@ -91,11 +93,11 @@ fn rowsCheck(c: *Ctx, rows: usize, p0: usize) !void {
     const kd = &c.k.sliding;
     const tag = nm(0, "r{d}", .{rows});
     const ids = try c.load(nm(1, "{s}.tokens", .{tag}), false);
-    const emb = try c.buf(rows * cfg.hidden * 2);
+    const emb = try c.buf(rows * geo.hidden * 2);
     const ew = try c.tensor("language_model.model.embed_tokens.weight");
     const es = try c.tensor("language_model.model.embed_tokens.scales");
     const eb = try c.tensor("language_model.model.embed_tokens.biases");
-    const scale = bf16Of(@sqrt(@as(f32, cfg.hidden)));
+    const scale = bf16Of(@sqrt(@as(f32, @floatFromInt(geo.hidden))));
     try c.run(struct {
         kd: *const g4.kernels.Kind,
         ids: mtl.Buffer,
@@ -109,11 +111,11 @@ fn rowsCheck(c: *Ctx, rows: usize, p0: usize) !void {
             e.setPipeline(x.kd.embed);
             for ([_]mtl.Buffer{ x.ids, x.w, x.s, x.b, x.out }, 0..) |bb, i| e.setBuffer(bb, 0, i);
             e.setValue(x.scale, 5);
-            e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = x.rows }, .{ .width = 256 });
+            e.dispatchThreads(.{ .width = geo.hidden / 2, .height = x.rows }, .{ .width = 256 });
         }
     }{ .kd = kd, .ids = ids.b, .w = ew, .s = es, .b = eb, .out = emb, .scale = scale, .rows = rows });
     try c.compare("embed", emb, nm(2, "{s}.embed", .{tag}));
-    const normed = try c.buf(rows * cfg.hidden * 2);
+    const normed = try c.buf(rows * geo.hidden * 2);
     const w0 = try c.tensor("language_model.model.layers.0.input_layernorm.weight");
     try c.run(struct {
         kd: *const g4.kernels.Kind,
@@ -151,7 +153,7 @@ fn layerCheck(c: *Ctx, rows: usize, p0: usize, layer: usize) !void {
     const global = cfg.global(layer);
     const kd = c.k.kind(global);
     const dh = cfg.headDim(layer);
-    const nk = cfg.kvHeads(layer);
+    const nk = geo.kvHeads(layer);
     const pre = nm(0, "r{d}.L{d}", .{ rows, layer });
     var pbuf: [64]u8 = undefined;
     const prefix = try std.fmt.bufPrint(&pbuf, "{s}", .{pre});
@@ -165,7 +167,7 @@ fn layerCheck(c: *Ctx, rows: usize, p0: usize, layer: usize) !void {
     const invf = try c.load(nm(2, "L{d}.inv_freq", .{layer}), false);
     const pos = try c.buf(rows * 4);
     for (pos.slice(i32, rows), 0..) |*p, i| p.* = @intCast(p0 + i);
-    const q = try c.buf(rows * cfg.query_heads * dh * 2);
+    const q = try c.buf(rows * geo.query_heads * dh * 2);
     const k = try c.buf(nk * rows * dh * 2);
     const v = try c.buf(nk * rows * dh * 2);
     try c.run(struct {
@@ -182,7 +184,7 @@ fn layerCheck(c: *Ctx, rows: usize, p0: usize, layer: usize) !void {
             e.setValue([3]i32{ 0, 0, 0 }, 11);
             e.dispatchGroups(.{ .width = s.slots, .height = s.rows }, .{ .width = 32 });
         }
-    }{ .kd = kd, .bs = .{ qkv.b, qw, kw, invf.b, pos, q, k, v }, .slots = cfg.query_heads + 2 * nk, .rows = rows });
+    }{ .kd = kd, .bs = .{ qkv.b, qw, kw, invf.b, pos, q, k, v }, .slots = geo.query_heads + 2 * nk, .rows = rows });
     try c.compare("q", q, nm(3, "{s}.q", .{prefix}));
     try c.compare("k", k, nm(3, "{s}.k", .{prefix}));
     try c.compare("v", v, nm(3, "{s}.v", .{prefix}));
@@ -224,11 +226,11 @@ fn attentionCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, rows:
     const chunks = (p0 + rows - 1) / kd.chunk - first_chunk + 1;
     const meta = try c.buf(32);
     meta.slice(i32, 8)[0..5].* = .{ @intCast(first_chunk), @intCast(chunks), @intCast(ring), @intCast(rows), @intCast(p0) };
-    const slots = cfg.query_heads * rows * chunks;
+    const slots = geo.query_heads * rows * chunks;
     const pm = try c.buf(slots * 4);
     const pl = try c.buf(slots * 4);
     const po = try c.buf(slots * dh * 4);
-    const out = try c.buf(rows * cfg.query_heads * dh * 2);
+    const out = try c.buf(rows * geo.query_heads * dh * 2);
     try c.run(struct {
         kd: *const g4.kernels.Kind,
         bs: [13]mtl.Buffer,
@@ -248,7 +250,7 @@ fn attentionCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, rows:
             e.setPipeline(s.kd.merge);
             for ([_]mtl.Buffer{ s.bs[8], s.bs[9], s.bs[10], s.bs[7], s.bs[11], s.bs[8] }, 0..) |bb, i| e.setBuffer(bb, 0, i);
             e.setValue(@as(i32, 0), 6);
-            e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = s.rows }, .{ .width = 32 });
+            e.dispatchGroups(.{ .width = 1, .height = geo.query_heads, .depth = s.rows }, .{ .width = 32 });
         }
     }{ .kd = kd, .bs = .{ q.b, kb, vb, kn.b, vn.b, pos, lo, meta, pm, pl, po, out, out }, .cap = @intCast(cap), .chunks = chunks, .nk = nk, .rows = rows });
     try c.compare("attention", out, nm(5, "{s}.o_in", .{prefix}));
@@ -259,8 +261,8 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
     const o = try c.load(nm(2, "{s}.o", .{prefix}), true);
     const wa = try c.tensor(nm(3, "{s}post_attention_layernorm.weight", .{lp}));
     const w1 = try c.tensor(nm(3, "{s}pre_feedforward_layernorm.weight", .{lp}));
-    const hn = try c.buf(rows * cfg.hidden * 2);
-    const n1 = try c.buf(rows * cfg.hidden * 2);
+    const hn = try c.buf(rows * geo.hidden * 2);
+    const n1 = try c.buf(rows * geo.hidden * 2);
     const Tail = struct {
         pipe: mtl.Pipeline,
         bs: []const mtl.Buffer,
@@ -281,7 +283,7 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
     try c.compare("attn_tail hn", hn, nm(4, "{s}.hn", .{prefix}));
     try c.compare("attn_tail norm", n1, nm(4, "{s}.n_mlp", .{prefix}));
     const gu = try c.load(nm(1, "{s}.gate_up", .{prefix}), true);
-    const act = try c.buf(rows * cfg.intermediate * 2);
+    const act = try c.buf(rows * geo.intermediate * 2);
     try c.run(struct {
         kd: *const g4.kernels.Kind,
         gu: mtl.Buffer,
@@ -291,11 +293,11 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
             e.setPipeline(s.kd.geglu);
             e.setBuffer(s.gu, 0, 0);
             e.setBuffer(s.act, 0, 1);
-            e.setValue(@as(u32, cfg.intermediate), 2);
+            e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
             e.setBuffer(s.act, 0, 3);
             e.setValue(@as(i32, 0), 4);
             e.setValue(@as(i32, 0), 5);
-            e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = s.rows }, .{ .width = 64 });
+            e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = s.rows }, .{ .width = 64 });
         }
     }{ .kd = kd, .gu = gu.b, .act = act, .rows = rows });
     try c.compare("geglu", act, nm(4, "{s}.act", .{prefix}));
@@ -304,8 +306,8 @@ fn tailsCheck(c: *Ctx, kd: *const g4.kernels.Kind, prefix: []const u8, lp: []con
     const wp = try c.tensor(nm(3, "{s}post_feedforward_layernorm.weight", .{lp}));
     const sc = try c.tensor(nm(3, "{s}layer_scalar", .{lp}));
     const wn = try c.tensor(nm(3, "language_model.model.layers.{d}.input_layernorm.weight", .{layer + 1}));
-    const h2 = try c.buf(rows * cfg.hidden * 2);
-    const nx = try c.buf(rows * cfg.hidden * 2);
+    const h2 = try c.buf(rows * geo.hidden * 2);
+    const nx = try c.buf(rows * geo.hidden * 2);
     try c.run(Tail{ .pipe = kd.dense_tail, .bs = &.{ hn_in.b, y.b, wp, sc, wn, h2, nx }, .eps_at = 5, .rows = rows });
     try c.compare("dense_tail h", h2, nm(4, "{s}.h2", .{prefix}));
     try c.compare("dense_tail next", nx, nm(4, "{s}.normed2", .{prefix}));
@@ -327,7 +329,8 @@ pub fn main(init: std.process.Init) !void {
     const files = try tf.checkpoint_host.shardFiles(gpa, init.io, model);
     defer tf.checkpoint_host.freeShardFiles(gpa, files);
     for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
-    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .k = try g4.kernels.Kernels.init(gpa, device), .dump = dump };
+    geo = (try cfg.Config.read(gpa, init.io, model)).geo;
+    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .k = try g4.kernels.Kernels.init(gpa, device, geo), .dump = dump };
     defer c.k.deinit();
     defer {
         for (c.owned.items) |b| b.deinit();

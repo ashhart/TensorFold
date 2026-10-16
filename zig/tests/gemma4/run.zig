@@ -52,12 +52,12 @@ pub fn main(init: std.process.Init) !void {
         const ids = try std.json.parseFromSlice([]u32, gpa, bytes, .{});
         defer ids.deinit();
         const capacity = (ids.value.len + count + 64 + 63) / 64 * 64;
-        var cache = try g4.state.Cache.init(m.device, capacity);
+        var cache = try g4.state.Cache.init(m.device, m.config.geo, capacity);
         defer cache.deinit();
-        var s = try g4.state.Scratch.init(m.device, capacity);
+        var s = try g4.state.Scratch.init(m.device, m.config.geo, capacity);
         defer s.deinit();
         const t1 = std.c.mach_absolute_time();
-        var ps: ?g4.prompt.Scratch = if (width == g4.state.chunk_rows) try g4.prompt.Scratch.init(m.device, capacity) else null;
+        var ps: ?g4.prompt.Scratch = if (width == g4.state.chunk_rows) try g4.prompt.Scratch.init(m.device, m.config.geo, capacity) else null;
         defer if (ps) |*p| p.deinit();
         var at: usize = 0;
         while (at < ids.value.len) : (at += width) {

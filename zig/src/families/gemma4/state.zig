@@ -20,8 +20,9 @@ pub const Tap = struct { buf: ?mtl.Buffer = null, off: usize = 0, start: u64 = 0
 
 /// One stream's keys and values, per layer [kv heads, slots, head dim] bf16, and how many positions it holds.
 pub const Cache = struct {
-    k: [cfg.layers]mtl.Buffer,
-    v: [cfg.layers]mtl.Buffer,
+    k: [cfg.max_layers]mtl.Buffer,
+    v: [cfg.max_layers]mtl.Buffer,
+    geo: cfg.Geometry,
     capacity: usize,
     len: usize = 0,
     /// The cache length the last verify started from (keep rolls back to it plus the kept rows).
@@ -32,17 +33,17 @@ pub const Cache = struct {
     tap: Tap = .{},
     last_tap: ?mtl.Buffer = null,
 
-    pub fn init(device: mtl.Device, capacity: usize) !Cache {
-        var c: Cache = .{ .k = undefined, .v = undefined, .capacity = capacity, .logits = try device.buffer(cfg.vocab * 2, shared) };
+    pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Cache {
+        var c: Cache = .{ .k = undefined, .v = undefined, .geo = geo, .capacity = capacity, .logits = try device.buffer(cfg.vocab * 2, shared) };
         errdefer c.logits.deinit();
         var made: usize = 0;
         errdefer for (0..made) |i| {
             c.k[i].deinit();
             c.v[i].deinit();
         };
-        for (0..cfg.layers) |i| {
+        for (0..geo.layers) |i| {
             const slots = slotsOf(i, capacity);
-            const bytes = cfg.kvHeads(i) * slots * cfg.headDim(i) * 2;
+            const bytes = geo.kvHeads(i) * slots * cfg.headDim(i) * 2;
             c.k[i] = try device.buffer(bytes, opts);
             c.v[i] = device.buffer(bytes, opts) catch |e| {
                 c.k[i].deinit();
@@ -56,7 +57,7 @@ pub const Cache = struct {
     pub fn deinit(c: *Cache) void {
         c.logits.deinit();
         if (c.last_tap) |b| b.deinit();
-        for (0..cfg.layers) |i| {
+        for (0..c.geo.layers) |i| {
             c.k[i].deinit();
             c.v[i].deinit();
         }
@@ -64,9 +65,9 @@ pub const Cache = struct {
 };
 
 /// Bytes a stream's caches take at `capacity` (Cache.init's buffers).
-pub fn cacheBytes(capacity: usize) u64 {
+pub fn cacheBytes(geo: cfg.Geometry, capacity: usize) u64 {
     var total: u64 = cfg.vocab * 2;
-    for (0..cfg.layers) |i| total += 2 * cfg.kvHeads(i) * slotsOf(i, capacity) * cfg.headDim(i) * 2;
+    for (0..geo.layers) |i| total += 2 * geo.kvHeads(i) * slotsOf(i, capacity) * cfg.headDim(i) * 2;
     return total;
 }
 
@@ -108,17 +109,18 @@ pub const Scratch = struct {
     /// Attention partial slots: heads x rows x chunks (256 keys a chunk on global layers; sliding ones in the window).
     slots: usize,
 
-    pub fn init(device: mtl.Device, capacity: usize) !Scratch {
+    pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Scratch {
         const r = prompt_rows;
-        const d = cfg.hidden;
-        const qd = cfg.query_heads * cfg.global_dim;
-        const slots = cfg.query_heads * max_rows * @max(capacity / 256 + 2, (cfg.window + max_rows) / 128 + 2);
+        const d = geo.hidden;
+        const qd = geo.queryWidth();
+        const kv = geo.kvWidth();
+        const slots = geo.query_heads * max_rows * @max(capacity / 256 + 2, (cfg.window + max_rows) / 128 + 2);
         var s: Scratch = undefined;
         s.slots = slots;
         s.taps = null;
         var made: usize = 0;
         errdefer s.release(made);
-        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * 16 * 256) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * 16 * 256 * 2, false }, .{ "v", r * 16 * 256 * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * cfg.intermediate * 2, false }, .{ "act", r * cfg.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (cfg.intermediate / 64) * 4, false }, .{ "picks", r * 8, true } }) |f| {
+        inline for (.{ .{ "ids", r * 4, true }, .{ "pos", r * 4, true }, .{ "qkv", r * (qd + 2 * kv) * 2, false }, .{ "q", r * qd * 2, false }, .{ "k", r * kv * 2, false }, .{ "v", r * kv * 2, false }, .{ "attn", r * qd * 2, false }, .{ "o", r * d * 2, false }, .{ "hn", r * d * 2, false }, .{ "n_mlp", r * d * 2, false }, .{ "gate_up", r * 2 * geo.intermediate * 2, false }, .{ "act", r * geo.intermediate * 2, false }, .{ "y", r * d * 2, false }, .{ "pm", slots * 4, false }, .{ "pl", slots * 4, false }, .{ "po", slots * cfg.global_dim * 4, false }, .{ "logits", r * cfg.vocab * 2, true }, .{ "sums", r * (geo.intermediate / 64) * 4, false }, .{ "picks", r * 8, true } }) |f| {
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else opts);
             made += 1;
         }

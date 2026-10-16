@@ -14,6 +14,7 @@ const Ctx = struct {
     device: mtl.Device,
     queue: mtl.Queue,
     ckpt: *tf.checkpoint_metal.Checkpoint,
+    geo: g4.config.Geometry,
     dump: []const u8,
     failed: usize = 0,
 };
@@ -65,7 +66,7 @@ const Stack = struct {
             @memcpy(biases[at * k / 64 ..][0..b.len], b);
             at += w.len / (k / 8);
         }
-        const sk = if (decode) g4.weights.splitK(n, k) else g4.weights.referenceSplit(n, k);
+        const sk = if (decode) g4.weights.splitK(c.geo, n, k) else g4.weights.referenceSplit(n, k);
         const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = 4, .group = 64 }, .sk = sk, .precompute_sums = precompute or reg, .reg = reg };
         const wb = try c.device.buffer(l.weightWords() * 4, shared);
         const sbb = try c.device.buffer(l.metadataElements() * 2, shared);
@@ -139,29 +140,31 @@ fn checkAffine(c: *Ctx) !void {
     const xb = try c.device.buffer(x.len * 2, shared);
     defer xb.deinit();
     @memcpy(xb.slice(u16, x.len), x);
-    const yb = try c.device.buffer(16 * 16384 * 2, shared);
+    const qn = c.geo.query_heads * g4.config.sliding_dim; // layer 0's q, then its k and v: the dumped qkv's row
+    const row = qn + 2 * c.geo.sliding_kv_heads * g4.config.sliding_dim;
+    const yb = try c.device.buffer(16 * row * 2, shared);
     defer yb.deinit();
     const w = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.weight");
     const sc = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.scales");
     const bi = try c.ckpt.get("language_model.model.layers.0.self_attn.q_proj.biases");
     const Q = struct { w: lane.Ref, s: lane.Ref, b: lane.Ref, n: u32, k: u32 };
-    const q = Q{ .w = .{ .buf = w.buffer, .off = w.offset }, .s = .{ .buf = sc.buffer, .off = sc.offset }, .b = .{ .buf = bi.buffer, .off = bi.offset }, .n = 8192, .k = 5376 };
+    const q = Q{ .w = .{ .buf = w.buffer, .off = w.offset }, .s = .{ .buf = sc.buffer, .off = sc.offset }, .b = .{ .buf = bi.buffer, .off = bi.offset }, .n = @intCast(qn), .k = @intCast(c.geo.hidden) };
     const cb = c.queue.commandBuffer();
     const e = cb.compute(.serial);
-    tf.affine_mm.denseBatch(e, pipes, lane.Ref{ .buf = xb }, q, lane.Ref{ .buf = yb }, 16, 1, .{ .x_row = 5376, .y_row = 16384 });
+    tf.affine_mm.denseBatch(e, pipes, lane.Ref{ .buf = xb }, q, lane.Ref{ .buf = yb }, 16, 1, .{ .x_row = @intCast(c.geo.hidden), .y_row = @intCast(row) });
     e.end();
     cb.commit();
     cb.wait();
-    const got = yb.slice(u16, 16 * 16384);
+    const got = yb.slice(u16, 16 * row);
     var worst: f32 = 0;
     var exact: usize = 0;
-    for (0..16) |r| for (0..8192) |j| {
-        const a: f32 = @bitCast(@as(u32, got[r * 16384 + j]) << 16);
-        const b: f32 = @bitCast(@as(u32, want[r * 16384 + j]) << 16);
+    for (0..16) |r| for (0..qn) |j| {
+        const a: f32 = @bitCast(@as(u32, got[r * row + j]) << 16);
+        const b: f32 = @bitCast(@as(u32, want[r * row + j]) << 16);
         worst = @max(worst, @abs(a - b));
-        exact += @intFromBool(got[r * 16384 + j] == want[r * 16384 + j]);
+        exact += @intFromBool(got[r * row + j] == want[r * row + j]);
     };
-    std.debug.print("affine_mm q_proj vs lane: {d} of {d} bit-equal, worst |diff| {d}; sample got {x} want {x}\n", .{ exact, 16 * 8192, worst, got[0], want[0] });
+    std.debug.print("affine_mm q_proj vs lane: {d} of {d} bit-equal, worst |diff| {d}; sample got {x} want {x}\n", .{ exact, 16 * qn, worst, got[0], want[0] });
 }
 
 pub fn main(init: std.process.Init) !void {
@@ -183,7 +186,8 @@ pub fn main(init: std.process.Init) !void {
     const files = try tf.checkpoint_host.shardFiles(gpa, init.io, model);
     defer tf.checkpoint_host.freeShardFiles(gpa, files);
     for (files) |path| try ckpt.addFileSelected(device, path, "", "language_model.");
-    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .dump = dump };
+    const geo = (try g4.config.Config.read(gpa, init.io, model)).geo;
+    var c = Ctx{ .gpa = gpa, .io = init.io, .device = device, .queue = queue, .ckpt = &ckpt, .geo = geo, .dump = dump };
     std.debug.print("device {s}, precomputed sums {}, reg {}\n", .{ device.name(), precompute, reg_mode });
     if (flag) |f| if (std.mem.eql(u8, f, "--affine")) return checkAffine(&c);
     for ([_]usize{ 0, 5 }) |layer| {
