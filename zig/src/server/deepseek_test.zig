@@ -480,3 +480,11 @@ test "a long session's request shape: 120 history calls with garbage arguments, 
     defer h.finish();
     try checkLoop1(&h, a);
 }
+
+test "a load without tokenizer.json names the file in the caller's problem arena, and the general allocator keeps nothing" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    try testing.expectError(error.Load, deepseek.DeepSeek.load(testing.allocator, testing.io, "/nonexistent-dsv41-dir", .{}, arena.allocator(), &problem));
+    try testing.expect(std.mem.indexOf(u8, problem, "/nonexistent-dsv41-dir/tokenizer.json") != null);
+}

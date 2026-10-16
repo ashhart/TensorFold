@@ -1,7 +1,8 @@
 # Adding a CUDA family
 
-This guide covers the Python engine, frozen at 0.6.5. New families go on the Zig engine: see
-[adding a Zig family](adding-a-zig-family.md).
+This guide covers the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its paths are at that tag. New families go on the
+Zig engine: see [adding a Zig family](adding-a-zig-family.md).
 
 A family serves CUDA when it exports `cuda_engine`. Keep implementation files under the family's `cuda/`
 package and import PyTorch inside backend code, so family discovery also works on an MLX installation.

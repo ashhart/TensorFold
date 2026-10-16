@@ -10,11 +10,10 @@ const vocab = 131072;
 const subset = 32768;
 const rows = 4;
 
-/// sample.cu's Rule: seed, 1 / T, top_p, the near window, ln(min_p), top_k.
-const Rule = extern struct { seed: u64, inv_t: f32, top_p: f32, near: f32, min_log: f32, top_k: u32, pad: u32 = 0 };
+const Rule = cuda.sample.Rule;
 
 fn ruleOf(s: lanes.Sampling) Rule {
-    return .{ .seed = s.seed, .inv_t = @floatCast(1.0 / @max(s.temperature, 1e-6)), .top_p = @floatCast(s.top_p), .near = 20.0, .min_log = @floatCast(s.minLog()), .top_k = s.top_k };
+    return Rule.from(lanes.gpu_rule.rule(s));
 }
 
 fn bf16(x: f32) u16 {

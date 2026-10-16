@@ -109,9 +109,10 @@ test "the io and mapped identity paths produce the same text" {
         const bytes = try tmp.dir.readFileAlloc(io, kv.value_ptr.string, a, .limited(1 << 30));
         try shards.append(a, .{ .name = kv.value_ptr.string, .size = bytes.len, .bytes = bytes });
     }
-    const through_maps = try pio.identityFromMapped(a, index_bytes, shards.items);
+    const config_bytes = try tmp.dir.readFileAlloc(io, "config.json", a, .limited(1 << 24));
+    const through_maps = try pio.identityFromMapped(a, index_bytes, config_bytes, shards.items);
     try std.testing.expectEqualStrings(through_io, through_maps);
-    try std.testing.expect(std.mem.startsWith(u8, through_maps, "index "));
+    try std.testing.expect(std.mem.startsWith(u8, through_maps, "flashnext pack 3\nindex "));
 }
 
 test "the identity string does not depend on the shard list's order" {
@@ -123,9 +124,9 @@ test "the identity string does not depend on the shard list's order" {
         .{ .name = "model-00002.safetensors", .size = 20, .header_sha256 = h2 },
     };
     const two = [_]pio.ShardId{ one[1], one[0] };
-    const s1 = try pio.identityString(a, h1, one[0..]);
+    const s1 = try pio.identityString(a, h1, h2, one[0..]);
     defer a.free(s1);
-    const s2 = try pio.identityString(a, h1, two[0..]);
+    const s2 = try pio.identityString(a, h1, h2, two[0..]);
     defer a.free(s2);
     try std.testing.expectEqualStrings(s1, s2);
     try std.testing.expect(std.mem.indexOf(u8, s1, "shard model-00001.safetensors 10 ") != null);
@@ -164,4 +165,20 @@ test "the no-dump pack cache is ready only complete and matching, resolved from 
     try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = grown });
     const changed = try pio.sourceIdentity(a, io, model_dir);
     try std.testing.expect(!try pio.packsReady(a, io, cache_dir, changed));
+}
+
+test "a config-only change (the widths the pack is cut at) gives a new identity, so a stale pack is never reused" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try fixture.writeCheckpoint(tmp, a);
+    const model_dir = try fixture.tmpPath(a, tmp, ".");
+    const before = try pio.sourceIdentity(a, io, model_dir);
+    try std.testing.expect(std.mem.indexOf(u8, before, "\nconfig ") != null);
+    const config = try tmp.dir.readFileAlloc(io, "config.json", a, .limited(1 << 24));
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.concat(a, u8, &.{ config, " " }) });
+    const after = try pio.sourceIdentity(a, io, model_dir);
+    try std.testing.expect(!std.mem.eql(u8, before, after));
 }
