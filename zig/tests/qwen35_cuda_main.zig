@@ -329,13 +329,13 @@ fn kl(init: std.process.Init, a: std.mem.Allocator, model: []const u8, ids_path:
     return 0;
 }
 
-/// KL(p || q) in float64 of two bf16 logit rows, whether their largest sit at one token, and each one's loss on `next`.
-fn divergence(p: []const u16, q: []const u16, next: u32) struct { kl: f64, same_top: bool, loss: [2]f64 } {
+/// KL(ref || got) in float64 of two bf16 logit rows, whether their top tokens agree, and each one's loss on `next`.
+fn divergence(ref: []const u16, got: []const u16, next: u32) struct { kl: f64, same_top: bool, loss: [2]f64 } {
     var mp: f64 = -std.math.inf(f64);
     var mq: f64 = -std.math.inf(f64);
     var ap: usize = 0;
     var aq: usize = 0;
-    for (p, q, 0..) |x, y, i| {
+    for (ref, got, 0..) |x, y, i| {
         if (bf(x) > mp) {
             mp = bf(x);
             ap = i;
@@ -347,18 +347,18 @@ fn divergence(p: []const u16, q: []const u16, next: u32) struct { kl: f64, same_
     }
     var zp: f64 = 0;
     var zq: f64 = 0;
-    for (p, q) |x, y| {
+    for (ref, got) |x, y| {
         zp += @exp(bf(x) - mp);
         zq += @exp(bf(y) - mq);
     }
     const lp = mp + @log(zp);
     const lq = mq + @log(zq);
     var d: f64 = 0;
-    for (p, q) |x, y| {
+    for (ref, got) |x, y| {
         const a = bf(x) - lp;
         d += @exp(a) * (a - (bf(y) - lq));
     }
-    return .{ .kl = @max(d, 0), .same_top = ap == aq, .loss = .{ lp - bf(p[next]), lq - bf(q[next]) } };
+    return .{ .kl = @max(d, 0), .same_top = ap == aq, .loss = .{ lp - bf(ref[next]), lq - bf(got[next]) } };
 }
 
 fn bf(h: u16) f64 {
