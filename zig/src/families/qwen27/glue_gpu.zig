@@ -17,6 +17,7 @@ pub const Kernels = struct {
     slice: mtl.Pipeline,
     add: mtl.Pipeline,
     gather: mtl.Pipeline,
+    take: mtl.Pipeline,
     profiler: ?*profile.Trace = null,
 
     pub fn init(device: mtl.Device) !Kernels {
@@ -33,11 +34,21 @@ pub const Kernels = struct {
         const add = try mtl.Pipeline.init(device, copy, "q27_add", false);
         errdefer add.deinit();
         const gather = try mtl.Pipeline.init(device, copy, "q27_tap_gather", false);
-        return .{ .embed = embed, .head = head, .slice = slice, .add = add, .gather = gather };
+        errdefer gather.deinit();
+        const take = try mtl.Pipeline.init(device, copy, "q27_take", false);
+        return .{ .embed = embed, .head = head, .slice = slice, .add = add, .gather = gather, .take = take };
     }
 
     pub fn deinit(k: Kernels) void {
-        inline for (.{ k.embed, k.head, k.slice, k.add, k.gather }) |p| p.deinit();
+        inline for (.{ k.embed, k.head, k.slice, k.add, k.gather, k.take }) |p| p.deinit();
+    }
+
+    /// Each row whose `takes` entry names an image row gets that row's bits from `images` over its embedding.
+    pub fn imageRows(k: Kernels, e: mtl.ComputeEncoder, out: Ref, images: Ref, takes: Ref, width: u32, rows: u32) void {
+        e.setPipeline(k.take);
+        inline for (.{ out, images, takes }, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
+        e.setValue([2]u32{ rows, width }, 3);
+        e.dispatchThreads(mtl.Size.of(width, rows, 1), mtl.Size.of(256, 1, 1));
     }
 
     pub fn embedding(k: Kernels, input_encoder: mtl.ComputeEncoder, c: Config, p: projection.Triple, ids: Ref, out: Ref, rows: u32) !void {
@@ -45,7 +56,7 @@ pub const Kernels = struct {
         errdefer span.cancel();
         const e = span.encoder;
 
-        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(c.vocab), .bits = 4, .group = 64, .metadata = .bf16 };
+        const a = abi.Embed{ .width = @intCast(c.hidden), .rows = rows, .vocab = @intCast(c.vocab), .bits = p.bits, .group = p.group, .metadata = .bf16 };
         try abi.checkEmbed(a);
         e.setPipeline(k.embed);
         e.setBuffer(ids.buffer, ids.offset, 0);

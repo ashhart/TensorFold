@@ -207,7 +207,7 @@ pub const Checkpoint = struct {
     pub fn get(self: *const Checkpoint, name: []const u8) !Tensor {
         return self.tensors.get(name) orelse {
             if (self.deferred.contains(name)) {
-                std.log.err("checkpoint tensor {s} stays in its file: read it through a Stage", .{name});
+                std.log.warn("checkpoint tensor {s} stays in its file: read it through a Stage", .{name});
                 return error.DeferredTensor;
             }
             std.log.err("checkpoint has no tensor {s}", .{name});

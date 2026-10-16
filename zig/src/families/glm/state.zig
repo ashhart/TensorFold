@@ -175,6 +175,7 @@ pub fn initState(arena: *Arena, c: *const cfg.Config, cap: u32, share: ?*const S
 pub fn init(arena: *Arena, c: *const cfg.Config, cap: u32) !struct { state: State, scratch: Scratch } {
     const R: usize = max_rows;
     const D: usize = c.hidden;
+    if (c.kdaWidth() > c.dense_inter) return error.ScratchTooSmall; // kdaStep puts f_b and g_b products made apart in gu
     const s = try initState(arena, c, cap, null);
     const H: usize = c.mla_heads;
     const V: usize = c.vocab;

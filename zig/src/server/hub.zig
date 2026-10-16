@@ -13,7 +13,7 @@ pub fn isRepoId(text: []const u8) bool {
     return true;
 }
 
-fn isDir(io: std.Io, path: []const u8) bool {
+pub fn isDir(io: std.Io, path: []const u8) bool {
     var dir = std.Io.Dir.cwd().openDir(io, path, .{}) catch return false;
     dir.close(io);
     return true;

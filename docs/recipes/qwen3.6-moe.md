@@ -1,5 +1,13 @@
 # Qwen3.6-35B-A3B
 
+This recipe describes the Python engine, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, variables and paths belong to that
+engine. @cshintov brought the model to Macs in [#138](https://github.com/ashhart/TensorFold/pull/138), and
+@philip-pentatonic ([#78](https://github.com/ashhart/TensorFold/pull/78),
+[#84](https://github.com/ashhart/TensorFold/pull/84)) and @BHCC2025
+([#270](https://github.com/ashhart/TensorFold/pull/270)) worked on its CUDA path; see [credits](../credits.md).
+The native binary has no `qwen3_5_moe` family yet, so `tensorfold pull` and `tensorfold info` refuse the checkpoint.
+
 The `qwen3_5_moe` family serves Qwen3.6-35B-A3B on Apple Silicon and on one NVIDIA GPU. Its layers are the 27B's
 (Gated DeltaNet and gated full attention, every fourth layer attention) with routed experts in place of the dense
 MLP, and on both backends it drafts with the checkpoint's own MTP layer.
@@ -68,7 +76,9 @@ activations by default: 0.90-0.96x the FP8 prompt path from 2k to 128k, and 1.23
 from 2k to 64k. `--prefill-fp8` restores the FP8 path ([prompt precision](cuda.md#prompt-precision)).
 
 Verify windows run the 27B's shared kernels (4-bit matmul, DeltaNet tree and replay, tree attention) with
-routed experts from `src/tensorfold/cuda/experts.py`: the router's top 8 of 256 by fp32 logit (ties to the lower
+routed experts from
+[`src/tensorfold/cuda/experts.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/src/tensorfold/cuda/experts.py):
+the router's top 8 of 256 by fp32 logit (ties to the lower
 id), weights renormalized over the eight, the shared expert as expert 256 with a sigmoid gate, and the slots
 summed in slot order. Each (row, expert) pair gets the same bits in any window, so a drafted row equals the
 serial step.
@@ -130,7 +140,8 @@ Serial decoding (`--no-drafts`) runs at 86-88 tok/s. A round verifies up to four
 own eight experts, so a round reads about twice the bytes of one serial step; longer drafts pay off only when
 most of their rows are kept.
 
-Cold prefill with `tools/prefill_cold.py` (chat prompts from the Python standard library at exact rendered
+Cold prefill with [`tools/prefill_cold.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tools/prefill_cold.py)
+(chat prompts from the Python standard library at exact rendered
 lengths, a unique first line each so nothing resumes; median time to first token of three):
 
 | Prompt tokens | 2,048 | 8,192 | 16,384 | 32,768 | 65,536 |

@@ -42,7 +42,8 @@ tensorfold-native serve MODEL --drafter DFLASH2 --parallel 8 --context 16384 --h
 
 With `--parallel N` (N > 1), each stream has its own slot on the card: GDN state (2 × 151 MB, the state and its
 backup for verification) and K/V cache (64 KB per token of `--context`). The number of slots is bounded by the memory
-left after loading, as the device reports it (`slotsThatFit`); a stream that does not fit is refused at startup. A lone stream that asks for drafts runs as a DFlash2 tree. As soon as another
+left after loading, as the device reports it (`slotsThatFit`); a stream that does not fit is refused at startup.
+A lone stream that asks for drafts runs as a DFlash2 tree. As soon as another
 stream arrives, the core takes it over in shared rounds: one forward for the windows of all streams (the pending
 token, then either copies of the context as a chain or the stream's DFlash2 drafts: a tree from 5 drafts up, a chain
 below), 16 rows at most. Each slot has its own DFlash2 context (the drafter's K/V in a ring of 2,080 positions,

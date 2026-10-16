@@ -253,7 +253,7 @@ pub const Gpu = struct {
         return error.NoDevice;
     }
 
-    /// On-board memory by Sysman (matched by UUID): free and total; `free` misses allocations not yet written.
+    /// On-board bytes free and in all by Sysman (device matched by UUID); an allocation leaves `free` once written.
     pub fn memory(g: *Gpu) Error!struct { free: u64, size: u64 } {
         const sys = try resolve(SysApi, &g.lib);
         try check(sys.zesInit(0));

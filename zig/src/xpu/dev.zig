@@ -1,6 +1,6 @@
 //! Low-level XPU device plumbing for the Qwen3.8-27B runner: safetensors shards, the Level Zero device, profiling.
 const std = @import("std");
-const ze = @import("ze.zig");
+const ze = @import("ze");
 const safetensors = @import("safetensors.zig");
 const q = @import("qwen27.zig");
 const fwd = @import("forward.zig");

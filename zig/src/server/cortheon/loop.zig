@@ -1,6 +1,6 @@
 //! Cortheon's reply loop: rounds with the model's server tool calls run between them, checks at the end, one reply.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const errors = @import("../errors.zig");
 const chat = @import("../chat.zig");
 const tool_parse = @import("../tool_parse.zig");
@@ -109,7 +109,7 @@ fn runCalls(t: *Turn, a: Allocator, input: *chat.Input, calls: []const Value, si
         const subject = (try tools.argument(a, c, if (is_search) "query" else "url")) orelse "";
         if (is_search) try t.progress(a, sink, "searching the web for \"{s}\"", .{subject}) else try t.progress(a, sink, "reading {s}", .{subject});
         if (is_search) t.focus = subject;
-        const ran = try tools.run(t.state.web, a, c, t.today, 6000, try std.mem.concat(a, u8, &.{ t.focus, " ", t.goal }));
+        const ran = try tools.run(t.state.web, a, c, t.today, 6000, try std.mem.concat(a, u8, &.{ t.focus, " ", t.goal }), &t.seen);
         try t.noteSources(a, ran);
         if (!ran.ok) try t.progress(a, sink, "{s}", .{ran.text[0..@min(ran.text.len, 200)]});
         try t.hide(a, input, try research.toolMessage(a, c, ran.text));

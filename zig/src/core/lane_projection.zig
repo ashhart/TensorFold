@@ -4,7 +4,7 @@ const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const frags = @import("frags.zig");
 
-pub const weight_layout = "u32[N/32][K/group][32][group*bits/32], low-bit-first codes";
+pub const weight_layout = "u32[ceil(N/32)][K/group][32][group*bits/32], low-bit-first codes, columns past N zero";
 pub const reg_layout = "u32[N/32][K/64][2][32 lanes][4] 4-bit codes, regBlock order";
 pub const metadata_layout = "bf16[K/group][N][scale,bias]";
 pub const Output = enum { bf16, f32 };
@@ -14,7 +14,7 @@ pub const Format = struct {
     group: usize,
 
     pub fn validate(f: Format) !void {
-        if (f.bits != 4 and f.bits != 6 and f.bits != 8) return error.UnsupportedBits;
+        if (f.bits < 2 or f.bits > 8 or f.bits == 7) return error.UnsupportedBits;
         if (f.group != 32 and f.group != 64 and f.group != 128) return error.UnsupportedGroup;
     }
 };
@@ -34,12 +34,16 @@ pub const Layout = struct {
     cooperative: bool = false,
     /// 4-bit g64 codes in reg_layout, unpacked into tensor-op registers; every word equals the cooperative kernel's.
     reg: bool = false,
+    /// Elements between output rows (default N): a member of a fused stack writes its columns of the fused rows.
+    y_stride: ?usize = null,
 
     pub fn validate(l: Layout) !void {
         try l.format.validate();
         if (l.cooperative and l.format.bits != 4) return error.UnsupportedCooperativeFormat;
         if (l.reg and (l.cooperative or l.format.bits != 4 or l.format.group != 64 or !l.precompute_sums)) return error.UnsupportedRegFormat;
-        if (l.n == 0 or l.n % 32 != 0 or l.k == 0 or l.k % l.format.group != 0 or
+        if ((l.cooperative or l.reg) and l.n % 32 != 0) return error.InvalidShape;
+        if (l.y_stride) |s| if (s < l.n or s > std.math.maxInt(i32) / 16) return error.InvalidOutputStride;
+        if (l.n == 0 or l.n % 16 != 0 or l.k == 0 or l.k % l.format.group != 0 or
             l.n > std.math.maxInt(i32) / 16 or l.k > std.math.maxInt(i32) / 16) return error.InvalidShape;
         if (l.sk == 0 or l.sk > 32 or (l.pf != 1 and l.pf != 2)) return error.InvalidSchedule;
         const g = l.groupCut();
@@ -49,7 +53,7 @@ pub const Layout = struct {
         if (l.threadgroupBytes() > 32768) return error.ThreadgroupMemoryLimit;
         var end: usize = 0;
         for (l.ranges) |r| {
-            if (r[1] == 0 or r[0] < end or r[0] >= l.n / 32 or r[1] > l.n / 32 - r[0]) return error.InvalidTileRange;
+            if (r[1] == 0 or r[0] < end or r[0] >= l.tileCount() or r[1] > l.tileCount() - r[0]) return error.InvalidTileRange;
             end = r[0] + r[1];
         }
         _ = try std.math.mul(usize, l.n, l.k);
@@ -59,8 +63,13 @@ pub const Layout = struct {
         return l.groups orelse .{ 0, l.k / l.format.group };
     }
 
+    /// 32-column tiles over N; a last tile of 16 columns is padded with zero codes and never stored.
+    pub fn tileCount(l: Layout) usize {
+        return (l.n + 31) / 32;
+    }
+
     pub fn tiles(l: Layout) usize {
-        if (l.ranges.len == 0) return l.n / 32;
+        if (l.ranges.len == 0) return l.tileCount();
         var count: usize = 0;
         for (l.ranges) |r| count += r[1];
         return count;
@@ -71,6 +80,11 @@ pub const Layout = struct {
     }
 
     pub fn weightWords(l: Layout) usize {
+        return l.tileCount() * 32 * (l.k / 32) * l.format.bits;
+    }
+
+    /// MLX's packed W for this layout: N rows of K*bits/32 words.
+    pub fn sourceWords(l: Layout) usize {
         return l.n * (l.k / 32) * l.format.bits;
     }
 
@@ -100,6 +114,7 @@ pub fn source(a: std.mem.Allocator, l: Layout) ![]u8 {
     try text.appendSlice(a, if (l.ranges.len == 0) "  return j;\n}\n" else "  return 0;\n}\n");
     try text.print(a, "#define TF_PRECOMPUTE_SUMS {d}\n", .{@intFromBool(l.precompute_sums)});
     if (l.reg) try text.appendSlice(a, "#define TF_REG 1\n");
+    if (l.y_stride) |s| try text.print(a, "#define TF_YS {d}\n", .{s});
     try text.appendSlice(a, ks.core_lane_projection);
     return text.toOwnedSlice(a);
 }
@@ -110,8 +125,8 @@ pub fn pack(l: Layout, w: []const u32, scales: []const u16, biases: []const u16,
     const ng = l.k / l.format.group;
     const wp = l.format.group * l.format.bits / 32;
     const row_words = l.k / 32 * l.format.bits;
-    if (w.len != l.weightWords() or scales.len != l.n * ng or biases.len != l.n * ng or
-        out_w.len != w.len or out_sb.len != l.metadataElements()) return error.InvalidStorage;
+    if (w.len != l.sourceWords() or scales.len != l.n * ng or biases.len != l.n * ng or
+        out_w.len != l.weightWords() or out_sb.len != l.metadataElements()) return error.InvalidStorage;
     if (overlap(std.mem.sliceAsBytes(w), std.mem.sliceAsBytes(out_w)) or
         overlap(std.mem.sliceAsBytes(w), std.mem.sliceAsBytes(out_sb)) or
         overlap(std.mem.sliceAsBytes(scales), std.mem.sliceAsBytes(out_w)) or
@@ -119,11 +134,14 @@ pub fn pack(l: Layout, w: []const u32, scales: []const u16, biases: []const u16,
         overlap(std.mem.sliceAsBytes(scales), std.mem.sliceAsBytes(out_sb)) or
         overlap(std.mem.sliceAsBytes(biases), std.mem.sliceAsBytes(out_sb)) or
         overlap(std.mem.sliceAsBytes(out_w), std.mem.sliceAsBytes(out_sb))) return error.OverlappingStorage;
-    for (0..l.n / 32) |tile| for (0..ng) |g| for (0..32) |col| {
+    for (0..l.tileCount()) |tile| for (0..ng) |g| for (0..32) |col| {
         const n = tile * 32 + col;
-        const src = n * row_words + g * wp;
         const dst = ((tile * ng + g) * 32 + col) * wp;
-        @memcpy(out_w[dst..][0..wp], w[src..][0..wp]);
+        if (n >= l.n) {
+            @memset(out_w[dst..][0..wp], 0);
+            continue;
+        }
+        @memcpy(out_w[dst..][0..wp], w[n * row_words + g * wp ..][0..wp]);
         const sb = (g * l.n + n) * 2;
         out_sb[sb] = scales[n * ng + g];
         out_sb[sb + 1] = biases[n * ng + g];
@@ -207,6 +225,7 @@ pub const Projection = struct {
     weight_bytes: usize,
     metadata_bytes: usize,
     output_bytes: usize,
+    y_stride: usize,
     tile_count: usize,
     sk: usize,
     sums_pipe: ?mtl.Pipeline = null,
@@ -233,7 +252,7 @@ pub const Projection = struct {
             errdefer sums_pipe.?.deinit();
             sums_buffer = try device.buffer(@as(usize, if (l.reg) reg_rows else 16) * (l.k / l.format.group) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         }
-        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
+        return .{ .pipe = p, .n = l.n, .k = l.k, .group_count = l.k / l.format.group, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = if (l.output == .f32) 4 else 2, .y_stride = l.y_stride orelse l.n, .tile_count = l.tiles(), .sk = l.sk, .sums_pipe = sums_pipe, .sums_buffer = sums_buffer, .threads_per_slice = if (l.cooperative) 64 else 32, .reg = l.reg };
     }
 
     pub fn deinit(p: Projection) void {
@@ -251,7 +270,7 @@ pub const Projection = struct {
     pub fn encodeSums(p: Projection, e: mtl.ComputeEncoder, x: Ref, w: Ref, sb: Ref, sums: Sums, y: Ref, rows: u32) !void {
         if (!p.reg) return error.SumsNeedReg;
         if (rows == 0 or rows > reg_rows or sums.stride < rows) return error.InvalidRows;
-        try checkRef(sums.ref, ((p.k / 64 - 1) * @as(usize, sums.stride) + rows) * 4, 4);
+        try checkRef(sums.ref, ((p.group_count - 1) * @as(usize, sums.stride) + rows) * 4, 4);
         return p.encodeImpl(e, x, w, sb, sums, y, rows);
     }
 
@@ -262,7 +281,7 @@ pub const Projection = struct {
         try checkRef(x, rows * p.k * 2, 2);
         try checkRef(w, p.weight_bytes, if (p.reg) 16 else 8);
         try checkRef(sb, p.metadata_bytes, 16);
-        try checkRef(y, rows * p.n * p.output_bytes, p.output_bytes);
+        try checkRef(y, ((rows - 1) * p.y_stride + p.n) * p.output_bytes, p.output_bytes);
         if (given == null) if (p.sums_pipe) |pipe| {
             e.setPipeline(pipe);
             e.setBuffer(x.buf, x.off, 0);
@@ -302,9 +321,35 @@ test "layouts reject unsupported formats, schedules, cuts and overlapping tile r
     const good = Layout{ .n = 64, .k = 256, .format = .{ .bits = 4, .group = 64 } };
     const s = try source(arena.allocator(), good);
     try std.testing.expect(std.mem.indexOf(u8, s, "#define TF_BITS 4\n#define TF_GROUP 64\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s[0 .. s.len - ks.core_lane_projection.len], "TF_YS") == null);
     var bad = good;
-    bad.format.bits = 5;
-    try std.testing.expectError(error.UnsupportedBits, bad.validate());
+    for ([_]u8{ 2, 3, 5, 6, 8 }) |bits| {
+        bad.format.bits = bits;
+        try bad.validate();
+    }
+    for ([_]u8{ 0, 1, 7, 9 }) |bits| {
+        bad.format.bits = bits;
+        try std.testing.expectError(error.UnsupportedBits, bad.validate());
+    }
+    bad = good;
+    bad.y_stride = 96;
+    try std.testing.expect(std.mem.indexOf(u8, try source(arena.allocator(), bad), "#define TF_YS 96\n") != null);
+    bad.y_stride = 63;
+    try std.testing.expectError(error.InvalidOutputStride, bad.validate());
+    bad = good;
+    bad.n = 48;
+    bad.ranges = &.{.{ 1, 1 }};
+    try bad.validate();
+    try std.testing.expectEqual(2, bad.tileCount());
+    bad.cooperative = true;
+    try std.testing.expectError(error.InvalidShape, bad.validate());
+    bad.cooperative = false;
+    bad.reg = true;
+    bad.precompute_sums = true;
+    try std.testing.expectError(error.InvalidShape, bad.validate());
+    bad = good;
+    bad.ranges = &.{.{ 2, 1 }};
+    try std.testing.expectError(error.InvalidTileRange, bad.validate());
     bad = good;
     bad.format.group = 16;
     try std.testing.expectError(error.UnsupportedGroup, bad.validate());
@@ -334,34 +379,45 @@ test "layouts reject unsupported formats, schedules, cuts and overlapping tile r
     try std.testing.expectError(error.InvalidTileRange, bad.validate());
 }
 
-test "every affine layout packs raw words and metadata without changing their bits" {
-    for ([_]u8{ 4, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
-        const l = Layout{ .n = 64, .k = 2 * group, .format = .{ .bits = bits, .group = group } };
-        const a = std.testing.allocator;
-        const w = try a.alloc(u32, l.weightWords());
-        defer a.free(w);
-        const s = try a.alloc(u16, 128);
-        defer a.free(s);
-        const b = try a.alloc(u16, 128);
-        defer a.free(b);
-        const pw = try a.alloc(u32, w.len);
-        defer a.free(pw);
-        const sb = try a.alloc(u16, 256);
-        defer a.free(sb);
-        for (w, 0..) |*v, i| v.* = @as(u32, @intCast(i)) *% 0x9e3779b9;
-        for (s, 0..) |*v, i| v.* = @intCast(i);
-        for (b, 0..) |*v, i| v.* = @intCast(65535 - i);
+test "every width, group and 16-row member packs MLX codes, metadata and zero padding without changing a bit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(0x1a9e);
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| for ([_]usize{ 64, 48 }) |rows| {
+        const l = Layout{ .n = rows, .k = 2 * group, .format = .{ .bits = bits, .group = group } };
+        const codes = try a.alloc(u8, l.n * l.k);
+        const w = try a.alloc(u32, l.sourceWords());
+        @memset(w, 0);
+        for (codes, 0..) |*v, i| {
+            v.* = @intCast(prng.random().intRangeAtMost(u16, 0, (@as(u16, 1) << @intCast(bits)) - 1));
+            // MLX's packing written bit by bit: row n is one low-bit-first stream of K codes.
+            for (0..bits) |bit| w[(i * bits + bit) / 32] |= @as(u32, (v.* >> @intCast(bit)) & 1) << @intCast((i * bits + bit) % 32);
+        }
+        const s = try a.alloc(u16, l.n * 2);
+        const b = try a.alloc(u16, l.n * 2);
+        for (s, b, 0..) |*sv, *bv, i| {
+            sv.* = @intCast(i);
+            bv.* = @intCast(65535 - i);
+        }
+        const pw = try a.alloc(u32, l.weightWords());
+        @memset(pw, 0xffff_ffff);
+        const sb = try a.alloc(u16, l.metadataElements());
         try pack(l, w, s, b, pw, sb);
         const wp = group * bits / 32;
-        for (0..64) |n| for (0..2) |g| {
-            const src = (n * 2 + g) * wp;
-            const dst = (((n / 32) * 2 + g) * 32 + n % 32) * wp;
-            try std.testing.expectEqualSlices(u32, w[src..][0..wp], pw[dst..][0..wp]);
-            try std.testing.expectEqual(s[n * 2 + g], sb[(g * 64 + n) * 2]);
-            try std.testing.expectEqual(b[n * 2 + g], sb[(g * 64 + n) * 2 + 1]);
+        for (0..l.tileCount() * 32) |n| for (0..l.k) |k| {
+            const at = ((((n / 32) * 2 + k / group) * 32 + n % 32) * wp) * 32 + (k % group) * bits;
+            var code: u32 = 0;
+            for (0..bits) |bit| code |= ((pw[(at + bit) / 32] >> @intCast((at + bit) % 32)) & 1) << @intCast(bit);
+            try std.testing.expectEqual(@as(u32, if (n < l.n) codes[n * l.k + k] else 0), code);
+        };
+        for (0..l.n) |n| for (0..2) |g| {
+            try std.testing.expectEqual(s[n * 2 + g], sb[(g * l.n + n) * 2]);
+            try std.testing.expectEqual(b[n * 2 + g], sb[(g * l.n + n) * 2 + 1]);
         };
         try std.testing.expectError(error.InvalidStorage, pack(l, w[1..], s, b, pw, sb));
-        try std.testing.expectError(error.OverlappingStorage, pack(l, w, s, b, w, sb));
+        try std.testing.expectError(error.InvalidStorage, pack(l, w, s, b, pw[1..], sb));
+        try std.testing.expectError(error.OverlappingStorage, pack(l, pw[0..w.len], s, b, pw, sb));
     };
 }
 

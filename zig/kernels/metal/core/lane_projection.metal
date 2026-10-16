@@ -12,18 +12,29 @@ using namespace mpp::tensor_ops;
 #ifndef TF_PRECOMPUTE_SUMS
 #define TF_PRECOMPUTE_SUMS 0
 #endif
+#ifndef TF_YS
+#define TF_YS TF_N
+#endif
+// Output rows lie TF_YS elements apart, so a member of a fused stack writes its columns of the fused rows.
+#define TF_ODD_WORDS (TF_GROUP * TF_BITS / 32 % 2)
 
 constant constexpr int NT = 32, GS = TF_GROUP, KG = TF_K / GS, NF = NT / 16;
 constant constexpr int WP = GS * TF_BITS / 32;
 
+#if TF_ODD_WORDS
+struct tf_raw { uint w[WP]; uint4 s[NF]; }; // 3- and 5-bit groups of 32 are an odd word count, loaded a word at a time
+#else
 struct tf_raw { uint2 w[WP / 2]; uint4 s[NF]; }; // a lane's packed code words and its scale/bias quads for one group
+#endif
 
 inline tf_raw tf_lane_fetch(const device uint* W, const device uint4* SB, int tile, int g, int g_end, int n0, int lane,
                             short fn) {
   tf_raw raw;
   const bool ok = g < g_end;
   const device uint2* src = (const device uint2*)(W + (((size_t)tile * KG + (ok ? g : 0)) * NT + lane) * WP);
-#if TF_BITS != 4
+#if TF_ODD_WORDS
+  for (int i = 0; i < WP; i++) raw.w[i] = ok && n0 + lane < TF_N ? ((const device uint*)src)[i] : 0u;
+#elif TF_BITS != 4
   for (int i = 0; i < WP / 2; i++) raw.w[i] = ok && n0 + lane < TF_N ? src[i] : uint2(0);
 #else
   for (int i = 0; i < WP / 2; i++) raw.w[i] = uint2(0);
@@ -53,6 +64,7 @@ inline float tf_lane_xsum(const device bfloat* X, int m, int g, int M) {
   return acc;
 }
 
+// Codes: 4-bit straight to the uint4 op; 2/3-bit widened to nibbles for it, 5/6/8-bit to bytes for the uint8 op.
 #if TF_BITS == 4
 #define TF_STAGE_CODES(raw)
 #define TF_GROUP_PRODUCT(g) \
@@ -62,9 +74,42 @@ inline float tf_lane_xsum(const device bfloat* X, int m, int g, int M) {
     auto P = op.template get_destination_cooperative_tensor<decltype(a), decltype(b), float>(); \
     op.run(a, b, P);
 #else
+#if TF_BITS < 4
 inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, int lane) {
     uint words[WP + 1];
+#if TF_ODD_WORDS
+    for (int i = 0; i < WP; i++) words[i] = raw.w[i];
+#else
     for (int i = 0; i < WP / 2; i++) { words[2*i] = raw.w[i].x; words[2*i+1] = raw.w[i].y; }
+#endif
+    words[WP] = 0u;
+#if TF_BITS == 3
+    for (int c = 0; c < GS / 8; c++) {
+      const int bit = 24 * c, i = bit >> 5, sh = bit & 31;
+      uint pack = words[i] >> sh;
+      if (sh > 8) pack |= words[i + 1] << (32 - sh);
+      uint nib = 0u;
+      for (int j = 0; j < 8; j++) nib |= ((pack >> (3 * j)) & 7u) << (4 * j);
+      stage[lane * (GS / 8) + c] = nib;
+    }
+#else
+    for (int c = 0; c < GS / 8; c++) { // word c/2's half c%2: 8 codes of 2 bits to 8 nibbles
+      uint v = (words[c >> 1] >> (16 * (c & 1))) & 0xFFFFu;
+      v = (v | (v << 8)) & 0x00FF00FFu;
+      v = (v | (v << 4)) & 0x0F0F0F0Fu;
+      v = (v | (v << 2)) & 0x33333333u;
+      stage[lane * (GS / 8) + c] = v;
+    }
+#endif
+}
+#else
+inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, int lane) {
+    uint words[WP + 1];
+#if TF_ODD_WORDS
+    for (int i = 0; i < WP; i++) words[i] = raw.w[i];
+#else
+    for (int i = 0; i < WP / 2; i++) { words[2*i] = raw.w[i].x; words[2*i+1] = raw.w[i].y; }
+#endif
     words[WP] = 0u;
     for (int c = 0; c < GS / 4; c++) {
       uint word = 0u;
@@ -77,6 +122,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
       stage[lane * (GS / 4) + c] = word;
     }
 }
+#endif
 #define TF_STAGE_CODES(raw) tf_stage_codes(stage, raw, lane);
 #define TF_GROUP_PRODUCT(g) \
     simdgroup_barrier(mem_flags::mem_threadgroup); \
@@ -136,7 +182,11 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
   constexpr auto desc = matmul2d_descriptor(16, NT, GS, false, true, false, matmul2d_descriptor::mode::multiply);
   matmul2d<desc, execution_simdgroup> op;
   tensor<device bfloat, dextents<int32_t, 2>, tensor_inline> tA((device bfloat*)X, dextents<int32_t, 2>(TF_K, M));
-#if TF_BITS != 4
+#if TF_BITS < 4
+  threadgroup uint stage_all[TF_SK * NT * (GS / 8)];
+  threadgroup uint* stage = stage_all + sg * NT * (GS / 8);
+  tensor<threadgroup uint4b_format, dextents<int32_t, 2>, tensor_inline> b((threadgroup uchar*)stage, dextents<int32_t, 2>(GS, NT));
+#elif TF_BITS != 4
   threadgroup uint stage_all[TF_SK * NT * (GS / 4)];
   threadgroup uint* stage = stage_all + sg * NT * (GS / 4);
   tensor<threadgroup uint8_t, dextents<int32_t, 2>, tensor_inline> b((threadgroup uint8_t*)stage, dextents<int32_t, 2>(GS, NT));
@@ -169,7 +219,7 @@ inline void tf_stage_codes(threadgroup uint* stage, thread const tf_raw& raw, in
         if (m < M && nn < TF_N)
           for (int j = 0; j < 4; j++) {
             const int col = nn + (TF_SIMD_FRAGS ? (j & 1) + 8 * (j >> 1) : j);
-            if (col < TF_N) Y[(size_t)m * TF_N + col] = static_cast<TF_OUT>(C[f * 8 + r * 4 + j]);
+            if (col < TF_N) Y[(size_t)m * TF_YS + col] = static_cast<TF_OUT>(C[f * 8 + r * 4 + j]);
           }
       }
 }
@@ -219,7 +269,7 @@ uint group_id [[simdgroup_index_in_threadgroup]],uint lane [[thread_index_in_sim
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if(sg==0) for(int part=1;part<TF_SK;part++)for(int i=0;i<8;i++)value[i]+=partial[((part-1)*8+i)*64+tip];
   }
-  if(sg==0)for(int i=0;i<8;i++)if(row[i]<M)Y[size_t(row[i])*TF_N+n0+column[i]]=TF_OUT(value[i]);
+  if(sg==0)for(int i=0;i<8;i++)if(row[i]<M)Y[size_t(row[i])*TF_YS+n0+column[i]]=TF_OUT(value[i]);
 }
 #endif
 
@@ -237,7 +287,7 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   const int r0 = int(tg.y) * 16, rows = mdims[0] - r0;
   if (rows <= 0) return;
   X += (size_t)r0 * TF_K;
-  Y += (size_t)r0 * TF_N;
+  Y += (size_t)r0 * TF_YS;
   XS += r0;
   const int lane = int(lanei), ks = int(sgi), M = min(rows, 16), stride = mdims[1], tile = tf_tile(int(tg.x)), n0 = tile * NT;
   const int nb = 4 * (lane & 1) + 8 * ((lane >> 3) & 1), mb = ((lane >> 1) & 3) + 4 * ((lane >> 4) & 1);
@@ -288,7 +338,7 @@ inline tf_reg_load tf_reg_fetch(const device uint4* wl, const device uint4* sbv,
   if (ks == 0)
     for (int i = 0; i < 16; i++) {
       const int m = mb + 8 * ((i >> 2) & 1), n = n0 + nb + 16 * (i >> 3) + (i & 3);
-      if (m < M && n < TF_N) Y[(size_t)m * TF_N + n] = static_cast<TF_OUT>(C[i]);
+      if (m < M && n < TF_N) Y[(size_t)m * TF_YS + n] = static_cast<TF_OUT>(C[i]);
     }
 }
 #endif

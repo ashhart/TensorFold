@@ -1,12 +1,16 @@
-//! GLM-5.3-Flash weights rewritten as they load: packed mixes and router, conv taps, fp32 norms, column slices.
+//! GLM-5.3-Flash weights as they load: parallel reads into place, and rewrites (mixes, router, conv, norms, columns).
 const std = @import("std");
 const st = @import("../../core/safetensors.zig");
+const paced_read = @import("../../core/paced_read.zig");
 
 /// One tensor's bytes on disk.
 pub const Src = struct { shard: u32, off: u64, len: u64, dtype: st.DType, shape: [st.max_rank]usize, rank: u8 };
 pub const Fix = enum { hc_pack, router_pack, conv, to_f32, transpose_bf16, cols };
 /// A tensor read whole into host memory and rewritten into its place (small: mixes, router, conv taps, norms).
 pub const Transform = struct { src: Src, dst: [*]u8, fix: Fix, extra: [3]?Src = .{ null, null, null }, arg: [3]usize = .{ 0, 0, 0 } };
+
+/// One tensor's bytes read straight into their place in a weights buffer.
+pub const Copy = struct { shard: u32, off: u64, len: u64, dst: [*]u8 };
 
 pub fn readAll(fd: std.c.fd_t, dest: []u8, at: u64) !void {
     var done: usize = 0;
@@ -21,7 +25,12 @@ pub fn transform(gpa: std.mem.Allocator, fds: []std.c.fd_t, t: Transform) !void 
     const raw = try gpa.alloc(u8, t.src.len);
     defer gpa.free(raw);
     try readAll(fds[t.src.shard], raw, t.src.off);
-    const in16: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw));
+    const narrow = t.src.dtype == .f32 and (t.fix == .hc_pack or t.fix == .router_pack); // mlx-lm's fp32 mixes, router
+    if (narrow) bf16Exact(raw) catch |err| {
+        @import("quant.zig").say("glm: an fp32 {t} tensor (shard {d}, at byte {d}, shape {any}) is not exact in bf16", .{ t.fix, t.src.shard, t.src.off, t.src.shape[0..t.src.rank] });
+        return err;
+    };
+    const in16: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, raw[0..if (narrow) raw.len / 2 else raw.len]));
     switch (t.fix) {
         .hc_pack => { // [og 6][tm 4][i 16][sgn 8][lane 32][tn 4] -> [og][sgn][lane][i][tm][tn]
             const out: [*]u16 = @ptrCast(@alignCast(t.dst));
@@ -78,4 +87,97 @@ pub fn transform(gpa: std.mem.Allocator, fds: []std.c.fd_t, t: Transform) !void 
             };
         },
     }
+}
+
+/// fp32 values as bf16 in place (the first half of `raw`), refused unless each is a bf16 (0.6.6's bf16_if_exact).
+fn bf16Exact(raw: []u8) error{InexactBf16}!void {
+    const n = raw.len / 4;
+    for (0..n) |i| {
+        const v = std.mem.readInt(u32, raw[4 * i ..][0..4], .little);
+        if (v & 0xffff != 0) return error.InexactBf16;
+        std.mem.writeInt(u16, raw[2 * i ..][0..2], @truncate(v >> 16), .little);
+    }
+}
+
+test "fp32 values that are bf16 narrow in place; any other value is refused" {
+    var raw: [12]u8 = undefined;
+    for ([_]f32{ 1.5, -0.0078125, 3.0 }, 0..) |v, i| std.mem.writeInt(u32, raw[4 * i ..][0..4], @bitCast(v), .little);
+    try bf16Exact(&raw);
+    try std.testing.expectEqual(@as(u16, 0x3fc0), std.mem.readInt(u16, raw[0..2], .little));
+    try std.testing.expectEqual(@as(u16, 0x4040), std.mem.readInt(u16, raw[4..6], .little));
+    std.mem.writeInt(u32, raw[0..4], @bitCast(@as(f32, 1.0000001)), .little);
+    try std.testing.expectError(error.InexactBf16, bf16Exact(&raw));
+}
+
+const Pool = struct {
+    fds: []std.c.fd_t,
+    jobs: []const Copy,
+    next: std.atomic.Value(usize) = .init(0),
+    failed: std.atomic.Value(bool) = .init(false),
+    short: std.atomic.Value(bool) = .init(false), // a read refused for memory: the first one's reading is `short_at`
+    short_at: paced_read.Memory = .{ .free = 0, .reclaimable = 0 },
+
+    fn run(p: *Pool) void {
+        const buf = paced_read.stage(std.heap.page_allocator, 16 << 20) catch {
+            p.failed.store(true, .release);
+            return;
+        };
+        defer std.heap.page_allocator.free(buf);
+        var short: paced_read.Memory = undefined;
+        while (!p.failed.load(.acquire)) { // a failed read fails the load: no thread starts another
+            const i = p.next.fetchAdd(1, .monotonic);
+            if (i >= p.jobs.len) return;
+            const j = p.jobs[i];
+            paced_read.read(p.fds[j.shard], j.dst[0..j.len], j.off, buf, &short) catch |err| {
+                if (err == error.MemoryShort and !p.short.swap(true, .acq_rel)) p.short_at = short;
+                p.failed.store(true, .release);
+            };
+        }
+    }
+};
+
+/// Every copy on `threads` threads, uncached, paced by the memory the kernel can give (else a load fills the cache).
+pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: []const Copy, transforms: []const Transform, threads: usize) !void {
+    const fds = try gpa.alloc(std.c.fd_t, shards.len);
+    defer gpa.free(fds);
+    for (shards, fds) |path, *fd| {
+        fd.* = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        if (fd.* < 0) return error.OpenFailed;
+        _ = std.c.fcntl(fd.*, 48, @as(c_int, 1)); // F_NOCACHE
+    }
+    defer for (fds) |fd| {
+        _ = std.c.close(fd);
+    };
+    var pool: Pool = .{ .fds = fds, .jobs = copies };
+    const workers = try gpa.alloc(?std.Thread, threads);
+    defer gpa.free(workers);
+    for (workers) |*t| t.* = std.Thread.spawn(.{}, Pool.run, .{&pool}) catch null;
+    pool.run();
+    for (workers) |t| if (t) |th| th.join();
+    if (pool.short.load(.acquire)) {
+        var buf: [400]u8 = undefined;
+        std.log.err("glm: {s}", .{paced_read.refusal(&buf, pool.short_at, paced_read.floor())});
+        return error.MemoryShort;
+    }
+    if (pool.failed.load(.acquire)) return error.ShortRead;
+    // the transforms on the same threads (each reads its own tensors whole)
+    const Tx = struct {
+        gpa: std.mem.Allocator,
+        jobs: []const Transform,
+        fds: []std.c.fd_t,
+        next: std.atomic.Value(usize) = .init(0),
+        failed: std.atomic.Value(bool) = .init(false),
+        fn run(x: *@This()) void {
+            while (true) {
+                const i = x.next.fetchAdd(1, .monotonic);
+                if (i >= x.jobs.len) return;
+                transform(x.gpa, x.fds, x.jobs[i]) catch x.failed.store(true, .release);
+            }
+        }
+    };
+    var tx: Tx = .{ .gpa = gpa, .jobs = transforms, .fds = fds };
+    for (workers) |*t| t.* = std.Thread.spawn(.{}, Tx.run, .{&tx}) catch null;
+    tx.run();
+    for (workers) |t| if (t) |th| th.join();
+    if (tx.failed.load(.acquire)) return error.TransformFailed;
 }

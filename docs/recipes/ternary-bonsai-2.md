@@ -1,5 +1,9 @@
 # Ternary Bonsai 2 27B
 
+This recipe describes the Python engine's `bonsai` family, frozen at 0.6.6 and available at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). The native binary has no family for this pack yet,
+so `tensorfold pull` and `tensorfold info` refuse it.
+
 Prism ML's Bonsai 2 27B is Qwen3.8-27B with ternary weights stored in a rotated basis. Its MLX pack
 (`model_type: prism_hadamard_qwen35`) keeps every projection as 2-bit codes in groups of 128. The weights
 are ternary, so each group's codes decode to -s, 0 or +s. The pack's `hadamard.json` names the transform

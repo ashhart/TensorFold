@@ -1,0 +1,100 @@
+{
+  "reason": "Exact public upstream copyright/author credits retained from node-forge 1.4.0, whose npm source integrity is recorded in mobile/vendor/security-backports.json; this is not a vendor-directory exemption.",
+  "matches": [
+    {
+      "file": "mobile/vendor/node-forge/lib/aes.js",
+      "lineSha256": "7c522e28a1e17cacf42bd6bc4db780243d8bb7ef583da3462ca40e3ee8081716",
+      "emailSha256": "bb99b8342359fd59c65812c91edf413629e2a38afc72614602550567a2e19b13"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/aes.js",
+      "lineSha256": "479a619627dc4c0e7aed5768290f1482bee11ea6754ab74c462932867f3cdf29",
+      "emailSha256": "808007d67403026610d6652ea805b4ec69e2c08cc9ecd57014a23fdfef2f4ad6"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/aes.js",
+      "lineSha256": "14df6ec37c086b2953b1523f62c73acaebdade2515621e7ee85967e58dfda44f",
+      "emailSha256": "f5481c442e28413d3d4b1831f11062bd7ac1d3bd24dfd9f515042d90b03b623a"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pkcs12.js",
+      "lineSha256": "7c2156e0348ac33e348c4999e1c204bab225a849e38a3eaec410e7e27c085f54",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pkcs12.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pkcs1.js",
+      "lineSha256": "fe6d67bf7b4125978bb950e312daff98bdf91a9d069b781e144276b0620ff75b",
+      "emailSha256": "74782b380380b3699e9c0abd32c348ced616e486f5407d8288a102e58f117d41"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/rc2.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/jsbn.js",
+      "lineSha256": "3d78e20368ab3935c25683f3e916e82cba3d737a56d5bd1b51179ebbb68f7e47",
+      "emailSha256": "4bf22612cfc82e9cdca353058876ac6f03684edb6834d5907e510cb214dbad9e"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/log.js",
+      "lineSha256": "6639b6d7c31454bc10e9fa3fb6bc0152ef5c16e37e6d07b91f8a06975dc432ad",
+      "emailSha256": "4dda1f2bfb964802496c229425cce9129d2aaf10226e41f24f09f99a2248228c"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pss.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/kem.js",
+      "lineSha256": "52fa1fbe009533b95aec201ee1cfac89eb78ae4d0e6b0fbaee230f13dee2fd89",
+      "emailSha256": "d65700a37ea4d4e02901bbd59be48b9e5c48cc163e59aba4da7890157e3d61fc"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/mgf1.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/mgf.js",
+      "lineSha256": "ce637abf5625dce16e7170c2e3785b22e799bb44af675811bc8262ac9a023850",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/des.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/form.js",
+      "lineSha256": "6639b6d7c31454bc10e9fa3fb6bc0152ef5c16e37e6d07b91f8a06975dc432ad",
+      "emailSha256": "4dda1f2bfb964802496c229425cce9129d2aaf10226e41f24f09f99a2248228c"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pkcs7asn1.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pbe.js",
+      "lineSha256": "7c2156e0348ac33e348c4999e1c204bab225a849e38a3eaec410e7e27c085f54",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pbe.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    },
+    {
+      "file": "mobile/vendor/node-forge/lib/pkcs7.js",
+      "lineSha256": "be364415ef222d4186144608e2b03c1732a9534921d3590a63a33053df968965",
+      "emailSha256": "cfbaa82879329d66159d2244629a3554cbd5b62815c3be35c39b591625d3fb08"
+    }
+  ]
+}

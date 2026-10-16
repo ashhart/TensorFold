@@ -10,12 +10,13 @@ const core_lane = @import("core_lane");
 const help =
     \\tf-qwen27-run --run --model DIR --tokens IDS.json [--max-tokens 256]
     \\  [--chunk 128] [--compare-chunk 16] [--reference GENERATED.json] [--force-length]
-    \\  [--no-warmup] [--profile-steps N] [--teacher]
+    \\  [--no-warmup] [--profile-steps N] [--teacher] [--seams N]
     \\IDs and reference files are JSON arrays of unsigned token IDs, already chat-rendered.
     \\Greedy only, drafts off; JSON receipt on stdout, errors on stderr.
     \\--teacher feeds every reference token and records native top2 at all positions; margin timing is diagnostic.
     \\--max-tokens 0 reports prompt tok/s including the final single-row head.
     \\--compare-chunk reruns the whole prompt and decode and checks prompt state/KV/logits bytes.
+    \\--seams N (with --compare-chunk): state/KV/logits bytes every N prompt rows under both chunks and after decode.
     \\CPU only: --help or --emit-sources EXISTING_DIR, no Metal device or model load.
 ;
 
@@ -85,6 +86,7 @@ pub fn main(init: std.process.Init) !void {
     var count: usize = 256;
     var chunk: usize = 128;
     var compare: usize = 0;
+    var seam_every: usize = 0;
     var run = false;
     var force = false;
     var warmup = true;
@@ -111,9 +113,9 @@ pub fn main(init: std.process.Init) !void {
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
         const value = args[i];
-        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
+        if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
     }
-    if (!run or model == null or file == null or chunk == 0 or chunk > 128 or compare > 128 or count > 65536) return error.BadOptions;
+    if (!run or model == null or file == null or chunk == 0 or chunk > 128 or compare > 128 or count > 65536 or (seam_every > 0 and compare == 0)) return error.BadOptions;
     const ids = try tokens(a, io, file.?);
     if (ids.len == 0 or ids.len + count > 262144) return error.BadPrompt;
     const expected = if (reference) |path| try tokens(a, io, path) else null;
@@ -144,6 +146,7 @@ pub fn main(init: std.process.Init) !void {
     const generation = try generated(a, s, count, force, expected, if (profile_steps > 0) &trace else null, profile_steps, teacher);
     const out = generation.tokens;
     const decode_ns = decode_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    const decoded = if (compare > 0) try s.fingerprint() else digest;
     const reference_equal = if (expected) |wanted| std.mem.eql(u32, out, wanted) else false;
     if (compare > 0) {
         try runner.reset(0);
@@ -151,6 +154,19 @@ pub fn main(init: std.process.Init) !void {
         if (!std.mem.eql(u8, &digest, &try s.fingerprint())) return error.PromptStateOrLogitsDiffer;
         const second = try generated(a, s, count, force, if (teacher) expected else null, null, 0, teacher);
         if (!std.mem.eql(u32, out, second.tokens)) return error.ChunkedTokensDiffer;
+        if (!std.mem.eql(u8, &decoded, &try s.fingerprint())) return error.DecodeStateOrLogitsDiffer;
+    }
+    const Seam = struct { at: usize, equal: bool };
+    var seams: std.ArrayList(Seam) = .empty;
+    var at = seam_every;
+    while (seam_every > 0 and at < ids.len) : (at += seam_every) {
+        var sides: [2][32]u8 = undefined;
+        for ([_]usize{ chunk, compare }, &sides) |c, *side| {
+            try runner.reset(0);
+            try s.prefill(ids[0..at], c);
+            side.* = try s.fingerprint();
+        }
+        try seams.append(a, .{ .at = at, .equal = std.mem.eql(u8, &sides[0], &sides[1]) });
     }
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
     const ProfileRecord = struct { class: []const u8, calls: u64, gpu_seconds: f64 };
@@ -168,6 +184,11 @@ pub fn main(init: std.process.Init) !void {
         .chunk = chunk,
         .compare_chunk = compare,
         .prompt_state_byte_equal = compare > 0,
+        .decode_state_byte_equal = compare > 0,
+        .seams = seams.items,
+        .seams_byte_equal = for (seams.items) |x| {
+            if (!x.equal) break false;
+        } else true,
         .reference_token_equal = reference_equal,
         .first_difference = generation.first_difference,
         .logit_dtype = "bf16",
@@ -188,5 +209,6 @@ pub fn main(init: std.process.Init) !void {
     }, .{});
     try std.Io.File.stdout().writeStreamingAll(io, receipt);
     try std.Io.File.stdout().writeStreamingAll(io, "\n");
+    for (seams.items) |x| if (!x.equal) return error.SeamStateOrLogitsDiffer;
     if (!teacher and reference != null and !reference_equal) return error.ReferenceTokensDiffer;
 }

@@ -93,7 +93,9 @@ pub fn createLayers(a: std.mem.Allocator, layers: usize) !*q.model.Model {
             inline for (.{ "self_attn.q_norm.weight", "self_attn.k_norm.weight" }) |leaf| try builder.tensor(try builder.layerName(i, leaf), &.{256}, .bf16, 1);
         }
     }
-    var weights = try q.gpu_weights.load(a, device, &cp, c);
+    var widths = try q.widths.Widths.uniformAll(a, c.layers);
+    defer widths.deinit();
+    var weights = try q.gpu_weights.load(a, device, &cp, c, &widths);
     errdefer weights.deinit();
     const glue = try q.glue_gpu.Kernels.init(device);
     errdefer glue.deinit();

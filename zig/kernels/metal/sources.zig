@@ -6,9 +6,16 @@ pub const nemotron = @import("nemotron/kernels.zig");
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
 
+/// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
+pub const lfm2 = @embedFile("lfm2/lfm2.metal");
+/// LFM2's prompt attention on the tensor units (nax.h inlined at load, after lfm2.metal's text).
+pub const lfm2_attn_nax = @embedFile("lfm2/lfm2_attn_nax.metal");
+
 /// Our glue kernels around them: embedding, MLX's RMS arithmetic, argmax, layout moves.
 pub const nemotron_glue = @embedFile("nemotron_glue.metal");
 pub const core_row_projection = @embedFile("core/row_projection.metal");
+pub const core_tile_qmm = @embedFile("core/tile_qmm.metal") ++ @embedFile("core/tile_qmv.metal") ++
+    @embedFile("core/tile_qmv_rows.metal");
 pub const core_exl3_projection = @embedFile("core/exl3_projection.metal");
 pub const core_exlr8_projection = @embedFile("core/exlr8_projection.metal");
 pub const core_exlr8_dense = @embedFile("core/exlr8_dense.metal");
@@ -49,6 +56,8 @@ pub const nax = @embedFile("nax.h");
 
 /// Flash Next 6-bit (group 32) prompt projections on the tensor units: dense and sorted-expert gather.
 pub const flashnext_qmm6 = @embedFile("prefill/qmm6_nax.metal") ++ @embedFile("prefill/qmm6_nax_b.metal");
+/// Flash Next's prompt products at any MLX width (WB and WG defined before it; nax.h inlined at load).
+pub const flashnext_qmmw = @embedFile("prefill/qmmw_nax.metal");
 /// Flash Next prompt-chunk glue: hyper-connection pieces, router rows, top-k, the expert sort, gathers and scatters.
 pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 /// Flash Next block selection in GPU-side rounds: per-row metadata from the arena and pooling at absolute blocks.
@@ -77,13 +86,22 @@ pub const prefill = [_]File{
 
 /// Flash Next decode: the DeltaNet window step with every row's independent work at once.
 pub const flashnext_gdn = @embedFile("decode/fn_gdn.metal");
+/// Flash Next decode products one input row a simdgroup, for GPUs without tensor units (0.6.6's rows.py).
+pub const flashnext_rows = @embedFile("decode/fn_rows.metal");
+pub const flashnext_rows_hc = @embedFile("decode/fn_rows_hc.metal");
 
 /// GLM-5.3-Flash's decode kernels from our Python family (tools/zig/gen_glm_kernels.py).
 pub const glm = @import("glm/kernels.zig");
 /// GLM-5.3-Flash's glue: MLX's arithmetic where the Python family calls MLX ops; selection, argmax, small steps.
 pub const glm_glue = @embedFile("glm_glue.metal");
+/// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
+pub const glm_rows = @embedFile("glm_rows.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
+/// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
+pub const glm_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("glm_vision.metal");
+/// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
+pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("core/qwen_vision.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
@@ -115,3 +133,7 @@ pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 pub const core_deltanet = @embedFile("core/deltanet.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
+/// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
+pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
+pub const core_contract_controls = @embedFile("core/contract_controls.metal");

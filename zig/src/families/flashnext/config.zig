@@ -1,6 +1,6 @@
 //! FlashNext text dimensions and quantization declarations are checked before weight or cache allocation.
 const std = @import("std");
-const affine = @import("affine.zig");
+const affine = @import("spec.zig");
 
 pub const Kind = enum { linear_attention, sparse_attention };
 pub const Gate = enum { sigmoid, silu };
@@ -54,6 +54,8 @@ pub const Config = struct {
     eos: [16]u32 = @splat(0),
     eos_count: usize = 0,
     global_affine: affine.Spec,
+    /// A widths.Widths set by a tensor reader; widths.quantization reads it, so this file imports no core.
+    widths: ?*const anyopaque = null,
 
     pub fn deinit(c: *Config) void {
         c.parsed.deinit();
@@ -93,7 +95,8 @@ pub const Config = struct {
         return c.kinds[i];
     }
 
-    pub fn quantization(c: *const Config, path: []const u8) !?affine.Spec {
+    /// The config's own width for `path`, keys spelled by `canonical` (core/quant/keys.zig): this file imports no core.
+    pub fn declared(c: *const Config, path: []const u8, canonical: *const fn ([]const u8) []const u8) !?affine.Spec {
         const wanted = canonical(path);
         var found = false;
         var answer: ?affine.Spec = c.global_affine;
@@ -112,14 +115,6 @@ pub const Config = struct {
         return answer;
     }
 };
-
-fn canonical(value: []const u8) []const u8 {
-    var path = if (std.mem.endsWith(u8, value, ".weight")) value[0 .. value.len - 7] else value;
-    for ([_][]const u8{ "model.language_model.", "language_model.", "text_model.", "model." }) |prefix| {
-        if (std.mem.startsWith(u8, path, prefix)) path = path[prefix.len..];
-    }
-    return path;
-}
 
 fn same(a: ?affine.Spec, b: ?affine.Spec) bool {
     if (a == null or b == null) return a == null and b == null;

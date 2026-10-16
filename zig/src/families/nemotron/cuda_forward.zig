@@ -11,6 +11,7 @@ const Dump = @import("cuda_dump.zig").Dump;
 const train_ops = @import("cuda_train_ops.zig");
 const lesson_route = @import("lesson_route.zig");
 const kept = @import("cuda_marks.zig");
+const latent = @import("cuda_latent.zig");
 
 pub const Delta = enum { none, dense, moe };
 
@@ -60,9 +61,26 @@ pub const Forward = struct {
     untaught: bool = false, // the pocket leaves rows (the model as shipped): `segs`' untaught sequences', else all
     segs: []const Seg = &.{}, // a window's sequences, as windowSegs runs them
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
+    tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
+    vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
-        return .{ .c = c, .w = w, .b = b, .ops = ops, .glue = .{ .set = if (ops.k.triton) |*t| t else null, .f = &ops.k.glue, .s = ops.s, .emb = &ops.k.emb }, .max_len = max_len, .nch = nch, .sampled = sampled };
+        return .{
+            .c = c,
+            .w = w,
+            .b = b,
+            .ops = .{ .k = ops.k, .s = ops.s, .ck8 = b.ck8 }, // FP8 layers' e4m3 rows in these buffers
+            .glue = .{
+                .set = if (ops.k.triton) |*t| t else null,
+                .f = &ops.k.glue,
+                .s = ops.s,
+                .emb = &ops.k.emb,
+                .norms = &ops.k.norms,
+            },
+            .max_len = max_len,
+            .nch = nch,
+            .sampled = sampled,
+        };
     }
 
     /// Rows of logits draw their next tokens into `out`, row r at position META[0] + r + 1, by `rule` when sampled.
@@ -72,7 +90,7 @@ pub const Forward = struct {
         try f.ops.draw(logits, v, rule, meta, 0, out, rows, null, null);
     }
 
-    fn mark(f: *const Forward, c: Class) !void {
+    pub fn mark(f: *const Forward, c: Class) !void {
         if (f.marks) |m| try m.add(f.ops.s, c);
     }
 
@@ -195,7 +213,10 @@ pub const Forward = struct {
                     delta = .dense;
                     aj += 1;
                 },
-                .moe => {
+                .moe => if (blk.moe.latent != null) {
+                    try latent.run(f, blk.moe, rows);
+                    delta = .dense;
+                } else {
                     try f.experts(blk.moe, rows, false);
                     delta = .moe;
                 },
@@ -264,7 +285,7 @@ pub const Forward = struct {
     fn pocketRun(f: *const Forward, o: kern.Ops, p: weights.Pocket, d: usize, y_f32: bool, r: [2]usize) !void {
         const c = f.c;
         const out = f.b.ymoe + @as(u64, r[0] * c.slots() * d) * @as(u64, if (y_f32) 4 else 2);
-        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p.up, p.down, p.n, out, y_f32, r[1], c.slots(), c.top_k);
+        try o.pocketRows(f.b.y + @as(u64, r[0] * d) * 2, d, p, f.b.pocket, out, y_f32, r[1], c.slots(), c.top_k);
     }
 
     /// A lesson's rest into the shared expert's halves' pair rows, a live change (--slide, 2W wide) into the first's.
@@ -326,6 +347,7 @@ pub const Forward = struct {
     pub fn chunkBegin(f: *const Forward, w: *Walk) !void {
         const b = f.b;
         try f.embed(b.p_ids, b.emb, w.rows);
+        if (f.vision) |v| try v.splice(f.ops.s, w.pos, w.pos + w.rows, b.emb);
         w.x = b.emb;
     }
 
@@ -410,7 +432,10 @@ pub const Forward = struct {
                 w.delta = .dense;
                 w.aj += 1;
             },
-            .moe => {
+            .moe => if (blk.moe.latent != null) {
+                try latent.run(f, blk.moe, w.rows);
+                w.delta = .dense;
+            } else {
                 try f.experts(blk.moe, w.rows, true);
                 w.delta = .moe;
             },

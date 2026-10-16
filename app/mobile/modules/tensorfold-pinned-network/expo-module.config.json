@@ -1,0 +1,1 @@
+{"platforms":["apple","android"],"apple":{"modules":["TensorFoldPinnedNetworkModule"]},"android":{"modules":["expo.modules.tensorfoldpinnednetwork.TensorFoldPinnedNetworkModule"]}}

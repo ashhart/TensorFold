@@ -31,6 +31,7 @@ const Rig = struct {
     s: cuda.Stream,
     f: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     rng: std.Random,
     bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
     bad: usize = 0,
@@ -38,7 +39,7 @@ const Rig = struct {
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
     fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb };
+        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
@@ -58,6 +59,16 @@ const Rig = struct {
     fn bfs(r: *Rig, n: usize, scale: f32) ![]u16 {
         const out = try r.a.alloc(u16, n);
         for (out) |*v| v.* = gm.f32ToBf16((r.rng.float(f32) * 2 - 1) * scale);
+        return out;
+    }
+
+    /// bf16 values of magnitude 2^-8 to 2^8, log-uniform: rows whose sums' order shows in their last bits.
+    fn wides(r: *Rig, n: usize) ![]u16 {
+        const out = try r.a.alloc(u16, n);
+        for (out) |*v| {
+            const sign: f32 = if (r.rng.boolean()) 1 else -1;
+            v.* = gm.f32ToBf16(sign * std.math.exp2(r.rng.float(f32) * 16 - 8));
+        }
         return out;
     }
 
@@ -127,8 +138,9 @@ fn norms(r: *Rig) !void {
         try r.same("add_rmsnorm y", u16, yd, y);
         try r.same("add_rmsnorm xs", f32, xsd, xs);
     }
-    for ([_]usize{ 16, 300 }, [_]bool{ true, false }) |rows, f32_out| {
-        const x = try r.bfs(rows * D, 2.0);
+    const moe_rows = [_]usize{ 1, 16, 300, 2048 }; // a decode row, a full window, prompt chunks
+    for (moe_rows, [_]bool{ false, true, false, true }, [_]bool{ true, false, false, true }) |rows, f32_out, wide| {
+        const x = if (wide) try r.wides(rows * D) else try r.bfs(rows * D, 2.0);
         const y32 = try r.f32s(rows * NS * D, -1, 1);
         const y16 = try r.bfs(rows * NS * D, 1.0);
         const wt = try r.f32s(rows * NS, 0, 0.5);
@@ -177,23 +189,29 @@ fn norms(r: *Rig) !void {
 
 fn route(r: *Rig) !void {
     const sk = glue.routerShape(D).sk;
-    for ([_]usize{ 1, 16, 300 }) |rows| {
-        const x = try r.bfs(rows * D, 1.0);
-        const w = try r.bfs(E * D, 0.05);
-        const bias = try r.f32s(E, -0.05, 0.05);
-        const part = try r.a.alloc(f32, sk * rows * E);
-        const idx = try r.a.alloc(i32, rows * NS);
-        const wt = try r.a.alloc(f32, rows * NS);
-        ref.router(x, w, part, rows, D, E, sk);
-        ref.topk(part, bias, idx, wt, rows, 2.5, E, sk, top_k, NS, true);
-        const partd = try r.zeros(f32, sk * rows * E);
-        const idxd = try r.zeros(i32, rows * NS);
-        const wtd = try r.zeros(f32, rows * NS);
-        try r.g().route(try r.dev(u16, x), try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, D, E, top_k, 2.5, true);
-        try r.same("router partials", f32, partd, part);
-        try r.same("top-k ids", i32, idxd, idx);
-        try r.same("top-k weights", f32, wtd, wt);
-    }
+    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router)
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0);
+    try routeRows(r, sk, 4, 2); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
+}
+
+/// `rows` rows that start `skew` bf16 values into their buffer, routed and ranked against the host references.
+fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize) !void {
+    const x = try r.bfs(skew + rows * D, 1.0);
+    const w = try r.bfs(E * D, 0.05);
+    const bias = try r.f32s(E, -0.05, 0.05);
+    const part = try r.a.alloc(f32, sk * rows * E);
+    const idx = try r.a.alloc(i32, rows * NS);
+    const wt = try r.a.alloc(f32, rows * NS);
+    ref.router(x[skew..], w, part, rows, D, E, sk);
+    ref.topk(part, bias, idx, wt, rows, 2.5, E, sk, top_k, NS, true);
+    const partd = try r.zeros(f32, sk * rows * E);
+    const idxd = try r.zeros(i32, rows * NS);
+    const wtd = try r.zeros(f32, rows * NS);
+    const xd = try r.dev(u16, x) + @as(u64, 2 * skew);
+    try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, D, E, top_k, 2.5, true);
+    try r.same("router partials", f32, partd, part);
+    try r.same("top-k ids", i32, idxd, idx);
+    try r.same("top-k weights", f32, wtd, wt);
 }
 
 /// Two windows through conv and scan: the second replays three kept rows of the first, at the other parity.
@@ -522,9 +540,18 @@ pub fn run(gpu: Gpu) !void {
         loaded += 1;
     }
     var prng = std.Random.DefaultPrng.init(0x5eed_9a7e);
-    var r: Rig = .{ .gpu = gpu, .a = arena.allocator(), .s = try cuda.Stream.init(gpu.d, true), .f = try glue.Fns.resolve(&mods), .emb = try cuda.embed_rows.EmbedRows.load(gpu.d), .rng = prng.random() };
+    var r: Rig = .{
+        .gpu = gpu,
+        .a = arena.allocator(),
+        .s = try cuda.Stream.init(gpu.d, true),
+        .f = try glue.Fns.resolve(&mods),
+        .emb = try cuda.embed_rows.EmbedRows.load(gpu.d),
+        .norms = try cuda.norms.Norms.load(gpu.d),
+        .rng = prng.random(),
+    };
     defer {
         r.emb.unload();
+        r.norms.unload();
         r.s.deinit();
         for (r.bufs.items) |*b| b.free();
         r.bufs.deinit(gpu.gpa);

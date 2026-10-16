@@ -108,7 +108,10 @@ then the final norm, the head GEMM, and `argmax_part` / `argmax`. What changes w
 | `T` | GEMM | GDN | Attention |
 |---|---|---|---|
 | 16 or fewer (decode, verification) | decode kernels (`w4k*` family) | serial `gdn_step`, as decode does | `attn_decode` + `attn_merge` |
-| more than 16 (prompt) | nGEN prompt GEMMs (`w4g_*`, or `w4a8` / `w4a4` with the W4A8 options) | chunked `gdn_prep`, `gdn_state`, `gdn_out` on 64-row chunks (padded with neutral rows) | `attn_prompt` (`attn_prompt8` with the int8 cache) |
+| more than 16 (prompt) | nGEN prompt GEMMs (`w4g_*`, `w4a8` or `w4a4`) | chunked GDN, 64 rows a chunk | `attn_prompt` |
+
+Prompt rows use `w4a8` or `w4a4` only with the W4A8 options. Their GDN runs `gdn_prep`, `gdn_state` and `gdn_out` on
+64-row chunks padded with neutral rows, and their attention is `attn_prompt8` with the int8 cache.
 
 Below 17 rows the GDN runs serially so that a verified row equals the serial one bit for bit; that is the foundation
 of the speculative-decoding contracts (section 10).
@@ -265,6 +268,10 @@ GEMMs have the same arithmetic and tiling as the OpenCL reference `w4n_prompt`, 
   and `w4a8_swiglu` (int8 activations, int8 DPAS, GPTQ g128 only) and `w4a4` (int4 activations on rotated weights).
 - Option words: `b3` (B over three buffers), `s4` (the sliced family), `asplit` (A read in two halves, overlapping the
   DPAS), `swiglu`, and `a8` / `a4` for the integer-activation kernels. The register map is documented in each header.
+- In `w4_prompt.hpp` a subgroup's tile is two 16-column tiles (8 accumulators). A group's DPAS partial is folded into
+  the accumulator by the previous group's scale while this group's DPAS run (a one-group lag), and the bias enters by
+  DPAS at the end (Ahi, Alo, b × gsz). `s4` keeps `((t0 + t1) + t2) + t3` in P, `asplit` reads A in two halves of
+  16 K, and `swiglu` takes gate|up interleaved by 16 columns and writes fp16(bf16(SiLU(g)·u)) as [M, N/2].
 
 ## 9. Environment variables
 

@@ -1,6 +1,9 @@
-// Affine 2-, 4-, 6- and 8-bit row projections for chips without tensor units: RPS columns a simdgroup, MB rows a weight read, each row its own fp32 sums.
+// Affine 2- to 8-bit row projections without tensor units: RPS columns a simdgroup, MB rows a weight read.
 #include <metal_stdlib>
 using namespace metal;
+
+// 2^-e, exact: a code read in place at bit e times its input scaled by 2^-e is the same product.
+inline float tf_rp_p2(int e) { return as_type<float>(uint(127 - e) << 23); }
 
 // 16 bf16 inputs as floats (scaled to the nibble positions at 4 bits) and their group sum: fp32 in order, or rounded to bf16 at each add (BF16SUM, the Nemotron expert convention).
 template <int BITS, bool BF16SUM>
@@ -10,22 +13,22 @@ inline float tf_rp_load16(const device bfloat* x, thread float* xt) {
     const bfloat a = x[i], b = x[i + 1], c = x[i + 2], d = x[i + 3];
     if (BF16SUM) sum += float(bfloat(float(bfloat(float(bfloat(float(a) + float(b))) + float(c))) + float(d)));
     else { sum += float(a); sum += float(b); sum += float(c); sum += float(d); }
-    xt[i] = float(a);
-    xt[i + 1] = BITS == 4 ? float(b) / 16.0f : float(b);
-    xt[i + 2] = BITS == 4 ? float(c) / 256.0f : float(c);
-    xt[i + 3] = BITS == 4 ? float(d) / 4096.0f : float(d);
+    xt[i] = BITS == 2 ? float(a) * tf_rp_p2(2 * i) : float(a);
+    xt[i + 1] = BITS == 4 ? float(b) / 16.0f : BITS == 2 ? float(b) * tf_rp_p2(2 * i + 2) : float(b);
+    xt[i + 2] = BITS == 4 ? float(c) / 256.0f : BITS == 2 ? float(c) * tf_rp_p2(2 * i + 4) : float(c);
+    xt[i + 3] = BITS == 4 ? float(d) / 4096.0f : BITS == 2 ? float(d) * tf_rp_p2(2 * i + 6) : float(d);
   }
   return sum;
 }
 
-// MB rows' dots with one weight word group (16 codes; 6-bit: four values in three bytes), the codes unpacked to floats once; each row's sums in one order.
+// MB rows' dots with 16 codes (3, 5, 6 bits: 8, 8, 4 codes in 3, 5, 3 bytes), unpacked once; sums in one order.
 template <int MB, int BITS>
 inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], float scale, float bias,
                          const thread float* sum, thread float* out) {
   float q[16];
   if (BITS == 2) {
     const uint v = *(const device uint*)w;
-    for (int i = 0; i < 16; i++) q[i] = float((v >> (2 * i)) & 3u);
+    for (int i = 0; i < 16; i++) q[i] = float(v & (3u << (2 * i)));
   } else if (BITS == 4) {
     const device uint16_t* ws = (const device uint16_t*)w;
     for (int i = 0; i < 4; i++) {
@@ -39,6 +42,20 @@ inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], 
       q[4 * i + 1] = float(((p[0] >> 6) & 0x03) | ((p[1] & 0x0f) << 2));
       q[4 * i + 2] = float(((p[1] >> 4) & 0x0f) | ((p[2] & 0x03) << 4));
       q[4 * i + 3] = float((p[2] >> 2) & 0x3f);
+    }
+  } else if (BITS == 3) {
+    for (int i = 0; i < 2; i++) {
+      const device uint8_t* p = w + 3 * i;
+      const uint v = uint(p[0]) | (uint(p[1]) << 8) | (uint(p[2]) << 16);
+      for (int j = 0; j < 8; j++) q[8 * i + j] = float((v >> (3 * j)) & 7u);
+    }
+  } else if (BITS == 5) {
+    for (int i = 0; i < 2; i++) {
+      const device uint8_t* p = w + 5 * i;
+      const uint lo = uint(p[0]) | (uint(p[1]) << 8) | (uint(p[2]) << 16) | (uint(p[3]) << 24), hi = p[4];
+      for (int j = 0; j < 6; j++) q[8 * i + j] = float((lo >> (5 * j)) & 31u);
+      q[8 * i + 6] = float(((lo >> 30) | (hi << 2)) & 31u);
+      q[8 * i + 7] = float(hi >> 3);
     }
   } else {
     for (int i = 0; i < 16; i++) q[i] = float(w[i]);
@@ -93,8 +110,8 @@ inline bfloat tf_rp_out(float v) {
   return bfloat(v);
 }
 
-// dims: K, N, GS, rows. X [rows, K] bf16; W [N, K*BITS/32] words; S, B [N, K/GS] bf16; OUT [rows, N] bf16.
-template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM>
+// dims: K, N, GS, rows, OUT's row stride when STRIDED (else N). X [rows, K]; W [N, K*BITS/32] words; S, B [N, K/GS].
+template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM, bool STRIDED = false>
 [[kernel]] void tf_row_projection(const device bfloat* X [[buffer(0)]],
                                   const device uint32_t* W [[buffer(1)]],
                                   const device bfloat* S [[buffer(2)]],
@@ -104,7 +121,7 @@ template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM>
                                   uint simdgroup_index_in_threadgroup [[simdgroup_index_in_threadgroup]],
                                   uint thread_index_in_simdgroup [[thread_index_in_simdgroup]],
                                   uint3 threadgroup_position_in_grid [[threadgroup_position_in_grid]]) {
-  const int K = dims[0], N = dims[1], GS = dims[2], rows = dims[3];
+  const int K = dims[0], N = dims[1], GS = dims[2], rows = dims[3], LD = STRIDED ? dims[4] : N;
   const uint lane = thread_index_in_simdgroup;
   const int row0 = (int(threadgroup_position_in_grid.x) * SG + int(simdgroup_index_in_threadgroup)) * RPS;
   if (row0 >= N) return;
@@ -119,14 +136,14 @@ template <int RPS, int SG, int MB, bool RELU2, int BITS, bool BF16SUM>
     tf_rp_rows<RPS, MB, BITS, BF16SUM>(wr, sr, br, X + size_t(m) * K, K, GS, lane, acc);
     if (lane == 0)
       for (int b = 0; b < MB; b++)
-        for (int j = 0; j < RPS; j++) OUT[size_t(m + b) * N + row0 + j] = tf_rp_out<RELU2>(acc[b][j]);
+        for (int j = 0; j < RPS; j++) OUT[size_t(m + b) * LD + row0 + j] = tf_rp_out<RELU2>(acc[b][j]);
   }
   #pragma clang loop unroll(disable)
   for (; m < rows; m++) {
     float acc[1][RPS];
     tf_rp_rows<RPS, 1, BITS, BF16SUM>(wr, sr, br, X + size_t(m) * K, K, GS, lane, acc);
     if (lane == 0)
-      for (int j = 0; j < RPS; j++) OUT[size_t(m) * N + row0 + j] = tf_rp_out<RELU2>(acc[0][j]);
+      for (int j = 0; j < RPS; j++) OUT[size_t(m) * LD + row0 + j] = tf_rp_out<RELU2>(acc[0][j]);
   }
 }
 
@@ -195,3 +212,31 @@ template [[host_name("tf_row_projection_q8_bf16")]] [[kernel]] decltype(tf_row_p
 template [[host_name("tf_row_projection_indexed_q8_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 8, true>) tf_row_projection_indexed<4, 2, false, 8, true>;
 template [[host_name("tf_row_projection_relu2_q8_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 8, true>) tf_row_projection<4, 2, 2, true, 8, true>;
 template [[host_name("tf_row_projection_indexed_relu2_q8_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 8, true>) tf_row_projection_indexed<4, 2, true, 8, true>;
+template [[host_name("tf_row_projection_q3_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 3, false>) tf_row_projection<4, 2, 2, false, 3, false>;
+template [[host_name("tf_row_projection_indexed_q3_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 3, false>) tf_row_projection_indexed<4, 2, false, 3, false>;
+template [[host_name("tf_row_projection_relu2_q3_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 3, false>) tf_row_projection<4, 2, 2, true, 3, false>;
+template [[host_name("tf_row_projection_indexed_relu2_q3_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 3, false>) tf_row_projection_indexed<4, 2, true, 3, false>;
+template [[host_name("tf_row_projection_q3_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 3, true>) tf_row_projection<4, 2, 2, false, 3, true>;
+template [[host_name("tf_row_projection_indexed_q3_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 3, true>) tf_row_projection_indexed<4, 2, false, 3, true>;
+template [[host_name("tf_row_projection_relu2_q3_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 3, true>) tf_row_projection<4, 2, 2, true, 3, true>;
+template [[host_name("tf_row_projection_indexed_relu2_q3_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 3, true>) tf_row_projection_indexed<4, 2, true, 3, true>;
+template [[host_name("tf_row_projection_q5_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 5, false>) tf_row_projection<4, 2, 2, false, 5, false>;
+template [[host_name("tf_row_projection_indexed_q5_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 5, false>) tf_row_projection_indexed<4, 2, false, 5, false>;
+template [[host_name("tf_row_projection_relu2_q5_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 5, false>) tf_row_projection<4, 2, 2, true, 5, false>;
+template [[host_name("tf_row_projection_indexed_relu2_q5_f32")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 5, false>) tf_row_projection_indexed<4, 2, true, 5, false>;
+template [[host_name("tf_row_projection_q5_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 5, true>) tf_row_projection<4, 2, 2, false, 5, true>;
+template [[host_name("tf_row_projection_indexed_q5_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, false, 5, true>) tf_row_projection_indexed<4, 2, false, 5, true>;
+template [[host_name("tf_row_projection_relu2_q5_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, true, 5, true>) tf_row_projection<4, 2, 2, true, 5, true>;
+template [[host_name("tf_row_projection_indexed_relu2_q5_bf16")]] [[kernel]] decltype(tf_row_projection_indexed<4, 2, true, 5, true>) tf_row_projection_indexed<4, 2, true, 5, true>;
+template [[host_name("tf_row_projection_strided_q2_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 2, false, true>) tf_row_projection<4, 2, 2, false, 2, false, true>;
+template [[host_name("tf_row_projection_strided_q2_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 2, true, true>) tf_row_projection<4, 2, 2, false, 2, true, true>;
+template [[host_name("tf_row_projection_strided_q3_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 3, false, true>) tf_row_projection<4, 2, 2, false, 3, false, true>;
+template [[host_name("tf_row_projection_strided_q3_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 3, true, true>) tf_row_projection<4, 2, 2, false, 3, true, true>;
+template [[host_name("tf_row_projection_strided_q4_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 4, false, true>) tf_row_projection<4, 2, 2, false, 4, false, true>;
+template [[host_name("tf_row_projection_strided_q4_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 4, true, true>) tf_row_projection<4, 2, 2, false, 4, true, true>;
+template [[host_name("tf_row_projection_strided_q5_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 5, false, true>) tf_row_projection<4, 2, 2, false, 5, false, true>;
+template [[host_name("tf_row_projection_strided_q5_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 5, true, true>) tf_row_projection<4, 2, 2, false, 5, true, true>;
+template [[host_name("tf_row_projection_strided_q6_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 6, false, true>) tf_row_projection<4, 2, 2, false, 6, false, true>;
+template [[host_name("tf_row_projection_strided_q6_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 6, true, true>) tf_row_projection<4, 2, 2, false, 6, true, true>;
+template [[host_name("tf_row_projection_strided_q8_f32")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 8, false, true>) tf_row_projection<4, 2, 2, false, 8, false, true>;
+template [[host_name("tf_row_projection_strided_q8_bf16")]] [[kernel]] decltype(tf_row_projection<4, 2, 2, false, 8, true, true>) tf_row_projection<4, 2, 2, false, 8, true, true>;

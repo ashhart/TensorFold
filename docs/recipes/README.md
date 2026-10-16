@@ -1,10 +1,12 @@
 # Recipe book
 
-Each family page describes its supported checkpoint, kernels and operating limits.
+Each family page describes its supported checkpoint, kernels and operating limits, and says which engine it covers:
+the native engine, or the Python engine frozen at 0.6.6.
 
 | Family | Recipe |
 | --- | --- |
-| Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md) |
+| Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
+| Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
 | Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [CUDA images](flash-next-vision.md) |
@@ -16,8 +18,8 @@ Each family page describes its supported checkpoint, kernels and operating limit
 
 ## Capability floor
 
-The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.6 (the
-RTX 30 series, RTX A6000, A10 and A40); the A100 (8.0) is not supported yet. On a Mac, `tensorfold info REPO` prints a
+The native binary's CUDA build runs Nemotron 3.5 Lightning on GB10 and on Ampere cards with compute capability 8.0 (the
+A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40). On a Mac, `tensorfold info REPO` prints a
 checkpoint's memory floor: its weights plus a 2 GiB runtime margin. The table below is the Python 0.6.6 engine's, quoted
 from its family pages, not measured per card.
 
@@ -25,6 +27,7 @@ from its family pages, not measured per card.
 | --- | --- |
 | CUDA, other families | Compute capability 8.9 or newer: Ada RTX 40, Hopper, and Blackwell cards (RTX 50, RTX PRO 6000, DGX Spark GB10). RTX 30 (8.6) is not supported yet. |
 | Flash Next, CUDA | sm_120 and sm_121 only: DGX Spark GB10, RTX 50, RTX PRO 6000. A card below sm_120 refuses Flash Next at startup. |
+| Intel GPU (XPU), Nemotron | Experimental. Weights need 17.3 GiB of device memory (18 to 19.4 GB in use from 4k to 128k context); measured on an Arc Pro B70 (32 GB). Cards below 24 GB are untested and a 16 GB card cannot hold the weights. |
 | MLX, Apple Silicon | GLM-5.3-Flash is written for a 256 GB Mac, about 151 GiB resident. DeepSeek-V4-Flash is the same, about 151 GiB resident. Flash Next's default command sizes to a 128 GiB M4 Max. Qwen3.8-27B on a 32 GB Mac needs more than the default 22.4 GiB. Machine classes, not measured minimums. |
 
 New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md) has the steps in order, what each
@@ -32,7 +35,8 @@ one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the 
 [adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
 [CUDA implementation rules](cuda.md).
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
-module every CUDA family can read: any codebook, any width per tensor, one grouped launch per MoE projection.
+module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
+any codebook, any width per tensor, one grouped launch per MoE projection.
 
 ## The contract
 

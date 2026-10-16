@@ -3,10 +3,14 @@ const std = @import("std");
 const mtl = @import("metal");
 const checkpoint = @import("core").checkpoint_metal;
 const row = @import("core").row_projection;
+const lane = @import("core").lane_projection;
 
 pub const Ref = struct { buffer: mtl.Buffer, offset: usize = 0 };
-pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null };
-pub const Triple = struct { weight: checkpoint.Tensor, scales: checkpoint.Tensor, biases: checkpoint.Tensor };
+/// A device matrix; `runs` non-empty means fused members of different widths, each its own product into these rows.
+pub const Linear = struct { words: Ref, pairs: Ref, n: u32, k: u32, tile: u32, slices: u32, raw: ?row.Weights = null, bits: u8 = 4, group: u32 = 64, runs: []const Run = &.{} };
+/// One product inside a mixed fused matrix, writing output columns [first, first + linear.n).
+pub const Run = struct { linear: Linear, first: u32 };
+pub const Triple = struct { weight: checkpoint.Tensor, scales: checkpoint.Tensor, biases: checkpoint.Tensor, bits: u8 = 4, group: u32 = 64 };
 
 pub fn split(n: usize, k: usize) !u32 {
     if (n == 0 or k == 0 or n % 4 != 0 or k % 64 != 0) return error.BadProjectionShape;
@@ -31,17 +35,21 @@ pub fn promptSplit(n: usize, k: usize) ?u32 {
 
 pub fn prepare(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, tile: u32) !Linear {
     if (tile != 32 or parts.len == 0) return error.BadProjectionShape;
-    const k = parts[0].weight.shape[1] * 8;
+    const bits = parts[0].bits;
+    const group = parts[0].group;
+    if (bits == 0 or bits > 8 or group == 0) return error.BadAffineMetadata;
+    const k = parts[0].weight.shape[1] * 32 / bits;
     var slices = try split(parts[0].weight.shape[0], k);
     var n: usize = 0;
     for (parts) |p| {
         const rows = p.weight.shape[0];
-        if (p.weight.rank != 2 or p.weight.dtype != .u32 or p.weight.shape[1] * 8 != k or rows % 4 != 0 or try split(rows, k) != slices) return error.BadProjectionShape;
-        if (p.scales.dtype != .bf16 or p.biases.dtype != .bf16 or p.scales.rank != 2 or p.biases.rank != 2 or p.scales.shape[0] != rows or p.biases.shape[0] != rows or p.scales.shape[1] != k / 64 or p.biases.shape[1] != k / 64) return error.BadAffineMetadata;
+        if (p.bits != bits or p.group != group or k % group != 0) return error.BadAffineMetadata;
+        if (p.weight.rank != 2 or p.weight.dtype != .u32 or p.weight.shape[1] * 32 != k * bits or rows % 4 != 0 or try split(rows, k) != slices) return error.BadProjectionShape;
+        if (p.scales.dtype != .bf16 or p.biases.dtype != .bf16 or p.scales.rank != 2 or p.biases.rank != 2 or p.scales.shape[0] != rows or p.biases.shape[0] != rows or p.scales.shape[1] != k / group or p.biases.shape[1] != k / group) return error.BadAffineMetadata;
         n = try std.math.add(usize, n, rows);
     }
-    if (n % tile != 0) return error.BadProjectionShape;
-    if (!device.tensorUnits()) return prepareRows(device, allocator, owned, parts, n, k, tile, slices);
+    if (!device.tensorUnits() or n % tile != 0) return prepareRows(device, allocator, owned, parts, n, k, tile, slices);
+    if (bits != 4 or group != 64) return prepareLanes(device, allocator, owned, parts, n, k, tile, slices);
     slices = m5Split(n, k) orelse slices;
     const w = try device.buffer(n * k / 2, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
     owned.append(allocator, w) catch |err| {
@@ -83,30 +91,92 @@ test "stacked gate-up keeps the member K split rather than recomputing it from s
 
 fn prepareRows(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, n: usize, k: usize, tile: u32, slices: u32) !Linear {
     const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-    const w = try device.buffer(n * k / 2, options);
-    owned.append(allocator, w) catch |err| {
-        w.deinit();
-        return err;
-    };
-    const scale = try device.buffer(n * (k / 64) * 2, options);
-    owned.append(allocator, scale) catch |err| {
-        scale.deinit();
-        return err;
-    };
-    const bias = try device.buffer(n * (k / 64) * 2, options);
-    owned.append(allocator, bias) catch |err| {
-        bias.deinit();
-        return err;
-    };
+    const bits: usize = parts[0].bits;
+    const ng = k / parts[0].group;
+    const row_bytes = k * bits / 8;
+    const w = try own(device, allocator, owned, n * row_bytes, options);
+    const scale = try own(device, allocator, owned, n * ng * 2, options);
+    const bias = try own(device, allocator, owned, n * ng * 2, options);
     var base: usize = 0;
     for (parts) |p| {
         const rows = p.weight.shape[0];
-        @memcpy(w.contents()[base * k / 2 .. (base + rows) * k / 2], std.mem.sliceAsBytes(p.weight.host(u32)));
-        @memcpy(scale.contents()[base * (k / 64) * 2 .. (base + rows) * (k / 64) * 2], std.mem.sliceAsBytes(p.scales.host(u16)));
-        @memcpy(bias.contents()[base * (k / 64) * 2 .. (base + rows) * (k / 64) * 2], std.mem.sliceAsBytes(p.biases.host(u16)));
+        @memcpy(w.contents()[base * row_bytes .. (base + rows) * row_bytes], std.mem.sliceAsBytes(p.weight.host(u32)));
+        @memcpy(scale.contents()[base * ng * 2 .. (base + rows) * ng * 2], std.mem.sliceAsBytes(p.scales.host(u16)));
+        @memcpy(bias.contents()[base * ng * 2 .. (base + rows) * ng * 2], std.mem.sliceAsBytes(p.biases.host(u16)));
         base += rows;
     }
-    const raw = row.Weights{ .w = w, .scales = scale, .biases = bias, .n = n, .k = k, .group = 64, .bits = 4, .sum = .f32 };
+    const raw = row.Weights{ .w = w, .scales = scale, .biases = bias, .n = n, .k = k, .group = parts[0].group, .bits = parts[0].bits, .sum = .f32 };
     try raw.validate();
-    return .{ .words = .{ .buffer = w }, .pairs = .{ .buffer = scale }, .n = @intCast(n), .k = @intCast(k), .tile = tile, .slices = slices, .raw = raw };
+    return .{ .words = .{ .buffer = w }, .pairs = .{ .buffer = scale }, .n = @intCast(n), .k = @intCast(k), .tile = tile, .slices = slices, .raw = raw, .bits = parts[0].bits, .group = parts[0].group };
+}
+
+/// Widths other than 4/64 on tensor units: lane_projection.weight_layout byte copies for the non-reg lane kernel.
+fn prepareLanes(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), parts: []const Triple, n: usize, k: usize, tile: u32, slices: u32) !Linear {
+    const options = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+    const layout = lane.Layout{ .n = n, .k = k, .format = .{ .bits = parts[0].bits, .group = parts[0].group }, .sk = slices };
+    try layout.validate();
+    const w = try own(device, allocator, owned, layout.weightWords() * 4, options);
+    const sb = try own(device, allocator, owned, layout.metadataElements() * 2, options);
+    var base: usize = 0;
+    for (parts) |p| {
+        packTiles(.{ .words = p.weight.host(u32), .scales = p.scales.host(u16), .biases = p.biases.host(u16), .rows = p.weight.shape[0] }, base, n, k, parts[0].bits, parts[0].group, w.slice(u32, layout.weightWords()), sb.slice(u16, layout.metadataElements()));
+        base += p.weight.shape[0];
+    }
+    return .{ .words = .{ .buffer = w }, .pairs = .{ .buffer = sb }, .n = @intCast(n), .k = @intCast(k), .tile = tile, .slices = slices, .bits = parts[0].bits, .group = parts[0].group };
+}
+
+/// One member as stored: words [rows][k*bits/32], scales and biases [rows][k/group].
+pub const Member = struct { words: []const u32, scales: []const u16, biases: []const u16, rows: usize };
+
+/// Copies a member into lane_projection.weight_layout rows [base, base + rows) of an n-row stack, bytes unchanged.
+pub fn packTiles(p: Member, base: usize, n: usize, k: usize, bits: usize, group: usize, out_w: []u32, out_sb: []u16) void {
+    const ng = k / group;
+    const wp = group * bits / 32;
+    for (0..p.rows) |r| for (0..ng) |g| {
+        const at = base + r;
+        @memcpy(out_w[((at / 32 * ng + g) * 32 + at % 32) * wp ..][0..wp], p.words[(r * ng + g) * wp ..][0..wp]);
+        out_sb[(g * n + at) * 2] = p.scales[r * ng + g];
+        out_sb[(g * n + at) * 2 + 1] = p.biases[r * ng + g];
+    };
+}
+
+test "a stack packed member by member equals the core lane pack of the whole matrix" {
+    const a = std.testing.allocator;
+    const n = 64;
+    const k = 256;
+    var rng = std.Random.DefaultPrng.init(7);
+    for ([_]u8{ 4, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
+        const l = lane.Layout{ .n = n, .k = k, .format = .{ .bits = bits, .group = group } };
+        const w = try a.alloc(u32, l.weightWords());
+        defer a.free(w);
+        const sb = try a.alloc(u16, n * (k / group) * 2);
+        defer a.free(sb);
+        rng.random().bytes(std.mem.sliceAsBytes(w));
+        rng.random().bytes(std.mem.sliceAsBytes(sb));
+        const scales = sb[0 .. n * (k / group)];
+        const biases = sb[n * (k / group) ..];
+        const want_w = try a.alloc(u32, w.len);
+        defer a.free(want_w);
+        const want_sb = try a.alloc(u16, l.metadataElements());
+        defer a.free(want_sb);
+        try lane.pack(l, w, scales, biases, want_w, want_sb);
+        const got_w = try a.alloc(u32, w.len);
+        defer a.free(got_w);
+        const got_sb = try a.alloc(u16, want_sb.len);
+        defer a.free(got_sb);
+        const row_words = w.len / n;
+        const ng = k / group;
+        for ([_][2]usize{ .{ 0, 32 }, .{ 32, 16 }, .{ 48, 16 } }) |part| packTiles(.{ .words = w[part[0] * row_words ..][0 .. part[1] * row_words], .scales = scales[part[0] * ng ..][0 .. part[1] * ng], .biases = biases[part[0] * ng ..][0 .. part[1] * ng], .rows = part[1] }, part[0], n, k, bits, group, got_w, got_sb);
+        try std.testing.expectEqualSlices(u32, want_w, got_w);
+        try std.testing.expectEqualSlices(u16, want_sb, got_sb);
+    };
+}
+
+fn own(device: mtl.Device, allocator: std.mem.Allocator, owned: *std.ArrayList(mtl.Buffer), bytes: usize, options: usize) !mtl.Buffer {
+    const b = try device.buffer(bytes, options);
+    owned.append(allocator, b) catch |err| {
+        b.deinit();
+        return err;
+    };
+    return b;
 }

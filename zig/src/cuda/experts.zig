@@ -341,7 +341,6 @@ pub const Nvfp4Experts = struct {
     /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
     pub fn runPrompt(e: *const Nvfp4Experts, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
         if (epi == .down_f32) return error.EpilogueNotBuilt;
-        if (skip >= 0) return error.OptionNotBuilt;
         const gate = epi == .up;
         const parts: usize = if (gate and !l.relu2) 2 else 1;
         const nb = (if (gate) l.width else l.dims) / cols;
@@ -357,6 +356,7 @@ pub const Nvfp4Experts = struct {
         for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
         a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
         a.add(if (gate) l.limit else @as(f32, 0.0));
+        a.add(skip);
         const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
@@ -374,11 +374,22 @@ pub const Nvfp4Experts = struct {
 
     /// One expert's words [n, k/2] (low nibble first) and e4m3 scales [n, k/16] as blocks [n/32][k/32][144] (_pack).
     pub fn packOne(out: []u32, codes: []const u8, scales: []const u8, n: usize, k: usize) void {
+        packPart(out, 1, 0, codes, scales, n, k);
+    }
+
+    /// Gate and up interleaved as make() stacks them, [n/32][k/32][2][144], packed in place (a loader packs thousands).
+    pub fn packGateUp(out: []u32, gate: [2][]const u8, up: [2][]const u8, n: usize, k: usize) void {
+        packPart(out, 2, 0, gate[0], gate[1], n, k);
+        packPart(out, 2, 1, up[0], up[1], n, k);
+    }
+
+    /// packOne into matrix `part` of `parts` stacked per (column block, k32 group).
+    fn packPart(out: []u32, parts: usize, part: usize, codes: []const u8, scales: []const u8, n: usize, k: usize) void {
         const kg = k / 32;
-        std.debug.assert(n % cols == 0 and k % 32 == 0 and out.len == n / cols * kg * words);
+        std.debug.assert(n % cols == 0 and k % 32 == 0 and out.len == n / cols * kg * parts * words and part < parts);
         std.debug.assert(codes.len == n * k / 2 and scales.len == n * k / 16);
         for (0..n / cols) |cb| for (0..kg) |g| {
-            const block = out[(cb * kg + g) * words ..][0..words];
+            const block = out[((cb * kg + g) * parts + part) * words ..][0..words];
             for (0..8) |gq| for (0..4) |t| for (0..4) |j| {
                 const row = cb * cols + j * 8 + gq;
                 var w: u32 = 0;
@@ -396,22 +407,6 @@ pub const Nvfp4Experts = struct {
                 sc[((t * 2 + h) * 4 + j) * 2 + c] = scales[row * (k / 16) + g * 2 + h];
             };
         };
-    }
-
-    /// Gate and up interleaved per (column block, k32 group) as make() stacks them: [n/32][k/32][2][144].
-    pub fn packGateUp(gpa: std.mem.Allocator, out: []u32, gate: [2][]const u8, up: [2][]const u8, n: usize, k: usize) !void {
-        const half = n / cols * (k / 32) * words;
-        std.debug.assert(out.len == 2 * half);
-        const g = try gpa.alloc(u32, half);
-        defer gpa.free(g);
-        const u = try gpa.alloc(u32, half);
-        defer gpa.free(u);
-        packOne(g, gate[0], gate[1], n, k);
-        packOne(u, up[0], up[1], n, k);
-        for (0..half / words) |b| {
-            @memcpy(out[(2 * b) * words ..][0..words], g[b * words ..][0..words]);
-            @memcpy(out[(2 * b + 1) * words ..][0..words], u[b * words ..][0..words]);
-        }
     }
 };
 
@@ -433,6 +428,25 @@ test "a packed nvfp4 block puts each nibble and scale where nvfp4/experts.py's _
     // its scale byte (t 2, h 1, j 1, c 0): row 32 + 8 + 4 = 44, k16 group 3
     const sc = std.mem.sliceAsBytes(out[(1 * 2 + 1) * words + 128 ..][0..16]);
     try std.testing.expectEqual(scales[44 * 4 + 3], sc[((2 * 2 + 1) * 4 + 1) * 2]);
+}
+
+test "packGateUp stacks packOne's gate and up blocks per (column block, k32 group)" {
+    const n = 64;
+    const k = 64;
+    const words = Nvfp4Experts.words;
+    var codes: [2][n * k / 2]u8 = undefined;
+    var scales: [2][n * k / 16]u8 = undefined;
+    for (0..2) |m| {
+        for (&codes[m], 0..) |*c, i| c.* = @truncate(i * 29 + 3 + m * 101);
+        for (&scales[m], 0..) |*c, i| c.* = @truncate(i * 7 + 1 + m * 13);
+    }
+    var one: [2][n / 32 * (k / 32) * words]u32 = undefined;
+    for (0..2) |m| Nvfp4Experts.packOne(&one[m], &codes[m], &scales[m], n, k);
+    var both: [2 * one[0].len]u32 = undefined;
+    Nvfp4Experts.packGateUp(&both, .{ &codes[0], &scales[0] }, .{ &codes[1], &scales[1] }, n, k);
+    for (0..one[0].len / words) |b| for (0..2) |m| {
+        try std.testing.expectEqualSlices(u32, one[m][b * words ..][0..words], both[(2 * b + m) * words ..][0..words]);
+    };
 }
 
 test "nvfp4 rows of either kind are refused when the format is not loaded" {

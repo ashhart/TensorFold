@@ -1,6 +1,6 @@
 //! Cortheon's checks before a reply ends: changed files tested before "done", researched answers naming sources.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const tools = @import("tools.zig");
 const Value = json.Value;
 

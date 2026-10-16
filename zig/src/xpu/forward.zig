@@ -1,6 +1,6 @@
 //! One Qwen3.8-27B forward on the XPU: activations, prompt GEMMs (fp16, W4A8, W4A4) and the layer loop.
 const std = @import("std");
-const ze = @import("ze.zig");
+const ze = @import("ze");
 const q = @import("qwen27.zig");
 const dev = @import("dev.zig");
 const loader = @import("load.zig");

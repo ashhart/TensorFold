@@ -10,7 +10,7 @@ three bring-ups:
 - Kimi K3 on four M3 Ultras, 3-4 Oct. One stream went from 2.7 to 11.6 tok/s plain, and 20.3 drafted on prose.
 
 The Python engine's guides, [adding an MLX family](adding-a-family.md) and
-[adding a CUDA family](adding-a-cuda-family.md), describe the engine frozen at 0.6.5. New families go here.
+[adding a CUDA family](adding-a-cuda-family.md), describe the engine frozen at 0.6.6. New families go here.
 
 ## How to use it
 
@@ -185,7 +185,7 @@ On M5 tensor units. Chips before M5 need their own path.
       nearly every expert's weights, so small segments lose: 2k rows -7%, 3k level. Three queues gave +2%, and four
       timed out.
     - Flash Next served: TTFT -5% to -8% from 8k (32k 7.52 to 6.94 s, 128k 31.5 to 29.1 s), with the same replies.
-      The second segment's buffers take about 9 GB. Pushed in zig-flashnext c2bede8fd.
+      The second segment's buffers take about 9 GB. Pushed in c2bede8fd.
 
 ## Stage 4: serve
 

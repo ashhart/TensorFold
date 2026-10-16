@@ -2,6 +2,7 @@
 //! keys for every prompt row), then GPU-side rounds whose drafts the depth rule sets; tokens leave as rounds are read.
 const std = @import("std");
 const mtl = @import("metal");
+const lanes = @import("lanes");
 const fz = @import("replay.zig");
 const config = @import("config.zig");
 const segments = @import("../../core/segments.zig");
@@ -15,6 +16,7 @@ const pack = @import("pack.zig");
 const pack_cache = @import("pack_cache.zig");
 const load_admission = @import("load_admission.zig");
 const think = @import("think.zig");
+const sample = @import("sample.zig");
 pub const Think = think.Think;
 pub const quantizationProblem = load_admission.problemFor;
 const Io = std.Io;
@@ -42,6 +44,7 @@ const Select = fz.Select;
 const Tmp = fz.Tmp;
 const Slot = fz.Slot;
 const DepthRule = fz.DepthRule;
+const CostDepth = @import("drafts_cost.zig").CostDepth;
 const hcOf = fz.hcOf;
 const laneOf = fz.laneOf;
 const i32Buf = fz.i32Buf;
@@ -49,9 +52,11 @@ const f32Buf = fz.f32Buf;
 const jsonInt = fz.jsonInt;
 
 /// Rounds the token ring holds (fz_accept writes round & 511).
-const RING = 512;
+pub const RING = 512;
 /// Positions a reply keeps free past its last token: two rounds in flight.
 pub const MARGIN = 2 * MAXR;
+/// An MoE layer's expert projections in the engine's order: gate, up, shared gate, shared up, down, shared down.
+const expert_projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
 /// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies that much more.
 pub const NEXT_TURN = 4096 * 13 * 2304;
 
@@ -89,6 +94,8 @@ pub const Out = struct {
     cancelled: *const fn (ctx: *anyopaque) bool,
     /// The prompt pass stands at one of generateFrom's marks (a chunk end): the prompt cache keeps its state here.
     marked: ?*const fn (ctx: *anyopaque, at: usize) void = null,
+    /// A sampled reply (a temperature above 0): each token drawn on the GPU by tf_sample_full; null: greedy.
+    sampling: ?lanes.Sampling = null,
 };
 
 pub const Engine = struct {
@@ -125,6 +132,7 @@ pub const Engine = struct {
     identity_hash: u64 = 0, // the checkpoint's identity text (pack_io.zig) hashed: --learn keys learned states by it
     // while copies land worse than the head's drafts, only 8-token matches the head agrees with are copied
     wids: Buf,
+    draw_at: Buf, // a sampled window's draw positions (sample.zig)
     rows_w: [MAXR + 1]Buf,
     mdims_w: [MAXR + 1]Buf,
     host: struct { rows: Buf, mdims: Buf, pos8: Buf, nk8: Buf, kvmeta: Buf, slots: [2 * MAXR]Slot },
@@ -199,7 +207,9 @@ pub const Engine = struct {
             }
             const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
             try maps.append(arena, index_mapped);
-            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], mapped_shards.items);
+            const config_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/config.json", .{model_dir}, 0));
+            try maps.append(arena, config_mapped);
+            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], config_mapped.bytes[0..config_mapped.size], mapped_shards.items);
             for (maps.items) |*m| m.deinit();
             maps.clearRetainingCapacity();
             break :blk id;
@@ -223,6 +233,7 @@ pub const Engine = struct {
         // the reference values: the dump's ref.json, or derived from the checkpoint's config (config.pleRef)
         var ple_values: config.PleRef = undefined;
         var attention_scale: f64 = undefined;
+        var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
         if (dump_dir) |d| {
             const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
             const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
@@ -243,7 +254,6 @@ pub const Engine = struct {
             }
             attention_scale = ref.object.get("attention_scale").?.float;
         } else {
-            var cfg = try config.Config.read(arena, io, model_dir);
             ple_values = try config.pleRef(&cfg);
             attention_scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(cfg.head_dim)));
         }
@@ -271,8 +281,7 @@ pub const Engine = struct {
                 L.pool = try r.loadf("L{d}.att.pool", .{i});
                 L.pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) };
             }
-            const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-            for (projs, 0..) |proj, j| {
+            for (expert_projs, 0..) |proj, j| {
                 for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
                     L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
                 }
@@ -309,6 +318,7 @@ pub const Engine = struct {
             m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
             m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
         }
+        m.ple.scale = try fz.ple_scale.of(r, index.object.get("weight_map").?.object);
         const B = struct {
             fn of(rr: *Run, n: usize) !Buf {
                 return .{ .b = try rr.buffer(n) };
@@ -360,11 +370,11 @@ pub const Engine = struct {
         {
             const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
             const ids = try r.load("mtp.draft_ids");
+            const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
             var ex: [18]Buf = undefined;
-            const projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-            for (projs, 0..) |proj, j| {
+            for (expert_projs, 0..) |proj, j| {
                 for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                    ex[j * 3 + k] = try r.loadf("language_model.mtp.layers.0.mlp.{s}.{s}", .{ proj, suffix });
+                    ex[j * 3 + k] = try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
                 }
             }
             if (r.xpack) try r.repack(&ex);
@@ -422,6 +432,7 @@ pub const Engine = struct {
         e.m = m;
         e.pr = try arena.create(Prompt);
         e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
+        const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
         e.pr2 = try arena.create(Prompt);
         e.pr2.* = try e.pr.sibling();
         try e.rounds();
@@ -429,55 +440,20 @@ pub const Engine = struct {
         e.msel = try GSelect.init(r, 0);
         // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in lockstep
         const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+        if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
         if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
+        if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
+        if (r.tp == null) try fz.rows_load.attach(
+            e.pr,
+            m,
+            @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
+        );
         return e;
     }
 
-    /// The GPU-side rounds' buffers: DeltaNet states (kept, window rows), the PLE tail pair, the arena, the token ring,
-    /// per-width row counts, and the MTP slots reading their positions from the arena.
+    /// The GPU-side rounds' buffers (engine_rounds.zig).
     fn rounds(e: *Engine) !void {
-        const r = e.r;
-        const m = e.m;
-        const n_lin: usize = 36;
-        e.g_cs = try r.buffer(n_lin * CS_ROW);
-        e.g_so = try r.buffer(n_lin * SO_ROW);
-        e.o_cs = try r.buffer(n_lin * MAXR * CS_ROW);
-        e.o_so = try r.buffer(n_lin * MAXR * SO_ROW);
-        var gi: usize = 0;
-        for (&m.layers) |*L| if (L.linear) {
-            L.cs[0] = .{ .b = e.g_cs, .off = gi * CS_ROW };
-            L.cs[1] = .{ .b = e.o_cs, .off = gi * MAXR * CS_ROW };
-            L.so[0] = .{ .b = e.g_so, .off = gi * SO_ROW };
-            L.so[1] = .{ .b = e.o_so, .off = gi * MAXR * SO_ROW };
-            gi += 1;
-        };
-        if (r.gdn_kept != null) m.recs = .{ .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) }, .{ .b = try r.buffer(n_lin * fz.gdn_step.RECORD) } };
-        m.marks = try fz.Marks.init(r, n_lin);
-        e.cins = .{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
-        r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
-        e.ring = try r.buffer(fz.RING_WORDS * 4 * RING);
-        e.hist = try r.buffer((CAP + 64) * 4);
-        e.wids = .{ .b = try r.buffer(64) };
-        for (1..MAXR + 1) |n| {
-            e.rows_w[n] = try i32Buf(r, &.{@intCast(n)});
-            e.mdims_w[n] = try i32Buf(r, &.{ @intCast(n), 16, 0, 0, 0, 0, 0, 0 });
-        }
-        e.host = .{ .rows = m.t.rows, .mdims = m.t.mdims, .pos8 = m.t.pos8, .nk8 = m.t.nk8, .kvmeta = m.t.kvmeta, .slots = m.mtp.slots };
-        e.gpu_slots = m.mtp.slots;
-        for (1..MAXR + 1) |n| { // the head absorbing a window of n rows: slot MAXR - 1 + n
-            const sl = &e.gpu_slots[MAXR - 1 + n];
-            try m.mtpMeta(sl, n);
-            sl.pos8 = .{ .b = r.ar.b, .off = fz.AR_ABS_POS * 4 };
-            sl.nk8 = .{ .b = r.ar.b, .off = fz.AR_ABS_NK * 4 };
-            sl.kvmeta = .{ .b = r.ar.b, .off = fz.AR_ABS_KV * 4 };
-        }
-        for (1..MAXR - 1) |j| { // chained draft j: slot j
-            try m.mtpMeta(&e.gpu_slots[j], 1);
-            const b = (fz.AR_CHAIN + (j - 1) * fz.AR_CHAIN_STRIDE) * 4;
-            e.gpu_slots[j].pos8 = .{ .b = r.ar.b, .off = b };
-            e.gpu_slots[j].nk8 = .{ .b = r.ar.b, .off = b + 16 * 4 };
-            e.gpu_slots[j].kvmeta = .{ .b = r.ar.b, .off = b + 32 * 4 };
-        }
+        return @import("engine_rounds.zig").rounds(e);
     }
 
     /// Host-driven calls (prompt chunks, the head's first drafts) read the host's metadata buffers.
@@ -517,7 +493,7 @@ pub const Engine = struct {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
 
-    /// One greedy reply. `depth` fixes the drafts a round (0: no drafts, one token a round); null: the depth rule.
+    /// One reply, sampled when out.sampling is set. `depth`: a round's drafts (0: one token a round); null: the rule.
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
         return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, .{}, out);
     }
@@ -530,6 +506,7 @@ pub const Engine = struct {
         if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
         if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
         for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
+        if (out.sampling != null and r.tp != null) return error.SpeedUpGreedyOnly; // each Mac holds half the logits
         var watch = try think.Watch.init(budget);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -600,6 +577,14 @@ pub const Engine = struct {
             }
             const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
             pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
+            if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
+                e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
+                const cb = r.queue.commandBuffer();
+                r.enc = cb.compute(.serial);
+                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
+                try m.finish(cb);
+                pick = m.t.picks.b.slice(u32, 1)[0];
+            };
             for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams
                 const s = at + segments.start(c.rows, c.parts, k);
                 const n = segments.rows(c.rows, c.parts, k);
@@ -635,10 +620,12 @@ pub const Engine = struct {
             m.state_row = 0;
         }
         var rule: DepthRule = .{ .pair = r.tp != null };
+        var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null; // 0.6.5's rule before M5
+        var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
         var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
         var head_rate: f64 = 0.6;
         const fixed = depth;
-        const depth0 = fixed orelse rule.pick();
+        const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
         var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
         const w = e.wids.b.slice(u32, 16);
         w[0] = pick;
@@ -727,9 +714,18 @@ pub const Engine = struct {
             if (r.gsel) |*g| g.nb_ub = ub;
             if (m.mtp.gsel) |*g| g.nb_ub = ub;
             try m.windowEncode(wr, e.wids);
+            if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
+                sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
+                if (!r.serial) r.enc.barrier();
+                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
+                if (!r.serial) r.enc.barrier();
+            }
             // the widest windows while copies land whole; otherwise the head's rule
             const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
-            const wn = (if (fixed) |d| d else if (copying) MAXR - 1 else next_depth) + 1;
+            const wn = (if (fixed) |d| d else if (copying)
+                (if (by_cost) |*c| c.copyDrafts(copy_rate) else MAXR - 1)
+            else
+                next_depth) + 1;
             widths[(round + 1) % 4] = wn;
             if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
             const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
@@ -759,6 +755,8 @@ pub const Engine = struct {
             const slot = (done % RING) * fz.RING_WORDS;
             const keep = rg[slot];
             const wd = widths[done % 4];
+            if (by_cost) |*c| if (last_end > 0) c.time(wd - 1, (prev.gpuEnd() - last_end) * 1e3);
+            last_end = prev.gpuEnd();
             const got = rg[slot + 3 .. slot + 3 + keep];
             const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
             if (learn and wd > 1) {
@@ -774,6 +772,7 @@ pub const Engine = struct {
                 res.copy_by_len[n][1] += keep - 1;
             }
             if (learn and fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
+            if (learn and wd > 1 and rg[slot + 1] == 0) if (by_cost) |*c| c.observe(wd - 1, keep - 1);
             res.rounds += 1;
             if (learn) res.drafted += wd - 1;
             if (learn) res.accepted += keep - 1;
@@ -791,7 +790,10 @@ pub const Engine = struct {
             if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
             emitted += take;
             const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
-            const ag = e.agreeRound(stop or emitted >= max_tokens or cancel, rule.pick()) catch |err| {
+            const ag = e.agreeRound(
+                stop or emitted >= max_tokens or cancel,
+                if (by_cost) |*c| c.pick() else rule.pick(),
+            ) catch |err| {
                 failed = err;
                 break;
             };

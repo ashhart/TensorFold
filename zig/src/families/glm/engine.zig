@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const page_cache = @import("page_cache.zig");
+const vision_mod = @import("vision.zig");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
 const mtp = @import("mtp.zig");
@@ -15,8 +16,11 @@ const CopyIndex = @import("../../core/copy_index.zig").CopyIndex;
 const checks = @import("checks.zig");
 const load_plan = @import("load_plan.zig");
 const plain_rounds = @import("plain_rounds.zig");
+const ranks = @import("ranks.zig");
 const frags = @import("../../core/frags.zig");
+const residency = @import("residency.zig");
 const Ref = wts.Ref;
+const lanes = @import("lanes");
 
 pub const Reason = enum { stop, length, cancelled };
 
@@ -81,9 +85,13 @@ pub const Engine = struct {
     model_hash: u64 = 0, // the checkpoint's config and weight index, hashed (a peer's and a learned state's identity)
     cut: u32 = 0, // GLM_CUTS=N: a prompt chunk also ends at N (a server's planned start, for its served == CLI check)
     copy_min: u32 = 0, // copy drafts (GLM_COPY=N): a round copies what followed the reply's last N+ tokens earlier (0: off)
+    sampling: ?lanes.Sampling = null, // the standalone path's keyed rules (GLM_SAMPLING; the server never sets it)
     rank_log: bool = false, // GLM_RANKS=1: each MTP depth's logits kept, and the target's rank in them where drafts miss
     ep_arena: std.heap.ArenaAllocator, // the link settings, alive as long as the link
     residency: ?mtl.ResidencySet = null,
+    vision: ?*vision_mod.Vision = null, // --vision: the image tower
+    vision_rows: Ref = undefined, // bf16 [image tokens, hidden]: a prompt's image rows (vision only)
+    vision_limits: vision_mod.Limits = .{},
     keepalive_sets: [1]mtl.ResidencySet = undefined, // the residency set, for the idle keepalive's commit
     keepalive_target: mtl.keepalive.Target = undefined, // the engine's queue, set at load for the server's ticker
     load_seconds: f64 = 0,
@@ -95,11 +103,11 @@ pub const Engine = struct {
 
     /// The checkpoint in `dir`, caches for `cap` tokens; GLM_LAYERS=N: the first N layers only; GLM_EP=settings: half the experts.
     pub fn load(gpa: std.mem.Allocator, dir: []const u8, cap: u32) !*Engine {
-        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false);
+        return loadWith(gpa, dir, cap, if (std.c.getenv("GLM_EP")) |v| std.mem.span(v) else null, false, null);
     }
 
-    /// `load` with expert parallel over the link in `ep_path` (this Mac's settings), or on one Mac when null.
-    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool) !*Engine {
+    /// `load` with expert parallel over `ep_path`'s link (one Mac when null) and `vision`'s image tower and rows.
+    pub fn loadWith(gpa: std.mem.Allocator, dir: []const u8, cap: u32, ep_path: ?[]const u8, learn: bool, vision: ?vision_mod.Limits) !*Engine {
         const e = try gpa.create(Engine); // undefined memory: every field is set below
         errdefer gpa.destroy(e);
         const pool = mtl.objc.Pool.push();
@@ -108,6 +116,7 @@ pub const Engine = struct {
         e.gpa = gpa;
         e.ev = 0;
         e.residency = null;
+        e.vision = null;
         e.gpu = .{ 0, 0 };
         e.fused_route = if (std.c.getenv("GLM_ROUTE")) |v| v[0] != '0' else true;
         e.draft_vocab = if (std.c.getenv("GLM_DRAFT_VOCAB")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
@@ -120,6 +129,7 @@ pub const Engine = struct {
         e.cut = if (std.c.getenv("GLM_CUTS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0 else 0;
         e.copy_min = if (std.c.getenv("GLM_COPY")) |v| std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 0, 0, 8) else 0;
         e.rank_log = if (std.c.getenv("GLM_RANKS")) |v| v[0] == '1' else false;
+        e.sampling = try fwd.envSampling(std.c.getenv);
         if (std.c.getenv("GLM_CHUNK")) |v| e.chunk_rows = std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch prompt_mod.max_rows, st.max_rows + 1, prompt_mod.max_rows);
         e.ep_arena = .init(gpa);
         errdefer e.ep_arena.deinit();
@@ -134,6 +144,7 @@ pub const Engine = struct {
         const f = try mtl.MappedFile.open(path);
         defer f.deinit();
         e.c = try cfg.parse(gpa, f.bytes[0..f.size]);
+        if (!cfg.whole(e.c)) return error.NotGlm53Flash; // its kernels take the whole model's counts
         if (e.draft_vocab == 0 or e.draft_vocab > e.c.vocab) e.draft_vocab = e.c.vocab;
         e.draft_vocab -= e.draft_vocab % 4; // the head's kernel takes four rows a simdgroup
         const model = try load_plan.modelHash(gpa, dir, f.bytes[0..f.size]);
@@ -165,12 +176,14 @@ pub const Engine = struct {
         const chunked = if (std.c.getenv("GLM_PROMPT")) |v| v[0] != '0' else true;
         e.limit = try load_plan.loadLimit(e.device);
         const limit = e.limit.bytes;
+        // --vision: the image tower and its rows count against the limit beside the weights and caches
+        const tower = if (vision) |lim| try vision_mod.planBytes(gpa, lim, e.c.hidden) else 0;
         var plan_bytes = try load_plan.planBytes(gpa, e.device, dir, &e.c);
-        if (e.c.mtp > 0 and link == null and plan_bytes + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
+        if (e.c.mtp > 0 and link == null and plan_bytes + tower + try load_plan.leastArena(gpa, &e.c, cap, chunked) > limit) { // one Mac: the MTP head stays on disk when only it passes the limit
             var lean = e.c;
             lean.mtp = 0;
             const lean_bytes = try load_plan.planBytes(gpa, e.device, dir, &lean);
-            if (lean_bytes + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
+            if (lean_bytes + tower + try load_plan.leastArena(gpa, &lean, cap, chunked) <= limit) {
                 std.log.info("glm: the MTP head would pass this Mac's {d:.1} GB load limit ({s}); loading without it (no MTP drafts, copy drafts stay)", .{ @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
                 e.c = lean;
                 plan_bytes = lean_bytes;
@@ -185,18 +198,19 @@ pub const Engine = struct {
         e.prompt_ids = try e.arena.buffer(@as(usize, cap) * 4);
         e.pick_ring = try e.arena.buffer(256);
         if (chunked and (link == null or e.c.byRows())) {
-            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes, limit, link != null);
+            const rows = load_plan.chunkHeight(gpa, &e.c, &e.sc, cap, plan_bytes + e.arena.bytes + tower, limit, link != null);
             e.pr = try prompt_mod.init(gpa, &e.arena, e.device, &e.c, &e.sc, e.k, cap, rows);
             e.chunk_rows = @min(e.chunk_rows, rows);
         }
         errdefer if (e.pr) |*p| p.deinit();
-        if (plan_bytes + e.arena.bytes > limit) { // refused before any weight is read: the floor's one-Mac limit
+        if (plan_bytes + e.arena.bytes + tower > limit) { // refused before any weight is read: the floor's one-Mac limit
+            if (tower > 0) std.log.err("glm: --vision's image tower and its rows add {d:.1} GB", .{@as(f64, @floatFromInt(tower)) / 1e9});
             std.log.err("glm: {d:.1} GB of weights and {d:.1} GB of caches pass this Mac's {d:.1} GB load limit ({s}); load a layer subset or the expert-parallel pair, or set GLM_LOAD_LIMIT_GB (past 70% of RAM a load risks a watchdog panic)", .{ @as(f64, @floatFromInt(plan_bytes)) / 1e9, @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, @as(f64, @floatFromInt(limit)) / 1e9, e.limit.source() });
             return error.OverMemoryLimit;
         }
-        { // free memory short of the load: a cached copy of the checkpoint holds it, the paced reads would wait (#583)
+        { // short of free memory: drop the checkpoint's own cached pages before the kernel takes other files' (#583)
             const dropped_at = std.c.mach_absolute_time();
-            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes)) |d| {
+            if (page_cache.dropForLoad(gpa, dir, plan_bytes + e.arena.bytes + tower)) |d| {
                 if (d.dropped > 0) std.log.info("glm: dropped {d:.1} GiB of the checkpoint from the file cache, the {d:.1} GiB free memory lacked for the load ({d:.2} s)", .{ @as(f64, @floatFromInt(d.dropped)) / (1 << 30), @as(f64, @floatFromInt(d.deficit)) / (1 << 30), @as(f64, @floatFromInt(std.c.mach_absolute_time() - dropped_at)) / 24e6 });
             } else |err| std.log.warn("glm: could not drop the checkpoint's cached pages ({s}); the load reads beside them", .{@errorName(err)});
         }
@@ -205,6 +219,7 @@ pub const Engine = struct {
             e.w.deinit();
             gpa.destroy(e.w);
         }
+        if (!wts.native(e.w, &e.c)) try e.k.widen(gpa, e.device); // a width, split stack or layout past the 4/64 kernels
         try e.prepare();
         if (link) |s| {
             const rows = e.c.byRows();
@@ -214,18 +229,9 @@ pub const Engine = struct {
             me.rest[2] = @intFromBool(learn); // --learn on both Macs or neither: each holds its half of a learned state
             e.ep = try ep_mod.Ep.init(gpa, e.device, s, me);
         }
-        // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-        if (std.c.getenv("GLM_RESIDENCY") == null) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len)) |set| {
-            for (e.w.buffers.items) |b| set.add(b);
-            for (e.arena.buffers.items) |b| set.add(b);
-            set.commit();
-            set.requestResidency();
-            e.queue.addResidencySet(set);
-            e.residency = set;
-        } else |_| {}
-        // every Metal engine offers its queue to the idle keepalive; the sets list only when the model is resident
-        if (e.residency) |set| e.keepalive_sets[0] = set;
-        e.keepalive_target = .{ .queue = e.queue, .sets = if (e.residency != null) &e.keepalive_sets else &.{} };
+        if (vision) |lim| try vision_mod.attach(e, gpa, dir, f.bytes[0..f.size], lim); // --vision: the tower and its rows
+        errdefer if (e.vision) |v| v.deinit();
+        residency.wire(e); // GLM_RESIDENCY's opt-in set, then the idle keepalive's target
         // a process's first prompt pays a one-time cost: every rank of a pair pays it here at the same step (GLM_NO_WARMUP: skip)
         if (e.pr != null and cap >= 128 and std.c.getenv("GLM_NO_WARMUP") == null) {
             var ids: [64]u32 = undefined;
@@ -267,6 +273,7 @@ pub const Engine = struct {
             set.deinit();
         }
         if (e.ep) |ep| ep.deinit(gpa);
+        if (e.vision) |v| v.deinit();
         e.ep_arena.deinit();
         if (e.pr) |*p| p.deinit();
         if (e.round_fence) |f| f.deinit();
@@ -352,36 +359,6 @@ pub const Engine = struct {
         enc.dispatchThreads(mtl.Size.of(D / 2, 1, 1), mtl.Size.of(256, 1, 1));
     }
 
-    /// Where `t` falls among MTP depth m + 1's choices (its logits row m): 1 for the 2nd, 2 the 3rd, 3 later or none.
-    fn rankAt(e: *const Engine, m: usize, t: u32) usize {
-        if (t >= e.draft_vocab) return 3;
-        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.m_logits.addr()));
-        const row = v[m * e.c.vocab ..][0..e.draft_vocab];
-        const lt: f32 = @bitCast(@as(u32, row[t]) << 16);
-        var above: usize = 0; // choices before t: higher logits, or equal ones at lower ids
-        for (row, 0..) |h, i| {
-            const f: f32 = @bitCast(@as(u32, h) << 16);
-            if (i != t and (f > lt or (f == lt and i < t))) above += 1;
-            if (above >= 3) return 3;
-        }
-        return @max(above, 1); // the draft holds the first place even when t ties it
-    }
-
-    /// The top two logits' difference in row `row` of the last head's logits (bf16).
-    fn margin(e: *const Engine, row: u32) f32 {
-        if (e.c.tp > 1) return std.math.nan(f32); // TP2: this Mac holds half of each row's logits
-        const v: [*]const u16 = @ptrCast(@alignCast(e.sc.logits.addr()));
-        var top = [2]f32{ -std.math.inf(f32), -std.math.inf(f32) };
-        for (v[@as(usize, row) * e.c.vocab ..][0..e.c.vocab]) |h| {
-            const f: f32 = @bitCast(@as(u32, h) << 16);
-            if (f > top[0]) {
-                top[1] = top[0];
-                top[0] = f;
-            } else if (f > top[1]) top[1] = f;
-        }
-        return top[0] - top[1];
-    }
-
     pub fn u32s(r: Ref, n: usize) []u32 {
         return @as([*]u32, @ptrCast(@alignCast(r.addr())))[0..n];
     }
@@ -393,11 +370,12 @@ pub const Engine = struct {
     pub const checkMatmul = checks.checkMatmul;
     pub const profilePrompt = checks.profilePrompt;
 
-    /// One greedy reply. `depth` drafts a round (0: one token a round, the reference drafted replies must equal).
+    /// One reply, greedy or sampled by `e.sampling`; `depth` drafts a round (drafted equals plain, depth 0).
     pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: usize, out: Out) !Result {
         const c = &e.c;
         const D = c.hidden;
         const P: u32 = @intCast(prompt.len);
+        if (e.ep != null and e.sampling != null and e.sampling.?.temperature > 0) return error.SampledPeerUnsupported; // the backend's refusal, before any state moves or the peer hears of it
         if (prompt.len == 0) return error.EmptyPrompt;
         const d: u32 = @intCast(if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1));
         if (prompt.len + max_tokens + d + 1 > e.s.cap) return error.ContextFull;
@@ -411,6 +389,8 @@ pub const Engine = struct {
         // the prompt: windows of up to 16 rows, the MTP head taking each row with the token after it
         var at: u32 = 0;
         var last_n: u32 = 1;
+        // The last prompt row draws the first reply token, keyed at P: the head's one output row is draws row 0.
+        const prompt_draws = @import("draw_rule.zig").promptDraws(e.sampling, P, c.vocab);
         while (at < P) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
             const end = if (e.cut > at and e.cut < P) e.cut else P;
@@ -425,6 +405,7 @@ pub const Engine = struct {
                 x.dump_row = n - 1;
             }
             defer x.dump = null;
+            x.draws = if (last and e.sampling != null and e.sampling.?.temperature > 0) &prompt_draws else null;
             if (chunk) {
                 const pr = &e.pr.?;
                 var px = x;
@@ -436,30 +417,26 @@ pub const Engine = struct {
                     copyRow(&x, b.enc, hidden.at(@as(usize, n - 1) * D * 2), e.sc.hidden, D);
                     fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, 1);
                 }
-                if (d > 0 and absorb > 0) {
-                    prompt_mod.mtp(pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
-                    e.s.mtp_pos = at + absorb;
-                }
+                if (d > 0 and absorb > 0) prompt_mod.mtp(pr, &px, b.enc, hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at);
                 last_n = 1;
             } else {
                 fwd.backbone(&x, b.enc, e.prompt_ids.at(@as(usize, at) * 4), n, at);
                 fwd.flipKda(&x);
                 if (last) fwd.head(&x, b.enc, e.sc.hidden.at(@as(usize, n - 1) * D * 2), e.sc.logits, e.sc.picks, 1);
-                if (d > 0 and absorb > 0) {
-                    mtp.run(&x, b.enc, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
-                    e.s.mtp_pos = at + absorb;
-                }
+                if (d > 0 and absorb > 0) mtp.run(&x, b.enc, e.sc.hidden, e.prompt_ids.at(@as(usize, at + 1) * 4), absorb, at, e.sc.m_picks);
                 last_n = n;
             }
+            if (d > 0 and absorb > 0) e.s.mtp_pos = at + absorb; // both prompt paths set it after their MTP absorb
             try e.finish(b.cb, b.enc);
             at += n;
         }
+        x.draws = null; // the decode loop re-arms the sampled draw each round; the MTP head drafts greedily
         e.s.pos = P;
         const t_prompt = std.c.mach_absolute_time();
         out.prefilled(out.ctx);
         var res: Result = .{ .reason = .length, .prompt_seconds = @as(f64, @floatFromInt(t_prompt - t_start)) / 24e6 };
         var tok = u32s(e.sc.picks, 1)[0];
-        if (e.margins) |m| try m.append(e.gpa, e.margin(0));
+        if (e.margins) |m| try m.append(e.gpa, ranks.margin(c, e.sc.logits, 0));
         res.generated = 1;
         if (try e.agree(out.tokens(out.ctx, &.{tok}) or std.mem.indexOfScalar(u32, eos, tok) != null)) {
             res.reason = .stop;
@@ -488,6 +465,7 @@ pub const Engine = struct {
         res.min_rows = d + 1;
         u32s(e.sc.next, 1)[0] = tok;
         var last_end: f64 = 0;
+        var round_draws: fwd.Draws = .{}; // the current decode round's rules, rebuilt each round
         while (true) {
             const t_enc = std.c.mach_absolute_time();
             const b = e.begin();
@@ -536,6 +514,11 @@ pub const Engine = struct {
             }
             const R = if (copied > 0) copied + 1 else d + 1;
             fwd.backbone(&x, b.enc, e.sc.ids, R, e.s.pos);
+            // The decode rows draw keyed at their context positions; the MTP head's drafts drew greedily.
+            x.draws = if (e.sampling) |p| if (p.temperature > 0) blk: {
+                round_draws = fwd.rulesFor(p, e.s.pos + 1, c.vocab, R);
+                break :blk &round_draws;
+            } else null else null;
             fwd.head(&x, b.enc, e.sc.hidden, e.sc.logits, e.sc.picks, R);
             try e.finish(b.cb, b.enc);
             res.encode_seconds += @as(f64, @floatFromInt(e.committed - t_enc)) / 24e6;
@@ -551,7 +534,7 @@ pub const Engine = struct {
             res.accepted += keep - 1;
             if (e.rank_log and copied == 0 and d > 0) {
                 const m = keep - 1;
-                res.draft_ranks[m][if (m == d) 0 else e.rankAt(m, picks[m])] += 1;
+                res.draft_ranks[m][if (m == d) 0 else ranks.rankAt(c, e.draft_vocab, e.sc.m_logits, m, picks[m])] += 1;
             }
             if (copied > 0) {
                 res.copy_rounds += 1;
@@ -568,7 +551,7 @@ pub const Engine = struct {
                     break;
                 }
             }
-            if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, e.margin(@intCast(j)));
+            if (e.margins) |m| for (0..take) |j| try m.append(e.gpa, ranks.margin(c, e.sc.logits, @intCast(j)));
             if (take > 0 and out.tokens(out.ctx, picks[0..take])) stop = true;
             if (hist) |*h| try h.extend(picks[0..take]);
             emitted += take;

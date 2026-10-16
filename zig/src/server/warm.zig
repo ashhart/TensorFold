@@ -1,9 +1,10 @@
 //! After a chat reply, the next turn's shared prompt prefilled in the background, so that turn resumes past the reply.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const prompt_mod = @import("prompt.zig");
+const images = @import("images.zig");
 const chat = @import("chat.zig");
 const log = @import("log.zig");
 const Server = @import("server.zig").Server;
@@ -25,12 +26,12 @@ const Pass = struct {
 };
 
 /// Prefill the conversation, `message` (the reply as sent) and the next turn's opening, on `warm_turns` engines.
-pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) void {
+pub fn reply(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) void {
     if (!srv.info.warm_turns or input.prompt != null or input.messages != .array) return;
-    start(srv, input, message, thinking, effort) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
+    start(srv, input, message, thinking, effort, prompt_len) catch |e| log.line("next turn: no background prefill ({s})", .{@errorName(e)});
 }
 
-fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8) !void {
+fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort: ?[]const u8, prompt_len: usize) !void {
     const p = try srv.gpa.create(Pass);
     p.* = .{ .gpa = srv.gpa, .arena = .init(srv.gpa), .request = undefined };
     var handed = false;
@@ -41,9 +42,17 @@ fn start(srv: *Server, input: chat.Input, message: Value, thinking: bool, effort
     const a = p.arena.allocator();
     var cx: errors.Cx = .{ .a = a };
     const warm_prompt = try shared(srv, &cx, input, message, thinking, effort);
-    const prompt = warm_prompt.ids;
+    var prompt = warm_prompt.ids;
+    // an image conversation's pass holds its images as its turns did (data URLs only: no URL is fetched twice)
+    const pictures = try images.expand(srv.info.vision, null, srv.text, &cx, .{ .array = warm_prompt.messages }, prompt, prompt.len);
+    if (pictures) |x| prompt = x.ids;
     if (prompt.len == 0 or (srv.info.context_window > 0 and prompt.len >= srv.info.context_window)) return;
-    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .history_len = @intCast(prompt.len), .rewind_len = @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    // its states count as the reply's request's: they supersede none of that turn's own until a later turn does
+    p.request = .{ .prompt = prompt, .max_tokens = 0, .background = true, .born = @intCast(prompt_len), .history_len = @intCast(prompt.len), .rewind_len = if (pictures != null) 0 else @intCast(prompt_mod.rewindLen(srv, &cx, .{ .array = warm_prompt.messages }, input.messages.array.len, input.tools, prompt, thinking, effort)), .chunks = try srv.chunks.starts(a, prompt), .decode_spans = try prompt_mod.replySpans(srv, &cx, prompt) };
+    if (pictures) |x| {
+        p.request.images = x.images;
+        p.request.cache_key = x.cache_key;
+    }
     const id = srv.next_id.fetchAdd(1, .monotonic);
     try srv.engine.submit(id, &p.request, .{ .ctx = p, .event = Pass.event });
     handed = true;

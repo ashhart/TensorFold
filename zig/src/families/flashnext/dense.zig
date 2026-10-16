@@ -61,7 +61,7 @@ pub fn recorded(r: *Run, role: []const u8) !struct { n: usize, k: usize, sk: usi
 }
 
 /// y = x W over the layout's tiles, for the rows `mdims` holds.
-pub fn project(r: *Run, l: Layout, x: Buf, w: Lane, mdims: Buf, y: Buf) !void {
+pub fn project(r: *Run, l: Layout, x: Buf, w: Lane.Six, mdims: Buf, y: Buf) !void {
     const pipe = try pipeline(r, l);
     r.enc.setPipeline(pipe);
     for ([_]Buf{ x, w.wq, w.sbt, mdims, y }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
@@ -70,7 +70,7 @@ pub fn project(r: *Run, l: Layout, x: Buf, w: Lane, mdims: Buf, y: Buf) !void {
 }
 
 /// A target lane projection on the core kernel at the recorded kernel's shape and K slices.
-pub fn lane(r: *Run, role: []const u8, x: Buf, w: Lane, mdims: Buf, y: Buf) !void {
+pub fn lane(r: *Run, role: []const u8, x: Buf, w: Lane.Six, mdims: Buf, y: Buf) !void {
     if (r.skip & Run.class(role) != 0) return;
     const s = try recorded(r, role);
     try project(r, .{ .n = s.n, .k = s.k, .sk = s.sk, .pf = r.lane_pf }, x, w, mdims, y);

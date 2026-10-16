@@ -7,10 +7,11 @@ const lanes = @import("lanes");
 const sampling = lanes.sampling;
 const XpuLanes = @import("xpu_lanes.zig").Lanes;
 const admit = @import("xpu_admit.zig");
+const nem = @import("xpu_nem.zig");
 const Allocator = std.mem.Allocator;
 
 pub const backends: []const []const u8 = &.{"xpu"};
-pub const families: []const api.Family = &.{.{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }};
+pub const families: []const api.Family = &.{ .{ .model_type = "qwen3_5", .formats = &.{ "mlx-q4g64", "gptq-int4-g128" } }, .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} } };
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return "Intel Xe2 (Level Zero)";
@@ -110,7 +111,7 @@ fn cacheBudget(o: api.Open) u64 {
     return if (gib > 0) std.math.lossyCast(u64, gib * (1 << 30)) else 0;
 }
 
-/// Further streams (GDN state + K/V of `context`) that fit in min(free, size − allocated); 0 when the margin does not.
+/// Streams the loaded card holds: each one past the first a GDN state and `context` tokens of K/V; 0 when none fits.
 fn slotsThatFit(runner: *xq.Runner, want: u32, reserve: u64) !u32 {
     const margin: u64 = 2 << 30; // activations of later chunks, the drafter's growth
     const mem = try runner.d.g.memory();
@@ -161,8 +162,9 @@ fn openLanes(gpa: Allocator, io: std.Io, runner: *xq.Runner, drafter: ?*Drafter,
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (nem.serves(o.model_type)) return nem.open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "qwen3_5")) {
-        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) only, not {s}", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "the XPU engine serves Qwen3.8-27B (qwen3_5, MLX affine 4/64 or symmetric GPTQ 4/128) and Nemotron-H (nemotron_h, MLX 4/64), not {s}", .{o.model_type});
         return null;
     }
     const context = xq.limits.context(o.context orelse 32768) catch {
@@ -185,7 +187,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         if (dr) |x| x.deinit();
         runner.deinit();
         problem.* = if (err == error.StreamDoesNotFit)
-            try std.fmt.allocPrint(a, "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache beside {s} on this card", .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir })
+            try std.fmt.allocPrint(
+                a,
+                "the XPU engine cannot hold a stream of {d} tokens and a {d:.1} GiB prompt cache " ++
+                    "beside {s} on this card",
+                .{ context, @as(f64, @floatFromInt(cacheBudget(o))) / (1 << 30), o.dir },
+            )
         else
             try std.fmt.allocPrint(a, "the XPU engine could not serve {s}: {s}", .{ o.dir, @errorName(err) });
         return null;

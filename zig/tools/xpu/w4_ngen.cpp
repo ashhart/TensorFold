@@ -1,6 +1,4 @@
-// nGEN generator of the XPU prompt GEMMs (int4 weights): writes one kernel as a zebin.
-//   c++ -std=c++17 -O1 -fno-operator-names -I<ngen> w4_ngen.cpp -o w4_ngen
-//   ./w4_ngen xe2|xe3 64|128 OUT.zebin [b3] [s4] [asplit] [swiglu]   or   ./w4_ngen xe2 128 OUT.zebin a8|a4 [swiglu]
+// nGEN generator of the XPU prompt GEMMs (int4 weights): one kernel as a zebin (docs/xpu/NAVIGATION.md section 8).
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>

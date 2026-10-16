@@ -17,11 +17,11 @@ pub const chunk_blocks = 64;
 /// The native kernels, by their extern "C" names.
 pub const Fns = struct {
     embed16: cuda.Function,
-    add_rmsnorm: cuda.Function,
     add_moe_norm: cuda.Function,
     concat_norms: cuda.Function,
     group_rmsnorm: cuda.Function,
     router: cuda.Function,
+    router_rows: cuda.Function,
     topk: cuda.Function,
     conv: cuda.Function,
     conv_rows: cuda.Function,
@@ -42,11 +42,11 @@ pub const Fns = struct {
     pub fn resolve(m: []const cuda.Module) !Fns {
         return .{
             .embed16 = try m[0].function("tf_nemo_embed16"),
-            .add_rmsnorm = try m[0].function("tf_nemo_add_rmsnorm"),
             .add_moe_norm = try m[0].function("tf_nemo_add_moe_norm"),
             .concat_norms = try m[0].function("tf_nemo_concat_norms"),
             .group_rmsnorm = try m[0].function("tf_nemo_group_rmsnorm"),
             .router = try m[1].function("tf_nemo_router"),
+            .router_rows = try m[1].function("tf_nemo_router_rows"),
             .topk = try m[1].function("tf_nemo_topk"),
             .conv = try m[2].function("tf_nemo_conv"),
             .conv_rows = try m[2].function("tf_nemo_conv_rows"),
@@ -100,6 +100,7 @@ pub const Glue = struct {
     f: *const Fns,
     s: cuda.Stream,
     emb: *const cuda.embed_rows.EmbedRows, // the shared token rows (embed_rows.cu)
+    norms: *const cuda.norms.Norms, // the shared RMS norm rows (norms.cu)
 
     fn tri(g: Glue) ?triton.Tri {
         return if (g.set) |x| .{ .set = x, .s = g.s } else null;
@@ -135,12 +136,7 @@ pub const Glue = struct {
     /// h = x + r (or x itself without r), y = rmsnorm(h) * w, xs = y's 64-group sums.
     pub fn addRmsnorm(g: Glue, x: u64, r: ?u64, w: u64, h: u64, y: u64, xs: u64, rows: usize, d: usize, eps: f32) !void {
         if (g.tri()) |t| return t.addRmsnorm(x, r, w, h, y, xs, rows, d, eps);
-        if (d > 4096) return error.RowTooWide;
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ x, r orelse 0, w, h, y, xs });
-        a.add(eps);
-        a.add(int(d));
-        try g.go(g.f.add_rmsnorm, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.norms.addRmsH(g.s, x, r, w, .bf16, h, y, xs, rows, d, eps);
     }
 
     /// The routed and shared expert sums in slot order, added to h, then its RMSNorm.
@@ -154,7 +150,7 @@ pub const Glue = struct {
         ptrs(&a, &.{ wt, w, hn, out, xs });
         a.add(eps);
         ints(&a, &.{ d, top_k, slots });
-        try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 256, 0, &a);
+        try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
     /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots.
@@ -162,10 +158,17 @@ pub const Glue = struct {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
         if (e > 256 or top_k + 2 > 8) return error.RouterTooWide;
         const shape = routerShape(d);
+        if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
         var a: cuda.Args = .{};
         ptrs(&a, &.{ x, w, part });
         ints(&a, &.{ rows, d, e, shape.sk });
-        try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
+        // decode: a block a (16 experts, slice) stages the rows and its experts, same bits
+        if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) {
+            const staged: u32 = @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16);
+            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, staged, &a);
+        } else {
+            try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
+        }
         var b: cuda.Args = .{};
         ptrs(&b, &.{ part, bias, ids, wts });
         b.add(int(rows));

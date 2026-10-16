@@ -24,7 +24,7 @@ const Data = struct {
     biases: []u16,
 
     fn init(l: core.Layout) !Data {
-        const d = Data{ .x = try a.alloc(u16, rows_max * l.k), .codes = try a.alloc(u8, l.n * l.k), .words = try a.alloc(u32, l.weightWords()), .scales = try a.alloc(u16, l.n * l.k / l.format.group), .biases = try a.alloc(u16, l.n * l.k / l.format.group) };
+        const d = Data{ .x = try a.alloc(u16, rows_max * l.k), .codes = try a.alloc(u8, l.n * l.k), .words = try a.alloc(u32, l.sourceWords()), .scales = try a.alloc(u16, l.n * l.k / l.format.group), .biases = try a.alloc(u16, l.n * l.k / l.format.group) };
         @memset(d.words, 0);
         var prng: std.Random.DefaultPrng = .init(0x1a9e + @as(u64, l.format.bits) * 1000 + l.format.group);
         const rnd = prng.random();
@@ -169,7 +169,8 @@ fn check(device: mtl.Device, queue: mtl.Queue, l: core.Layout, counts: *Counts) 
             counts.cpu_values += 1;
         };
     }
-    if (l.format.bits == 6 and l.format.group == 32) {
+    const pinned = if (frozen.bytes(l)) |_| true else |_| false; // fn_lane's recorded 6/32 layouts only
+    if (pinned) {
         for (1..rows_max + 1) |m| {
             const count = m * l.n * elem;
             const got = windows.contents()[guard + (m - 1) * window_bytes ..][0..count];
@@ -180,20 +181,67 @@ fn check(device: mtl.Device, queue: mtl.Queue, l: core.Layout, counts: *Counts) 
     for ([_]mtl.Buffer{ x, w, sb, one, windows }) |b| try checkGuard(b);
     counts.layouts += 1;
     std.debug.print("PASS b{d}g{d} sk{d} pf{d} {s} groups{any} tiles{d}: widths1-16, guards{s}\n", .{
-        l.format.bits,                                                                          l.format.group, l.sk, l.pf, @tagName(l.output), l.groupCut(), l.tiles(),
-        if (l.format.bits == 6 and l.format.group == 32) ", frozen fn_lane byte-equal" else "",
+        l.format.bits,                                     l.format.group, l.sk, l.pf, @tagName(l.output), l.groupCut(), l.tiles(),
+        if (pinned) ", frozen fn_lane byte-equal" else "",
+    });
+}
+
+/// A member writing into fused rows: each row equals the unstrided encode's and nothing around it is touched.
+fn strided(device: mtl.Device, queue: mtl.Queue, l: core.Layout) !void {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var fused = l;
+    fused.y_stride = l.n + 48;
+    const p = try core.Projection.init(a, device, l);
+    defer p.deinit();
+    const q = try core.Projection.init(a, device, fused);
+    defer q.deinit();
+    const d = try Data.init(l);
+    defer d.deinit();
+    const x = try buffer(device, d.x.len * 2);
+    defer x.deinit();
+    const w = try buffer(device, l.weightWords() * 4);
+    defer w.deinit();
+    const sb = try buffer(device, l.metadataElements() * 2);
+    defer sb.deinit();
+    const elem: usize = if (l.output == .f32) 4 else 2;
+    const ys = fused.y_stride.? * elem;
+    const plain = try buffer(device, rows_max * l.n * elem);
+    defer plain.deinit();
+    const stack = try buffer(device, rows_max * ys);
+    defer stack.deinit();
+    @memcpy(x.contents()[guard..][0 .. d.x.len * 2], std.mem.sliceAsBytes(d.x));
+    const packed_w = @as([*]u32, @ptrCast(@alignCast(w.contents() + guard)))[0..l.weightWords()];
+    const packed_sb = @as([*]u16, @ptrCast(@alignCast(sb.contents() + guard)))[0..l.metadataElements()];
+    try core.pack(l, d.words, d.scales, d.biases, packed_w, packed_sb);
+    const cb = queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    try p.encode(enc, ref(x, 0), ref(w, 0), ref(sb, 0), ref(plain, 0), rows_max);
+    try q.encode(enc, ref(x, 0), ref(w, 0), ref(sb, 0), ref(stack, 16 * elem), rows_max);
+    enc.end();
+    try finish(cb);
+    for (0..rows_max) |r| {
+        const row = stack.contents()[guard + r * ys ..][0..ys];
+        const want = plain.contents()[guard + r * l.n * elem ..][0 .. l.n * elem];
+        if (!std.mem.eql(u8, want, row[16 * elem ..][0 .. l.n * elem])) return error.StridedRowMismatch;
+        for (row[0 .. 16 * elem]) |v| if (v != 0xa5) return error.StridedGapOverwrite;
+        for (row[(16 + l.n) * elem ..]) |v| if (v != 0xa5) return error.StridedGapOverwrite;
+    }
+    for ([_]mtl.Buffer{ x, w, sb, plain, stack }) |b| try checkGuard(b);
+    std.debug.print("PASS b{d}g{d} n{d} {s}: output rows {d} apart equal the unstrided rows, gaps untouched\n", .{
+        l.format.bits, l.format.group, l.n, @tagName(l.output), fused.y_stride.?,
     });
 }
 
 fn packBench(io: std.Io, l: core.Layout) !void {
     try l.validate();
-    const w = try a.alloc(u32, l.weightWords());
+    const w = try a.alloc(u32, l.sourceWords());
     defer a.free(w);
     const s = try a.alloc(u16, l.n * l.k / l.format.group);
     defer a.free(s);
     const b = try a.alloc(u16, s.len);
     defer a.free(b);
-    const pw = try a.alloc(u32, w.len);
+    const pw = try a.alloc(u32, l.weightWords());
     defer a.free(pw);
     const sb = try a.alloc(u16, 2 * s.len);
     defer a.free(sb);
@@ -261,7 +309,7 @@ pub fn main(init: std.process.Init) !void {
         try check(device, queue, .{ .n = 96, .k = 224, .format = .{ .bits = 6, .group = 32 }, .sk = 4, .pf = 2, .ranges = &.{.{ 1, 1 }}, .groups = .{ 1, 3 }, .output = .f32 }, &counts);
         if (!device.tensorUnits()) {
             var unsupported = core.Layout{ .n = 64, .k = 224, .format = .{ .bits = 6, .group = 32 } };
-            for ([_]u8{ 4, 8 }) |bits| {
+            for ([_]u8{ 2, 3, 4, 5, 8 }) |bits| {
                 unsupported.format.bits = bits;
                 try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
             }
@@ -278,12 +326,16 @@ pub fn main(init: std.process.Init) !void {
             unsupported.reg = true;
             try std.testing.expectError(error.TensorUnitsRequired, core.Projection.init(a, device, unsupported));
         }
+        // 48 rows (a zero-padded last tile) and a member writing its columns of fused rows, on the same path
+        try check(device, queue, .{ .n = 48, .k = 160, .format = .{ .bits = 6, .group = 32 }, .sk = 2, .pf = 2, .output = .f32 }, &counts);
+        try strided(device, queue, .{ .n = 48, .k = 96, .format = .{ .bits = 6, .group = 32 } });
+        try strided(device, queue, .{ .n = 64, .k = 96, .format = .{ .bits = 6, .group = 32 }, .sk = 2, .output = .f32 });
         std.debug.print("PASS Flash Next: {d} layouts, {d} bit-equal row/window pairs, {d} frozen windows, {d} CPU values, {d} refusals; max fp32 error {d:.9}, max roundoff-bound fraction {d:.6}\n", .{
-            counts.layouts, counts.row_pairs, counts.golden_windows, counts.cpu_values, @as(usize, if (device.tensorUnits()) 0 else 7), counts.max_error, counts.max_fraction,
+            counts.layouts, counts.row_pairs, counts.golden_windows, counts.cpu_values, @as(usize, if (device.tensorUnits()) 0 else 10), counts.max_error, counts.max_fraction,
         });
         return;
     }
-    for ([_]u8{ 4, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
         for ([_]usize{ 1, 2, 4 }) |sk| for ([_]usize{ 1, 2 }) |pf| {
             const l = core.Layout{ .n = 64, .k = 7 * group, .format = .{ .bits = bits, .group = group }, .sk = sk, .pf = pf, .output = .f32 };
             try check(device, queue, l, &counts);
@@ -309,6 +361,13 @@ pub fn main(init: std.process.Init) !void {
         const group: usize = if (bits == 4) 64 else if (bits == 6) 32 else 128;
         try check(device, queue, .{ .n = 96, .k = 7 * group, .format = .{ .bits = bits, .group = group }, .sk = 4, .pf = 2, .ranges = &.{.{ 1, 1 }}, .groups = .{ 1, 3 }, .output = .f32 }, &counts);
     }
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]usize{ 32, 64, 128 }) |group| {
+        // 48 rows: the last tile's 16 padded columns are read as zero codes and never stored.
+        try check(device, queue, .{ .n = 48, .k = 5 * group, .format = .{ .bits = bits, .group = group }, .sk = 2, .pf = 2, .output = .f32 }, &counts);
+        try strided(device, queue, .{ .n = 48, .k = 3 * group, .format = .{ .bits = bits, .group = group } });
+        try strided(device, queue, .{ .n = 64, .k = 3 * group, .format = .{ .bits = bits, .group = group }, .sk = 2, .output = .f32 });
+    };
+    try strided(device, queue, .{ .n = 96, .k = 9 * 64, .format = .{ .bits = 4, .group = 64 }, .sk = 2, .precompute_sums = true, .cooperative = true });
     std.debug.print("PASS {d} layouts, {d} bit-equal row/window pairs, {d} frozen fn_lane byte-equal windows, {d} CPU-reference values; max fp32 error {d:.9}, max roundoff-bound fraction {d:.6}\n", .{
         counts.layouts, counts.row_pairs, counts.golden_windows, counts.cpu_values, counts.max_error, counts.max_fraction,
     });

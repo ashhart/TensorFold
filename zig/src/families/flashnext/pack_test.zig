@@ -162,6 +162,7 @@ pub fn writeCheckpoint(tmp: std.testing.TmpDir, a: std.mem.Allocator) !void {
     // the vision tower's rank-five entry: the builder never reads it, and it must not stop the load
     try list.append(a, .{ .name = "model.visual.patch_embed.proj.weight", .dtype = "BF16", .shape = &.{ 1, 1, 1, 1, 1 }, .bytes = &.{ 0, 0 } });
     try qspecs(&list, a, "language_model.lm_head", 128, 500_000, 0x3C00, 0x3B00);
+    try qspecs(&list, a, "language_model.model.embed_tokens", 128, 600_000, 0x3C00, 0x3B00); // read raw by the engine
     const mtp = "language_model.mtp";
     try hcSpecs(&list, a, try std.fmt.allocPrint(a, "{s}.layers.0.attn_hyper_connection", .{mtp}), 13_000_000, true, 0x3C00, 0x3400);
     try hcSpecs(&list, a, try std.fmt.allocPrint(a, "{s}.layers.0.mlp_hyper_connection", .{mtp}), 13_500_000, true, 0x3C00, 0x3400);
@@ -522,4 +523,36 @@ test "the draft vocabulary builds the mtp decode tensors and gathers the head's 
     try expectTensor(&file, "mtp.enorm.scale", .f32, &.{32});
     try expectTensor(&file, "mtp.hnorm.scale", .f32, &.{32});
     try expectTensor(&file, "mtp.fce.wq", .u32, &.{ 32, 6 });
+}
+
+test {
+    _ = @import("pack_hash_test.zig");
+}
+
+test "a pack never reads a tensor at a width the config leaves half-declared, though its shapes would fit" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCheckpoint(tmp, a);
+    // stored 6/32; a 3-bit group-64 reading of the same words and tables fits every shape check
+    const declared = "\"quantization\": {\"mtp.fc_embedding\": {\"bits\": 3}, ";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.replaceOwned(u8, a, config_json, "\"quantization\": {", declared) });
+    try tmp.dir.createDirPath(io, "out");
+    try std.testing.expectError(error.UnsupportedQuantization, pack.build(a, io, try tmpPath(a, tmp, "."), try tmpPath(a, tmp, "out"), null));
+}
+
+test "a directly read tensor (expert, embedding, n-gram table) whose shapes contradict its declared width is refused" {
+    var arena_state: std.heap.ArenaAllocator = .init(gpa);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try writeCheckpoint(tmp, a);
+    // stored 6/32; the embedding declared 8/64 would be read by the lookup kernel at the wrong width
+    const declared = "\"quantization\": {\"language_model.model.embed_tokens\": {\"bits\": 8, \"group_size\": 64}, ";
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = try std.mem.replaceOwned(u8, a, config_json, "\"quantization\": {", declared) });
+    try tmp.dir.createDirPath(io, "out");
+    try std.testing.expectError(error.InvalidAffineShape, pack.build(a, io, try tmpPath(a, tmp, "."), try tmpPath(a, tmp, "out"), null));
 }

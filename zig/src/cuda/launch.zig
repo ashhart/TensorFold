@@ -8,6 +8,14 @@ const Error = @import("driver.zig").Error;
 
 pub const Dim3 = abi.Dim3;
 
+/// Rows a row kernel's call takes as decode-sized: one row spread over small blocks, as Triton's tuned glue does.
+pub const few_rows = 16;
+
+/// Threads a block for a row kernel: `few` for decode-sized calls, `many` for prompt rows (bits never depend on it).
+pub fn rowThreads(rows: usize, many: u32, few: u32) u32 {
+    return if (rows <= few_rows) few else many;
+}
+
 /// Argument values in kernel order; each must have exactly the C type of its kernel parameter.
 pub const Args = struct {
     pub const max_args = 48;

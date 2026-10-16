@@ -29,6 +29,12 @@ pub const Modelopt = struct { lane: cuda.qmmf.Lane, gemm: cuda.nvfp4.Prompt, exp
 /// Scratch the expert plan writes (cuda/grouped.zig, shared by the MoE families).
 pub const Plan = cuda.grouped.Plan;
 
+/// A pocket's neurons, [n, D] fp32 up and down; the first `used` in use, their count on the device at `count` too.
+pub const Pocket = struct { up: u64, down: u64, n: usize, used: usize = 0, count: u64 = 0 };
+
+/// The most neurons a pocket holds: the pocket kernels' activation rows are this wide.
+pub const pocket_width = 64;
+
 /// Rows inside a scan launch where it also stores its state (scan_rows.cu `Snaps`): `r[k]` rows taken in, -1 none.
 pub const Snaps = extern struct {
     p: [max]u64 = @splat(0),
@@ -42,6 +48,7 @@ pub const Kernels = struct {
     triton: ?cuda.aot.Set, // a captured Triton set for the glue (GB10's qualified one); null: our own glue kernels
     glue: glue.Fns,
     emb: cuda.embed_rows.EmbedRows,
+    norms: cuda.norms.Norms,
     affine: cuda.qlinear.Affine4Kernels, // the 4-bit projections: qmm_group, lane_gemv and qmm_prefill
     router: cuda.grouped.Router,
     experts: cuda.experts.Affine4Experts, // the 4-bit grouped experts: experts, experts_prefill and experts_pack
@@ -51,13 +58,16 @@ pub const Kernels = struct {
     serial_feed: cuda.Function,
     plan_routed: cuda.Function,
     rest_rows: cuda.Function,
-    pocket_rows: cuda.Function,
+    pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
+    pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
+    latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
+    ck: ?cuda.ck.Ck = null, // the checkpoint's own math (loadCk): FP8 rows and NVFP4 experts, sm_120 on
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -82,15 +92,20 @@ pub const Kernels = struct {
         k.serial_feed = try k.mods[7].function("tf_serial_feed");
         k.plan_routed = try k.mods[7].function("tf_plan_routed");
         k.rest_rows = try k.mods[7].function("tf_rest_rows");
-        k.pocket_rows = try k.mods[7].function("tf_pocket_rows");
+        k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
+        k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
         k.emb = try cuda.embed_rows.EmbedRows.load(d);
         errdefer k.emb.unload();
+        k.norms = try cuda.norms.Norms.load(d);
+        errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
+        k.latent = null;
+        k.ck = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -108,6 +123,9 @@ pub const Kernels = struct {
 
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
+        k.norms.unload();
+        if (k.latent) |*x| x.unload();
+        if (k.ck) |*x| x.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -120,11 +138,25 @@ pub const Kernels = struct {
         for (&k.mods) |*m| m.unload();
     }
 
+    /// nemotron_latent.cu for a latent MoE checkpoint.
+    pub fn loadLatent(k: *Kernels) !void {
+        if (k.latent == null) k.latent = try @import("cuda_latent.zig").Fns.load(k.d);
+    }
+
+    /// The checkpoint math's kernels (--precision checkpoint): Blackwell's FP4 and FP8 mma.
+    pub fn loadCk(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.ck != null) return;
+        const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
+        if (major < ck_major) return error.CheckpointMathNeedsBlackwell;
+        k.ck = try cuda.ck.Ck.load(k.d, major, @intCast(try ctx.attribute(.multiprocessor_count)));
+    }
+
     /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.
     pub fn loadModelopt(k: *Kernels, ctx: *const cuda.Context) !void {
         if (k.modelopt != null) return;
         const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
-        if (major < 9) return error.ModeloptNeedsSm90; // the lane matmul sums K slices in a cluster: no reduce scratch
+        const minor: u32 = @intCast(try ctx.attribute(.compute_capability_minor));
+        if (modeloptRefusal(10 * major + minor) != null) return error.ModeloptNeedsSm90;
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         var lane = try cuda.qmmf.Lane.load(k.d, major);
         errdefer lane.unload();
@@ -135,6 +167,19 @@ pub const Kernels = struct {
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
 };
+
+/// The checkpoint's own math needs this major capability: the block-scaled FP4 mma (sm_120a, sm_121a).
+pub const ck_major: u32 = 12;
+
+/// FP8 and NVFP4 paths stop below this full capability: decode's split-K sums meet in a thread-block cluster.
+pub const modelopt_min: u32 = 90;
+
+/// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
+pub fn modeloptRefusal(capability: u32) ?[]const u8 {
+    if (capability >= modelopt_min) return null;
+    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: " ++
+        "a ModelOpt checkpoint needs compute capability 9.0 or newer";
+}
 
 /// qmm.split_k (cuda/qlinear.zig).
 pub const splitK = cuda.qlinear.splitK;
@@ -154,6 +199,7 @@ fn u(x: usize) u32 {
 pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
+    ck8: u64 = 0, // the e4m3 rows an FP8 projection reads in the checkpoint's math (its buffers' ck8)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
         try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared }, o.s, args);
@@ -192,7 +238,7 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8 };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
@@ -236,19 +282,49 @@ pub const Ops = struct {
     }
 
     /// nemotron_ops' pocket: out (bf16, fp32 if `out_f32`) += down relu^2(up y) at rows `i * row_mul + row_add`.
-    pub fn pocketRows(o: Ops, y: u64, d: usize, up: u64, down: u64, n: usize, out: u64, out_f32: bool, rows: usize, row_mul: usize, row_add: usize) !void {
-        if (n > 64) return error.PocketTooWide;
+    pub fn pocketRows(
+        o: Ops,
+        y: u64,
+        d: usize,
+        p: Pocket,
+        act: u64,
+        out: u64,
+        out_f32: bool,
+        rows: usize,
+        row_mul: usize,
+        row_add: usize,
+    ) !void {
+        if (p.n > pocket_width) return error.PocketTooWide;
+        if (p.used == 0) return; // no neuron in use: nothing launched, so the output keeps its bits, an exact -0.0 too
+        // a block row a row until the tiled forms (eight neurons by eight rows a warp, 16 rows a thread) run faster
+        const tiled = [2]bool{ rows >= 256, rows >= 64 };
         var a: cuda.Args = .{};
         a.add(y);
         a.add(int(d));
-        a.add(up);
-        a.add(down);
-        a.add(int(n));
-        a.add(out);
-        a.add(@as(c_int, @intFromBool(out_f32)));
-        a.add(int(row_mul));
-        a.add(int(row_add));
-        try o.go(o.k.pocket_rows, .{ rows, 1, 1 }, 256, 0, &a);
+        a.add(p.up);
+        a.add(p.count);
+        a.add(act);
+        a.add(int(rows));
+        const in_grid: [3]usize = if (tiled[0])
+            .{ (p.n + 63) / 64, (rows + 7) / 8, 1 }
+        else
+            .{ (p.n + 3) / 4, rows, 1 };
+        try o.go(o.k.pocket_in[@intFromBool(tiled[0])], in_grid, if (tiled[0]) 256 else 128, 0, &a);
+        var b: cuda.Args = .{};
+        b.add(act);
+        b.add(p.down);
+        b.add(p.count);
+        b.add(int(d));
+        b.add(out);
+        b.add(@as(c_int, @intFromBool(out_f32)));
+        for ([_]usize{ rows, row_mul, row_add }) |v| b.add(int(v));
+        try o.go(
+            o.k.pocket_out[@intFromBool(tiled[1])],
+            .{ (d + 127) / 128, if (tiled[1]) (rows + 15) / 16 else rows, 1 },
+            128,
+            0,
+            &b,
+        );
     }
 
     /// nemotron_ops' nudge: y (bf16, or fp32 when `y_f32`) += x (fp32) over n values.
@@ -335,4 +411,9 @@ test "items follow the Python shapes" {
     try std.testing.expectEqual(@as(usize, 135), maxItems(328, 130, 64));
     try std.testing.expectEqual(@as(usize, 1154), maxItems(16384, 130, 16));
     try std.testing.expectEqual(@as(usize, 8), maxItems(8, 130, 16));
+}
+
+test "ModelOpt's floor refuses every card below sm_90, the Ampere ones included, and admits sm_90 up" {
+    for ([_]u32{ 75, 80, 86, 89 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
 }

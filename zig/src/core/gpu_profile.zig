@@ -2,7 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 pub const Class = enum { dense, norm, xsum, embedding, copy, activation, gdn_prepare, gdn_scan, gdn_gate, state_publish, attention_prepare, attention };
-pub const Shape = struct { n: usize = 0, k: usize = 0, sk: usize = 0, calls: u64 = 0, gpu_seconds: f64 = 0 };
+pub const Shape = struct { n: usize = 0, k: usize = 0, sk: usize = 0, bits: u8 = 0, calls: u64 = 0, gpu_seconds: f64 = 0 };
 pub const Trace = struct {
     queue: mtl.Queue,
     enabled: bool = false,
@@ -43,7 +43,7 @@ pub const Scope = struct {
         t.seconds[index] += cb.gpuSeconds();
         if (s.shape) |shape| {
             var found: ?usize = null;
-            for (t.shapes[0..t.shape_count], 0..) |entry, j| if (entry.n == shape.n and entry.k == shape.k and entry.sk == shape.sk) {
+            for (t.shapes[0..t.shape_count], 0..) |entry, j| if (entry.n == shape.n and entry.k == shape.k and entry.sk == shape.sk and entry.bits == shape.bits) {
                 found = j;
                 break;
             };

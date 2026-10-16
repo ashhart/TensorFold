@@ -1,6 +1,6 @@
 //! Qwen3.8-27B forward on Intel Xe2 over Level Zero (MLX affine 4-bit g64), chunked prompt, serial decode.
 const std = @import("std");
-pub const ze = @import("ze.zig");
+pub const ze = @import("ze");
 const kb = @import("xpu_qwen27_kernels");
 const dev = @import("dev.zig");
 const fwd = @import("forward.zig");
@@ -134,7 +134,7 @@ pub const Runner = struct {
     taps_on: bool = false,
     on_taps: ?struct { ctx: *anyopaque, f: *const fn (*anyopaque, *anyopaque, u32) anyerror!void } = null,
 
-    /// Loads `dir` (MLX 4/64 or GPTQ 4/128) onto the first Arc Pro B70 (0xe223) with room for `context` positions.
+    /// Loads `dir` (MLX affine 4/64 or GPTQ 4/128) onto the first Arc Pro B70 (PCI id 0xe223), room for `context` rows.
     pub fn init(dir: []const u8, context: u32) !*Runner {
         if (std.c.getenv("XPU_DUMP")) |v| dump_dir = std.mem.span(v);
         if (std.c.getenv("XPU_PREFILL_INT8") != null) prefill_int8 = true;
