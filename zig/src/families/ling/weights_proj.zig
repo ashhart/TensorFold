@@ -57,11 +57,23 @@ pub const Store = struct {
         return p;
     }
 
+    /// deinit, or when the device may still write them (a failed drain) the host lists alone: buffers leaked.
+    pub fn drop(s: *Store, settled: bool) void {
+        if (!settled) s.buffers.clearRetainingCapacity();
+        s.deinit();
+    }
+
     pub fn find(s: *const Store, name: []const u8) ?Named {
         for (s.named.items) |n| if (std.mem.eql(u8, n.name, name)) return n;
         return null;
     }
 };
+
+/// Whether `s` drained: false when its synchronize fails (work queued on it may still touch memory).
+pub fn drains(s: cuda.Stream) bool {
+    s.synchronize() catch return false;
+    return true;
+}
 
 /// Host bf16 from fp32: round to nearest even, NaN kept quiet.
 pub fn toBf16(v: f32) u16 {
@@ -88,6 +100,7 @@ pub const Reader = struct {
     c: *const config.Config,
     store: *Store,
     stage: usize = 512 << 20, // raw expert bytes staged at a time (weights.Options.stage)
+    queued: bool = false, // an upload or packer launch not yet drained
     buf: [256]u8 = undefined,
 
     fn name(r: *Reader, module: []const u8, tail: []const u8) ![]const u8 {
@@ -110,19 +123,32 @@ pub const Reader = struct {
         };
     }
 
-    /// A temporary device copy of `bytes` for a packer, freed by the caller after the stream drains.
+    /// A temporary device copy of `bytes` for a packer, freed by the caller once settled().
     fn staged(r: *Reader, bytes: []const u8) !cuda.DeviceBuffer {
         return cuda.DeviceBuffer.fromHost(r.store.d, bytes);
+    }
+
+    /// Nothing queued can still read or write memory: at once, or after a drain; false when the drain fails.
+    pub fn settled(r: *Reader) bool {
+        if (r.queued and !drains(r.stream)) return false;
+        r.queued = false;
+        return true;
+    }
+
+    fn drain(r: *Reader) !void {
+        try r.stream.synchronize();
+        r.queued = false;
     }
 
     fn bf16(r: *Reader, module: []const u8, n: usize, k: usize) !Proj {
         const t = try r.ck.get(try r.name(module, "weight"));
         if (!t.is(.bf16, &.{ n, k })) return wrong(module, .bf16, t, n, k);
         var src = try r.staged(t.bytes);
-        defer src.free();
+        defer if (r.settled()) src.free(); // else leaked: a packer may still read it
         const out = try r.store.alloc(cuda.modelopt.padded(n) * k * 2, module);
+        r.queued = true;
         try r.pack.bf16Lane(r.stream, src.ptr, out, n, k);
-        try r.stream.synchronize();
+        try r.drain();
         return .{ .bf16 = cuda.modelopt.bf16Weight(out, n, k) };
     }
 
@@ -138,8 +164,9 @@ pub const Reader = struct {
     fn fp8(r: *Reader, module: []const u8, n: usize, k: usize) !Proj {
         const p = try r.fp8Pair(module, n, k);
         var src = try r.staged(p.w.bytes);
-        defer src.free();
+        defer if (r.settled()) src.free(); // else leaked: a packer may still read it
         const codes = try r.store.alloc(cuda.fp8.padded(n) * k, module);
+        r.queued = true;
         try r.pack.fp8Lane(r.stream, src.ptr, codes, n, k);
         const inv = try r.gpa.alloc(f32, p.s.numel());
         defer r.gpa.free(inv);
@@ -148,7 +175,7 @@ pub const Reader = struct {
         defer r.gpa.free(tiles);
         cuda.fp8.packScales(tiles, inv, n, k);
         const scales = try r.store.keep(std.mem.sliceAsBytes(tiles), try r.name(module, "weight_scale_inv"));
-        try r.stream.synchronize();
+        try r.drain();
         return .{ .fp8g = cuda.fp8.weight(codes, scales, n, k) };
     }
 
@@ -163,14 +190,15 @@ pub const Reader = struct {
     fn fp4(r: *Reader, module: []const u8, n: usize, k: usize) !Proj {
         const l = try r.fp4Read(module, n, k);
         var codes = try r.staged(l.codes);
-        defer codes.free();
+        defer if (r.settled()) codes.free(); // else both leaked
         var scales = try r.staged(l.scales);
-        defer scales.free();
+        defer if (r.settled()) scales.free();
         const np = cuda.nvfp4.padded(n);
         const words = try r.store.alloc(np / 64 * (k / 64) * 512 * 4, module);
         const tiles = try r.store.alloc(np * (k / 16), try r.name(module, "weight_scale"));
+        r.queued = true;
         try r.pack.fp4Lane(r.stream, codes.ptr, scales.ptr, words, tiles, n, k);
-        try r.stream.synchronize();
+        try r.drain();
         return .{ .nvfp4 = cuda.nvfp4.weight(words, tiles, l.global, n, k) };
     }
 
@@ -270,6 +298,7 @@ pub const Reader = struct {
 
         fn deinit(st: *Stage, r: *Reader) void {
             st.jobs.deinit(r.gpa);
+            if (!r.settled()) return; // both leaked on purpose: the upload or a packer may still read them
             st.host.free();
             st.dev.free();
         }
@@ -294,12 +323,13 @@ pub const Reader = struct {
             st.copy(0);
             for (pool) |t| if (t) |x| x.join();
             st.jobs.clearRetainingCapacity();
+            r.queued = true;
             try st.dev.uploadAsync(0, st.host.bytes, r.stream.handle);
         }
 
         /// The packers done (the stage is reused) and the batch's file pages dropped: the GPU shares this memory.
         fn drained(_: *Stage, r: *Reader) !void {
-            try r.stream.synchronize();
+            try r.drain();
             r.ck.release();
         }
     };

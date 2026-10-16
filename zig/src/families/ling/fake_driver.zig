@@ -14,6 +14,12 @@ var calls: u64 = 0; // fallible calls since reset
 var fail_at: ?u64 = null; // the call that fails
 var code: R = 2; // what it returns (2: out of memory; NOT_READY reaches the caller without a log line)
 var bad: usize = 0; // frees of something not held, releases of nothing
+var lazy = false; // async copies, memsets and launches stay pending until a stream or context drains
+var sticky = false; // every call from the failing one on fails too, drains included
+var pending: usize = 0; // async work queued since the last drain (lazy only)
+var early: usize = 0; // frees while work was pending
+var stuck: usize = 0; // drains that failed
+var hit = false; // the failing call came with work pending
 var next: usize = 0x1000;
 var globals: [1 << 16]u8 align(256) = undefined;
 
@@ -21,8 +27,44 @@ var globals: [1 << 16]u8 align(256) = undefined;
 pub fn reset(at: ?u64, with: R) void {
     calls = 0;
     bad = 0;
+    pending = 0;
+    early = 0;
+    stuck = 0;
+    hit = false;
     fail_at = at;
     code = with;
+}
+
+/// From now on async work stays pending until a successful drain (`queue`); failures persist (`stick`).
+pub fn mode(queue: bool, stick: bool) void {
+    lazy = queue;
+    sticky = stick;
+}
+
+/// Frees of device or pinned memory while async work was pending, since reset; work pending now; failed drains.
+pub fn freedEarly() usize {
+    return early;
+}
+
+pub fn queued() usize {
+    return pending;
+}
+
+pub fn failedDrains() usize {
+    return stuck;
+}
+
+pub fn failedPending() bool {
+    return hit;
+}
+
+/// Everything still held freed (what a failed drain leaked on purpose); returns how many.
+pub fn sweep() usize {
+    const n = held.count();
+    var it = held.iterator();
+    while (it.next()) |kv| backing.free(@as([*]align(256) u8, @ptrFromInt(kv.key_ptr.*))[0..kv.value_ptr.*]);
+    held.clearRetainingCapacity();
+    return n;
 }
 
 /// Fallible calls since reset, and whether the failure was handed out.
@@ -59,7 +101,21 @@ pub fn context(d: *const cuda.Driver) cuda.Context {
 /// The countdown: each fallible call takes one step, and the chosen one fails.
 fn step() R {
     calls += 1;
-    return if (fail_at != null and calls == fail_at.?) code else ok;
+    const n = fail_at orelse return ok;
+    if (calls == n) hit = pending > 0;
+    return if (calls == n or (sticky and calls > n)) code else ok;
+}
+
+/// An async call's result: queued work pending until a drain when lazy.
+fn later(r: R) R {
+    if (r == ok and lazy) pending += 1;
+    return r;
+}
+
+fn drain() R {
+    const r = step();
+    if (r == ok) pending = 0 else stuck += 1;
+    return r;
 }
 
 /// Every entry point without out-parameters: a step, nothing else (the C ABI lets a caller pass arguments it ignores).
@@ -88,6 +144,7 @@ fn take(n: usize) ?u64 {
 }
 
 fn give(p: u64) R {
+    if (pending > 0) early += 1;
     const kv = held.fetchRemove(p) orelse {
         bad += 1;
         return 1;
@@ -196,18 +253,18 @@ const table = struct {
         return ok;
     }
     pub fn cuMemcpyHtoDAsync_v2(dst: abi.DevicePtr, src: ?*const anyopaque, n: usize, _: abi.Stream) callconv(.c) R {
-        return cuMemcpyHtoD_v2(dst, src, n);
+        return later(cuMemcpyHtoD_v2(dst, src, n));
     }
     pub fn cuMemcpyDtoHAsync_v2(dst: ?*anyopaque, src: abi.DevicePtr, n: usize, _: abi.Stream) callconv(.c) R {
-        return cuMemcpyDtoH_v2(dst, src, n);
+        return later(cuMemcpyDtoH_v2(dst, src, n));
     }
     pub fn cuMemcpyDtoDAsync_v2(dst: abi.DevicePtr, src: abi.DevicePtr, n: usize, _: abi.Stream) callconv(.c) R {
-        return cuMemcpyDtoD_v2(dst, src, n);
+        return later(cuMemcpyDtoD_v2(dst, src, n));
     }
     pub fn cuMemcpy2DAsync_v2(m: *const abi.Memcpy2D, _: abi.Stream) callconv(.c) R {
         if (step() != ok) return code;
         for (0..m.height) |r| @memmove(bytes(m.dst + r * m.dst_pitch, m.width), bytes(m.src + r * m.src_pitch, m.width));
-        return ok;
+        return later(ok);
     }
     pub fn cuMemsetD8_v2(p: abi.DevicePtr, v: u8, n: usize) callconv(.c) R {
         if (step() != ok) return code;
@@ -220,10 +277,22 @@ const table = struct {
         return ok;
     }
     pub fn cuMemsetD8Async(p: abi.DevicePtr, v: u8, n: usize, _: abi.Stream) callconv(.c) R {
-        return cuMemsetD8_v2(p, v, n);
+        return later(cuMemsetD8_v2(p, v, n));
     }
     pub fn cuMemsetD32Async(p: abi.DevicePtr, v: c_uint, n: usize, _: abi.Stream) callconv(.c) R {
-        return cuMemsetD32_v2(p, v, n);
+        return later(cuMemsetD32_v2(p, v, n));
+    }
+    pub fn cuLaunchKernel(_: abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) R {
+        return later(step());
+    }
+    pub fn cuLaunchKernelEx(_: *const abi.LaunchConfig, _: abi.Function, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) R {
+        return later(step());
+    }
+    pub fn cuStreamSynchronize(_: abi.Stream) callconv(.c) R {
+        return drain();
+    }
+    pub fn cuCtxSynchronize() callconv(.c) R {
+        return drain();
     }
     pub fn cuStreamCreate(s: *abi.Stream, _: c_uint) callconv(.c) R {
         if (step() != ok) return code;

@@ -103,11 +103,11 @@ pub const Engine = struct {
             defer pack.unload();
             e.w = try weights.load(gpa, d, e.stream, &pack, &opened.ck, c, all, .{});
         }
-        errdefer e.w.deinit();
+        errdefer e.w.drop(weights.drains(e.stream)); // leaked on a failed drain: a queued launch may read them
         e.main = e.w;
         e.main.layers = e.w.layers[0..layers.len];
         e.g = try fw.Graph.init(gpa, d, &e.m, e.stream, &e.main);
-        errdefer e.g.deinit();
+        errdefer e.g.drop(weights.drains(e.stream)); // as e.w
         if (mtp) {
             e.mtp = @as(head.Head, undefined);
             e.mtp.?.init(gpa, d, &e.m, e.stream, &e.w, o.prompt_rows, o.capacity) catch |err| {
@@ -381,10 +381,10 @@ pub const Engine = struct {
         const q = e.cur;
         if (q.st.pending != 0) return error.NotCommitted;
         var buf = try cuda.DeviceBuffer.alloc(e.d, q.st.arena.buf.len);
-        errdefer buf.free();
+        errdefer if (weights.drains(e.stream)) buf.free(); // else leaked: the copy into it may be queued
         try e.copy(buf.ptr, q.st.arena.buf.ptr, buf.len);
         var hd: ?cuda.DeviceBuffer = null;
-        errdefer if (hd) |*x| x.free();
+        errdefer if (hd) |*x| if (weights.drains(e.stream)) x.free();
         if (q.hd) |h| {
             if (q.in_head != 0) return error.NotCommitted;
             hd = try cuda.DeviceBuffer.alloc(e.d, h.arena.buf.len);

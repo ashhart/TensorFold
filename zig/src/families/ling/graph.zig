@@ -155,7 +155,7 @@ pub const Graph = struct {
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *const Modules, s: cuda.Stream, w: *const weights.Weights) !Graph {
         const c = &w.config;
         var g: Graph = .{ .w = w, .store = .{ .gpa = gpa, .d = d }, .slot = try gpa.alloc(u32, w.layers.len), .absorb = &.{}, .kda_layers = 0, .mla_layers = 0, .freq = 0, .zero_bias = 0 };
-        errdefer g.deinit();
+        errdefer g.drop(weights.drains(s)); // a failed drain leaks the store: a queued decode may still use it
         for (w.layers, g.slot) |l, *x| switch (l.mixer) {
             .kda => {
                 x.* = @intCast(g.kda_layers);
@@ -181,13 +181,23 @@ pub const Graph = struct {
     }
 
     pub fn deinit(g: *Graph) void {
+        g.drop(true);
+    }
+
+    /// deinit, but the store's device buffers leaked unless `settled` (nothing queued can still use them).
+    pub fn drop(g: *Graph, settled: bool) void {
         const gpa = g.store.gpa;
         gpa.free(g.slot);
         gpa.free(g.absorb);
-        g.store.deinit();
+        g.store.drop(settled);
         g.* = undefined;
     }
 };
+
+/// `b` freed, after draining `s` if work is `pending` on it; a failed drain leaks it (the device may still read it).
+fn freeDrained(s: cuda.Stream, b: *cuda.DeviceBuffer, pending: bool) void {
+    if (!pending or weights.drains(s)) b.free();
+}
 
 /// kv_b in its loaded format through the lane on identity rows: W^T [lw][heads (nope + v)], regrouped by head.
 fn absorbOf(gpa: std.mem.Allocator, store: *weights.Store, m: *const Modules, s: cuda.Stream, c: *const Config, kv_b: Proj, index: u32) !Absorb {
@@ -202,17 +212,20 @@ fn absorbOf(gpa: std.mem.Allocator, store: *weights.Store, m: *const Modules, s:
     defer gpa.free(eye);
     @memset(eye, 0);
     for (0..lw) |i| eye[i * lw + i] = 0x3f80; // bf16 1.0
+    var pending = false; // the decode queued and not yet drained
     var x = try cuda.DeviceBuffer.fromHost(store.d, std.mem.sliceAsBytes(eye));
-    defer x.free();
+    defer freeDrained(s, &x, pending);
     var y = try cuda.DeviceBuffer.alloc(store.d, lw * n * 2);
-    defer y.free();
+    defer freeDrained(s, &y, pending);
     var part = try cuda.DeviceBuffer.alloc(store.d, @max(16, m.lane.partBytes(lw, switch (kv_b) {
         .fp8g, .nvfp4, .fp8, .bf16 => |q| q,
         else => return error.FormatNotBuilt,
     })));
-    defer part.free();
+    defer freeDrained(s, &part, pending);
+    pending = true;
     try m.linear().decode(s, kv_b, .{ .x = x.ptr, .ldx = lw, .part = part.ptr }, y.ptr, lw);
     try s.synchronize();
+    pending = false;
     const t = try gpa.alloc(u16, lw * n);
     defer gpa.free(t);
     try y.download(0, std.mem.sliceAsBytes(t));

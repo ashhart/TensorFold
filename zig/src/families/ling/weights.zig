@@ -12,6 +12,7 @@ pub const Proj = proj.Proj;
 pub const Mlp = proj.Mlp;
 pub const Routed = proj.Routed;
 pub const Store = proj.Store;
+pub const drains = proj.drains;
 
 /// KDA: full-rank projections, the q|k|v short convs as #804's chain reads them, the decay and output norm tensors.
 pub const Kda = struct {
@@ -76,8 +77,13 @@ pub const Weights = struct {
     mtp: ?Mtp = null,
 
     pub fn deinit(w: *Weights) void {
+        w.drop(true);
+    }
+
+    /// deinit, but the device buffers leaked unless `settled` (nothing queued can still read them).
+    pub fn drop(w: *Weights, settled: bool) void {
         w.store.gpa.free(w.layers);
-        w.store.deinit();
+        w.store.drop(settled);
         w.* = undefined;
     }
 
@@ -203,8 +209,8 @@ const Loader = struct {
 /// Layers `layers` (index c.layers is the MTP layer) from `ck`, each tensor in its stored format; `stream` blocking.
 pub fn load(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream, pack: *const cuda.modelopt.Packer, ck: *core.Checkpoint, c: Config, layers: []const u32, opts: Options) !Weights {
     var w: Weights = .{ .config = c, .store = .{ .gpa = gpa, .d = d } };
-    errdefer w.store.deinit();
     var L: Loader = .{ .r = .{ .gpa = gpa, .stream = stream, .pack = pack, .ck = ck, .c = &w.config, .store = &w.store, .stage = opts.stage }, .c = &w.config, .opts = opts };
+    errdefer w.store.drop(L.r.settled()); // the packers' outputs freed only once nothing queued writes them
     const out = try gpa.alloc(Layer, layers.len);
     errdefer gpa.free(out);
     for (layers, out) |i, *l| {
