@@ -186,6 +186,13 @@ pub const Writeback = struct {
     }
 
     pub fn check(self: *Writeback, _: g.Gate) !?[]const u8 {
+        if (!try self.rig.intact()) return "a payload guard changed";
+        const inputs = try self.rig.inputBytes();
+        var offset: usize = 0;
+        for ([_][]const u8{ std.mem.sliceAsBytes(self.h), std.mem.sliceAsBytes(self.inj), std.mem.sliceAsBytes(self.y), std.mem.sliceAsBytes(self.wts), std.mem.sliceAsBytes(self.br) }) |expected| {
+            if (!std.mem.eql(u8, inputs[offset..][0..expected.len], expected)) return "an immutable input changed";
+            offset += expected.len;
+        }
         const a = self.arena.?.allocator();
         const pss = try a.dupe(u8, try self.rig.bytes(self.pss, self.count() * 4));
         if (self.mode != .sums) {

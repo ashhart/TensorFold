@@ -11,6 +11,7 @@ const mx_k = @import("contract_mxfp8.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
 const writeback_k = @import("contract_flashnext_writeback.zig");
+const utility_k = @import("contract_utility.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -118,6 +119,18 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&writebacks) |*w| w.deinit();
     for (&writebacks) |*w| try kernels.append(a, w.kernel());
+    var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
+    defer batch.unload();
+    var sums: [2]utility_k.Sum = undefined;
+    var shifts: [2]utility_k.Shift = undefined;
+    for ([_]bool{ false, true }, &sums, &shifts) |variant, *sum, *shift| {
+        sum.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_sum_slices"), .bf16 = variant };
+        shift.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_shift_window"), .padded = variant };
+    }
+    defer for (&sums) |*sum| sum.deinit();
+    defer for (&shifts) |*shift| shift.deinit();
+    for (&sums) |*sum| try kernels.append(a, sum.kernel());
+    for (&shifts) |*shift| try kernels.append(a, shift.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
