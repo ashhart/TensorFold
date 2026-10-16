@@ -95,13 +95,19 @@ pub const Gpu = struct {
         const b = try g.device.buffer(len, mtl.ResourceOptions.shared);
         @memset(b.contents()[0..len], 0);
         g.peak = @max(g.peak, g.device.allocated());
-        return g.register(b, true);
+        return g.register(b, true) catch |err| {
+            b.deinit();
+            return err;
+        };
     }
 
     /// An address for a buffer made elsewhere (a mapped checkpoint shard); `own` releases it at close.
     pub fn register(g: *Gpu, b: mtl.Buffer, own: bool) !u64 {
-        try g.bufs.append(g.gpa, b);
-        try g.owned.append(g.gpa, own);
+        // both lists grow first, so a failed allocation leaves them the same length and the caller owning `b`
+        try g.bufs.ensureUnusedCapacity(g.gpa, 1);
+        try g.owned.ensureUnusedCapacity(g.gpa, 1);
+        g.bufs.appendAssumeCapacity(b);
+        g.owned.appendAssumeCapacity(own);
         return @as(u64, g.bufs.items.len - 1) << slot_shift;
     }
 
@@ -153,10 +159,17 @@ pub const Gpu = struct {
         cb.commit();
         g.enc = null;
         g.cb = null;
-        try g.waitPending();
+        defer {
+            if (g.pool) |p| p.pop();
+            g.pool = null;
+        }
+        g.waitPending() catch |err| {
+            // the new command is already queued: let it finish before anyone can release its buffers
+            cb.wait();
+            cb.release();
+            return err;
+        };
         g.pending = cb;
-        if (g.pool) |p| p.pop();
-        g.pool = null;
     }
 
     fn waitPending(g: *Gpu) !void {
