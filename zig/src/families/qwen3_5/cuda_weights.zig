@@ -1,4 +1,4 @@
-//! The checkpoint's weights onto the device: affine-4 projections packed as qlinear tiles, out of the engine's arena.
+//! The checkpoint's weights onto the device as qlinear tiles in the engine's arena: 2-4 bits affine-4, 5-8 bits 8-bit.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -6,46 +6,84 @@ const geometry = @import("cuda_geometry.zig");
 const engine = @import("cuda_engine.zig");
 
 const Geometry = geometry.Geometry;
+const Slot = geometry.Slot;
 const Engine = engine.Engine;
+const Proj = engine.Proj;
 const Affine4 = cuda.qlinear.Affine4;
+const Affine8 = cuda.qlinear.Affine8;
+const servedBits = cuda.qlinear.servedBits;
 const DeviceBuffer = cuda.DeviceBuffer;
 const aligned = engine.aligned;
 const head_dim = geometry.head_dim;
 
-/// The packed tiles' bytes of an n-by-k affine-4 projection (qlinear's words, scales and biases).
-fn packedBytes(n: usize, k: usize) usize {
-    const l = Affine4.layout(n, k);
+/// The packed tiles' bytes of an n-by-k projection of `bits` codes (qlinear's words, scales and biases).
+fn packedBytes(n: usize, k: usize, bits: u8) usize {
+    if (servedBits(bits) == 4) {
+        const l = Affine4.layout(n, k);
+        return aligned(l.words) + 2 * aligned(l.scales);
+    }
+    const l = Affine8.layout(n, k);
     return aligned(l.words) + 2 * aligned(l.scales);
 }
 
-/// The checkpoint's own bytes of an n-by-k affine-4 projection: words, then its scales and biases.
-fn rawBytes(n: usize, k: usize) usize {
-    return n * k / 8 * 4 + 2 * (n * k / 64 * 2);
+/// The checkpoint's own bytes of an n-by-k projection of `bits` codes: words, then its scales and biases.
+fn rawBytes(n: usize, k: usize, bits: u8) usize {
+    return n * k * bits / 8 + 2 * (n * k / 64 * 2);
+}
+
+/// A slot's output and input widths.
+fn shape(g: Geometry, slot: Slot) [2]usize {
+    return switch (slot) {
+        .gate, .up => .{ g.intermediate, g.hidden },
+        .down => .{ g.hidden, g.intermediate },
+        .qkv => .{ g.convWidth(), g.hidden },
+        .z => .{ g.valueWidth(), g.hidden },
+        .a, .b => .{ g.v_heads, g.hidden },
+        .out => .{ g.hidden, g.valueWidth() },
+        .q => .{ 2 * g.attnWidth(), g.hidden },
+        .k, .v => .{ g.kv_heads * head_dim, g.hidden },
+        .o => .{ g.hidden, g.attnWidth() },
+    };
+}
+
+/// The slots layer `i` loads: the MLP's and its mixer's.
+fn slots(g: Geometry, i: usize) []const Slot {
+    return if (g.linear[i]) &.{ .gate, .up, .down, .qkv, .z, .a, .b, .out } else &.{ .gate, .up, .down, .q, .k, .v, .o };
+}
+
+/// The token embedding as the embed kernels read it: MLX rows at the width it is served (4 or 8 bits).
+fn embedBytes(g: Geometry) usize {
+    return aligned(g.vocab * g.hidden * servedBits(g.bits.embed) / 8) + 2 * aligned(g.vocab * g.hidden / 64 * 2);
 }
 
 /// What `load` takes from the arena: every packed projection and vector, each allocation aligned.
 pub fn total(g: Geometry) usize {
-    var t: usize = 0;
-    t += aligned(g.vocab * g.hidden / 8 * 4) + 2 * aligned(g.vocab * g.hidden / 64 * 2); // the embedding as stored
-    t += packedBytes(g.vocab, g.hidden); // the head, tied or not
+    var t: usize = embedBytes(g);
+    t += packedBytes(g.vocab, g.hidden, g.bits.head); // the head, tied or not
     t += aligned(g.hidden * 2);
-    for (g.linear[0..g.layers]) |lin| {
-        t += 2 * aligned(g.hidden * 2) + 2 * packedBytes(g.intermediate, g.hidden) + packedBytes(g.hidden, g.intermediate);
-        if (lin) {
-            t += packedBytes(g.convWidth(), g.hidden) + packedBytes(g.valueWidth(), g.hidden) + 2 * packedBytes(g.v_heads, g.hidden) + packedBytes(g.hidden, g.valueWidth());
+    for (0..g.layers) |i| {
+        t += 2 * aligned(g.hidden * 2);
+        for (slots(g, i)) |slot| {
+            const nk = shape(g, slot);
+            t += packedBytes(nk[0], nk[1], g.bits.of(i, slot));
+        }
+        if (g.linear[i]) {
             t += aligned(g.convWidth() * geometry.taps * 2) + aligned(geometry.dk * 2) + aligned(g.v_heads * 4) + aligned(g.v_heads * 2);
         } else {
-            t += packedBytes(2 * g.attnWidth(), g.hidden) + 2 * packedBytes(g.kv_heads * head_dim, g.hidden) + packedBytes(g.hidden, g.attnWidth());
             t += 2 * aligned(head_dim * 2);
         }
     }
     return t;
 }
 
-/// The largest projection's bytes as stored: the staging buffer the load packs each one from.
+/// The largest projection's bytes as stored: the staging buffer the load packs each one from (and widens through).
 pub fn stageBytes(g: Geometry) usize {
-    var most: usize = 0;
-    for ([_][2]usize{ .{ g.vocab, g.hidden }, .{ g.intermediate, g.hidden }, .{ g.hidden, g.intermediate }, .{ g.convWidth(), g.hidden }, .{ g.valueWidth(), g.hidden }, .{ 2 * g.attnWidth(), g.hidden } }) |nk| most = @max(most, rawBytes(nk[0], nk[1]));
+    var most = rawBytes(g.vocab, g.hidden, g.bits.head);
+    if (servedBits(g.bits.embed) != g.bits.embed) most = @max(most, rawBytes(g.vocab, g.hidden, g.bits.embed));
+    for (0..g.layers) |i| for (slots(g, i)) |slot| {
+        const nk = shape(g, slot);
+        most = @max(most, rawBytes(nk[0], nk[1], g.bits.of(i, slot)));
+    };
     return most;
 }
 
@@ -71,58 +109,94 @@ fn f32vec(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anyt
     return upload(e, std.mem.sliceAsBytes(words));
 }
 
-fn tensor(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape: []const usize) !u64 {
+fn tensor(e: *Engine, ck: *core.Checkpoint, comptime fmt: []const u8, args: anytype, dtype: core.checkpoint.DType, shape_: []const usize) !u64 {
     var buf: [160]u8 = undefined;
-    return put(e, try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape));
+    return put(e, try ck.expect(try std.fmt.bufPrint(&buf, fmt, args), dtype, shape_));
 }
 
-/// An MLX affine-4 projection packed into qlinear's tiles from the staging buffer, which holds it as stored.
-fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8, n: usize, k: usize) !Affine4 {
+/// An MLX affine projection packed into qlinear's tiles from staging; 4-bit takes the affine-4 pack, others by width.
+fn linear(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, name: []const u8, n: usize, k: usize, bits: u8) !Proj {
     var buf: [160]u8 = undefined;
     var raw: [3]u64 = undefined;
     var at: usize = 0;
-    const parts = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k / 8 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
+    const parts = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
     for (parts, &raw) |p, *r| {
         const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ n, p[2] });
         try e.stage.upload(at, t.bytes);
         r.* = e.stage.ptr + at;
         at += t.bytes.len;
     }
-    const l = Affine4.layout(n, k);
-    const q: Affine4 = .{ .w = try e.alloc(l.words), .s = try e.alloc(l.scales), .b = try e.alloc(l.scales), .n = n, .k = k, .npad = l.npad };
-    try e.affine.pack(e.stream, raw[0], raw[1], raw[2], q);
+    const out: Proj = if (servedBits(bits) == 4) blk: {
+        const l = Affine4.layout(n, k);
+        const q: Affine4 = .{ .w = try e.alloc(l.words), .s = try e.alloc(l.scales), .b = try e.alloc(l.scales), .n = n, .k = k, .npad = l.npad };
+        if (bits == 4) {
+            try e.affine.pack(e.stream, raw[0], raw[1], raw[2], q);
+        } else {
+            try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
+            try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
+            try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
+        }
+        break :blk .{ .a4 = q };
+    } else blk: {
+        const l = Affine8.layout(n, k);
+        const q: Affine8 = .{ .w = try e.alloc(l.words), .s = try e.alloc(l.scales), .b = try e.alloc(l.scales), .n = n, .k = k, .npad = l.npad };
+        try e.wide.packWords(e.stream, raw[0], bits, n, k, q.w);
+        try e.wide.packTable(e.stream, raw[1], n, k, q.npad, q.s);
+        try e.wide.packTable(e.stream, raw[2], n, k, q.npad, q.b);
+        break :blk .{ .a8 = q };
+    };
     try e.stream.synchronize(); // the next projection's staging overwrites this one's
-    return q;
+    return out;
+}
+
+/// The token embedding's words for the embed kernels: as stored at 4 or 8 bits, else widened through staging.
+fn embedWords(e: *Engine, ck: *core.Checkpoint, m: []const u8) !u64 {
+    const g = e.g;
+    const bits = g.bits.embed;
+    const wide = servedBits(bits);
+    var buf: [160]u8 = undefined;
+    const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}embed_tokens.weight", .{m}), .u32, &.{ g.vocab, g.hidden * bits / 32 });
+    if (bits == wide) return put(e, t);
+    try e.stage.upload(0, t.bytes);
+    const out = try e.alloc(g.vocab * g.hidden * wide / 8);
+    try e.wide.widen(e.stream, e.stage.ptr, bits, g.vocab, g.hidden, out, wide);
+    try e.stream.synchronize();
+    return out;
 }
 
 pub fn load(e: *Engine, ck: *core.Checkpoint) !void {
     const g = e.g;
     const m = "language_model.model.";
-    e.embed_w = try tensor(e, ck, "{s}embed_tokens.weight", .{m}, .u32, &.{ g.vocab, g.hidden / 8 });
+    e.embed_bits = servedBits(g.bits.embed);
+    e.embed_w = try embedWords(e, ck, m);
     e.embed_s = try tensor(e, ck, "{s}embed_tokens.scales", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
     e.embed_b = try tensor(e, ck, "{s}embed_tokens.biases", .{m}, .bf16, &.{ g.vocab, g.hidden / 64 });
-    e.head = if (g.tied) try linear(e, ck, m, "embed_tokens", g.vocab, g.hidden) else try linear(e, ck, "language_model.", "lm_head", g.vocab, g.hidden);
+    e.head = if (g.tied) try linear(e, ck, m, "embed_tokens", g.vocab, g.hidden, g.bits.head) else try linear(e, ck, "language_model.", "lm_head", g.vocab, g.hidden, g.bits.head);
     e.final_norm = try tensor(e, ck, "{s}norm.weight", .{m}, .bf16, &.{g.hidden});
     const conv = g.convWidth();
-    const vw = g.valueWidth();
     for (e.layers, 0..) |*l, i| {
         var pbuf: [96]u8 = undefined;
         const p = try std.fmt.bufPrint(&pbuf, "{s}layers.{d}.", .{ m, i });
+        var ps: std.enums.EnumArray(Slot, Proj) = .initUndefined();
+        for (slots(g, i)) |slot| {
+            const nk = shape(g, slot);
+            ps.set(slot, try linear(e, ck, p, geometry.slot_modules.get(slot), nk[0], nk[1], g.bits.of(i, slot)));
+        }
         l.* = .{
             .input_norm = try tensor(e, ck, "{s}input_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
             .post_norm = try tensor(e, ck, "{s}post_attention_layernorm.weight", .{p}, .bf16, &.{g.hidden}),
-            .gate = try linear(e, ck, p, "mlp.gate_proj", g.intermediate, g.hidden),
-            .up = try linear(e, ck, p, "mlp.up_proj", g.intermediate, g.hidden),
-            .down = try linear(e, ck, p, "mlp.down_proj", g.hidden, g.intermediate),
+            .gate = ps.get(.gate),
+            .up = ps.get(.up),
+            .down = ps.get(.down),
             .mixer = undefined,
         };
         if (g.linear[i]) {
             l.mixer = .{ .delta = .{
-                .qkv = try linear(e, ck, p, "linear_attn.in_proj_qkv", conv, g.hidden),
-                .z = try linear(e, ck, p, "linear_attn.in_proj_z", vw, g.hidden),
-                .a = try linear(e, ck, p, "linear_attn.in_proj_a", g.v_heads, g.hidden),
-                .b = try linear(e, ck, p, "linear_attn.in_proj_b", g.v_heads, g.hidden),
-                .out = try linear(e, ck, p, "linear_attn.out_proj", g.hidden, vw),
+                .qkv = ps.get(.qkv),
+                .z = ps.get(.z),
+                .a = ps.get(.a),
+                .b = ps.get(.b),
+                .out = ps.get(.out),
                 .conv = try tensor(e, ck, "{s}linear_attn.conv1d.weight", .{p}, .bf16, &.{ conv, geometry.taps, 1 }),
                 .norm = try tensor(e, ck, "{s}linear_attn.norm.weight", .{p}, .bf16, &.{geometry.dk}),
                 .a_log = try f32vec(e, ck, "{s}linear_attn.A_log", .{p}, g.v_heads),
@@ -130,13 +204,30 @@ pub fn load(e: *Engine, ck: *core.Checkpoint) !void {
             } };
         } else {
             l.mixer = .{ .attention = .{
-                .q = try linear(e, ck, p, "self_attn.q_proj", 2 * g.attnWidth(), g.hidden),
-                .k = try linear(e, ck, p, "self_attn.k_proj", g.kv_heads * head_dim, g.hidden),
-                .v = try linear(e, ck, p, "self_attn.v_proj", g.kv_heads * head_dim, g.hidden),
-                .o = try linear(e, ck, p, "self_attn.o_proj", g.hidden, g.attnWidth()),
+                .q = ps.get(.q),
+                .k = ps.get(.k),
+                .v = ps.get(.v),
+                .o = ps.get(.o),
                 .q_norm = try tensor(e, ck, "{s}self_attn.q_norm.weight", .{p}, .bf16, &.{head_dim}),
                 .k_norm = try tensor(e, ck, "{s}self_attn.k_norm.weight", .{p}, .bf16, &.{head_dim}),
             } };
         }
     }
+}
+
+test "a uniform 4-bit checkpoint keeps its sizes; wider modules take a byte a weight" {
+    var g: Geometry = undefined;
+    g = .{ .hidden = 2048, .intermediate = 6144, .layers = 2, .vocab = 248320, .k_heads = 16, .v_heads = 16, .q_heads = 8, .kv_heads = 2, .eps = 1e-6, .tied = true, .context = 4096, .linear = @splat(false) };
+    g.linear[0] = true;
+    const uniform = total(g);
+    try std.testing.expectEqual(rawBytes(g.vocab, g.hidden, 4), stageBytes(g));
+    g.bits.proj[1][@backingInt(Slot.down)] = 8;
+    const nk = shape(g, .down);
+    try std.testing.expectEqual(uniform - packedBytes(nk[0], nk[1], 4) + packedBytes(nk[0], nk[1], 8), total(g));
+    g.bits.proj[1][@backingInt(Slot.down)] = 3; // widened onto the 4-bit tiles: the same device bytes
+    try std.testing.expectEqual(uniform, total(g));
+    g.bits.embed = 6;
+    g.bits.head = 6;
+    try std.testing.expect(total(g) > uniform);
+    try std.testing.expectEqual(rawBytes(g.vocab, g.hidden, 6), stageBytes(g));
 }

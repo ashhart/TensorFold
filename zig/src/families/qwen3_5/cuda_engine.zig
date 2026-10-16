@@ -11,6 +11,7 @@ pub const Cache = caches.Cache;
 pub const tap_rows = caches.tap_rows;
 const Seg = caches.Seg;
 const Affine4 = cuda.qlinear.Affine4;
+const Affine8 = cuda.qlinear.Affine8;
 const DeviceBuffer = cuda.DeviceBuffer;
 const head_dim = geometry.head_dim;
 
@@ -33,19 +34,38 @@ pub fn aligned(n: usize) usize {
 /// qwen35.cuh's Geo.
 pub const Geo = extern struct { hid: c_int, nk: c_int, nv: c_int, qh: c_int, kvh: c_int, nl: c_int };
 
-pub const Delta = struct { qkv: Affine4, z: Affine4, a: Affine4, b: Affine4, out: Affine4, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
-pub const Attention = struct { q: Affine4, k: Affine4, v: Affine4, o: Affine4, q_norm: u64, k_norm: u64 };
+/// A projection on the tiles of the width it is served at: 4 bits (codes of 2 to 4) or 8 (codes of 5 to 8).
+pub const Proj = union(enum) {
+    a4: Affine4,
+    a8: Affine8,
+
+    pub fn outputs(p: Proj) usize {
+        return switch (p) {
+            inline else => |q| q.n,
+        };
+    }
+
+    pub fn inputs(p: Proj) usize {
+        return switch (p) {
+            inline else => |q| q.k,
+        };
+    }
+};
+
+pub const Delta = struct { qkv: Proj, z: Proj, a: Proj, b: Proj, out: Proj, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
+pub const Attention = struct { q: Proj, k: Proj, v: Proj, o: Proj, q_norm: u64, k_norm: u64 };
 pub const Layer = struct {
     input_norm: u64,
     post_norm: u64,
-    gate: Affine4,
-    up: Affine4,
-    down: Affine4,
+    gate: Proj,
+    up: Proj,
+    down: Proj,
     mixer: union(enum) { delta: Delta, attention: Attention },
 };
 
 const Fns = struct {
     embed: cuda.Function,
+    embed8: cuda.Function,
     norm: cuda.Function,
     sums: cuda.Function,
     gdn_pre: cuda.Function,
@@ -80,9 +100,10 @@ pub const Engine = struct {
     g: Geometry,
     geo: Geo,
     stream: cuda.Stream,
-    mods: [7]cuda.Module,
+    mods: [8]cuda.Module,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
+    wide: cuda.qlinear.Affine8Kernels, // 8-bit tiles, and the packs of every width but 4
     fns: Fns,
     keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
@@ -96,7 +117,8 @@ pub const Engine = struct {
     embed_w: u64,
     embed_s: u64,
     embed_b: u64,
-    head: Affine4,
+    embed_bits: u8, // the embedding's rows' width: 4 or 8
+    head: Proj,
     final_norm: u64,
     layers: []Layer,
     // scratch, max_rows rows each
@@ -174,7 +196,7 @@ pub const Engine = struct {
         e.stage = try DeviceBuffer.alloc(d, weights.stageBytes(g));
         errdefer e.stage.free();
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8 };
         var loaded: usize = 0;
         errdefer for (e.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -185,6 +207,8 @@ pub const Engine = struct {
         const gb10 = try ctx.attribute(.compute_capability_major) == 12 and try ctx.attribute(.compute_capability_minor) == 1;
         e.affine = try cuda.qlinear.Affine4Kernels.resolve(d, e.mods[0], e.mods[1], e.mods[2], e.mods[3], sms, gb10);
         errdefer e.affine.deinit();
+        e.wide = try cuda.qlinear.Affine8Kernels.resolve(d, e.mods[7], e.mods[3], sms, gb10);
+        errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
@@ -230,6 +254,7 @@ pub const Engine = struct {
         e.arena.free();
         e.gpa.free(e.layers);
         e.affine.deinit();
+        e.wide.deinit();
         for (&e.mods) |*m| m.unload();
         e.stream.deinit();
         e.gpa.destroy(e);
@@ -303,14 +328,33 @@ pub const Engine = struct {
     }
 
     /// out (rows, n) = x (rows, k) through `l`: 16-row decode tiles (a row's bits batch-independent) or a prompt GEMM.
-    pub fn proj(e: *Engine, l: Affine4, x: u64, out: u64, rows: usize, prompt: bool) !void {
-        if (prompt and rows > 16) return e.affine.prompt(e.stream, x, l, out, rows);
-        try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, e.xs, @as(c_int, @intCast(l.k)), e.tables.ptr + params_at });
+    pub fn proj(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+        return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
+    }
+
+    /// `proj` with group sums in `xs` and row counts at `params`; 8-bit tiles run prompts 16 rows at a time.
+    pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
+        const n_out = l.outputs();
+        const k = l.inputs();
+        if (prompt and rows > 16) if (l == .a4) return e.affine.prompt(e.stream, x, l.a4, out, rows);
+        try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         var at: usize = 0;
         while (at < rows) : (at += 16) {
             const n = @min(16, rows - at);
-            try e.affine.decode(e.stream, x + at * l.k * 2, e.xs + at * (l.k / 64) * 4, l, out + at * l.n * 2, n);
+            const xa = x + at * k * 2;
+            const sa = xs + at * (k / 64) * 4;
+            const oa = out + at * n_out * 2;
+            switch (l) {
+                .a4 => |q| try e.affine.decode(e.stream, xa, sa, q, oa, n),
+                .a8 => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
+            }
         }
+    }
+
+    /// Token rows of the embedding into `out` (rows, hidden) bf16, at the width its words are served.
+    pub fn embed(e: *Engine, ids: u64, out: u64, rows: usize, params: u64) !void {
+        const f = if (e.embed_bits == 8) e.fns.embed8 else e.fns.embed;
+        try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
 
     fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
@@ -466,7 +510,7 @@ pub const Engine = struct {
         const geo = e.geo;
         const group = g.q_heads / g.kv_heads;
 
-        try e.run(e.fns.embed, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ t_ids, e.embed_w, e.embed_s, e.embed_b, e.h, @as(c_int, @intCast(g.hidden)), t_params });
+        try e.embed(t_ids, e.h, total, t_params);
         var di: usize = 0;
         var ai: c_int = 0;
         for (e.layers, 0..) |l, i| {
