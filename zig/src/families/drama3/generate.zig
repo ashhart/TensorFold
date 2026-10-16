@@ -164,6 +164,7 @@ const AudioOut = struct {
 
     fn open(gpa: std.mem.Allocator, io: std.Io, wav_path: ?[]const u8, pcm_path: ?[]const u8, verbose: bool) !AudioOut {
         var o: AudioOut = .{ .gpa = gpa, .io = io, .verbose = verbose, .t0 = d3.engine.nowNs(io) };
+        errdefer o.abandon();
         if (wav_path) |p| {
             const z = try gpa.dupeSentinel(u8, p, 0);
             defer gpa.free(z);
@@ -261,6 +262,7 @@ fn runRequest(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *d3.Engine, tts: ?
         out.t0 = t_req;
         errdefer out.abandon();
         const r = try t.speak(io, rows, q.smp, q.max_frames, .{ .first_chunk = a.first_chunk, .chunk = a.chunk }, .{ .ctx = &out, .audio = AudioOut.put });
+        errdefer gpa.free(r.frames);
         try out.close();
         frames = r.frames;
         st = r.stats;
