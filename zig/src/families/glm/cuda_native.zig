@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
+const images_mod = @import("cuda_images.zig");
 const glm_lanes = @import("cuda_lanes.zig");
 const ranks = @import("cuda_ranks.zig");
 const fw = @import("cuda_forward.zig");
@@ -31,6 +32,7 @@ pub const Options = struct {
     segments: usize = 1,
     slide: bool = false,
     room: ?Room = null,
+    vision: ?images_mod.Limits = null, // --vision: rank 0's tower, every rank's image rows
 };
 /// The smallest room among the other ranks and whose it is.
 pub const Peer = struct { bytes: u64, rank: usize };
@@ -49,6 +51,7 @@ pub const Loaded = struct {
     lone: ?LoneRun = null,
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
     peer_room: ?Peer = null, // rank 0: the server admits streams and kept states by this when it is smaller
+    vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
 };
 
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
@@ -141,8 +144,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     if (p.world > 1) try warmPeers(ctx.d, &own.group);
     const cap = capacity(o.context);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = if (o.vision) |l| l.image_tokens else 0 });
     errdefer own.e.deinit();
+    if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
+        own.e.images = (try images_mod.Images.init(gpa, io, ctx.d, own.e.stream, dir, lim, fw.prefill_rows + 1, p.rank == 0, &problem)) orelse {
+            std.log.err("{s}", .{problem});
+            return error.NoVisionTower;
+        };
+    }
+    errdefer if (own.e.images) |v| v.deinit();
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
     own.e.group = &own.group;
@@ -186,6 +196,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .deinit = close,
         .target = own.e,
         .peer_room = peer,
+        .vision = own.e.images,
     };
 }
 
@@ -230,6 +241,7 @@ fn close(ptr: *anyopaque) void {
     own.lanes.x.end() catch {};
     own.lanes.deinit();
     own.link.deinit();
+    if (own.e.images) |v| v.deinit();
     own.e.deinit();
     own.group.close();
     own.gpa.destroy(own);

@@ -12,11 +12,13 @@ const sampler = @import("cuda_sampler.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
+const images_mod = @import("cuda_images.zig");
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
     mtp: bool, // load the MTP head (drafts)
     settings: ranks.Settings,
+    vision: u32 = 0, // --vision's image tokens (0: none): every rank must hold the rows rank 0 sends
 };
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -67,6 +69,7 @@ pub const Engine = struct {
     lib: *const cuda.nccl.Library,
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
+    images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
     settings: ranks.Settings,
     m: fw.Modules,
     stream: cuda.Stream,
@@ -112,7 +115,7 @@ pub const Engine = struct {
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
         const program_hash = try ranks.hashFile(a, io, "/proc/self/exe");
-        const fp = ranks.Fingerprint.of(
+        var fp = ranks.Fingerprint.of(
             world,
             rank,
             o.settings,
@@ -122,6 +125,7 @@ pub const Engine = struct {
             program_hash,
             checkpoint,
         );
+        fp.vision = o.vision;
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         const share = try shard.Share.of(&c, rank, world);
         const spans = try gpa.alloc(shard.Span, world);
@@ -193,7 +197,8 @@ pub const Engine = struct {
 
     fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .kda_wide = e.settings.kda_wide };
+        const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .kda_wide = e.settings.kda_wide, .images = im };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -232,6 +237,12 @@ pub const Engine = struct {
     /// The committed length: the pending token sits at this position, a window's row r draws position pos + 1 + r.
     pub fn pos(e: *const Engine) usize {
         return e.cur.st.pos;
+    }
+
+    /// A follower's begin: rank 0's next request; no image rows from an earlier one splice into it.
+    pub fn beginFollowing(e: *Engine, sampling: ?sampler.Sampling) !void {
+        if (e.images) |v| v.clear();
+        return e.begin(sampling);
     }
 
     /// A fresh sequence with `sampling` (null or temperature 0: greedy).
