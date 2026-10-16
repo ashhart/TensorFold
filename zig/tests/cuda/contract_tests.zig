@@ -9,6 +9,8 @@ const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
 const h3_k = @import("contract_h3.zig");
+const h3_prep = @import("contract_h3_prep.zig");
+const h3_topk_k = @import("contract_h3_topk.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -97,15 +99,18 @@ pub fn run(gpu: check.Gpu) !void {
     try kernels.append(a, rank.kernel());
     var h3_mod = try cuda.Module.load(gpu.d, &h3_image.bytes);
     defer h3_mod.unload();
-    const h3_kinds = comptime std.enums.values(h3_k.Kind);
-    var h3_gemms: [h3_kinds.len]h3_k.Gemm = undefined;
-    for (h3_kinds, &h3_gemms) |kind, *m| {
-        const f = try h3_mod.function(h3_k.geo(kind).symbol);
-        if (h3_k.shared(kind) > 48 * 1024) try f.allowDynamicShared(h3_k.shared(kind));
-        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = f };
+    const h3_which = comptime std.enums.values(h3_k.Which);
+    var h3_list: [h3_which.len]h3_k.H3 = undefined;
+    for (h3_which, &h3_list) |w, *m| {
+        const f = try h3_mod.function(h3_k.symbol(w));
+        if (w == .attention) try f.allowDynamicShared(h3_prep.attention_shared);
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .f = f, .arena = std.heap.ArenaAllocator.init(a) };
     }
-    defer for (&h3_gemms) |*m| m.deinit();
-    for (&h3_gemms) |*m| try kernels.append(a, m.kernel());
+    defer for (&h3_list) |*m| m.deinit();
+    for (&h3_list) |*m| try kernels.append(a, m.kernel());
+    var h3_topk = h3_topk_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_topk") };
+    defer h3_topk.deinit();
+    try kernels.append(a, h3_topk.kernel());
     var h3_spans = h3_k.Spans{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_spans") };
     defer h3_spans.deinit();
     try kernels.append(a, h3_spans.kernel());
