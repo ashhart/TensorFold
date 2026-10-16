@@ -57,7 +57,6 @@ pub const Weights = struct {
     }
 };
 
-
 const Loader = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
