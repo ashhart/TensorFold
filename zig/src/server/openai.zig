@@ -429,10 +429,25 @@ const Run = struct {
     const StreamSink = struct {
         run: *Run,
         tools: bool,
+        prompt_len: usize,
+        opened: bool = false,
+        pending: std.ArrayList(Value) = .empty, // research progress waits for actual engine admission
+
+        fn begin(ctx: *anyopaque, _: usize) error{Closed}!void {
+            const s: *StreamSink = @ptrCast(@alignCast(ctx));
+            if (s.opened) return;
+            const r = s.run;
+            try r.out.vt.open(r.out.ctx, s.prompt_len);
+            s.opened = true;
+            if (!s.tools and r.is_chat) try r.emit(r.chunk(roleDelta(r.a) catch return error.Closed, null) catch return error.Closed);
+            for (s.pending.items) |delta| try call(ctx, delta);
+            s.pending.clearRetainingCapacity();
+        }
 
         fn call(ctx: *anyopaque, delta: Value) error{Closed}!void {
             const s: *StreamSink = @ptrCast(@alignCast(ctx));
             const r = s.run;
+            if (!s.opened) return s.pending.append(r.a, delta) catch error.Closed;
             if (!s.tools) {
                 // completions stream text only, with its logprob rows when asked
                 if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
@@ -482,7 +497,7 @@ const Run = struct {
         const a = r.a;
         const tools = r.plan.input.tools.len > 0;
         var cx: Cx = .{ .a = a };
-        // a context-window refusal is reported inside the stream; every other refusal is still a 400 before it opens
+        // Context-window refusals stay streamed; other pre-admission refusals retain their HTTP status.
         var compaction: ?compact.Stamp = null;
         const prepared = if (r.srv.config.compact_at == null) chat.prepare(r.srv, &cx, r.plan.input, gone) catch |e| {
             if (e == error.Refused and cx.kind == .context_length) return r.streamedContext(&cx, tools, field);
@@ -497,12 +512,11 @@ const Run = struct {
         };
         var handed = false; // generate gives the preparing count back from here on
         defer if (!handed) chat.release(r.srv, prepared.preparing);
-        r.out.vt.open(r.out.ctx, prepared.prompt_len) catch return;
-        if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
-        var sink_state: StreamSink = .{ .run = r, .tools = tools };
+        var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
-        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call };
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
         var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, gone) else chat.generate(r.srv, &cx, prepared, sink, gone)) catch |e| {
+            if (!sink_state.opened) return r.unsent(&cx, e, field);
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {
