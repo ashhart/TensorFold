@@ -103,6 +103,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - A versioned drafter release format (`docs/drafter-release.md`): config.json names the target, its adapter and taps, `check` compares it with the loaded target and `checkRecording` with a `--record` recording, and `Release.open` reads a folder and checks every tensor's name and shape. Nothing serves a release yet (#893). Thanks to @jschmied.
 - A recipe for training a block drafter from `--record` recordings into a drafter release, with what each step gained on Kolibri-1 (`docs/recipes/training-a-drafter.md`) (#894). Thanks to @jschmied.
 - Qwen3.8-27B decode on Metal: K splits on M5 measured over every layer's matrices, an undrafted one-row round kept by its own verify with a DeltaNet step of three dispatches, and decode attention in 128-key chunks below position 8,192, chosen for each row by its own position so a window across 8,192 keeps every row's one-row bits (#887). Thanks to @BobClawblaw.
+- GLM-5.3-Flash on CUDA with `TF_GLM_PREFILL_REDUCE=split`, the default, exchanges a value with every other rank before the weights load and refuses a pair of ranks that cannot reach each other, naming `TF_GLM_PREFILL_REDUCE=gather`, instead of failing in the first prompt (#899). Thanks to @Bizuayeu.
 
 ## 1.0.11
 
