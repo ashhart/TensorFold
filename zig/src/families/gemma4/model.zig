@@ -1,4 +1,4 @@
-//! A native Gemma 4 dense model: admitted config, packed weights, the glue pipelines and the lane projections.
+//! A native Gemma 4 dense model (31B or 12B): admitted config, packed weights, the glue pipelines, lane projections.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -18,7 +18,7 @@ pub const Model = struct {
     checkpoint: ckpt.Checkpoint,
     weights: weights.Weights,
     kernels: kernels.Kernels,
-    projections: weights.Projections = .{},
+    projections: weights.Projections,
     /// core/affine_mm's pipelines for prompt chunks: 4-bit groups of 64 from the checkpoint's own tensors.
     mm: affine_mm.Pipes,
     /// RoPE inverse frequencies, float32 [dim / 2], for sliding and for global layers.
@@ -27,7 +27,7 @@ pub const Model = struct {
     /// The core's bf16 argmax: a window's greedy tokens on the GPU (the lowest index among ties, as mx.argmax).
     picks: round.Ops,
     /// A drafter's tapped layers: each layer's index among the taps (-1: untapped), and how many there are.
-    tap_of: [cfg.layers]i8 = @splat(-1),
+    tap_of: [cfg.max_layers]i8 = @splat(-1),
     taps: u32 = 0,
     /// One-row windows take the fused pipelines (the glue as the projections' prologues); off for the bench's check.
     fuse: bool = true,
@@ -39,12 +39,12 @@ pub const Model = struct {
         errdefer gpa.destroy(m);
         m.* = undefined;
         m.gpa = gpa;
-        m.projections = .{};
         m.tap_of = @splat(-1);
         m.taps = 0;
         m.fuse = true;
         m.vision = null;
         m.config = try cfg.Config.read(gpa, io, dir);
+        m.projections = .{ .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!m.device.tensorUnits()) return error.GemmaNeedsTensorUnits;
@@ -55,9 +55,9 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint);
+        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config.geo);
         errdefer m.weights.deinit(gpa);
-        m.kernels = try kernels.Kernels.init(gpa, m.device);
+        m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo);
         errdefer m.kernels.deinit();
         m.picks = try round.Ops.init(m.device);
         errdefer m.picks.deinit();
@@ -83,7 +83,7 @@ pub const Model = struct {
         defer shards.freeShardFiles(m.gpa, files);
         try vision.addTensors(&m.checkpoint, m.device, files);
         if (!vision.present(&m.checkpoint)) return error.NoGemmaVision;
-        m.vision = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm);
+        m.vision = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm, m.config.geo.hidden);
     }
 
     /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.
@@ -91,7 +91,7 @@ pub const Model = struct {
         if (layers.len == 0 or layers.len > 8) return error.BadGemmaTaps;
         m.tap_of = @splat(-1);
         for (layers, 0..) |l, t| {
-            if (l >= cfg.layers or m.tap_of[l] >= 0) return error.BadGemmaTaps;
+            if (l >= m.config.geo.layers or m.tap_of[l] >= 0) return error.BadGemmaTaps;
             m.tap_of[l] = @intCast(t);
         }
         m.taps = @intCast(layers.len);

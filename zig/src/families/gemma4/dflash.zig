@@ -49,7 +49,7 @@ pub const Drafter = struct {
     ops: ops.Ops,
     attention: attention.Attention,
     picks: round.Ops,
-    projections: weights.Projections = .{},
+    projections: weights.Projections,
     lanes: std.AutoHashMapUnmanaged(*Stream, *Lane) = .empty,
     step_ms: f64 = 0,
     block_ms: [2]f64 = .{ 0, 0 }, // a 1-draft and a 15-draft block's wall time at load
@@ -91,16 +91,16 @@ pub const Drafter = struct {
         d.io = io;
         d.target = target;
         d.options = options;
-        d.projections = .{};
+        d.projections = .{ .geo = target.config.geo };
         d.lanes = .empty;
         d.step_ms = 0;
         d.block_ms = .{ 0, 0 };
         d.pending = null;
         d.trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null;
         errdefer d.projections.deinit(gpa); // warm's blocks fill it
-        d.config = try dw.Config.read(gpa, io, dir);
+        d.config = try dw.Config.read(gpa, io, dir, target.config.geo);
         const c = &d.config;
-        d.w = try dw.load(gpa, target.device, io, dir, c);
+        d.w = try dw.load(gpa, target.device, io, dir, c, target.config.geo);
         errdefer d.w.deinit(gpa);
         d.ops = try ops.Ops.init(target.device);
         errdefer d.ops.deinit();
@@ -471,7 +471,7 @@ pub const Drafter = struct {
         e.setBuffer(t.weights.embed_s.buf, t.weights.embed_s.off, 2);
         e.setBuffer(t.weights.embed_b.buf, t.weights.embed_b.off, 3);
         e.setBuffer(d.h, 0, 4);
-        e.setValue(fwd.embedScale(), 5);
+        e.setValue(fwd.embedScale(t.config.geo.hidden), 5);
         e.dispatchThreads(.{ .width = hid / 2, .height = rows }, .{ .width = 256 });
         const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
         const pos = Ref{ .buf = d.pos };

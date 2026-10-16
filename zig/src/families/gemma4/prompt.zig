@@ -38,15 +38,16 @@ pub const Scratch = struct {
     /// The drafter's tapped rows [rows, taps x hidden] bf16, once a drafter asked for them.
     taps: ?mtl.Buffer = null,
 
-    pub fn init(device: mtl.Device, capacity: usize) !Scratch {
-        const d = cfg.hidden;
-        const qd = cfg.query_heads * cfg.global_dim;
+    pub fn init(device: mtl.Device, geo: cfg.Geometry, capacity: usize) !Scratch {
+        const d = geo.hidden;
+        const qd = geo.queryWidth();
+        const kv = geo.kvWidth();
         _ = capacity;
         var s: Scratch = undefined;
         s.taps = null;
         var made: usize = 0;
         errdefer s.release(made);
-        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "hi", R * 4, true }, .{ "qkv", R * (qd + 2 * 16 * 256) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * 16 * 256 * 2, false }, .{ "v", R * 16 * 256 * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * cfg.intermediate * 2, false }, .{ "act", R * cfg.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
+        inline for (.{ .{ "ids", R * 4, true }, .{ "pos", R * 4, true }, .{ "hi", R * 4, true }, .{ "qkv", R * (qd + 2 * kv) * 2, false }, .{ "q", R * qd * 2, false }, .{ "k", R * kv * 2, false }, .{ "v", R * kv * 2, false }, .{ "attn", R * qd * 2, false }, .{ "o", R * d * 2, false }, .{ "hn", R * d * 2, false }, .{ "n_mlp", R * d * 2, false }, .{ "gate_up", R * 2 * geo.intermediate * 2, false }, .{ "act", R * geo.intermediate * 2, false }, .{ "y", R * d * 2, false }, .{ "logits", cfg.vocab * 2, true } }) |f| {
             @field(s, f[0]) = try device.buffer(f[1], if (f[2]) shared else private);
             made += 1;
         }
@@ -91,7 +92,7 @@ fn bind(e: mtl.ComputeEncoder, bufs: []const mtl.Buffer, first: usize) void {
     for (bufs, first..) |b, i| e.setBuffer(b, 0, i);
 }
 
-/// An encoded image's rows in the prompt: positions [at, at + n), its rows from `rows` (5376 bf16 each).
+/// An encoded image's rows in the prompt: positions [at, at + n), its rows from `rows` (hidden bf16 each).
 pub const Span = struct { at: usize, n: u32, rows: Ref };
 
 /// `ids` (at most 512) at the cache's length, `images`' rows over theirs (a span wholly in or out); s.logits: the last.
@@ -110,6 +111,7 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
         if (span.at < p0 or span.at + span.n > p0 + rows) return error.ImageAcrossChunks;
         @memset(s.hi.slice(i32, rows)[span.at - p0 ..][0..span.n], @intCast(span.at + span.n - 1));
     }
+    const geo = m.config.geo;
     const ks = &m.kernels.sliding;
     const w = &m.weights;
     const cb = m.queue.commandBuffer();
@@ -121,11 +123,11 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     e.setBuffer(w.embed_s.buf, w.embed_s.off, 2);
     e.setBuffer(w.embed_b.buf, w.embed_b.off, 3);
     bind(e, &.{s.h[0]}, 4);
-    e.setValue(fwd.embedScale(), 5);
-    e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = rows }, .{ .width = 256 });
+    e.setValue(fwd.embedScale(geo.hidden), 5);
+    e.dispatchThreads(.{ .width = geo.hidden / 2, .height = rows }, .{ .width = 256 });
     for (images) |span| if (span.at >= p0 and span.at < p0 + rows) {
         const v = m.vision orelse return error.NoGemmaVision;
-        v.inject(e, span.rows, .{ .buf = s.h[0], .off = (span.at - p0) * cfg.hidden * 2 }, span.n);
+        v.inject(e, span.rows, .{ .buf = s.h[0], .off = (span.at - p0) * geo.hidden * 2 }, span.n);
     };
     e.setPipeline(ks.rms);
     bind(e, &.{s.h[0]}, 0);
@@ -135,13 +137,13 @@ pub fn run(m: *Model, s: *Scratch, c: *state.Cache, ids: []const u32, images: []
     noSums(e, s, 4);
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
-    for (0..cfg.layers) |i| {
+    for (0..geo.layers) |i| {
         try layer(m, e, s, c, i, cur, r32, .{});
         cur = 1 - cur;
     }
     // the head on the last row only (the lane kernel's one-row bits), soft-capped
     const head = try m.projections.get(m.gpa, m.device, w.head.n, w.head.k);
-    try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * cfg.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
+    try head.encode(e, .{ .buf = s.normed[cur], .off = (rows - 1) * geo.hidden * 2 }, .{ .buf = w.head.w }, .{ .buf = w.head.sb }, .{ .buf = s.logits }, 1);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
     e.setValue(cfg.softcap, 1);
@@ -161,12 +163,13 @@ pub const Stages = struct { mm: bool = true, attn: bool = true, glue: bool = tru
 
 /// Layer `i` over `rows` rows of s.normed[cur] (keys at the cache's length) into s.h[1 - cur] and s.normed[1 - cur].
 pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: usize, cur: usize, rows: u32, st: Stages) !void {
+    const geo = m.config.geo;
     const global = cfg.global(i);
     const kd: *const kernels.Kind = m.kernels.kind(global);
     const l = &m.weights.layers[i];
-    const nk = cfg.kvHeads(i);
+    const nk = geo.kvHeads(i);
     const dh = cfg.headDim(i);
-    const qn = cfg.query_heads * dh;
+    const qn = geo.query_heads * dh;
     const width = qn + nk * dh * @as(usize, if (global) 1 else 2);
     if (st.mm) {
         mm(m, e, l.mlx[0], s.normed[cur], s.qkv, 0, width, rows);
@@ -182,17 +185,17 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.setValue(cfg.eps, 5);
         bind(e, &.{ s.q, s.k, s.v, c.k[i], c.v[i] }, 6); // keys and values straight into the cache too
         e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
-        e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
+        e.dispatchGroups(.{ .width = geo.query_heads + 2 * nk, .height = rows }, .{ .width = 32 });
     }
     if (st.attn) {
         e.setPipeline(kd.prompt_attn);
         bind(e, &.{ s.q, c.k[i], c.v[i], s.attn }, 0);
         e.setValue([3]i32{ @intCast(rows), @intCast(c.len), @intCast(state.slotsOf(i, c.capacity)) }, 4);
         bind(e, &.{s.hi}, 5);
-        e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = cfg.query_heads }, .{ .width = 32 * dh / 64 });
+        e.dispatchGroups(.{ .width = (rows + 31) / 32, .height = geo.query_heads }, .{ .width = 32 * dh / 64 });
     }
     if (st.mm) {
-        mm(m, e, l.mlx[3], s.attn, s.o, 0, cfg.hidden, rows);
+        mm(m, e, l.mlx[3], s.attn, s.o, 0, geo.hidden, rows);
     }
     if (st.glue) {
         e.setPipeline(kd.attn_tail);
@@ -205,26 +208,26 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *Scratch, c: *state.Cache, i: 
         e.dispatchGroups(.{ .width = rows }, .{ .width = 256 });
     }
     if (st.mm) {
-        mm(m, e, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * cfg.intermediate, rows);
-        mm(m, e, l.mlx[5], s.n_mlp, s.gate_up, cfg.intermediate, 2 * cfg.intermediate, rows);
+        mm(m, e, l.mlx[4], s.n_mlp, s.gate_up, 0, 2 * geo.intermediate, rows);
+        mm(m, e, l.mlx[5], s.n_mlp, s.gate_up, geo.intermediate, 2 * geo.intermediate, rows);
     }
     if (st.glue) {
         e.setPipeline(kd.geglu);
         bind(e, &.{ s.gate_up, s.act }, 0);
-        e.setValue(@as(u32, cfg.intermediate), 2);
+        e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
         noSums(e, s, 3);
         e.setValue(@as(i32, 0), 5);
-        e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
+        e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
     }
     if (st.mm) {
-        mm(m, e, l.mlx[6], s.act, s.y, 0, cfg.hidden, rows);
+        mm(m, e, l.mlx[6], s.act, s.y, 0, geo.hidden, rows);
     }
     if (!st.glue) return;
     e.setPipeline(kd.dense_tail);
     bind(e, &.{ s.hn, s.y }, 0);
     e.setBuffer(l.post_feedforward.buf, l.post_feedforward.off, 2);
     e.setBuffer(l.scalar.buf, l.scalar.off, 3);
-    const nx = if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
+    const nx = if (i + 1 < geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm;
     e.setBuffer(nx.buf, nx.off, 4);
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);

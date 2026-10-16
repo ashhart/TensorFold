@@ -164,9 +164,9 @@ struct G4vRows { uint width; uint weighted; float eps; };
   out[ulong(p.y) * G4V_W + p.x] = bfloat((h - float(bias[p.x])) * float(scale[p.x]));
 }
 
-// An image's rows over the prompt's embedded rows, 5376 bf16 a row: the soft tokens go in unscaled.
+// An image's rows over the prompt's embedded rows, G4V_OUT (the language model's width) bf16 a row, unscaled.
 [[kernel]] void g4v_rows(const device uint4* src [[buffer(0)]], device uint4* dst [[buffer(1)]],
                          uint2 p [[thread_position_in_grid]]) {
-  if (p.x >= 5376 / 8) return;
-  dst[ulong(p.y) * (5376 / 8) + p.x] = src[ulong(p.y) * (5376 / 8) + p.x];
+  if (p.x >= G4V_OUT / 8) return;
+  dst[ulong(p.y) * (G4V_OUT / 8) + p.x] = src[ulong(p.y) * (G4V_OUT / 8) + p.x];
 }

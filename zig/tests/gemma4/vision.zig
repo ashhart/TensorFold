@@ -18,12 +18,13 @@ const usage =
     \\features fail when their error averaged over the images is past torch's average.
 ;
 
-const stages = [_]struct { name: []const u8, stop: ?u32, width: usize, pooled: bool }{
+/// Each stage's rows; a null width: the language model's (the projection's output).
+const stages = [_]struct { name: []const u8, stop: ?u32, width: ?usize, pooled: bool }{
     .{ .name = "embed", .stop = 0, .width = vision.width, .pooled = false },
     .{ .name = "block0", .stop = 1, .width = vision.width, .pooled = false },
     .{ .name = "blocks", .stop = vision.depth, .width = vision.width, .pooled = false },
     .{ .name = "pooled", .stop = null, .width = vision.width, .pooled = true },
-    .{ .name = "features", .stop = null, .width = vision.out_hidden, .pooled = false },
+    .{ .name = "features", .stop = null, .width = null, .pooled = false },
 };
 
 fn readFile(a: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
@@ -87,9 +88,10 @@ pub fn main(init: std.process.Init) !void {
         for (&mm, affine_mm.names) |*p, name| p.* = try mtl.Pipeline.init(device, lib, name, false);
     }
     defer for (mm) |p| p.deinit();
-    const v = try vision.Vision.load(gpa, device, &c, mm);
+    const geo = (try g.config.Config.read(gpa, init.io, args[1])).geo;
+    const v = try vision.Vision.load(gpa, device, &c, mm, geo.hidden);
     defer v.deinit();
-    const out = try device.buffer(vision.max_patches / 9 * vision.out_hidden * 2, mtl.ResourceOptions.shared);
+    const out = try device.buffer(vision.max_patches / 9 * v.out_hidden * 2, mtl.ResourceOptions.shared);
     defer out.deinit();
     const back = try device.buffer(vision.max_patches * vision.width * 2, mtl.ResourceOptions.shared);
     defer back.deinit();
@@ -118,6 +120,7 @@ pub fn main(init: std.process.Init) !void {
         if (differ != 0) failed = true;
         const P = prep.gh * prep.gw;
         for (stages) |s| {
+            const width = s.width orelse v.out_hidden;
             const cb = queue.commandBuffer();
             const e = cb.compute(.serial);
             const t0 = std.Io.Clock.awake.now(init.io).toNanoseconds();
@@ -127,7 +130,7 @@ pub fn main(init: std.process.Init) !void {
             const from = if (s.stop != null) v.x else if (s.pooled) v.pooled else vision.Ref{ .buf = out };
             if (from.buf.id != out.id) {
                 const b = cb.blit();
-                b.copy(from.buf, from.off, back, 0, rows * s.width * 2);
+                b.copy(from.buf, from.off, back, 0, rows * width * 2);
                 b.end();
             }
             cb.commit();
@@ -138,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
             }
             const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).toNanoseconds() - t0)) / 1e6;
             const src: [*]const u16 = @ptrCast(@alignCast(if (from.buf.id != out.id) back.contents() else out.contents()));
-            const got = try a.alloc(f32, rows * s.width);
+            const got = try a.alloc(f32, rows * width);
             for (got, 0..) |*x, i| x.* = @bitCast(@as(u32, src[i]) << 16);
             const want = try floats(a, ref, try std.fmt.allocPrint(a, "{s}_fp32.f32", .{s.name}));
             const torch = try floats(a, ref, try std.fmt.allocPrint(a, "{s}.f32", .{s.name}));
@@ -147,8 +150,8 @@ pub fn main(init: std.process.Init) !void {
                 failed = true;
                 continue;
             }
-            const n = compare(got, want, s.width);
-            const t = compare(torch, want, s.width);
+            const n = compare(got, want, width);
+            const t = compare(torch, want, width);
             const ok = n[0] <= t[0] * 1.1;
             if (s.stop == null and !s.pooled) {
                 sums[0] += n[0];
