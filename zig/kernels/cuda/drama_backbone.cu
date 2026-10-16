@@ -439,7 +439,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_silu_mul(const __nv_bflo
     if (lane == 0) hs[static_cast<size_t>(r) * (I / 128) + group] = sc;
 }
 
-// MoE output: bf16 routed sum (moe_sum_reduce), then sigmoid(x . wg) * shared + routed (fused_gate_sigmoid_mul_add).
+// MoE output as moe_sum_reduce then fused_gate_sigmoid_mul_add; a thread owns 8 contiguous outputs, width % 8 == 0.
 extern "C" __global__ void __launch_bounds__(256) drama_moe_combine(const __nv_bfloat16* down, int top,
                                                                    const __nv_bfloat16* x, const __nv_bfloat16* wg,
                                                                    const __nv_bfloat16* shared, __nv_bfloat16* out,
@@ -449,10 +449,19 @@ extern "C" __global__ void __launch_bounds__(256) drama_moe_combine(const __nv_b
     float part = 0.f;
     for (int i = threadIdx.x; i < width; i += 256) part += bf(x[r * width + i]) * bf(wg[i]);
     const float gate = sigmoid(block_sum(part, scratch, 8));
-    for (int i = threadIdx.x; i < width; i += 256) {
-        float acc = 0.f;
-        for (int s = 0; s < top; ++s) acc += bf(down[(r * top + s) * width + i]);
-        const float routed = round_bf(acc);
-        out[r * width + i] = tobf(gate * bf(shared[r * width + i]) + routed);
+    for (int c = 8 * threadIdx.x; c < width; c += 8 * 256) {
+        float acc[8], value[8];
+#pragma unroll
+        for (int i = 0; i < 8; ++i) acc[i] = 0.f;
+#pragma unroll 8
+        for (int s = 0; s < top; ++s) {
+            load8(down + (r * top + s) * width + c, value);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) acc[i] += value[i];
+        }
+        load8(shared + r * width + c, value);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) value[i] = gate * value[i] + round_bf(acc[i]);
+        store8(out + r * width + c, value);
     }
 }

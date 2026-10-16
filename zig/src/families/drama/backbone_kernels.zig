@@ -340,6 +340,7 @@ pub const Kernels = struct {
     }
 
     pub fn combine(k: *const Kernels, s: cuda.Stream, down: u64, top: usize, x: u64, wg: u64, shared: u64, out: u64, rows: usize, width: usize) !void {
+        if (width % 8 != 0 or (down | shared | out) % 16 != 0) return error.DramaRowShape;
         var a: cuda.Args = .{};
         a.add(down);
         a.add(int(top));
