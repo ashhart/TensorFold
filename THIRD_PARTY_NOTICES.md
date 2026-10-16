@@ -95,11 +95,13 @@ The drafter (`zig/src/families/gemma4/dflash.zig`) implements z-lab's DFlash for
 under [vendored code](#vendored-code-and-weights) (z-lab/dflash, MIT License, Copyright © 2026 Z Lab); the native
 engine vendors no copy.
 
-The 12B (`gemma4_unified`) and its MTP assistant (`zig/src/families/gemma4/assistant.zig`,
-`assistant_weights.zig`) follow @gilby's `gemma4_unified` family at `6b0ead7a`
-([gilby/TensorFold](https://github.com/gilby/TensorFold), `src/tensorfold/families/gemma4_unified/model.py` and
-`assistant.py`), which follows `Gemma4UnifiedAssistantForCausalLM` in transformers (Copyright 2026 the HuggingFace
-Team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt)). The engine runs none of their code.
+The 12B (`gemma4_unified`) and its MTP assistant (`zig/src/families/gemma4/assistant.zig`, `assistant_weights.zig`)
+follow @gilby's `gemma4_unified` family at `6b0ead7a` ([gilby/TensorFold](https://github.com/gilby/TensorFold),
+`src/tensorfold/families/gemma4_unified/model.py` and `assistant.py`), which follows `Gemma4UnifiedAssistantForCausalLM`
+in transformers. The 12B's image embedder (`zig/src/families/gemma4/vision_unified.zig`) follows
+`Gemma4UnifiedVisionEmbedder` in `models/gemma4_unified/modeling_gemma4_unified.py`, and `image.zig`'s merged patches
+`patches_merge` in `image_processing_gemma4_unified.py` (transformers, Copyright 2026 the HuggingFace Team, Apache
+License 2.0; see [the license text](LICENSES/Apache-2.0.txt)). The engine runs none of their code.
 
 ## CUDA
 

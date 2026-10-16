@@ -1,9 +1,9 @@
 # Gemma 4 12B, native Metal
 
-This recipe covers text generation with Google's
+This recipe covers text and image input with Google's
 [`google/gemma-4-12B-it`](https://huggingface.co/google/gemma-4-12B-it/tree/707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7),
 revision `707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7` (`gemma4_unified`), its language model converted to MLX affine
-4-bit in groups of 64, with Google's MTP assistant
+4-bit in groups of 64 and its image embedder kept in bf16, with Google's MTP assistant
 [`google/gemma-4-12B-it-assistant`](https://huggingface.co/google/gemma-4-12B-it-assistant/tree/46d4c6f13f0ac0ad827b915669b8df9b81c64c51)
 (revision `46d4c6f13f0ac0ad827b915669b8df9b81c64c51`) as the drafter. It runs on the native Gemma 4 family that serves
 [the 31B](gemma-4-native.md), on M5 tensor-unit GPUs. Build with Zig **0.17.0** and Xcode's Metal toolchain, as
@@ -16,12 +16,13 @@ hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b91566
 python tools/zig/gemma4_12b_convert.py "$HOME/models/gemma-4-12b-hf" "$HOME/models/gemma-4-12b"   # mlx and mlx-lm installed
 zig build native -Dcpu=apple_m1
 zig-out/native/bin/tensorfold-native serve "$HOME/models/gemma-4-12b" --port 8888 --parallel 4 \
-  --drafter "$HOME/models/gemma-4-12b-assistant"
+  --drafter "$HOME/models/gemma-4-12b-assistant" --vision
 ```
 
-`gemma4_12b_convert.py` keeps the language model's tensors (the image and audio inputs' are dropped), quantizes them
-with mlx-lm's converter to affine 4-bit in groups of 64 (6.3 GB, 4.5 bits a weight with the scales), and writes the
-checkpoint's own `gemma4_unified` config back with that quantization. Run twice, it writes the same tensors bit for bit.
+`gemma4_12b_convert.py` quantizes the language model's tensors with mlx-lm's converter to affine 4-bit in groups of
+64 (6.3 GB, 4.5 bits a weight with the scales), writes the image embedder's ten tensors as stored (bf16, 100 MB) to
+`model-vision.safetensors`, drops the audio input's, and writes the checkpoint's own `gemma4_unified` config back with
+that quantization. Run twice, it writes the same tensors bit for bit.
 
 ## The model
 
@@ -56,7 +57,8 @@ Served, one stream decodes at 140-248 tokens a second with it (prose 140, code 2
 | The converted 12B, M5 Ultra, macOS 27 | Greedy and sampled decode, prompts to 252k, shared rounds, MTP drafts, structured output, prompt reuse, the server, below. |
 | `google/gemma-4-12B-it-assistant` `46d4c6f1` | The one MTP assistant admitted for the 12B. |
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
-| Images, audio | Not read yet: the converted checkpoint has the language model only, and `--vision` is refused by name. |
+| Images | `--vision`: PNG and JPEG, 256 to 280 tokens an image, [below](#images). |
+| Audio | Not read: the converter drops the audio input, and the server takes no audio. |
 
 Structured output (`response_format`, `guided_*`) works with drafts on: the harness's structured check obeys 18 of 18
 (each field greedy, sampled and with thinking), and a bad regex gets HTTP 400. Thinking is on with
@@ -69,6 +71,34 @@ busy server takes 37 ms.
 Thinking replies fill the window: at `--context 32768`, three greedy prompts (a proof with a checked list, a
 tested red-black tree, a question on a 25,801-token document) thought until the window was full (32,705, 32,714 and
 6,959 tokens), each drafted reply equal to the same request with `"draft": false`.
+
+## Images
+
+`serve --vision` loads the image embedder (`vision_embedder.`, `embed_vision.`) and reads images as for
+[the 31B](gemma-4-native.md#images): PNG and JPEG data URLs in user messages and tool results (public HTTPS URLs with
+`--vision-urls`), decoded to Pillow's pixels by core's picture decoder (JPEG needs libjpeg-turbo 3.1.4.1, as
+[image input](../vision.md#the-native-server) says). An image is sized as for the 31B (the largest aspect-preserving
+size whose sides are multiples of 48 and whose 16-pixel patches fit 280 tokens, PIL's bicubic resize, then 1/255),
+and `zig/src/families/gemma4/image.zig` cuts it into 48-pixel patches, the order transformers'
+`Gemma4UnifiedImageProcessor` gives with `patches_merge`, one token each: 256 to 280 tokens (70 or 140 with
+`detail: low` or a smaller `--vision-image-tokens`).
+
+The 12B has no image encoder: `zig/src/families/gemma4/vision_unified.zig` follows `Gemma4UnifiedVisionEmbedder`,
+LayerNorm, the 6,912 to 3,840 Linear and LayerNorm on each patch, the x and y position rows and LayerNorm, then
+the unscaled RMS norm and the 3,840 x 3,840 projection, in bf16 at torch's rounding on gemm_nax's tensor-unit
+GEMMs (about 2 ms an image). The language model does the rest: the image's rows replace its tokens' embeddings, and on
+the 40 sliding layers they see one another both ways (`use_bidirectional_attention: "vision"`, as for the 31B).
+
+Checked with `tools/zig/gemma4_vision_fixtures.py` (transformers 5.17 and torch, bf16 and fp32 runs of the embedder)
+and `tf-gemma4-vision` on the 31B's five drawn images: the patches equal those of the PIL processor's resize through
+`patches_merge` bit for bit, and each stage is as close to the fp32 run as torch's own bf16 run (the projected rows
+0.30% relative error averaged over the images, torch's 0.31%). The checkpoint's own processor resizes with
+torchvision, 0 to 2 levels of 255 from PIL's. Served with the assistant, `tools/zig/vision_served.py` passes its 19
+checks (drafted equal to `"draft": false`, concurrent image requests equal to their runs alone, a later turn resuming
+past its image, the refusals), and questions about the images answer right (the circle red and the rectangle blue,
+the circle on the left, the text "GEMMA 4", the tall image taller than wide). mlx-vlm 0.7.2 on the same checkpoint
+gives the same pixels and the same five short answers; an 80-token description parts from it at its third token, on
+a near-tie in mlx-vlm's own logits ("design" -1.625, "illustration" -1.75).
 
 ## Quality
 
