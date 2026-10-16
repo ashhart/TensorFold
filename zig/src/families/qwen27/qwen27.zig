@@ -7,6 +7,8 @@ pub const checkpoint = @import("checkpoint.zig");
 pub const weights = @import("weights.zig");
 pub const attention = @import("attention.zig");
 pub const attention_plan = @import("attention_plan.zig");
+/// The tail attention's rewrite and check before M5, as the runner builds it (tf-qwen27-attention-precision reads it).
+pub const simd_attention = @import("simd_attention.zig");
 pub const decode_round = @import("decode_round.zig");
 pub const forward = @import("forward.zig");
 pub const gdn = @import("gdn.zig");
