@@ -156,7 +156,7 @@ const Tracer = struct {
             try t.capture(try std.fmt.bufPrint(&nb, "layer{d}.attention_norm", .{i}), xn, .f16, frames, latent, "attention_norm(x)");
             try k.gemm(s, .{ .x = xn, .w = t.wp(l.wqkv), .y = qkv, .m = frames, .n = 3 * latent, .cin = latent, .ldx = latent, .ldy = 3 * latent });
             try k.ropeQk(s, qkv, t.wp(w.rope), frames, latent);
-            try k.windowAttention(s, qkv, att, frames, heads, window, scale);
+            try k.windowAttention(s, qkv, att, 0, frames, heads, window, scale);
             try t.capture(try std.fmt.bufPrint(&nb, "layer{d}.attention_core", .{i}), att, .f16, frames, latent, "windowed attention output, wo input");
             try k.gemm(s, .{ .x = att, .w = t.wp(l.wo), .y = x, .m = frames, .n = latent, .cin = latent, .ldx = latent, .ldy = latent, .scale = t.wp(l.attention_scale), .residual = x, .ldr = latent });
             try t.capture(try std.fmt.bufPrint(&nb, "layer{d}.attention_residual", .{i}), x, .f16, frames, latent, "h = x + attention_layer_scale(wo(core)), ffn_norm input");
@@ -181,7 +181,7 @@ const Tracer = struct {
             try t.capture(try std.fmt.bufPrint(&nb, "upsample{d}.transconv", .{i}), y, .f16, rows, latent, "ConvTranspose1d k2 s2 + bias");
             const dw = p[2];
             const normed = p[2] + rows * latent * h;
-            try k.dwconv(s, y, t.wp(u.dw), t.wp(u.dw_b), dw, rows, latent);
+            try k.dwconv(s, y, t.wp(u.dw), t.wp(u.dw_b), dw, 0, rows, latent);
             try t.capture(try std.fmt.bufPrint(&nb, "upsample{d}.dwconv", .{i}), dw, .f16, rows, latent, "ConvNeXt causal depthwise conv7 + bias");
             try k.layerNorm(s, dw, t.wp(u.norm_w), t.wp(u.norm_b), normed, rows, latent, layer_norm_eps);
             try t.capture(try std.fmt.bufPrint(&nb, "upsample{d}.layer_norm", .{i}), normed, .f16, rows, latent, "ConvNeXt LayerNorm");
@@ -225,7 +225,7 @@ const Tracer = struct {
         }
         try k.snake(s, cur, t.wp(w.out_snake.alpha), t.wp(w.out_snake.inv), cur, rows, ch);
         try t.capture("decoder.out_snake", cur, .f16, rows, ch, "decoder.model.5 Snake1d");
-        try k.convOutTanh(s, cur, t.wp(w.out_conv), t.wp(w.out_conv_b), m.audio_dev.ptr, rows, ch);
+        try k.convOutTanh(s, cur, t.wp(w.out_conv), t.wp(w.out_conv_b), m.audio_dev.ptr, 0, rows, ch);
         if (rows != t.frames * samples_per_frame) return error.UnexpectedSampleCount;
         t.replay_equal = try t.captureCompare("pcm", m.audio_dev.ptr, .f32, rows, 1, "decoder.model.6 causal conv7 96 -> 1, tanh (model.7)", t.production);
     }

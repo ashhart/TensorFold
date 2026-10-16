@@ -122,12 +122,12 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_rope(
   }
 }
 
-// Causal window attention as Torch's efficient path: 64-key tiles, exp2 softmax, FP16 P for P*V, FP32 sums.
+// Causal window attention as Torch's efficient path for queries t0.. at their absolute rows; FP16 P, FP32 sums.
 extern "C" __global__ void __launch_bounds__(128) drama_codec_window_attention(
-    const __half* __restrict__ qkv, __half* __restrict__ out, int heads, int window, float scale) {
+    const __half* __restrict__ qkv, __half* __restrict__ out, int t0, int heads, int window, float scale) {
   constexpr int tile = 64;
   __shared__ float q[kHeadDim], p[tile], part[32];
-  const int t = blockIdx.x, h = blockIdx.y, j = threadIdx.x;
+  const int t = t0 + blockIdx.x, h = blockIdx.y, j = threadIdx.x;
   const size_t ld = (size_t)3 * heads * kHeadDim;
   if (j < kHeadDim) q[j] = h2f(qkv[(size_t)t * ld + h * kHeadDim + j]);
   __syncthreads();
@@ -196,13 +196,13 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_layer_norm(
     yr[c] = f2h(fmaf(h2f(w[c]), rstd * (h2f(xr[c]) - mean), h2f(b[c])));
 }
 
-// ConvNeXtBlock.dwconv: causal depthwise conv, kernel 7, cuDNN then bias add_.
+// ConvNeXtBlock.dwconv: causal depthwise conv, kernel 7, cuDNN then bias add_, on rows t0..t0 + rows - 1.
 extern "C" __global__ void __launch_bounds__(256) drama_codec_dwconv7(
     const __half* __restrict__ x, const __half* __restrict__ w, const __half* __restrict__ b,
-    __half* __restrict__ y, long long rows, int width) {
+    __half* __restrict__ y, long long t0, long long rows, int width) {
   const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= rows * width) return;
-  const long long t = i / width;
+  const long long t = t0 + i / width;
   const int c = (int)(i % width);
   float acc = 0.f;
 #pragma unroll
@@ -210,7 +210,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_dwconv7(
     const long long r = t - 6 + k;
     if (r >= 0) acc = fmaf(h2f(x[r * width + c]), h2f(w[c * 7 + k]), acc);
   }
-  y[i] = f2h(rh(acc) + h2f(b[c]));
+  y[t * width + c] = f2h(rh(acc) + h2f(b[c]));
 }
 
 // dac Snake1d as the Triton kernel: y = x + inv * s * s with s = sin(alpha * x), the final multiply-add fused.
@@ -225,12 +225,13 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_snake(
   y[i] = f2h(fmaf(inv_alpha[c] * s, s, v));
 }
 
-// The last decoder conv (96 -> 1, kernel 7, causal) and tanh, written as FP32 PCM.
+// The last decoder conv (96 -> 1, kernel 7, causal) and tanh on rows t0..t0 + rows - 1, written as FP32 PCM.
 extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_out_tanh(
     const __half* __restrict__ x, const __half* __restrict__ w, const __half* __restrict__ b,
-    float* __restrict__ y, long long rows, int width) {
-  const long long t = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-  if (t >= rows) return;
+    float* __restrict__ y, long long t0, long long rows, int width) {
+  const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= rows) return;
+  const long long t = t0 + i;
   float acc = 0.f;
   for (int k = 0; k < 7; ++k) {
     const long long r = t - 6 + k;
@@ -243,7 +244,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_out_tanh(
   y[t] = rh(tanhf(v));
 }
 
-// One implicit GEMM for every conv, transposed conv and linear; the epilogue rounds to FP16 in the reference's order.
+// One implicit GEMM for every conv, transposed conv and linear on rows m_begin..m; FP16 epilogue in reference order.
 struct GemmParams {
   const __half* x;
   const __half* w;
@@ -251,7 +252,7 @@ struct GemmParams {
   const __half* scale;     // [period] or null
   const __half* residual;  // [m][ldr] or null (may alias y)
   __half* y;
-  long long m;
+  long long m, m_begin;
   int n, cin, taps, dilation, ldx, ldy, ldr, period, bias_mode, act;
 };
 
@@ -274,7 +275,7 @@ __device__ __forceinline__ float gemm_epilogue(const GemmParams& p, long long m,
 }
 }  // namespace
 
-// 128 x 128 tiles, 8 warps of 64 x 32; cin, ldx and ldy multiples of 8, x and w 16-byte aligned.
+// 128 x 128 tiles from row 0 over [m_begin, m), 8 warps of 64 x 32; cin, ldx, ldy % 8 == 0, x, w 16-byte aligned.
 extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_gemm(const GemmParams p) {
   using namespace nvcuda;
   __shared__ __align__(128) __half as[BM * LDS];
@@ -282,7 +283,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_gemm(const Ge
   __shared__ __align__(128) float cs[8][16 * 16];
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int wm = warp >> 2, wn = warp & 3;
-  const long long m0 = (long long)blockIdx.x * BM;
+  const long long m0 = (p.m_begin / BM + blockIdx.x) * BM;
   const int n0 = blockIdx.y * BN;
   const int ktot = p.taps * p.cin;
 
@@ -301,7 +302,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_gemm(const Ge
       const int kk = k0 + c;
       uint4 a = make_uint4(0u, 0u, 0u, 0u), b = make_uint4(0u, 0u, 0u, 0u);
       const long long m = m0 + r;
-      if (m < p.m && kk < ktot) {
+      if (m >= p.m_begin && m < p.m && kk < ktot) {
         const int tap = kk / p.cin, ci = kk - tap * p.cin;
         const long long rin = m - (long long)(p.taps - 1 - tap) * p.dilation;
         if (rin >= 0) a = *reinterpret_cast<const uint4*>(p.x + rin * p.ldx + ci);
@@ -350,7 +351,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_codec_conv_gemm(const Ge
       for (int e = lane; e < 256; e += 32) {
         const long long m = m0 + wm * 64 + i * 16 + (e >> 4);
         const int n = n0 + wn * 32 + j * 16 + (e & 15);
-        if (m < p.m && n < p.n) p.y[m * p.ldy + n] = f2h(gemm_epilogue(p, m, n, c[e]));
+        if (m >= p.m_begin && m < p.m && n < p.n) p.y[m * p.ldy + n] = f2h(gemm_epilogue(p, m, n, c[e]));
       }
       __syncwarp();
     }

@@ -24,6 +24,7 @@ const GemmParams = extern struct {
     residual: u64,
     y: u64,
     m: i64,
+    m_begin: i64,
     n: i32,
     cin: i32,
     taps: i32,
@@ -36,7 +37,7 @@ const GemmParams = extern struct {
     act: i32,
 };
 
-/// One drama_codec_conv_gemm call: m rows of n columns from taps shifted reads of cin channels (ld in elements).
+/// One drama_codec_conv_gemm call: rows [first, m) of n columns from taps shifted reads of cin channels.
 pub const Gemm = struct {
     x: u64,
     w: u64,
@@ -46,6 +47,8 @@ pub const Gemm = struct {
     cin: usize,
     ldx: usize,
     ldy: usize,
+    /// Rows before it are neither read nor written (an incremental decode's earlier chunks).
+    first: usize = 0,
     taps: usize = 1,
     dilation: usize = 1,
     bias: u64 = 0,
@@ -150,15 +153,17 @@ pub const Kernels = struct {
         try run(k.rope, s, .{ .x = try blocks(frames, 1) }, 256, &a);
     }
 
-    pub fn windowAttention(k: *const Kernels, s: cuda.Stream, qkv: u64, out: u64, frames: usize, heads: usize, window: usize, scale: f32) !void {
+    /// Queries [first, end) at their absolute rows; qkv holds every row their windows reach.
+    pub fn windowAttention(k: *const Kernels, s: cuda.Stream, qkv: u64, out: u64, first: usize, end: usize, heads: usize, window: usize, scale: f32) !void {
         if (window == 0 or window > 128) return error.Invalid;
         var a: cuda.Args = .{};
         a.add(qkv);
         a.add(out);
+        a.add(try small(first));
         a.add(try small(heads));
         a.add(try small(window));
         a.add(scale);
-        try run(k.attention, s, .{ .x = try blocks(frames, 1), .y = @intCast(heads) }, 128, &a);
+        try run(k.attention, s, .{ .x = try blocks(end - first, 1), .y = @intCast(heads) }, 128, &a);
     }
 
     pub fn siluMul(k: *const Kernels, s: cuda.Stream, gu: u64, out: u64, rows: usize, width: usize) !void {
@@ -181,15 +186,17 @@ pub const Kernels = struct {
         try run(k.layer_norm, s, .{ .x = try blocks(rows, 1) }, 256, &a);
     }
 
-    pub fn dwconv(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, b: u64, y: u64, rows: usize, width: usize) !void {
+    /// Rows [first, end) at their absolute rows; x holds the six rows before `first`.
+    pub fn dwconv(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, b: u64, y: u64, first: usize, end: usize, width: usize) !void {
         var a: cuda.Args = .{};
         a.add(x);
         a.add(w);
         a.add(b);
         a.add(y);
-        a.add(@as(i64, @intCast(rows)));
+        a.add(@as(i64, @intCast(first)));
+        a.add(@as(i64, @intCast(end - first)));
         a.add(try small(width));
-        try run(k.dwconv7, s, .{ .x = try blocks(rows * width, 256) }, 256, &a);
+        try run(k.dwconv7, s, .{ .x = try blocks((end - first) * width, 256) }, 256, &a);
     }
 
     /// Snake over [rows][width]; x and y may be the same buffer.
@@ -204,21 +211,22 @@ pub const Kernels = struct {
         try run(k.snake_fn, s, .{ .x = try blocks(rows * width, 256) }, 256, &a);
     }
 
-    /// The final conv and tanh into FP32 PCM [rows].
-    pub fn convOutTanh(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, b: u64, y: u64, rows: usize, width: usize) !void {
+    /// The final conv and tanh into FP32 PCM rows [first, end) at their absolute rows.
+    pub fn convOutTanh(k: *const Kernels, s: cuda.Stream, x: u64, w: u64, b: u64, y: u64, first: usize, end: usize, width: usize) !void {
         var a: cuda.Args = .{};
         a.add(x);
         a.add(w);
         a.add(b);
         a.add(y);
-        a.add(@as(i64, @intCast(rows)));
+        a.add(@as(i64, @intCast(first)));
+        a.add(@as(i64, @intCast(end - first)));
         a.add(try small(width));
-        try run(k.out_tanh, s, .{ .x = try blocks(rows, 256) }, 256, &a);
+        try run(k.out_tanh, s, .{ .x = try blocks(end - first, 256) }, 256, &a);
     }
 
     pub fn gemm(k: *const Kernels, s: cuda.Stream, g: Gemm) !void {
         const ktot = g.taps * g.cin;
-        if (g.m == 0 or g.n == 0 or g.taps == 0 or g.cin == 0) return error.Invalid;
+        if (g.first >= g.m or g.n == 0 or g.taps == 0 or g.cin == 0) return error.Invalid;
         if (g.cin % 8 != 0 or g.ldx % 8 != 0 or g.ldx < g.cin or g.ldy < g.n) return error.Invalid;
         if (g.x % 16 != 0 or g.w % 16 != 0) return error.Misaligned;
         if ((g.bias_mode != .none) != (g.bias != 0)) return error.Invalid;
@@ -231,6 +239,7 @@ pub const Kernels = struct {
             .residual = g.residual,
             .y = g.y,
             .m = @intCast(g.m),
+            .m_begin = @intCast(g.first),
             .n = try small(g.n),
             .cin = try small(g.cin),
             .taps = try small(g.taps),
@@ -245,6 +254,6 @@ pub const Kernels = struct {
         _ = try small(ktot);
         var a: cuda.Args = .{};
         a.add(p);
-        try run(k.gemm_fn, s, .{ .x = try blocks(g.m, 128), .y = try blocks(g.n, 128) }, 256, &a);
+        try run(k.gemm_fn, s, .{ .x = try blocks(g.m - g.first / 128 * 128, 128), .y = try blocks(g.n, 128) }, 256, &a);
     }
 };
