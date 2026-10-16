@@ -49,36 +49,40 @@ Receipts include token hashes supplied by the server, but the command does not r
 
 ## Publishing
 
-Running locally needs no token or account. Community contributors can get upload access immediately on [the benchmark board](https://tensorfold.dev/benchmarks), without an email request or administrator approval.
-
-To upload a saved receipt in your browser, choose **Upload result**, enter a public display name, select the JSON receipt and review its hardware, model and timing fields. Confirm the data to submit it; the browser creates upload access automatically. Nothing is sent during the receipt preview.
-
-To publish from the CLI, choose **Run the CLI** in that dialog, enter a display name and choose **Get upload access**. Copy the private token, then run the login command below. Keep the token private and save it before closing the page if you want to reuse it. It allows submissions and management of your own results, with up to 20 uploads per day; it does not grant administration access. Display names are self-chosen and do not verify an identity. Signup limits apply to reduce spam; complete standard runs publish automatically after the server checks them.
-
-Install or update the CLI using the [runbook](../RUNBOOK.md) before running the examples.
+The browser upload flow needs no login, pasted token, email request or administrator approval. Install or update the CLI using the [runbook](../RUNBOOK.md), run a cached public model locally, and save its receipt:
 
 ```sh
-# Paste an issued token at the hidden prompt.
-tensorfold benchmark login
+tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --output benchmark.json
+```
 
-# For automation, read the token from a private secret store or file.
-tensorfold benchmark login --token-stdin < /secure/upload-token
+Open [the benchmark board](https://tensorfold.dev/benchmarks), choose **Upload result**, enter a public display name and select `benchmark.json`. Review the hardware, model and timing fields, then confirm the data to submit it. Receipt contents are not sent before confirmation. The website creates a scoped browser profile privately and remembers it across reloads using a Secure, HttpOnly, SameSite cookie; there is no upload key to copy or paste.
 
-# Run, show the exact public fields, and ask before publishing. The token is checked before the run starts.
+That browser profile keeps later submissions together, with up to 20 uploads per day. Clearing browser data or using another browser creates a separate profile. Display names are self-chosen and do not verify an identity; matching names do not merge profiles. New-profile limits apply to reduce spam.
+
+Complete standard community-v1 submissions publish automatically after quota checks, strict receipt validation, public-checkpoint lookup and server-side statistics/completeness checks. A complete standard run includes both workloads at the suite temperatures and seeds, five successful repetitions per cell, 256 output tokens, a managed single-rank execution, a checkpoint revision/configuration digest and reported GPU hardware. A published submission returns its public result URL.
+
+If the website's model-checkpoint service is temporarily unavailable, a valid receipt is saved privately and its public-checkpoint check is retried automatically. A complete standard run becomes public only after that check passes. You do not need to rerun the benchmark or upload the same receipt again. Private or inaccessible checkpoints are never published automatically. Valid incomplete or nonstandard runs remain pending review after public-checkpoint verification; invalid receipts are rejected.
+
+Retries return the same saved submission without using another upload. Older manual-review submissions and withdrawn results are not automatically republished. The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported; automatic approval does not independently verify speed or hardware.
+
+### Existing CLI publishing credentials
+
+CLI installations that already have scoped upload credentials can continue to publish directly:
+
+```sh
+# Run, show the public fields, and ask before publishing.
 tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --publish
 
-# Or publish an existing receipt; --yes consents without the prompt.
+# Publish an existing receipt; --yes consents without the prompt.
 tensorfold benchmark publish receipt.json --yes
 
-# Remove locally stored upload credentials.
+# Remove locally stored CLI upload credentials.
 tensorfold benchmark logout
 ```
 
-`TENSORFOLD_BENCHMARK_TOKEN` can supply a token for a single automation run; it is never saved into a receipt or printed. `--upload-url` selects another HTTPS receiver, and saved credentials are bound to that exact API URL. Redirects are not followed, and uploads and the public check connect directly: proxy variables are not used. Loopback HTTP is accepted for local development only. Before any upload, the receipt is checked with the board's own rules and the checkpoint must be public on Hugging Face.
+Direct CLI publishing still requires its existing credentials; it does not use the browser cookie. New contributors can use the local-run and browser-upload flow above without credentials. If a CLI publication check fails, the saved receipt can be uploaded through the website without rerunning the model.
 
-Complete standard community-v1 submissions are approved and published immediately on [the benchmark board](https://tensorfold.dev/benchmarks), after contributor authentication, daily quota checks, strict receipt validation, public-checkpoint lookup and server-side statistics/completeness checks. A complete standard run includes both workloads at the suite temperatures and seeds, five successful repetitions per cell, 256 output tokens, a managed single-rank execution, a checkpoint revision/configuration digest and reported GPU hardware. The same operation saves the receipt and its approval timestamp, and a successful upload returns the public result URL.
-
-Valid incomplete or nonstandard submissions remain pending review, and invalid submissions are rejected. Retries preserve the original submission status, so this policy does not automatically publish older pending or withdrawn results. The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported; automatic approval does not independently verify speed or hardware.
+For existing automation, `tensorfold benchmark login` reads an issued token at a hidden prompt, and `--token-stdin` reads it from a private secret store or file. `TENSORFOLD_BENCHMARK_TOKEN` can supply a token for a single automation run; it is never saved into a receipt or printed. Saved credentials are bound to the exact HTTPS API URL selected by `--upload-url`. Redirects are not followed, and CLI uploads and public checks connect directly without proxy variables. Loopback HTTP is accepted for local development only.
 
 ## Contributor profiles and leaderboards
 
