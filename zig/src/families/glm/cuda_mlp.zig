@@ -3,12 +3,19 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
+const b16 = @import("cuda_b16.zig");
 
-/// One dense layer on a rank: gate and up [width][dims] and down [dims][width], NVFP4 as Fp4Linear holds them.
-pub const Layer = struct { gate: cuda.qmmf.Weight, up: cuda.qmmf.Weight, down: cuda.qmmf.Weight, width: usize, dims: usize, limit: f32 };
+/// A dense layer's weights: NVFP4 as Fp4Linear holds them, or the checkpoint's bf16 (an EXL3 checkpoint's).
+pub const Weights = union(enum) {
+    nvfp4: struct { gate: cuda.qmmf.Weight, up: cuda.qmmf.Weight, down: cuda.qmmf.Weight },
+    bf16: struct { gu: u64, down: u64 }, // [gate | up] rows [2 width][dims], down [dims][width]
+};
 
-/// The block's scratch for up to `rows` rows: one projection's rows, the [gate | up] rows, the activation and its sums.
-pub const Scratch = struct { tmp: u64, gu: u64, act: u64, xs_act: u64 };
+/// One dense layer on a rank: gate and up [width][dims] and down [dims][width].
+pub const Layer = struct { w: Weights, width: usize, dims: usize, limit: f32 };
+
+/// The block's scratch for `rows` rows: a projection's rows, [gate | up], the activation, its sums, split-K partials.
+pub const Scratch = struct { tmp: u64, gu: u64, act: u64, xs_act: u64, mm_part: u64 };
 
 pub const Kernels = struct { set: glue.Set, linear: cuda.qlinear.Linear, copy_rows: cuda.Function };
 
@@ -31,13 +38,23 @@ pub fn block(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_st
 
 /// forward.out_proj's fill for the dense MLP: down of rows lo..hi (s.act) into out [hi - lo][dims] fp32.
 pub fn fill(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, lo: usize, hi: usize, prompt: bool, out: u64) !void {
-    try mm(k, stream, l.down, s.act + lo * l.width * 2, l.width, hi - lo, out, true, prompt);
+    switch (l.w) {
+        .nvfp4 => |w| try mm(k, stream, w.down, s.act + lo * l.width * 2, l.width, hi - lo, out, true, prompt),
+        .bf16 => |w| try b16.matmul(k.set, stream, s.act + lo * l.width * 2, l.width, w.down, out, s.mm_part, hi - lo, l.dims, l.width, true),
+    }
 }
 
 /// The block up to its down projection: [gate | up] and SwiGLU into s.act.
 pub fn body(k: Kernels, stream: cuda.Stream, l: Layer, s: Scratch, x: u64, x_stride: usize, rows: usize, prompt: bool) !void {
     const w = l.width;
-    for ([_]cuda.qmmf.Weight{ l.gate, l.up }, 0..) |proj, j| {
+    const q = switch (l.w) {
+        .nvfp4 => |q| q,
+        .bf16 => |b| { // [gate | up] in one matmul, as the shared expert's
+            try b16.matmul(k.set, stream, x, x_stride, b.gu, s.gu, s.mm_part, rows, 2 * w, l.dims, false);
+            return glue.swiglu(k.set, stream, s.gu, s.act, s.xs_act, l.limit, rows, w);
+        },
+    };
+    for ([_]cuda.qmmf.Weight{ q.gate, q.up }, 0..) |proj, j| {
         // Fp4Linear(out=a column slice): the rows computed contiguous, then copied into their half of each row
         try mm(k, stream, proj, x, x_stride, rows, s.tmp, false, prompt);
         var a: cuda.Args = .{};
