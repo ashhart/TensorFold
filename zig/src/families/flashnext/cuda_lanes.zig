@@ -348,7 +348,9 @@ pub fn Namespace(comptime Tri: type) type {
             own.lanes = .empty;
             own.next = 0;
             var stream_bytes = prompt.seqBytes(window);
-            if (own.head) |h| stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
+            if (own.head) |h| {
+                stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
+            } else if (o.drafts and o.tp == 2) stream_bytes += mtp.Draft.bytes(window, 1, own.engine.chunk);
             return .{
                 .backend = own.backend(),
                 .facts = own.facts(),

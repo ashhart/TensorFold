@@ -11,6 +11,7 @@ pub const collective = @import("cuda_collective.zig");
 pub const rank_wire = @import("cuda_rank_wire.zig");
 pub const modelopt_experts = @import("cuda_modelopt_experts.zig");
 pub const hc = @import("cuda_hc.zig");
+pub const draft_affine = @import("cuda_draft_affine.zig");
 pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
 pub const mlp = @import("cuda_mlp.zig");
@@ -382,6 +383,7 @@ test {
     _ = @import("cuda_modelopt_experts.zig");
     _ = row_path;
     _ = @import("cuda_mtp_check.zig");
+    _ = @import("cuda_draft_affine.zig");
 }
 
 test "embed grid is one program per row and per group of 32" {
