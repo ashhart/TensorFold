@@ -22,7 +22,10 @@ const usage =
     \\GLM_TRACE_LAST=PREFIX (each prompt's last row at every capture point, bf16, to PREFIX.NAME.trace: embedding, then
     \\each layer's attention input and output and MLP input and output, then the final norm),
     \\GLM_PROMPT=0 (prompts in 16-row decode windows), GLM_CHUNK=N (prompt chunks of N rows), GLM_COPY=N (copy drafts from
-    \\N-token matches), GLM_RANKS=1 (where missed drafts' targets fell among the MTP head's choices).
+    \\N-token matches), GLM_RANKS=1 (where missed drafts' targets fell among the MTP head's choices),
+    \\GLM_SAMPLING=seed,temperature,top_k,top_p,min_p (seeded sampling for the standalone engine's replies; the seed is
+    \\required, 0 top_k races the whole vocabulary, the filters default to top_p 1 and min_p 0; unset or a 0 temperature
+    \\decodes greedily; a malformed value stops the run with an error rather than sampling or falling back to greedy).
 ;
 
 const Collect = struct {

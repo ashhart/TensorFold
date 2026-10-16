@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -22,7 +23,8 @@ def usage(cached=0):
 
 def response(counts=None, done=True, chunks=None, runtime=None):
     chunks = chunks if chunks is not None else [{"choices": [{"text": t}]} for t in ["H", "ell", "o", " world"]]
-    chunks.append({"choices": [], "usage": counts, "tensorfold": runtime or {"token_sha": "a" * 12}})
+    chunks.append({"choices": [], "usage": counts,
+                   "tensorfold": runtime or {"token_sha": "a" * 12, "token_sha256": "a" * 64}})
     return io.BytesIO(b"".join(b"data: " + json.dumps(c).encode() + b"\n\n" for c in chunks)
                       + (b"data: [DONE]\n\n" if done else b""))
 
@@ -50,12 +52,24 @@ class UsageTests(unittest.TestCase):
         self.assertIsNone(token_equal(row, row))
         for value in [None, True, "not-a-hash", "a" * 11]:
             self.assertIsNone(Evidence().finish(usage(), {"token_sha": value}, True)["token_sha"])
-        a = Evidence().finish(usage(), {"token_sha": "a" * 12}, True)
-        b = Evidence().finish(usage(), {"token_sha": "b" * 12}, True)
+        a = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64}, True)
+        b = Evidence().finish(usage(), {"token_sha": "b" * 12, "token_sha256": "b" * 64}, True)
         self.assertTrue(token_equal(a, a))
         self.assertFalse(token_equal(a, b))
         self.assertIsNone(token_equal(a, {**a, "complete": False}))
         self.assertIsNone(token_equal(a, {**a, "error": "failure"}))
+
+    def test_short_prefix_cannot_qualify_token_equality(self):
+        legacy = Evidence().finish(usage(), {"token_sha": "a" * 12}, True)
+        self.assertIsNone(token_equal(legacy, legacy))
+        a = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 64}, True)
+        b = Evidence().finish(usage(), {"token_sha": "a" * 12, "token_sha256": "a" * 12 + "b" * 52}, True)
+        self.assertFalse(token_equal(a, b))
+        bad = Evidence().finish(usage(), {"token_sha": "b" * 12, "token_sha256": "a" * 64}, True)
+        self.assertIsNone(token_equal(a, bad))
+        for value in [None, "a" * 63, "A" * 64, "z" * 64, True]:
+            row = Evidence().finish(usage(), {"token_sha256": value}, True)
+            self.assertIsNone(token_equal(row, row))
 
     def test_unicode_hashes_ignore_chunks_and_distinguish_reasoning(self):
         a, b, c = Evidence(), Evidence(), Evidence()
@@ -133,6 +147,29 @@ class ClientTests(unittest.TestCase):
         cells = [json.loads(line) for line in out.getvalue().splitlines()]
         self.assertTrue(all(cell["alone"]["equal"] == 0 and cell["alone"]["failed"] == 1 for cell in cells))
         self.assertTrue(all(cell["serial"]["equal"] == 0 and cell["serial"]["failed"] == 1 for cell in cells))
+
+    def test_concurrent_report_retains_full_pairs_and_real_http_intervals(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "report.json"
+            argv = ["bench_concurrent.py", "http://127.0.0.1:8080", "fixture", "--levels", "2", "--reps", "1",
+                    "--temperatures", "0", "--alone", "--serial", "--output", str(output)]
+            with patch.object(sys, "argv", argv):
+                with patch.object(bench_concurrent.urllib.request, "urlopen",
+                                  side_effect=lambda *a, **k: response(usage())):
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        bench_concurrent.main()
+            report = json.loads(output.read_text())
+        for cell in report["cells"]:
+            rep = cell["reps"][0]
+            self.assertEqual(len(rep["comparisons"]), 2)
+            self.assertEqual(len(rep["client_intervals"]), 2)
+            for pair in rep["comparisons"]:
+                for key in ["concurrent", "alone", "serial"]:
+                    self.assertEqual(pair[key]["token_sha256"], "a" * 64)
+                    self.assertEqual(pair[key]["tokens"], 4)
+                    self.assertEqual(len(pair[key]["output_sha256"]), 64)
+            for interval in rep["client_intervals"]:
+                self.assertLessEqual(interval["start"], interval["end"])
 
     def test_cli_missing_usage_and_empty_output_do_not_fabricate_timing(self):
         for module in [bench_concurrent, bench_openai]:

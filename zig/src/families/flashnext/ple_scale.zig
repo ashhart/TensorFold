@@ -38,7 +38,7 @@ pub fn of(r: *replay.Run, map: std.json.ObjectMap) !?Scale {
     } else return null;
     const e = try r.entry(name);
     const b = try r.load(name);
-    defer b.b.deinit();
+    defer r.release(b.b);
     const bytes = b.b.contents()[0..e.len];
     const value: f32 = switch (e.len) {
         2 => @bitCast(@as(u32, std.mem.readInt(u16, bytes[0..2], .little)) << 16),

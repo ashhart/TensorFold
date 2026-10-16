@@ -1,4 +1,4 @@
-//! GLM-5.3-Flash's plain greedy rounds in generate: the next round committed before this one's pick is read.
+//! GLM-5.3-Flash's plain rounds in generate: the next round committed before this one's pick is read.
 const std = @import("std");
 const mtl = @import("metal");
 const fwd = @import("forward.zig");
@@ -25,6 +25,10 @@ fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
         b.enc.dispatchThreads(fwd.size(1, 1, 1), fwd.size(1, 1, 1));
     }
     fwd.backbone(x, b.enc, e.sc.ids, 1, pos);
+    const draws = @import("draw_rule.zig").promptDraws(e.sampling, pos + 1, e.c.vocab);
+    const prior = x.draws;
+    x.draws = &draws;
+    defer x.draws = prior;
     fwd.head(x, b.enc, e.sc.hidden, e.sc.logits, to, 1);
     fence.update(b.enc);
     b.enc.end();

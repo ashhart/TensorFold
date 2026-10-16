@@ -66,6 +66,8 @@ pub const Kernels = struct {
     torch: torch_ops.Functions,
     train: train_ops.Kernels, // Sliding Weights' learning step, and the learned change a forward adds while lessons run
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
+    latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
+    ck: ?cuda.ck.Ck = null, // the checkpoint's own math (loadCk): FP8 rows and NVFP4 experts, sm_120 on
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -102,6 +104,8 @@ pub const Kernels = struct {
         errdefer k.norms.unload();
         k.grammar_mask = try k.mods[14].function("tf_grammar_mask");
         k.modelopt = null;
+        k.latent = null;
+        k.ck = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -120,6 +124,8 @@ pub const Kernels = struct {
     pub fn deinit(k: *Kernels) void {
         k.emb.unload();
         k.norms.unload();
+        if (k.latent) |*x| x.unload();
+        if (k.ck) |*x| x.unload();
         if (k.modelopt) |*m| {
             m.lane.unload();
             m.gemm.unload();
@@ -132,10 +138,25 @@ pub const Kernels = struct {
         for (&k.mods) |*m| m.unload();
     }
 
+    /// nemotron_latent.cu for a latent MoE checkpoint.
+    pub fn loadLatent(k: *Kernels) !void {
+        if (k.latent == null) k.latent = try @import("cuda_latent.zig").Fns.load(k.d);
+    }
+
+    /// The checkpoint math's kernels (--precision checkpoint): Blackwell's FP4 and FP8 mma.
+    pub fn loadCk(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.ck != null) return;
+        const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
+        if (major < ck_major) return error.CheckpointMathNeedsBlackwell;
+        k.ck = try cuda.ck.Ck.load(k.d, major, @intCast(try ctx.attribute(.multiprocessor_count)));
+    }
+
     /// The lane matmul, prompt GEMM, NVFP4 experts and repack a ModelOpt checkpoint's FP8, NVFP4 and bf16 tensors need.
     pub fn loadModelopt(k: *Kernels, ctx: *const cuda.Context) !void {
         if (k.modelopt != null) return;
         const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
+        const minor: u32 = @intCast(try ctx.attribute(.compute_capability_minor));
+        if (modeloptRefusal(10 * major + minor) != null) return error.ModeloptNeedsSm90;
         const sms: usize = @intCast(try ctx.attribute(.multiprocessor_count));
         var lane = try cuda.qmmf.Lane.load(k.d, major);
         errdefer lane.unload();
@@ -146,6 +167,19 @@ pub const Kernels = struct {
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
 };
+
+/// The checkpoint's own math needs this major capability: the block-scaled FP4 mma (sm_120a, sm_121a).
+pub const ck_major: u32 = 12;
+
+/// FP8 and NVFP4 paths stop below this full capability: they decode to bf16 for mma.sync.
+pub const modelopt_min: u32 = 80;
+
+/// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
+pub fn modeloptRefusal(capability: u32) ?[]const u8 {
+    if (capability >= modelopt_min) return null;
+    return "FP8 and NVFP4 weights decode to bf16 for mma.sync: " ++
+        "a ModelOpt checkpoint needs compute capability 8.0 or newer";
+}
 
 /// qmm.split_k (cuda/qlinear.zig).
 pub const splitK = cuda.qlinear.splitK;
@@ -166,6 +200,7 @@ pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
     part: u64 = 0, // the lane matmul's slice partials where it reduces them (no clusters below sm_90)
+    ck8: u64 = 0, // the e4m3 rows an FP8 projection reads in the checkpoint's math (its buffers' ck8)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
         try cuda.launch.launch(f, .{ .grid = .{ .x = u(grid[0]), .y = u(grid[1]), .z = u(grid[2]) }, .block = .{ .x = block }, .shared = shared }, o.s, args);
@@ -204,7 +239,7 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8 };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
@@ -377,4 +412,9 @@ test "items follow the Python shapes" {
     try std.testing.expectEqual(@as(usize, 135), maxItems(328, 130, 64));
     try std.testing.expectEqual(@as(usize, 1154), maxItems(16384, 130, 16));
     try std.testing.expectEqual(@as(usize, 8), maxItems(8, 130, 16));
+}
+
+test "ModelOpt's floor refuses every card below sm_80 and admits Ampere up, the cards without clusters included" {
+    for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 80, 86, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
 }

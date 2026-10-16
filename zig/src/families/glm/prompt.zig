@@ -126,7 +126,7 @@ fn buffers(p: *Prompt, arena: *st.Arena, c: *const cfg.Config, decode: *const st
     p.wts = try big.of(arena, n * 4);
     p.counts = try big.of(arena, blocks * c.experts * 4);
     p.starts = try big.of(arena, blocks * c.experts * 4);
-    p.offsets = try big.of(arena, (c.experts + 1) * 4);
+    p.offsets = try big.of(arena, c.experts * 4);
     p.order = try big.of(arena, n * 4);
     p.sorted = try big.of(arena, n * 4);
     p.sums = try big.of(arena, @max(R * 16384, n * D) / 64 * 4); // the widest dense K (MLA's out-projection), or a gather's
@@ -268,8 +268,28 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
     }
     const path = wide.routed(w.gate, w.up, w.down);
     if (s & Class.routed == 0 and path == .rows) { // each expert's sorted pairs at its width
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit }, x_in, p.offsets, p.order, p.act, c.moe_inter);
-        wide.bySorted(&p.mm.wide.?, e, .{ .w = w.down, .experts = E, .repeat = 1 }, p.act, p.offsets, p.order, p.yp, D);
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.gate, .up = w.up, .experts = E, .repeat = c.topk, .lim = c.swiglu_limit },
+            x_in,
+            p.offsets,
+            p.order,
+            p.act,
+            c.moe_inter,
+            n,
+        );
+        wide.bySorted(
+            &p.mm.wide.?,
+            e,
+            .{ .w = w.down, .experts = E, .repeat = 1 },
+            p.act,
+            p.offsets,
+            p.order,
+            p.yp,
+            D,
+            n,
+        );
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
         gateUp(p, mm, x, e, w, x_in, M, n);
@@ -451,7 +471,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             e.setPipeline(if (c.tp > 1) x.k.sparse_nax_tp else x.k.sparse_nax);
             bind(e, 0, .{ p.ql, x.s.mla[mi].keys, p.indices });
             e.setValue(@as(f32, 1.0 / 16.0), 3);
-            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), 0, 0 }, 4);
+            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), @intCast(pos), 0 }, 4);
             bind(e, 5, .{p.att});
             e.dispatchGroups(size(c.mla_heads / 16, M, 1), size(128, 1, 1));
         } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);
@@ -470,7 +490,7 @@ pub fn backbone(p: *const Prompt, x: *fwd.Ctx, e: mtl.ComputeEncoder, ids: Ref, 
     std.debug.assert(x.sc == ss and M <= p.rows);
     const s = x.skip; // classes a profile leaves out
     const Class = fwd.Class;
-    if (s & Class.ends == 0) fwd.embed(x, e, ids, M);
+    if (s & Class.ends == 0) fwd.embed(x, e, ids, M, pos);
     const plane = @as(usize, M) * c.hidden * 2; // a trace's capture points: the decode backbone's
     fwd.snap(x, e, ss.h, plane);
     var pending = false;
@@ -532,6 +552,7 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     const L = &x.w.layers[c.layers];
     const m = x.w.mtp.?;
     fwd.embedRows(x, e, next, p.m_emb, M);
+    fwd.inject(x, e, p.m_emb, M, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, p.m_emb, m.enorm, p.m_eh, M, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
     if (m.eh_bf16) |eh| wide.bf16(&p.mm.wide.?, e, eh, D, 2 * D, .{ .in = p.m_eh, .ldx = 2 * D, .out = p.m_x, .ldo = D, .rows = M }) else qmm(p, e, p.m_eh, m.eh_proj, p.m_x, M);

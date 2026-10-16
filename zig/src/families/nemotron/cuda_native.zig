@@ -14,18 +14,21 @@ pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
 pub const snap_ready = reuse.ready; // the spare Mamba buffers it sets aside come out of the cache's budget
+pub const kept_states = reuse; // their shape, a blank one and copies out and in, for the disk (--learn-conversations)
 const core = @import("core");
 
 /// Sliding Weights' learner (--slide): lessons change the weights this engine's lanes decode with.
 pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
+pub const explains_open = true; // explain() words open refusals too (--vision on a checkpoint without a tower)
 pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null };
+pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
 pub const lone_min_budget = @import("cuda_lone.zig").min_budget;
@@ -51,6 +54,8 @@ pub const Loaded = struct {
     target: *reuse.Target, // the prompt cache copies this engine (cuda_reuse.zig)
     learns: ?*engine.Engine = null, // --slide: the engine its learner trains, whose sites it attached at load
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
+    vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
+    taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
 };
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
@@ -63,13 +68,21 @@ pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]co
     return core.shard_edit.plainShared(arena, io, dir);
 }
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null };
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null, taps: [1]u32 = undefined };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
+    if (std.c.getenv("TF_NEMOTRON_RANK")) |r| if (!std.mem.eql(u8, std.mem.span(r), "0")) { // expert ranks never serve
+        @import("cuda_worker.zig").serve(gpa, io, ctx, dir, o.precision) catch |err| {
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with this rank's error
+            std.log.err("expert rank stopped: {s}", .{@errorName(err)});
+            std.c._exit(1); // a stream may still wait on rank 0: a normal exit would join it
+        };
+        std.process.exit(0);
+    };
     const carve = try openCarveout(gpa, ctx);
     errdefer if (carve) |c| closeCarveout(gpa, c);
-    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide });
+    const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision });
     errdefer e.deinit();
     const head: ?*Head = if (o.drafts) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
@@ -87,6 +100,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
+    own.taps = .{@import("cuda_lanes.zig").finalTap(e.c)};
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
@@ -98,6 +112,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .lone = if (head != null) loneRun else null,
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
+        .vision = e.vision,
+        .taps = &own.taps,
     };
 }
 
@@ -117,6 +133,10 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
+        error.VisionRefused => "--vision: this checkpoint has no image tower the CUDA engine reads (Nemotron Omni's RADIO); serve it without --vision",
+        error.NoVision => "this server reads no images: start it with --vision",
+        error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
+        error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         else => null,
     };
 }

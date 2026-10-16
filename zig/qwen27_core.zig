@@ -5,6 +5,8 @@ pub const safetensors = @import("src/core/safetensors.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const npy = @import("src/core/npy.zig");
 pub const tokenizer = @import("tokenizer");
+/// Qwen-VL image input's backend-neutral parts (M-RoPE positions for the forward).
+pub const qwen_vl = @import("src/core/qwen_vl/qwen_vl.zig");
 
 pub const segments = @import("src/core/segments.zig");
 
