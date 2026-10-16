@@ -57,7 +57,7 @@ extern "C" __global__ void __launch_bounds__(256) drama_attention(const __nv_bfl
                                                                  const __nv_bfloat16* vc, const __nv_bfloat16* qkv,
                                                                  int ld_qkv, __nv_bfloat16* out, int pos0, int H,
                                                                  int HK, float scale) {
-    constexpr int D = 256, NW = 8;
+    constexpr int D = 256, NW = 8, U = 8;
     __shared__ float sm_m[NW], sm_l[NW];
     __shared__ float sm_o[NW][D];
     const int r = blockIdx.x, h = blockIdx.y;
@@ -72,22 +72,46 @@ extern "C" __global__ void __launch_bounds__(256) drama_attention(const __nv_bfl
         o[i] = 0.f;
     }
     float m = -INFINITY, l = 0.f;
-    for (int j = warp; j <= last; j += NW) {
-        const uint4 kw = *reinterpret_cast<const uint4*>(kc + (static_cast<size_t>(j) * HK + kh) * D + lane * 8);
-        const __nv_bfloat16* kp = reinterpret_cast<const __nv_bfloat16*>(&kw);
-        float dot = 0.f;
+    // Keys go U at a time with the next batch's loads in flight; the softmax update stays in key order.
+    const __nv_bfloat16* kp = kc + kh * D + lane * 8;
+    const __nv_bfloat16* vp = vc + kh * D + lane * 8;
+    uint4 kw[U], vw[U];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) dot += qv[i] * bf(kp[i]);
-        const float sc = warp_sum(dot) * scale;
-        const float mn = fmaxf(m, sc);
-        const float corr = expf(m - mn);  // m = -inf on the first key: 0
-        const float p = expf(sc - mn);
-        l = l * corr + p;
-        const uint4 vw = *reinterpret_cast<const uint4*>(vc + (static_cast<size_t>(j) * HK + kh) * D + lane * 8);
-        const __nv_bfloat16* vp = reinterpret_cast<const __nv_bfloat16*>(&vw);
+    for (int u = 0; u < U; ++u) {
+        const size_t at = static_cast<size_t>(min(warp + u * NW, last)) * HK * D;
+        kw[u] = *reinterpret_cast<const uint4*>(kp + at);
+        vw[u] = *reinterpret_cast<const uint4*>(vp + at);
+    }
+    for (int j0 = warp; j0 <= last; j0 += NW * U) {
+        float sc[U];
+        uint4 vb[U];
 #pragma unroll
-        for (int i = 0; i < 8; ++i) o[i] = o[i] * corr + round_bf(p) * bf(vp[i]);
-        m = mn;
+        for (int u = 0; u < U; ++u) {
+            const __nv_bfloat16* k = reinterpret_cast<const __nv_bfloat16*>(&kw[u]);
+            float dot = 0.f;
+#pragma unroll
+            for (int i = 0; i < 8; ++i) dot += qv[i] * bf(k[i]);
+            sc[u] = dot;
+            vb[u] = vw[u];
+            const size_t at = static_cast<size_t>(min(j0 + (U + u) * NW, last)) * HK * D;
+            kw[u] = *reinterpret_cast<const uint4*>(kp + at);
+            vw[u] = *reinterpret_cast<const uint4*>(vp + at);
+        }
+#pragma unroll
+        for (int u = 0; u < U; ++u) sc[u] = warp_sum(sc[u]) * scale;
+        const int n = min(U, (last - j0) / NW + 1);
+#pragma unroll
+        for (int u = 0; u < U; ++u) {
+            if (u >= n) break;
+            const float mn = fmaxf(m, sc[u]);
+            const float corr = expf(m - mn);  // m = -inf on the first key: 0
+            const float p = expf(sc[u] - mn);
+            l = l * corr + p;
+            const __nv_bfloat16* v = reinterpret_cast<const __nv_bfloat16*>(&vb[u]);
+#pragma unroll
+            for (int i = 0; i < 8; ++i) o[i] = o[i] * corr + round_bf(p) * bf(v[i]);
+            m = mn;
+        }
     }
     if (lane == 0) {
         sm_m[warp] = m;
