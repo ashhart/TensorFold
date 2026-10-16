@@ -10,6 +10,7 @@ const mm_k = @import("contract_mm.zig");
 const mx_k = @import("contract_mxfp8.zig");
 const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
+const writeback_k = @import("contract_flashnext_writeback.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -104,6 +105,19 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var hc = try cuda.Module.load(gpu.d, kk.flashnext_hc);
+    defer hc.unload();
+    var writebacks: [3]writeback_k.Writeback = undefined;
+    for (std.enums.values(writeback_k.Mode), &writebacks) |mode, *w| {
+        const symbol: [:0]const u8 = switch (mode) {
+            .sums => "fn_hc_writeback0",
+            .moe => "fn_hc_writeback_moe",
+            .slices => "fn_hc_writeback_slices",
+        };
+        w.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try hc.function(symbol), .mode = mode };
+    }
+    defer for (&writebacks) |*w| w.deinit();
+    for (&writebacks) |*w| try kernels.append(a, w.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
