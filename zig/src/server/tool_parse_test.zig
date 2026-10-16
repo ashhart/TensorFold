@@ -2,6 +2,7 @@
 const std = @import("std");
 const json = @import("json");
 const tool_parse = @import("tool_parse.zig");
+const tool_closers = @import("tool_closers.zig");
 const parse = tool_parse.parse;
 const closeCall = tool_parse.closeCall;
 const repairGlmKeys = tool_parse.repairGlmKeys;
@@ -212,6 +213,52 @@ const nested_calls = [_][]const u8{
     "<tool_call>{\"name\":\"lookup\",\"arguments\":{}}</tool_call>",
     "<tool_call>{\"name\":\"lookup\",\"arguments\":{}",
 };
+
+test "namespaced openers without closers read in linear time" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"lookup\"}}]")).ok.array;
+    // one namespace repeated, then a new namespace per opener
+    for ([_]bool{ false, true }) |distinct| {
+        var ns: [2]u64 = undefined;
+        for ([_]usize{ 1000, 8000 }, &ns) |n, *best| {
+            var reply: std.ArrayList(u8) = .empty;
+            for (0..n) |i| try reply.print(a, "<ns{d}:tool_call>", .{if (distinct) i else 0});
+            best.* = std.math.maxInt(u64);
+            for (0..3) |_| {
+                var run: std.heap.ArenaAllocator = .init(std.testing.allocator);
+                defer run.deinit();
+                const start = std.Io.Clock.awake.now(std.testing.io).nanoseconds;
+                const r = try parse(run.allocator(), reply.items, tools, null);
+                best.* = @min(best.*, @as(u64, @intCast(std.Io.Clock.awake.now(std.testing.io).nanoseconds - start)));
+                try std.testing.expect(r.calls == null);
+            }
+        }
+        // 8x the openers: near 8x the time, not 64x
+        try std.testing.expect(ns[1] <= 20 * std.time.ns_per_ms or ns[1] <= 24 * ns[0]);
+    }
+}
+
+test "a closer found by name is the one a search for it finds" {
+    var prng: std.Random.DefaultPrng = .init(0x7f4a7c15);
+    const r = prng.random();
+    const pieces = [_][]const u8{ "</a:tool_call>", "</A:TOOL_CALL>", "</ab:tool_call>", "</b.c:tool_call>", "</a:tool_cal>", "</", "<", "a", ":tool_call>", "x", "</x\u{e9}:tool_call>", "</x\u{c9}:tool_call>" };
+    const names = [_][]const u8{ "a", "A", "ab", "b.c", "B.C", "x\u{e9}", "x\u{c9}", "zz" };
+    for (0..5_000) |_| {
+        var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var text: std.ArrayList(u8) = .empty;
+        for (0..r.uintLessThan(usize, 16)) |_| try text.appendSlice(a, pieces[r.uintLessThan(usize, pieces.len)]);
+        var closers: tool_closers.Closers = .{ .text = text.items };
+        // every start in order, every name at each, as the parser asks
+        for (0..text.items.len + 1) |from| for (names) |name| {
+            const closer = try std.mem.concat(a, u8, &.{ "</", name, ":tool_call>" });
+            try std.testing.expectEqual(std.ascii.findIgnoreCasePos(text.items, from, closer), try closers.next(a, name, from));
+        };
+    }
+}
 
 test "DSML parameters contain complete and unfinished legacy calls without consuming adjacent calls" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
