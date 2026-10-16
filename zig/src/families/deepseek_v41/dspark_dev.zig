@@ -336,12 +336,12 @@ pub const Chain = struct {
         var cs: [32]Copy2D = undefined;
         for (reorder(world, rows, k, at, &cs)) |cp| {
             const p: cuda.abi.Memcpy2D = .{
-                .srcDevice = gathered + cp.src,
-                .srcPitch = cp.src_pitch,
-                .dstDevice = (if (cp.ids) x.bufs[0].ptr else x.bufs[1].ptr) + cp.dst,
-                .dstPitch = cp.dst_pitch,
-                .WidthInBytes = cp.width,
-                .Height = cp.height,
+                .src = gathered + cp.src,
+                .src_pitch = cp.src_pitch,
+                .dst = (if (cp.ids) x.bufs[0].ptr else x.bufs[1].ptr) + cp.dst,
+                .dst_pitch = cp.dst_pitch,
+                .width = cp.width,
+                .height = cp.height,
             };
             try r.d.check(r.d.api.cuMemcpy2DAsync_v2(&p, r.stream.handle), "cuMemcpy2DAsync");
         }

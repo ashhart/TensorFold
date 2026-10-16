@@ -84,11 +84,12 @@ pub const DeepSeek = struct {
     memory: Memory,
     images_omitted: std.atomic.Value(u64) = .init(0),
 
-    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, options: Options, problem: *[]const u8) !*DeepSeek {
+    /// `pa` owns a failure's `problem` text (the caller's problem arena), so a refused load leaks nothing.
+    pub fn load(gpa: Allocator, io: std.Io, dir: []const u8, options: Options, pa: Allocator, problem: *[]const u8) !*DeepSeek {
         const d = try gpa.create(DeepSeek);
         errdefer gpa.destroy(d);
         const tok = tokenizer.Tokenizer.load(gpa, io, dir) catch |e| {
-            problem.* = try std.fmt.allocPrint(gpa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
+            problem.* = try std.fmt.allocPrint(pa, "cannot read {s}/tokenizer.json ({s})", .{ dir, @errorName(e) });
             return error.Load;
         };
         d.* = .{ .gpa = gpa, .tok = tok, .options = options, .memory = .{ .gpa = gpa, .entries = options.memory_entries } };

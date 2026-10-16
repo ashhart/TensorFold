@@ -162,6 +162,116 @@ inline void gather_qmm_rhs_nax(const device T* x, const device uint32_t* w, cons
   qmm_store<T, SM / 16>(acc, y + long(row + tm) * N + col + tn, N, live, frag_home(ushort(lane)));
 }
 
+// qmm_k_loop with block i's rows home.y and home.y + 8 at xr[i][0] and xr[i][1], read where lo / hi flag them.
+template <typename T, int TM>
+inline void qmm_k_loop_rows(thread frag<float> (&acc)[TM][2], const device T* const thread (&xr)[TM][2],
+                            const thread bool (&lo)[TM], const thread bool (&hi)[TM], int K, int live, bool inside,
+                            const device uchar* wq, const device T* scales, const device T* biases, threadgroup T* tile,
+                            int tn, uint t, short2 home) {
+  constexpr int PAD = 64 + 16 / sizeof(T);
+  threadgroup T* mine = tile + (t / 2) * PAD + 32 * (t % 2);
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    acc[i][0] = frag<float>(0);
+    acc[i][1] = frag<float>(0);
+  }
+  for (int k = 0; k < K; k += 64) {
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    qmm_dequant<16>(wq, *scales, *biases, mine);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+#pragma clang loop unroll(disable)
+    for (int kk = 0; kk < 64; kk += 32) {
+      if (live > 0) {
+        frag<T> a[TM][2], b[2][2];
+        TF_UNROLL
+        for (short i = 0; i < 2; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            frag_get_t(b[j][i], (const threadgroup T*)tile, PAD, tn + 16 * i, kk + 16 * j, home);
+          }
+        }
+        TF_UNROLL
+        for (short i = 0; i < TM; i++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            if (inside) {
+              frag_get_rows(a[i][j], xr[i][0], xr[i][1], k + kk + 16 * j, home, true, true);
+            } else {
+              frag_get_rows(a[i][j], xr[i][0], xr[i][1], k + kk + 16 * j, home, lo[i], hi[i]);
+            }
+          }
+        }
+        TF_UNROLL
+        for (short m = 0; m < TM; m++) {
+          TF_UNROLL
+          for (short j = 0; j < 2; j++) {
+            mma_16x32<false, true>(acc[m][0], acc[m][1], a[m][j], b[j][0], b[j][1]);
+          }
+        }
+      }
+    }
+    wq += 32;
+    scales++;
+    biases++;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// gather_qmm_rhs_nax with sorted row s read from x[map[s] / P[4]] (XMAP) or written to y[map[s]]: its tiles and sums.
+template <typename T, int BM, bool XMAP>
+inline void gather_qmm_rhs_nax_map(const device T* x, const device uint32_t* w, const device T* scales,
+                                   const device T* biases, const device int32_t* offsets, const device uint32_t* map,
+                                   device T* y, const device int* P, threadgroup T* tile, uint3 tg, uint sg,
+                                   uint lane) {
+  constexpr int SM = BM / 2, TM = SM / 16;
+  const int M = P[0], N = P[1], K = P[2];
+  int expert, row, rows;
+  if (!expert_tile<BM>(offsets, P[3], M, int(tg.y), lane, expert, row, rows)) {
+    return;
+  }
+  const int col = int(tg.x) * 64, t = int(sg) * 32 + int(lane);
+  const int tm = SM * int(sg / 2), tn = 32 * int(sg % 2), live = clamp(rows - tm, 0, SM);
+  const bool inside = row + tm + SM <= M;
+  const short2 home = frag_home(ushort(lane));
+  const long wrow = long(expert) * N + col + t / 2;
+  const device uchar* wq = (const device uchar*)w + wrow * (K / 2) + 16 * (t % 2);
+  const device T* sc = scales + wrow * (K / 64);
+  const device T* bi = biases + wrow * (K / 64);
+  bool lo[TM], hi[TM];
+  int slot[TM][2];
+  TF_UNROLL
+  for (short i = 0; i < TM; i++) {
+    lo[i] = 16 * i + home.y < live;
+    hi[i] = 16 * i + home.y + 8 < live;
+    slot[i][0] = row + tm + 16 * i + home.y;
+    slot[i][1] = slot[i][0] + 8;
+  }
+  frag<float> acc[TM][2];
+  if (XMAP) {
+    const device T* xr[TM][2];
+    TF_UNROLL
+    for (short i = 0; i < TM; i++) {
+      TF_UNROLL
+      for (short h = 0; h < 2; h++) {
+        xr[i][h] = x + (slot[i][h] < M ? long(map[slot[i][h]] / uint(P[4])) * K : 0);
+      }
+    }
+    qmm_k_loop_rows<T, TM>(acc, xr, lo, hi, K, live, inside, wq, sc, bi, tile, tn, uint(t), home);
+    qmm_store<T, TM>(acc, y + long(row + tm) * N + col + tn, N, live, home);
+  } else {
+    qmm_k_loop<T, TM>(acc, x + long(row + tm) * K, K, live, inside, wq, sc, bi, tile, tn, uint(t), home);
+    TF_UNROLL
+    for (short i = 0; i < TM; i++) {
+      device T* y0 = y + (lo[i] ? long(map[slot[i][0]]) * N : 0) + col + tn;
+      device T* y1 = y + (hi[i] ? long(map[slot[i][1]]) * N : 0) + col + tn;
+      TF_UNROLL
+      for (short j = 0; j < 2; j++) {
+        frag_put_rows(acc[i][j], y0, y1, 16 * j, home, lo[i], hi[i]);
+      }
+    }
+  }
+}
+
 // One K partition of x W^T on a 32x32 block (affine_qmm_t_splitk): fp32 8x8 MMAs, sums to bf16. P: K N M part stride.
 template <typename T>
 inline void qmm_splitk_part(const device uint32_t* w, const device T* scales, const device T* biases,
@@ -284,6 +394,39 @@ inline void qmm_splitk_sum(const device T* parts, device T* y, const device int*
   threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
   tfp::gather_qmm_rhs_nax<bfloat16_t, 64>(X, W, S, B, O, Y, P, tile, threadgroup_position_in_grid, simdgroup_index_in_threadgroup, thread_index_in_simdgroup);
 
+}
+// The gathers through the pair order: xmap reads token rows x[order / k], ymap writes rows back in pair order.
+[[kernel]] void tf_gather_qmm_xmap_32(const device bfloat16_t* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+    const device bfloat16_t* S [[buffer(2)]], const device bfloat16_t* B [[buffer(3)]],
+    const device int32_t* O [[buffer(4)]], const device uint32_t* MAP [[buffer(5)]], const device int32_t* P [[buffer(6)]],
+    device bfloat16_t* Y [[buffer(7)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
+  tfp::gather_qmm_rhs_nax_map<bfloat16_t, 32, true>(X, W, S, B, O, MAP, Y, P, tile, tg, sg, lane);
+}
+[[kernel]] void tf_gather_qmm_xmap_64(const device bfloat16_t* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+    const device bfloat16_t* S [[buffer(2)]], const device bfloat16_t* B [[buffer(3)]],
+    const device int32_t* O [[buffer(4)]], const device uint32_t* MAP [[buffer(5)]], const device int32_t* P [[buffer(6)]],
+    device bfloat16_t* Y [[buffer(7)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
+  tfp::gather_qmm_rhs_nax_map<bfloat16_t, 64, true>(X, W, S, B, O, MAP, Y, P, tile, tg, sg, lane);
+}
+[[kernel]] void tf_gather_qmm_ymap_32(const device bfloat16_t* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+    const device bfloat16_t* S [[buffer(2)]], const device bfloat16_t* B [[buffer(3)]],
+    const device int32_t* O [[buffer(4)]], const device uint32_t* MAP [[buffer(5)]], const device int32_t* P [[buffer(6)]],
+    device bfloat16_t* Y [[buffer(7)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
+  tfp::gather_qmm_rhs_nax_map<bfloat16_t, 32, false>(X, W, S, B, O, MAP, Y, P, tile, tg, sg, lane);
+}
+[[kernel]] void tf_gather_qmm_ymap_64(const device bfloat16_t* X [[buffer(0)]], const device uint32_t* W [[buffer(1)]],
+    const device bfloat16_t* S [[buffer(2)]], const device bfloat16_t* B [[buffer(3)]],
+    const device int32_t* O [[buffer(4)]], const device uint32_t* MAP [[buffer(5)]], const device int32_t* P [[buffer(6)]],
+    device bfloat16_t* Y [[buffer(7)]], uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
+  threadgroup bfloat16_t tile[64 * (64 + 16 / sizeof(bfloat16_t))];
+  tfp::gather_qmm_rhs_nax_map<bfloat16_t, 64, false>(X, W, S, B, O, MAP, Y, P, tile, tg, sg, lane);
 }
 [[kernel]] void custom_kernel_tf_qmm_splitk_part_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t_int32_t_bfloat16_t(
   const device uint32_t* W [[buffer(0)]],

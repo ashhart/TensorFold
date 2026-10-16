@@ -11,6 +11,7 @@ const log = @import("log.zig");
 const request_log = @import("request_log.zig");
 const sse = @import("sse.zig");
 const warm = @import("warm.zig");
+const cortheon = @import("cortheon/cortheon.zig");
 const Server = @import("server.zig").Server;
 const Value = json.Value;
 const Cx = errors.Cx;
@@ -35,6 +36,8 @@ pub const Run = struct {
     created: i64,
     streamed_prose: bool = false,
     prose_sent: std.ArrayList(u8) = .empty, // the content a tool stream sent
+    text_offset: usize = 0, // characters a completion stream's logprob rows have covered
+    turn: ?*cortheon.Turn = null, // --cortheon's work on this request
 
     fn chunk(r: *Run, delta: ?Value, finish: ?[]const u8) Allocator.Error!Value {
         const a = r.a;
@@ -48,11 +51,15 @@ pub const Run = struct {
         if (r.is_chat) {
             const d: Value = if (delta) |v| (if (v == .object) v else if (v.string.len > 0) try chat.deltaOf(a, "content", v.string) else .{ .object = try json.newObject(a) }) else .{ .object = try json.newObject(a) };
             try choice.put(a, "delta", d);
+            // a content delta's rows (logprobs.Stream) are the choice's, as OpenAI streams them
+            if (d == .object) if (d.object.fetchOrderedRemove("logprobs")) |kv| try choice.put(a, "logprobs", kv.value);
             try choice.put(a, "finish_reason", if (finish) |f| .{ .string = f } else .null);
         } else {
-            try choice.put(a, "text", delta orelse .{ .string = "" });
+            const d = delta orelse Value{ .string = "" };
+            const rows = if (d == .object) d.object.get("logprobs") else null;
+            try choice.put(a, "text", if (d == .object) d.object.get("content") orelse .{ .string = "" } else d);
             try choice.put(a, "finish_reason", if (finish) |f| .{ .string = f } else .null);
-            try choice.put(a, "logprobs", .null);
+            try choice.put(a, "logprobs", if (rows) |v| try @import("logprobs.zig").legacy(a, v, &r.text_offset) else .null);
         }
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
@@ -85,6 +92,7 @@ pub const Run = struct {
         if (reply.stop_sequence) |s| try o.put(r.a, "stop_sequence", .{ .string = s });
         try o.put(r.a, "tensorfold", reply.runtime);
         try o.put(r.a, "speculative", reply.speculative);
+        if (r.turn) |t| try o.put(r.a, "cortheon", try t.summary(r.a));
     }
 
     /// ``ToolCallPolicy.finish``: the reply's calls parsed out of its content.
@@ -93,8 +101,8 @@ pub const Run = struct {
         const tools = r.plan.input.tools;
         if (tools.len == 0) return null;
         const parsed = try tool_parse.parse(r.a, reply.content, tools, r.plan.policy.maxCalls());
-        const calls = parsed.calls orelse {
-            if (r.plan.policy.single) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
+        const calls = (if (r.turn != null) cortheon.clientCalls(parsed.calls) else parsed.calls) orelse {
+            if (r.plan.policy.single or parsed.calls != null) reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
             return null;
         };
         reply.content = try r.plan.policy.parsedContent(r.a, parsed.content);
@@ -127,7 +135,8 @@ pub const Run = struct {
     /// A context-window refusal on a stream: the role chunk when there are no tools, then the error event and [DONE].
     fn streamedContext(r: *Run, cx: *const Cx, tools: bool, field: []const u8) void {
         const a = r.a;
-        r.out.vt.open(r.out.ctx) catch return;
+        // a context-window refusal: the head opens with no prompt behind it, so it carries no count
+        r.out.vt.open(r.out.ctx, 0) catch return;
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
         logRefused(r.id, cx.message);
         const body = errorBody(a, cx, field) catch return;
@@ -138,7 +147,7 @@ pub const Run = struct {
     pub fn whole(r: *Run, gone: Gone, field: []const u8) void {
         const a = r.a;
         var cx: Cx = .{ .a = a };
-        var reply = chat.run(r.srv, &cx, r.plan.input, null, gone) catch |e| return r.unsent(&cx, e, field);
+        var reply = (if (r.turn) |t| cortheon.loop.whole(t, r.srv, &cx, &r.plan.input, gone) else chat.run(r.srv, &cx, r.plan.input, null, gone)) catch |e| return r.unsent(&cx, e, field);
         const calls = r.attachCalls(&reply) catch return;
         const o = json.newObject(a) catch return;
         r.wholeBody(o, &reply, calls) catch return;
@@ -151,9 +160,10 @@ pub const Run = struct {
         if (!r.is_chat) return;
         const message = json.newObject(r.a) catch return;
         message.put(r.a, "role", .{ .string = "assistant" }) catch return;
-        message.put(r.a, "content", if (calls != null) .null else .{ .string = reply.content }) catch return;
+        message.put(r.a, "content", if (calls != null and reply.content.len == 0) .null else .{ .string = reply.content }) catch return;
         if (calls) |c| message.put(r.a, "tool_calls", .{ .array = c }) catch return;
-        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort);
+        if (r.turn) |t| t.remember(r.a, r.plan.input, .{ .object = message });
+        warm.reply(r.srv, r.plan.input, .{ .object = message }, reply.thinking, reply.effort, reply.prompt_tokens);
     }
 
     fn wholeBody(r: *Run, o: *json.Object, reply: *const chat.Reply, calls: ?[]Value) Allocator.Error!void {
@@ -167,8 +177,9 @@ pub const Run = struct {
         if (r.is_chat) {
             const message = try json.newObject(a);
             try message.put(a, "role", .{ .string = "assistant" });
-            const empty_null = r.srv.family != null and reply.content.len == 0; // a family's reply: ``content or None``
-            try message.put(a, "content", if (calls != null or empty_null) .null else .{ .string = reply.content });
+            // a family's reply: ``content or None`` and no prose beside calls; the template path keeps a call's prose
+            const no_content = if (r.srv.family != null) calls != null or reply.content.len == 0 else calls != null and reply.content.len == 0;
+            try message.put(a, "content", if (no_content) .null else .{ .string = reply.content });
             if (reply.reasoning) |t| if (t.len > 0) {
                 if (r.srv.family) |fam| {
                     const d = try fam.reasoningDelta(a, t);
@@ -182,7 +193,9 @@ pub const Run = struct {
         } else {
             try choice.put(a, "text", .{ .string = reply.content });
             try choice.put(a, "finish_reason", .{ .string = reply.finish_reason });
-            try choice.put(a, "logprobs", .null);
+            var from: usize = 0;
+            try choice.put(a, "logprobs", if (reply.logprobs) |lp| try @import("logprobs.zig").legacy(a, lp, &from) else .null);
+            if (reply.prompt_logprobs) |p| try choice.put(a, "prompt_logprobs", p);
         }
         const list = try a.alloc(Value, 1);
         list[0] = .{ .object = choice };
@@ -199,7 +212,8 @@ pub const Run = struct {
             const s: *StreamSink = @ptrCast(@alignCast(ctx));
             const r = s.run;
             if (!s.tools) {
-                if (!r.is_chat and delta != .string) return; // completions stream text only
+                // completions stream text only, with its logprob rows when asked
+                if (!r.is_chat and delta != .string and (delta != .object or delta.object.get("content") == null)) return;
                 return r.emit(r.chunk(delta, null) catch return error.Closed);
             }
             const filtered = r.policyDelta(delta) catch return error.Closed;
@@ -262,14 +276,15 @@ pub const Run = struct {
         };
         var handed = false; // generate gives the preparing count back from here on
         defer if (!handed) chat.release(r.srv, prepared.preparing);
-        r.out.vt.open(r.out.ctx) catch return;
+        r.out.vt.open(r.out.ctx, prepared.prompt_len) catch return;
         if (!tools and r.is_chat) r.emit(r.chunk(roleDelta(a) catch return, null) catch return) catch return;
         var sink_state: StreamSink = .{ .run = r, .tools = tools };
         handed = true;
         var live = gone;
         live.out = r.out;
         live.every_ns = @intFromFloat(r.srv.config.sse_keepalive_s * std.time.ns_per_s);
-        var reply = chat.generate(r.srv, &cx, prepared, .{ .ctx = &sink_state, .call = StreamSink.call }, live) catch |e| {
+        const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call };
+        var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, live) else chat.generate(r.srv, &cx, prepared, sink, live)) catch |e| {
             switch (e) {
                 error.Cancelled => return,
                 error.Refused => if (cx.kind != .other and cx.kind != .server) {

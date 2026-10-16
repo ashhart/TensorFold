@@ -82,7 +82,7 @@ const Backend = struct {
         return null;
     }
 
-    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 {
+    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, _: bool) error{Failed}!f64 {
         const b: *@This() = @ptrCast(@alignCast(ctx));
         b.calls += 1;
         b.prompt_len = prompt.len;

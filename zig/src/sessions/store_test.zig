@@ -253,3 +253,28 @@ test "historyOf: a RAM entry's ids come from the index, an NVMe entry's only fro
     try testing.expectError(error.NotTheEntry, r.store.historyOf(parked.id, edited, &out));
     try testing.expectError(error.BadLength, r.store.historyOf(parked.id, a[0 .. n - 1], &out));
 }
+
+test "zero chat or byte budgets evict idle residency while null remains unlimited" {
+    const gpa = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try tmpRoot(gpa, &tmp, "zero-budget");
+    defer gpa.free(root);
+    var r: Rank = undefined;
+    try r.init(gpa, root, 1, 0, .{});
+    defer r.deinit();
+    const slot = try r.pool.newSlot(64 * page);
+    const ids = try chatIds(gpa, 1, 5 * page);
+    defer gpa.free(ids);
+    _ = try turn(gpa, &r, slot, 1, ids);
+    try testing.expectEqual(@as(u32, 1), r.store.resident().chats);
+    r.store.policy.chats = 0;
+    try testing.expectEqual(@as(u32, 1), try r.store.enforce());
+    try testing.expectEqual(@as(u32, 0), r.store.resident().chats);
+    r.store.policy.chats = null;
+    _ = try turn(gpa, &r, slot, 1, ids);
+    try testing.expect(r.store.resident().bytes > 0);
+    r.store.policy.resident_bytes = 0;
+    try testing.expectEqual(@as(u32, 1), try r.store.enforce());
+    try testing.expectEqual(@as(u64, 0), r.store.resident().bytes);
+}

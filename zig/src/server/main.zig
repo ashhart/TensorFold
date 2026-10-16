@@ -8,15 +8,38 @@ const engines = @import("engines.zig");
 const serve = @import("serve.zig");
 const hf_text = @import("hf_text.zig");
 const startup = @import("startup.zig");
+const slide_cli = @import("slide_cli.zig");
+const slide_key = @import("slide_key.zig");
+const api = @import("engine_api");
+const recall_open = @import("recall_open.zig");
+const benchmark = @import("benchmark.zig");
 const deepseek = @import("deepseek.zig");
 const model_text = @import("model_text.zig");
 const family_mod = @import("family.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
-const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE] [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard] [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB] [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB] [--max-tokens MAX_TOKENS] [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}] [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER] [--drafter-bits {0,4}] [--keep-warm SECONDS] [--compact-at COMPACT_AT] [--compact-keep COMPACT_KEEP] [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE] [--segments SEGMENTS] model\n";
+const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
+    " [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
+    " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
+    " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
+    " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
+    " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P]" ++
+    " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
+    " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++
+    " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
+    " [--compact-keep COMPACT_KEEP]" ++
+    " [--compact-memory COMPACT_MEMORY] [--slide] [--slide-graph SLIDE_GRAPH] [--parallel PARALLEL]" ++
+    " [--cortheon] [--no-update-check] [--backend {auto,mlx,cuda}] [--device DEVICE]" ++
+    " [--segments SEGMENTS] model\n";
+const not_lanes = "--recall drafts from a record in the lane engine's rounds, " ++
+    "which this model's engine does not run: serve it without --recall, --recall-dir, " ++
+    "--recall-gib or --recall-read-only";
 
 /// The flags past the common ones this binary's backend serves; cli.zig reads them from the root.
 pub const serves = engines.serves;
+
+pub const std_options = engines.std_options;
 
 pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
@@ -29,7 +52,7 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
     if (argv.len == 2 and (std.mem.eql(u8, argv[1], "--help") or std.mem.eql(u8, argv[1], "-h"))) {
-        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | serve MODEL [flags]\n" ++ usage_line);
+        try std.Io.File.stdout().writeStreamingAll(io, "usage: tensorfold-native --version | capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n" ++ usage_line);
         return 0;
     }
     if (argv.len >= 3 and std.mem.eql(u8, argv[1], "serve")) {
@@ -40,6 +63,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
     // the checkpoint commands need no model, GPU or driver either
     if (argv.len >= 2 and checkpoint_cli.wants(@ptrCast(argv[1..]))) return checkpoint_cli.main(init, argv[1..]);
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "slide")) return slide_cli.main(init, argv[2..]);
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);
@@ -47,8 +71,9 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
     }
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "benchmark")) return benchmark.main(init, argv[2..], engines.capabilities(a));
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
-        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | serve MODEL [flags]\n", .{});
+        std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
         return 2;
     }
     const started = std.Io.Clock.awake.now(io).toNanoseconds();
@@ -60,11 +85,23 @@ pub fn main(init: std.process.Init) !u8 {
         },
         else => |x| return x,
     };
+    if (try slide_key.slideKeyless(a, args, init.environ_map.get("TENSORFOLD_API_KEY") orelse "")) |why| {
+        std.debug.print("tensorfold: {s}\n", .{why});
+        return 2;
+    }
     var problem: []const u8 = "";
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
     const model_type = modelType(a, io, dir);
+    // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
+    var unheld: []const u8 = "";
+    const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
+        error.OutOfMemory => |x| return x,
+        else => return fail(unheld),
+    };
+    defer if (held) |h| h.release();
+    if (held == null) log.line("{s}", .{unheld});
     if (args.rank > 0) { // a rank above 0 serves no HTTP and loads no text: it runs rank 0's steps
         if (!try engines.follow(a, gpa, io, dir, model_type, args, &problem)) return fail(problem);
         return 0;
@@ -78,18 +115,32 @@ pub fn main(init: std.process.Init) !u8 {
         return e;
     } orelse return fail(problem);
     defer up.text.deinit();
+    var record: ?*@import("engine_api").recall_store.Store = null;
+    defer if (record) |r| r.close(); // after the engine below has stopped reading it
     var closer: Closer = .{ .opened = up.engine };
     defer closer.closeOnce();
+    const served = hub.servedName(args.name, args.model, dir);
+    problem = "";
+    record = switch (up.text) {
+        .hf => |h| recall_open.open(gpa, io, a, args, h, served, &problem),
+        .ds => if (args.recall) return fail("--recall reads the checkpoint's chat template text; DeepSeek-V4.1 serves its own encoding") else null,
+    } catch |e| {
+        return if (problem.len > 0) fail(problem) else e;
+    };
+    if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
-        .stop = .{ .ctx = &closer, .halt = if (up.engine.halt != null) Closer.halt else null, .close = Closer.close },
+        .stop = .{ .ctx = &closer, .close = Closer.close },
         .engine = up.engine.engine,
         .text = up.text.text(),
         .family = up.text.family(),
-        .served = hub.servedName(args.name, args.model, dir),
+        .served = served,
+        .recall = record,
         .model_dir = dir,
         .sampling = try sampling(a, io, dir, args),
         .environ = init.environ_map,
         .started = started,
+        .identity = engines.identity(a, args),
+        .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
     });
 }
 
@@ -107,12 +158,13 @@ const Closer = struct {
     fn close(ctx: *anyopaque) void {
         closeOnce(@ptrCast(@alignCast(ctx)));
     }
-
-    fn halt(ctx: *anyopaque, reason: []const u8) void {
-        const c: *Closer = @ptrCast(@alignCast(ctx));
-        if (c.opened.halt) |h| h(c.opened.ctx, reason);
-    }
 };
+
+/// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
+fn forgetFail(env: *const std.process.Environ.Map) u32 {
+    const v = env.get("TF_SLIDE_FORGET_FAIL") orelse return 0;
+    return std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch 0;
+}
 
 /// The served text: a family's own (deepseek.zig), else the checkpoint's chat template (hf_text.zig).
 const Text = union(enum) {
@@ -152,7 +204,7 @@ fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []c
 fn textOf(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []const u8, template: ?[]const u8, env: ?*const std.process.Environ.Map, pa: std.mem.Allocator, problem: *[]const u8) !Text {
     if (std.mem.eql(u8, model_type, deepseek.model_type)) {
         const options = try deepseek.Options.fromEnv(env, problem);
-        return .{ .ds = try deepseek.DeepSeek.load(gpa, io, dir, options, problem) };
+        return .{ .ds = try deepseek.DeepSeek.load(gpa, io, dir, options, pa, problem) };
     }
     return .{ .hf = try hf_text.HfText.load(gpa, io, dir, template, pa, problem) };
 }
