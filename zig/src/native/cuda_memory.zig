@@ -1,5 +1,6 @@
 //! CUDA memory admission arithmetic, and the host pool read from /proc/meminfo and validated, without a device.
 const std = @import("std");
+const cuda = @import("cuda");
 const gib: f64 = 1 << 30;
 
 /// What /proc/meminfo says: MemTotal and MemAvailable in bytes (the page cache counts as available).
@@ -106,6 +107,29 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
 pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryUnavailable}!MemInfo {
     if (unified) return meminfo(text orelse return error.HostMemoryUnavailable) orelse error.HostMemoryUnavailable;
     return card;
+}
+
+/// Shared native-engine admission; the context must be current. Invalid environment settings fail closed.
+pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
+    const unified = (try ctx.attribute(.integrated)) != 0;
+    const card = try ctx.memInfo();
+    const text = if (unified) procText(a, io, "/proc/meminfo") else null;
+    defer if (text) |bytes| a.free(bytes);
+    const available = counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
+        return null;
+    };
+    const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
+    const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
+    const reserve = reserveBytes(reserve_text, available.total, unified) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ reserve_text orelse "", floor(unified).least });
+        return null;
+    };
+    const limit = limitBytes(limit_text) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{limit_text orelse ""});
+        return null;
+    };
+    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified };
 }
 
 test "the memory plan: reserve, cap, and admission that fails closed" {
