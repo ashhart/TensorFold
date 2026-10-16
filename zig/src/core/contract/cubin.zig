@@ -118,6 +118,21 @@ pub fn kernels(a: std.mem.Allocator, elf: []const u8, sm: u32) ![]Kernel {
     return out.toOwnedSlice(a);
 }
 
+/// The nvcc release that built an image, from its .note.nv.tkinfo ("release 13.2"); null when it names none.
+pub fn release(a: std.mem.Allocator, elf: []const u8) !?limits.Nvcc {
+    const all = try sections(a, elf);
+    defer a.free(all);
+    for (all) |s| if (std.mem.eql(u8, s.name, ".note.nv.tkinfo") and s.kind != sht_nobits) {
+        const text = try contents(elf, s);
+        const at = std.mem.indexOf(u8, text, "release ") orelse continue;
+        var parts = std.mem.splitAny(u8, text[at + "release ".len ..], ".,");
+        const major = std.fmt.parseInt(u32, parts.next() orelse continue, 10) catch continue;
+        const minor = std.fmt.parseInt(u32, parts.next() orelse continue, 10) catch continue;
+        return .{ .major = major, .minor = minor };
+    };
+    return null;
+}
+
 /// The value a global .nv.info record of `attr` keeps for symbol `sym` (EIATTR_REGCOUNT's symbol, count).
 fn record(info: []const u8, attr: u8, sym: u32) !?u32 {
     var at: usize = 0;
@@ -213,6 +228,46 @@ test "a cubin's registers, static shared bytes and launch bounds" {
         }
     }
     try std.testing.expectError(error.NotAFatbin, images(a, "not a fatbin"));
+}
+
+/// A tiny ELF64 whose only data section is a .note.nv.tkinfo holding `text`.
+fn noted(a: std.mem.Allocator, text: []const u8) ![]u8 {
+    const names = "\x00.shstrtab\x00.note.nv.tkinfo\x00";
+    const data_at = 64;
+    const note_at = data_at + names.len;
+    const shoff = std.mem.alignForward(usize, note_at + text.len, 8);
+    const out = try a.alloc(u8, shoff + 3 * 64);
+    @memset(out, 0);
+    @memcpy(out[0..4], "\x7fELF");
+    out[4] = 2;
+    std.mem.writeInt(u64, out[0x28..0x30], shoff, .little);
+    std.mem.writeInt(u16, out[0x3a..0x3c], 64, .little);
+    std.mem.writeInt(u16, out[0x3c..0x3e], 3, .little);
+    std.mem.writeInt(u16, out[0x3e..0x40], 1, .little);
+    @memcpy(out[data_at..][0..names.len], names);
+    @memcpy(out[note_at..][0..text.len], text);
+    const rows = [_][4]u64{ .{ 0, 0, 0, 0 }, .{ 1, 3, data_at, names.len }, .{ 11, 7, note_at, text.len } };
+    for (rows, 0..) |r, i| {
+        const h = shoff + 64 * i;
+        std.mem.writeInt(u32, out[h..][0..4], @intCast(r[0]), .little);
+        std.mem.writeInt(u32, out[h + 4 ..][0..4], @intCast(r[1]), .little);
+        std.mem.writeInt(u64, out[h + 24 ..][0..8], r[2], .little);
+        std.mem.writeInt(u64, out[h + 32 ..][0..8], r[3], .little);
+    }
+    return out;
+}
+
+test "the nvcc release an image's .note.nv.tkinfo names, and none without one" {
+    const a = std.testing.allocator;
+    const built = try noted(a, "\x00ptxas\x00Cuda compilation tools, release 13.2, V13.2.78\x00Build cuda_13.2.r13.2\x00");
+    defer a.free(built);
+    try std.testing.expectEqual(@as(?limits.Nvcc, .{ .major = 13, .minor = 2 }), try release(a, built));
+    const odd = try noted(a, "Cuda compilation tools, release thirteen");
+    defer a.free(odd);
+    try std.testing.expectEqual(@as(?limits.Nvcc, null), try release(a, odd));
+    const bare = try synthetic(a, 143, 1060, 256, true);
+    defer a.free(bare);
+    try std.testing.expectEqual(@as(?limits.Nvcc, null), try release(a, bare));
 }
 
 test "a fatbin entry whose header ends before its flags is refused, not read past" {

@@ -20,20 +20,20 @@ const full72_symbol = "_ZN20tf_prefill_attention11full_kernelILi72ELi8ELi8EEEvPK
 /// CUDA kernels as launched; tf-cuda-test kernel-contract-limits re-derives the usage records.
 pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "norms tf_rms_rows_bf16", .symbol = "tf_rms_rows_bf16", .image = "norms", .threads = 256 }, .usage = .{ .{ .regs = 79, .static = 32, .bound = 256 }, .{ .regs = 79, .static = 32, .bound = 256 }, .{ .regs = 79, .static = 32, .bound = 256 }, .{ .regs = 80, .static = 32, .bound = 256 }, .{ .regs = 80, .static = 32, .bound = 256 } } },
-    .{ .launch = .{ .name = "norms tf_rms_rows", .symbol = "tf_rms_rows", .image = "norms", .threads = 1024 }, .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 } } },
+    .{ .launch = .{ .name = "norms tf_rms_rows", .symbol = "tf_rms_rows", .image = "norms", .threads = 1024 }, .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 45, .static = 132, .bound = 1024 }, .{ .regs = 45, .static = 132, .bound = 1024 } } },
     .{ .launch = .{ .name = "router tf_nemo_router", .symbol = "tf_nemo_router", .image = "nemotron_route", .threads = 256, .dynamic = 28800 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
-    .{ .launch = .{ .name = "router tf_nemo_topk", .symbol = "tf_nemo_topk", .image = "nemotron_route", .threads = 32 }, .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
+    .{ .launch = .{ .name = "router tf_nemo_topk", .symbol = "tf_nemo_topk", .image = "nemotron_route", .threads = 32 }, .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 91, .static = 0, .bound = 32 }, .{ .regs = 91, .static = 0, .bound = 32 } } },
     .{ .launch = .{ .name = "qmm_group cluster of 8", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmm_group one CTA a tile", .symbol = group_symbol, .image = "qmm_group", .threads = 128, .dynamic = 35328 }, .usage = .{ .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 54, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
-    .{ .launch = .{ .name = "lane_gemv", .symbol = gemv_symbol, .image = "lane_gemv", .threads = 128, .dynamic = 35328 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 } } },
-    .{ .launch = .{ .name = "lane_gemv split-K", .symbol = "tf_lane_gemv_split", .image = "lane_gemv", .threads = 128, .dynamic = 17664 }, .usage = .{ .{ .regs = 62, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 } } },
+    .{ .launch = .{ .name = "lane_gemv", .symbol = gemv_symbol, .image = "lane_gemv", .threads = 128, .dynamic = 35328 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 57, .static = 0, .bound = 128 }, .{ .regs = 57, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "lane_gemv split-K", .symbol = "tf_lane_gemv_split", .image = "lane_gemv", .threads = 128, .dynamic = 17664 }, .usage = .{ .{ .regs = 62, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 44, .static = 128, .bound = 128 }, .{ .regs = 44, .static = 128, .bound = 128 } } },
     .{ .launch = .{ .name = "prompt16 FP4", .symbol = std.fmt.comptimePrint(prompt_symbol, .{ 0, 0 }), .image = "prompt16", .threads = 128, .dynamic = 41984 }, .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 } } },
-    .{ .launch = .{ .name = "prompt16 FP8", .symbol = std.fmt.comptimePrint(prompt_symbol, .{ 1, 0 }), .image = "prompt16", .threads = 128, .dynamic = 49152 }, .usage = .{ .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "prompt16 FP8", .symbol = std.fmt.comptimePrint(prompt_symbol, .{ 1, 0 }), .image = "prompt16", .threads = 128, .dynamic = 49152 }, .usage = .{ .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 218, .static = 0, .bound = 128 }, .{ .regs = 218, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "prompt16 FP4 fp32 out", .symbol = std.fmt.comptimePrint(prompt_symbol, .{ 0, 1 }), .image = "prompt16", .threads = 128, .dynamic = 41984 }, .usage = .{ .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 255, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out 16-row tile", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 16, 0, 0 }), .image = "qmmf", .threads = 128, .dynamic = 17408 }, .usage = .{ .{ .regs = 88, .static = 0, .bound = 128 }, .{ .regs = 88, .static = 0, .bound = 128 }, .{ .regs = 96, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 }, .{ .regs = 56, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out 16-row tile, cluster of 8", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 16, 1, 0 }), .image = "qmmf", .threads = 128, .dynamic = 17408, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 }, .{ .regs = 48, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out 32-row tile", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 32, 0, 0 }), .image = "qmmf", .threads = 128, .dynamic = 25600 }, .usage = .{ .{ .regs = 106, .static = 0, .bound = 128 }, .{ .regs = 106, .static = 0, .bound = 128 }, .{ .regs = 128, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 } } },
-    .{ .launch = .{ .name = "qmmf FP4 fp32 out 32-row tile, cluster of 8", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 32, 1, 0 }), .image = "qmmf", .threads = 128, .dynamic = 25600, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 80, .static = 0, .bound = 128 }, .{ .regs = 61, .static = 0, .bound = 128 }, .{ .regs = 61, .static = 0, .bound = 128 } } },
+    .{ .launch = .{ .name = "qmmf FP4 fp32 out 32-row tile, cluster of 8", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 32, 1, 0 }), .image = "qmmf", .threads = 128, .dynamic = 25600, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 80, .static = 0, .bound = 128 }, .{ .regs = 63, .static = 0, .bound = 128 }, .{ .regs = 63, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out 64-row tile", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 64, 0, 0 }), .image = "qmmf", .threads = 128, .dynamic = 41984 }, .usage = .{ .{ .regs = 148, .static = 0, .bound = 128 }, .{ .regs = 148, .static = 0, .bound = 128 }, .{ .regs = 180, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out 64-row tile, cluster of 8", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 64, 1, 0 }), .image = "qmmf", .threads = 128, .dynamic = 41984, .cluster = 8, .min_sm = 90 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 72, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 }, .{ .regs = 78, .static = 0, .bound = 128 } } },
     .{ .launch = .{ .name = "qmmf FP4 fp32 out fused slices", .symbol = std.fmt.comptimePrint(qmmf_f32_symbol, .{ 64, 0, 1 }), .image = "qmmf", .threads = 128, .dynamic = 41984 }, .usage = .{ .{ .regs = 182, .static = 0, .bound = 128 }, .{ .regs = 182, .static = 0, .bound = 128 }, .{ .regs = 228, .static = 0, .bound = 128 }, .{ .regs = 168, .static = 0, .bound = 128 }, .{ .regs = 168, .static = 0, .bound = 128 } } },
@@ -46,6 +46,57 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "vit tf_vit_bias", .symbol = "tf_vit_bias", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "vit tf_vit_unshuffle", .symbol = "tf_vit_unshuffle", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 29, .static = 0, .bound = 256 }, .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 }, .{ .regs = 34, .static = 0, .bound = 256 } } },
 };
+
+/// The nvcc release `cuda`'s usage records come from: the compiler that builds the release fatbins.
+pub const cuda_release: limits.Nvcc = .{ .major = 13, .minor = 0 };
+
+/// One launch's usage under a later nvcc, by the record's name.
+pub const Override = struct { name: []const u8, usage: [limits.sms.len]U };
+
+/// A later nvcc's records: the launches it compiles differently from the release before it.
+pub const CudaSet = struct { release: limits.Nvcc, usage: []const Override };
+
+/// The later releases' sets, rising by release; a tree's images are checked against the newest at or below their own.
+pub const cuda_sets = [_]CudaSet{
+    .{ .release = .{ .major = 13, .minor = 2 }, .usage = &.{
+        .{ .name = "norms tf_rms_rows", .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 } } },
+        .{ .name = "lane_gemv", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 } } },
+        .{ .name = "lane_gemv split-K", .usage = .{ .{ .regs = 62, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 } } },
+        .{ .name = "prompt16 FP8", .usage = .{ .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 243, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 }, .{ .regs = 212, .static = 0, .bound = 128 } } },
+        .{ .name = "qmmf FP4 fp32 out 32-row tile, cluster of 8", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 80, .static = 0, .bound = 128 }, .{ .regs = 61, .static = 0, .bound = 128 }, .{ .regs = 61, .static = 0, .bound = 128 } } },
+    } },
+    .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
+        .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
+    } },
+};
+
+fn newer(x: limits.Nvcc, y: limits.Nvcc) bool {
+    return x.major > y.major or (x.major == y.major and x.minor > y.minor);
+}
+
+/// The release whose records a compiler's images are checked against: the newest set at or below it, else cuda's.
+pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
+    var at = cuda_release;
+    const rel = release orelse return at;
+    for (cuda_sets) |s| {
+        if (newer(s.release, rel)) break;
+        at = s.release;
+    }
+    return at;
+}
+
+/// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
+pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
+    var u = r.usage;
+    const rel = release orelse return u;
+    for (cuda_sets) |s| {
+        if (newer(s.release, rel)) break;
+        for (s.usage) |o| if (std.mem.eql(u8, o.name, r.launch.name)) {
+            u = o.usage;
+        };
+    }
+    return u;
+}
 
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
@@ -173,4 +224,43 @@ test "the registered launches fit every Apple family and every SM, and each plan
     for (metal_controls) |l| try std.testing.expect(try checkMetal(a, &.{l}, true) > 0);
     try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &cuda, false));
     for (cuda_controls) |r| try std.testing.expect(try checkCuda(a, &.{r}, true) > 0);
+}
+
+fn named(name: []const u8) ?CudaRecord {
+    for (cuda) |r| if (std.mem.eql(u8, r.launch.name, name)) return r;
+    return null;
+}
+
+test "each later nvcc's set rises by release and names registered launches that fit every SM" {
+    const a = std.testing.allocator;
+    var below = cuda_release;
+    for (cuda_sets) |s| {
+        try std.testing.expect(newer(s.release, below));
+        below = s.release;
+        for (s.usage) |o| {
+            var r = named(o.name) orelse return error.UnregisteredOverride;
+            r.usage = o.usage;
+            try std.testing.expectEqual(@as(usize, 0), try checkCuda(a, &.{r}, false));
+        }
+    }
+}
+
+test "a compiler's records: its own set, else the newest below it, else 13.0's" {
+    const topk = named("router tf_nemo_topk").?;
+    const rms = named("norms tf_rms_rows").?;
+    const cases = [_]struct { ?limits.Nvcc, limits.Nvcc, u32, u32 }{
+        .{ null, .{ .major = 13, .minor = 0 }, 91, 45 },
+        .{ .{ .major = 12, .minor = 8 }, .{ .major = 13, .minor = 0 }, 91, 45 },
+        .{ .{ .major = 13, .minor = 0 }, .{ .major = 13, .minor = 0 }, 91, 45 },
+        .{ .{ .major = 13, .minor = 1 }, .{ .major = 13, .minor = 0 }, 91, 45 },
+        .{ .{ .major = 13, .minor = 2 }, .{ .major = 13, .minor = 2 }, 91, 43 },
+        .{ .{ .major = 13, .minor = 3 }, .{ .major = 13, .minor = 3 }, 96, 43 },
+        .{ .{ .major = 14, .minor = 0 }, .{ .major = 13, .minor = 3 }, 96, 43 },
+    };
+    for (cases) |c| {
+        try std.testing.expectEqual(c[1], setFor(c[0]));
+        try std.testing.expectEqual(c[2], usageFor(topk, c[0])[3].regs);
+        try std.testing.expectEqual(c[3], usageFor(rms, c[0])[4].regs);
+        try std.testing.expectEqual(topk.usage[0], usageFor(topk, c[0])[0]);
+    }
 }

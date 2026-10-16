@@ -73,7 +73,7 @@ TEXT, `--offline DIR` adds the M1/M2 compiles, and `--repro` prints the smallest
 On a CUDA machine, build with `-Dnvcc` (the controls are compiled only then), and run `zig build kernel-contract
 -Dnvcc=/usr/local/cuda/bin/nvcc`. For the limits of every SM, `zig build fatbins kernel-contract-fatbins -Dnvcc=...
 -Dsm=80,86,89,120,121`, then `tf-cuda-test kernel-contract-limits zig-out/fatbin`. Its `RECORD` lines are the values
-`registry.zig` holds.
+`registry.zig` holds for that build's nvcc (see [CUDA records per nvcc release](#cuda-records-per-nvcc-release)).
 
 Every run ends with a `SUMMARY` line: kernels passing gates 1 to 4, known findings, controls red, and limit problems.
 The program exits 1 on any failed gate, any control that stayed green, or any limit problem.
@@ -85,7 +85,7 @@ The program exits 1 on any failed gate, any control that stayed green, or any li
    and `reference` give the outputs and their float64 values, `simulate` replays the sums for gate 4.
 2. Add it to the runner's list, with its served shapes and tiles.
 3. Add its launches to `registry.zig`, and fill the records from `--offline` (Metal) or `kernel-contract-limits`
-   (CUDA).
+   (CUDA: nvcc 13.0's in `cuda`, and each later release's set where that release compiles it differently).
 4. Post the `SUMMARY` lines from each backend you ran in the pull request, and say which chips you could not run.
 
 A replacement kernel names the kernel it replaces and gives `replaced`, which runs that kernel on the same inputs.
@@ -109,6 +109,15 @@ tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile
 tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true>`), and the reduce-scatter's
 `tf_rank_sum`.
 
-## CUDA compiler resource baseline
+## CUDA records per nvcc release
 
-The registered usage arrays were re-derived with NVCC 13.3.73 (`cuda_13.3.r13.3/compiler.38244171_0`) for SM 80, 86, 89, 120 and 121. `kernel-contract-limits` reads each compiled image and reports its register count, static shared memory and thread bound. Source changes or a different compiler may change these values; re-derive the arrays and run the live audit rather than changing the audit tolerance. Launch dimensions, dynamic shared memory, device limits and planted controls remain independent checks. Only SM 120 was executed on hardware in this update; the other four records come from their compiled images, not hardware execution.
+nvcc allocates registers differently from one release to the next, so the CUDA records are kept per release.
+`registry.cuda` holds what nvcc 13.0 compiles, the compiler of the release fatbins. `registry.cuda_sets` lists what
+each later release compiles differently from the release before it: nvcc 13.2 changes five launches (`tf_rms_rows`,
+`lane_gemv` and its split-K form, prompt16's FP8 tile and qmmf's 32-row cluster tile), and nvcc 13.3 keeps 13.2's and
+changes `tf_nemo_topk` on sm_120 and sm_121. `kernel-contract` and `kernel-contract-limits` read the release from each
+image's `.note.nv.tkinfo`, check the image against the newest set at or below that release (13.0's when an image names
+none), and print which set they used. A release with no set of its own is checked against the one below it, so its
+differences show as stale records: re-derive them with `kernel-contract-limits` and add a set for that release rather
+than loosening the audit. Launch dimensions, dynamic shared memory, the device's limits and the planted controls are
+checked the same way under every release.

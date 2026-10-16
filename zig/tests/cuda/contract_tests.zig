@@ -128,9 +128,16 @@ fn live(gpu: check.Gpu) !usize {
         if (got != d[2]) n += 1;
         std.debug.print("{s} limits live sm_{d} {s}: the driver says {d}, the table {d}\n", .{ if (got == d[2]) "PASS" else "FAIL", sm, d[0], got, d[2] });
     }
+    var said: ?limits.Nvcc = null;
     for (registry.cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
-        var mod = try cuda.Module.load(gpu.d, image(r.launch.image));
+        const bytes = image(r.launch.image);
+        const rel = try built(gpu.gpa, bytes, sm);
+        const set = registry.setFor(rel);
+        if (said == null or !std.meta.eql(said.?, set)) records("live", rel, set);
+        said = set;
+        const want = registry.usageFor(r, rel)[at];
+        var mod = try cuda.Module.load(gpu.d, bytes);
         defer mod.unload();
         const sym = try gpu.gpa.dupeSentinel(u8, r.launch.symbol, 0);
         defer gpu.gpa.free(sym);
@@ -139,19 +146,37 @@ fn live(gpu: check.Gpu) !usize {
         const static: u32 = @intCast(try f.attribute(.shared_size_bytes));
         const most: u32 = @intCast(try f.attribute(.max_threads_per_block));
         const fits = r.launch.threads <= most and static + r.launch.dynamic <= t.smem_optin;
-        const current = r.usage[at].regs == regs and r.usage[at].static == static;
+        const current = want.regs == regs and want.static == static;
         if (!control and !(fits and current)) n += 1;
         if (control and fits) n += 1;
         const word = if (control) (if (fits) "MISSED" else "RED ") else if (fits and current) "PASS" else "FAIL";
-        std.debug.print("{s} limits live {s}: {d} threads launched, the driver allows {d}; {d} registers, {d} + {d} shared bytes (recorded {d}, {d})\n", .{ word, r.launch.name, r.launch.threads, most, regs, static, r.launch.dynamic, r.usage[at].regs, r.usage[at].static });
+        std.debug.print("{s} limits live {s}: {d} threads launched, the driver allows {d}; {d} registers, {d} + {d} shared bytes (recorded {d}, {d})\n", .{ word, r.launch.name, r.launch.threads, most, regs, static, r.launch.dynamic, want.regs, want.static });
     }
     return n;
+}
+
+/// The nvcc release that built a fatbin's image for `sm`, else any of its images (null: none names one).
+fn built(a: std.mem.Allocator, bytes: []const u8, sm: u32) !?limits.Nvcc {
+    const imgs = try contract.cubin.images(a, bytes);
+    defer a.free(imgs);
+    for (imgs) |im| if (im.sm == sm) return contract.cubin.release(a, im.elf);
+    for (imgs) |im| if (try contract.cubin.release(a, im.elf)) |rel| return rel;
+    return null;
+}
+
+/// Says which compiler's records an audit compares against, and why.
+fn records(what: []const u8, rel: ?limits.Nvcc, set: limits.Nvcc) void {
+    if (rel) |v| {
+        const own = std.meta.eql(v, set);
+        std.debug.print("INFO limits {s}: images built by nvcc {d}.{d}, checked against nvcc {d}.{d}'s records{s}\n", .{ what, v.major, v.minor, set.major, set.minor, if (own) "" else " (the newest set at or below it)" });
+    } else std.debug.print("INFO limits {s}: the images name no nvcc release; checked against nvcc {d}.{d}'s records\n", .{ what, set.major, set.minor });
 }
 
 /// tf-cuda-test kernel-contract-limits DIR: each record against the fatbins in DIR, every SM image they hold.
 pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
     const a = gpu.gpa;
     var n: usize = 0;
+    var said: ?limits.Nvcc = null;
     for (registry.cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         const path = try std.fmt.allocPrint(a, "{s}/{s}.fatbin", .{ dir, r.launch.image });
@@ -176,10 +201,14 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             const k = for (ks) |kv| {
                 if (std.mem.eql(u8, kv.name, r.launch.symbol)) break kv;
             } else return error.SymbolNotInImage;
+            const rel = try contract.cubin.release(a, img.elf);
+            const set = registry.setFor(rel);
+            if (said == null or !std.meta.eql(said.?, set)) records("fatbins", rel, set);
+            said = set;
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(a);
             red += try limits.cuda(r.launch, k.usage, t, &out, a);
-            const current = std.meta.eql(k.usage, r.usage[i]);
+            const current = std.meta.eql(k.usage, registry.usageFor(r, rel)[i]);
             if (!control and !current) n += 1;
             std.debug.print("{s} limits sm_{d} {s}: {d} registers, {d} static shared bytes, bound {d} (record {s}){s}", .{ if (out.items.len > 0) (if (control) "RED " else "FAIL") else "PASS", t.sm, r.launch.name, k.usage.regs, k.usage.static, k.usage.bound, if (current) "current" else "stale", if (out.items.len > 0) ": " else "\n" });
             if (out.items.len > 0) std.debug.print("{s}", .{out.items});
