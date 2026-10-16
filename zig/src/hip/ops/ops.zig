@@ -13,6 +13,7 @@ const elementwise = @import("elementwise.zig");
 const moe = @import("moe.zig");
 const draw = @import("draw.zig");
 const tp = @import("tp.zig");
+pub const mamba = @import("mamba.zig");
 
 pub const Kind = types.Kind;
 pub const Error = types.Error;
@@ -90,6 +91,11 @@ pub const Ops = struct {
     pub const moeLocalize = tp.moeLocalize;
     pub const moeForeignItems = tp.moeForeignItems;
     pub const moeZeroForeign = tp.moeZeroForeign;
+    pub const mambaConv = mamba.mambaConv;
+    pub const mambaDt = mamba.mambaDt;
+    pub const mambaScan = mamba.mambaScan;
+    pub const mambaGroupNorm = mamba.mambaGroupNorm;
+    pub const mambaMixer = mamba.mambaMixer;
 };
 
 test "dtype numberings of the three kernel families" {

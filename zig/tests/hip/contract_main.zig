@@ -6,6 +6,8 @@ const controls = @import("hip_controls");
 const gate5 = @import("contract_limits.zig");
 const rows_k = @import("contract_rows.zig");
 const stream_k = @import("contract_stream.zig");
+const mamba_k = @import("contract_mamba.zig");
+const scan_k = @import("contract_scan.zig");
 
 const g = core.contract.gates;
 
@@ -67,6 +69,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
         nrows += 1;
     }
     for (row_list[0..nrows]) |*x| try kernels.append(a, x.kernel());
+    var mambas: [3]mamba_k.Mamba = undefined;
+    for (&mambas, std.enums.values(mamba_k.Which)) |*m, w| m.* = .init(a, &r, s, &l, w);
+    defer for (&mambas) |*m| m.deinit();
+    for (&mambas) |*m| try kernels.append(a, m.kernel());
+    var scans: [2]scan_k.Scan = undefined;
+    for (&scans, std.enums.values(scan_k.Part)) |*m, p| m.* = .init(a, &r, s, &l, p);
+    defer for (&scans) |*m| m.deinit();
+    for (&scans) |*m| try kernels.append(a, m.kernel());
     var streams: [stream_k.cases.len]stream_k.Stream = undefined;
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();

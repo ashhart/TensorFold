@@ -39,6 +39,7 @@ const elementwise = @import("launches/elementwise.zig");
 const draw = @import("launches/draw.zig");
 const tp = @import("launches/tp.zig");
 const flashnext = @import("launches/flashnext.zig");
+const mamba = @import("launches/mamba.zig");
 
 pub const ConvArgs = conv.ConvArgs;
 pub const PlanArgs = plan.PlanArgs;
@@ -80,6 +81,8 @@ pub const Launcher = struct {
     affine: affine.Kernels,
     /// Flash Next's kernels: its residual streams, n-gram rows, indexer and sparse attention.
     fnx: flashnext.Fns,
+    /// Nemotron's Mamba-2 mixer kernels.
+    mamba: mamba.Fns,
 
     const PlanFns = struct {
         kv_write: Function,
@@ -255,6 +258,7 @@ pub const Launcher = struct {
         };
         l.softmax_stats = try att.function("tf_softmax_stats");
         l.sum_partials = try att.function("tf_sum_partials");
+        l.mamba = try mamba.Fns.load(l.mods[@backingInt(kernels.Group.mamba)]);
         const tiles = l.mods[@backingInt(kernels.Group.affine_tiles)];
         const dot2 = l.mods[@backingInt(kernels.Group.affine_dot2)];
         l.affine = try affine.Kernels.load(tiles, dot2, caps.Caps.of(kernels.arch) orelse return error.Invalid, choices.products);
@@ -330,6 +334,10 @@ pub const Launcher = struct {
     pub const fn_idx_scores = flashnext.idxScores;
     pub const fn_idx_select = flashnext.idxSelect;
     pub const fn_sparse_attention = flashnext.sparseAttention;
+    pub const tf_mamba_conv = mamba.tf_mamba_conv;
+    pub const tf_mamba_dt = mamba.tf_mamba_dt;
+    pub const tf_mamba_scan = mamba.tf_mamba_scan;
+    pub const tf_mamba_gnorm = mamba.tf_mamba_gnorm;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {
