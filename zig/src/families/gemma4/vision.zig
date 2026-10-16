@@ -348,5 +348,5 @@ test "the projection is admitted only as packed u32 words at its width with bf16
     try std.testing.expect(!projectionFits(T.of(.bf16, out_hidden, width / 8), scales, scales, four, out_hidden));
     const eight: Width = .{ .bits = 8, .group = 64 };
     try std.testing.expect(projectionFits(T.of(.u32, out_hidden, width / 4), scales, scales, eight, out_hidden));
-    try std.testing.expect(!projectionFits(words, scales, scales, eight, out_hidden)); // 4-bit words under an 8-bit entry
+    try std.testing.expect(!projectionFits(words, scales, scales, eight, out_hidden)); // 4-bit words, 8-bit entry
 }

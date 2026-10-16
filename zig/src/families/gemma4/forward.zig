@@ -53,7 +53,7 @@ pub fn prepare(s: *state.Scratch, segments: []const Segment, ids: []const u32, c
     }
 }
 
-/// A projection on its input's group sums in s.sums, which the input's own kernel wrote (no sums dispatch).
+/// A projection: at 4/64 on the group sums in s.sums its input's kernel wrote; other widths sum their input themselves.
 fn project(m: *Model, s: *state.Scratch, e: mtl.ComputeEncoder, l: weights.Linear, x: mtl.Buffer, y: mtl.Buffer, rows: usize) !void {
     const p = try m.projections.get(m.gpa, m.device, l);
     const out: lane.Ref = .{ .buf = y, .off = l.col * 2 };

@@ -146,7 +146,8 @@ fn storedK(c: *const ckpt.Checkpoint, prefix: []const u8, member: []const u8, wi
     const s = try c.get(try std.fmt.bufPrint(&name, "{s}{s}.scales", .{ prefix, member }));
     const b = try c.get(try std.fmt.bufPrint(&name, "{s}{s}.biases", .{ prefix, member }));
     const ok = w.dtype == .u32 and w.rank == 2 and s.rank == 2 and b.rank == 2 and s.dtype == .bf16 and b.dtype == .bf16 and
-        s.shape[0] == w.shape[0] and b.shape[0] == w.shape[0] and s.shape[1] == b.shape[1];
+        s.shape[0] == w.shape[0] and b.shape[0] == w.shape[0] and s.shape[1] == b.shape[1] and
+        w.count() == w.shape[0] * w.shape[1] and s.count() == s.shape[0] * s.shape[1] and b.count() == s.count();
     const k = s.shape[1] * width.group;
     if (!ok or w.shape[1] * 32 != k * width.bits) {
         std.log.warn("gemma4: {s}{s} is not stored at its config width, {d}-bit in groups of {d}", .{ prefix, member, width.bits, width.group });
@@ -252,7 +253,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
         l.gate_up = try stack(gpa, device, c, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, lw[4..6], true);
         l.down = try pack(gpa, device, c, &w.owned, geo, pre, &.{"mlp.down_proj"}, lw[6], false);
         for (&l.mlx, cfg.widths.module_names, lw) |*x, member, width| {
-            x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, c, &w.owned, pre, member, width); // global layers: no v_proj, never read
+            // global layers have no v_proj: k stands in, never read
+            x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, c, &w.owned, pre, member, width);
         }
         inline for (.{ "q_norm", "k_norm", "input_norm", "post_attention", "pre_feedforward", "post_feedforward", "scalar" }, .{ "self_attn.q_norm.weight", "self_attn.k_norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight", "layer_scalar" }) |field, t|
             @field(l, field) = try ref(c, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }));
@@ -266,7 +268,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     return w;
 }
 
-/// The lane pipelines, one per distinct (n, k, width, stride, prologue): seven a width, four fused ones.
+/// The lane pipelines, one per distinct (n, k, width, stride, prologue).
 pub const Projections = struct {
     /// The model's sizes, which pick each shape's split.
     geo: cfg.Geometry,

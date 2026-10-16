@@ -51,7 +51,7 @@ pub fn read(gpa: std.mem.Allocator, quant: std.json.ObjectMap, layers: usize) Er
         const k = e.key_ptr.*;
         if (std.mem.eql(u8, k, "bits") or std.mem.eql(u8, k, "group_size") or std.mem.eql(u8, k, "mode")) continue;
         if (e.value_ptr.* != .object or e.value_ptr.object.count() == 0) {
-            std.log.warn("gemma4: {s} is declared unquantized; every linear here is MLX affine", .{k});
+            std.log.warn("gemma4: {s} is not a width table (false or {{}} marks a module unquantized); every linear is affine", .{k});
             return error.GemmaModuleUnquantized;
         }
     }

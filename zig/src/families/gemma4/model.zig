@@ -70,7 +70,7 @@ pub const Model = struct {
     /// A drafter's tapped layers: each layer's index among the taps (-1: untapped), and how many there are.
     tap_of: [cfg.max_layers]i8 = @splat(-1),
     taps: u32 = 0,
-    /// One-row windows take the fused pipelines (glue as prologues) when every linear is 4/64; off for the bench.
+    /// One-row windows take the fused pipelines (glue as prologues) when every linear is 4/64; the bench may not.
     fuse: bool = true,
     /// The image input, once loadVision read it (serve --vision).
     vision: ?Tower = null,

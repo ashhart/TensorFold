@@ -32,8 +32,7 @@ pub fn addTensors(c: *ck.Checkpoint, device: mtl.Device, files: []const [:0]u8) 
 
 /// Whether the checkpoint has the embedder (tools/zig/gemma4_12b_convert.py keeps it).
 pub fn present(c: *const ck.Checkpoint) bool {
-    _ = c.get("vision_embedder.patch_dense.weight") catch return false;
-    return true;
+    return c.has("vision_embedder.patch_dense.weight");
 }
 
 pub const Embedder = struct {
@@ -112,19 +111,22 @@ pub const Embedder = struct {
         v.pos_w = try t.get(ckpt, e ++ "pos_norm.weight", width);
         v.pos_b = try t.get(ckpt, e ++ "pos_norm.bias", width);
         const pp = "embed_vision.embedding_projection.";
-        if (ckpt.get(pp ++ "scales")) |s| {
+        if (ckpt.has(pp ++ "scales")) {
+            const s = try ckpt.get(pp ++ "scales");
             const w = try ckpt.get(pp ++ "weight");
             const b = try ckpt.get(pp ++ "biases");
             const words = @as(usize, width) * q.bits / 32;
+            const groups = width / q.group;
             const fits = w.dtype == .u32 and w.rank == 2 and w.shape[0] == out_hidden and w.shape[1] == words and
-                s.dtype == .bf16 and b.dtype == .bf16 and s.count() == out_hidden * width / q.group and b.count() == s.count();
+                w.count() == out_hidden * words and s.dtype == .bf16 and b.dtype == .bf16 and s.rank == 2 and b.rank == 2 and
+                s.shape[0] == out_hidden and s.shape[1] == groups and b.shape[0] == out_hidden and b.shape[1] == groups and
+                s.count() == out_hidden * groups and b.count() == s.count();
             if (!fits) {
                 std.log.err("gemma4 vision: {s}* is not {d}-bit in groups of {d} [{d}, {d}]", .{ pp, q.bits, q.group, out_hidden, width });
                 return error.UnexpectedGemmaVisionTensor;
             }
-            v.proj = ref(w);
             v.proj_q = .{ .w = .{ .w = ref(w), .s = ref(s), .b = ref(b), .n = @intCast(out_hidden), .k = width, .bits = q.bits }, .mm = mm };
-        } else |_| v.proj = try t.get(ckpt, pp ++ "weight", out_hidden * width);
+        } else v.proj = try t.get(ckpt, pp ++ "weight", out_hidden * width);
         const T: usize = image.max_budget;
         const sizes = [_]usize{ T * mw * 2, T * width * 2, T * width * 2, T * width * 2 };
         var total: usize = 0;
