@@ -16,6 +16,9 @@ release fixes it, and the release notes say which one.
   request is back to speed. The tokens are the same.
 - Qwen3.8-Flash-Next on a Mac: the first turn after the server has been idle for a few seconds takes about 2 s to its
   first token on an M3 Ultra, even when its prompt is cached.
+- Gemma 4 31B on a Mac: the first request after the server has been idle for six seconds or more takes 0.4-0.7 s to
+  its first token on an M5 Ultra, where a busy server takes 0.08 s. Its buffers are held in a residency set; the idle
+  keepalive's tick does no GPU work yet, and both are needed.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
 
