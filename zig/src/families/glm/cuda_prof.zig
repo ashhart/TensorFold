@@ -2,8 +2,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 
-pub const Section = enum { embed, kda, mla, gather_a, dense, router, routed, shared, gather_b, head, mtp };
-const names = [_][]const u8{ "embed", "kda", "mla", "gather_a", "dense", "router", "routed", "shared", "gather_b", "head", "mtp" };
+pub const Section = enum { gate, embed, kda, mla, gather_a, dense, router, routed, shared, gather_b, head, draw, mtp, commit };
+const names = [_][]const u8{ "gate", "embed", "kda", "mla", "gather_a", "dense", "router", "routed", "shared", "gather_b", "head", "draw", "mtp", "commit" };
 const max_marks = 512;
 
 pub const Prof = struct {
@@ -19,6 +19,7 @@ pub const Prof = struct {
     wall_ms: f64 = 0,
     calls: u64 = 0,
     label: []const u8 = "",
+    every: u64 = 64, // calls a report sums
 
     pub fn init(d: *const cuda.Driver, io: std.Io) !*Prof {
         const p = try std.heap.page_allocator.create(Prof);
@@ -61,7 +62,7 @@ pub const Prof = struct {
         p.gpu_ms += cuda.Event.elapsedMs(p.events[0], p.events[p.n]) catch 0;
         p.wall_ms += wall;
         p.calls += 1;
-        if (p.calls % 64 != 0) return;
+        if (p.calls % p.every != 0) return;
         const k: f64 = @floatFromInt(p.calls);
         var buf: [512]u8 = undefined;
         var w: std.Io.Writer = .fixed(&buf);
