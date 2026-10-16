@@ -6,6 +6,7 @@ const snaps = @import("cuda_snap.zig");
 const wire = @import("cuda_rank_wire.zig");
 const Collective = @import("cuda_collective.zig").Collective;
 const wt = @import("cuda_prompt_wt.zig");
+const mtp = @import("cuda_mtp.zig");
 
 pub const Identity = extern struct {
     config: [32]u8,
@@ -15,6 +16,7 @@ pub const Identity = extern struct {
     context: u64,
     chunk: u64,
     decode_graph: u64 = 0,
+    mtp: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -49,6 +51,8 @@ pub const Session = struct {
     next_object: u64 = 1,
     seqs: std.AutoHashMapUnmanaged(u64, *prompt.Seq) = .empty,
     saved: std.AutoHashMapUnmanaged(u64, *snaps.Snap) = .empty,
+    windows: std.AutoHashMapUnmanaged(u64, mtp.Draft) = .empty,
+    drafting: bool = false,
     stopped: bool = false,
     available: std.atomic.Value(bool) = .init(true),
 
@@ -74,7 +78,7 @@ pub const Session = struct {
             try link.send(std.mem.asBytes(&mine), until);
         }
         if (!sameIdentity(mine, peer)) return error.RankIdentity;
-        s.* = .{ .gpa = a, .rank = rank, .link = link, .collective = try Collective.init(link, rank, 30_000) };
+        s.* = .{ .gpa = a, .rank = rank, .link = link, .collective = try Collective.init(link, rank, 30_000), .drafting = mine.mtp == 1 };
         return s;
     }
 
@@ -96,6 +100,9 @@ pub const Session = struct {
             const h = s.command(.{ .kind = .stop }, &.{}) catch null;
             if (h) |sent| s.ack(sent) catch s.poison();
         }
+        var wi = s.windows.valueIterator();
+        while (wi.next()) |d| d.deinit();
+        s.windows.deinit(s.gpa);
         s.collective.deinit();
         var qi = s.seqs.valueIterator();
         while (qi.next()) |q| {
@@ -173,7 +180,7 @@ pub const Session = struct {
     }
 
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
-        if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.streams != 0 or hooks.logits == .all) return error.UnsupportedRankOperation;
+        if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
         try tokenIds(ids);
         const h = try s.command(.{ .kind = .forward, .object = q.rank_id, .bytes = @intCast(ids.len * 4), .flags = @backingInt(hooks.logits) }, std.mem.sliceAsBytes(ids));
         errdefer s.poison();
@@ -196,6 +203,36 @@ pub const Session = struct {
         errdefer s.poison();
         try s.engine.round(Tri, tri, seqs, ids, out);
         try s.ack(h);
+    }
+
+    /// Both ranks keep their own recurrent window; only the leader consumes draft scores and hidden rows.
+    pub fn verify(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) !void {
+        if (!s.drafting or ids.len == 0 or ids.len > mtp.max_rows or q.fed + ids.len > q.cap) return error.UnsupportedRankOperation;
+        try tokenIds(ids);
+        const h = try s.command(.{ .kind = .verify, .object = q.rank_id, .bytes = @intCast(ids.len * 4) }, std.mem.sliceAsBytes(ids));
+        errdefer s.poison();
+        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
+        try ops.verify(q, d, ids);
+        try s.ack(h);
+    }
+
+    pub fn keep(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, d: *mtp.Draft, count: usize) !void {
+        if (!s.drafting or count == 0 or count > d.rows) return error.CannotRewind;
+        const h = try s.command(.{ .kind = .keep, .object = q.rank_id, .arg = count }, &.{});
+        errdefer s.poison();
+        const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
+        try ops.rollback(q, d, count);
+        try s.collective.finish(s.engine.stream.*);
+        try s.ack(h);
+    }
+
+    fn window(s: *Session, q: *prompt.Seq) !*mtp.Draft {
+        const item = try s.windows.getOrPut(s.gpa, q.rank_id);
+        if (!item.found_existing) {
+            errdefer _ = s.windows.remove(q.rank_id);
+            item.value_ptr.* = try mtp.Draft.init(s.gpa, s.engine.driver, s.engine.stream.*, q.cap, 1, s.engine.chunk);
+        }
+        return item.value_ptr;
     }
 
     pub fn save(s: *Session, q: *prompt.Seq) !*snaps.Snap {
@@ -283,8 +320,30 @@ pub const Session = struct {
                 }
                 try s.engine.round(Tri, tri, seqs[0..n], ids[0..n], logits);
             },
+            .verify => {
+                if (!s.drafting) return error.UnsupportedRankOperation;
+                const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                var ids: [mtp.max_rows]u32 = undefined;
+                const n = payload.len / 4;
+                for (ids[0..n], 0..) |*id, i| id.* = std.mem.readInt(u32, payload[i * 4 ..][0..4], .little);
+                try tokenIds(ids[0..n]);
+                const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
+                try ops.verify(q, try s.window(q), ids[0..n]);
+            },
+            .keep => {
+                if (!s.drafting) return error.UnsupportedRankOperation;
+                const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                const d = s.windows.getPtr(h.object) orelse return error.CannotRewind;
+                const ops: mtp.Ops(Tri) = .{ .e = s.engine, .tri = tri, .h = undefined };
+                try ops.rollback(q, d, @intCast(h.arg));
+                try s.collective.finish(s.engine.stream.*);
+            },
             .drop_seq => {
                 s.engine.round_graph.clear();
+                if (s.windows.fetchRemove(h.object)) |entry| {
+                    var d = entry.value;
+                    d.deinit();
+                }
                 const entry = s.seqs.fetchRemove(h.object) orelse return error.UnknownRankSequence;
                 entry.value.deinit(s.gpa);
                 s.gpa.destroy(entry.value);
@@ -338,6 +397,8 @@ pub fn shape(h: wire.Header) !void {
     switch (h.kind) {
         .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
+        .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
+        .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .round => if (h.object != 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 32) return error.BadRankFrame,
         .save, .restore => if (h.object == 0 or h.arg == 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
         .drop_seq, .drop_snap => if (h.object == 0 or h.arg != 0 or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
@@ -363,12 +424,26 @@ test "rank identity binds checkpoint, config, index, program and execution setti
     other = base;
     other.decode_graph = 1;
     try std.testing.expect(!sameIdentity(base, other));
+    other = base;
+    other.mtp = 1;
+    try std.testing.expect(!sameIdentity(base, other));
 }
 
 test "rank operations refuse invalid geometry and unsupported hooks before execution" {
     try shape(.{ .kind = .create, .object = 1, .arg = 4096 });
     try shape(.{ .kind = .forward, .object = 1, .bytes = 4 });
     try shape(.{ .kind = .round, .bytes = 24 });
+    try shape(.{ .kind = .verify, .object = 1, .bytes = mtp.max_rows * 4 });
+    try shape(.{ .kind = .keep, .object = 1, .arg = mtp.max_rows });
+    for ([_]wire.Header{
+        .{ .kind = .verify, .object = 1, .bytes = (mtp.max_rows + 1) * 4 },
+        .{ .kind = .verify, .object = 1, .bytes = 3 },
+        .{ .kind = .verify, .bytes = 4 },
+        .{ .kind = .verify, .object = 1, .bytes = 4, .flags = 1 },
+        .{ .kind = .keep, .object = 1 },
+        .{ .kind = .keep, .object = 1, .arg = mtp.max_rows + 1 },
+        .{ .kind = .keep, .object = 1, .arg = 1, .bytes = 4 },
+    }) |bad| try std.testing.expectError(error.BadRankFrame, shape(bad));
     for ([_]wire.Header{
         .{ .kind = .hello },                             .{ .kind = .create, .arg = 4096 },                          .{ .kind = .create, .object = 1, .arg = prompt.max_tokens + 1 },
         .{ .kind = .forward, .object = 1, .bytes = 3 },  .{ .kind = .forward, .object = 1, .bytes = 4, .flags = 1 }, .{ .kind = .round, .bytes = 33 * 12 },

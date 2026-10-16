@@ -5,7 +5,7 @@ const p = std.posix;
 const net = std.Io.net;
 
 pub const max_payload = 1 << 20;
-pub const Kind = enum(u32) { hello = 1, ready, create, forward, round, drop_seq, save, restore, drop_snap, stop, ack };
+pub const Kind = enum(u32) { hello = 1, ready, create, forward, round, drop_seq, save, restore, drop_snap, stop, ack, verify, keep };
 pub const Header = struct {
     kind: Kind,
     sequence: u64 = 0,

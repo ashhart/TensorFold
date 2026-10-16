@@ -54,14 +54,28 @@ fn download(stream: cuda.Stream, dst: []u8, src: u64) !void {
     try d.check(d.api.cuMemcpyDtoH_v2(dst.ptr, src, dst.len), "cuMemcpyDtoH");
 }
 
+/// An owner can mirror main-model mutations to a peer without exposing device pointers on the control wire.
+pub const Main = struct {
+    ptr: *anyopaque,
+    forward: *const fn (*anyopaque, *prompt.Seq, []const u32, batch.Hooks) anyerror!void,
+    verify: *const fn (*anyopaque, *prompt.Seq, *Draft, []const u32) anyerror!void,
+    rollback: *const fn (*anyopaque, *prompt.Seq, *Draft, usize) anyerror!void,
+};
+
 /// The head's work over a sequence: prompt pass, verify windows, rollback, forward and chains; `Tri` launches kernels.
 pub fn Ops(comptime Tri: type) type {
     return struct {
         e: *prompt.Engine,
         tri: Tri,
         h: *Head,
+        main: ?Main = null,
 
         const Self = @This();
+
+        fn forwardMain(o: Self, seq: *prompt.Seq, ids: []const u32, hooks: batch.Hooks) !void {
+            if (o.main) |m| return m.forward(m.ptr, seq, ids, hooks);
+            return o.e.forward(Tri, o.tri, seq, ids, hooks);
+        }
 
         fn stream(o: Self) cuda.Stream {
             return o.e.stream.*;
@@ -72,7 +86,7 @@ pub fn Ops(comptime Tri: type) type {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0) return error.PositionMismatch;
             const last = stop == ids.len;
-            try o.e.forward(Tri, o.tri, seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
+            try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
             const head_to = @min(stop, ids.len - 1);
             if (head_to > at) try o.forwardHead(d, ids[at + 1 .. head_to + 1], d.streams.ptr, false);
             if (last) d.prompt_last = d.streams.ptr + (stop - 1 - at) * wide * 2;
@@ -108,7 +122,7 @@ pub fn Ops(comptime Tri: type) type {
                 .tri = tri,
                 .k = &e.batch_k,
                 .s = s,
-                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
+                .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
                 .seq = .{ .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
                 .hooks = .{ .logits = .none },
             };
@@ -212,6 +226,8 @@ pub fn Ops(comptime Tri: type) type {
 
         /// One forward over the window `ids` from seq.fed: each row's scores in d.logits, its streams in d.streams.
         pub fn verify(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32) !void {
+            if (o.main) |m| return m.verify(m.ptr, seq, d, ids);
+            o.e.round_graph.clear();
             const n = ids.len;
             if (n == 0 or n > max_rows) return error.WindowTooWide;
             if (seq.fed + n > seq.cap) return error.PromptTooLong;
@@ -244,6 +260,8 @@ pub fn Ops(comptime Tri: type) type {
 
         /// Keep the window's first `keep` rows (Python forward.commit) from its saved rows; a repeat is a no-op.
         pub fn rollback(o: Self, seq: *prompt.Seq, d: *Draft, keep: usize) !void {
+            if (o.main) |m| return m.rollback(m.ptr, seq, d, keep);
+            o.e.round_graph.clear();
             if (keep == 0 or keep > d.rows) return error.CannotRewind;
             if (keep == d.rows) return d.settle(seq);
             if (!d.open) return error.CannotRewind;

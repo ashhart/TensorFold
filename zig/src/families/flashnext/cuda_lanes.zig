@@ -80,8 +80,9 @@ pub fn Namespace(comptime Tri: type) type {
             if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
             const mode = try config.mode(gpa, io, dir);
             if (mode == .modelopt) {
-                if (drafts) return error.ModelOptDraftsUnavailable;
-                return @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
+                const main = try @import("cuda_rank_memory.zig").estimate(gpa, io, dir, world, rank);
+                // Dense draft projections and vocabulary rows exceed the affine head's estimate.
+                return main + if (drafts and rank == 0) mtp.headBytes() + (1 << 30) else @as(u64, 0);
             }
             if (world != 1) return error.UnsupportedQuantization;
             const main = try weights.deviceBytes(gpa, io, dir);
@@ -104,7 +105,7 @@ pub fn Namespace(comptime Tri: type) type {
                 error.PromptTooLong => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
                 error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
                 error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
-                error.ModelOptDraftsUnavailable => "ModelOpt Flash Next serves without its MTP head so far: use --no-drafts",
+                error.TensorRankDraftSnapshotUnavailable => "tensor-rank MTP snapshots are unavailable: disable the prompt cache for this configuration",
                 error.RankDisconnected, error.RankTimeout, error.RemoteRank, error.BadRankFrame => "a tensor-parallel rank failed; restart both ranks from the same checkpoint before retrying",
                 error.LearnedPocket => "this folder holds Living Weights pockets, which Flash Next on CUDA does not serve yet",
                 else => null,
@@ -145,7 +146,27 @@ pub fn Namespace(comptime Tri: type) type {
             }
 
             fn ops(self: *Cuda) Ops {
-                return .{ .e = self.engine, .tri = self.tri(), .h = self.head.? };
+                return .{ .e = self.engine, .tri = self.tri(), .h = self.head.?, .main = if (self.ranks != null) .{
+                    .ptr = self,
+                    .forward = mainForward,
+                    .verify = mainVerify,
+                    .rollback = mainRollback,
+                } else null };
+            }
+
+            fn mainForward(ptr: *anyopaque, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) anyerror!void {
+                const self = of(ptr);
+                return self.ranks.?.forward(Tri, self.tri(), q, ids, hooks);
+            }
+
+            fn mainVerify(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, ids: []const u32) anyerror!void {
+                const self = of(ptr);
+                return self.ranks.?.verify(Tri, self.tri(), q, d, ids);
+            }
+
+            fn mainRollback(ptr: *anyopaque, q: *prompt.Seq, d: *mtp.Draft, keep: usize) anyerror!void {
+                const self = of(ptr);
+                return self.ranks.?.keep(Tri, self.tri(), q, d, keep);
             }
 
             fn backend(self: *Cuda) be.Backend {
@@ -282,7 +303,6 @@ pub fn Namespace(comptime Tri: type) type {
             if (o.segments != 1 or o.slide) return error.UnsupportedOption;
             if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
             const mode = try config.mode(gpa, io, dir);
-            if (mode == .modelopt and o.drafts) return error.ModelOptDraftsUnavailable;
             if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
             const driver: *cuda.Driver = @constCast(ctx.d);
             const own = try gpa.create(Cuda);
@@ -297,7 +317,8 @@ pub fn Namespace(comptime Tri: type) type {
             errdefer if (own.set) |*x| x.deinit();
             if (o.tp == 2) {
                 const configured_chunk = envUsize("TF_FLASHNEXT_CHUNK", prompt.batch.default_chunk);
-                const id = try ranks.identity(gpa, io, dir, o.context, if (configured_chunk == 0) prompt.batch.default_chunk else configured_chunk);
+                var id = try ranks.identity(gpa, io, dir, o.context, if (configured_chunk == 0) prompt.batch.default_chunk else configured_chunk);
+                id.mtp = @intFromBool(o.drafts);
                 own.ranks = try ranks.Session.init(gpa, io, o.master orelse "127.0.0.1", o.master_port, o.rank, id);
             }
             errdefer if (own.ranks) |r| {
@@ -313,7 +334,7 @@ pub fn Namespace(comptime Tri: type) type {
             // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
             _ = try own.engine.reserve(@min(o.context, own.engine.chunk));
             // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
-            if (o.drafts) {
+            if (o.drafts and (o.tp == 1 or o.rank == 0)) {
                 own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
                 own.depth = @max(1, @min(mtp.max_chain, envUsize("TF_FLASHNEXT_DRAFTS", mtp.max_chain)));
                 if (std.c.getenv("TF_FLASHNEXT_CONFIDENCE")) |v| own.confidence = std.fmt.parseFloat(f64, std.mem.span(v)) catch mtp.default_confidence;
@@ -480,7 +501,9 @@ pub fn Namespace(comptime Tri: type) type {
                 const l = try self.lane(r.stream);
                 const d = if (l.draft) |*x| x else return error.NoDraftHead;
                 // the window's kept rows: rollback is idempotent, so a later keep finds it done
-                if (r.rows) |path| try self.ops().rollback(&l.seq, d, path.len) else d.settle(&l.seq);
+                if (r.rows) |path| try self.ops().rollback(&l.seq, d, path.len) else {
+                    if (d.open) try self.ops().rollback(&l.seq, d, d.rows);
+                }
                 if (r.position != l.seq.fed + 1) return error.PositionMismatch;
                 // the window's rows past the cache's room cannot run: fewer drafts there
                 const room = l.seq.cap - l.seq.fed - 1;
@@ -534,7 +557,10 @@ pub fn Namespace(comptime Tri: type) type {
             const s: *lanes.Stream = @ptrCast(@alignCast(owner orelse return error.NoStream));
             const l = try self.lane(s);
             if (l.seq.fed != at) return error.NotAtMark;
-            if (self.ranks) |r| return try r.save(&l.seq);
+            if (self.ranks) |r| {
+                if (l.draft != null) return error.TensorRankDraftSnapshotUnavailable;
+                return try r.save(&l.seq);
+            }
             return try snap.save(self.gpa, self.engine.driver, self.stream, &l.seq, if (l.draft) |*d| d else null);
         }
 
