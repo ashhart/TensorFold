@@ -72,9 +72,9 @@ test "info prints family, format, context, weights and floor for a cached checkp
 
     var refused: std.Io.Writer.Allocating = .init(a);
     try w.createDirPath(io, try std.fs.path.join(a, &.{ root, "models--Org--Draft/snapshots/rev2" }));
-    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, "models--Org--Draft/snapshots/rev2/config.json" }), .data = "{\"model_type\": \"gemma4_unified\"}" });
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ root, "models--Org--Draft/snapshots/rev2/config.json" }), .data = "{\"model_type\": \"gemma3n\"}" });
     try std.testing.expectEqual(@as(u8, 1), try run(a, io, &refused.writer, null, root, "Org/Draft"));
-    try std.testing.expect(has(refused.written(), "no registered Zig family serves model_type gemma4_unified"));
+    try std.testing.expect(has(refused.written(), "no registered Zig family serves model_type gemma3n"));
 }
 
 fn has(text: []const u8, needle: []const u8) bool {

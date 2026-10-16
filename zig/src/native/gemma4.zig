@@ -1,4 +1,4 @@
-//! Gemma 4 dense (the 31B) served by the lane host: windows of up to 16 rows, several streams a forward, DFlash drafts.
+//! Gemma 4 dense (31B, 12B) on the lane host: windows of up to 16 rows, several streams a forward, DFlash drafts.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -11,7 +11,7 @@ const Resident = @import("resident.zig").Resident;
 /// The context a stream gets without --context: attention's per-call scratch grows with it (pass --context for more).
 const default_context = 32768;
 
-/// --drafter loads z-lab's DFlash drafter (gemma-4-31B-it-DFlash) in front of the engine.
+/// --drafter loads z-lab's DFlash drafter (gemma-4-31B-it-DFlash, for the 31B) in front of the engine.
 pub const takes_drafter = true;
 
 const Host = struct {
@@ -59,7 +59,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 /// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
 fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !*Host {
     const model = g.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves the dense 31B in 4-bit groups of 64", .{@errorName(err)});
+        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B and 12B in 4-bit groups of 64", .{@errorName(err)});
         return error.Refused;
     };
     errdefer model.deinit();
@@ -70,7 +70,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     }
     if (o.vision != null) model.loadVision(io, o.dir) catch |err| switch (err) {
         error.NoGemmaVision => {
-            problem.* = "--vision: this Gemma 4 checkpoint has no image tower (vision_tower. and embed_vision. tensors)";
+            problem.* = try std.fmt.allocPrint(a, "--vision: this Gemma 4 {s} checkpoint has no image tower (vision_tower. and embed_vision. tensors)", .{model.config.geo.name});
             return error.Refused;
         },
         else => return err,
@@ -89,7 +89,10 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     h.resident = null;
     if (if (o.drafts) o.drafter else null) |dir| {
         h.draft = g.dflash.Drafter.init(gpa, io, model, dir, .{ .capacity = @intCast(window) }) catch |err| {
-            problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s} ({s}): it takes z-lab/gemma-4-31B-it-DFlash", .{ dir, @errorName(err) });
+            problem.* = if (err == error.DraftForAnotherTarget)
+                try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s}: its width or taps do not fit Gemma 4 {s} (DFlash drafts take z-lab/gemma-4-31B-it-DFlash on the 31B only)", .{ dir, model.config.geo.name })
+            else
+                try std.fmt.allocPrint(a, "the native Gemma 4 drafter cannot load {s} ({s}): it takes z-lab/gemma-4-31B-it-DFlash", .{ dir, @errorName(err) });
             return error.Refused;
         };
     }
@@ -112,7 +115,7 @@ fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, 
     errdefer if (h.resident) |*r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start(); // the host's lists are empty until its thread runs, so a failed start leaves nothing to free
-    std.log.info("gemma4: the dense 31B, context {d} tokens, {d} streams{s}{s}", .{ window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "", if (vis != null) ", images" else "" });
+    std.log.info("gemma4: Gemma 4 {s}, context {d} tokens, {d} streams{s}{s}", .{ model.config.geo.name, window, @max(o.lanes, 2), if (h.draft != null) ", DFlash drafts" else "", if (vis != null) ", images" else "" });
     return h;
 }
 
