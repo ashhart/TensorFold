@@ -38,6 +38,7 @@ Verify these contracts at the same checkpoint, backend, runtime and settings:
 - Prompt chunks and decode use the required row arithmetic, with recurrent state, KV and final logits checked at seams.
 - Cancellation, reset and partial acceptance leave the next request's state valid.
 
+A new or changed GPU kernel registers with the [kernel contract](docs/kernel-contract.md), and its pull request posts each backend's `SUMMARY` line.
 Keep the checkpoint's activation precision and the required accumulation precision.
 A changed reduction order needs an independent FP64 reference for each affected projection class, with native error no worse than the current reference.
 Compare prompt and decode references separately on identical input rows.

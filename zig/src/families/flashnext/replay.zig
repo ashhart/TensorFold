@@ -831,6 +831,8 @@ pub const Run = struct {
     variants: std.StringHashMapUnmanaged(*Variant) = .empty,
     roles: std.StringHashMapUnmanaged(Site) = .empty,
     shapes: std.StringHashMapUnmanaged(mtl.Buffer) = .empty,
+    held: std.ArrayList(mtl.Buffer) = .empty, // what buffer, load and group made: a host's residency set holds them
+    follow: ?mtl.ResidencySet.Follow = null, // set once the host's set is built: later buffers join it
     loaded: usize = 0,
     rows: usize = 1,
     fused_xsum: bool = false,
@@ -846,6 +848,8 @@ pub const Run = struct {
     lookup_pipe: mtl.Pipeline = undefined,
     force_pipe: mtl.Pipeline = undefined,
     span_pipe: mtl.Pipeline = undefined,
+    positions_pipe: mtl.Pipeline = undefined,
+    draw_pipe: mtl.Pipeline = undefined, // tf_sample_full: a sampled reply's draws (sample.zig)
     take_pipe: mtl.Pipeline = undefined,
     gpu_round: bool = false,
     ar: Buf = undefined,
@@ -910,7 +914,24 @@ pub const Run = struct {
         const n = @max(len, 64);
         const b = try r.device.buffer(n, opts);
         @memset(b.contents()[0..n], 0);
+        try r.keep(b);
         return b;
+    }
+
+    /// `b` on the held list, and in the host's residency set when one was built before it.
+    fn keep(r: *Run, b: mtl.Buffer) !void {
+        try r.held.append(r.arena, b);
+        if (r.follow) |f| f.join(f.ctx, b);
+    }
+
+    /// A buffer `buffer`, `load` or `group` made, freed by its caller: off the held list and out of the set first.
+    pub fn release(r: *Run, b: mtl.Buffer) void {
+        for (r.held.items, 0..) |x, i| if (x.id == b.id) {
+            _ = r.held.swapRemove(i);
+            break;
+        };
+        if (r.follow) |f| f.leave(f.ctx, b);
+        b.deinit();
     }
 
     /// Every tensor of a safetensors file in the index, at its absolute offset.
@@ -946,6 +967,7 @@ pub const Run = struct {
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
+        try r.keep(b);
         return .{ .b = b };
     }
 
@@ -969,6 +991,7 @@ pub const Run = struct {
             at += e.len;
         }
         r.loaded += total;
+        try r.keep(b);
         return .{ .b = b };
     }
 
@@ -1060,6 +1083,9 @@ pub const Run = struct {
         r.lookup_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_lookup", false);
         r.force_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_force", false);
         r.span_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_span", false);
+        r.positions_pipe = try mtl.Pipeline.init(r.device, verdict, "fz_positions", false);
+        const draws = try mtl.Library.fromSource(r.device, ks.nemotron_sample, mtl.CompileOptions.mlx());
+        r.draw_pipe = try mtl.Pipeline.init(r.device, draws, "tf_sample_full", false);
         r.take_pipe = try mtl.Pipeline.init(r.device, glue, "fz_mtp_take", false);
         r.repack_w = try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false);
         r.repack_s = try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false);
@@ -1426,6 +1452,7 @@ pub fn catchSlot(words: []i32, k: usize, first: usize) usize {
 test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
     _ = @import("drafts.zig"); // the depth rule's tests
+    _ = @import("replay_held_test.zig"); // Run.release and the held list (#732)
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
