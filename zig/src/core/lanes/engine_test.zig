@@ -88,9 +88,14 @@ const Classes = struct {
 };
 
 fn model() !Config {
+    return modelWith(true);
+}
+
+/// The test family drafting with its head (`mtp`) or by copies alone, when drafted streams step pipelined.
+fn modelWith(mtp: bool) !Config {
     var costs: [16]@import("config.zig").Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
-    return Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+    return Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = mtp, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
 }
 
 /// Every case's emitted tokens, the cases admitted together and stepped until done.
@@ -437,6 +442,94 @@ test "structured output: where the grammar spells its own text, its drafts fill 
         try expectInGrammar(s.emitted(), c.classes.?);
         // the head's guesses are wrong here; the grammar's own drafts land every round, a window's worth at a time
         try std.testing.expect(s.emitted().len > 4 * s.rounds);
+    }
+}
+
+/// Each token the fake target draws one at a time after `prompt`, as `got` must hold them.
+fn expectDecode(prompt: []const u32, got: []const u32) !void {
+    var history: std.ArrayList(u32) = .empty;
+    defer history.deinit(gpa);
+    try history.appendSlice(gpa, prompt);
+    for (got) |t| {
+        try std.testing.expectEqual(fake.next(history.items, null, history.items.len), t);
+        try history.append(gpa, t);
+    }
+}
+
+test "a lone stream handed to another driver between rounds and back replies as if kept, pipelined or windowed" {
+    // a plain stream left in verify by a shared round, a windowed drafted one, a copy-drafted one left there by a drain
+    const Set = struct { cases: []const Case, mtp: bool };
+    const sets = [_]Set{
+        .{ .cases = &.{ .{ .prompt = &p1, .drafts = false }, .{ .prompt = &p2, .max_new = 6 } }, .mtp = true },
+        .{ .cases = &.{.{ .prompt = &p2 }}, .mtp = true },
+        .{ .cases = &.{.{ .prompt = &p2 }}, .mtp = false },
+    };
+    for (sets) |set| {
+        var cfg = try modelWith(set.mtp);
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var proposers: [2]SuffixLookup = undefined;
+        var streams: [2]sm.Stream = undefined;
+        for (set.cases, proposers[0..set.cases.len], streams[0..set.cases.len]) |c, *p, *s| {
+            p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+            s.* = try sm.Stream.init(gpa, .{
+                .id = "s",
+                .prompt = c.prompt,
+                .max_new = c.max_new,
+                .eos = c.eos,
+                .drafts = c.drafts,
+                .proposer = p.proposer(),
+            });
+        }
+        defer for (proposers[0..set.cases.len], streams[0..set.cases.len]) |*p, *s| {
+            s.deinit(gpa);
+            p.deinit();
+        };
+        for (streams[0..set.cases.len]) |*s| try engine.addStream(s);
+        var handed: usize = 0;
+        while (engine.activeCount() > 0) {
+            try engine.step();
+            if (engine.live.items.len != 1) continue;
+            const s = engine.live.items[0];
+            if (!engine.detach(s)) continue;
+            handed += 1;
+            try engine.adopt(s);
+        }
+        try std.testing.expect(handed > 0);
+        for (set.cases, streams[0..set.cases.len]) |c, *s| try expectDecode(c.prompt, s.emitted());
+    }
+}
+
+test "a stream another driver opened and hands to the lane core replies as its one-token decode" {
+    for ([_]bool{ true, false }) |mtp| {
+        var cfg = try modelWith(mtp);
+        defer cfg.deinit(gpa);
+        var target: fake.Fake = .{ .gpa = gpa };
+        defer target.deinit();
+        var clock: fake.FixedClock = .{};
+        var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+        defer engine.deinit();
+        var p = try SuffixLookup.init(gpa, .{ .min_match = 4 });
+        defer p.deinit();
+        var s = try sm.Stream.init(gpa, .{
+            .id = "s",
+            .prompt = &p2,
+            .max_new = 40,
+            .eos = &.{96},
+            .proposer = p.proposer(),
+        });
+        defer s.deinit(gpa);
+        // as a lone driver hands a stream over after its first token (lane_host_lone_test.zig's Lone)
+        _ = try target.backend().opening(gpa, &s);
+        s.pending = s.context.items[s.context.items.len - 1];
+        s.cache_len = s.prompt_len;
+        try engine.adopt(&s);
+        while (engine.activeCount() > 0) try engine.step();
+        try expectDecode(&p2, s.emitted());
     }
 }
 
