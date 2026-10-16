@@ -384,8 +384,10 @@ pub fn Pass(comptime Tri: type) type {
                     try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
                     try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
                 }
-                // Multi-rank admission remains refused until the owning engine provides its collective.
-                if (native.world != 1) return error.TensorParallelUnavailable;
+                if (native.world != 1) {
+                    const collective = self.m.collective orelse return error.TensorParallelUnavailable;
+                    try collective.sum(self.stream, s.y, pairs * dims);
+                }
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);

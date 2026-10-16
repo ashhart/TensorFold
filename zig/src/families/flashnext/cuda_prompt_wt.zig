@@ -86,6 +86,9 @@ pub const Store = struct {
     file: ?Shard = null,
     held: [12]Held = undefined,
     nheld: usize = 0,
+    released: [2]Held = undefined,
+    nreleased: usize = 0,
+    norm_offset: f32 = 0,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Store {
         const index = try std.fs.path.join(gpa, &.{ dir, "model.safetensors.index.json" });
@@ -95,18 +98,63 @@ pub const Store = struct {
         return .{ .gpa = gpa, .io = io, .dir = dir, .parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{}) };
     }
 
+    /// Infer one checkpoint-wide convention from every decoder HC norm, never from the final mixer's outlier.
+    pub fn detectNorms(self: *Store) !void {
+        var means: [layers_n]f64 = undefined;
+        var buf: [160]u8 = undefined;
+        for (0..layers_n) |i| {
+            const name = try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}.attn_hyper_connection.hc_norm.weight", .{i});
+            const values = try asF32(self.gpa, try self.tensor(name));
+            defer self.gpa.free(values);
+            if (values.len != wide) return error.UnexpectedTensor;
+            var sum: f64 = 0;
+            for (values) |v| {
+                if (!std.math.isFinite(v)) return error.InvalidNormConvention;
+                sum += v;
+            }
+            means[i] = sum / @as(f64, @floatFromInt(values.len));
+        }
+        self.norm_offset = try @import("cuda_norms.zig").offset(layers_n, means);
+    }
+
+    pub fn normScale(self: *const Store, gpa: std.mem.Allocator, t: Tensor) ![]f32 {
+        const values = try asF32(gpa, t);
+        errdefer gpa.free(values);
+        for (values) |*v| {
+            if (!std.math.isFinite(v.*)) return error.InvalidNormConvention;
+            v.* += self.norm_offset;
+        }
+        return values;
+    }
+
     pub fn deinit(self: *Store) void {
         self.release();
+        self.closeReleased();
         self.closeFile();
         self.parsed.deinit();
     }
 
+    /// Borrowers expire here; two indexed shards cover separate weight and calibration planes.
     pub fn release(self: *Store) void {
-        for (self.held[0..self.nheld]) |*h| {
+        for (self.held[0..self.nheld]) |h| {
+            if (self.nreleased == self.released.len) {
+                self.released[0].file.close();
+                self.gpa.free(self.released[0].rel);
+                self.released[0] = self.released[1];
+                self.nreleased -= 1;
+            }
+            self.released[self.nreleased] = h;
+            self.nreleased += 1;
+        }
+        self.nheld = 0;
+    }
+
+    fn closeReleased(self: *Store) void {
+        for (self.released[0..self.nreleased]) |*h| {
             h.file.close();
             self.gpa.free(h.rel);
         }
-        self.nheld = 0;
+        self.nreleased = 0;
     }
 
     pub fn hold(self: *Store, requested: []const u8) !Tensor {
@@ -117,6 +165,15 @@ pub const Store = struct {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
         }
         if (self.nheld == self.held.len) return error.UnexpectedTensor;
+        for (self.released[0..self.nreleased], 0..) |cached, i| {
+            if (std.mem.eql(u8, cached.rel, file)) {
+                self.held[self.nheld] = cached;
+                self.nreleased -= 1;
+                if (i < self.nreleased) self.released[i] = self.released[self.nreleased];
+                self.nheld += 1;
+                return self.held[self.nheld - 1].file.get(key) orelse return error.MissingTensor;
+            }
+        }
         const rel = try self.gpa.dupe(u8, file);
         errdefer self.gpa.free(rel);
         const path = try std.fs.path.join(self.gpa, &.{ self.dir, file });
@@ -361,7 +418,7 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     defer gpa.free(up.s);
     defer gpa.free(up.b);
     const gamma = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix}));
-    const scale = try asF32(gpa, gamma);
+    const scale = try store.normScale(gpa, gamma);
     defer gpa.free(scale);
     if (scale.len != wide) return error.UnexpectedTensor;
     var n: usize = low;
@@ -421,7 +478,7 @@ fn loadDenseHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, pref
     if (!up.is(.bf16, &.{ wide, low })) return error.UnexpectedTensor;
     var uq = try projection.dense(gpa, driver, up);
     errdefer uq.free();
-    const gamma = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix})));
+    const gamma = try store.normScale(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix})));
     defer gpa.free(gamma);
     if (gamma.len != wide) return error.UnexpectedTensor;
     const scale = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(gamma));
@@ -473,4 +530,70 @@ test "canonical checkpoint aliases preserve exact stored namespace and prefer a 
     try std.testing.expectError(error.MissingTensor, store.resolveKey("language_model.model.missing", &buf));
     try std.testing.expect(hostOnly("model.visual.weight"));
     try std.testing.expect(hostOnly("mtp.layers.0.weight"));
+}
+
+test "released expert planes reuse two indexed shards without invalidating held peers" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    const header = "{\"x\":{\"dtype\":\"U8\",\"shape\":[1],\"data_offsets\":[0,1]}}";
+    var data: [8 + header.len + 1]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    data[data.len - 1] = 17;
+    try tmp.dir.writeFile(io, .{ .sub_path = "a", .data = &data });
+    data[data.len - 1] = 29;
+    try tmp.dir.writeFile(io, .{ .sub_path = "b", .data = &data });
+    try tmp.dir.writeFile(io, .{ .sub_path = "c", .data = &data });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{\"weight_map\":{\"x\":\"a\"}}" });
+    var store = try Store.open(a, io, dir);
+    defer store.deinit();
+    const first = try store.hold("x");
+    const address = first.bytes.ptr;
+    store.release();
+    try std.testing.expectEqual(@as(usize, 0), store.nheld);
+    try std.testing.expectEqual(@as(usize, 1), store.nreleased);
+    // Removing the path proves the next borrow uses the existing mapping and parsed header.
+    try tmp.dir.deleteFile(io, "a");
+    const again = try store.hold("x");
+    try std.testing.expectEqual(address, again.bytes.ptr);
+    try std.testing.expectEqual(@as(u8, 17), again.bytes[0]);
+    const wm = &store.parsed.value.object.getPtr("weight_map").?.object;
+    wm.getPtr("x").?.* = .{ .string = "b" };
+    const other = try store.hold("x");
+    try std.testing.expectEqual(@as(u8, 29), other.bytes[0]);
+    try std.testing.expectEqual(@as(u8, 17), again.bytes[0]);
+    store.release();
+    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
+    try tmp.dir.deleteFile(io, "b");
+    wm.getPtr("x").?.* = .{ .string = "a" };
+    try std.testing.expectEqual(@as(u8, 17), (try store.hold("x")).bytes[0]);
+    wm.getPtr("x").?.* = .{ .string = "b" };
+    try std.testing.expectEqual(@as(u8, 29), (try store.hold("x")).bytes[0]);
+    store.release();
+    store.release();
+    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
+    wm.getPtr("x").?.* = .{ .string = "c" };
+    _ = try store.hold("x");
+    store.release();
+    try std.testing.expectEqual(@as(usize, 2), store.nreleased);
+    for (store.released[0..store.nreleased]) |h| try std.testing.expect(!std.mem.eql(u8, "a", h.rel));
+}
+
+test "centered scales add one in FP32 while direct scales preserve the original bits" {
+    _ = @import("cuda_norms.zig");
+    const raw = [_]f32{ -0.25, 0.0001, 2.75 };
+    const t: Tensor = .{ .dtype = .f32, .rank = 1, .shape = .{ 3, 1, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&raw) };
+    var store: Store = undefined;
+    store.norm_offset = 1;
+    const scales = try store.normScale(std.testing.allocator, t);
+    defer std.testing.allocator.free(scales);
+    for (raw, scales) |v, scale| try std.testing.expectEqual(v + @as(f32, 1), scale);
+    store.norm_offset = 0;
+    const direct = try store.normScale(std.testing.allocator, t);
+    defer std.testing.allocator.free(direct);
+    try std.testing.expectEqualSlices(f32, &raw, direct);
 }

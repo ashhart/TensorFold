@@ -133,9 +133,15 @@ pub const Engine = struct {
     scores: ?cuda.DeviceBuffer = null,
     /// Rows a batched chunk takes at most (TF_FLASHNEXT_CHUNK; batch.default_chunk by default).
     chunk: usize,
+    collective: ?*@import("cuda_collective.zig").Collective = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
+        return initRank(gpa, io, driver, stream, model_dir, 1, 0);
+    }
+
+    pub fn initRank(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8, world: usize, rank: usize) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+        if ((world != 1 and world != 2) or rank >= world) return error.BadRank;
         const e = try gpa.create(Engine);
         errdefer gpa.destroy(e);
         e.gpa = gpa;
@@ -143,11 +149,13 @@ pub const Engine = struct {
         e.driver = driver;
         e.stream = stream;
         e.n_layers = 0;
+        e.collective = null;
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
         errdefer gpa.free(e.model_dir);
         e.store = try Store.open(gpa, io, e.model_dir);
         errdefer e.store.deinit();
+        try e.store.detectNorms();
         const weight = try e.store.tensor(embed.weight_name);
         if (weight.dtype == .bf16) {
             e.table = try embed.Table.uploadDense(driver, weight);
@@ -178,8 +186,9 @@ pub const Engine = struct {
         defer pack_mod.unload();
         const pack_fn = try pack_mod.function(weights.pack_symbol);
         for (0..layers_n) |i| {
-            e.layers[i] = try loadLayer(gpa, driver, stream, &e.store, pack_fn, i);
+            e.layers[i] = try load.loadLayerRank(gpa, driver, stream, &e.store, pack_fn, i, world, rank);
             e.n_layers += 1;
+            std.log.info("flashnext: rank {d}/{d} loaded layer {d}/{d}", .{ rank + 1, world, i + 1, layers_n });
         }
         e.store.release();
         e.store.closeFile();
@@ -286,7 +295,7 @@ pub const Engine = struct {
             .tri = tri,
             .k = &e.batch_k,
             .s = s,
-            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
+            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .collective = e.collective },
             .seq = seq.view(scores),
             .hooks = hooks,
         };
@@ -324,7 +333,7 @@ pub const Engine = struct {
             .tri = tri,
             .k = &e.batch_k,
             .s = s,
-            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram },
+            .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = e.layers[0..e.n_layers], .mixer = e.mixer, .head = e.head_q, .ngram = &e.ngram, .collective = e.collective },
             .seq = rows[0].seq,
             .lanes = rows,
             .hooks = .{ .logits = .all, .logits_out = out },
@@ -341,6 +350,7 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    rank_id: u64 = 0,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
     kc: []cuda.DeviceBuffer,

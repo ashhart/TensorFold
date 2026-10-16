@@ -44,8 +44,7 @@ pub const Owned = struct {
     }
 };
 
-/// The reader owns only the selected rectangle, not a decoded full expert stack.
-/// The store is an exclusive loader scratch here: every borrowed plane is released before returning.
+/// Own only the selected rectangle; the exclusive loader store releases every borrowed plane before return.
 pub fn readPart(a: std.mem.Allocator, store: anytype, name: []const u8, cut: Cut, down: bool, dims: usize, full_width: usize) !slice.Linear {
     defer store.release();
     var buf: [512]u8 = undefined;
@@ -59,8 +58,7 @@ pub fn readPart(a: std.mem.Allocator, store: anytype, name: []const u8, cut: Cut
     return linear;
 }
 
-/// Pack and upload one expert at a time, bounding host scratch independently of expert count.
-/// Activations remain BF16 (W4A16); input_scale is validated as metadata by the source reader.
+/// Pack one expert at a time with BF16 activations (W4A16); input_scale is validated as metadata.
 pub fn load(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, prefix: []const u8, world: usize, rank: usize) !Owned {
     return loadShape(a, d, store, prefix, world, rank, wt.dims, wt.moe_w, wt.experts_n);
 }

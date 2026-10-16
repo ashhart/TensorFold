@@ -323,6 +323,7 @@ pub const Scratch = struct {
         var n: usize = 0;
         n += cap * 4 + (cap + 1) * 16;
         n += cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
+        n += cap * wide * 2 + 8 * cap * dims * 4;
         n += cap * low * 2 + cap * (low / 32) * 4 + cap * streams * 2 + cap * dims * 2 + cap * (dims / 32) * 4;
         n += cap * proj_row * 2 + out_sk * cap * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
         n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
@@ -459,6 +460,7 @@ pub const Lane = struct { seq: SeqState, pos: usize };
 
 /// The engine's resident weights the pass reads.
 pub const Model = struct {
+    collective: ?*@import("cuda_collective.zig").Collective = null,
     table_w: u64,
     table_s: u64,
     table_b: u64,

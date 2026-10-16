@@ -24,6 +24,7 @@ pub fn bytes(at: usize, head: bool) usize {
 
 /// One kept state; `head`: it holds the MTP head's cache over the same rows, which a drafting stream needs.
 pub const Snap = struct {
+    rank_id: u64 = 0,
     buf: cuda.DeviceBuffer,
     at: usize,
     history: [2]i64,
