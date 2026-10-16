@@ -168,3 +168,31 @@ test "dynamic keyword mapping must be the final call argument" {
     }) |source| try expect(source, "{}", .{ .text = null, .raised = null });
     try expect("{{ dict(*[]) }}", "{}", .{ .text = null, .raised = null });
 }
+
+test "appending to a long string in a namespace stays linear in memory" {
+    const a = std.testing.allocator;
+    const filler: [1000]u8 = @splat('x');
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(a);
+    try json.appendSlice(a, "{\"messages\":[");
+    for (0..600) |i| {
+        if (i > 0) try json.append(a, ',');
+        try json.print(a, "{{\"role\":\"user\",\"content\":\"{s}\"}}", .{&filler});
+    }
+    try json.appendSlice(a, "]}");
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, json.items, .{});
+    defer parsed.deinit();
+    const budget = try a.alloc(u8, 24 << 20);
+    defer a.free(budget);
+    var fba = std.heap.FixedBufferAllocator.init(budget);
+    const source = "{% set ns = namespace(out='') %}{% for m in messages %}{% set ns.out = ns.out + m.content %}{% set ns.out = ns.out ~ '|' %}{% endfor %}{{ ns.out }}";
+    const tilde = "{% set ns = namespace(out='') %}{% for m in messages %}{% set ns.out = ns.out ~ m.content ~ '|' %}{% endfor %}{{ ns.out }}";
+    const out = try template.renderChat(fba.allocator(), source, parsed.value.object.get("messages").?, .null, parsed.value, false, null);
+    try std.testing.expectEqual(@as(usize, 600 * 1001), out.len);
+    try std.testing.expectEqualStrings(filler ++ "|" ++ filler ++ "|", out[0 .. 2 * 1001]);
+    const first = try a.dupe(u8, out);
+    defer a.free(first);
+    fba.reset();
+    const out2 = try template.renderChat(fba.allocator(), tilde, parsed.value.object.get("messages").?, .null, parsed.value, false, null);
+    try std.testing.expectEqualStrings(first, out2);
+}

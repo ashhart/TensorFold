@@ -24,6 +24,7 @@ pub const Ctx = struct {
     vars: *const v.Map,
     out: *std.ArrayList(u8),
     depth: usize = 0,
+    acc: std.ArrayList(u8) = .empty,
 
     fn resolve(c: *Ctx, name: []const u8) Error!Value {
         if (c.vars.get(name)) |x| return x;
@@ -31,6 +32,24 @@ pub const Ctx = struct {
         return c.rt.undef("'{s}' is undefined", .{name});
     }
 };
+
+const acc_min = 4096;
+
+fn isAcc(c: *const Ctx, s: []const u8) bool {
+    return s.len > 0 and s.ptr == c.acc.items.ptr and s.len == c.acc.items.len;
+}
+
+fn join(c: *Ctx, l: []const u8, r: []const u8) Error![]const u8 {
+    const a = c.rt.a;
+    if (l.len < acc_min and !isAcc(c, l)) return std.mem.concat(a, u8, &.{ l, r });
+    if (!isAcc(c, l) or c.acc.items.len + r.len > c.acc.capacity) {
+        var grown: std.ArrayList(u8) = try .initCapacity(a, (l.len + r.len) * 2);
+        grown.appendSliceAssumeCapacity(l);
+        c.acc = grown;
+    }
+    c.acc.appendSliceAssumeCapacity(r);
+    return c.acc.items;
+}
 
 const Flow = enum { normal, brk, cont };
 
@@ -340,7 +359,7 @@ fn binop(c: *Ctx, op: ast.BinOp, l: Value, r: Value) Error!Value {
         const safe = l.str.safe or r.str.safe;
         const ls = if (safe and !l.str.safe) try htmlEscape(c, l.str.s) else l.str.s;
         const rs = if (safe and !r.str.safe) try htmlEscape(c, r.str.s) else r.str.s;
-        return .{ .str = .{ .s = try std.mem.concat(rt.a, u8, &.{ ls, rs }), .safe = safe } };
+        return .{ .str = .{ .s = try join(c, ls, rs), .safe = safe } };
     }
     if (op == .add and l == .list and r == .list and l.list.seq == r.list.seq and (l.list.seq == .list or l.list.seq == .tuple))
         return rt.list(try std.mem.concat(rt.a, Value, &.{ l.list.items, r.list.items }), l.list.seq);
@@ -453,8 +472,15 @@ pub fn eval(c: *Ctx, act: *Activation, e: *const ast.Expr) Error!Value {
         },
         .binop => |b| binop(c, b.op, try eval(c, act, b.l), try eval(c, act, b.r)),
         .concat => |items| blk: {
+            const first = try v.toStr(rt, try eval(c, act, items[0]));
+            if (isAcc(c, first) or first.len >= acc_min) {
+                var out = first;
+                for (items[1..]) |x| out = try join(c, out, try v.toStr(rt, try eval(c, act, x)));
+                break :blk Value.string(out);
+            }
             var out: std.ArrayList(u8) = .empty;
-            for (items) |x| try out.appendSlice(rt.a, try v.toStr(rt, try eval(c, act, x)));
+            try out.appendSlice(rt.a, first);
+            for (items[1..]) |x| try out.appendSlice(rt.a, try v.toStr(rt, try eval(c, act, x)));
             break :blk Value.string(out.items);
         },
         .list, .tuple => |items| blk: {
