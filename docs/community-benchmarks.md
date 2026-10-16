@@ -49,7 +49,13 @@ Receipts include token hashes supplied by the server, but the command does not r
 
 ## Publishing
 
-The receiver uses administrator-issued contributor tokens. Running locally needs no token or account.
+Running locally needs no token or account. Community contributors can get upload access immediately on [the benchmark board](https://tensorfold.dev/benchmarks), without an email request or administrator approval.
+
+To upload a saved receipt in your browser, choose **Upload result**, enter a public display name, select the JSON receipt and review its hardware, model and timing fields. Confirm the data to submit it for review; the browser creates upload access automatically. Nothing is sent during the receipt preview.
+
+To publish from the CLI, choose **Run the CLI** in that dialog, enter a display name and choose **Get upload access**. Copy the private token, then run the login command below. Keep the token private and save it before closing the page if you want to reuse it. It allows submissions and management of your own results, with up to 20 uploads per day; it does not grant administration access. Display names are self-chosen and do not verify an identity. Signup limits apply to reduce spam, and new results still require moderation.
+
+Install or update the CLI using the [runbook](../RUNBOOK.md) before running the examples.
 
 ```sh
 # Paste an issued token at the hidden prompt.
