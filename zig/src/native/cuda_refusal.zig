@@ -12,8 +12,21 @@ pub fn backend(o: api.Open) ?[]const u8 {
 
 /// A family takes --drafter only if it says so (`takes_drafter`); null when `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
+    if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     return null;
+}
+
+test "a family must consume rank options before tensor parallelism is admitted" {
+    const Single = struct {
+        pub const Options = struct { context: usize };
+    };
+    const Ranked = struct {
+        pub const Options = struct { context: usize, rank: usize };
+    };
+    try std.testing.expectStringStartsWith(family(Single, .{ .dir = "d", .model_type = "m", .tp = 2 }) orelse "", "this CUDA family has no tensor-parallel ranks");
+    try std.testing.expect(family(Ranked, .{ .dir = "d", .model_type = "m", .tp = 2 }) == null);
 }
 
 test "--learn is refused whatever the family, and --slide or a learned-disk size alone is not" {
