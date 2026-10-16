@@ -119,7 +119,7 @@ Flags that change decoding, such as `--no-drafts` or `--no-thinking`, go on both
 
 ### 6. Connect a client
 
-Point any OpenAI-compatible client at `http://RANK0:8888/v1` with the model name `flash-next`, where RANK0 is rank 0's
+Point any OpenAI-compatible client at `http://RANK0:8080/v1` with the model name `flash-next`, where RANK0 is rank 0's
 address. Send requests only to rank 0, since rank 1 refuses its own.
 
 ## Measured speeds

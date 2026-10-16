@@ -23,7 +23,7 @@ The standard-library-only cache client runs one first request, identical repeate
 concurrent group using the same prompt, greedy temperature, seed and reply limit. There is no warm-up:
 
 ```sh
-python3 tools/bench_cache.py http://127.0.0.1:8888 MODEL \
+python3 tools/bench_cache.py http://127.0.0.1:8080 MODEL \
   --tokens 64 --repeats 2 --streams 4 --require-cold --output cache.json
 ```
 
@@ -36,7 +36,7 @@ prefix retention (`--prompt-cache-gib 0`, where supported) for independent cold-
 For exact 2K/8K/32K/64K raw prefill, supply a JSON array of IDs from the checkpoint's own tokenizer:
 
 ```sh
-python3 tools/bench_cache.py http://127.0.0.1:8888 MODEL \
+python3 tools/bench_cache.py http://127.0.0.1:8080 MODEL \
   --prompt-file public-8192-tokens.json --expected-prompt-tokens 8192 \
   --tokens 64 --require-cold --output cache-8192.json
 ```

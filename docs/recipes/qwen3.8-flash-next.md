@@ -98,7 +98,7 @@ local-inference-lab's.
 ship, MTP head included, on one GPU:
 
 ```bash
-tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8888
+tensorfold serve local-inference-lab/Qwen3.8-Flash-Next-NVFP4 --host 0.0.0.0 --port 8080
 ```
 
 | Checkpoint (revision) | Routed experts | DeltaNet, attention, shared expert | n-gram table |
@@ -169,7 +169,7 @@ Download that branch, then serve the folder:
 ```bash
 python -c "from huggingface_hub import snapshot_download as d; d('turboderp/Qwen3.8-Flash-Next-exl3', revision='3.05bpw_h5_ng5', local_dir='flashnext-exl3-3.05bpw')"
 python -m tensorfold.cuda.exl3.inspect flashnext-exl3-3.05bpw   # bits per tensor, from the headers
-tensorfold serve flashnext-exl3-3.05bpw --host 0.0.0.0 --port 8888
+tensorfold serve flashnext-exl3-3.05bpw --host 0.0.0.0 --port 8080
 ```
 
 A pack maps its n-gram table from its own file and runs on one GPU: `--tp 2` and `--ple-on-ssd` are for the MLX

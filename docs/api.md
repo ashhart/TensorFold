@@ -1,6 +1,6 @@
 # Compatible APIs
 
-The base URL is `http://127.0.0.1:8888/v1` with the default server settings.
+The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 
 ## Native chat template override
 
@@ -586,5 +586,5 @@ redacted thinking and other context edits return HTTP 400.
 Connect Claude Code using the ID from `/v1/models`:
 
 ```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:8888 ANTHROPIC_API_KEY=local claude --model local-model
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 ANTHROPIC_API_KEY=local claude --model local-model
 ```

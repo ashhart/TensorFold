@@ -65,7 +65,7 @@ body = {
     'max_tokens': 128,
     'stream': False,
 }
-request = Request('http://127.0.0.1:8888/v1/chat/completions',
+request = Request('http://127.0.0.1:8080/v1/chat/completions',
                   data=json.dumps(body).encode(),
                   headers={'Content-Type': 'application/json'})
 with urlopen(request) as response:

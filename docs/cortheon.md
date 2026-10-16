@@ -100,8 +100,8 @@ tensorfold serve TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --cor
 ```
 
 ```bash
-curl -s http://127.0.0.1:8888/v1/chat/completions -H 'Content-Type: application/json' \
+curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "What changed in the latest Zig release?"}]}'
 ```
 
-Point any OpenAI-compatible client at `http://127.0.0.1:8888/v1` as before.
+Point any OpenAI-compatible client at `http://127.0.0.1:8080/v1` as before.

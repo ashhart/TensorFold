@@ -104,14 +104,14 @@ bin/tensorfold-native serve "$HOME/models/nemotron-lightning" \
 Leave the server running and check it from another terminal:
 
 ```sh
-curl -fsS http://127.0.0.1:8888/health
-curl -fsS http://127.0.0.1:8888/v1/models
-curl -fsS http://127.0.0.1:8888/v1/chat/completions \
+curl -fsS http://127.0.0.1:8080/health
+curl -fsS http://127.0.0.1:8080/v1/models
+curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 
-Use `http://127.0.0.1:8888/v1` as the OpenAI client base URL.
+Use `http://127.0.0.1:8080/v1` as the OpenAI client base URL.
 For streaming, add `"stream": true` to the request.
 The native server also has `/v1/responses` and Anthropic `/v1/messages` routes.
 Serve flags and request overrides are described in [README.md](README.md#serve-flags).

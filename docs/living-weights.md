@@ -69,13 +69,13 @@ there is no key, when the key file is missing, empty or readable by other users 
 space in it. Every request then sends the key, as the commands below do; [API keys](api.md#api-keys) has the rest.
 
 `--slide-graph` keeps the list of learned facts in a file, so it survives a restart; without it the list lives in
-memory, though the weights keep what they learned either way. The server listens on `http://127.0.0.1:8888` unless you
+memory, though the weights keep what they learned either way. The server listens on `http://127.0.0.1:8080` unless you
 pass `--host` or `--port`.
 
 ### 4. Teach it a fact
 
 ```sh
-curl -N http://127.0.0.1:8888/v1/slide/learn \
+curl -N http://127.0.0.1:8080/v1/slide/learn \
   -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' \
   -d '{"text": "I like blue."}'
@@ -93,7 +93,7 @@ few seconds on a Mac.
 Use the normal chat API, from any client:
 
 ```sh
-curl http://127.0.0.1:8888/v1/chat/completions -H "Authorization: Bearer $(cat ~/models/slide-key)" \
+curl http://127.0.0.1:8080/v1/chat/completions -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' -d '{"messages": [{"role": "user", "content": "What colour do I like?"}]}'
 ```
 
@@ -125,7 +125,7 @@ nothing behind. An earlier fact's neuron that the new lesson would disturb is re
 - A file: send its contents as the text, for example:
 
   ```sh
-  jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8888/v1/slide/learn \
+  jq -Rs '{text: .}' notes.md | curl -N http://127.0.0.1:8080/v1/slide/learn \
     -H "Authorization: Bearer $(cat ~/models/slide-key)" -H 'Content-Type: application/json' -d @-
   ```
 
@@ -153,7 +153,7 @@ A panel shows each fact as queued, learning, learned or missed.
 
 ## See what it learned
 
-Open `http://127.0.0.1:8888/slide` in a browser while the server runs. It draws the model in 3D and updates live:
+Open `http://127.0.0.1:8080/slide` in a browser while the server runs. It draws the model in 3D and updates live:
 
 - The model as a tower of its 52 layers. Each MoE layer is a ring carrying its 64 pocket neurons, and a neuron glows in
   the colour of the fact that owns it.
@@ -167,7 +167,7 @@ Drag to turn, scroll or pinch to zoom, and click a fact for its neurons, the que
 rounds. Phones get a bottom sheet. Without WebGL2, or with `/slide?flat`, the page draws a flat graph from the same
 data. The page asks for the server's key once and keeps it for that browser tab.
 
-- `curl -H "Authorization: Bearer $(cat ~/models/slide-key)" http://127.0.0.1:8888/v1/slide/graph`
+- `curl -H "Authorization: Bearer $(cat ~/models/slide-key)" http://127.0.0.1:8080/v1/slide/graph`
   returns the same data as JSON: each fact's state, neurons (layer, index and key), questions and rounds, and the
   model's layers, pocket and shards.
 - The same with `-X DELETE` clears the graph. The weights keep what they learned. To take one fact out of the weights,
@@ -176,7 +176,7 @@ data. The page asks for the server's key once and keeps it for that browser tab.
 ## Delete one fact
 
 ```sh
-curl -N -X DELETE http://127.0.0.1:8888/v1/slide/fact/2 \
+curl -N -X DELETE http://127.0.0.1:8080/v1/slide/fact/2 \
   -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' -d '{"reason": "my sister changed her name"}'
 ```

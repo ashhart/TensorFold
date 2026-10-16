@@ -63,7 +63,7 @@ how matrix multiplication uses a GPU. The chat fixture disables thinking. After 
 `--name bench`, run from the repository root:
 
 ```bash
-python3 tools/bench_openai.py http://127.0.0.1:8888 bench \
+python3 tools/bench_openai.py http://127.0.0.1:8080 bench \
   --tokens 64 --reps 5 --temperatures 1.0,0 --output bench.json
 ```
 
