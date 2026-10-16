@@ -8,6 +8,7 @@ const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
+const h3_k = @import("contract_h3.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -19,8 +20,13 @@ const controls = struct {
     pub const bytes align(16) = @embedFile("fatbin_contract_controls").*;
 };
 
+const h3_image = struct {
+    pub const bytes align(16) = @embedFile("fatbin_h3").*;
+};
+
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
     inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
@@ -89,6 +95,20 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var h3_mod = try cuda.Module.load(gpu.d, &h3_image.bytes);
+    defer h3_mod.unload();
+    const h3_kinds = comptime std.enums.values(h3_k.Kind);
+    var h3_gemms: [h3_kinds.len]h3_k.Gemm = undefined;
+    for (h3_kinds, &h3_gemms) |kind, *m| {
+        const f = try h3_mod.function(h3_k.geo(kind).symbol);
+        if (h3_k.shared(kind) > 48 * 1024) try f.allowDynamicShared(h3_k.shared(kind));
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .f = f };
+    }
+    defer for (&h3_gemms) |*m| m.deinit();
+    for (&h3_gemms) |*m| try kernels.append(a, m.kernel());
+    var h3_spans = h3_k.Spans{ .rig = .{ .gpu = gpu, .s = s }, .f = try h3_mod.function("h3_spans") };
+    defer h3_spans.deinit();
+    try kernels.append(a, h3_spans.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
