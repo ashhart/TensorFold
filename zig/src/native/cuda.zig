@@ -17,6 +17,9 @@ const vision_offer = @import("cuda_vision_offer.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, nemotron.omni, glm.native };
 
+/// --record opens here (engines.zig refuses it for a backend without this).
+pub const records = true;
+
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 1]api.Family = undefined;
@@ -108,12 +111,14 @@ const Host = struct {
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
+    recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
 
     fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
+        if (h.recording) |r| r.free(h.gpa);
         if (h.gpu) |g| g.ctx.makeCurrent() catch {};
         if (h.store) |s| {
             const rows = s.disk;
@@ -198,6 +203,7 @@ const Host = struct {
 };
 
 const refusals = @import("cuda_refusal.zig");
+const record = @import("cuda_record.zig");
 
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
@@ -361,6 +367,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         }
     };
     defer if (!opened) loaded.deinit(loaded.ctx);
+    const taps = record.taps(loaded); // --record is refused before the host is made, so a refusal holds nothing
+    if (o.record) |dir| if (try record.refusal(a, io, o.model_type, dir, taps)) |why| {
+        problem.* = why;
+        return null;
+    };
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     var room = after.room(model) -| loaded.learn_bytes;
@@ -436,6 +447,14 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         h.slide_free.?(gpa, s);
         gpa.free(h.dir);
     };
+    if (o.record) |dir| {
+        const r = try record.open(gpa, io, dir, taps, loaded.backend);
+        h.recording = r;
+        h.inner = r.recorded.backend();
+        h.lone = null; // every token through the lane rounds, where the recorder sees it
+        std.log.info("recording each stream's rows under {s}/{s}", .{ dir, r.recorder.name });
+    }
+    errdefer if (h.recording) |r| r.free(gpa);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
     try h.serve(io, loaded.facts, loaded.rows, .{
         .lanes = streams,

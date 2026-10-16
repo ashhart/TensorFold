@@ -51,7 +51,7 @@ pub const Metal = struct {
     }
 
     pub fn facts(self: *const Metal) lanes.Model {
-        return .{ .exact_width = self.width, .hidden_rows = self.width > 1, .batch_rows = st.batch_rows, .max_streams = self.options.streams, .streams_exact = true, .window_costs = self.costs[0..self.timed], .plain_guard = true };
+        return factsFor(self.width, self.options.streams, self.costs[0..self.timed]);
     }
 
     /// Each window width's forward ms on a 256-token history (the fastest of three, after the GPU's clocks ramp up).
@@ -281,6 +281,29 @@ pub fn draw(gpa: std.mem.Allocator, logits: []const u16, settings: ?lanes.Sampli
         filled = @min(filled + 1, k);
     }
     return @intCast(try lanes.sampling.choose(gpa, values, ids, position, sampling));
+}
+
+/// The lane facts at `width` exact rows: at one row (the wider check failed) no forward is shared between streams.
+fn factsFor(width: u32, streams: u32, costs: []const lanes.config.Cost) lanes.Model {
+    return .{
+        .exact_width = width,
+        .hidden_rows = width > 1,
+        .batch_rows = st.batch_rows,
+        .max_streams = streams,
+        .streams_exact = true,
+        .window_costs = costs,
+        .plain_guard = true,
+    };
+}
+
+test "after a failed wider-lanes check every forward is one stream's one row, so no window or by-expert twin runs" {
+    const gpa = std.testing.allocator;
+    var one = try lanes.Config.init(gpa, factsFor(1, 8, &.{}), st.window_rows, st.window_rows - 1);
+    defer one.deinit(gpa);
+    try std.testing.expect(!one.family_streams and one.batch_streams == 1 and one.most_drafts == 0);
+    var wide = try lanes.Config.init(gpa, factsFor(st.window_rows, 8, &.{}), st.window_rows, st.window_rows - 1);
+    defer wide.deinit(gpa);
+    try std.testing.expect(wide.family_streams and wide.batch_streams == 8);
 }
 
 test "candidate selection preserves full-vocabulary keyed draws and tie order" {

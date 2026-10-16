@@ -16,13 +16,13 @@ const Buffer = mtl.Buffer;
 const At = pl.At;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-/// lane_qmm's rows at most: wider chunks take MLX's 4-bit matmuls on the checkpoint's layout.
+/// lane_qmm's rows at most: wider chunks take MLX's 4-bit matmuls on the checkpoint's layout (4/64 matrices).
 pub const lane_rows = 128;
 
 /// mlx_lm's SSD step.
 pub const ssd_step = 256;
 
-/// A 4-bit linear in MLX's layout: weight [N, K/8] u32, scales and biases [N, K/64] bf16.
+/// A linear in MLX's layout: weight [N, K * bits / 32] u32, scales and biases [N, K / group] bf16.
 pub const Raw = [3]At;
 
 pub const Mamba = struct { in_proj: Raw, out_proj: Raw, conv_w: At, conv_b: At, dt_bias: At, d: At, a: At };
@@ -144,8 +144,10 @@ pub const Chunk = struct {
         return self.cache.len > 0;
     }
 
-    /// x [rows, K] times a projection into `out`: lane_qmm up to 128 rows, else MLX's 4-bit matmul.
+    /// x [rows, K] times a projection: lane_qmm to 128 rows, else MLX's 4-bit matmul; other widths on the row kernels.
     pub fn linear(self: Chunk, comptime key: []const u8, comptime sums: []const u8, lin: wts.Linear, raw: Raw, x: Buffer, out: Buffer) void {
+        if (lin.tiles == null and self.rows > lane_rows and self.f.wide(self.e, lin, x, out, self.rows)) return;
+        if (lin.tiles == null) return self.f.coop(self.e, key, lin, x, 0, self.p.s.xs, out, self.rows);
         if (self.rows <= lane_rows) {
             self.f.xsum(self.e, sums, lin.k, x, 0, self.p.s.xs, self.rows);
             self.f.coop(self.e, key, lin, x, 0, self.p.s.xs, out, self.rows);
@@ -291,8 +293,9 @@ pub const Prefill = struct {
         return .{ .p = self, .e = e, .f = f, .rows = rows, .cache = cache, .pool = f.pool, .fresh = fresh };
     }
 
-    /// The ids' embedding rows into s.h.
+    /// The ids' embedding rows into s.h (another width than 4/64: the decode's width-general lookup).
     pub fn embed(self: *const Prefill, x: Chunk, ids: Buffer, ids_off: usize) void {
+        if (!self.w.embed_width.four()) return x.f.embed(x.e, x.rows, ids, ids_off, self.s.h);
         const d = self.c.hidden;
         const e = x.e;
         e.pipe(self.k.get("tf_embed_b4_g64"));

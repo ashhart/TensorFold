@@ -16,11 +16,22 @@ const cache_fit = @import("cache_fit.zig");
 const nemo_disk = @import("nemotron_disk.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
+
+/// Every checkpoint-wide MLX affine width the per-module readers take (oQ quants): 2-8 bits but 7, groups 32-128.
+const affine_widths = blk: {
+    var out: [18][]const u8 = undefined;
+    for ([_]u8{ 2, 3, 4, 5, 6, 8 }, 0..) |bits, i| for ([_]u16{ 32, 64, 128 }, 0..) |group, j| {
+        out[3 * i + j] = std.fmt.comptimePrint("mlx-q{d}g{d}", .{ bits, group });
+    };
+    const done = out;
+    break :blk &done;
+};
+
 pub const families: []const api.Family = &.{
-    .{ .model_type = "nemotron_h", .formats = &.{"mlx-q4g64"} },
-    .{ .model_type = "qwen4_exp", .formats = &.{"mlx-q6g32"} },
+    .{ .model_type = "nemotron_h", .formats = affine_widths },
+    .{ .model_type = "qwen4_exp", .formats = affine_widths },
     .{ .model_type = "glm5_next", .formats = &.{"mlx-q4g64"} },
-    .{ .model_type = "qwen3_5", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "qwen3_5", .formats = affine_widths },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
 };
@@ -144,6 +155,10 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     };
+    if (o.slide) if (try slideWidths(a, io, o.dir)) |why| {
+        problem.* = why;
+        return null;
+    };
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
     if (window < 0 or (native > 0 and window > native)) {
@@ -238,6 +253,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// --slide writes 4-bit codes into the shards: a checkpoint with any other width is refused by its first such matrix.
+fn slideWidths(a: Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
+    const c = nemotron.config.Config.read(a, io, dir) catch return null; // the load names a config.json it cannot read
+    var buf: [96]u8 = undefined;
+    const m = c.other(&buf) orelse return null;
+    return try std.fmt.allocPrint(a, "--slide learns into checkpoints at 4-bit in groups of 64, and {s} in {s} is {d}-bit in groups of {d}: serve it without --slide", .{ m.name, dir, m.width.bits, m.width.group });
 }
 
 /// Flash Next's replay engine copies on the GPU from its own history: it reads no Recall record yet.

@@ -38,7 +38,7 @@ pub const Host = struct {
 /// The words for a request the engine refuses.
 fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.GreedyOnly => "the native GLM-5.3-Flash engine decodes greedily only: send temperature 0",
+        error.SampledPeerUnsupported => "speed-up mode: the two-Mac pair decodes greedily only — a correct full-vocabulary draw needs both Macs' logits; send temperature 0",
         error.FollowsPeer => "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0",
         error.ContextFull => "the prompt and max_tokens do not fit this server's --context",
         else => null,
@@ -122,7 +122,8 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
             offer.?.video = .{ .prepare = prepareVideo, .video_token = vm[1], .group_open = v.c.image_start, .group_close = v.c.image_end, .markers = &h.video_markers, .video_tokens = o.video_tokens, .max_videos = o.max_videos, .max_frames = o.max_frames };
         }
     }
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = true, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
+    // sampled draws on one Mac (the pair refuses them per request)
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-zig", .lanes = n, .context_window = serves, .prefill_step = eng.chunk_rows, .greedy_only = eng.ep != null, .admit = if (h.slots.pool != null) .{ .ctx = &h.back, .fits = glm.backend.Backend.fits } else null, .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.cache = null;
     const budget = cacheBudget(eng, cache_gib);

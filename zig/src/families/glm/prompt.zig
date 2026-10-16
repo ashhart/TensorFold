@@ -471,7 +471,7 @@ fn mla(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, mi: usize, w:
             e.setPipeline(if (c.tp > 1) x.k.sparse_nax_tp else x.k.sparse_nax);
             bind(e, 0, .{ p.ql, x.s.mla[mi].keys, p.indices });
             e.setValue(@as(f32, 1.0 / 16.0), 3);
-            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), 0, 0 }, 4);
+            e.setValue([4]i32{ @intCast(width), @intCast(pos + M), @intCast(pos), 0 }, 4);
             bind(e, 5, .{p.att});
             e.dispatchGroups(size(c.mla_heads / 16, M, 1), size(128, 1, 1));
         } else fwd.attendIndexed(x, e, mi, p.ql, p.indices, p.att, M, pos + M);

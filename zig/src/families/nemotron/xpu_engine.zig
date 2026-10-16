@@ -3,6 +3,7 @@
 const std = @import("std");
 const xpu = @import("xpu");
 const cfgm = @import("xpu_config.zig");
+const widths = @import("config.zig");
 const model = @import("xpu_model.zig");
 const nw = @import("xpu_win.zig");
 const mtp = @import("xpu_mtp.zig");
@@ -82,6 +83,7 @@ pub const Engine = struct {
         e.loader = try ld.Loader.init(gpa, &e.r, dir);
         try model.checkFormat(&e.loader); // before the config: another format's config.json may not parse
         const text = try ld.readFile(gpa, dir, "config.json");
+        try widths.fourOnlyText(gpa, text, "the Intel GPU engine");
         e.cfg = (try cfgm.parse(gpa, text)).value;
         e.m = try model.Model.load(gpa, &e.r, &e.loader, e.cfg, @intCast(o.context));
         e.m.bf16_logits = true;
