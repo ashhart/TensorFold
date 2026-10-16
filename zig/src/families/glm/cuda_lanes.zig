@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
+const dflash = @import("dflash.zig");
 
 const be = lanes.backend;
 
@@ -14,12 +15,13 @@ const ring = 1024;
 /// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
 pub const max_rows = fw.window_rows;
 const mtp_rows = 1 + engine.max_drafts;
+const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
 
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
-    held: [engine.max_drafts]u32 = undefined,
+    held: [max_held]u32 = undefined,
     held_n: usize = 0,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
 };
@@ -60,6 +62,7 @@ pub const Lanes = struct {
     /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
+        const block = self.x.e.drafter != null;
         const sharing = drafting and !self.alone;
         return .{
             .exact_width = if (drafting) max_rows else 1,
@@ -68,7 +71,9 @@ pub const Lanes = struct {
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
-            .drafts = engine.max_drafts,
+            .drafts = if (block) max_held else engine.max_drafts,
+            .draft_streams = block, // one block pass drafts every stream of the round
+            .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,
@@ -278,6 +283,7 @@ pub const Lanes = struct {
 
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const self = of(ptr);
+        if (self.x.e.drafter != null) return self.draftBlock(requests);
         if (!self.x.e.mtp) return error.NoDraftHead;
         for (requests) |r| {
             const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
@@ -293,6 +299,28 @@ pub const Lanes = struct {
             }
             l.held_n = depth;
         }
+    }
+
+    /// DFlash2: every request's kept rows committed, then one block round for them all (cuda_follow's block step).
+    fn draftBlock(self: *Lanes, requests: []const be.DraftRequest) !void {
+        if (requests.len > dflash.MAX_S) return error.TooManyStreams;
+        var reqs: [dflash.MAX_S]dflash.Req = undefined;
+        var held: [dflash.MAX_S]*Lane = undefined;
+        for (requests, 0..) |r, i| {
+            const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
+            if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
+            if (r.lanes != null) return error.TreesNotBuilt;
+            var n: usize = 0;
+            const anchor = if (r.rows) |rows| a: {
+                for (rows, 0..) |row, j| if (row != j) return error.TreesNotBuilt;
+                n = rows.len;
+                break :a r.follow[rows.len - 1];
+            } else self.value(r.first orelse return error.NoFirstToken);
+            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held };
+            held[i] = l;
+        }
+        try self.x.block(reqs[0..requests.len]);
+        for (requests, held[0..requests.len]) |r, l| l.held_n = @min(r.depth, max_held);
     }
 
     /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).

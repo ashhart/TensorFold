@@ -13,6 +13,7 @@ const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
 const images_mod = @import("cuda_images.zig");
+const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
 
 pub const Options = struct {
@@ -20,6 +21,7 @@ pub const Options = struct {
     mtp: bool, // load the MTP head (drafts)
     settings: ranks.Settings,
     vision: u32 = 0, // --vision's image tokens (0: none): every rank must hold the rows rank 0 sends
+    drafter: bool = false, // --drafter: DFlash2 loads after the engine (the ranks agree on it here)
 };
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -71,6 +73,7 @@ pub const Engine = struct {
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
+    drafter: ?*dflash.Drafter = null, // --drafter: DFlash2 (every rank runs its passes; rank 0 selects the drafts)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     settings: ranks.Settings,
@@ -129,6 +132,7 @@ pub const Engine = struct {
             checkpoint,
         );
         fp.vision = o.vision;
+        fp.mtp += @intFromBool(o.drafter);
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         const share = try shard.Share.of(&c, rank, world);
         const spans = try gpa.alloc(shard.Span, world);
@@ -182,6 +186,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        if (e.drafter) |dr| dr.deinit();
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
         e.snaps.deinit(e.gpa);
@@ -212,7 +217,7 @@ pub const Engine = struct {
     fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
         out.* = .{.{ .w = &e.w, .st = &e.cur.st, .b = b }};
         const im: ?fw.ImageRows = if (e.images) |v| .{ .v = v, .slot = e.slot } else null;
-        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .kda_wide = e.settings.kda_wide, .images = im };
+        return .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = out, .exchange = e.exchange(), .pieces = if (b == &e.bp) &e.pieces else null, .split = e.settings.split, .kda_wide = e.settings.kda_wide, .images = im, .taps = if (e.drafter) |dr| dr.taps(b == &e.bp) else null };
     }
 
     /// Binds slot `slot`'s sequence for the steps that follow, making it (a zeroed state) on first use.
@@ -264,6 +269,7 @@ pub const Engine = struct {
         e.cur.sampling = sampler.check(sampling);
         e.cur.in_head = 0;
         try e.cur.st.reset(e.stream);
+        if (e.drafter) |dr| try dr.restart(e.slot, 0);
     }
 
     /// decode.prefill: `ids` in 2,048-row chunks, then the first token from the last row; `from` restores a kept state.
@@ -280,6 +286,7 @@ pub const Engine = struct {
         const r = from orelse return 0;
         if (r.at == 0 or r.at >= len or r.at % fw.prefill_rows != 0) return error.BadResume;
         try e.restoreState(r.id);
+        if (e.drafter) |dr| try dr.restart(e.slot, r.at); // the rows before it were never tapped
         return r.at;
     }
 
@@ -300,6 +307,7 @@ pub const Engine = struct {
         try e.gate(cancel);
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
+        if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         const last = start + rows == len;
         var first: ?u32 = null;
         if (last) {
@@ -441,6 +449,7 @@ pub const Engine = struct {
         f.prof = e.profs[ids.len - 1];
         if (f.prof) |p| try p.begin(e.stream, verifyLabel(ids.len));
         try f.run(@ptrCast(ids));
+        if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
         e.cur.rows_at = e.bd.fnormed;
         try e.draw(e.bd.logits, ids.len, at + 1, out);
         if (f.prof) |p| p.end();
@@ -467,13 +476,21 @@ pub const Engine = struct {
             rows += p.ids.len;
         }
         var one: [1]fw.Rank = .{.{ .w = &e.w, .st = segs[0].st, .b = b, .segs = segs[0..parts.len] }};
-        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .kda_wide = e.settings.kda_wide };
+        const f: fw.Forward = .{ .d = e.d, .m = &e.m, .stream = e.stream, .ranks = &one, .exchange = e.exchange(), .pieces = null, .split = e.settings.split, .kda_wide = e.settings.kda_wide, .taps = if (e.drafter) |dr| dr.taps(false) else null };
         try f.run(@ptrCast(ids[0..rows]));
+        if (e.drafter) |dr| for (parts, segs[0..parts.len], 0..) |p, g, i| try dr.noteVerify(p.slot, g.row0, g.rows, g.st.pos, i == 0);
         for (parts, segs[0..parts.len]) |p, g| {
             try e.bind(p.slot);
             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
             try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.out);
         }
+    }
+
+    /// DFlash2's round (every rank, the same `reqs`): each stream's kept rows into its context, then the block pass.
+    pub fn draftBlock(e: *Engine, reqs: []dflash.Req) !void {
+        const dr = e.drafter orelse return error.NoDrafter;
+        for (reqs) |*q| q.pos = @intCast((e.seqs.items[q.slot] orelse return error.UnknownSlot).st.pos);
+        try dr.draft(e, reqs);
     }
 
     /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).

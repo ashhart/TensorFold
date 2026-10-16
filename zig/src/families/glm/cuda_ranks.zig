@@ -67,7 +67,7 @@ pub const Fingerprint = extern struct {
     kda_wide: u32,
     pieces: u32,
     layers: u32, // TF_GLM_LAYERS (0: all)
-    mtp: u32, // 1: the MTP head loads and runs (drafts on): every prompt pass adds its collectives
+    mtp: u32, // 1: the MTP head loads and runs (drafts on); 2: and DFlash2 (--drafter), whose rounds gather
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike

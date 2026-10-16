@@ -11,6 +11,8 @@ const ranks = @import("cuda_ranks.zig");
 const fw = @import("cuda_forward.zig");
 const config = @import("config.zig");
 const shard = @import("cuda_shard.zig");
+const dflash = @import("dflash.zig");
+const dflash_load = @import("dflash_load.zig");
 
 pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -33,7 +35,10 @@ pub const Options = struct {
     slide: bool = false,
     room: ?Room = null,
     vision: ?images_mod.Limits = null, // --vision: rank 0's tower, every rank's image rows
+    drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
 };
+/// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
+pub const takes_drafter = true;
 /// The smallest room among the other ranks and whose it is.
 pub const Peer = struct { bytes: u64, rank: usize };
 
@@ -144,7 +149,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     if (p.world > 1) try warmPeers(ctx.d, &own.group);
     const cap = capacity(o.context);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = if (o.vision) |l| l.image_tokens else 0 });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = if (o.vision) |l| l.image_tokens else 0, .drafter = o.drafter != null });
     errdefer own.e.deinit();
     if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
         own.e.images = (try images_mod.Images.init(gpa, io, ctx.d, own.e.stream, dir, lim, fw.prefill_rows + 1, p.rank == 0, &problem)) orelse {
@@ -153,6 +158,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         };
     }
     errdefer if (own.e.images) |v| v.deinit();
+    if (o.drafter) |dd| { // before the rooms: its weights and scratch count against every rank's
+        if (!o.drafts) return error.DrafterNeedsDrafts;
+        own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world);
+    }
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
     own.e.group = &own.group;
@@ -190,7 +199,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
-        .stream_bytes = own.e.seqBytes(), // each stream past the first makes its own sequence on every rank
+        .stream_bytes = own.e.seqBytes() + if (o.drafter != null) dflash.ring_bytes else 0, // and its DFlash2 ring
         .free_streams = 1, // the first is the sequence the engine made
         .ctx = own,
         .deinit = close,
