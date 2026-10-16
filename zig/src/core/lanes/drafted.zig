@@ -44,7 +44,7 @@ pub const Drafted = struct {
     }
 
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .release = release } };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
@@ -158,6 +158,18 @@ pub const Drafted = struct {
         }
         if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
         return x.target.verify(x.windows.items, out);
+    }
+
+    /// One stream's held drafts as host tokens before its verify, for a grammar to walk (fillers: the pending token).
+    fn held(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const x = self(ptr);
+        const lane = x.lanes.getPtr(s) orelse return error.NotDrafting;
+        if (lane.filler > 0) {
+            @memset(out, s.pending.?);
+            lane.filler = 0;
+            return;
+        }
+        try x.drafter.held(&.{s}, &.{out});
     }
 
     /// The target keeps from the windows it verified (host tokens): the round loop's, position for position.

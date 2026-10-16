@@ -11,6 +11,7 @@ const dr = @import("drafter.zig");
 const Drafted = @import("drafted.zig").Drafted;
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
 const Sampling = @import("sampling.zig").Sampling;
+const grammar = @import("grammar.zig");
 
 const gpa = std.testing.allocator;
 
@@ -149,7 +150,7 @@ const Strict = struct {
     }
 
     fn backend(x: *Strict) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draftNone, .prepare_features = prepare, .features = features, .release = release } };
     }
 
     fn self(ptr: *anyopaque) *Strict {
@@ -174,6 +175,11 @@ const Strict = struct {
 
     fn first(ptr: *anyopaque, s: *sm.Stream, position: u64) anyerror!u64 {
         return self(ptr).inner.first(s, position);
+    }
+
+    fn firstMasked(ptr: *anyopaque, s: *sm.Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const in = self(ptr).inner;
+        return in.vtable.first_masked.?(in.ptr, s, position, mask);
     }
 
     fn queue(ptr: *anyopaque, s: *sm.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -243,7 +249,7 @@ const Strict = struct {
 };
 
 const Mode = enum { plain, wrapped };
-const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0 };
+const Case = struct { prompt: []const u32, max_new: u32 = 40, sampling: ?Sampling = null, drafts: bool = true, restored: u32 = 0, grammar: ?*grammar.Constraint = null };
 const Out = struct {
     tokens: [][]u32,
     drafted: u64 = 0,
@@ -291,7 +297,7 @@ fn run(cases: []const Case, mode: Mode, batched: bool) !Out {
             b.release(&early);
         }
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .reuse = .{ .saved = k.*, .at = c.restored } });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .proposer = p.proposer(), .reuse = .{ .saved = k.*, .at = c.restored }, .grammar = c.grammar });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -503,4 +509,73 @@ test "a copy round after a whole restore does not leave fillers in place of the 
     // the verify read the drafter (not stale fillers) and the target saw its drafts
     try std.testing.expectEqual(@as(u32, 1), head.helds);
     try std.testing.expectEqualSlices(u32, head.lanes.getPtr(&s).?.held.items[0..3], &echo2);
+}
+
+/// A test grammar: `length` odd tokens, then 96.
+const Odd = struct {
+    length: u32 = 12,
+    at: u32 = 0,
+    done: bool = false,
+
+    fn rules(o: *Odd) grammar.Rules {
+        return .{ .ptr = o, .vtable = &.{ .accept = accept, .rollback = rollback, .terminated = terminated, .fill = fill, .drafts = drafts, .free = free } };
+    }
+
+    fn cast(ptr: *anyopaque) *Odd {
+        return @ptrCast(@alignCast(ptr));
+    }
+
+    fn allows(o: *const Odd, t: u32) bool {
+        if (o.done) return false;
+        return if (o.at == o.length) t == 96 else t % 2 == 1;
+    }
+
+    fn accept(ptr: *anyopaque, t: u32) anyerror!bool {
+        const o = cast(ptr);
+        if (!o.allows(t)) return false;
+        if (o.at == o.length) o.done = true else o.at += 1;
+        return true;
+    }
+
+    fn rollback(ptr: *anyopaque, n: usize) anyerror!void {
+        const o = cast(ptr);
+        for (0..n) |_| {
+            if (o.done) o.done = false else o.at -= 1;
+        }
+    }
+
+    fn terminated(ptr: *anyopaque) bool {
+        return cast(ptr).done;
+    }
+
+    fn fill(ptr: *anyopaque, words: []u32) anyerror!void {
+        const o = cast(ptr);
+        @memset(words, 0);
+        for (0..fake.vocab) |t| if (o.allows(@intCast(t))) {
+            words[t / 32] |= @as(u32, 1) << @intCast(t % 32);
+        };
+    }
+
+    fn drafts(_: *anyopaque, _: []u32) anyerror!usize {
+        return 0;
+    }
+
+    fn free(_: *anyopaque) void {}
+};
+
+test "structured output through the wrapper: the grammar walks the drafter's held drafts, and drafted == plain" {
+    for ([_]?Sampling{ null, sampled }) |s| {
+        var outs: [2]Out = undefined;
+        for (&outs, [_]Mode{ .wrapped, .plain }) |*o, mode| {
+            var g: Odd = .{};
+            var k: grammar.Constraint = .init(g.rules(), (fake.vocab + 31) / 32, null);
+            o.* = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = mode == .wrapped, .grammar = &k }}, mode, false);
+        }
+        defer for (outs) |o| freeOut(o);
+        try std.testing.expectEqualSlices(u32, outs[1].tokens[0], outs[0].tokens[0]);
+        try std.testing.expect(outs[0].head.helds > 0 and outs[0].drafted > 0);
+        var g: Odd = .{};
+        for (outs[0].tokens[0]) |t| try std.testing.expect(try Odd.accept(&g, t));
+        try std.testing.expect(g.done);
+    }
 }
