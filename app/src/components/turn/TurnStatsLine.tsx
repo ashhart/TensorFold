@@ -17,7 +17,7 @@ function Line({ segments, title }: { segments: string[]; title?: string }) {
 function EngineStatsLine({ stats, provider }: { stats: AssistantTurnStats; provider: Provider }) {
   const { snapshot } = useEngine()
   return <>
-    <Line segments={turnStatsSegments(stats, statsModelLabel(stats.model, provider, snapshot?.suggestions))} title={turnStatsTitle(stats)} />
+    <Line segments={turnStatsSegments(stats, snapshot?.installed.find((model) => model.repo === stats.model)?.title ?? statsModelLabel(stats.model, provider, snapshot?.suggestions))} title={turnStatsTitle(stats)} />
     <CortheonNote stats={stats} />
   </>
 }

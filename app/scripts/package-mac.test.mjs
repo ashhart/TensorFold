@@ -206,6 +206,11 @@ try {
   }
   assert.equal(normal.calls.some((call) => call.includes(staleApp) || call.includes(staleDmg)), false, 'stale release artifacts are out of scope')
   assert.ok(normal.calls.some((call) => tool(call[0]) === 'codesign' && call.includes('--strict')))
+  assert.ok(normal.calls.some((call) => tool(call[0]) === 'xcrun' && call.includes('-show-build')), 'release verification inspects native OS requirements')
+  await assert.rejects(
+    () => verifyMacReleaseArtifacts(tmp, ['dir'], metadata, release, createFakeRun(metadata, { nativeMinimum: '14.0' }).run),
+    /requires macOS 14.0, but the app declares 13.3/,
+  )
   assert.ok(normal.calls.some((call) => tool(call[0]) === 'spctl'))
   assert.ok(normal.calls.some((call) => tool(call[0]) === 'xcrun' && call.includes('validate')))
   const attach = normal.calls.find((call) => tool(call[0]) === 'hdiutil' && call[1] === 'attach')
@@ -368,7 +373,7 @@ async function createFixtureApp(parent, metadata) {
   for (const rel of engineManifest.executables) {
     const file = path.join(app, 'Contents', 'Resources', 'engine', rel)
     await mkdir(path.dirname(file), { recursive: true })
-    await writeFile(file, 'fixture engine file')
+    await writeFile(file, Buffer.concat([Buffer.from('cffaedfe', 'hex'), Buffer.from('fixture engine file')]))
   }
   const helper = path.join(app, 'Contents', 'Resources', 'computer-use', 'tensorfold-computer')
   await mkdir(path.dirname(helper), { recursive: true })
@@ -432,8 +437,14 @@ function createFakeRun(metadata, options = {}) {
         CFBundleIdentifier: metadata.appId,
         CFBundleShortVersionString: metadata.version,
         CFBundleVersion: '100',
+        LSMinimumSystemVersion: '13.3',
       }
       return { stdout: `${values[key]}\n`, stderr: '' }
+    }
+    if (name === 'xcrun' && args[0] === 'vtool') {
+      const minos = options.nativeMinimum ?? '13.3'
+      const stdout = `Load command 1\n cmd LC_BUILD_VERSION\n platform MACOS\n minos ${minos}\n sdk 26.5\n`
+      return { stdout, stderr: '' }
     }
     if (name === 'spctl') return { stdout: '', stderr: 'accepted\nsource=Notarized Developer ID\n' }
     return { stdout: '', stderr: '' }

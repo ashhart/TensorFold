@@ -126,10 +126,16 @@ async function serveCommand(args) {
   const host = flag(args, '--host') ?? '127.0.0.1'
   const name = flag(args, '--name') ?? model
   const keys = (env.TENSORFOLD_API_KEY ?? '').split(',').filter(Boolean)
+  const graphFile = flag(args, '--slide-graph')
+  let graph = { next: 1, facts: [], model: { layers: 52, kinds: 'ME', pocket: { neurons: 64, layers: [1], used: [0] }, shards: [{ name: 'model.safetensors', bytes: 8192, pocket: true, layers: [1] }] } }
+  if (graphFile && existsSync(graphFile)) graph = { ...graph, ...JSON.parse(readFileSync(graphFile, 'utf8')) }
+  const saveGraph = () => { if (graphFile) writeFileSync(graphFile, JSON.stringify(graph), { mode: 0o600 }) }
+  let learning = false
   record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
   console.error(`[tensorfold] loading ${model}`)
   await sleep(Number(env.FAKE_SERVE_LOAD_MS ?? 50))
   if (env.FAKE_SERVE_FAIL) { console.error(`tensorfold: ${env.FAKE_SERVE_FAIL}`); process.exit(1) }
+  if ((env.FAKE_CORTHEON_FAIL && args.includes('--cortheon')) || (env.FAKE_SLIDE_FAIL && args.includes('--slide'))) { console.error('tensorfold: requested mode failed to load'); process.exit(1) }
   const server = http.createServer((req, res) => {
     if (keys.length && req.headers.authorization !== `Bearer ${keys[0]}`) {
       res.writeHead(401, { 'WWW-Authenticate': 'Bearer', 'Content-Type': 'application/json' })
@@ -139,6 +145,34 @@ async function serveCommand(args) {
     // FAKE_CONTEXT: the served window (default 32768; 'none' = unbounded). FAKE_MODELS_NO_CONTEXT
     // leaves it out of /v1/models so only /tokenize reports it.
     const context = env.FAKE_CONTEXT === 'none' ? null : Number(env.FAKE_CONTEXT ?? 32768)
+    if (env.FAKE_ENGINE_LEARNING && req.method === 'GET' && req.url === '/v1/slide/graph') {
+      res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(graph)); return
+    }
+    if (env.FAKE_ENGINE_LEARNING && req.method === 'POST' && req.url === '/v1/slide/learn') {
+      if (!args.includes('--slide')) { res.writeHead(501); res.end(); return }
+      if (learning) { res.writeHead(503); res.end(); return }
+      learning = true
+      let body = ''
+      req.on('data', (chunk) => { body += chunk })
+      req.on('end', async () => {
+        const input = JSON.parse(body)
+        record({ kind: 'teach', text: input.text })
+        const fact = { id: graph.next++, text: input.text, source: 'chat', at: Date.now(), state: 'learning', links: [] }
+        graph.facts.push(fact)
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' })
+        res.write(`event: fact\ndata: ${JSON.stringify({ id: fact.id, text: fact.text })}\n\nevent: learning\ndata: ${JSON.stringify({ id: fact.id })}\n\n`)
+        await sleep(Number(env.FAKE_LEARN_DELAY_MS ?? 20))
+        fact.state = 'learned'
+        res.write(`event: learned\ndata: ${JSON.stringify({ id: fact.id, recalled: true })}\n\ndata: [DONE]\n\n`)
+        graph.model.save = { state: 'saving', at: Date.now() }
+        await sleep(Number(env.FAKE_SAVE_DELAY_MS ?? 20))
+        graph.model.save.state = 'saved'
+        saveGraph()
+        learning = false
+        res.end()
+      })
+      return
+    }
     if (req.method === 'GET' && req.url === '/v1/models') {
       res.writeHead(200, { 'Content-Type': 'application/json' })
       const window = context && !env.FAKE_MODELS_NO_CONTEXT ? { context_length: context, max_model_len: context } : {}
@@ -185,7 +219,7 @@ async function serveCommand(args) {
 
 const [command, ...rest] = argv
 if (command === '--version') console.log(`tensorfold-native ${env.FAKE_ENGINE_VERSION ?? '1.0.7'}`)
-else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'] }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'HF_HOME', 'HF_HUB_CACHE'] }))
+else if (command === 'capabilities' && rest[0] === '--json') console.log(JSON.stringify({ schema: 1, engine: 'zig', version: '1.0.7', chip: 'Apple M5 Max', backends: ['mlx'], families: { qwen3_5: ['mlx-q4g64'], nemotron_h: ['mlx-q4g64'] }, serve: { flags: { ...(env.FAKE_ENGINE_CORTHEON ? { '--cortheon': {} } : {}), ...(env.FAKE_ENGINE_LEARNING ? { '--slide': {}, '--slide-graph': {} } : {}), '--host': {}, '--port': {}, '--drafter': {} } }, env: ['TENSORFOLD_API_KEY', 'HF_HOME', 'HF_HUB_CACHE'] }))
 else if (command === 'models') process.exitCode = modelsCommand()
 else if (command === 'info') process.exitCode = infoCommand(rest[0])
 else if (command === 'pull') process.exitCode = await pullCommand(rest[0])

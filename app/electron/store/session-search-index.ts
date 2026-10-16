@@ -4,7 +4,7 @@ import path from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { contentText } from '../agent/content'
 import { stripIncognitoThreads } from '../agent/incognito'
-import { searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from '../agent/session-recall'
+import { canRecallThread, searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from '../agent/session-recall'
 import type { Thread, TimelineItem } from '../agent/types'
 
 export type BlindSearchToken = (token: string) => string
@@ -159,7 +159,7 @@ export function syncSessionSearchIndex(file: string, threads: Thread[], blind: B
 
   db.exec('BEGIN IMMEDIATE')
   try {
-    for (const thread of threads) {
+    for (const thread of stripIncognitoThreads(threads).filter((thread) => !thread.phoneLocalOnly)) {
       liveIds.add(thread.id)
       const fingerprint = threadTextFingerprint(thread)
       if (existing.get(thread.id) === fingerprint) continue
@@ -190,10 +190,9 @@ export function searchSessionIndex(
   options: SessionSearchOptions,
   blind: BlindSearchToken,
 ): SessionSearchResult {
-  // The index only ever receives incognito-stripped threads; the linear-scan fallback
-  // must preserve that posture instead of leaking incognito transcripts exactly when
-  // the index is broken.
-  const visible = stripIncognitoThreads(threads)
+  // Live source policy also filters stale index rows and the broken-index fallback.
+  // A phone owner's own messages can be scanned directly without a global derived row.
+  const visible = threads.filter((thread) => canRecallThread(thread, options.currentThreadId))
   const terms = searchTerms(options.query)
   if (!terms.length) return searchSessionThreads(visible, options)
   try {
@@ -220,7 +219,7 @@ export function searchSessionIndex(
       LIMIT ?
     `).all(...params) as Array<{ thread_id: string }>
     const ids = new Set(rows.map((row) => row.thread_id))
-    return searchSessionThreads(visible.filter((thread) => ids.has(thread.id)), options)
+    return searchSessionThreads(visible.filter((thread) => ids.has(thread.id) || thread.phoneLocalOnly), options)
   } catch {
     return searchSessionThreads(visible, options)
   }

@@ -305,9 +305,10 @@ export function useProviderSettings({ draft, editDraft, commit, patch, save }: S
     setSetupStatus(null)
     try {
       const models = await api.fetchModels(provider)
-      setSetupStatus(models.length
-        ? { state: 'ok', msg: `Connection OK — ${models.length} model${models.length === 1 ? '' : 's'} available (not added yet).` }
-        : { state: 'error', msg: 'Connected, but the endpoint returned no models.' })
+      const model = provider.models.find((candidate) => models.includes(candidate)) ?? models[0]
+      if (!model) throw new Error('Connected, but the endpoint returned no models.')
+      const probe = await api.testProviderResponse({ provider, model })
+      setSetupStatus({ state: 'ok', msg: `Response received from ${probe.model} in ${(probe.firstTokenMs / 1000).toFixed(1)}s; ${models.length} model${models.length === 1 ? '' : 's'} available. Provider has not been added.` })
     } catch (e: any) {
       const msg = String(e?.message || e || 'Could not connect').replace(/^Error invoking remote method '[^']+':\s*/, '').replace(/^Error:\s*/, '')
       setSetupStatus({ state: 'error', msg })

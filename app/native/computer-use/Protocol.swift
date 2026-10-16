@@ -20,6 +20,14 @@ enum Target: Equatable {
     case element(Int)
 }
 
+enum PhoneInput: Equatable {
+    case tap(CGPoint, CGSize)
+    case swipe(CGPoint, CGPoint, CGSize, Double)
+    case type(String)
+    case home
+    case enter
+}
+
 enum Command: Equatable {
     case permissions
     case requestPermissions(accessibility: Bool, screenRecording: Bool)
@@ -33,6 +41,11 @@ enum Command: Equatable {
     case type(String)
     case key(KeyCombo)
     case openApp(name: String?, bundleId: String?)
+    case phoneStatus
+    case phoneConnect
+    case phoneObserve(String)
+    case phoneInput(String, PhoneInput)
+    case phoneDisconnect(String)
     case stop
 }
 
@@ -216,11 +229,43 @@ func parseCommand(_ cmd: String, _ p: Params) throws -> Command {
             throw badRequest("open_app needs exactly one of name or bundleId.")
         }
         return .openApp(name: name, bundleId: bundleId)
+    case "phone_status": return .phoneStatus
+    case "phone_connect": return .phoneConnect
+    case "phone_observe": return .phoneObserve(try phoneToken(p))
+    case "phone_disconnect": return .phoneDisconnect(try phoneToken(p))
+    case "phone_input":
+        let token = try phoneToken(p)
+        guard let action = try p.string("action") else { throw badRequest("phone_input needs an action.") }
+        switch action {
+        case "tap", "swipe":
+            guard let width = try p.number("width"), let height = try p.number("height"), width >= 1, height >= 1, width <= 4096, height <= 4096 else { throw badRequest("Phone input needs the latest bounded screen dimensions.") }
+            let size = CGSize(width: width, height: height)
+            let from = try p.xy()
+            guard phoneLocalPoint(from, size: size) else { throw badRequest("Phone coordinates must be inside the latest phone screen.") }
+            if action == "tap" { return .phoneInput(token, .tap(from, size)) }
+            guard let toX = try p.number("toX"), let toY = try p.number("toY") else { throw badRequest("Phone swipe needs toX and toY.") }
+            let to = CGPoint(x: toX, y: toY)
+            guard phoneLocalPoint(to, size: size) else { throw badRequest("Phone swipe must end inside the phone screen.") }
+            let duration = try p.number("durationMs") ?? 400
+            guard duration >= 100, duration <= 2000 else { throw badRequest("Phone swipe duration must be between 100 and 2000 milliseconds.") }
+            return .phoneInput(token, .swipe(from, to, size, duration / 1000))
+        case "type":
+            guard let text = try p.string("text"), !text.isEmpty, text.utf16.count <= 4000, phoneTypeAllowed(text) else { throw badRequest("Phone typing needs 1 to 4000 characters without control or private key codes.") }
+            return .phoneInput(token, .type(text))
+        case "home": return .phoneInput(token, .home)
+        case "enter": return .phoneInput(token, .enter)
+        default: throw badRequest("Mirroring supports tap, swipe, type, home and enter only.")
+        }
     case "stop":
         return .stop
     default:
         throw HelperError("unknown_cmd", "Unknown command \(String(cmd.prefix(40))).")
     }
+}
+
+func phoneToken(_ p: Params) throws -> String {
+    guard let token = try p.string("token"), token.count == 36, UUID(uuidString: token) != nil else { throw badRequest("Phone requests need the current connection token.") }
+    return token
 }
 
 // One line of JSON plus a newline; anything JSONSerialization would reject becomes an internal error line.

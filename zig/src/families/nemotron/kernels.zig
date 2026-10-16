@@ -5,7 +5,7 @@ const sources = @import("kernel_sources");
 const simd_attention = @import("simd_attention.zig");
 const row = @import("../../core/row_projection.zig");
 
-pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
+pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_embed_bits", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
 
 /// Tree windows (nemotron_tree.metal): Mamba by parent for every forward, tree attention, compaction, gathers, top-k.
 pub const tree_names = [_][:0]const u8{ "tf_tree_conv", "tf_tree_scan", "tf_tree_tail", "tf_tree_merge", "tf_kv_compact", "tf_gather_rows", "tf_topk_probs", "tf_lane_tokens" };
@@ -94,7 +94,9 @@ pub fn sourceHash() u64 {
 
 pub const Kernels = struct {
     pipelines: [total]mtl.Pipeline = undefined,
-    rows: ?row.Pipelines = null, // the core's row projections, on chips without tensor units
+    rows: ?row.Pipelines = null, // the core's row projections: chips without tensor units, and widths but 4/64
+    bits: ?*row.simd_bits.Pipelines = null, // prompt chunks' tiles at widths but 4/64 (the model owns them)
+    gathers: []const @import("prefill_w.zig").Gathers = &.{}, // prompt chunks' routed experts at widths but 4/64 (model's)
 
     /// The pipeline of a generated kernel (by its generator key) or a glue kernel (by function name).
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {

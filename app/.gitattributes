@@ -1,3 +1,4 @@
 # Preserve the exact reviewed upstream vendor bytes and license text.
 mobile/vendor/braces/lib/stringify.js whitespace=-blank-at-eof
 mobile/vendor/node-forge/LICENSE whitespace=-blank-at-eof
+build/voice/CMU-DICTIONARY-BSD.txt whitespace=-blank-at-eof,-trailing-space

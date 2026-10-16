@@ -54,11 +54,12 @@ export const restoredProjects = new Set<string>()
 
 // Thread-create / start / guide / cancel helpers that route through either the local api or the
 // owning Orchestrator depending on whether the record carries an origin stamp.
-export async function createThreadForProject(get: () => import('../types').AppState, cwd: string, kind: 'task' | 'chat', projectId: string | null): Promise<{ thread: import('../../types').Thread; remoteHostId: string | null }> {
+export async function createThreadForProject(get: () => import('../types').AppState, cwd: string, kind: 'task' | 'chat', projectId: string | null, incognito = false): Promise<{ thread: import('../../types').Thread; remoteHostId: string | null }> {
   const state = get()
   const project = projectId ? state.projects.find((candidate) => candidate.id === projectId) ?? null : null
   const remoteHostId = (await import('./remote-host')).remoteHostIdForProject(state, project)
   if (remoteHostId) {
+    if (incognito) throw new Error('Incognito tasks run in this desktop app; choose This Mac before starting a private task.')
     const created = await api.createRemoteOrchestratorThread(remoteHostId, { cwd, kind, projectId })
     // Stamp the origin immediately — the snapshot mirror stamps too, but the first run can
     // start before the next snapshot lands.
@@ -66,7 +67,8 @@ export async function createThreadForProject(get: () => import('../types').AppSt
   }
   // One command id per user action: if the IPC reply is lost and this retries, the host's
   // spine receipt returns the SAME thread instead of minting a duplicate.
-  return { thread: await api.createThread(cwd, kind, projectId, crypto.randomUUID()), remoteHostId: null }
+  const commandId = crypto.randomUUID()
+  return { thread: incognito ? await api.createThread(cwd, kind, projectId, commandId, true) : await api.createThread(cwd, kind, projectId, commandId), remoteHostId: null }
 }
 
 export function startThreadRunApi(hostId: string | null, payload: Parameters<typeof api.startRun>[0]): Promise<{ runId: string }> {

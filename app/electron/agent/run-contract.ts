@@ -1,3 +1,4 @@
+import { captureThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import type {
   AgentEventReceipt,
@@ -63,6 +64,7 @@ export function buildAgentRunContract(input: {
   const targetKind = thread.workspace?.kind === 'ssh' ? 'remote' : 'local'
   return {
     id: randomUUID(),
+    memoryPolicy: { ...captureThreadMemoryPolicy(thread) },
     runId,
     objective: clean(input.objective) || clean(thread.goal) || clean(thread.title) || 'Untitled run',
     surface: guardPolicy.surface,
@@ -152,6 +154,8 @@ export function buildAgentRunReceipt(input: {
   const warnings: string[] = []
   const gaps: string[] = []
   let approvals = 0
+  let pendingApprovals = 0
+  let deniedActions = 0
   let diffs = 0
   let errors = 0
   let lastChangeOrder = -1
@@ -164,18 +168,25 @@ export function buildAgentRunReceipt(input: {
     if (item.kind === 'visualization') artifacts.push(item.title ?? item.visualization?.title ?? 'visualization')
     if (item.kind !== 'tool') return
     if (item.state === 'awaiting' || item.approval) approvals++
-    if (item.diff?.length) diffs++
+    if (item.state === 'awaiting') pendingApprovals++
+    if (item.state === 'denied') deniedActions++
+    const completed = item.state === 'ok' || item.state === 'error'
+    if (completed && item.diff?.length) diffs++
     const path = pathFromItem(item)
-    if ((item.tool && WRITE_TOOLS.has(item.tool)) || item.diff?.length) {
+    if ((item.state === 'ok' && item.tool && WRITE_TOOLS.has(item.tool)) || (completed && item.diff?.length)) {
       if (path) changedFiles.push(path)
+      lastChangeOrder = Math.max(lastChangeOrder, order)
+    }
+    if (completed && item.changedPaths?.length) {
+      changedFiles.push(...item.changedPaths)
       lastChangeOrder = Math.max(lastChangeOrder, order)
     }
     if (item.command || item.tool === 'run_command') {
       const command = item.command ?? String(item.args?.command ?? '')
       if (command) commands.push(command)
-      if (TEST_COMMAND_RE.test(command)) {
+      if (completed && TEST_COMMAND_RE.test(command)) {
         tests.push(command)
-        if (!item.state || item.state === 'ok') lastSuccessfulTestOrder = Math.max(lastSuccessfulTestOrder, order)
+        if (item.state === 'ok') lastSuccessfulTestOrder = Math.max(lastSuccessfulTestOrder, order)
       }
     }
     if (isArtifactTool(item)) artifacts.push(item.title ?? item.path ?? item.tool ?? 'artifact')
@@ -188,12 +199,15 @@ export function buildAgentRunReceipt(input: {
   if (input.aborted) {
     verdict = 'cancelled'
     gaps.push('run cancelled')
-  } else if (approvals > 0) {
+  } else if (pendingApprovals > 0) {
     verdict = 'blocked'
     gaps.push('approval pending')
   } else if (errors > 0) {
     verdict = 'failed'
     gaps.push('runtime error')
+  } else if (deniedActions > 0) {
+    verdict = 'blocked'
+    gaps.push('action denied')
   } else if (requiresVerification && !freshVerification) {
     verdict = 'unverified'
     gaps.push('fresh test, build, lint, or typecheck evidence missing')
@@ -209,7 +223,9 @@ export function buildAgentRunReceipt(input: {
     runId: input.contract.runId,
     threadId: input.thread.id,
     verdict,
-    summary: receiptSummary(verdict, uniqueChangedFiles.length, tests.length, approvals),
+    summary: deniedActions > 0 && pendingApprovals === 0 && verdict === 'blocked'
+      ? `${deniedActions} action${deniedActions === 1 ? ' was' : 's were'} denied.`
+      : receiptSummary(verdict, uniqueChangedFiles.length, tests.length, pendingApprovals),
     changedFiles: uniqueChangedFiles,
     commands: unique(commands),
     tests: unique(tests),
@@ -245,7 +261,7 @@ function isArtifactTool(item: TimelineItem): boolean {
 
 function receiptSummary(verdict: AgentRunReceiptSnapshot['verdict'], changedCount: number, testCount: number, approvals: number): string {
   if (verdict === 'cancelled') return 'The run was cancelled before a final verdict.'
-  if (verdict === 'blocked') return `${approvals || 1} approval or blocker is waiting.`
+  if (verdict === 'blocked') return `${approvals || 1} approval${approvals === 1 ? ' is' : 's are'} waiting.`
   if (verdict === 'failed') return 'The run recorded an error before a clean final verdict.'
   if (verdict === 'unverified') return `${changedCount} changed file${changedCount === 1 ? '' : 's'} need fresh verification.`
   if (verdict === 'verified') return `${changedCount} changed file${changedCount === 1 ? '' : 's'} verified by ${testCount} check${testCount === 1 ? '' : 's'}.`

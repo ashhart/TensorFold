@@ -7,6 +7,7 @@ import type { ModelInfo } from './cli'
 import { assertRepoId, type EngineBinary } from './paths'
 import { killGroup } from './pull'
 import { loweredEngineMemoryBudget } from './memory-budget'
+import { CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 
 // The engine's default kept-prompt budget is whatever 70% of RAM leaves (68.9 GiB on a 128 GB Mac);
 // a desktop app shares memory with everything else, so cap retained prompt states.
@@ -34,6 +35,7 @@ export interface SupervisorDeps {
   onPid?: (pid: number | null) => void
   // True when the next start should pass --cortheon.
   cortheon?: () => boolean
+  learning?: (repo: string) => { enabled: boolean; graphFile: string } | null
 }
 
 export interface LiveEngine {
@@ -59,6 +61,7 @@ export interface SupervisorStatus {
   contextTokens: number | null
   // The running (or starting) server was given --cortheon.
   cortheonActive: boolean
+  learningActive: boolean
 }
 
 const LOG_LINES = 200
@@ -143,6 +146,7 @@ export class EngineSupervisor {
   private activeRequests = 0
   private requestModel: string | null = null
   private cortheon = false
+  private learning = false
 
   constructor(private readonly deps: SupervisorDeps) {}
 
@@ -169,6 +173,7 @@ export class EngineSupervisor {
       memoryLimitBytes: this.memoryLimitBytes,
       contextTokens: this.contextTokens,
       cortheonActive: this.cortheon && (this.state === 'starting' || this.state === 'ready'),
+      learningActive: this.learning && (this.state === 'starting' || this.state === 'ready'),
     }
   }
 
@@ -202,6 +207,26 @@ export class EngineSupervisor {
     if (!model || this.state === 'stopped' || this.state === 'failed') return Promise.resolve(null)
     try { this.assertRequestIdle() } catch (error) { return Promise.reject(error) }
     const next = this.queue.then(() => { this.assertRequestIdle(); return this.switchTo(model) })
+    this.queue = next.catch(() => {})
+    return next
+  }
+
+  // Both the persistent choice and the running process change under the same request guard.
+  // No preference is changed when a reply or lesson holds a lease.
+  reconfigure(apply: () => Promise<void>, rollback: () => Promise<void>): Promise<void> {
+    const next = this.queue.then(async () => {
+      this.assertRequestIdle()
+      const model = this.model
+      const running = model != null && (this.state === 'ready' || this.state === 'starting')
+      try {
+        await apply()
+        if (running) await this.switchTo(model!)
+      } catch (error) {
+        await rollback()
+        if (running && !this.live(model!)) await this.switchTo(model!).catch(() => {})
+        throw error
+      }
+    })
     this.queue = next.catch(() => {})
     return next
   }
@@ -331,8 +356,12 @@ export class EngineSupervisor {
 
     const port = await freeLoopbackPort()
     const apiKey = randomBytes(32).toString('hex')
-    this.cortheon = this.deps.cortheon?.() === true
-    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, '--prompt-cache-gib', String(ENGINE_PROMPT_CACHE_GIB), ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : [])]
+    this.cortheon = cortheonEnabledForRelease(this.deps.cortheon?.())
+    const learning = this.deps.learning?.(model)
+    this.learning = learning?.enabled === true
+    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, '--prompt-cache-gib', String(ENGINE_PROMPT_CACHE_GIB), ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
+    // Independently reject a stale injected binary prefix as well as the normal serve choice.
+    if (!CORTHEON_RELEASE_POLICY.enabled && [...binary.args, ...args].includes('--cortheon')) this.fail(CORTHEON_RELEASE_POLICY.reason)
     const env = { ...this.deps.env(), TENSORFOLD_API_KEY: apiKey, TENSORFOLD_NO_UPDATE_CHECK: '1' }
     const child = spawn(binary.command, [...binary.args, ...args], { env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
     this.child = child

@@ -92,6 +92,7 @@ inline float sq_acc(float acc, float v) {
 }
 #pragma clang fp contract(on)
 template <int H, int D, int TAPS, int TY, int FB, int GB>
+[[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void custom_kernel_tf_glm5_kda_rows_918a341e71__64_128_4_32_4_4_bfloat16_t_bfloat16_t_float_uint32_t_bfloat16_t_bfloat16_t_uint32_t_bfloat16_t_bfloat16_t_float_float_float_float_floatc_floatc_bfloat16_t_float_bfloat16_t(
   const device bfloat16_t* P [[buffer(0)]],
   const constant int* P_shape [[buffer(1)]],

@@ -1,7 +1,6 @@
 //! FlashNext text dimensions and quantization declarations are checked before weight or cache allocation.
 const std = @import("std");
-const affine = @import("affine.zig");
-const keys = @import("../../core/quant/keys.zig");
+const affine = @import("spec.zig");
 
 pub const Kind = enum { linear_attention, sparse_attention };
 pub const Gate = enum { sigmoid, silu };
@@ -55,8 +54,8 @@ pub const Config = struct {
     eos: [16]u32 = @splat(0),
     eos_count: usize = 0,
     global_affine: affine.Spec,
-    /// Set by a tensor reader: each lookup then goes through core/quant, which fills in no missing bits or group.
-    widths: ?*const @import("widths.zig").Widths = null,
+    /// A widths.Widths set by a tensor reader; widths.quantization reads it, so this file imports no core.
+    widths: ?*const anyopaque = null,
 
     pub fn deinit(c: *Config) void {
         c.parsed.deinit();
@@ -96,17 +95,14 @@ pub const Config = struct {
         return c.kinds[i];
     }
 
-    pub fn quantization(c: *const Config, path: []const u8) !?affine.Spec {
-        if (c.widths) |w| {
-            const width = (try w.of(path)) orelse return null;
-            return try affine.Spec.init(width.bits, width.group);
-        }
-        const wanted = keys.canonical(path);
+    /// The config's own width for `path`, keys spelled by `canonical` (core/quant/keys.zig): this file imports no core.
+    pub fn declared(c: *const Config, path: []const u8, canonical: *const fn ([]const u8) []const u8) !?affine.Spec {
+        const wanted = canonical(path);
         var found = false;
         var answer: ?affine.Spec = c.global_affine;
         var it = c.quant.iterator();
         while (it.next()) |item| {
-            if (!std.mem.eql(u8, keys.canonical(item.key_ptr.*), wanted)) continue;
+            if (!std.mem.eql(u8, canonical(item.key_ptr.*), wanted)) continue;
             const candidate: ?affine.Spec = switch (item.value_ptr.*) {
                 .bool => |enabled| if (enabled) c.global_affine else null,
                 .object => |value| if (value.count() == 0) null else try spec(value, 4),

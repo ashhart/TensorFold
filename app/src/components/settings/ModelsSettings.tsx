@@ -314,7 +314,7 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                   {setupStatus && (
                     <div className={clsx('inline-flex max-w-full items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[13px]', setupStatus.state === 'ok' ? 'border-positive/30 bg-positive/10 text-positive' : 'border-danger/30 bg-danger/5 text-danger')}>
                       <Icon name={setupStatus.state === 'ok' ? 'check' : 'warning'} size={13} className="shrink-0" />
-                      <span className="truncate">{setupStatus.msg}</span>
+                      <span className="break-words">{setupStatus.msg}</span>
                     </div>
                   )}
                 </div>
@@ -324,8 +324,8 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                       {discoverBusy === 'new' ? 'Discovering' : 'Discover this Mac'}
                     </Button>
                   )}
-                  <Button variant="default" size="sm" icon="signal" onClick={() => testConfiguredProvider()} disabled={setupBusy}>
-                    {setupBusy ? 'Testing' : 'Test connection'}
+                  <Button variant="default" size="sm" icon="signal" onClick={() => testConfiguredProvider()} disabled={setupBusy} title="Sends a fixed test prompt with no files or conversation history; provider usage may apply.">
+                    {setupBusy ? 'Testing' : 'Test response'}
                   </Button>
                   <Button variant="default" size="sm" icon="plus" onClick={() => addConfiguredProvider(false)} disabled={setupBusy}>Add only</Button>
                   <Button variant="primary" size="sm" icon="plug" onClick={() => addConfiguredProvider(true)} disabled={setupBusy}>

@@ -1,3 +1,4 @@
+import { captureThreadMemoryPolicy } from '../../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
 import { spineEligible } from '../../agent/incognito'
 import type { EventSpineHost } from '../../agent/event-spine-host'
@@ -13,6 +14,27 @@ export interface ThreadRevertForkDeps {
   // factory; accessors keep the lookups lazy so the factory can be constructed early.
   remoteServer(): { publish(event: { kind: string; data: unknown }): void }
   spineHost(): EventSpineHost | null
+}
+
+/** A bot keeps its captured executor; a host worktree cannot stand in for it. */
+export function assertThreadForkRestrictions(source: Pick<Thread, 'bot' | 'engine'>, worktree: boolean): void {
+  if (source.bot === undefined) return
+  if (!source.bot || typeof source.bot !== 'object' || Array.isArray(source.bot)) throw new Error('This chat has an invalid captured bot configuration; start a new bot chat.')
+  if (worktree) throw new Error('Bot conversations cannot fork into a host worktree. Fork this chat without a worktree to retain its captured permissions.')
+  if (source.engine && source.engine !== 'native') throw new Error('Bot conversations require TensorFold\'s native permission checks before they can fork.')
+}
+
+function frozenBotCopy(bot: NonNullable<Thread['bot']>): NonNullable<Thread['bot']> {
+  const copy = structuredClone(bot)
+  const seen = new WeakSet<object>()
+  const freeze = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || seen.has(value)) return
+    seen.add(value)
+    for (const child of Object.values(value)) freeze(child)
+    Object.freeze(value)
+  }
+  freeze(copy)
+  return copy
 }
 
 /**
@@ -57,11 +79,16 @@ export function createThreadForkFactory(deps: ThreadRevertForkDeps): (sourceThre
   return function createForkThread(sourceThreadId, fork, overrides) {
     const source = store.threads.find((t) => t.id === sourceThreadId)
     if (!source) return null
+    assertThreadForkRestrictions(source, overrides?.cwd !== undefined)
     const now = Date.now()
     const t: Thread = {
       id: randomUUID(),
       title: `Fork of ${source.title}`,
       kind: source.kind,
+      memoryPolicy: { ...captureThreadMemoryPolicy(source) },
+      memoryPolicyRevision: 0,
+      ...(source.bot ? { bot: frozenBotCopy(source.bot) } : {}),
+      ...(source.phoneLocalOnly ? { phoneLocalOnly: true } : {}),
       projectId: source.projectId ?? null,
       // A fork worktree (VST-036) homes the fork at its own copy of the fork-point
       // snapshot; otherwise the fork shares the source folder as before. A worktree

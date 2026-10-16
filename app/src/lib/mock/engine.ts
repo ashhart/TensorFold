@@ -1,5 +1,7 @@
-import type { EngineEvent, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
+import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY } from '../../../shared/release-feature-policy'
+import type { EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, SuggestedModel } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
+import type { EngineModelLibrarySnapshot } from '../types'
 
 // Browser demo of the built-in engine: a fake installed model, Hub results and a simulated download.
 // Nothing here reaches Hugging Face or runs a model.
@@ -30,21 +32,37 @@ const HUB: HubModelSummary[] = [
 ]
 
 export function createMockEngineApi(): Pick<TensorFoldStudioApi,
-  'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineDelete' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
   const listeners = new Set<(event: EngineEvent) => void>()
   const emit = (event: EngineEvent) => { for (const cb of listeners) cb(event) }
   let installed: EngineInstalledModel[] = [{
     repo: 'mlx-community/Qwen3.5-2B-MLX-4bit', family: 'Qwen3.5-2B or Qwen3.8-27B', modelType: 'qwen3_5', format: '4-bit, group 64', contextTokens: 262144,
-    weightsBytes: 1.6 * GIB, memoryFloorBytes: 3.6 * GIB, fitsMemory: true, drafter: null, drafterInstalled: null,
+    weightsBytes: 1.6 * GIB, memoryFloorBytes: 3.6 * GIB, fitsMemory: true, drafter: null, drafterInstalled: null, source: 'download',
   }]
+  let library: EngineModelLibrarySnapshot = { includeHuggingFace: false, folders: [], models: [], scanning: false, scannedAt: null, warnings: [], truncated: false, cancelled: false }
+  const librarySnapshot = () => structuredClone(library)
+  const scanLibrary = async (options?: { includeHuggingFace?: boolean }) => {
+    library = { ...library, ...options, scanning: true, cancelled: false }
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    const models: EngineModelLibrarySnapshot['models'] = []
+    if (library.includeHuggingFace) models.push({ id: 'local/' + 'a'.repeat(64), repo: 'mlx-community/Qwen3.5-2B-MLX-4bit', title: 'Qwen3.5-2B', path: '~/.cache/huggingface/hub/models--mlx-community--Qwen3.5-2B-MLX-4bit/snapshots/demo', source: 'huggingface', folderId: 'huggingface', revision: 'demo', modelType: 'qwen3_5', format: '4-bit, group 64', complete: true, compatible: true, loadable: true, reason: 'Browser demo: compatible model found; no files are scanned.', weightsBytes: 1.6 * GIB, memoryFloorBytes: 3.6 * GIB, fitsMemory: true })
+    if (library.folders.length) models.push({ id: 'local/' + 'b'.repeat(64), repo: null, title: 'Example unsupported model', path: library.folders[0].path + '/example-gguf', source: 'folder', folderId: library.folders[0].id, revision: null, modelType: 'llama', format: 'GGUF', complete: true, compatible: false, loadable: false, reason: 'This engine does not load GGUF; use a supported MLX checkpoint or connect another runtime in Full.', weightsBytes: 2 * GIB, memoryFloorBytes: null, fitsMemory: null })
+    library = { ...library, models: library.cancelled ? library.models : models, scanning: false, scannedAt: Date.now() }
+    return librarySnapshot()
+  }
   const pulls = new Map<string, PullProgress>()
   const timers = new Map<string, ReturnType<typeof setInterval>>()
   let status: EngineStatus = {
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
-    available: true, version: '1.0.9', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+    available: true, version: '1.0.10', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
-    cortheon: { supported: true, enabled: false, active: false },
+    cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
   }
+  let learning: EngineLearningSnapshot = { supported: true, experimental: true, enabled: false, active: false, model: null, state: 'off', message: 'Browser demo: no weights are changed.', privateCopy: false, progress: null, job: null, graph: { next: 1, facts: [] } }
+  let lessonTimer: ReturnType<typeof setTimeout> | null = null
+  const learningSnapshot = () => structuredClone(learning)
+  const emitLearning = () => emit({ kind: 'learning', snapshot: learningSnapshot() })
+  const syncLearning = () => { learning = { ...learning, active: learning.enabled && status.state === 'ready' && status.model === learning.model }; emitLearning() }
   const setStatus = (patch: Partial<EngineStatus>) => { status = { ...status, ...patch }; emit({ kind: 'status', status }) }
   const snapshot = (): EngineSnapshot => ({ status, performance: null, installed, pulls: [...pulls.values()], suggestions: SUGGESTIONS, hubCache: '~/.cache/huggingface/hub' })
 
@@ -73,6 +91,11 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   }
 
   return {
+    engineLibrary: async () => librarySnapshot(),
+    engineScanLibrary: scanLibrary,
+    engineAddLibraryFolder: async () => { library = { ...library, folders: [{ id: 'demo-folder', path: '/Volumes/Example/Models', label: 'Example models' }] }; return scanLibrary() },
+    engineRemoveLibraryFolder: async (id) => { library = { ...library, folders: library.folders.filter((folder) => folder.id !== id) }; return scanLibrary() },
+    engineCancelLibraryScan: async () => { library = { ...library, cancelled: true, scanning: false }; return librarySnapshot() },
     engineSnapshot: async () => snapshot(),
     // Demo mode never starts a server, so it cannot supply a working client connection.
     engineConnection: async () => null,
@@ -99,7 +122,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
         if (done) {
           clearInterval(timers.get(repo))
           const nemotron = repo.includes('Nemotron')
-          installed = [...installed.filter((m) => m.repo !== repo), { repo, family: nemotron ? 'Nemotron 3.5 Lightning' : 'Qwen3.5-2B or Qwen3.8-27B', modelType: nemotron ? 'nemotron_h' : 'qwen3_5', format: '4-bit, group 64', contextTokens: 262144, weightsBytes: total, memoryFloorBytes: total + 2 * GIB, fitsMemory: total + 2 * GIB <= LIMIT, drafter: null, drafterInstalled: null }]
+          installed = [...installed.filter((m) => m.repo !== repo), { repo, family: nemotron ? 'Nemotron 3.5 Lightning' : 'Qwen3.5-2B or Qwen3.8-27B', modelType: nemotron ? 'nemotron_h' : 'qwen3_5', format: '4-bit, group 64', contextTokens: 262144, weightsBytes: total, memoryFloorBytes: total + 2 * GIB, fitsMemory: total + 2 * GIB <= LIMIT, drafter: null, drafterInstalled: null, source: 'download' }]
           emit({ kind: 'installed', installed })
         }
       }, 500))
@@ -115,19 +138,52 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       return { cancelled: true }
     },
     engineLoad: async (repo) => {
+      if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
       setStatus({ state: 'starting', model: repo, startedAt: Date.now(), readyAt: null, message: `Loading ${repo}`, port: 52814 })
       await new Promise((r) => setTimeout(r, 1200))
-      setStatus({ state: 'ready', readyAt: Date.now(), message: null, contextTokens: 32_768, cortheon: { supported: true, enabled: status.cortheon?.enabled ?? false, active: status.cortheon?.enabled ?? false } })
+      setStatus({ state: 'ready', readyAt: Date.now(), message: null, contextTokens: 32_768, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
+      syncLearning()
       return status
     },
     engineUnload: async () => {
-      setStatus({ state: 'stopped', model: null, port: null, startedAt: null, readyAt: null, message: null, contextTokens: null, cortheon: { supported: true, enabled: status.cortheon?.enabled ?? false, active: false } })
+      if (learning.state === 'teaching' || learning.state === 'cancelling') throw new Error('Stop the current lesson before unloading.')
+      setStatus({ state: 'stopped', model: null, port: null, startedAt: null, readyAt: null, message: null, contextTokens: null, cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
+      syncLearning()
       return status
     },
     engineSetCortheon: async (enabled) => {
-      const running = status.state === 'ready'
-      setStatus({ cortheon: { supported: true, enabled, active: running && enabled } })
+      assertCortheonReleaseAllowed(enabled)
+      if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
+      setStatus({ cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason } })
       return status
+    },
+    engineLearning: async () => learningSnapshot(),
+    engineSetLearning: async (enabled, model) => {
+      if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
+      const repo = model ?? status.model ?? learning.model
+      if (enabled && (!repo?.includes('Nemotron-3.5-Lightning') || !installed.some((m) => m.repo === repo))) throw new Error('Download and choose Nemotron 3.5 Lightning first.')
+      if (enabled && status.state === 'ready' && status.model !== repo) throw new Error('Load Nemotron before enabling Living Weights.')
+      learning = { ...learning, enabled, model: enabled ? repo : learning.model, state: enabled ? 'ready' : 'off', privateCopy: enabled || learning.privateCopy }
+      syncLearning(); return learningSnapshot()
+    },
+    engineTeach: async (text) => {
+      if (!learning.active || learning.state !== 'ready') throw new Error('Load the learning model before teaching.')
+      if (!text.trim() || new TextEncoder().encode(text).length > 8192) throw new Error('Teach a short fact, up to 8 KB.')
+      const id = learning.graph?.next ?? 1
+      const startedAt = Date.now()
+      learning = { ...learning, state: 'teaching', job: { id: `demo-${startedAt}`, state: 'running', startedAt, finishedAt: null, learned: 0, missed: 0, message: 'Simulated browser lesson.' }, graph: { ...learning.graph, next: id + 1, facts: [...(learning.graph?.facts ?? []), { id, text: text.trim(), source: 'browser-demo', at: startedAt, state: 'learning', links: [], phase: 'fitting', step: 1, of: 3 }] } }
+      emitLearning()
+      lessonTimer = setTimeout(() => {
+        learning = { ...learning, state: 'ready', job: { ...learning.job!, state: 'done', finishedAt: Date.now(), learned: 1 }, graph: { ...learning.graph!, facts: learning.graph!.facts.map((f) => f.id === id ? { ...f, state: 'learned', recalled: true, phase: undefined, step: 3 } : f) } }
+        emitLearning(); lessonTimer = null
+      }, 5_000)
+      return learningSnapshot()
+    },
+    engineCancelTeach: async () => {
+      if (lessonTimer) clearTimeout(lessonTimer)
+      lessonTimer = null
+      if (learning.job?.state === 'running') learning = { ...learning, state: learning.enabled ? 'ready' : 'off', job: { ...learning.job, state: 'cancelled', finishedAt: Date.now() }, graph: { ...learning.graph!, facts: learning.graph!.facts.map((f) => f.state === 'learning' ? { ...f, state: 'missed', recalled: false, message: 'Simulated lesson cancelled.' } : f) } }
+      emitLearning(); return learningSnapshot()
     },
     engineDelete: async (repo) => {
       if (status.model === repo && status.state !== 'stopped') throw new Error(`Unload ${repo} before deleting it.`)

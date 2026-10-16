@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict'
+import { assertBotLifecycleIdle, reserveBotLifecycleTransition, reserveBotVmRun } from './bot-run-boundary'
+
+assertBotLifecycleIdle('fixture')
+const releaseRun = reserveBotVmRun('fixture', 'chat-a')
+assert.throws(() => reserveBotVmRun('fixture', 'chat-b'), /already working/)
+const releaseOther = reserveBotVmRun('different-bot', 'chat-c')
+releaseOther()
+releaseRun()
+releaseRun()
+reserveBotVmRun('fixture', 'chat-b')()
+const release = reserveBotLifecycleTransition('fixture')
+assert.throws(() => assertBotLifecycleIdle('fixture'), /paused or archived/)
+assertBotLifecycleIdle('different-bot')
+const releaseSecond = reserveBotLifecycleTransition('fixture')
+release()
+release()
+assert.throws(() => assertBotLifecycleIdle('fixture'), /paused or archived/, 'overlapping transactions retain the boundary until both complete')
+releaseSecond()
+assertBotLifecycleIdle('fixture')
+console.log('Bot lifecycle boundary checks passed.')

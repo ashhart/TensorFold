@@ -1,4 +1,5 @@
-import type { ArchiveSnapshot, Room, RoomEventItem, Thread, TimelineItem } from '../../types'
+import { inspectThreadMemoryPolicy } from '../../../../shared/thread-memory-policy'
+import type { AgentEvent, ArchiveSnapshot, Room, RoomEventItem, Thread, TimelineItem } from '../../types'
 import { projectedHostId, projectionOriginsMatch } from './proxy-state'
 
 export function mergeTimelineItems(base: TimelineItem[] = [], live: TimelineItem[] = []): TimelineItem[] {
@@ -49,6 +50,11 @@ export function mergeRoomSnapshot(current: Room, server: Room, patch: Partial<Ro
 }
 
 export function mergeThreadRecord(base: Thread, live: Thread): Thread {
+  const baseMemoryRevision = inspectThreadMemoryPolicy(base).revision
+  const liveMemoryRevision = inspectThreadMemoryPolicy(live).revision
+  const memoryOwner = baseMemoryRevision === null || liveMemoryRevision === null
+    ? (live.updatedAt >= base.updatedAt ? live : base)
+    : liveMemoryRevision >= baseMemoryRevision ? live : base
   const updatedAt = Math.max(base.updatedAt ?? 0, live.updatedAt ?? 0)
   const newer = (live.updatedAt ?? 0) >= (base.updatedAt ?? 0)
   const baseConversationRevision = base.conversationRevision ?? 0
@@ -59,6 +65,8 @@ export function mergeThreadRecord(base: Thread, live: Thread): Thread {
     ...(newer ? base : live),
     ...(newer ? live : base),
     updatedAt,
+    memoryPolicy: memoryOwner.memoryPolicy,
+    memoryPolicyRevision: memoryOwner.memoryPolicyRevision,
     conversationRevision: Math.max(baseConversationRevision, liveConversationRevision),
     // A checkpoint revert deliberately SHORTENS both arrays. Accept that exact host
     // conversation only when its monotonic epoch advances; ordinary same-epoch snapshots
@@ -70,6 +78,17 @@ export function mergeThreadRecord(base: Thread, live: Thread): Thread {
         ? live.apiMessages
       : (live.apiMessages?.length ?? 0) >= (base.apiMessages?.length ?? 0) ? live.apiMessages : base.apiMessages,
   }
+}
+
+// Replayed host events keep the newest memory pair while applying other patch fields.
+export function mergeThreadEventPatch(thread: Thread, patch: Extract<AgentEvent, { type: 'thread_update' }>['patch']): Thread {
+  const next = { ...thread, ...patch, updatedAt: Date.now() }
+  if (!Object.hasOwn(patch, 'memoryPolicy') && !Object.hasOwn(patch, 'memoryPolicyRevision')) return next
+  const currentRevision = inspectThreadMemoryPolicy(thread).revision
+  const incomingRevision = inspectThreadMemoryPolicy(next).revision
+  // A queued event cannot repair an unknown revision; a fresh full snapshot can still reconcile it.
+  const memoryOwner = currentRevision === null ? thread : incomingRevision === null ? next : mergeThreadRecord(thread, next)
+  return { ...next, memoryPolicy: memoryOwner.memoryPolicy, memoryPolicyRevision: memoryOwner.memoryPolicyRevision }
 }
 
 export function mergeThreadLists(loaded: Thread[], live: Thread[]): Thread[] {

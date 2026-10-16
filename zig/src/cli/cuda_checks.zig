@@ -207,3 +207,41 @@ pub fn widths(gpa: std.mem.Allocator, e: *nemotron.Engine, prompt: []const u32, 
     std.debug.print("{s} widths 1-{d}: {d} of {d} kept rows equal serial ({d} tokens, {d} windows)\n", .{ if (bad == 0) "PASS" else "FAIL", rows_max, seen - bad, seen, ref.items.len, window });
     return if (bad == 0) 0 else 1;
 }
+
+fn logit(row: []const u8, i: usize) f32 {
+    return @bitCast(@as(u32, std.mem.readInt(u16, row[2 * i ..][0..2], .little)) << 16);
+}
+
+/// A gold reply teacher-forced after the prompt: where our argmax is not gold's next token, and the logit gaps.
+pub fn margins(gpa: std.mem.Allocator, e: *nemotron.Engine, prompt: []const u32, gold: []const u32) !u8 {
+    const v = e.c.vocab;
+    _ = try e.prefill(prompt, null, null);
+    var differ: usize = 0;
+    var tightest: f32 = std.math.inf(f32);
+    var tight_at: usize = 0;
+    for (gold, 0..) |want, i| {
+        const row = try download(gpa, e, if (i == 0) e.b.p_logits else e.b.logits, v * 2);
+        defer gpa.free(row);
+        var best: usize = 0;
+        var second: f32 = -std.math.inf(f32);
+        for (1..v) |t| {
+            const x = logit(row, t);
+            if (x > logit(row, best)) {
+                second = logit(row, best);
+                best = t;
+            } else if (x > second) second = x;
+        }
+        const gap = logit(row, best) - second;
+        if (gap < tightest) {
+            tightest = gap;
+            tight_at = i;
+        }
+        if (best != want) {
+            differ += 1;
+            std.debug.print("position {d}: ours {d} ({d:.4}) gold {d} ({d:.4}), second best {d:.4}\n", .{ i, best, logit(row, best), want, logit(row, want), second });
+        }
+        if (i + 1 < gold.len) _ = try e.step(want, null);
+    }
+    std.debug.print("RESULT margins: {d} of {d} positions differ from the gold; tightest top-2 gap {d:.4} at {d}\n", .{ differ, gold.len, tightest, tight_at });
+    return 0;
+}
