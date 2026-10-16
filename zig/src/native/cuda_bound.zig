@@ -115,6 +115,7 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
             }
         }.f else null,
         .prompt_rows = v.prompt_rows,
+        .reports_fill = v.reports_fill, // the family's fill-progress reporting reaches the CUDA wrapper
         .release = struct {
             fn f(p: *anyopaque, s: *lanes.Stream) void {
                 const x = H.bind(p);

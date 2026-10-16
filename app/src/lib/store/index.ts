@@ -46,6 +46,7 @@ const buildState = (set: SetState, get: GetState): AppState => ({
       if (!get().ready) return
       set({ ready: false })
     } else if (!acquireInitStarted()) return // StrictMode must not double-subscribe.
+    const updateStatusAtStart = get().updateStatus
     const newSubscriptions = acquireSubscriptionsStarted()
     if (newSubscriptions) {
       api.onAgentEvent((e) => get().applyEvent(e))
@@ -119,7 +120,8 @@ const buildState = (set: SetState, get: GetState): AppState => ({
         tickets: mergeOriginBoundRecords(tickets, live.tickets, projectedHostId),
         jobs: mergeRecordsByFreshest(jobs, live.jobs),
         automations: mergeRecordsByFreshest(automations, live.automations),
-        updateStatus,
+        // Live host pushes received during hydration supersede its captured update snapshot.
+        updateStatus: live.updateStatus !== updateStatusAtStart ? live.updateStatus : updateStatus,
         archives,
         resolvedTheme: resolveTheme(settings),
         notice: failed ? { kind: 'error', message: 'Some data failed to load — running with partial state.' } : live.notice,

@@ -53,6 +53,8 @@ pub const Fake = struct {
     answer_cycles: bool = false,
     prefill_chunks: usize = 0,
     prefill_count: usize = 0,
+    many_passes: usize = 0, // prefill_many calls that took their streams (batched())
+    many_streams: usize = 0, // streams those calls prefilled
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
@@ -76,12 +78,32 @@ pub const Fake = struct {
     }
 
     pub fn backend(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts, .reports_fill = true } };
+    }
+
+    /// The same target taking several prompts in one pass (`prefill_many`).
+    pub fn batched(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_many = prefillMany, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
+    }
+
+    fn prefillMany(ptr: *anyopaque, ss: []const *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.memory_lanes) |n| if (x.lanes.count() + ss.len > n) return false; // not all at once: one at a time instead
+        for (ss, 0..) |s, i| prefill(ptr, s) catch |err| { // none left prefilled, as the contract says
+            for (ss[0..i]) |done| if (x.lanes.fetchRemove(done)) |kv| {
+                var l = kv.value;
+                freeLane(x.gpa, &l);
+            };
+            return err;
+        };
+        x.many_passes += 1;
+        x.many_streams += ss.len;
+        return true;
     }
 
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
     pub fn stepped(x: *Fake) be.Backend {
-        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow } };
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -133,6 +155,7 @@ pub const Fake = struct {
         const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
         for (0..chunks) |chunk| {
             x.prefill_count += 1;
+            s.fill_at.store(@intCast(s.prompt_len * (chunk + 1) / chunks), .monotonic);
             if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, chunk);
             if (s.isCancelled()) return error.Cancelled;
             if (s.yields()) return error.Yielded;
@@ -152,6 +175,7 @@ pub const Fake = struct {
         if (x.prefill_hook) |hook| hook(x.prefill_hook_ctx.?, s, l.filled);
         if (s.isCancelled()) return error.Cancelled;
         l.filled += 1;
+        s.fill_at.store(@intCast(s.prompt_len * l.filled / @max(1, x.prefill_chunks)), .monotonic);
         if (l.filled < @max(1, x.prefill_chunks)) return false;
         l.filling = false;
         try x.fillPrompt(l, s);

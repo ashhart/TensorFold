@@ -1,5 +1,10 @@
 # Control room
 
+The control room is part of the Python engine, frozen at 0.6.6. Install that engine from the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) to use it; its code is
+[`src/tensorfold/control/`](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/control) there.
+The native binary has no `service` or `tui` command, and it refuses the Python-only serve flags in the examples below.
+
 `tensorfold service` installs a per-user macOS LaunchAgent that runs
 `python -m tensorfold serve` with a literal argument list.
 `tensorfold tui` is the keyboard dashboard for those jobs and for read-only HTTP endpoints.
@@ -65,6 +70,10 @@ tensorfold service install "/cached/model with spaces" --name code \
 
 `--port` and `--parallel` are written on the serve command. A non-secret `--env` value such as
 `TENSORFOLD_MEMORY_LIMIT_GB` is stored on the profile and passed to that process.
+That variable is the Python engine's memory budget, in GiB. The native engine does not read it. GLM on a Mac reads
+`GLM_LOAD_LIMIT_GB`, in GB, and the CUDA build reads `TENSORFOLD_CUDA_MEMORY_LIMIT_GB`.
+`--spill-gib` is @gilby's disk spill from [#68](https://github.com/ashhart/TensorFold/pull/68), and `--vision` is
+[image input](vision.md); the native binary refuses both.
 Repeat `--arg` for extra literal `serve` arguments. Managed endpoint flags stay on their own options.
 The bind address defaults to `127.0.0.1`. A non-loopback address needs `--allow-network`.
 That acknowledgement leaves authentication to a proxy you configure separately.

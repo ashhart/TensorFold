@@ -1,10 +1,10 @@
-import { app, BrowserWindow, shell, session, clipboard, Notification } from 'electron'
+import { app, BrowserWindow, shell, session, clipboard, Notification, dialog, Tray, Menu } from 'electron'
 import path from 'node:path'
 import { promises as fs, statSync } from 'node:fs'
 import os from 'node:os'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { defaultSettings, ensureTensorFoldStudioHome, loadSettings, saveSettings, loadThreads, saveThreads, loadProjects, saveProjects, loadRooms, saveRooms, loadTickets, saveTickets, loadAutomations, saveAutomations, loadConnectorEvents, saveConnectorEvents, loadContactDirectory, loadCliSessions, loadMissions, saveMissions, loadJobs, saveJobs, loadSubAgents, saveSubAgents, loadSkills, saveSkills, loadCommands, saveCommands, loadSuggestions, loadMcpServers, saveMcpServers, loadBotControlSessions, saveBotControlSessions, loadProjectMemory, saveProjectMemory, loadProjectMemoryCandidates, saveProjectMemoryCandidates, loadTurnCheckpoints, saveTurnCheckpoints, loadPairingSessions, savePairingSessions, loadSkillTrust, saveSkillTrust, loadArtifacts, loadProviderStatus, saveProviderStatus, loadSchedulerLease, saveSchedulerLease, loadWebhooks, saveWebhooks, makeRemoteControlToken, purgeLegacyUserDataState, safeSegment, vontraPath, writeTensorFoldStudioJson, writeTensorFoldStudioProtectedJson, writeTensorFoldStudioStateJson } from './store'
+import { defaultSettings, ensureTensorFoldStudioHome, loadSettings, saveSettings, loadThreads, saveThreads, saveThreadQuestion, loadProjects, saveProjects, loadRooms, saveRooms, loadTickets, saveTickets, loadAutomations, saveAutomations, loadConnectorEvents, saveConnectorEvents, loadContactDirectory, loadCliSessions, loadMissions, saveMissions, loadJobs, saveJobs, loadSubAgents, saveSubAgents, loadSkills, saveSkills, loadCommands, saveCommands, loadSuggestions, loadMcpServers, saveMcpServers, loadBotControlSessions, saveBotControlSessions, loadProjectMemory, saveProjectMemory, loadProjectMemoryCandidates, saveProjectMemoryCandidates, loadTurnCheckpoints, saveTurnCheckpoints, loadPairingSessions, savePairingSessions, loadSkillTrust, saveSkillTrust, loadArtifacts, loadProviderStatus, saveProviderStatus, loadSchedulerLease, saveSchedulerLease, loadWebhooks, saveWebhooks, makeRemoteControlToken, purgeLegacyUserDataState, safeSegment, vontraPath, writeTensorFoldStudioJson, writeTensorFoldStudioProtectedJson, writeTensorFoldStudioStateJson } from './store'
 import { runAgent, compactThread } from './agent/loop'
 import { executeTool } from './agent/tools'
 import { estimateTokens, kfmt, renderTranscript } from './agent/compaction'
@@ -113,6 +113,8 @@ import { createRemoteHostApi } from './main/host/remote-host-api'
 import { enableOrchestrationJournal, quiesceOrchestrationJournal } from './agent/orchestration-journal'
 import { wireOrchestrationEventsToWindow, type OrchestrationEvent } from './main/host/orchestration-events'
 import { registerCoreIpc } from './main/host/core-ipc'
+import { createDesktopModeRuntime } from './main/host/desktop-mode'
+import { desktopTrayIcon } from './main/host/desktop-tray-icon'
 import { buildCoreIpcConfig } from './main/host/core-ipc-config'
 import { createLocalPrRuntime, type LocalPrRuntime } from './main/host/local-pr-runtime'
 import { createTicketWorkerRuntime, type TicketWorkerInput, type TicketWorkerRuntime } from './main/host/ticket-worker-runtime'
@@ -137,8 +139,20 @@ import { createDurableApprovalRuleStore, type ApprovalRuleDetails } from './main
 import { durablePairingMutation } from './main/host/durable-pairing'
 import { registerIncidentIpc } from './main/host/incidents-ipc'
 import { createEngineRuntime, engineService } from './main/host/engine-runtime'
+import { createLearningQuitGuard } from './main/host/learning-quit'
 import { shutdownComputerUse } from './main/host/computer-use-host'
 import { registerEngineIpc } from './main/host/ipc/engine-ipc'
+import { initializePhoneHost, phoneHost } from './main/host/phone-host'
+import { registerPhoneIpc } from './main/host/ipc/phone-ipc'
+import { initializeBotVmHost, getBotVmHost } from './main/host/bot-vm-host'
+import { registerBotVmIpc } from './main/host/ipc/bot-vm-ipc'
+import { assertBotLifecycleIdle } from './main/host/bot-run-boundary'
+import { captureBotConfig } from '../shared/bot-policy'
+import { isRestrictedBot } from '../shared/bot-tool-policy'
+import { initializeUserQuestionHost, getUserQuestionHost } from './main/host/user-question-host'
+import { createUserQuestionPersistence } from './main/host/user-question-persistence'
+import { registerUserQuestionIpc } from './main/host/ipc/user-question-ipc'
+import { isExternalProvider } from '../shared/provider-trust'
 import { assertTicketRelations, describeTicketForRoom, mkTicket, summarizeTicketWorkerOutcome, ticketEvidenceFromArgs } from './main/host/ticket-helpers'
 import { createRoomSupervisorHelpers, type RoomSupervisorHelpers } from './main/host/room-supervisor-helpers'
 import { ensureRoomWorktree } from './main/host/room-worktree'
@@ -416,6 +430,12 @@ let spineHost: EventSpineHost | null = null
 // referenced until clicked or closed so macOS can still deliver the click.
 const liveNotifications = new Set<Notification>()
 const runAttention = createRunAttention({
+  isIncognito: (id) => {
+    const thread = store.threads.find((thread) => thread.id === id)
+    // Approval runtime calls attention directly, so admission must protect both
+    // phone-derived titles and Incognito even when the event emitter is bypassed.
+    return !thread || thread.incognito === true || thread.phoneLocalOnly === true
+  },
   enabled: () => store.settings?.notifyRuns !== false,
   focused: () => { try { return !!store.win && !store.win.isDestroyed() && store.win.isFocused() } catch { return false } },
   // Headless hosts have no window to bring forward, so they never notify.
@@ -536,6 +556,12 @@ missionRuntime = createMissionRuntime({
 })
 
 const securityPurgeRuntime = createSecurityPurgeRuntime(buildSecurityPurgeConfig({
+  quiescePhoneControl: async () => { await phoneHost()?.service.disconnect() },
+  quiesceBotVms: async () => { await getBotVmHost()?.quiesce() },
+  purgeBotVmData: async () => { await getBotVmHost()?.purgeOwnedData() },
+  resumeBotVms: () => { getBotVmHost()?.resume() },
+  quiesceUserQuestions: async () => { await getUserQuestionHost()?.quiesce(); await questionPersistence.drain() },
+  resumeUserQuestions: () => { getUserQuestionHost()?.resume() },
   aborters,
   roomAborters,
   missionAborters,
@@ -551,6 +577,7 @@ const securityPurgeRuntime = createSecurityPurgeRuntime(buildSecurityPurgeConfig
   spineHost: () => spineHost,
   providerStatusRuntime: () => providerStatusRuntime,
   loopHost: () => loopHost,
+  engineService,
 }))
 async function purgeLocalMemory(): Promise<SecurityPurgeResult> {
   requireSecurityRole('owner', 'purge local memory')
@@ -710,12 +737,48 @@ const appWindowRuntime = createAppWindowRuntime({
   openExternalSafely,
   session,
   onWindowClosed: () => sshManager.cancelPendingPrompts(),
+  onWindowCreated: (win) => desktopModeRuntime.attachWindow(win),
+  shouldShowWindow: () => desktopModeRuntime.shouldShowWindow(),
 })
 // Lazy-accessor bundle: replaces the installSessionHardening + createWindow forwarder shims.
 const appWindowApi = {
   installSessionHardening: () => appWindowRuntime.installSessionHardening(),
   createWindow: () => appWindowRuntime.createWindow(),
 }
+
+const desktopModeRuntime = createDesktopModeRuntime({
+  headless: HEADLESS_MODE,
+  getSettings: () => store.settings,
+  getWindow: () => store.win,
+  createWindow: () => appWindowRuntime.createWindow(),
+  createTray: () => new Tray(desktopTrayIcon()),
+  buildMenu: (items) => Menu.buildFromTemplate(items),
+  showDock: () => { void app.dock?.show().catch(() => {}) },
+  hideDock: () => app.dock?.hide(),
+  changeMode: (mode) => coreIpc.setDesktopMode(mode),
+  engineStatus: async () => engineService()?.status() ?? null,
+  startModel: async (repo) => {
+    requireSecurityRole('operator', 'start a local model')
+    const reservation = workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] })
+    try {
+      const engine = engineService()
+      if (!engine) throw new Error('The built-in engine is unavailable.')
+      await auditEvent('engine.load', { repo })
+      return await engine.load(repo)
+    } finally { reservation.release() }
+  },
+  stopModel: async () => {
+    requireSecurityRole('operator', 'stop the local model')
+    const reservation = workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] })
+    try { return await engineService()?.unload() } finally { reservation.release() }
+  },
+  activeLocalRuns: () => store.threads.filter((thread) => thread.providerId === 'tensorfold' && !thread.orchestratorHostId && thread.workspace?.kind !== 'ssh' && (thread.status === 'running' || aborters.has(thread.id))).length,
+  learningBusy: () => engineService()?.isLearningBusy() ?? false,
+  navigate: (target) => { sendToRenderer('desktop:navigate', { target }) },
+  quit: () => app.quit(),
+  reportError: (message) => dialog.showErrorBox('TensorFold', message),
+})
+app.on('second-instance', () => { if (app.isReady() && store.settings) desktopModeRuntime.show() })
 
 // Ordered event spine (VST-034). Created at boot; null only during the pre-ready window.
 // (spineHost is forward-declared above the emit helpers factory; assigned during app-ready.)
@@ -882,7 +945,7 @@ const handleBootFailure = createHandleBootFailure({
   defaultSettings,
 })
 
-registerCoreIpc(buildCoreIpcConfig({
+const coreIpc = registerCoreIpc(buildCoreIpcConfig({
   clipboard,
   remoteServer,
   sshManager,
@@ -899,6 +962,8 @@ registerCoreIpc(buildCoreIpcConfig({
   ensureRemoteControlToken,
   applyTheme,
   applyPowerSettings,
+  applyDesktopMode: () => desktopModeRuntime.applySettings(),
+  hideDesktopWindow: () => desktopModeRuntime.hide(),
   startUpdateChecks,
   startBotControlPolling: botPollingApi.startBotControlPolling,
   webhookServer,
@@ -1082,7 +1147,74 @@ registerIncidentIpc({
 
 // Built-in TensorFold engine: Models page, pulls, and the engine behind the built-in provider.
 createEngineRuntime()
-registerEngineIpc(engineService, { reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] }) })
+registerEngineIpc(engineService, {
+  reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] }),
+  assertCanEnableCortheon: () => {
+    if (store.threads.some((thread) => aborters.has(thread.id) && (thread.phoneLocalOnly || thread.bot?.executionTarget === 'vm' || isRestrictedBot(thread.bot)))) {
+      throw new Error('Stop active phone, isolated or restricted bot conversations before enabling Cortheon; hidden research cannot bypass their execution boundaries.')
+    }
+  },
+})
+const phones = initializePhoneHost({
+  appHome: vontraHomeDir(), supported: !HEADLESS_MODE,
+  authorizeThread: (id) => {
+    const thread = store.threads.find((candidate) => candidate.id === id)
+    if (HEADLESS_MODE || !thread || thread.kind !== 'chat' || thread.orchestratorHostId || thread.workspace?.kind === 'ssh') throw new Error('Phone control requires a chat in this local desktop app.')
+    const provider = store.settings.providers.find((candidate) => candidate.id === (thread.providerId ?? store.settings.activeProviderId))
+    if (!provider || isExternalProvider(runtimeProvider(provider, thread.providerAccountId))) throw new Error('Choose the built-in TensorFold engine or another model running on this Mac before granting phone access.')
+    if (engineService()?.hasExternalResearchEnabled()) throw new Error('Turn Cortheon off in AI settings before granting phone access; phone chats keep research and model processing local.')
+  },
+  markChatLocal: async (id) => {
+    const thread = store.threads.find((candidate) => candidate.id === id)
+    if (!thread) throw new Error('This chat is no longer available.')
+    if (thread.phoneLocalOnly) return
+    thread.phoneLocalOnly = true
+    try { await saveThreads(store.threads) } catch (error) { delete thread.phoneLocalOnly; throw error }
+    sendToRenderer('thread:update', thread)
+  },
+  cancelThread: (id) => { cancelThreadRun(id) },
+  emit: (snapshot) => { sendToRenderer('phone:event', snapshot) },
+})
+registerPhoneIpc(phones, { reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['phone:local'] }) })
+const botVms = initializeBotVmHost({
+  appHome: vontraHomeDir(), supported: !HEADLESS_MODE,
+  reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['bot:vm'] }),
+})
+registerBotVmIpc(botVms, {
+  authorizeBot: (id) => {
+    if (HEADLESS_MODE || !store.settings?.agentPresets.some((bot) => bot.id === id)) throw new Error('Choose a saved bot in this local desktop app.')
+  },
+  authorizeBotStart: (id) => {
+    const preset = store.settings?.agentPresets.find((bot) => bot.id === id)
+    if (HEADLESS_MODE || !preset || preset.executionTarget !== 'vm') throw new Error('Choose a saved VM bot in this local desktop app.')
+    assertBotLifecycleIdle(id)
+    captureBotConfig(preset, store.settings.providers)
+  },
+  cancelBotRuns: (id) => {
+    for (const thread of store.threads) if (thread.bot?.presetId === id) aborters.get(thread.id)?.abort()
+  },
+  reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['bot:vm'] }),
+})
+const isQuestionRunActive = (threadId: string, runId: string) => {
+  const controller = aborters.get(threadId)
+  return !!controller && !controller.signal.aborted && store.threads.find((thread) => thread.id === threadId)?.activeRunContract?.runId === runId
+}
+const questionPersistence = createUserQuestionPersistence({
+  getThread: (id) => store.threads.find((thread) => thread.id === id) ?? null,
+  save: (run, patch) => saveThreadQuestion(() => store.threads, run, patch),
+  emit: (run, patch) => {
+    // A slow encrypted write must not raise a fresh attention notice after Stop.
+    if (patch.question?.state !== 'interrupted' && !isQuestionRunActive(run.threadId, run.runId)) return
+    if (patch.question?.state === 'pending' && !getUserQuestionHost()?.isWaiting(patch.question.id)) return
+    emitToRenderer({ ...run, type: 'item_update', id: run.itemId, patch })
+  },
+})
+const userQuestions = HEADLESS_MODE ? null : initializeUserQuestionHost({
+  getThread: (id) => store.threads.find((thread) => thread.id === id) ?? null,
+  isRunActive: isQuestionRunActive,
+  commitQuestion: questionPersistence.commit,
+})
+if (userQuestions) registerUserQuestionIpc(userQuestions, { reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['user:question'] }) })
 configureUpdateInstallSafety({
   acquireLease: () => workspaceMutationGuard.acquireGlobal('App update installation'),
   assertIdle: () => assertUpdateQuiescent({
@@ -1178,6 +1310,8 @@ app.whenReady().then(() => bootAppState({
   reconcileStuckJobs: roomJobApi.reconcileStuckJobs,
   installSessionHardening: appWindowApi.installSessionHardening,
   createWindow: appWindowApi.createWindow,
+  initializeDesktopMode: () => desktopModeRuntime.applySettings({ startup: true }),
+  showDesktopWindow: () => desktopModeRuntime.show(),
   applyTheme,
   applyPowerSettings,
   startScheduler: automationApi.startScheduler,
@@ -1187,7 +1321,7 @@ app.whenReady().then(() => bootAppState({
   getSpineHost: () => spineHost,
   setSpineHost: (host) => { spineHost = host },
   setBootSchedulerLease: (lease) => { bootSchedulerLease = lease },
-})).then(() => mobileBridgeRuntime.initialize()).catch(handleBootFailure)
+})).then(async () => { await userQuestions?.recoverInterrupted(store.threads); await mobileBridgeRuntime.initialize() }).catch(handleBootFailure)
 
 // Last-resort safety net: a rejected promise or thrown error anywhere in the main
 // process should be logged (and surfaced), not silently swallowed into a windowless
@@ -1199,7 +1333,57 @@ process.on('uncaughtException', (err) => {
   console.error('[main] uncaughtException', err)
 })
 
-app.on('before-quit', () => {
+let quitAdmissionPause: { release(): void } | null = null
+function resumeAfterFailedQuit() {
+  // A later device fence can fail after earlier services have already stopped.
+  // Reopen their admission without reconnecting phones or restarting bot VMs.
+  try {
+    userQuestions?.resume(); questionQuitSettled = false
+    phones.service.resume(); phoneQuitSettled = false
+    botVms.resume(); botVmQuitSettled = false
+    quitAdmissionPause?.release(); quitAdmissionPause = null
+  } catch { /* retain the gate until the still-stopping service settles and Quit is retried */ }
+}
+const deferLearningQuit = createLearningQuitGuard({
+  service: engineService,
+  quit: () => app.quit(),
+  failed: (error) => {
+    resumeAfterFailedQuit()
+    console.error('[engine] Could not finish learning before quit', error)
+    dialog.showErrorBox('Living Weights is still saving', 'TensorFold could not confirm that your private model is safely saved, so it remains open; inspect the learning graph before quitting again.')
+  },
+})
+let phoneQuitSettled = false
+const deferPhoneQuit = createLearningQuitGuard({
+  service: () => ({ isLearningBusy: () => !phoneQuitSettled, prepareToQuit: async () => { await phones.shutdown(); phoneQuitSettled = true } }),
+  quit: () => { setImmediate(() => app.quit()) },
+  failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Phone control is stopping', 'TensorFold is waiting for its phone connection to close safely; try Quit again after it stops.') },
+})
+let botVmQuitSettled = false
+const deferBotVmQuit = createLearningQuitGuard({
+  service: () => ({ isLearningBusy: () => !botVmQuitSettled, prepareToQuit: async () => { await botVms.shutdown(); botVmQuitSettled = true } }),
+  quit: () => { setImmediate(() => app.quit()) },
+  failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Bot VMs are stopping', 'TensorFold could not confirm that its isolated bot work has stopped; your VM workspaces are preserved, so inspect the bot status before quitting again.') },
+})
+let questionQuitSettled = false
+const deferQuestionQuit = createLearningQuitGuard({
+  service: () => userQuestions ? { isLearningBusy: () => !questionQuitSettled, prepareToQuit: async () => { await userQuestions.shutdown(); await questionPersistence.drain(); questionQuitSettled = true } } : null,
+  quit: () => { setImmediate(() => app.quit()) },
+  failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Questions are stopping', 'TensorFold could not confirm that its pending questions were safely interrupted; try Quit again after the current save finishes.') },
+})
+app.on('before-quit', (event) => {
+  quitAdmissionPause ??= workspaceMutationGuard.pauseAdmission('TensorFold is quitting')
+  // Stop model work before asynchronous save/device fences can release a parked
+  // question; Quit must never interpret an interrupted question as permission.
+  for (const controller of aborters.values()) controller.abort()
+  for (const controller of roomAborters.values()) controller.abort()
+  for (const controller of missionAborters.values()) controller.abort()
+  automationRuntime?.abortAll()
+  if (deferLearningQuit(event)) return
+  if (deferQuestionQuit(event)) return
+  if (deferPhoneQuit(event)) return
+  if (deferBotVmQuit(event)) return
+  desktopModeRuntime.dispose()
   botPollingApi.stopBotControlPolling()
   closeBrowserAutomationSessions()
   stopCaffeinate()
@@ -1223,4 +1407,4 @@ app.on('before-quit', () => {
   void mobileBridgeRuntime.stop()
   void remoteServer.stop()
 })
-app.on('window-all-closed', () => { if (!HEADLESS_MODE && process.platform !== 'darwin') app.quit() })
+app.on('window-all-closed', () => { if (!HEADLESS_MODE && process.platform !== 'darwin' && !desktopModeRuntime.canBackground()) app.quit() })

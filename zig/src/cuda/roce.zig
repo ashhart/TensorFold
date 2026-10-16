@@ -7,7 +7,8 @@ const memory = @import("memory.zig");
 const Module = @import("module.zig").Module;
 const Function = @import("module.zig").Function;
 const launch = @import("launch.zig");
-const tp_link = @import("tp_link.zig");
+const tp_group = @import("tp_group.zig");
+const Stream = @import("stream.zig").Stream;
 const kernels = @import("kernels.zig");
 
 const max_hcas = 2;
@@ -143,7 +144,20 @@ fn opsCall(comptime T: type, ctx: *Context, offset: usize) T {
     return slot.*;
 }
 
-pub const Error = error{ VerbsUnavailable, NoHca, HcaFailed, PeerRefused, ProxyFailed, ExchangeTimedOut };
+pub const Error = error{ VerbsUnavailable, NoHca, HcaFailed, PeerRefused, ProxyFailed, ExchangeTimedOut, Misaligned };
+
+/// TF_ROCE=0 keeps every gather on NCCL; unset or any other value asks for this path (both ranks must ask).
+pub fn wanted() bool {
+    const v = std.c.getenv("TF_ROCE") orelse return true;
+    return !std.mem.eql(u8, std.mem.span(v), "0");
+}
+
+/// The peer's `mine`: both ranks' values cross the group's communicator, rank order.
+fn swap(comptime T: type, group: *const tp_group.Group, d: *const Driver, s: Stream, mine: T) !T {
+    var both: [2]T = undefined;
+    try group.gather(T, d, s, mine, &both);
+    return both[1 - group.rank];
+}
 
 // -- the region's layout (the same on both ranks) ---------------------------------------------------------------------
 const Layout = struct {
@@ -219,20 +233,24 @@ pub const Gather = struct {
     err: [256]u8 = @splat(0),
     gathers: u64 = 0,
 
-    /// Both ranks' exchange, or null on both when either cannot; verdicts cross ``link``. ``max_bytes``: a shard.
-    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, link: tp_link.Link, wanted: bool, max_bytes: usize) !?*Gather {
+    /// Both ranks' exchange or null on both; setup crosses ``group``'s communicator on ``s``. ``max_bytes``: a shard.
+    pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, group: *const tp_group.Group, s: Stream, want: bool, max_bytes: usize) !?*Gather {
+        if (group.world != 2) return error.PeerRefused;
         const g = try gpa.create(Gather);
         var mine: Blob = std.mem.zeroes(Blob);
-        const ok = wanted and blk: {
-            g.setup(gpa, io, d, link.rank, max_bytes) catch |e| {
+        const ok = want and blk: {
+            g.setup(gpa, io, d, @intCast(group.rank), max_bytes) catch |e| {
                 std.log.warn("RoCE all-gather: {s} ({s}); NCCL carries every gather", .{ @errorName(e), std.mem.sliceTo(&g.err, 0) });
                 break :blk false;
             };
             break :blk true;
         };
         if (ok) g.blob(&mine);
-        var theirs: Blob = undefined;
-        try link.swap(std.mem.asBytes(&mine), std.mem.asBytes(&theirs));
+        const theirs = swap(Blob, group, d, s, mine) catch |e| {
+            if (ok) g.teardown();
+            gpa.destroy(g);
+            return e;
+        };
         if (!ok or theirs.ok == 0 or theirs.n_hca != mine.n_hca or theirs.slot_bytes != mine.slot_bytes) {
             if (ok) g.teardown();
             gpa.destroy(g);
@@ -246,10 +264,12 @@ pub const Gather = struct {
             };
             break :blk true;
         };
-        var v: [1]u8 = .{@intFromBool(connected)};
-        var pv: [1]u8 = undefined;
-        try link.swap(&v, &pv);
-        if (!connected or pv[0] == 0) {
+        const peer_connected = swap(u32, group, d, s, @intFromBool(connected)) catch |e| {
+            g.teardown();
+            gpa.destroy(g);
+            return e;
+        };
+        if (!connected or peer_connected == 0) {
             g.teardown();
             gpa.destroy(g);
             return null;
@@ -472,13 +492,14 @@ pub const Gather = struct {
         return @intCast(@min(mine, theirs));
     }
 
-    /// Whether a gather of ``bytes`` a rank (from and to 16-byte aligned buffers) goes this way.
-    pub fn fits(g: *const Gather, bytes: usize, send: abi.DevicePtr, recv: abi.DevicePtr) bool {
-        return bytes > 0 and bytes <= g.max_bytes and bytes % 16 == 0 and send % 16 == 0 and recv % 16 == 0;
+    /// Whether a gather of ``bytes`` a rank goes this way: the size alone decides, so both ranks pick the same path.
+    pub fn fits(g: *const Gather, bytes: usize) bool {
+        return bytes > 0 and bytes <= g.max_bytes and bytes % 16 == 0;
     }
 
-    /// Both ranks' ``bytes`` from ``send`` into ``recv`` in rank order (as ncclAllGather), on ``stream``.
+    /// Both ranks' ``bytes`` from ``send`` into ``recv`` in rank order (as ncclAllGather); misaligned is an error.
     pub fn gather(g: *Gather, stream: abi.Stream, send: abi.DevicePtr, recv: abi.DevicePtr, bytes: usize) !void {
+        if (send % 16 != 0 or recv % 16 != 0) return error.Misaligned;
         const packs = bytes / 16;
         const need = @max(1, std.math.divCeil(usize, packs, 2 * threads) catch unreachable);
         const grid: u32 = @intCast(@min(std.math.ceilPowerOfTwo(usize, need) catch max_blocks, max_blocks));

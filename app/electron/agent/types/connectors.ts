@@ -789,7 +789,7 @@ export interface ControllerSnapshot {
 // 'elevenlabs' ElevenLabs cloud TTS (character/emotion via stability+style),
 // 'local'      a downloadable expressive engine (Kokoro/Piper-class) served over a local
 //              HTTP endpoint the user runs — falls back to Web Speech if unreachable.
-export type VoiceProvider = 'browser' | 'openai' | 'custom' | 'elevenlabs' | 'local'
+export type VoiceProvider = 'browser' | 'openai' | 'custom' | 'elevenlabs' | 'local' | 'kokoro'
 
 export interface VoiceSettings {
   enabled: boolean
@@ -824,6 +824,8 @@ export interface VoiceSettings {
   localTtsBaseUrl: string
   localTtsVoice: string
   localTtsEmotion: string
+  // Managed offline Kokoro. Optional for backward-compatible saved settings.
+  kokoroVoice?: string
   secretRotations?: SecretRotationMetadata
 }
 

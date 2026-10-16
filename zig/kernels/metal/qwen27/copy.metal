@@ -29,3 +29,13 @@ kernel void q27_tap_gather(device const ushort* X [[buffer(0)]], device const ui
   const uint plane = t.x / p.width, column = t.x % p.width;
   Y[t.y * (p.width * p.planes) + t.x] = X[(plane * p.capacity + kept[t.y]) * p.width + column];
 }
+
+struct Take { uint rows, width; };
+
+// An image row's bits over its placeholder's embedding (take[r]: its row in R, or -1 to keep the embedding).
+[[max_total_threads_per_threadgroup(256)]] kernel void q27_take(device ushort* X [[buffer(0)]], device const ushort* R [[buffer(1)]],
+                     device const int* take [[buffer(2)]], constant Take& p [[buffer(3)]],
+                     uint2 t [[thread_position_in_grid]]) {
+  if (t.x >= p.width || t.y >= p.rows || take[t.y] < 0) return;
+  X[t.y * p.width + t.x] = R[ulong(take[t.y]) * p.width + t.x];
+}

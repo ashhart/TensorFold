@@ -14,7 +14,7 @@ const previous = process.env.VONTRA_HOME;
 process.env.VONTRA_HOME = path.join(tmp, 'profile');
 if (!process.argv[2]) {
   try {
-    for (const mode of ['primary', 'models', 'concurrent', 'admission', 'metadata', 'apply']) {
+    for (const mode of ['primary', 'models', 'concurrent', 'admission', 'metadata', 'apply', 'bot-pause']) {
       const child = spawnSync(process.execPath, [import.meta.filename, mode, tmp], {
         cwd: studio,
         encoding: 'utf8',
@@ -62,8 +62,11 @@ if (!process.argv[2]) {
     normalize: async n => n,
     apply: async () => {},
     effects: 0,
+    aborters: new Map(),
+    vmHost: null,
     store: {
-      settings: current
+      settings: current,
+      threads: []
     },
     handlers: new Map(),
     saveSettings,
@@ -71,7 +74,7 @@ if (!process.argv[2]) {
   };
   globalThis.__coreSettingsFixture = state;
   const fixture = path.join(tmp, 'fixture.mjs');
-  await fs.writeFile(fixture, `import path from 'node:path';export const store=globalThis.__coreSettingsFixture.store;export const saveSettings=(s)=>globalThis.__coreSettingsFixture.saveSettings(s);export const vontraPath=(...p)=>path.join(globalThis.__coreSettingsFixture.root,...p);export const makeRemoteControlToken=()=>'synthetic-token';export const handle=(c,cb)=>globalThis.__coreSettingsFixture.handlers.set(c,cb);export const requireSecurityRole=()=>{};export const auditEvent=async()=>{};export const shell={};`);
+  await fs.writeFile(fixture, `import path from 'node:path';export const store=globalThis.__coreSettingsFixture.store;export const saveSettings=(s)=>globalThis.__coreSettingsFixture.saveSettings(s);export const vontraPath=(...p)=>path.join(globalThis.__coreSettingsFixture.root,...p);export const makeRemoteControlToken=()=>'synthetic-token';export const handle=(c,cb)=>globalThis.__coreSettingsFixture.handlers.set(c,cb);export const requireSecurityRole=()=>{};export const auditEvent=async()=>{};export const shell={};export const getBotVmHost=()=>globalThis.__coreSettingsFixture.vmHost;`);
   const noops = path.join(tmp, 'noops.mjs');
   const names = ['RemoteControl', 'Ssh', 'Workspace', 'Session', 'Spine', 'Mcp', 'Provider', 'Controller', 'Missions', 'Bot'];
   await fs.writeFile(noops, names.map(n => `export const register${n}Ipc=()=>{};`).join('\n') + `export const syncRemoteEventStreams=()=>{};export const sanitizeRendererThreadPatch=(x)=>x;export const openExternalSafely=async()=>{};export const modelRouterCooldownSnapshot=()=>({});export const securityControlSnapshot=()=>({});`);
@@ -80,6 +83,7 @@ if (!process.argv[2]) {
     '../state': fixture,
     './audit': fixture,
     './ipc': fixture,
+    './bot-vm-host': fixture,
     electron: fixture,
     './external': noops,
     './provider-runtime': noops,
@@ -96,6 +100,7 @@ if (!process.argv[2]) {
   } = await jiti.import(path.join(studio, 'electron/main/host/core-ipc.ts'));
   const noop = () => {};
   registerCoreIpc({
+    aborters: state.aborters,
     workspaceMutationGuard: guard,
     registerConnectorIpc: noop,
     normalizeRemoteOrchestratorDestinations: (n, c) => state.normalize(n, c),
@@ -118,7 +123,22 @@ if (!process.argv[2]) {
     ...current,
     activeModel: name
   });
-  if (mode === 'primary' || mode === 'models') {
+  if (mode === 'bot-pause') {
+    const preset = { id: 'bot_fixture', name: 'Fixture bot', role: 'Review', lane: 'review', providerId: 'synthetic-provider', model: 'model', executionTarget: 'vm', createdAt: 1, updatedAt: 1 };
+    await commit({ ...current, agentPresets: [preset] });
+    const controller = new AbortController();
+    state.aborters.set('bot-chat', controller);
+    const conversation = { id: 'bot-chat', bot: { presetId: preset.id, executionTarget: 'vm' }, timeline: [{ kind: 'user', text: 'Synthetic history remains.' }] };
+    state.store.threads = [conversation];
+    let stopped = 0;
+    state.vmHost = { stop: async id => { assert.equal(id, preset.id); assert.equal(controller.signal.aborted, true, 'bot work is cancelled before the guest stops'); stopped++; } };
+    await commit({ ...state.store.settings, agentPresets: [{ ...preset, paused: true }] });
+    assert.equal(stopped, 1);
+    assert.equal(state.store.settings.agentPresets[0].paused, true);
+    assert.equal((await loadSettings()).agentPresets[0].paused, true, 'pause is durable');
+    assert.equal(state.store.threads[0], conversation, 'pause retains conversation history');
+    assert.equal(conversation.timeline.length, 1);
+  } else if (mode === 'primary' || mode === 'models') {
     const blocked = path.join(state.root, mode === 'models' ? 'models.json' : 'settings.json');
     await fs.rename(blocked, blocked + '.before');
     await fs.mkdir(blocked);

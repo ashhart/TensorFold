@@ -21,7 +21,6 @@ pub const Dim3 = launch.Dim3;
 pub const graph = @import("graph.zig");
 pub const cublaslt = @import("cublaslt.zig");
 pub const nccl = @import("nccl.zig");
-pub const tp_link = @import("tp_link.zig");
 pub const roce = @import("roce.zig");
 pub const triton = @import("triton.zig");
 pub const aot = @import("aot.zig");
@@ -35,8 +34,13 @@ pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
 pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
+pub const vit = @import("vit.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
+pub const rank_scatter = @import("rank_scatter.zig");
+pub const tp_group = @import("tp_group.zig");
+pub const tp_watch = @import("tp_watch.zig");
+pub const ck = @import("ck.zig");
 pub const modelopt = @import("modelopt.zig");
 
 test {
@@ -45,9 +49,11 @@ test {
     _ = @import("qlinear.zig");
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
+    _ = @import("vit.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");
+    _ = @import("rank_scatter.zig");
     _ = launch;
     _ = abi;
     _ = aot;
@@ -57,5 +63,6 @@ test {
     _ = carveout;
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
-    _ = @import("tp_link.zig");
+    _ = @import("ck.zig");
+    _ = @import("tp_watch.zig");
 }

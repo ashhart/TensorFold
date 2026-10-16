@@ -1,5 +1,12 @@
 # Universal EXL3 routed experts on CUDA (`src/tensorfold/cuda/exl3/experts.*`)
 
+## Engine versions
+
+@vcruz305 wrote these grouped experts for the Python engine (#42, shipped in 0.3.6). This page describes that engine's
+module, under `src/tensorfold/cuda/exl3/` at the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6/src/tensorfold/cuda/exl3), and its numbers were
+measured there. The native engine's CUDA routed experts on this format are in review (#741).
+
 One grouped trellis GEMV launch per projection runs a whole MoE layer's routed experts, where every expert
 matrix may have its own bit width (1 to 8 bits, half-bit widths included, e.g. 3.5) and the layer uses any of
 the three EXL3 codebooks (`3inst`, `mcg`, `mul1`), mixed freely inside one layer, as MiMo-V2.6-Flash's

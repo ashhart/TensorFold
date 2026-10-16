@@ -3,23 +3,6 @@
 pub const Result = c_int;
 pub const Device = c_int;
 pub const DevicePtr = u64;
-/// CUmemGenericAllocationHandle.
-pub const MemHandle = u64;
-/// CUmemLocation: type 1 = a device, id its ordinal.
-pub const MemLocation = extern struct { type: c_int = 1, id: c_int = 0 };
-/// CUmemAllocationProp: type 1 = pinned device memory, no shareable handle.
-pub const MemAllocationProp = extern struct {
-    type: c_int = 1,
-    requested_handle_types: c_int = 0,
-    location: MemLocation = .{},
-    win32_handle_meta_data: ?*anyopaque = null,
-    compression_type: u8 = 0,
-    gpu_direct_rdma_capable: u8 = 0,
-    usage: u16 = 0,
-    reserved: [4]u8 = @splat(0),
-};
-/// CUmemAccessDesc: flags 3 = read and write.
-pub const MemAccessDesc = extern struct { location: MemLocation = .{}, flags: c_int = 3 };
 
 pub const Context = ?*opaque {};
 pub const Module = ?*opaque {};
@@ -209,15 +192,6 @@ pub const Api = struct {
     cuMemsetD32_v2: *const fn (DevicePtr, c_uint, usize) callconv(.c) R,
     cuMemsetD8Async: *const fn (DevicePtr, u8, usize, Stream) callconv(.c) R,
     cuMemsetD32Async: *const fn (DevicePtr, c_uint, usize, Stream) callconv(.c) R,
-    // virtual memory: address ranges reserved once, physical chunks mapped into them as a cache grows
-    cuMemAddressReserve: *const fn (*DevicePtr, usize, usize, DevicePtr, u64) callconv(.c) R,
-    cuMemAddressFree: *const fn (DevicePtr, usize) callconv(.c) R,
-    cuMemCreate: *const fn (*MemHandle, usize, *const MemAllocationProp, u64) callconv(.c) R,
-    cuMemRelease: *const fn (MemHandle) callconv(.c) R,
-    cuMemMap: *const fn (DevicePtr, usize, usize, MemHandle, u64) callconv(.c) R,
-    cuMemUnmap: *const fn (DevicePtr, usize) callconv(.c) R,
-    cuMemSetAccess: *const fn (DevicePtr, usize, *const MemAccessDesc, usize) callconv(.c) R,
-    cuMemGetAllocationGranularity: *const fn (*usize, *const MemAllocationProp, c_int) callconv(.c) R,
     cuStreamCreate: *const fn (*Stream, c_uint) callconv(.c) R,
     cuStreamDestroy_v2: *const fn (Stream) callconv(.c) R,
     cuStreamSynchronize: *const fn (Stream) callconv(.c) R,
@@ -256,14 +230,6 @@ pub const Api = struct {
     cuGraphExecDestroy: *const fn (GraphExec) callconv(.c) R,
     cuGraphExecUpdate_v2: *const fn (GraphExec, Graph, *ExecUpdateResultInfo) callconv(.c) R,
     cuGraphExecKernelNodeSetParams_v2: *const fn (GraphExec, GraphNode, *const KernelNodeParams) callconv(.c) R,
-    cuGraphNodeGetType: *const fn (GraphNode, *c_int) callconv(.c) R,
-    cuGraphMemcpyNodeGetParams: *const fn (GraphNode, *anyopaque) callconv(.c) R,
-    cuGraphMemsetNodeGetParams: *const fn (GraphNode, *anyopaque) callconv(.c) R,
-    cuFuncGetParamInfo: *const fn (Function, usize, *usize, *usize) callconv(.c) R,
-    cuKernelGetParamInfo: *const fn (Kernel, usize, *usize, *usize) callconv(.c) R,
-    cuModuleGetFunctionCount: *const fn (*c_uint, Module) callconv(.c) R,
-    cuModuleEnumerateFunctions: *const fn ([*]Function, c_uint, Module) callconv(.c) R,
-    cuFuncGetName: *const fn (*?[*:0]const u8, Function) callconv(.c) R,
     cuGetErrorName: *const fn (R, *?[*:0]const u8) callconv(.c) R,
     cuGetErrorString: *const fn (R, *?[*:0]const u8) callconv(.c) R,
 };

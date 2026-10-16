@@ -26,8 +26,13 @@ pub const Order = enum(c_int) { col = 0, row = 1 };
 
 pub const desc_transa: c_int = 3;
 pub const desc_transb: c_int = 4;
+pub const desc_epilogue: c_int = 7;
+pub const desc_bias_pointer: c_int = 8;
 pub const layout_order: c_int = 1;
 pub const pref_max_workspace_bytes: c_int = 1;
+
+/// What D gets after the product: nothing, or a bias over its columns added in f32 before D's one rounding.
+pub const Epilogue = enum(u32) { none = 1, bias = 4 };
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, CublasFailed, NoAlgorithm, Invalid };
 
@@ -50,6 +55,7 @@ pub const Api = struct {
     cublasLtMatmulPreferenceDestroy: *const fn (Preference) callconv(.c) S,
     cublasLtMatmulPreferenceSetAttribute: *const fn (Preference, c_int, CPtr, usize) callconv(.c) S,
     cublasLtMatmulAlgoGetHeuristic: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, Preference, c_int, [*]Heuristic, *c_int) callconv(.c) S,
+    cublasLtMatmulAlgoCheck: *const fn (Handle, MatmulDesc, Layout, Layout, Layout, Layout, *const Algo, *Heuristic) callconv(.c) S,
     cublasLtMatmul: *const fn (Handle, MatmulDesc, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, CPtr, abi.DevicePtr, Layout, abi.DevicePtr, Layout, ?*const Algo, abi.DevicePtr, usize, abi.Stream) callconv(.c) S,
 };
 
@@ -105,14 +111,15 @@ pub const Linear = struct {
     pref: Preference,
     algo: Algo,
     workspace_need: usize,
+    epilogue: Epilogue, // fused into `algo`: `initEpilogue` asks, the algorithm decides
 
     /// Picks the heuristic's first algorithm for this shape once; `workspace_limit` bounds what it may ask for.
     pub fn init(lt: *const Library, m: u64, n: u64, k: u64, out: DataType, workspace_limit: usize) Error!Linear {
-        return initTyped(lt, m, n, k, .bf16, out, workspace_limit);
+        return initEpilogue(lt, m, n, k, out, workspace_limit, .none);
     }
 
-    /// ``init`` with ``in`` the type of X and W (bf16, or f32 for an fp32 product).
-    pub fn initTyped(lt: *const Library, m: u64, n: u64, k: u64, in: DataType, out: DataType, workspace_limit: usize) Error!Linear {
+    /// `init`'s plan, its algorithm also running `epilogue` when it supports it (`epilogue` says if); see `runBias`.
+    pub fn initEpilogue(lt: *const Library, m: u64, n: u64, k: u64, out: DataType, workspace_limit: usize, epilogue: Epilogue) Error!Linear {
         var self: Linear = undefined;
         self.lt = lt;
         try lt.check(lt.api.cublasLtCreate(&self.handle), "cublasLtCreate");
@@ -124,9 +131,9 @@ pub const Linear = struct {
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transa, &ta, @sizeOf(c_int)), "set transa");
         try lt.check(lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_transb, &tb, @sizeOf(c_int)), "set transb");
         // column-major view: D^T[n,m] = W[n,k] (stored k x n, transposed) . X^T[k,m]
-        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.a, in, k, n, @intCast(k)), "layout W");
+        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.a, .bf16, k, n, @intCast(k)), "layout W");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.a);
-        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.b, in, k, m, @intCast(k)), "layout X");
+        try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.b, .bf16, k, m, @intCast(k)), "layout X");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.b);
         try lt.check(lt.api.cublasLtMatrixLayoutCreate(&self.c, out, n, m, @intCast(n)), "layout D");
         errdefer _ = lt.api.cublasLtMatrixLayoutDestroy(self.c);
@@ -140,6 +147,8 @@ pub const Linear = struct {
         if (count < 1 or found[0].state != 0) return error.NoAlgorithm;
         self.algo = found[0].algo;
         self.workspace_need = found[0].workspace_size;
+        self.epilogue = .none;
+        if (epilogue != .none) try self.fuse(epilogue, workspace_limit);
         return self;
     }
 
@@ -160,6 +169,28 @@ pub const Linear = struct {
         const one: f32 = 1;
         const zero: f32 = 0;
         try self.lt.check(self.lt.api.cublasLtMatmul(self.handle, self.desc, &one, w, self.a, x, self.b, &zero, d, self.c, d, self.c, &self.algo, workspace, workspace_len, stream), "cublasLtMatmul");
+    }
+
+    /// D = X . W^T + bias (bias [n], D's type) on a plan that fused `.bias`, one rounding to D.
+    pub fn runBias(self: *const Linear, x: abi.DevicePtr, w: abi.DevicePtr, bias: abi.DevicePtr, d: abi.DevicePtr, workspace: abi.DevicePtr, workspace_len: usize, stream: abi.Stream) Error!void {
+        if (self.epilogue != .bias) return error.Invalid;
+        try self.lt.check(self.lt.api.cublasLtMatmulDescSetAttribute(self.desc, desc_bias_pointer, &bias, @sizeOf(abi.DevicePtr)), "set bias");
+        try self.run(x, w, d, workspace, workspace_len, stream);
+    }
+
+    /// Fuses `epilogue` into the chosen algorithm when it supports it within `workspace_limit`; else leaves it unfused.
+    fn fuse(self: *Linear, epilogue: Epilogue, workspace_limit: usize) Error!void {
+        const api = self.lt.api;
+        const e: u32 = @backingInt(epilogue);
+        try self.lt.check(api.cublasLtMatmulDescSetAttribute(self.desc, desc_epilogue, &e, @sizeOf(u32)), "set epilogue");
+        var checked: Heuristic = undefined;
+        if (api.cublasLtMatmulAlgoCheck(self.handle, self.desc, self.a, self.b, self.c, self.c, &self.algo, &checked) == 0 and checked.state == 0 and checked.workspace_size <= workspace_limit) {
+            self.epilogue = epilogue;
+            self.workspace_need = @max(self.workspace_need, checked.workspace_size);
+            return;
+        }
+        const none: u32 = @backingInt(Epilogue.none);
+        try self.lt.check(api.cublasLtMatmulDescSetAttribute(self.desc, desc_epilogue, &none, @sizeOf(u32)), "unset epilogue");
     }
 };
 

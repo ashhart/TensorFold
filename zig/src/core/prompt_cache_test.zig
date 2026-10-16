@@ -392,32 +392,30 @@ test "a kept state grows only into what the budget leaves, and evicts nothing to
     try std.testing.expect(!s.grow(&stranger, 0)); // a state the store doesn't hold
 }
 
-test "an entry pinned for a restore still to come outlives the lookups set up after it; unpinned, it goes again" {
+test "a dead state leaves lookup at once and storage at the next safe boundary" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     var f: Fake = .{ .gpa = gpa };
-    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 220); // fake bytes: 100 + at
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1000);
     defer s.deinit();
-    const x = [_]u32{ 5, 5, 5, 5 };
-    _ = f.pass(&s, &x, try s.begin(a, &x, 3, &.{}, &.{}, null, &.{})); // 103 bytes, the oldest
-    const y = [_]u32{ 6, 6, 6, 6 };
-    _ = f.pass(&s, &y, try s.begin(a, &y, 3, &.{}, &.{}, null, &.{})); // 103: 206 held
-    const xa = [_]u32{ 5, 5, 5, 5, 9 };
-    const l = try s.lookup(a, &xa, 3, &.{}, &.{}, &.{}); // a job set up to resume x
-    const e = l.entry.?;
-    _ = s.pin(e);
-    const z = [_]u32{ 7, 7, 7, 7, 7, 7, 7, 7 };
-    _ = try s.lookup(a, &z, 7, &.{}, &.{}, &.{}); // the next job's room: y goes, not x
-    try std.testing.expect(s.find(&xa, &.{}, &.{}) == e);
-    try std.testing.expect(s.find(&.{ 6, 6, 6, 6 }, &.{}, &.{}) == null);
-    const w: [130]u32 = @splat(8);
-    _ = try s.lookup(a, &w, 120, &.{}, &.{}, &.{}); // 220 bytes, and nothing but x to evict: it stays
-    try std.testing.expect(!s.keep(&w, 120, null, &.{}, &.{})); // and a keep with no room is refused
-    try std.testing.expect(s.find(&xa, &.{}, &.{}) == e);
-    s.unpin(e);
-    _ = try s.lookup(a, &w, 120, &.{}, &.{}, &.{});
-    try std.testing.expect(s.find(&xa, &.{}, &.{}) == null);
-    try std.testing.expectEqual(s.entries.items.len, f.live);
+    const t1 = [_]u32{ 1, 2, 3, 4, 5, 6 };
+    _ = f.pass(&s, &t1, try s.begin(a, &t1, 4, &.{}, &.{}, null, &.{}));
+    const t2 = [_]u32{ 9, 9, 9, 9, 9, 9 };
+    _ = f.pass(&s, &t2, try s.begin(a, &t2, 5, &.{}, &.{}, null, &.{}));
+    const e1 = s.find(&t1, &.{}, &.{}).?;
+    const saved = e1.saved;
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    s.expired(saved); // a backend callback never frees state or sends a peer command
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    try std.testing.expectEqual(@as(?*pc.Entry, null), s.find(&t1, &.{}, &.{}));
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
+    try std.testing.expectEqual(@as(usize, 2), f.live);
+    s.expired(saved); // repeated notification counts only once
+    s.collectExpired();
+    try std.testing.expectEqual(@as(usize, 1), f.live);
+    s.expired(saved); // an opaque saved value, never a read of the freed Entry
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.evicted);
 }

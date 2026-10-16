@@ -1,5 +1,5 @@
 // NL automation-intent builder (VST-038): parse a plain-English description into a draft
-// automation config, so "every weekday at 9am, summarize my inbox and email it to me"
+// automation config, so "daily at 9am, summarize my inbox and email it to me"
 // becomes a scheduled automation the user can review + enable. Pure and deterministic — no
 // model call — so it's testable and instant; a model-assisted refinement can layer on top.
 //
@@ -7,6 +7,8 @@
 // (cadence, delivery target, mode) and leaves the rest at safe defaults. Every field it
 // sets is reported in `matched` so the UI can show what it understood and let the user
 // correct it — never a silent guess presented as fact.
+
+import { normalizeAutomationTimeZone } from '../../shared/automation-time'
 
 export type IntentScheduleKind = 'manual' | 'interval' | 'daily'
 export type IntentMode = 'chat' | 'agent' | 'digest'
@@ -19,6 +21,7 @@ export interface AutomationIntent {
   everyMinutes: number
   atHour: number
   atMinute: number
+  timeZone?: string
   mode: IntentMode
   deliverTo: IntentDeliver
   // What the parser confidently extracted (for a "here's what I understood" UI); anything
@@ -59,9 +62,9 @@ function parseTimeOfDay(text: string): { hour: number; minute: number } | null {
 function extractPrompt(text: string): string {
   return text
     .replace(/\b(?:every|each)\s+(?:\d+\s+)?(?:minutes?|mins?|min|hours?|hrs?|hr|days?)\b/gi, '')
-    .replace(/\b(?:every\s+)?(?:week)?day(?:s)?\b/gi, '')
+    .replace(/\b(?:(?:every|each)\s+days?|everyday)\b/gi, '')
     .replace(/\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\b/gi, '')
-    .replace(/\b(?:daily|hourly|each morning|every morning|nightly)\b/gi, '')
+    .replace(/\b(?:daily|each morning|every morning|nightly)\b/gi, '')
     .replace(/\b(?:and\s+)?(?:email|e-mail|send|deliver|message|text|dm)\s+(?:it\s+|the (?:result|summary|output)\s+)?(?:to\s+)?(?:me|my inbox|telegram|slack)?\b/gi, '')
     .replace(/^[\s,.:;-]+|[\s,.:;-]+$/g, '')
     .replace(/\s{2,}/g, ' ')
@@ -75,19 +78,37 @@ function titleFromPrompt(prompt: string, fallback: string): string {
   return title.length > 60 ? `${title.slice(0, 57)}…` : title
 }
 
-export function parseAutomationIntent(input: string): AutomationIntent {
+export function parseAutomationIntent(input: string, defaultTimeZone?: string): AutomationIntent {
   const text = (input ?? '').trim()
   const lower = text.toLowerCase()
   const matched: string[] = []
+
+  // These calendars have no scheduler representation. Refuse an explicit restriction
+  // before inferring a daily clock time, rather than widening it to every day.
+  const calendar = '(?:weekdays?|weekends?|weeks?|months?|years?|mon(?:day)?s?|tue(?:s(?:day)?)?s?|wed(?:nesday)?s?|thu(?:rs(?:day)?)?s?|fri(?:day)?s?|sat(?:urday)?s?|sun(?:day)?s?)'
+  const unsupportedCalendar = new RegExp(`\\b(?:every|each|on|next|this)\\s+(?:(?:other|\\d+)\\s+)?${calendar}\\b`, 'i').test(text)
+    || /^(?:(?:run|repeat|schedule)\s+)?(?:weekly|monthly|yearly|annually|biweekly|fortnightly|weekdays|weekends)\b/i.test(text)
+    || new RegExp(`^(?:run|repeat|schedule)\\s+${calendar}\\b`, 'i').test(text)
+    || new RegExp(`^${calendar}\\s+at\\b`, 'i').test(text)
+    || /\b(?:run|repeat|schedule(?:d)?)\s+(?:weekly|monthly|yearly|annually|biweekly|fortnightly)\b/i.test(text)
+    || /\b(?:weekdays?|weekends?)\s+only\b/i.test(text)
+    || new RegExp(`\\bat\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?\\s+${calendar}\\b`, 'i').test(text)
+  if (unsupportedCalendar) throw new Error('This calendar restriction is not supported yet. Choose a daily time with an IANA timezone or an elapsed-time interval; weekday, weekly and monthly calendars cannot be scheduled.')
 
   let scheduleKind: IntentScheduleKind = 'manual'
   let everyMinutes = 60
   let atHour = 9
   let atMinute = 0
 
-  const interval = parseInterval(lower)
+  // A prefix, suffix or explicit "run hourly" is cadence; an ordinary phrase such
+  // as "calculate the hourly rate" stays a manual instruction with its text intact.
+  const hourly = /^(?:run\s+)?hourly\b|\b(?:run|repeat|schedule)\s+hourly\b|\bhourly\s*[,.!?]?$/i.exec(text)
+  const interval = parseInterval(lower) ?? (hourly ? 60 : null)
   const timeOfDay = parseTimeOfDay(lower)
-  const mentionsDaily = /\b(daily|every ?day|each day|weekday|every morning|each morning|nightly|hourly)\b/.test(lower)
+  const mentionsDaily = /\b(daily|every ?day|each day|every morning|each morning|nightly)\b/.test(lower)
+  if (interval != null && timeOfDay && !(interval === 1440 && mentionsDaily && !hourly)) {
+    throw new Error('Elapsed-time intervals with a start time are not supported yet; choose an interval or a daily time.')
+  }
 
   if (interval != null && !timeOfDay) {
     scheduleKind = 'interval'
@@ -114,7 +135,29 @@ export function parseAutomationIntent(input: string): AutomationIntent {
   if (/\b(digest|briefing|summary of (?:my )?(?:activity|jobs|day)|status report)\b/.test(lower)) { mode = 'digest'; matched.push('digest mode (no model)') }
   else if (/\b(agent|run tests|fix|edit|refactor|open a pr|open a pull request|commit|build|deploy|check out|clone)\b/.test(lower)) { mode = 'agent'; matched.push('agent mode (tool loop)') }
 
-  const prompt = extractPrompt(text) || text
+  // Accept an explicit IANA identifier, not ambiguous abbreviations such as CST.
+  // An invalid identifier is an error rather than an invitation to use the host zone.
+  const zoneMatch = /\b(?:time\s*zone|tz)\b\s*[:=]?\s*([^\s,;]+)/i.exec(text)
+    // A slash identifier immediately after the clock time expresses timezone intent,
+    // even if its region is unknown; a task path later in the instruction does not.
+    ?? /\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:in\s+)?([A-Za-z][A-Za-z0-9_.+-]*(?:\/[A-Za-z0-9_.+-]+)+)\b/i.exec(text)
+    ?? /\b(?:in\s+)?(?:Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific|Etc|US|Canada|Brazil|Mexico|Chile)\/[A-Za-z0-9_+./-]+\b/i.exec(text)
+    ?? /\bin\s+(UTC)\b/i.exec(text)
+    ?? /\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(UTC)\b/i.exec(text)
+  let timeZone: string | undefined
+  if (scheduleKind === 'daily' && !zoneMatch && /\bat\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s+(?:in\s+)?(?:GMT|BST|EST|EDT|CST|CDT|MST|MDT|PST|PDT|IST|CET|CEST)\b/i.test(text)) {
+    throw new Error('Use an explicit IANA timezone, such as America/Los_Angeles or UTC, instead of a timezone abbreviation.')
+  }
+  if (zoneMatch && scheduleKind === 'daily') {
+    const zone = zoneMatch[1] ?? zoneMatch[0].replace(/^in\s+/i, '')
+    timeZone = normalizeAutomationTimeZone(zone)
+    matched.push(`timezone ${timeZone}`)
+  } else if (scheduleKind === 'daily' && defaultTimeZone !== undefined) {
+    timeZone = normalizeAutomationTimeZone(defaultTimeZone)
+    matched.push(`timezone ${timeZone} (review before enabling)`)
+  }
+  const withoutZone = timeZone && zoneMatch ? text.replace(zoneMatch[0], '') : text
+  const prompt = extractPrompt(hourly && scheduleKind === 'interval' ? withoutZone.replace(hourly[0], '') : withoutZone) || text
   return {
     name: titleFromPrompt(prompt, 'Automation'),
     prompt,
@@ -122,6 +165,7 @@ export function parseAutomationIntent(input: string): AutomationIntent {
     everyMinutes,
     atHour,
     atMinute,
+    ...(timeZone ? { timeZone } : {}),
     mode,
     deliverTo,
     matched,

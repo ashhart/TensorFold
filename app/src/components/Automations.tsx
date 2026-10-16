@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
 import { Icon, type IconName } from '../lib/icons'
@@ -8,6 +8,7 @@ import type { Automation, AutomationDeliver } from '../lib/types'
 import { accountLabel, modelDisplayName } from '../lib/provider-accounts'
 import { modelChoiceValue, parseModelChoice, resolveModelSelect } from '../lib/automation-model-select'
 import { parseAutomationIntent } from '../lib/automation-intent'
+import { automationTimeZones, dailyAutomationPreview, deviceAutomationTimeZone, normalizeAutomationTimeZone } from '../../shared/automation-time'
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -30,7 +31,7 @@ const INTERVALS: { value: number; label: string }[] = [
 
 function scheduleSummary(a: Automation): string {
   if (a.scheduleKind === 'manual') return 'Manual'
-  if (a.scheduleKind === 'daily') return `Daily · ${pad(a.atHour)}:${pad(a.atMinute)}`
+  if (a.scheduleKind === 'daily') return `Daily · ${pad(a.atHour)}:${pad(a.atMinute)} · ${a.timeZone ?? 'Legacy host-local timezone'}`
   const m = a.everyMinutes
   if (m % 1440 === 0) return `Every ${m / 1440}d`
   if (m % 60 === 0) return `Every ${m / 60}h`
@@ -39,6 +40,7 @@ function scheduleSummary(a: Automation): string {
 
 function nextLabel(a: Automation): string {
   if (!a.enabled) return 'Paused'
+  if (a.scheduleError) return 'Fix schedule'
   if (a.scheduleKind === 'manual') return 'On demand'
   if (!a.nextRunAt) return 'Scheduled'
   const ms = a.nextRunAt - Date.now()
@@ -57,30 +59,43 @@ export function Automations() {
   const createAutomation = useStore((s) => s.createAutomation)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [describe, setDescribe] = useState('')
+  const [createError, setCreateError] = useState<string | null>(null)
 
   const editing = automations.find((a) => a.id === editingId)
 
   const startNew = async (tpl?: Partial<Automation>) => {
+    setCreateError(null)
+    const timeZone = deviceAutomationTimeZone()
     const base: Partial<Automation> = {
       name: 'New automation', prompt: '', scheduleKind: 'manual', mode: 'chat', deliverTo: 'inbox', enabled: false,
       providerId: settings?.activeProviderId ?? null, providerAccountId: settings?.activeProviderAccountId ?? null, model: settings?.activeModel ?? null,
+      ...(timeZone ? { timeZone } : {}),
       ...tpl,
     }
-    const a = await createAutomation(base)
-    setEditingId(a.id)
+    try {
+      const a = await createAutomation(base)
+      setEditingId(a.id)
+      return true
+    } catch (error) {
+      setCreateError(error instanceof Error ? error.message : 'Could not create this automation.')
+      return false
+    }
   }
 
   // NL builder (VST-038): parse a plain-English description into a draft the user reviews.
   const startFromDescription = async () => {
     const text = describe.trim()
     if (!text) return
-    const intent = parseAutomationIntent(text)
-    setDescribe('')
-    await startNew({
-      name: intent.name, prompt: intent.prompt, scheduleKind: intent.scheduleKind,
-      everyMinutes: intent.everyMinutes, atHour: intent.atHour, atMinute: intent.atMinute,
-      mode: intent.mode, deliverTo: intent.deliverTo,
-    })
+    try {
+      const intent = parseAutomationIntent(text, deviceAutomationTimeZone())
+      const created = await startNew({
+        name: intent.name, prompt: intent.prompt, scheduleKind: intent.scheduleKind,
+        everyMinutes: intent.everyMinutes, atHour: intent.atHour, atMinute: intent.atMinute,
+        ...(intent.timeZone ? { timeZone: intent.timeZone } : {}),
+        mode: intent.mode, deliverTo: intent.deliverTo,
+      })
+      if (created) setDescribe('')
+    } catch (error) { setCreateError(error instanceof Error ? error.message : 'Check the schedule and try again.') }
   }
 
   if (editing) return <Editor key={editing.id} automation={editing} onClose={() => setEditingId(null)} />
@@ -97,6 +112,7 @@ export function Automations() {
         </div>
 
         {/* NL builder (VST-038): describe it in words → a reviewable draft. */}
+        {createError && <p role="alert" className="mt-4 text-[13px] text-danger">{createError}</p>}
         <div className="mt-4 rounded-xl border border-line bg-card p-3 shadow-card">
           <div className="mb-1.5 flex items-center gap-1.5 text-[13px] font-medium text-ink-2"><Icon name="spark" size={13} className="text-accent" />Describe it in plain English</div>
           <div className="flex items-center gap-2">
@@ -104,7 +120,7 @@ export function Automations() {
               value={describe}
               onChange={(e) => setDescribe(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter') void startFromDescription() }}
-              placeholder="e.g. every weekday at 9am, summarize my inbox and email it to me"
+              placeholder="e.g. daily at 9am in Europe/London, summarize my inbox"
             />
             <Button variant="default" icon="arrowRight" onClick={() => void startFromDescription()} disabled={!describe.trim()}>Build</Button>
           </div>
@@ -218,6 +234,25 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
   const providers = settings?.providers ?? []
 
   const [draft, setDraft] = useState<Automation>(automation)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [previewNow, setPreviewNow] = useState(Date.now)
+  const timeZones = useMemo(automationTimeZones, [])
+  const deviceZone = deviceAutomationTimeZone()
+  const legacyLocal = automation.scheduleKind === 'daily' && automation.timeZone === undefined && draft.timeZone === undefined
+  useEffect(() => {
+    if (draft.scheduleKind !== 'daily') return
+    const timer = window.setInterval(() => setPreviewNow(Date.now()), 30_000)
+    return () => window.clearInterval(timer)
+  }, [draft.scheduleKind])
+  let timeZoneError: string | null = null
+  let nextPreview: string | null = null
+  if (draft.scheduleKind === 'daily' && !legacyLocal) {
+    try {
+      const zone = normalizeAutomationTimeZone(draft.timeZone)
+      nextPreview = dailyAutomationPreview(draft.atHour, draft.atMinute, previewNow, zone)
+    } catch (error) { timeZoneError = error instanceof Error ? error.message : 'Choose a valid IANA timezone.' }
+  }
   const patch = (p: Partial<Automation>) => setDraft((d) => ({ ...d, ...p }))
   // Bind the model <select> to a real rendered option. See automation-model-select.ts for
   // why a naive rebuild can desync from the option set and read as "model reverted to default".
@@ -241,6 +276,7 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
     everyMinutes: draft.everyMinutes,
     atHour: draft.atHour,
     atMinute: draft.atMinute,
+    ...(draft.timeZone !== undefined ? { timeZone: draft.timeZone } : {}),
     providerId: draft.providerId,
     providerAccountId: draft.providerAccountId,
     model: draft.model,
@@ -273,8 +309,18 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
     patch({ completionPolicy: next ? { ...next, version: (draft.completionPolicy?.version ?? 0) + 1 } as Automation['completionPolicy'] : undefined })
   const missingAcks = (draft.requiredRisks ?? []).filter((r) => !(draft.acknowledgedRisks ?? []).includes(r))
 
-  const save = async () => { await updateAutomation(automation.id, editablePatch()); onClose() }
-  const runNow = async () => { await updateAutomation(automation.id, editablePatch()); runAutomation(automation.id) }
+  const commit = async (run: boolean) => {
+    if (saving || timeZoneError) return
+    setSaving(true); setSaveError(null)
+    try {
+      await updateAutomation(automation.id, editablePatch())
+      if (run) await runAutomation(automation.id)
+      else onClose()
+    } catch (error) { setSaveError(error instanceof Error ? error.message : 'Could not save this automation.') }
+    finally { setSaving(false) }
+  }
+  const save = () => commit(false)
+  const runNow = () => commit(true)
 
   const time = `${pad(draft.atHour)}:${pad(draft.atMinute)}`
 
@@ -310,7 +356,7 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
           <div className="mb-1.5 text-[13px] font-medium text-ink-2">Schedule</div>
           <Segmented
             value={draft.scheduleKind}
-            onChange={(v) => patch({ scheduleKind: v })}
+            onChange={(v) => patch({ scheduleKind: v, ...(v === 'daily' && draft.scheduleKind !== 'daily' && draft.timeZone === undefined ? { timeZone: deviceZone ?? '' } : {}) })}
             options={[{ value: 'manual', label: 'Manual', icon: 'play' }, { value: 'interval', label: 'Interval', icon: 'clock' }, { value: 'daily', label: 'Daily', icon: 'sun' }]}
           />
           {draft.scheduleKind === 'interval' && (
@@ -319,7 +365,8 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
             </div>
           )}
           {draft.scheduleKind === 'daily' && (
-            <div className="mt-2.5 flex items-center gap-2 text-[13px] text-ink-3">
+            <div className="mt-2.5 space-y-3 text-[13px] text-ink-3">
+              <div className="flex flex-wrap items-center gap-2">
               <span>Runs every day at</span>
               <input
                 type="time"
@@ -327,7 +374,19 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
                 onChange={(e) => { const [h, m] = e.target.value.split(':').map(Number); patch({ atHour: h || 0, atMinute: m || 0 }) }}
                 className="no-drag h-9 rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent"
               />
-              <span className="text-ink-4">(local time)</span>
+              </div>
+              <Field label="Timezone" hint={legacyLocal ? 'Existing host-local schedule' : 'Pinned IANA timezone'}>
+                <Input aria-label="Automation timezone" aria-invalid={!!timeZoneError} list="automation-timezones" value={draft.timeZone ?? ''} onChange={(event) => patch({ timeZone: event.target.value })} placeholder={legacyLocal ? 'Legacy host-local timezone' : 'Europe/London'} autoCapitalize="off" autoCorrect="off" spellCheck={false} />
+                <datalist id="automation-timezones">{timeZones.map((zone) => <option key={zone} value={zone} />)}</datalist>
+              </Field>
+              <div className="flex flex-wrap gap-2">
+                <Button size="sm" variant="default" disabled={!deviceZone} onClick={() => patch({ timeZone: deviceZone })}>Use this device's timezone{deviceZone ? ` · ${deviceZone}` : ''}</Button>
+                {automation.scheduleKind === 'daily' && automation.timeZone === undefined && draft.timeZone !== undefined && <Button size="sm" variant="ghost" onClick={() => patch({ timeZone: undefined })}>Keep legacy host-local time</Button>}
+              </div>
+              {legacyLocal ? <p className="text-[12px] leading-relaxed text-ink-3">This existing schedule uses the scheduler host's local timezone and follows that host when its timezone changes; choose a timezone to pin future runs.</p> : <p className="text-[12px] leading-relaxed text-ink-3">The selected timezone stays fixed when this device or the scheduler host changes timezone; a clock time skipped by daylight saving does not run that date, and a repeated clock time runs once at its first occurrence.</p>}
+              {timeZoneError && <p role="alert" className="text-[12px] text-danger">{timeZoneError}</p>}
+              {nextPreview && <p role="status" className="text-[12px] text-ink-2">Next scheduled time: {nextPreview} · {draft.timeZone}</p>}
+              <p className="text-[12px] text-ink-4">Runs on the scheduler host while TensorFold is open; a missed daily time runs once when it is available again.</p>
             </div>
           )}
         </div>
@@ -367,7 +426,7 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
         </div>
 
         {/* Advanced (VST-038): misfire, risk acknowledgement, completion policy. */}
-        {draft.scheduleKind !== 'manual' && (
+        {draft.scheduleKind === 'interval' && (
           <div className="mt-5">
             <div className="mb-1.5 text-[13px] font-medium text-ink-2">If a fire time was missed</div>
             <Segmented
@@ -446,10 +505,11 @@ function Editor({ automation, onClose }: { automation: Automation; onClose: () =
             {draft.enabled ? 'Enabled' : 'Paused'}
           </label>
           <div className="flex items-center gap-2">
-            <Button variant="default" icon="play" onClick={runNow}>Run now</Button>
-            <Button variant="primary" icon="check" onClick={save}>Save</Button>
+            <Button variant="default" icon="play" disabled={saving || !!timeZoneError} onClick={runNow}>Run now</Button>
+            <Button variant="primary" icon="check" disabled={saving || !!timeZoneError} onClick={save}>{saving ? 'Saving…' : 'Save'}</Button>
           </div>
         </div>
+        {saveError && <p role="alert" className="mt-3 text-[13px] text-danger">{saveError}</p>}
       </div>
     </div>
   )

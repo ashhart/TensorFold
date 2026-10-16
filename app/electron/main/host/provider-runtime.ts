@@ -116,16 +116,27 @@ async function fetchOpenRouterModels(provider: Provider, fetchImpl: typeof fetch
   return Array.from(new Set([...OPENROUTER_PRIORITY_MODELS, ...ids]))
 }
 
-export async function listProviderModels(provider: Provider): Promise<string[]> {
-  if (isEngineProvider(provider)) return ((await engineService()?.installed(true)) ?? []).map((m) => m.repo)
+export function resolveProviderProbe(provider: Provider): Provider {
   const stored = store.settings.providers.find((candidate) => candidate.id === provider.id)
   // A stored (masked) key must never be sent to a renderer-chosen URL: swapping baseUrl
   // while replaying the mask would exfiltrate the real key to an attacker host.
-  const maskedConflict = maskedSecretUrlError(isSecretMask(provider.apiKey), provider.baseUrl, stored?.baseUrl)
+  const maskedEnvironment = (env?: Record<string, string>) => Object.values(env ?? {}).some(isSecretMask)
+  const hasMaskedCredential = isSecretMask(provider.apiKey) || maskedEnvironment(provider.cliEnv) || (provider.accounts ?? []).some((account) => isSecretMask(account.apiKey) || maskedEnvironment(account.env))
+  if (hasMaskedCredential && !stored) throw new Error('The saved provider secret is unavailable. Re-enter the key before testing.')
+  const maskedConflict = maskedSecretUrlError(hasMaskedCredential, provider.baseUrl, stored?.baseUrl)
   if (maskedConflict) throw new Error(maskedConflict)
-  const effectiveProvider = providerWithAccount(stored ? {
+  if (stored && hasMaskedCredential) {
+    if ((provider.transport ?? 'chat-completions') !== (stored.transport ?? 'chat-completions')) throw new Error('A saved secret can only be used with its saved transport; re-enter it for a different connection.')
+    const launchBinding = (value: { cliPath?: string; cliProfile?: string; cliHome?: string }) => JSON.stringify([value.cliPath?.trim() ?? '', value.cliProfile?.trim() ?? '', value.cliHome?.trim() ?? ''])
+    if ((maskedEnvironment(provider.cliEnv) || provider.transport?.endsWith('-cli')) && launchBinding(provider) !== launchBinding(stored)) throw new Error('A saved CLI secret can only be used with its saved executable and launch profile; re-enter it for a different launch.')
+    for (const account of provider.accounts ?? []) {
+      const existing = stored.accounts?.find((candidate) => candidate.id === account.id)
+      if (maskedEnvironment(account.env) && (!existing || launchBinding(account) !== launchBinding(existing))) throw new Error('A saved CLI account secret can only be used with its saved launch profile; re-enter it for a different launch.')
+    }
+  }
+  return providerWithAccount(stored ? {
     ...provider,
-    apiKey: provider.apiKey && !isSecretMask(provider.apiKey) ? provider.apiKey : stored.apiKey,
+    apiKey: isSecretMask(provider.apiKey) ? stored.apiKey : provider.apiKey,
     cliEnv: Object.fromEntries(Object.entries(provider.cliEnv ?? {}).map(([key, value]) => [key, isSecretMask(value) ? (stored.cliEnv?.[key] ?? '') : value])),
     accounts: provider.accounts?.map((account) => {
       const existing = stored.accounts?.find((candidate) => candidate.id === account.id)
@@ -136,6 +147,11 @@ export async function listProviderModels(provider: Provider): Promise<string[]> 
       }
     }),
   } : provider, provider.defaultAccountId)
+}
+
+export async function listProviderModels(provider: Provider): Promise<string[]> {
+  if (isEngineProvider(provider)) return ((await engineService()?.installed(true)) ?? []).map((m) => m.repo)
+  const effectiveProvider = resolveProviderProbe(provider)
   if (effectiveProvider.transport === 'codex-cli') {
     await checkCodexCli(effectiveProvider)
     return effectiveProvider.models?.length ? effectiveProvider.models : defaultCliModels('codex-cli')

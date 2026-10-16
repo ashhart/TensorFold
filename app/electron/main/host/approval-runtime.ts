@@ -91,7 +91,7 @@ export function createApprovalRuntime(deps: ApprovalRuntimeDeps) {
       const thread = meta ? store.threads.find((candidate) => candidate.id === meta.threadId) : null
       let rule: Awaited<ReturnType<ApprovalRuntimeDeps['findApprovalRule']>> = null
       try {
-        rule = meta ? await deps.findApprovalRule(meta.policy.scope, meta.policy.key, {
+        rule = meta && meta.policy.classification !== 'phone-control' ? await deps.findApprovalRule(meta.policy.scope, meta.policy.key, {
           projectId: thread?.projectId ?? null,
           workspace: thread?.cwd ?? null,
         }) : null

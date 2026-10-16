@@ -21,6 +21,8 @@ export interface CoreIpcConfigDeps {
   ensureRemoteControlToken: CoreIpcDeps['ensureRemoteControlToken']
   applyTheme: CoreIpcDeps['applyTheme']
   applyPowerSettings: CoreIpcDeps['applyPowerSettings']
+  applyDesktopMode?: CoreIpcDeps['applyDesktopMode']
+  hideDesktopWindow?: CoreIpcDeps['hideDesktopWindow']
   startUpdateChecks: CoreIpcDeps['startUpdateChecks']
   startBotControlPolling: CoreIpcDeps['startBotControlPolling']
   webhookServer: { syncFromEndpoints(): Promise<void> }
@@ -61,6 +63,8 @@ export function buildCoreIpcConfig(deps: CoreIpcConfigDeps): CoreIpcDeps {
     ensureRemoteControlToken,
     applyTheme,
     applyPowerSettings,
+    applyDesktopMode,
+    hideDesktopWindow,
     startUpdateChecks,
     startBotControlPolling,
     webhookServer,
@@ -92,6 +96,8 @@ export function buildCoreIpcConfig(deps: CoreIpcConfigDeps): CoreIpcDeps {
     ensureRemoteControlToken,
     applyTheme,
     applyPowerSettings,
+    applyDesktopMode,
+    hideDesktopWindow,
     startUpdateChecks,
     startBotControlPolling,
     syncWebhookServer: () => webhookServer.syncFromEndpoints(),

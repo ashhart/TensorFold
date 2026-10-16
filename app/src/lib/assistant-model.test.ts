@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { resolveAssistantModel, hasAssistantModelOverride, resolveSurfaceModel, hasSurfaceModelOverride } from './assistant-model.ts'
+import { resolveAssistantModel, hasAssistantModelOverride, resolveSurfaceModel, hasSurfaceModelOverride, settingsForSurfaceModelPick } from './assistant-model.ts'
 import { surfaceModelOverride } from '../../electron/agent/provider-accounts.ts'
 
 const base: any = {
@@ -24,6 +24,10 @@ assert.equal(hasAssistantModelOverride(partial), false)
 
 // Per-surface defaults (VST-015): the code surface has its own trio, independent of chat.
 const codeOnly = { ...base, codeProviderId: 'anthropic', codeProviderAccountId: 'work', codeModel: 'claude-sonnet-5' }
+const pickedLocal = { providerId: 'tensorfold', providerAccountId: null, model: 'local-model' }
+const pickedSettings = settingsForSurfaceModelPick(codeOnly, 'code', pickedLocal)
+assert.deepEqual(resolveSurfaceModel(pickedSettings, 'code'), pickedLocal, 'composer selection replaces a pinned code route')
+assert.deepEqual(resolveSurfaceModel(pickedSettings, 'chat'), resolveSurfaceModel(codeOnly, 'chat'), 'changing a pinned code route preserves the chat default')
 assert.deepEqual(resolveSurfaceModel(codeOnly, 'code'), { providerId: 'anthropic', providerAccountId: 'work', model: 'claude-sonnet-5' })
 assert.deepEqual(resolveSurfaceModel(codeOnly, 'chat'), { providerId: 'openai', providerAccountId: 'acc1', model: 'gpt-4o' }, 'a code override never leaks into chat')
 assert.equal(hasSurfaceModelOverride(codeOnly, 'code'), true)

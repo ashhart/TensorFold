@@ -6,7 +6,7 @@ import { type EventSpineHost } from '../../agent/event-spine-host'
 import { type PairingRegistry } from '../../agent/pairing-sessions'
 import { HEADLESS_MODE } from '../early-electron-paths'
 import { archiveSnapshot } from './archive'
-import { redactRemoteControlEventForPaired, pairedRemoteArchiveSnapshot, pairedRemoteControlSnapshot, remoteControlDoctorSnapshot, remoteControlSnapshot } from './remote-snapshot'
+import { redactRemoteControlEventForPaired, pairedRemoteArchiveSnapshot, pairedRemoteControlSnapshot, remoteControlDoctorSnapshot, remoteControlSnapshot, remoteArchiveSnapshot, isRemoteEventVisible, assertRemoteThreadVisible as assertPublicThread, assertRemoteTicketVisible as assertPublicTicket, assertRemoteApprovalVisible } from './remote-snapshot'
 import { durablePairingMutation } from './durable-pairing'
 import { auditEvent } from './audit'
 import { persistSettings } from './persistence'
@@ -134,7 +134,7 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
       activeRoomIds: Array.from(roomAborters().keys()),
       activeMissionIds: Array.from(runningMissions()),
     }),
-    getArchives: () => archiveSnapshot(),
+    getArchives: () => remoteArchiveSnapshot(archiveSnapshot()),
     getPairedSnapshot: () => pairedRemoteControlSnapshot({
       appVersion: app.getVersion(),
       headless: HEADLESS_MODE,
@@ -144,6 +144,7 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
     }),
     getPairedArchives: () => pairedRemoteArchiveSnapshot(archiveSnapshot()),
     redactPairedEvent: redactRemoteControlEventForPaired,
+    isPublishVisible: isRemoteEventVisible,
     getDoctor: () => remoteControlDoctorSnapshot({
       appVersion: app.getVersion(),
       headless: HEADLESS_MODE,
@@ -152,15 +153,18 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
       activeMissionIds: Array.from(runningMissions()),
     }),
     createThread: (input, scope) => remoteHostApi().createThreadOnThisHost(input, scope),
-    startThread: (payload, scope) => remoteHostApi().startRemoteThreadOnThisHost(payload, scope),
-    guideThread: (payload, scope) => remoteHostApi().guideRemoteThreadOnThisHost(payload, scope),
-    cancelThread: (threadId) => remoteHostApi().cancelRemoteThreadOnThisHost(threadId),
-    approve: (callId, decision) => jobControlRuntime().resolveToolApproval(callId, decision),
+    startThread: (payload, scope) => { assertPublicThread(payload.threadId); return remoteHostApi().startRemoteThreadOnThisHost(payload, scope) },
+    guideThread: (payload, scope) => { assertPublicThread(payload.threadId); return remoteHostApi().guideRemoteThreadOnThisHost(payload, scope) },
+    cancelThread: (threadId) => { assertPublicThread(threadId); return remoteHostApi().cancelRemoteThreadOnThisHost(threadId) },
+    approve: (callId, decision) => {
+      assertRemoteApprovalVisible(callId)
+      return jobControlRuntime().resolveToolApproval(callId, decision)
+    },
     updateProject: (id, patch) => remoteHostApi().updateProjectOnThisHost(id, patch),
     deleteProject: (id) => remoteHostApi().archiveProjectOnThisHost(id),
     restoreProject: (id) => remoteHostApi().restoreProjectOnThisHost(id),
-    deleteThread: (id) => remoteHostApi().archiveThreadOnThisHost(id),
-    restoreThread: (id) => remoteHostApi().restoreThreadOnThisHost(id),
+    deleteThread: (id) => { assertPublicThread(id); return remoteHostApi().archiveThreadOnThisHost(id) },
+    restoreThread: (id) => { assertPublicThread(id); return remoteHostApi().restoreThreadOnThisHost(id) },
     createRoom: (input) => remoteHostApi().createRoomOnThisHost(input),
     updateRoom: (id, patch) => remoteHostApi().updateRoomOnThisHost(id, patch),
     renameRoom: (id, name) => remoteHostApi().renameRoomOnThisHost(id, name),
@@ -170,12 +174,12 @@ export function buildRemoteControlConfig(deps: RemoteControlConfigDeps): RemoteC
     restoreRoom: (id) => remoteHostApi().restoreRoomOnThisHost(id),
     startRoom: (roomId, problem, attachments, scope) => remoteHostApi().startRemoteRoomOnThisHost(roomId, problem, attachments, scope),
     cancelRoom: (roomId) => remoteHostApi().cancelRemoteRoomOnThisHost(roomId),
-    createTicket: (input) => remoteHostApi().createTicketOnThisHost(input),
-    startTicketExecution: (id, input, scope) => remoteHostApi().startRemoteTicketExecutionOnThisHost(id, input, scope),
-    updateTicket: (id, patch) => remoteHostApi().updateTicketOnThisHost(id, patch),
-    transitionTicket: (id, command) => remoteHostApi().transitionRemoteTicketOnThisHost(id, command),
-    deleteTicket: (id) => remoteHostApi().archiveTicketOnThisHost(id),
-    restoreTicket: (id) => remoteHostApi().restoreTicketOnThisHost(id),
+    createTicket: (input) => { assertPublicThread(input.threadId); return remoteHostApi().createTicketOnThisHost(input) },
+    startTicketExecution: (id, input, scope) => { assertPublicTicket(id); return remoteHostApi().startRemoteTicketExecutionOnThisHost(id, input, scope) },
+    updateTicket: (id, patch) => { assertPublicTicket(id); assertPublicThread(patch.threadId); return remoteHostApi().updateTicketOnThisHost(id, patch) },
+    transitionTicket: (id, command) => { assertPublicTicket(id); return remoteHostApi().transitionRemoteTicketOnThisHost(id, command) },
+    deleteTicket: (id) => { assertPublicTicket(id); return remoteHostApi().archiveTicketOnThisHost(id) },
+    restoreTicket: (id) => { assertPublicTicket(id); return remoteHostApi().restoreTicketOnThisHost(id) },
     setMissionStatus: (id, status, message) => setMissionStatusLocal(id, status, message),
     recordMissionHeartbeat: (id, message) => recordMissionHeartbeatLocal(id, message),
     listDirectories: (dir, options) => remoteHostApi().listHostDirectories(dir, options),

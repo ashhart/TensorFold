@@ -28,6 +28,11 @@ import { registerProviderIpc } from './ipc/provider-ipc'
 import { registerControllerIpc } from './ipc/controller-ipc'
 import { registerMissionsIpc } from './ipc/missions-ipc'
 import { registerBotIpc } from './ipc/bot-ipc'
+import { sendToRenderer } from './renderer-events'
+import { normalizeDesktopMode } from './desktop-mode'
+import { normalizeAgentPresets } from '../../../shared/bot-policy'
+import { reserveBotLifecycleTransition } from './bot-run-boundary'
+import { getBotVmHost } from './bot-vm-host'
 
 export { requireNativeConfirmation } from './sensitive-confirmation'
 // Re-export the renderer thread patch sanitizer so existing import sites keep resolving here.
@@ -62,6 +67,8 @@ export interface CoreIpcDeps {
   ensureRemoteControlToken(): void
   applyTheme(): void
   applyPowerSettings(): void
+  applyDesktopMode?(): void
+  hideDesktopWindow?(): { hidden: boolean }
   startUpdateChecks(): void
   startBotControlPolling(): void
   syncWebhookServer(): Promise<void>
@@ -161,7 +168,10 @@ export function registerCoreIpc(deps: CoreIpcDeps) {
   registerProviderIpc()
   registerControllerIpc({ appName, rememberConnectorEvents })
   registerMissionsIpc({ getMission, createLocalPrLoop })
-  registerBotIpc({ pollTelegramUpdates })
+  registerBotIpc({ pollTelegramUpdates, recipes: {
+    currentSettings: () => store.settings,
+    commitImport: (prepare) => commitSettingsChange(prepare, async () => {}),
+  } })
 
 // ---------------------------------------------------------------- IPC
 
@@ -170,8 +180,8 @@ handle('security:purgeLocalMemory', async () => {
   requireSecurityRole('owner', 'purge all local memory/state')
   await requireNativeConfirmation(confirmSensitiveAction, {
     title: 'Erase local TensorFold memory?',
-    message: 'This permanently removes local conversations, work records, paired sessions, and protected runtime state.',
-    detail: 'This confirmation is shown by the main process so renderer content cannot silently trigger the wipe.',
+    message: 'This permanently removes local conversations, work records, paired sessions, protected runtime state, and private Living Weights models and learned facts.',
+    detail: 'Original downloaded models and configured provider credentials remain. This confirmation is shown by the main process so renderer content cannot silently trigger the wipe.',
     confirmLabel: 'Erase local memory',
   })
   return purgeLocalMemory()
@@ -194,20 +204,57 @@ handle('settings:get', async () => {
   syncRemoteEventStreams()
   return redactSettings(store.settings)
 })
+async function setDesktopMode(mode: unknown, onboardingComplete?: unknown): Promise<Settings> {
+  requireSecurityRole('owner', 'change desktop mode')
+  if (mode !== 'minimal' && mode !== 'full') throw new Error('Choose Minimal or Full mode.')
+  if (onboardingComplete !== undefined && typeof onboardingComplete !== 'boolean') throw new Error('Onboarding completion must be true or false.')
+  return commitSettingsChange(async (current) => ({
+    ...current, desktopMode: mode,
+    ...(onboardingComplete === undefined ? {} : { desktopOnboardingComplete: onboardingComplete }),
+  }), async () => {
+    await auditEvent('desktop.mode', { mode, onboardingComplete: onboardingComplete ?? null })
+    deps.applyDesktopMode?.()
+    sendToRenderer('desktop:modeChanged', redactSettings(store.settings))
+  })
+}
+
+handle('desktop:modeSet', async (_e, input: { mode?: unknown; onboardingComplete?: unknown }) => setDesktopMode(input?.mode, input?.onboardingComplete))
+handle('desktop:hide', async () => {
+  requireSecurityRole('operator', 'hide the desktop window')
+  return deps.hideDesktopWindow?.() ?? { hidden: false }
+})
+
 handle('settings:save', async (_e, s: Settings) => {
   requireSecurityRole('owner', 'save settings')
-  return commitSettingsChange(async (current) => {
+  const releaseBotTransitions: Array<() => void> = []
+  try { return await commitSettingsChange(async (current) => {
     assertDedicatedWhatsAppSourceRemoval(s, current)
     const merged = mergeSettingsSecrets(s, current)
+    merged.agentPresets = normalizeAgentPresets(merged.agentPresets ?? [], true)
     // Renderer snapshots never own approval rules. Merge masks against the live
     // configuration only once this transaction reaches the head of the queue.
-    let next = await normalizeRemoteOrchestratorDestinations({ ...merged, approvalRules: current.approvalRules }, current)
+    let next = await normalizeRemoteOrchestratorDestinations({ ...merged, desktopMode: normalizeDesktopMode(merged.desktopMode), desktopOnboardingComplete: merged.desktopOnboardingComplete === true, approvalRules: current.approvalRules }, current)
+    for (const preset of current.agentPresets) {
+      const nextPreset = next.agentPresets.find((candidate) => candidate.id === preset.id)
+      if (nextPreset && !nextPreset.paused && !nextPreset.archivedAt) continue
+      if ((preset.paused || preset.archivedAt) && nextPreset && preset.paused === nextPreset.paused && (preset.archivedAt ?? null) === (nextPreset.archivedAt ?? null)) continue
+      releaseBotTransitions.push(reserveBotLifecycleTransition(preset.id))
+      for (const thread of store.threads) if (thread.bot?.presetId === preset.id) aborters.get(thread.id)?.abort()
+      if (preset.executionTarget === 'vm' || store.threads.some((thread) => thread.bot?.presetId === preset.id && thread.bot.executionTarget === 'vm')) await getBotVmHost()?.stop(preset.id)
+    }
     if (next.remoteControl.enabled && (!next.remoteControl.authToken || isSecretMask(next.remoteControl.authToken))) {
       next = { ...next, remoteControl: { ...next.remoteControl, authToken: makeRemoteControlToken() } }
     }
     return stampSettingsSecretRotations(next, current)
   }, async (next) => {
+    for (const thread of store.threads) {
+      if (!thread.bot) continue
+      const preset = next.agentPresets.find((candidate) => candidate.id === thread.bot!.presetId)
+      if (!preset || preset.paused || preset.archivedAt) aborters.get(thread.id)?.abort()
+    }
     await auditEvent('settings.save', { providers: next.providers.length, defaultCwd: next.defaultCwd ? auditPreview(next.defaultCwd) : null })
+    deps.applyDesktopMode?.()
+    sendToRenderer('desktop:modeChanged', redactSettings(store.settings))
     await reloadPlugins(next)
     applyTheme()
     applyPowerSettings()
@@ -216,7 +263,7 @@ handle('settings:save', async (_e, s: Settings) => {
     startUpdateChecks()
     startBotControlPolling()
     await syncWebhookServer()
-  })
+  }) } finally { for (const release of releaseBotTransitions) release() }
 })
 
 handle('approval:revokeRule', async (_e, id: string) => {
@@ -256,4 +303,5 @@ handle('modelRouter:snapshot', async () => {
 
 registerConnectorIpc()
 
+  return { setDesktopMode }
 }
