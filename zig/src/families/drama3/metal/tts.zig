@@ -32,8 +32,9 @@ pub const Tts = struct {
         t.audio = try e.g.alloc(t.max_chunk * spf * 4);
         // warm the codec's pipelines: one silent chunk
         try t.c.reset();
-        const zero = try e.g.alloc(4 * W * 4);
-        try t.c.decode(zero, 4, t.audio);
+        const warm_frames: usize = @min(t.max_chunk, 4);
+        const zero = try e.g.alloc(warm_frames * W * 4);
+        try t.c.decode(zero, warm_frames, t.audio);
         try e.flush();
         return t;
     }

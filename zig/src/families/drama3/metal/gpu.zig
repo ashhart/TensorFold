@@ -136,7 +136,7 @@ pub const Gpu = struct {
     /// One dispatch: buffers bound at 0.., then `args` (an extern struct, or void) at the next index.
     pub fn go(g: *Gpu, p: P, groups: [3]usize, threads: usize, bufs: []const u64, args: anytype) void {
         const e = g.encoder();
-        e.setPipeline(g.pipes[@intFromEnum(p)]);
+        e.setPipeline(g.pipes[@backingInt(p)]);
         for (bufs, 0..) |a, i| {
             const r = g.ref(a);
             e.setBuffer(r.buf, r.off, i);
