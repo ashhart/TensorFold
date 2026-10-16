@@ -1,19 +1,23 @@
 # MiniMax H3 / FastH3 transformer blocks on CUDA (GB10)
 
 This is a video model's denoising transformer, not a token model. It has no lane round and no drafted tokens, and
-it runs its projections and attention in int8, which trades precision for speed. It sits beside the engine as a
-library a host pipeline calls; nothing in the lane core or the server changes.
+it runs its projections and attention in int8, which trades precision for speed. There is no bf16 path. It sits
+beside the engine as a library a host pipeline calls; nothing in the lane core or the server changes.
 
 ## What it is
 
-`zig build tf-h3 -Dnvcc=/usr/local/cuda/bin/nvcc` builds `zig-out/lib/libtf_h3.so`. The host owns the text encoder,
-the sampler, the patch projections, the final layer and the decoders, and shares its CUDA context. Each denoising
-pass it hands over the packed stream (rows of the model's hidden width, bf16) and gets all 50 blocks applied in place.
+`zig build tf-h3 -Dnvcc=/usr/local/cuda/bin/nvcc` builds `zig-out/lib/libtf_h3.so` (it links libibverbs). The host
+owns the text encoder, the sampler, the patch projections, the final layer and the decoders, and shares its CUDA
+context (the device's primary context and the legacy default stream). Each denoising pass it hands over the packed
+stream (rows of the model's hidden width, bf16) and gets all 50 blocks applied in place.
 
 | Call | Does |
 |---|---|
-| `tf_h3_open(path)` | Maps the one-file checkpoint, quantizes the block projections to int8 on the GPU, or reads the saved copy |
+| `tf_h3_open(path)` | Maps the one-file checkpoint and quantizes the block projections on the GPU, or reads the saved copy; a `.tf-int8` path opens the saved copy alone |
 | `tf_h3_forward(model, inputs)` | Every block over the stream; returns the seconds taken |
+| `tf_h3_set_weight(model, block, projection, w, rows, cols)` | One block projection from bf16 on the device (a LoRA merged by the host), quantized as at load |
+| `tf_h3_tp_init`, `_info`, `_connect`, `_close`, `_stats` | Join, wire and leave a sequence-parallel world of 2 to 8 ranks over RoCE |
+| `tf_h3_forward_host`, `tf_h3_host_alloc`, `tf_h3_host_free` | The forward for inputs in host memory, for a rank with no framework |
 | `tf_h3_profile`, `tf_h3_spent` | Per-stage seconds, each stage waited for |
 | `tf_h3_close(model)` | Frees the model |
 
@@ -29,35 +33,42 @@ width 7168, MLP 14336). The int8 copy is written beside it as `<checkpoint>.tf-i
   softmax weights 8-bit per key tile with an online softmax across tiles.
 - Rounding to bf16 where the reference's bf16 arithmetic rounds.
 
+## Several GPUs
+
+A rank runs the rows of its own routing tiles (`Inputs.tile0`, `tile1`, `cuts`). Every block it writes its tiles'
+int8 keys, values, scales and pooled means into every peer's registered region over RDMA, takes theirs, and attends
+as on one GPU. The kernels are the one-GPU kernels, so N ranks give the bits of one. The host moves each pass's rows
+to the ranks and back over its own channel; that orchestration is not part of the library.
+
 ## Receipt
 
-Measured 2026-10-09 on one DGX Spark (GB10, compute capability 12.1, CUDA 13.0 toolkit, DGX OS, driver's bundled
-runtime), host ComfyUI at commit `a4b5a045`, 124 frames, 8 passes, seed fixed. The kernels are the ones in this
-change; the Zig around them was split into smaller files afterwards and renders a bit-identical clip.
+Measured 2026-10-16 on DGX Spark (GB10, compute capability 12.1, driver 580.173.02, CUDA 13.0.88 toolkit, Ubuntu
+24.04.4, kernel 6.17.0-1029-nvidia), host ComfyUI at `a4b5a045` (0.39.0), checkpoint above, 864x480, 124 frames,
+8 passes, sparsity 0.8, seed 7 (gate) and 8 (timed), the same machine for every row.
 
-| Size | Rows | This family, a pass | ComfyUI's own blocks in bf16, a pass |
+| Blocks | A pass | Sampler, 8 passes | Clip |
 |---|---|---|---|
-| 864x480 | 15,452 | 7.1 s | 10.5 s (dense attention) |
-| 1280x736 | 34,507 | 18 s | not measured |
-| 1344x768 | 37,763 | 20.5 s | 29.4 s (its block-sparse attention) |
-
-Checks, same input stream on both sides:
+| ComfyUI's own blocks in bf16, dense attention | 10.6 s | 85.1 s | 103.0 s |
+| ComfyUI's own blocks in bf16, its block-sparse attention 0.8 | 11.5 s | 92.2 s | 110.5 s |
+| This library, one GPU | 6.68 s | 54.1 s | 72.6 s |
+| This library, two GB10s over RoCE (two rails) | 4.06 to 4.14 s | 32.8 s | 51.1 s |
+| This library, three GB10s | 3.02 to 3.06 s | 24.9 s | 43.5 s |
 
 | Check | Result |
 |---|---|
-| int8 product kernel against a float64 host sum, sampled outputs, four shapes | worst relative difference 0.004 |
-| Tile attention kernel against exact float64 attention over the same int8 inputs | relative error 0.002 |
-| One block, dense attention, against ComfyUI's bf16 block | cosine 0.9999, relative error 0.015 |
-| All 50 blocks, dense attention, 864x480 | cosine 0.998, relative error 0.065 |
-| All 50 blocks, dense attention, 1344x768 | cosine 0.996, relative error 0.090 |
-| Same seed twice | bit-identical clip |
+| This branch against the fork's engine (the same kernels before the port), 8 passes, same seed | 8 of 8 pass streams sha256-identical |
+| Same seed after a ComfyUI restart | 8 of 8 identical |
+| Two and three ranks against one | 8 of 8 identical at each |
+| One block, dense attention, against ComfyUI's bf16 block, first pass | cosine 0.99989, relative error 0.0150, max abs 512 of values up to 1.08e5, worst row 0.077 |
+| All 50 blocks, dense attention, first pass | cosine 0.99669, relative error 0.0813, max abs 7.9e5 of values up to 6.2e6, worst row 0.561 |
+| All 50 blocks, sparse attention, against ComfyUI dense, first pass | cosine 0.641: a different attention, and at the first pass the tiles' routing is decided by noise |
 
-Raw tensor-core rate on the GB10, registers only: int8 245 TOPS, bf16 122 TFLOPS. The product kernel reaches 150 to
-175 TOPS on these shapes.
+The kernel contract (`zig build kernel-contract -Dnvcc=/usr/local/cuda/bin/nvcc` on the GB10) registers the four
+int8 products and `h3_spans`; gate 5's records come from `kernel-contract-limits` over sm_80, 86, 89, 120 and 121.
 
 ## Not done
 
-- No FP64 reference per projection class in the tree; the checks above were run from a bench harness and a host
-  plug-in that are not part of this change.
-- One GPU model tested (GB10). Two checkpoints' worth of shapes are not covered: only FastH3 8-Step V2.
-- The Metal family for the same model lives on a fork and is not in this change.
+- No bf16 path: the projections and attention are int8 only.
+- The tile attention, row, routing, pooling and quantize kernels are not registered with the kernel contract.
+- One GPU model tested (GB10) and one checkpoint (FastH3 8-Step V2); no other size than 864x480 in this receipt.
+- Four or more ranks, and a rank dying mid-pass (the host's pass fails; there is no fall back).

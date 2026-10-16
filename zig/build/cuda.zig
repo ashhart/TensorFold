@@ -127,11 +127,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
         if (image.*) |file| fatbin_step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
     }
-    h3Library(b, target, optimize, nvcc, if (nvcc != null) (version orelse blk: {
-        const run = b.addSystemCommand(&.{ nvcc.?, "--version" });
+    // MiniMax H3's kernel image: its library and the contract's runner take it
+    const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
+        const run = b.addSystemCommand(&.{ tool, "--version" });
         run.has_side_effects = true;
         break :blk run.captureStdOut(.{});
-    }) else null, sms);
+    }, .{ .name = "h3", .flags = &.{"-O3"} }, sms) else null;
+    h3Library(b, target, optimize, h3_image);
     const cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{});
     const mods = family(b, target, optimize, cuda, draft_ids);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
@@ -162,7 +164,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
-    @import("kernel_contract.zig").cuda(b, runner_exe, controls);
+    @import("kernel_contract.zig").cuda(b, runner_exe, controls, h3_image);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
@@ -189,13 +191,12 @@ fn radioModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 }
 
 /// `zig build tf-h3 -Dnvcc=...`: libtf_h3.so, MiniMax H3's blocks for a host pipeline, with its own kernel image.
-fn h3Library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, nvcc: ?[]const u8, version: ?std.Build.LazyPath, sms: []const u8) void {
+fn h3Library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h3_image: ?std.Build.LazyPath) void {
     const step = b.step("tf-h3", "libtf_h3.so: MiniMax H3 / FastH3's transformer blocks on CUDA in int8");
-    const tool = nvcc orelse {
+    const image = h3_image orelse {
         step.dependOn(&b.addFail("tf-h3 needs -Dnvcc").step);
         return;
     };
-    const image = fatbin(b, tool, version.?, .{ .name = "h3", .flags = &.{"-O3"} }, sms);
     const cuda = runtime(b, target, optimize, &.{});
     const lib = b.addLibrary(.{ .name = "tf_h3", .linkage = .dynamic, .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"),
