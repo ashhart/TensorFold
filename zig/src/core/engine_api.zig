@@ -244,7 +244,14 @@ pub const MemorySource = struct {
     read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
 };
 
+/// Thread-safe backend readiness; no GPU context or blocking device work is allowed on HTTP threads.
+pub const HealthSource = struct {
+    ctx: *anyopaque,
+    read: *const fn (*anyopaque) bool,
+};
+
 pub const Status = struct {
+    healthy: bool = true,
     /// Requests in prefill or decode, and those waiting for a lane.
     running: u32 = 0,
     waiting: u32 = 0,

@@ -11,6 +11,9 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    var status: api.Status = .{};
+    srv.engine.status(&status, &.{});
+    if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     const o = try json.newObject(a);
     try o.put(a, "status", .{ .string = "ok" });
@@ -20,8 +23,6 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     try o.put(a, "model_ids", .{ .array = ids });
     try o.put(a, "max_batch_size", try json.intValue(a, srv.info.lanes));
     if (srv.info.policy.len > 0) try o.put(a, "policy", .{ .string = srv.info.policy });
-    var status: api.Status = .{};
-    srv.engine.status(&status, &.{});
     try o.put(a, "warming", .{ .bool = status.warming });
     const memory = try json.newObject(a);
     if (srv.engine.memory(std.mem.indexOf(u8, conn.path, "reset_peak=1") != null)) |mem| {
