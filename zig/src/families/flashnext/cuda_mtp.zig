@@ -159,10 +159,11 @@ pub const Head = struct {
         h.gpa = gpa;
         var store = try wt.Store.open(gpa, io, dir);
         defer store.deinit();
+        try store.detectNorms();
         var buf: [120]u8 = undefined;
-        const ne = try wt.asF32(gpa, try store.tensor("language_model.mtp.pre_fc_norm_embedding.weight"));
+        const ne = try store.normScale(gpa, try store.tensor("language_model.mtp.pre_fc_norm_embedding.weight"));
         defer gpa.free(ne);
-        const nh = try wt.asF32(gpa, try store.tensor("language_model.mtp.pre_fc_norm_hidden.weight"));
+        const nh = try store.normScale(gpa, try store.tensor("language_model.mtp.pre_fc_norm_hidden.weight"));
         defer gpa.free(nh);
         if (ne.len != dims or nh.len != wide) return error.UnexpectedTensor;
         h.norm_e = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(ne));
@@ -184,28 +185,7 @@ pub const Head = struct {
         errdefer h.layer.free(gpa);
         h.ids = try draftIds(gpa);
         errdefer gpa.free(h.ids);
-        {
-            const head_w = try wt.join3(gpa, &store, &buf, "language_model.lm_head", "");
-            defer gpa.free(head_w.w);
-            defer gpa.free(head_w.s);
-            defer gpa.free(head_w.b);
-            const wrow = (dims / 8) * 4;
-            const grow = (dims / 32) * 2;
-            if (head_w.w.len != vocab * wrow or head_w.s.len != vocab * grow) return error.UnexpectedTensor;
-            const n = h.ids.len;
-            const w = try gpa.alloc(u8, n * wrow);
-            defer gpa.free(w);
-            const s = try gpa.alloc(u8, n * grow);
-            defer gpa.free(s);
-            const b = try gpa.alloc(u8, n * grow);
-            defer gpa.free(b);
-            for (h.ids, 0..) |id, j| {
-                @memcpy(w[j * wrow ..][0..wrow], head_w.w[id * wrow ..][0..wrow]);
-                @memcpy(s[j * grow ..][0..grow], head_w.s[id * grow ..][0..grow]);
-                @memcpy(b[j * grow ..][0..grow], head_w.b[id * grow ..][0..grow]);
-            }
-            h.draft = try wt.uploadQ4(gpa, driver, w, s, b, n, dims / 8);
-        }
+        h.draft = try @import("cuda_mtp_load.zig").draft(gpa, driver, &store, h.ids);
         errdefer h.draft.free();
         h.module = try cuda.Module.load(driver, cuda.kernels.flashnext_mtp);
         errdefer h.module.unload();
@@ -214,12 +194,8 @@ pub const Head = struct {
     }
 
     fn fc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *wt.Store, buf: []u8, name: []const u8) !Q4 {
-        const t = try wt.join3(gpa, store, buf, name, "");
-        defer gpa.free(t.w);
-        defer gpa.free(t.s);
-        defer gpa.free(t.b);
-        if (t.w.len != dims * (dims / 8) * 4) return error.UnexpectedTensor;
-        return wt.uploadQ4(gpa, driver, t.w, t.s, t.b, dims, dims / 8);
+        _ = buf;
+        return @import("cuda_projection_load.zig").load(gpa, driver, store, name, dims, dims);
     }
 
     pub fn deinit(h: *Head) void {

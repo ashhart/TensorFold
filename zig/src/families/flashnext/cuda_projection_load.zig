@@ -104,6 +104,20 @@ pub fn loadStitched(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, pre
         if (value.n != n or value.k != k) return error.UnexpectedTensor;
         return uploadMicro(a, d, value);
     }
+    if (first.dtype == .bf16) {
+        const bytes = try a.alloc(u8, try std.math.mul(usize, try std.math.mul(usize, n, k), 2));
+        defer a.free(bytes);
+        var at: usize = 0;
+        for (names) |name| {
+            const t = try store.tensor(try std.fmt.bufPrint(&buf, "{s}{s}.weight", .{ prefix, name }));
+            if (t.dtype != .bf16 or t.rank != 2 or t.dim(1) != k or t.bytes.len != t.dim(0) * k * 2 or t.bytes.len > bytes.len - at)
+                return error.UnexpectedTensor;
+            @memcpy(bytes[at..][0..t.bytes.len], t.bytes);
+            at += t.bytes.len;
+        }
+        if (at != bytes.len) return error.UnexpectedTensor;
+        return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, k, 1, 1, 1 }, .bytes = bytes });
+    }
     if (first.dtype != .u32) return error.UnsupportedQuantization;
     const planes = try wt.stitch(a, store, prefix, names);
     defer a.free(planes.w);
