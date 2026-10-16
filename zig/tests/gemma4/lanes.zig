@@ -1,4 +1,4 @@
-//! Gemma 4 dense on the lane core: copy drafts, DFlash drafts (GEMMA_DRAFTER) and shared rounds against plain replies.
+//! Gemma 4 dense on the lane core: copy drafts, DFlash or MTP assistant drafts (GEMMA_DRAFTER) against plain replies.
 const std = @import("std");
 const tf = @import("tensorfold");
 
@@ -22,7 +22,12 @@ fn readJson(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u
 
 /// The engine's own plain reply to `ids` (one stream, no drafts): the reference drafted runs must equal.
 fn plain(gpa: std.mem.Allocator, engine: *lanes.Engine, ids: []const u32, count: u32) ![]u32 {
-    var s = try lanes.Stream.init(gpa, .{ .id = "plain", .prompt = ids, .max_new = count, .drafts = false });
+    return plainWith(gpa, engine, ids, count, null);
+}
+
+/// `sampling`: draws keyed by position from its seed, the same in a plain and a drafted run.
+fn plainWith(gpa: std.mem.Allocator, engine: *lanes.Engine, ids: []const u32, count: u32, sampling: ?lanes.Sampling) ![]u32 {
+    var s = try lanes.Stream.init(gpa, .{ .id = "plain", .prompt = ids, .max_new = count, .drafts = false, .sampling = sampling });
     defer s.deinit(gpa);
     try engine.addStream(&s);
     while (engine.activeCount() > 0) try engine.step();
@@ -31,11 +36,11 @@ fn plain(gpa: std.mem.Allocator, engine: *lanes.Engine, ids: []const u32, count:
 
 /// Runs `streams` copies of the prompts (round-robin) together; returns how many streams' tokens differ.
 fn case(gpa: std.mem.Allocator, io: std.Io, engine: *lanes.Engine, prompts: []const Prompt, streams: usize, copies: bool, label: []const u8) !usize {
-    return caseWith(gpa, io, engine, prompts, streams, copies, true, label);
+    return caseWith(gpa, io, engine, prompts, streams, copies, true, null, label);
 }
 
 /// `drafts` false runs the streams plain on a drafted engine; `copies` adds the copy proposer.
-fn caseWith(gpa: std.mem.Allocator, io: std.Io, engine: *lanes.Engine, prompts: []const Prompt, streams: usize, copies: bool, drafts: bool, label: []const u8) !usize {
+fn caseWith(gpa: std.mem.Allocator, io: std.Io, engine: *lanes.Engine, prompts: []const Prompt, streams: usize, copies: bool, drafts: bool, sampling: ?lanes.Sampling, label: []const u8) !usize {
     const ss = try gpa.alloc(lanes.Stream, streams);
     defer gpa.free(ss);
     const looks = try gpa.alloc(lanes.SuffixLookup, streams);
@@ -43,7 +48,7 @@ fn caseWith(gpa: std.mem.Allocator, io: std.Io, engine: *lanes.Engine, prompts: 
     for (ss, looks, 0..) |*s, *l, i| {
         const p = prompts[i % prompts.len];
         l.* = try lanes.SuffixLookup.init(gpa, .{ .min_match = 4 });
-        s.* = try lanes.Stream.init(gpa, .{ .id = p.name, .prompt = p.ids, .max_new = @intCast(p.want.len), .drafts = drafts, .proposer = if (copies) l.proposer() else null });
+        s.* = try lanes.Stream.init(gpa, .{ .id = p.name, .prompt = p.ids, .max_new = @intCast(p.want.len), .drafts = drafts, .sampling = sampling, .proposer = if (copies) l.proposer() else null });
     }
     defer for (ss, looks) |*s, *l| {
         s.deinit(gpa);
@@ -137,13 +142,26 @@ pub fn main(init: std.process.Init) !void {
     if (bad > 0) std.process.exit(1);
 }
 
-/// The DFlash drafter at `dir` in front of the backend: drafted replies must equal the engine's plain ones.
+/// The drafter at `dir` in front of the backend (DFlash, or the MTP assistant by its config): drafted == plain.
 fn drafted(gpa: std.mem.Allocator, io: std.Io, m: *g4.Model, metal: *g4.backend.Metal, prompts: []Prompt, dir: []const u8, extra: ?[]const u8) !void {
     const t0 = std.Io.Clock.awake.now(io);
-    const head = try g4.dflash.Drafter.init(gpa, io, m, dir, .{ .capacity = 4096 });
-    defer head.deinit();
-    std.debug.print("drafter loaded in {d:.0} ms; a block of 1 draft {d:.2} ms, of 15 drafts {d:.2} ms, step {d:.3} ms a draft\n", .{ ms(io, t0), head.block_ms[0], head.block_ms[1], head.step_ms });
-    var wrap = try lanes.drafted.Drafted.init(gpa, metal.backend(), head.drafter());
+    var flash: ?*g4.dflash.Drafter = null;
+    defer if (flash) |d| d.deinit();
+    var assist: ?*g4.assistant.Drafter = null;
+    defer if (assist) |d| d.deinit();
+    const head: lanes.drafter.Drafter = if (try g4.assistant_weights.isAssistant(gpa, io, dir)) blk: {
+        const d = try g4.assistant.Drafter.init(gpa, io, metal, dir);
+        assist = d;
+        std.debug.print("MTP assistant loaded in {d:.0} ms; a chain of 1 draft {d:.2} ms, of {d} drafts {d:.2} ms, step {d:.3} ms a draft\n", .{ ms(io, t0), d.chain_ms[0], g4.assistant.depth, d.chain_ms[1], d.step_ms });
+        break :blk d.drafter();
+    } else blk: {
+        const d = try g4.dflash.Drafter.init(gpa, io, m, dir, .{ .capacity = 4096 });
+        flash = d;
+        std.debug.print("drafter loaded in {d:.0} ms; a block of 1 draft {d:.2} ms, of 15 drafts {d:.2} ms, step {d:.3} ms a draft\n", .{ ms(io, t0), d.block_ms[0], d.block_ms[1], d.step_ms });
+        break :blk d.drafter();
+    };
+    const name = if (assist != null) "MTP assistant" else "DFlash";
+    var wrap = try lanes.drafted.Drafted.init(gpa, metal.backend(), head);
     defer wrap.deinit();
     var cfg = try lanes.Config.init(gpa, wrap.facts(metal.facts()), g4.state.max_rows, g4.state.max_rows - 1);
     defer cfg.deinit(gpa);
@@ -151,21 +169,28 @@ fn drafted(gpa: std.mem.Allocator, io: std.Io, m: *g4.Model, metal: *g4.backend.
     var engine = lanes.Engine.init(gpa, &cfg, wrap.backend(), clock.clock());
     defer engine.deinit();
     var bad: usize = 0;
+    var label: [128]u8 = undefined;
     for (prompts) |*p| p.want = try plain(gpa, &engine, p.ids, 128);
-    for (prompts) |p| bad += try caseWith(gpa, io, &engine, &.{p}, 1, false, true, "DFlash, one stream");
-    bad += try caseWith(gpa, io, &engine, prompts, 4, false, true, "DFlash, four streams");
-    bad += try caseWith(gpa, io, &engine, prompts, 8, false, true, "DFlash, eight streams");
+    for (prompts) |p| bad += try caseWith(gpa, io, &engine, &.{p}, 1, false, true, null, try std.fmt.bufPrint(&label, "{s}, one stream", .{name}));
+    bad += try caseWith(gpa, io, &engine, prompts, 4, false, true, null, try std.fmt.bufPrint(&label, "{s}, four streams", .{name}));
+    bad += try caseWith(gpa, io, &engine, prompts, 8, false, true, null, try std.fmt.bufPrint(&label, "{s}, eight streams", .{name}));
+    const seeded: lanes.Sampling = .{ .seed = 7, .temperature = 1.0 };
+    var sampled: [4]Prompt = undefined;
+    for (&sampled, prompts) |*s, p| s.* = .{ .name = p.name, .ids = p.ids, .want = try plainWith(gpa, &engine, p.ids, 128, seeded) };
+    defer for (sampled) |s| gpa.free(s.want);
+    for (sampled) |p| bad += try caseWith(gpa, io, &engine, &.{p}, 1, false, true, seeded, try std.fmt.bufPrint(&label, "{s}, seeded sampling, one stream", .{name}));
+    bad += try caseWith(gpa, io, &engine, &sampled, 4, false, true, seeded, try std.fmt.bufPrint(&label, "{s}, seeded sampling, four streams", .{name}));
     if (extra) |x| {
         var copy_heavy: [2]Prompt = undefined;
-        for (&copy_heavy, [_][]const u8{ "repeat", "edit" }) |*p, name| {
-            const ids = try readJson(gpa, io, x, name, ".ids.json");
-            p.* = .{ .name = name, .ids = ids, .want = try plain(gpa, &engine, ids, 256) };
+        for (&copy_heavy, [_][]const u8{ "repeat", "edit" }) |*p, n| {
+            const ids = try readJson(gpa, io, x, n, ".ids.json");
+            p.* = .{ .name = n, .ids = ids, .want = try plain(gpa, &engine, ids, 256) };
         }
         defer for (copy_heavy) |p| {
             gpa.free(p.ids);
             gpa.free(p.want);
         };
-        for (copy_heavy) |p| bad += try caseWith(gpa, io, &engine, &.{p}, 1, false, true, "DFlash on a copying reply, one stream");
+        for (copy_heavy) |p| bad += try caseWith(gpa, io, &engine, &.{p}, 1, false, true, null, try std.fmt.bufPrint(&label, "{s} on a copying reply, one stream", .{name}));
     }
     std.debug.print("{s}: {d} streams differ\n", .{ if (bad == 0) "all equal" else "differ", bad });
     if (bad > 0) std.process.exit(1);
