@@ -49,6 +49,7 @@ pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").byt
 pub const drama_backbone: []const u8 = if (available) &Blob("fatbin_drama_backbone").bytes else &.{};
 pub const drama_backbone_gemm: []const u8 = if (available) &Blob("fatbin_drama_backbone_gemm").bytes else &.{};
 pub const drama_tower: []const u8 = if (available) &Blob("fatbin_drama_tower").bytes else &.{};
+pub const drama_tower_gemv: []const u8 = if (available) &Blob("fatbin_drama_tower_gemv").bytes else &.{};
 pub const drama_codec: []const u8 = if (available) &Blob("fatbin_drama_codec").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).

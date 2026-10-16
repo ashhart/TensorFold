@@ -51,6 +51,7 @@ const kernels = [_]Kernel{
     .{ .name = "drama_backbone", .flags = glue },
     .{ .name = "drama_backbone_gemm", .flags = &.{"-O3"} },
     .{ .name = "drama_tower", .flags = glue },
+    .{ .name = "drama_tower_gemv", .flags = glue },
     .{ .name = "drama_codec", .flags = glue },
 };
 

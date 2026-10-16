@@ -6,12 +6,13 @@ const Stager = @import("stager.zig").Stager;
 const Buffer = cuda.DeviceBuffer;
 const Linear = cuda.cublaslt.Linear;
 const Allocator = std.mem.Allocator;
+const gemv = @import("tower_gemv.zig");
 
 pub const Frame = [11]u32;
 pub const Options = struct { context: usize = 8192, max_rows: usize = 128 };
 pub const Sampling = struct { temperature: f32 = 1, top_p: f32 = 0.9, top_k: u32 = 30 };
 const hidden = 2048;
-const intermediate = 6144;
+pub const intermediate = 6144;
 const query_width = 4096;
 const kv_width = 512;
 const qkv_width = 9216;
@@ -20,7 +21,7 @@ const workspace_bytes = 8 << 20;
 const sample_shared_bytes = 65536;
 /// drama_tower.cu's attention_split: the CTAs of drama_attention_decode's cluster for one query head.
 const attention_split = 4;
-const projections = [_][2]usize{
+pub const projections = [_][2]usize{
     .{ hidden, 2 * hidden },       .{ qkv_width, hidden },    .{ hidden, query_width },
     .{ 2 * intermediate, hidden }, .{ hidden, intermediate }, .{ 4096, hidden },
 };
@@ -123,7 +124,7 @@ const Kernels = struct {
     }
 };
 
-const Impl = struct {
+pub const Impl = struct {
     gpa: Allocator,
     driver: *const cuda.Driver,
     options: Options,
@@ -135,6 +136,10 @@ const Impl = struct {
     buffers: std.ArrayList(Buffer) = .empty,
     plans: std.ArrayList(Linear) = .empty,
     module: ?cuda.Module = null,
+    gemv_module: ?cuda.Module = null,
+    gemv: cuda.Function = undefined,
+    /// Per projection kind: qualifyGemv found drama_tower_gemv bit-identical to its one-row plan.
+    gemv_exact: [projections.len]bool = @splat(false),
     library: cuda.cublaslt.Library = undefined,
     library_open: bool = false,
     kernels: Kernels = undefined,
@@ -172,6 +177,7 @@ const Impl = struct {
         for (p.buffers.items) |*buffer| buffer.free();
         p.buffers.deinit(p.gpa);
         if (p.module) |*module| module.unload();
+        if (p.gemv_module) |*module| module.unload();
         const gpa = p.gpa;
         gpa.destroy(p);
     }
@@ -224,10 +230,23 @@ const Impl = struct {
         };
     }
 
-    fn project(p: *Impl, stream: cuda.Stream, rows: usize, kind: usize, x: Buffer, w: Buffer, out: Buffer) !void {
+    pub fn project(p: *Impl, stream: cuda.Stream, rows: usize, kind: usize, x: Buffer, w: Buffer, out: Buffer) !void {
+        if (rows == 1 and p.gemv_exact[kind]) return p.gemvRow(stream, kind, x, w, out);
         const plan = &p.plans.items[(rows - 1) * projections.len + kind];
         try plan.run(x.ptr, w.ptr, out.ptr, p.workspace.ptr, p.workspace.len, stream.handle);
     }
+
+    pub fn gemvRow(p: *Impl, stream: cuda.Stream, kind: usize, x: Buffer, w: Buffer, out: Buffer) !void {
+        comptime for (projections) |shape| std.debug.assert(shape[0] % 8 == 0 and shape[1] % 256 == 0);
+        var a: cuda.Args = .{};
+        a.add(x.ptr);
+        a.add(w.ptr);
+        a.add(out.ptr);
+        a.add(@as(i32, @intCast(projections[kind][1])));
+        try launch(p.gemv, stream, projections[kind][0] / 8, 32, 0, &a);
+    }
+
+    const qualifyGemv = gemv.qualifyGemv;
 
     fn norm(p: *Impl, stream: cuda.Stream, rows: usize, x: Buffer, residual: ?Buffer, w: Buffer, out: Buffer, residual_out: ?Buffer) !void {
         var a: cuda.Args = .{};
@@ -371,6 +390,16 @@ fn launch(function: cuda.Function, stream: cuda.Stream, blocks: usize, threads: 
     try cuda.launch.launch(function, .{ .grid = .{ .x = @intCast(blocks), .y = 1, .z = 1 }, .block = .{ .x = threads, .y = 1, .z = 1 }, .shared = shared }, stream, args);
 }
 
+/// `file` from `kernel_dir`, else the embedded image.
+pub fn loadModule(gpa: Allocator, io: std.Io, d: *const cuda.Driver, kernel_dir: []const u8, file: []const u8, embedded: []const u8) !cuda.Module {
+    if (kernel_dir.len == 0) return cuda.Module.load(d, embedded);
+    const path = try std.fs.path.join(gpa, &.{ kernel_dir, file });
+    defer gpa.free(path);
+    const image = try std.Io.Dir.cwd().readFileAllocOptions(io, path, gpa, .limited(1 << 26), .@"16", null);
+    defer gpa.free(image);
+    return cuda.Module.load(d, image);
+}
+
 pub const Model = struct {
     impl: *Impl,
 
@@ -392,13 +421,7 @@ pub const Model = struct {
         const p = try gpa.create(Impl);
         p.* = .{ .gpa = gpa, .driver = ctx.d, .options = options, .semantic_start = parsed.value.semantic_start_token_id, .semantic_end = parsed.value.semantic_end_token_id, .eos = parsed.value.eos_token_id, .eps = c.norm_eps, .rope_base = c.rope_base };
         errdefer p.release();
-        p.module = if (kernel_dir.len == 0) try cuda.Module.load(ctx.d, cuda.kernels.drama_tower) else blk: {
-            const kernel_path = try std.fs.path.join(gpa, &.{ kernel_dir, "drama_tower.fatbin" });
-            defer gpa.free(kernel_path);
-            const image = try std.Io.Dir.cwd().readFileAllocOptions(io, kernel_path, gpa, .limited(1 << 26), .@"16", null);
-            defer gpa.free(image);
-            break :blk try cuda.Module.load(ctx.d, image);
-        };
+        p.module = try loadModule(gpa, io, ctx.d, kernel_dir, "drama_tower.fatbin", cuda.kernels.drama_tower);
         p.kernels = try Kernels.resolve(p.module.?);
         try p.kernels.sample.allowDynamicShared(sample_shared_bytes);
         p.library = try cuda.cublaslt.Library.open();
@@ -444,6 +467,11 @@ pub const Model = struct {
         p.output_hidden = try p.allocate(rows * hidden * 2);
         p.head_logits = try p.allocate(4096 * 2);
         p.result = try p.allocate(48 + 16 * 4);
+        // The probe is an optimization: a failure keeps every plan, but a sticky fault poisons the context: fatal.
+        p.qualifyGemv(io, ctx, kernel_dir) catch |e| {
+            try ctx.synchronize();
+            std.log.warn("drama tower: one-row projections on cuBLASLt: drama_tower_gemv qualification failed: {s}", .{@errorName(e)});
+        };
         return .{ .impl = p };
     }
 
