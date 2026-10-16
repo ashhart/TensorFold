@@ -43,8 +43,9 @@ release archives ship it; from source, `zig build grammar -Dxgrammar=DIR` with a
   chat resume there. A kept state cannot sit beside its own stream past about 110k tokens, so longer prompts are not
   kept. States sit on 2,048-token boundaries and chat-history cuts, so a new question on the same image in a new
   chat reads the image again.
-- **Images** (`--vision`) follow vLLM's Step3-VL processor: 504-pixel crops and a 728-pixel overview, each through the
-  encoder on the tensor units. A 1200x800 image is 688 tokens; its first reply took 3.8 s with an 80-token answer.
+- **Images** (`--vision`) follow vLLM's Step3-VL processor as of vLLM `dd944845777b`: 504-pixel crops and a
+  728-pixel overview, each through the encoder on the tensor units. A 1200x800 image is 688 tokens; its first reply
+  took 3.8 s with an 80-token answer.
 - **Streams.** `--parallel N` serves N streams at once, each with its own caches under the same budget.
 - **Idle.** Weights and scratch sit in a residency set that the idle keepalive touches with a tiny kernel, so the
   first request after a pause is as fast as the rest (0.17 s for a one-token reply).

@@ -42,6 +42,12 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         return null;
     };
     errdefer model.deinit();
+    // refusals that return null free what they hold themselves: errdefer runs only for errors
+    if (o.vision != null and model.vision == null) {
+        model.deinit();
+        problem.* = "--vision: this Step-5 checkpoint has no image tower (tools/step5_fp8_to_mlx.py --only-vision adds it)";
+        return null;
+    }
     var ram: u64 = 0;
     var len: usize = @sizeOf(u64);
     if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) ram = 0;
@@ -56,8 +62,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     const fits = s5.budget.longest(&model.config, budget, model.config.context);
     const window: i64 = o.context orelse @intCast(fits);
     if (window < 1 or window > fits) {
-        model.deinit();
         problem.* = try std.fmt.allocPrint(a, "--context {d}: this Mac's Step-5 caches fit {d} tokens under its load limit (75% of RAM, or STEP5_LOAD_LIMIT_GB)", .{ window, fits });
+        model.deinit(); // after the message, so a failed allocation leaves the model to the errdefer
         return null;
     }
     std.log.info("step5: {d:.1} GiB for caches, context up to {d} tokens", .{ @as(f64, @floatFromInt(budget)) / (1 << 30), window });
@@ -76,10 +82,6 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.core.deinit();
     var vis: ?api.Vision = null;
     if (o.vision) |v| {
-        if (model.vision == null) {
-            problem.* = "--vision: this Step-5 checkpoint has no image tower (tools/step5_fp8_to_mlx.py --only-vision adds it)";
-            return null;
-        }
         h.markers = .{ 128000, 128001, 128002, 128003, 128004, 128005 };
         vis = .{ .ctx = h, .prepare = prepareImage, .image_token = h.markers[1], .markers = &h.markers, .part_type = "image", .image_tokens = v.image_tokens, .max_images = v.max_images };
     }
@@ -95,6 +97,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.host.info_.prompt_cache = true;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
     }
+    errdefer if (h.cache) |*store| store.deinit();
     try holdResident(h);
     errdefer h.resident.?.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };

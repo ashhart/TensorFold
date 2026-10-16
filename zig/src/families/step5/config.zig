@@ -121,7 +121,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     c.proxy = try int(sp, "proxy_dim");
     c.index_span = try int(sp, "sparse_indexer_rope_dim");
     c.index_heads = try indexHeads(sp, c.kv_heads);
-    if (c.region != 8 or c.proxy != 256 or c.index_heads != 4 * c.kv_heads or c.index_span % 2 != 0) return error.UnsupportedStep5Indexer;
+    if (c.region != 8 or c.proxy != 256 or c.index_heads != 4 * c.kv_heads or c.index_span % 2 != 0 or c.index_span > c.proxy) return error.UnsupportedStep5Indexer;
     const eos = try field(t, "eos_token_id");
     if (eos == .array and eos.array.items.len == 2) {
         for (&c.eos, eos.array.items) |*e, v| e.* = @intCast(v.integer);
@@ -140,7 +140,10 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     for (0..all) |i| {
         if (kinds[i] != .string) return error.BadStep5Config;
         const kind: Kind = if (std.mem.eql(u8, kinds[i].string, "sliding_attention")) .sliding else if (std.mem.eql(u8, kinds[i].string, "full_attention")) .full else return error.BadStep5Config;
-        var span: u32 = @intFromFloat(@round(@as(f64, @floatFromInt(c.head_dim)) * try number(factors[i])));
+        // the rotated span stays inside the head, which the qk kernel's 256-wide norm array holds
+        const factor = try number(factors[i]);
+        if (!(factor >= 0 and factor <= 1)) return error.BadStep5Config;
+        var span: u32 = @intFromFloat(@round(@as(f64, @floatFromInt(c.head_dim)) * factor));
         span -= span % 2;
         c.layer[i] = .{ .kind = kind, .span = span, .theta = @floatCast(try number(thetas[i])), .limit = @floatCast(try number(limits[i])), .shared_limit = @floatCast(try number(shared[i])), .moe = moe.isSet(i) };
     }
@@ -171,4 +174,10 @@ test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
     try std.testing.expectEqual(@as(u32, 512), c.index_topk);
     try std.testing.expectEqual(@as(u32, 16), c.index_heads);
     try std.testing.expectEqual(@as(u32, 768), c.kvWidth());
+    // a rotary factor past 1 (or below 0) would rotate past the head
+    for ([_][]const u8{ "1.5", "-0.5" }) |bad| {
+        const sliced = try std.mem.replaceOwned(u8, std.testing.allocator, text, "0.3333333333333333", bad);
+        defer std.testing.allocator.free(sliced);
+        try std.testing.expectError(error.BadStep5Config, parse(std.testing.allocator, sliced));
+    }
 }

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Step-5's image path in torch: vLLM's Step3-VL preprocessing, StepFun's encoder, downsamplers and projector."""
+"""Step-5's image path in torch: vLLM's Step3-VL preprocessing, StepFun's encoder, downsamplers and projector.
+
+The preprocessing follows vLLM dd944845777b, vllm/transformers_utils/processors/step3_vl.py.
+"""
 # Usage: step5_vision_ref.py --model DIR --stepfun SRC/inference --image PNG --out DIR (pieces' pixels, rows, layout)
 
 from __future__ import annotations

@@ -67,12 +67,19 @@ pub const Vision = struct {
         v.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
         errdefer v.lib.deinit();
         const kinds = [_][]const u8{ "bf16_nt", "f32_nt", "f32_nn" };
-        for (kinds, 0..) |kind, ki| for (0..2) |m| for (0..2) |n| {
+        const gemms: *[12]mtl.Pipeline = @ptrCast(&v.gemm); // [kind][m][n] in order
+        var made: usize = 0; // pipelines created so far, gemms then glue, released if a later step fails
+        errdefer for (0..made) |i| (if (i < gemms.len) gemms[i] else v.glue[i - gemms.len]).deinit();
+        for (gemms, 0..) |*p, i| {
             var name: [64]u8 = undefined;
-            const full = try std.fmt.bufPrint(&name, "s5v_gemm_{s}_{d}{d}", .{ kind, m, n });
-            v.gemm[ki][m][n] = try mtl.Pipeline.init(device, v.lib, full, false);
-        };
-        for (glue_names, 0..) |n, i| v.glue[i] = try mtl.Pipeline.init(device, v.lib, n, false);
+            const full = try std.fmt.bufPrint(&name, "s5v_gemm_{s}_{d}{d}", .{ kinds[i / 4], i / 2 % 2, i % 2 });
+            p.* = try mtl.Pipeline.init(device, v.lib, full, false);
+            made += 1;
+        }
+        for (glue_names, 0..) |n, i| {
+            v.glue[i] = try mtl.Pipeline.init(device, v.lib, n, false);
+            made += 1;
+        }
         const t = struct {
             fn get(cp: *const ck.Checkpoint, comptime fmt: []const u8, args: anytype, count: usize) !ck.Tensor {
                 var b: [160]u8 = undefined;
@@ -138,6 +145,7 @@ pub const Vision = struct {
         var total: usize = 0;
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
         v.scratch = try device.buffer(total, mtl.ResourceOptions.private);
+        errdefer v.scratch.deinit();
         var off: usize = 0;
         const fields = [_]*Ref{ &v.patches, &v.x, &v.xn, &v.qkv, &v.q, &v.k, &v.v, &v.s, &v.o, &v.att, &v.h };
         for (fields, sizes) |f, s| {
