@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
 import { assertProductionMacSigner, assertProductionUpdateTrustRoot, readReleaseTrustConfig } from './update-signing-trust.mjs'
 import { assertFuses, assertStagedEngine, verifyPackagedComputerHelper, verifyPackagedEngine } from './package-checks.mjs'
+import { assertPackagedMacOSMinimum } from './macos-runtime-minimum.mjs'
 
 const exec = promisify(execFile)
 const CODESIGN = '/usr/bin/codesign'
@@ -146,6 +147,7 @@ async function verifySignedMacApp(app, metadata, release, run, containmentRoot =
   if (bundleIdentifier !== metadata.appId) throw new Error(`${app} has bundle identifier ${bundleIdentifier || '(missing)'}; expected ${metadata.appId}.`)
   if (shortVersion !== metadata.version) throw new Error(`${app} has version ${shortVersion || '(missing)'}; expected ${metadata.version}.`)
   if (!bundleVersion) throw new Error(`${app} has no CFBundleVersion.`)
+  await assertPackagedMacOSMinimum(app, { run })
 
   const assessment = await run(SPCTL, ['--assess', '--type', 'execute', '--verbose=4', app])
   if (!/source=Notarized Developer ID/i.test(commandOutput(assessment))) {
@@ -360,6 +362,7 @@ async function main() {
     child.once('exit', (code, signal) => code === 0 ? resolve() : reject(new Error(`electron-builder failed (${signal || code}).`)))
   })
   await assertFuses(expected.apps[0], pkg?.build?.electronFuses)
+  await assertPackagedMacOSMinimum(expected.apps[0])
   if (mode === 'release') {
     if (targets.includes('dmg')) await notarizeMacDmgArtifacts(outputDir, release, process.env, metadata)
     await verifyMacReleaseArtifacts(outputDir, targets, metadata, release)

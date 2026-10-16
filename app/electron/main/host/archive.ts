@@ -1,6 +1,7 @@
 import { writeArchiveRecord, writeTensorFoldStudioProtectedJson } from '../../store'
 import type { ArchiveKind, ArchiveSnapshot, Ticket } from '../../agent/types'
 import { store } from '../state'
+import { stripIncognitoThreads } from '../../agent/incognito'
 import { persistProjects, persistRooms, persistThreads, persistTickets } from './persistence'
 import { archiveProjectState, archiveRoomState, archiveThreadState, archiveTicketState, restoreProjectState, restoreRoomState, restoreThreadState, restoreTicketState, ticketArchiveClosure } from './archive-state'
 
@@ -80,30 +81,36 @@ export const archiveSnapshot = (): ArchiveSnapshot => {
   }
 }
 
-async function snapshotArchive(kind: ArchiveKind, id: string, relatedTickets: readonly unknown[] = []): Promise<void> {
+const ticketMayPersist = (ticket: Ticket) => !store.threads.some((thread) => thread.id === ticket.threadId && thread.incognito)
+export function persistentArchiveSnapshot(): ArchiveSnapshot {
+  const snapshot = archiveSnapshot()
+  return { ...snapshot, threads: stripIncognitoThreads(snapshot.threads), tickets: snapshot.tickets.filter(ticketMayPersist) }
+}
+
+async function snapshotArchive(kind: ArchiveKind, id: string, relatedTickets: readonly Ticket[] = []): Promise<void> {
   const now = Date.now()
   if (kind === 'project') {
     const project = store.projects.find((p) => p.id === id)
     if (project) await writeArchiveRecord('project', id, {
       archivedAt: project.archivedAt ?? now,
       project,
-      threads: store.threads.filter((t) => t.projectId === id),
+      threads: stripIncognitoThreads(store.threads.filter((t) => t.projectId === id)),
       rooms: store.rooms.filter((r) => r.projectId === id),
-      tickets: store.tickets.filter((t) => t.projectId === id),
+      tickets: store.tickets.filter((t) => t.projectId === id && ticketMayPersist(t)),
     }).catch(() => {})
   } else if (kind === 'thread') {
     const thread = store.threads.find((t) => t.id === id)
-    if (thread) await writeArchiveRecord('thread', id, { archivedAt: thread.archivedAt ?? now, thread, tickets: relatedTickets }).catch(() => {})
+    if (thread && !thread.incognito) await writeArchiveRecord('thread', id, { archivedAt: thread.archivedAt ?? now, thread, tickets: relatedTickets.filter(ticketMayPersist) }).catch(() => {})
   } else if (kind === 'room') {
     const room = store.rooms.find((r) => r.id === id)
     if (room) await writeArchiveRecord('room', id, {
       archivedAt: room.archivedAt ?? now,
       room,
-      tickets: relatedTickets,
+      tickets: relatedTickets.filter(ticketMayPersist),
     }).catch(() => {})
   } else {
     const ticket = store.tickets.find((t) => t.id === id)
-    if (ticket) await writeArchiveRecord('ticket', id, { archivedAt: ticket.archivedAt ?? now, ticket, tickets: relatedTickets }).catch(() => {})
+    if (ticket && ticketMayPersist(ticket)) await writeArchiveRecord('ticket', id, { archivedAt: ticket.archivedAt ?? now, ticket, tickets: relatedTickets.filter(ticketMayPersist) }).catch(() => {})
   }
 }
 
@@ -184,7 +191,7 @@ export async function archiveEntity(kind: ArchiveKind, id: string, controls: Arc
     }
   }
   persistProjects(); persistThreads(); persistRooms(); persistTickets()
-  await writeTensorFoldStudioProtectedJson(['archives', 'index.json'], archiveSnapshot()).catch(() => {})
+  await writeTensorFoldStudioProtectedJson(['archives', 'index.json'], persistentArchiveSnapshot()).catch(() => {})
   return archiveSnapshot()
 }
 
@@ -251,6 +258,6 @@ export async function restoreEntity(kind: ArchiveKind, id: string, controls: Arc
     }
   }
   persistProjects(); persistThreads(); persistRooms(); persistTickets()
-  await writeTensorFoldStudioProtectedJson(['archives', 'index.json'], archiveSnapshot()).catch(() => {})
+  await writeTensorFoldStudioProtectedJson(['archives', 'index.json'], persistentArchiveSnapshot()).catch(() => {})
   return archiveSnapshot()
 }

@@ -125,9 +125,9 @@
 @theme inline {
   --color-ink: rgb(var(--ink));
   /* Muted text ramp: ink at 60 / 42 / 26 / 10%. */
-  --color-ink-2: rgb(var(--ink) / 0.60);
-  --color-ink-3: rgb(var(--ink) / 0.42);
-  --color-ink-4: rgb(var(--ink) / 0.26);
+  --color-ink-2: rgb(var(--ink) / var(--ink-2-alpha, 0.80));
+  --color-ink-3: rgb(var(--ink) / var(--ink-3-alpha, 0.70));
+  --color-ink-4: rgb(var(--ink) / var(--ink-4-alpha, 0.62));
   --color-ink-5: rgb(var(--ink) / 0.10);
 
   --color-bg: var(--bg);
@@ -421,8 +421,8 @@ label,
 .pointer-cursors summary { cursor: pointer; }
 
 /* Syntax highlighting tokens */
-:root { --syn-kw: #8250df; --syn-str: #0a7d33; --syn-num: #0b6bcb; --syn-type: #1f7f9c; --syn-fn: #6639ba; --syn-com: rgb(var(--ink) / 0.42); }
-.dark { --syn-kw: #c792ea; --syn-str: #7ee787; --syn-num: #79c0ff; --syn-type: #56d4dd; --syn-fn: #d2a8ff; --syn-com: rgb(var(--ink) / 0.42); }
+:root { --syn-kw: #8250df; --syn-str: #0a7d33; --syn-num: #0b6bcb; --syn-type: #1f7f9c; --syn-fn: #6639ba; --syn-com: rgb(var(--ink) / var(--ink-3-alpha, 0.70)); }
+.dark { --syn-kw: #c792ea; --syn-str: #7ee787; --syn-num: #79c0ff; --syn-type: #56d4dd; --syn-fn: #d2a8ff; --syn-com: rgb(var(--ink) / var(--ink-3-alpha, 0.70)); }
 .syn-kw { color: var(--syn-kw); }
 .syn-str { color: var(--syn-str); }
 .syn-num { color: var(--syn-num); }

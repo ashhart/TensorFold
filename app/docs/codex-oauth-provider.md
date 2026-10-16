@@ -1,6 +1,6 @@
 # CLI OAuth Providers
 
-TensorFold Studio's first OAuth-backed frontier integrations use local CLI transports.
+TensorFold's first OAuth-backed frontier integrations use local CLI transports.
 That matches Zora's `codex_cli` and `claude_cli` patterns: the app does not store an API key;
 it delegates auth to the operator's existing local CLI login.
 
@@ -48,9 +48,9 @@ Normal HTTP providers continue to use:
 `streamChat()` now dispatches by provider transport:
 
 - `chat-completions` calls `POST /chat/completions`.
-- `codex-cli` runs `codex exec --json -`, flattens TensorFold Studio's message history into stdin, and parses JSONL `agent_message` output.
-- `claude-cli` runs `claude -p --output-format stream-json`, sends TensorFold Studio's message history through stdin, and parses Claude Code stream-json text deltas.
+- `codex-cli` runs `codex exec --json -`, flattens TensorFold's message history into stdin, and parses JSONL `agent_message` output.
+- `claude-cli` runs `claude -p --output-format stream-json`, sends TensorFold's message history through stdin, and parses Claude Code stream-json text deltas.
 
-The CLI bridges intentionally do not forward TensorFold Studio's OpenAI tool schema. Codex CLI and Claude
+The CLI bridges intentionally do not forward TensorFold's OpenAI tool schema. Codex CLI and Claude
 CLI use their own native tool and permission surfaces. The Settings cards expose the auth source
 and CLI controls so this is visible at provider-selection time.

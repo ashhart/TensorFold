@@ -83,16 +83,7 @@ pub const Engine = struct {
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
 
-    pub const adoptPrefilled = open.adoptPrefilled;
-    pub const max_together = open.max_together;
-    pub const addStreams = open.addStreams;
-
-    /// Whether the backend prefills several prompts in one pass (addStreams batches them).
-    pub fn batchesPrompts(e: *const Engine) bool {
-        return e.backend.vtable.prefill_many != null;
-    }
-
-    /// Take over a stream another driver decoded: cache settled, `pending` and `cache_len` set, no drafts held.
+    /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
     pub fn adopt(e: *Engine, s: *Stream) !void {
         try e.live.append(e.gpa, s);
     }
@@ -212,7 +203,7 @@ pub const Engine = struct {
     }
 
     /// One stream's round: verify pending and drafted tokens together, keep drafts to the first mismatch.
-    fn familyRound(e: *Engine, s: *Stream, copied: ?[]const u32) !Result {
+    fn familyRound(e: *Engine, s: *Stream, copied: ?win.Copy) !Result {
         e.clock.start();
         const priced = s.priced;
         s.priced = null;
@@ -347,7 +338,9 @@ pub const Engine = struct {
                 for (path[1..]) |r| own_kept += @intFromBool(r < own_end);
                 const own: usize = own_end - 1;
                 if (p.kind == .copy) {
-                    if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
+                    if (p.recalled) {
+                        if (s.recall) |r| r.observe(@intCast(own), @intCast(own_kept), s.rounds);
+                    } else if (s.proposer) |pr| pr.observe(@intCast(own), @intCast(own_kept));
                     if (e.alone) {
                         const width = s.copy_width orelse e.cfg.first_copy;
                         s.copy_width = if (own_kept == own) @min(e.cfg.max_copy, 2 * width + 1) else e.cfg.first_copy;
@@ -360,17 +353,31 @@ pub const Engine = struct {
                     for (path[1..]) |r| chain_kept += @intFromBool((p.branch_from == 0 or r < p.branch_from) and r < own_end);
                     try e.rule.observeDepth(win.who(s), std.mem.max(u32, chain), @intCast(chain_kept));
                 }
-                var kept_branch: u64 = 0;
+                var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
+                var kept_recall: u64 = 0;
+                var recall_rows: u64 = 0;
                 if (p.branch_from > 0) {
                     s.branch_rows += rows - p.branch_from;
-                    for (path[1..]) |r| kept_branch += @intFromBool(r >= p.branch_from);
-                    s.branch_accepted += kept_branch;
+                    for (@as(usize, p.branch_from)..rows) |r| recall_rows += @intFromBool(p.recallRow(r));
+                    for (path[1..]) |r| if (r >= p.branch_from) {
+                        if (p.recallRow(r)) kept_recall += 1 else kept_branch += 1;
+                    };
+                    s.branch_accepted += kept_branch + kept_recall;
                 }
                 if (p.tried) {
-                    const tried: f64 = @floatFromInt(if (p.branch_from > 0) rows - p.branch_from else 1);
-                    s.graft_hit = 0.75 * s.graft_hit + 0.25 * @as(f64, @floatFromInt(kept_branch)) / tried;
+                    // grafting nothing is the context's miss; rows Recall grafted count for Recall alone
+                    const grafted: u64 = if (p.branch_from > 0) rows - p.branch_from else 0;
+                    if (grafted == 0 or grafted > recall_rows) {
+                        const tried: f64 = @floatFromInt(@max(1, grafted - recall_rows));
+                        s.graft_hit = 0.75 * s.graft_hit + 0.25 * @as(f64, @floatFromInt(kept_branch)) / tried;
+                    }
+                    if (recall_rows > 0) {
+                        const share = @as(f64, @floatFromInt(kept_recall)) / @as(f64, @floatFromInt(recall_rows));
+                        s.recall_hit = 0.75 * s.recall_hit + 0.25 * share;
+                    }
                 }
             }
+            if (s.recall) |r| if (p.kind != .copy) r.noteHead(path.len); // its own rounds: the bar a copy must beat
         }
         const budget_cut = s.thinkCut(committed.items);
         const loop_cut = sm.loopCut(s, committed.items);
@@ -461,18 +468,22 @@ pub const Engine = struct {
         }
     }
 
-    /// The rows a stream's suffix matches would graft this round and the share of grafted rows it keeps (null: none).
+    /// The rows the context's matches and Recall's would graft this round, and the share it keeps (null: none).
     fn graftProspect(e: *Engine, s: *Stream) !?plan_lanes.Grafts {
         if (e.cfg.fill_lanes == 0) return null;
         const probe_round = s.rounds % 8 == 0;
-        if (s.graft_hit < e.cfg.fill_floor and !probe_round) return null;
         const a = e.arena.allocator();
         const room = e.cfg.fill_lanes -| 1;
-        const found = try fill.suffixCandidates(a, s.context.items, 16, e.cfg.fill_match, room, 8);
+        const found = try win.candidates(e, s, room, probe_round);
         if (found.len == 0) return null;
         const b = try fill.graft(a, .{}, found, room);
-        // the stream's recent share of grafted rows kept; every eighth round at least the floor, so grafts get retried
-        const hit = if (probe_round) @max(s.graft_hit, e.cfg.fill_floor) else s.graft_hit;
+        // each source's recent share of grafted rows kept; every eighth round at least the floor, so grafts get retried
+        const own_hit = if (probe_round) @max(s.graft_hit, e.cfg.fill_floor) else s.graft_hit;
+        const recall_hit = if (probe_round) @max(s.recall_hit, e.cfg.fill_floor) else s.recall_hit;
+        var recalled: f64 = 0;
+        for (b.recalled) |x| recalled += @floatFromInt(@intFromBool(x));
+        const rows: f64 = @floatFromInt(b.tokens.len);
+        const hit = if (recalled == 0) own_hit else (own_hit * (rows - recalled) + recall_hit * recalled) / rows;
         return .{ .rows = @intCast(b.tokens.len), .hit = hit };
     }
 
@@ -482,9 +493,11 @@ pub const Engine = struct {
         const mode = s.mode orelse .pipe;
         var result: Result = .{ .rows = 1, .keep = 1, .got = &.{} };
         if (mode == .verify or mode == .exit) {
-            const proposal = if (mode == .verify and e.cfg.family_width >= 2) try win.copyProposal(e, s) else &.{};
-            if (proposal.len > 0) {
-                result = try e.familyRound(s, try e.arena.allocator().dupe(u32, proposal));
+            const verifying = mode == .verify and e.cfg.family_width >= 2;
+            const proposal: win.Copy = if (verifying) try win.copyProposal(e, s) else .{};
+            if (proposal.tokens.len > 0) {
+                const copied = try e.arena.allocator().dupe(u32, proposal.tokens);
+                result = try e.familyRound(s, .{ .tokens = copied, .recalled = proposal.recalled });
                 if (result.keep == 1 or s.force.items.len > 0) s.mode = .exit;
             } else {
                 // nothing to copy: back to steps queued ahead (this one lands next round)
@@ -508,7 +521,9 @@ pub const Engine = struct {
         s.rounds += 1;
         const landed = try s.commit(e.gpa, &.{token}, &.{});
         s.pending = token;
-        if (e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts and (try win.copyProposal(e, s)).len > 0)
+        if (s.recall) |r| r.noteHead(1); // a step lands one token: the bar a copy must beat
+        const piping = e.cfg.family_width >= 2 and (s.mode orelse .pipe) == .pipe and !s.finished and s.drafts;
+        if (piping and (try win.copyProposal(e, s)).tokens.len > 0)
             s.mode = .drain; // a copy window is ahead: land the queued step
         result.got = try e.arena.allocator().dupe(u32, s.emitted()[s.emitted().len - landed ..]);
         try trail.pipe(e, s, before, result.got);

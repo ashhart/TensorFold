@@ -25,6 +25,34 @@ const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
   ok('provider stream reads time out and honor abort instead of hanging forever')
 }
 
+{
+  const aborted = new AbortController()
+  aborted.abort()
+  const unhandled: unknown[] = []
+  const onUnhandled = (error: unknown) => { unhandled.push(error) }
+  process.on('unhandledRejection', onUnhandled)
+  try {
+    await assert.rejects(
+      readWithIdleTimeout(() => Promise.reject(new DOMException('Fixture read aborted.', 'AbortError')), 100, aborted.signal),
+      (error: any) => error?.name === 'AbortError',
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepStrictEqual(unhandled, [], 'an already-aborted read must still observe its rejected promise')
+    const activeFailure = new Error('Fixture active read failure.')
+    await assert.rejects(readWithIdleTimeout(() => Promise.reject(activeFailure), 100), (error) => error === activeFailure)
+    const rejectingSource = async function* () { throw activeFailure }
+    for await (const _chunk of withDelegatedCliHeartbeat(rejectingSource(), { transport: 'codex-cli', name: 'Fixture' }, { signal: aborted.signal })) { /* already cancelled */ }
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    assert.deepStrictEqual(unhandled, [], 'an already-aborted delegated iterator must still observe its rejected next promise')
+    await assert.rejects(async () => {
+      for await (const _chunk of withDelegatedCliHeartbeat(rejectingSource(), { transport: 'codex-cli', name: 'Fixture' })) { /* expected failure */ }
+    }, (error) => error === activeFailure)
+  } finally {
+    process.removeListener('unhandledRejection', onUnhandled)
+  }
+  ok('already-aborted reads/iterators observe rejection while active failures propagate unchanged')
+}
+
 async function collectContent() {
   let out = ''
   for await (const chunk of streamChat({

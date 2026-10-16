@@ -24,6 +24,7 @@ export interface TurnSummary {
   answerId: string | null
   edits: FileEdit[]
   running: boolean
+  questionPending?: boolean
 }
 
 export type TurnRow =
@@ -137,7 +138,7 @@ export function buildTurnRows(timeline: TimelineItem[], opts: { running?: boolea
     body.forEach((item, i) => {
       const folds = (item.kind === 'assistant' && i !== answerAt)
         || item.kind === 'reasoning'
-        || (item.kind === 'tool' && !needsUser(item))
+        || (item.kind === 'tool' && !needsUser(item) && !item.question)
         || isMachineryNotice(item)
       if (folds) work.push(item)
       else visible.push(item)
@@ -153,6 +154,7 @@ export function buildTurnRows(timeline: TimelineItem[], opts: { running?: boolea
       answerId: answerAt >= 0 ? body[answerAt].id : null,
       edits: turnFileEdits(body),
       running,
+      questionPending: body.some((item) => item.question?.state === 'pending'),
     }
     if (user) rows.push({ type: 'item', item: user, turn })
     if (work.length || running) rows.push({ type: 'work', turn })
@@ -188,7 +190,7 @@ export function stepLabel(item: TimelineItem | undefined): string {
 
 /** What the live row says it is doing right now. */
 export function currentStepLabel(turn: TurnSummary, status?: string): string {
-  if (status === 'awaiting') return 'Waiting for approval'
+  if (status === 'awaiting') return turn.questionPending ? 'Waiting for your answer' : 'Waiting for approval'
   const inFlight = [...turn.work].reverse().find((item) => item.kind === 'tool' && IN_FLIGHT.has(String(item.state ?? '')))
   if (inFlight) return stepLabel(inFlight)
   if (status === 'thinking') return 'Thinking'
@@ -209,9 +211,10 @@ export function compactDuration(ms: number): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** "Worked for 12s · 4 steps" when done; "Working · 12s · Editing App.tsx" while live. */
-export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string }): string {
+export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string; phaseLabel?: string }): string {
   if (turn.running) {
     const elapsed = turn.startedAt != null ? compactDuration(opts.now - turn.startedAt) : null
+    if (opts.phaseLabel) return [opts.phaseLabel, elapsed].filter(Boolean).join(' · ')
     return ['Working', elapsed, currentStepLabel(turn, opts.status)].filter(Boolean).join(' · ')
   }
   const duration = turn.startedAt != null && turn.endedAt != null && turn.endedAt > turn.startedAt

@@ -1,7 +1,7 @@
 //! Host checks for opt-in compaction. The fake engine records each prompt and answers OK.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const model_text = @import("model_text.zig");
 const chat = @import("chat.zig");

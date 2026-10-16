@@ -134,3 +134,14 @@ const shape = (rows: TurnRow[]) => rows.map((row) => row.type === 'item' ? `${ro
 }
 
 console.log('turn-blocks: ok')
+
+{
+  const question = tool('ask_user', { state: 'awaiting', question: { id: 'q-visible', state: 'pending' } as any })
+  const rows = buildTurnRows([user('Help me choose'), question], { running: true })
+  const work = rows.find((row) => row.type === 'work')!.turn
+  assert.equal(currentStepLabel(work, 'awaiting'), 'Waiting for your answer')
+  assert.ok(shape(rows).includes(`tool:${question.id}`), 'a pending question stays visible outside collapsed work')
+  const answered = { ...question, state: 'ok' as const, question: { ...question.question!, state: 'answered' as const, answer: 'Amber' } }
+  const settled = buildTurnRows([user('Help me choose'), answered, assistant('Amber it is.')])
+  assert.ok(shape(settled).includes(`tool:${question.id}`), 'the answer remains readable in the conversation after completion')
+}

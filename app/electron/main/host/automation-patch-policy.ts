@@ -1,5 +1,6 @@
 import type { Automation, AutomationCompletionPolicy, Provider } from '../../agent/types'
 import { pickStrictOwnPatch } from './project-patch-policy'
+import { normalizeAutomationTimeZone } from '../../../shared/automation-time'
 
 export const AUTOMATION_USER_FIELDS = [
   'name',
@@ -8,6 +9,7 @@ export const AUTOMATION_USER_FIELDS = [
   'everyMinutes',
   'atHour',
   'atMinute',
+  'timeZone',
   'providerId',
   'providerAccountId',
   'model',
@@ -93,6 +95,10 @@ function sanitizeAutomationUserFields(input: unknown, current?: Automation): Par
   if (patch.everyMinutes !== undefined && (!Number.isInteger(patch.everyMinutes) || patch.everyMinutes < 1 || patch.everyMinutes > 525_600)) throw new Error('Automation everyMinutes must be an integer from 1 to 525600.')
   if (patch.atHour !== undefined && (!Number.isInteger(patch.atHour) || patch.atHour < 0 || patch.atHour > 23)) throw new Error('Automation atHour must be an integer from 0 to 23.')
   if (patch.atMinute !== undefined && (!Number.isInteger(patch.atMinute) || patch.atMinute < 0 || patch.atMinute > 59)) throw new Error('Automation atMinute must be an integer from 0 to 59.')
+  if (Object.prototype.hasOwnProperty.call(patch, 'timeZone')) patch.timeZone = normalizeAutomationTimeZone(patch.timeZone)
+  if ((patch.scheduleKind ?? current?.scheduleKind) === 'daily' && (!current || current.scheduleKind !== 'daily') && !(patch.timeZone ?? current?.timeZone)) {
+    throw new Error('Choose an explicit IANA timezone before creating a daily schedule.')
+  }
   shortNullableString(patch.providerId, 'providerId', 500)
   shortNullableString(patch.providerAccountId, 'providerAccountId', 500)
   shortNullableString(patch.model, 'model', 1_000)

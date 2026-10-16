@@ -61,16 +61,23 @@ export interface AutomationTiming {
   enabled: boolean
   everyMs: number
   lastRunAt: number | null
+  // Host-committed first-fire instant, also shown in the automation UI.
+  // Missing legacy instants must be initialized by the host before dispatch.
+  nextRunAt?: number | null
   misfire: MisfirePolicy
   // Cap on run_each catch-up so a week-long sleep can't queue thousands of runs.
   maxCatchup?: number
 }
 
 // How many fire times have elapsed since the last run (0 if not yet due). A never-run
-// automation is due once.
+// automation waits for its committed first fire, rather than running when enabled.
 export function missedFireCount(timing: AutomationTiming, now: number): number {
   if (!timing.enabled || timing.everyMs <= 0) return 0
-  if (timing.lastRunAt == null) return 1
+  if (timing.lastRunAt == null) {
+    const first = timing.nextRunAt
+    if (typeof first !== 'number' || !Number.isFinite(first) || first <= 0 || now < first) return 0
+    return 1 + Math.floor((now - first) / timing.everyMs)
+  }
   const elapsed = now - timing.lastRunAt
   if (elapsed < timing.everyMs) return 0
   return Math.floor(elapsed / timing.everyMs)
@@ -88,7 +95,10 @@ export function dueRuns(timing: AutomationTiming, now: number): number {
 // Next scheduled fire time from a reference point.
 export function nextRunAt(timing: AutomationTiming, now: number): number {
   if (timing.everyMs <= 0) return now
-  if (timing.lastRunAt == null) return now
+  if (timing.lastRunAt == null) {
+    const first = timing.nextRunAt
+    return typeof first === 'number' && Number.isFinite(first) && first > 0 ? first : now + timing.everyMs
+  }
   const missed = missedFireCount(timing, now)
   return timing.lastRunAt + Math.max(1, missed) * timing.everyMs
 }
@@ -200,6 +210,7 @@ export interface SchedulableAutomation {
   manual: boolean
   everyMs: number
   lastRunAt: number | null
+  nextRunAt?: number | null
   misfire: MisfirePolicy
   requiredRisks: string[]
   acknowledgedRisks: string[]
@@ -242,7 +253,7 @@ export function automationTick(input: AutomationTickInput): AutomationTickResult
   for (const automation of input.automations) {
     if (!automation.enabled || automation.manual) continue
     if (input.isRunning(automation.id)) continue
-    const due = dueRuns({ enabled: automation.enabled, everyMs: automation.everyMs, lastRunAt: automation.lastRunAt, misfire: automation.misfire }, input.now)
+    const due = dueRuns({ enabled: automation.enabled, everyMs: automation.everyMs, lastRunAt: automation.lastRunAt, nextRunAt: automation.nextRunAt, misfire: automation.misfire }, input.now)
     if (due <= 0) continue
     const gate = gateAutomationRun({ requiredRisks: automation.requiredRisks, acknowledgedRisks: automation.acknowledgedRisks })
     if (!gate.allowed) { blocked.push({ id: automation.id, missing: gate.missing }); continue }

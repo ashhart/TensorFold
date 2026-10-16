@@ -1,4 +1,4 @@
-//! What the round loop asks a backend (Metal, CUDA or the fake); drawn tokens stay on the GPU behind handles.
+//! What the round loop asks a backend (Metal, CUDA or the fake) to compute; drawn tokens stay on the GPU behind handles.
 const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Shape = @import("shape.zig").Shape;
@@ -68,8 +68,6 @@ pub const Backend = struct {
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
-        /// Several streams' prompts in one pass, each as after `prefill`; false, doing nothing, when they don't fit.
-        prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
@@ -102,6 +100,8 @@ pub const Backend = struct {
         held: ?*const fn (ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void = null,
         /// `prefill` fills `Stream.prompt_rows` for a stream with `prompt_logprobs` (it then starts from 0).
         prompt_rows: bool = false,
+        /// The backend stores `Stream.fill_at` as its pass runs: the status reader may count its fill totals.
+        reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
     };
@@ -139,7 +139,7 @@ pub const Backend = struct {
         b.vtable.release(b.ptr, s);
     }
 
-    /// A driver of its own starts a stream: prompt pass and first token, committed; cancel or failure releases it.
+    /// A driver of its own starts a stream: the prompt pass and its first token, committed; a cancel or failure releases it.
     pub fn opening(b: Backend, gpa: std.mem.Allocator, s: *Stream) !u32 {
         errdefer b.release(s);
         try b.prefill(s);

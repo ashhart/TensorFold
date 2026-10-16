@@ -1,6 +1,6 @@
 # Visualization Widgets
 
-TensorFold Studio can render structured visual artifacts directly in Chat and Code timelines. The first
+TensorFold can render structured visual artifacts directly in Chat and Code timelines. The first
 renderer is dependency-free and supports four widget kinds:
 
 - `flow` - node and edge diagrams for workflows, architecture, and reasoning maps.
@@ -13,7 +13,7 @@ renderer is dependency-free and supports four widget kinds:
 OpenAI-compatible providers with tool calling can use the `visualize` tool. Chat receives only this
 tool; Code receives it alongside filesystem and shell tools.
 
-CLI providers that do not expose TensorFold Studio's tool schema can emit a fenced widget block in normal
+CLI providers that do not expose TensorFold's tool schema can emit a fenced widget block in normal
 assistant text:
 
 ````markdown

@@ -1,19 +1,23 @@
 import { randomUUID } from 'node:crypto'
 import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
+import { assertCortheonReleaseAllowed, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 
 // Built-in engine choices the user makes once, kept beside the model registry.
 export interface EnginePreferences {
-  // Serve with --cortheon when the bundled engine offers it.
+  // The release policy can disable a previously saved research choice.
   cortheon: boolean
+  learningEnabled: boolean
+  learningModel: string | null
 }
 
-const DEFAULTS: EnginePreferences = { cortheon: false }
+const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null }
 
 function readPreferences(file: string): EnginePreferences {
   try {
     const doc = JSON.parse(readFileSync(file, 'utf8'))
-    return { cortheon: doc?.cortheon === true }
+    const learningModel = doc?.learningModel === 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit' ? doc.learningModel : null
+    return { cortheon: cortheonEnabledForRelease(doc?.cortheon), learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel }
   } catch {
     return { ...DEFAULTS }
   }
@@ -34,8 +38,11 @@ export class EnginePreferenceStore {
   }
 
   set(patch: Partial<EnginePreferences>): Promise<EnginePreferences> {
+    // Refuse an old renderer or direct caller before queuing a disk write.
+    try { if (patch.cortheon !== undefined) assertCortheonReleaseAllowed(patch.cortheon) } catch (error) { return Promise.reject(error) }
     const next = this.writes.then(async () => {
       const value = { ...this.value, ...patch }
+      value.cortheon = cortheonEnabledForRelease(value.cortheon)
       const directory = path.dirname(this.file)
       await fs.mkdir(directory, { recursive: true, mode: 0o700 })
       const temporary = path.join(directory, `.preferences-${randomUUID()}.tmp`)
