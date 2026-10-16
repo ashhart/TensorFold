@@ -3,9 +3,13 @@ const std = @import("std");
 const hip = @import("hip");
 const nem = @import("nemotron");
 
+const gen = @import("gen.zig");
+const replay = @import("replay.zig");
+
 const Tensor = hip.ops.Tensor;
 
-const usage = "usage: tf-nemotron-hip-test load <model dir> [--capacity N] [--rows N] [--no-mtp] [--tp W --rank R]\n";
+const usage = "usage: tf-nemotron-hip-test load <model dir> [--capacity N] [--rows N] [--no-mtp] [--tp W " ++
+    "--rank R]\n" ++ gen.usage ++ replay.usage;
 
 const Args = struct {
     dir: []const u8 = "",
@@ -168,9 +172,9 @@ fn check(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         std.debug.print("forward: a {d}-token prompt ran through every block\n", .{a.rows});
     } else |err| std.debug.print("forward: stops at block 0 ({s}): {t}\n", .{ @tagName(m.blocks[0].mixer), err });
     // the paged attention path: one call of `rows` rows, then two halves on a fresh stream, the same bits
-    e.arena.reset();
+    try e.fresh();
     const whole = try readBack(e, al, try attentionRows(e, tokens, false), a.rows * m.dims.hidden);
-    e.arena.reset();
+    try e.fresh();
     const tail = (a.rows / 2) * m.dims.hidden;
     const split = try readBack(e, al, try attentionRows(e, tokens, true), tail);
     var worst: f32 = 0;
@@ -184,7 +188,7 @@ fn check(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
         .{ a.rows, worst, finite },
     );
     // the head on the attention rows' final norm: the logits of the last row
-    e.arena.reset();
+    try e.fresh();
     const o = e.ops(&e.arena);
     const y = try attentionRows(e, tokens, false);
     const last = try nem.forward.take(o, m.act, m.dims.hidden);
@@ -243,8 +247,20 @@ fn loadRank(gpa: std.mem.Allocator, io: std.Io, a: Args, v: nem.admit.Verdict) !
     std.debug.print("rank {d}'s weights match the plan\n", .{rank});
 }
 
+fn run(f: anytype, init: std.process.Init, args: []const [:0]const u8) u8 {
+    f(init.gpa, init.io, args) catch |err| {
+        std.debug.print("FAIL {t}\n", .{err});
+        return 1;
+    };
+    return 0;
+}
+
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "gen")) return run(gen.gen, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "teacher")) return run(gen.teacher, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "window")) return run(gen.window, init, args[2..]);
+    if (args.len >= 3 and std.mem.eql(u8, args[1], "replay")) return run(replay.replay, init, args[2..]);
     if (args.len < 3 or !std.mem.eql(u8, args[1], "load")) {
         std.debug.print(usage, .{});
         return 2;

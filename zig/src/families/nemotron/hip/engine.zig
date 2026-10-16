@@ -20,8 +20,9 @@ pub const Options = struct {
     capacity: usize = 4096,
     /// Prompt rows a forward takes at most.
     chunk: usize = 512,
-    /// Streams the KV pool holds at the full capacity.
+    /// Streams the KV pool holds at the full capacity, and pages beside them (a prompt cache's).
     streams: usize = 1,
+    extra_pages: usize = 0,
     /// Rank 0 loads the MTP head when its file is there.
     mtp: bool = true,
 };
@@ -83,7 +84,7 @@ pub const Engine = struct {
             gpa,
             &e.driver,
             plan.attentionLayers(&e.cfg, mtp),
-            o.streams * pages.pagesFor(o.capacity),
+            o.streams * pages.pagesFor(o.capacity) + o.extra_pages,
             d.kv_heads,
             d.head_dim,
             e.act,
@@ -108,6 +109,11 @@ pub const Engine = struct {
 
     pub fn model_(e: *const Engine) *const model.Model {
         return &e.weights.model;
+    }
+
+    /// The arena emptied for the next op.
+    pub fn fresh(e: *Engine) !void {
+        e.arena.reset();
     }
 
     pub fn ops(e: *Engine, arena: *hip.Arena) hip.ops.Ops {
@@ -145,7 +151,7 @@ pub const Engine = struct {
             const n = @min(e.o.chunk, tokens.len - at);
             try s.cover(&e.pool, s.len + n);
             try e.stream.synchronize();
-            e.arena.reset();
+            try e.fresh();
             const o = e.ops(&e.arena);
             const dev = try e.ids(o, tokens[at..][0..n]);
             out = try forward.run(
@@ -210,7 +216,7 @@ pub const Engine = struct {
             prompt_rows,
         );
         s.mtp_len += next.len;
-        return y;
+        return y.logits;
     }
 };
 

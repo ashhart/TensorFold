@@ -12,6 +12,10 @@ pub const mamba = @import("hip/mamba.zig");
 pub const moe = @import("hip/moe.zig");
 pub const forward = @import("hip/forward.zig");
 pub const engine = @import("hip/engine.zig");
+/// The lane backend the native server drives, its draft head and its prompt cache.
+pub const lanes = @import("hip/lanes.zig");
+pub const head = @import("hip/head.zig");
+pub const prefix = @import("hip/prefix.zig");
 /// The registry entry of the native server.
 pub const native = @import("hip/native.zig");
 
@@ -26,6 +30,9 @@ test {
     _ = moe;
     _ = forward;
     _ = native;
+    _ = lanes;
+    _ = head;
+    _ = prefix;
     @import("std").testing.refAllDecls(load);
     @import("std").testing.refAllDecls(forward);
     @import("std").testing.refAllDecls(engine.Engine);
