@@ -172,6 +172,7 @@ pub const Api = struct {
     cuDevicePrimaryCtxRelease_v2: *const fn (Device) callconv(.c) R,
     cuCtxSetCurrent: *const fn (Context) callconv(.c) R,
     cuCtxGetCurrent: *const fn (*Context) callconv(.c) R,
+    cuCtxGetDevice: *const fn (*Device) callconv(.c) R,
     cuCtxSynchronize: *const fn () callconv(.c) R,
     cuMemGetInfo_v2: *const fn (*usize, *usize) callconv(.c) R,
     cuMemAlloc_v2: *const fn (*DevicePtr, usize) callconv(.c) R,
