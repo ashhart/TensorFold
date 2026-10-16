@@ -203,10 +203,15 @@ pub fn weightName(buf: []u8, shard: usize, nested: bool) ![]const u8 {
 }
 
 pub fn partName(buf: []u8, shard: usize, nested: bool, part: []const u8) ![]const u8 {
+    return partNameFor(buf, shard, nested, part, false);
+}
+
+fn partNameFor(buf: []u8, shard: usize, nested: bool, part: []const u8, modelopt: bool) ![]const u8 {
+    const prefix = if (modelopt) "model.language_model" else "language_model.model";
     return if (nested)
-        std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shards.{d}.{s}", .{ layer, shard, part })
+        std.fmt.bufPrint(buf, "{s}.layers.{d}.ple.ple_embedding.ngram_embedding.shards.{d}.{s}", .{ prefix, layer, shard, part })
     else
-        std.fmt.bufPrint(buf, "language_model.model.layers.{d}.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ layer, shard, part });
+        std.fmt.bufPrint(buf, "{s}.layers.{d}.ple.ple_embedding.ngram_embedding.shard_{d}.{s}", .{ prefix, layer, shard, part });
 }
 
 pub fn findOpen(opened: []Open, path: []const u8) ?*Open {
@@ -230,8 +235,11 @@ pub fn copyRow(file: *const Open, shard: usize, nested: bool, local: usize, dh: 
 }
 
 pub fn tableScale(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, wm: std.json.ObjectMap) !f32 {
-    const name = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale";
-    const file = wm.get(name) orelse return 1;
+    return readScale(gpa, io, dir, wm, "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale", false);
+}
+
+fn readScale(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, wm: std.json.ObjectMap, name: []const u8, required: bool) !f32 {
+    const file = wm.get(name) orelse return if (required) error.MissingTensor else 1;
     const path = try std.fs.path.join(gpa, &.{ dir, file.string });
     defer gpa.free(path);
     var opened = try Open.load(gpa, io, path);
@@ -333,6 +341,8 @@ pub const Ngram = struct {
     w: [max_shards][]const u8 = undefined,
     s: [max_shards][]const u8 = undefined,
     b: [max_shards][]const u8 = undefined,
+    format: enum { mlx, nvfp4 } = .mlx,
+    tables: [max_shards]core.nvfp4_rows.Table = undefined,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model_dir: []const u8) !Ngram {
         const cfg = try readSpec(gpa, io, model_dir);
@@ -356,16 +366,22 @@ pub const Ngram = struct {
         const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
         defer parsed.deinit();
         const wm = parsed.value.object.get("weight_map").?.object;
-        g.scale = try tableScale(gpa, io, model_dir, wm);
+        const first = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight";
+        const modelopt = wm.contains(first);
+        g.format = if (modelopt) .nvfp4 else .mlx;
+        g.scale = if (modelopt)
+            try readScale(gpa, io, model_dir, wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.weight_scale_2", true)
+        else
+            try tableScale(gpa, io, model_dir, wm);
         const dh = g.hash.dh;
         var key: [180]u8 = undefined;
         for (0..g.hash.shards) |shard| {
             var nested = false;
-            const mapped = if (wm.get(try weightName(&key, shard, false))) |v|
+            const mapped = if (wm.get(try partNameFor(&key, shard, false, "weight", modelopt))) |v|
                 v.string
             else blk: {
                 nested = true;
-                break :blk (wm.get(try weightName(&key, shard, true)) orelse return error.MissingTensor).string;
+                break :blk (wm.get(try partNameFor(&key, shard, true, "weight", modelopt)) orelse return error.MissingTensor).string;
             };
             const path = try std.fs.path.join(gpa, &.{ model_dir, mapped });
             defer gpa.free(path);
@@ -376,13 +392,23 @@ pub const Ngram = struct {
                 try g.files.append(gpa, o);
                 break :file &g.files.items[g.files.items.len - 1];
             };
-            const w = try file.tensor(try partName(&key, shard, nested, "weight"), .u32);
-            const s = try file.tensor(try partName(&key, shard, nested, "scales"), .bf16);
-            const b = try file.tensor(try partName(&key, shard, nested, "biases"), .bf16);
-            if (w.dim(1) != dh / 8 or s.dim(1) != dh / 32 or b.dim(1) != dh / 32) return error.UnexpectedTensor;
-            g.w[shard] = w.bytes;
-            g.s[shard] = s.bytes;
-            g.b[shard] = b.bytes;
+            const w = try file.tensor(try partNameFor(&key, shard, nested, "weight", modelopt), if (modelopt) .u8 else .u32);
+            const expected_rows: usize = @intCast(g.hash.starts[shard + 1] - g.hash.starts[shard]);
+            if (w.rank != 2 or w.dim(0) != expected_rows) return error.UnexpectedTensor;
+            if (modelopt) {
+                const sc = try file.tensor(try partNameFor(&key, shard, nested, "weight_scale", true), .f8_e4m3);
+                const table = try core.nvfp4_rows.Table.init(w, sc, g.scale);
+                if (table.width != dh) return error.UnexpectedTensor;
+                g.tables[shard] = table;
+            } else {
+                const sc = try file.tensor(try partNameFor(&key, shard, nested, "scales", false), .bf16);
+                const bias = try file.tensor(try partNameFor(&key, shard, nested, "biases", false), .bf16);
+                if (!w.is(.u32, &.{ expected_rows, dh / 8 }) or !sc.is(.bf16, &.{ expected_rows, dh / 32 }) or
+                    !bias.is(.bf16, &.{ expected_rows, dh / 32 })) return error.UnexpectedTensor;
+                g.w[shard] = w.bytes;
+                g.s[shard] = sc.bytes;
+                g.b[shard] = bias.bytes;
+            }
         }
         return g;
     }
@@ -402,7 +428,11 @@ pub const Ngram = struct {
         const dh = g.hash.dh;
         for (lo..hi) |i| {
             const loc = try g.hash.locate(ids[i]);
-            try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, out[i * dh ..][0..dh]);
+            const row = out[i * dh ..][0..dh];
+            switch (g.format) {
+                .mlx => try embed.dequant(g.w[loc.shard], g.s[loc.shard], g.b[loc.shard], dh, loc.local, row),
+                .nvfp4 => try g.tables[loc.shard].gather(&.{loc.local}, row),
+            }
         }
     }
 
@@ -449,7 +479,7 @@ pub const Ngram = struct {
         }
         for (0..tokens.len) |t| {
             const row = out[t * w ..][0..w];
-            if (g.scale != 1) {
+            if (g.format == .mlx and g.scale != 1) {
                 for (row) |*v| {
                     const f: f32 = @bitCast(@as(u32, v.*) << 16);
                     v.* = toBf16(f * g.scale);
@@ -483,4 +513,8 @@ test "a fresh window hashes token 7 into sixteen rows" {
     const loc = try h.locate(ids[0]);
     try std.testing.expectEqual(@as(usize, 1), loc.shard);
     try std.testing.expectEqual(@as(usize, 427641), loc.local);
+}
+
+test {
+    _ = @import("cuda_ple_nvfp4_test.zig");
 }

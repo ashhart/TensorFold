@@ -15,6 +15,7 @@ pub const affine4_fold = @import("affine4_fold.zig");
 pub const shard_edit = @import("shard_edit.zig");
 pub const quant = @import("quant/quant.zig");
 pub const nvfp4_csf = @import("nvfp4_csf.zig");
+pub const nvfp4_rows = @import("nvfp4_rows.zig");
 pub const nvfp4_slice = @import("nvfp4_slice.zig");
 pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
@@ -32,6 +33,7 @@ test {
     _ = quant;
     _ = nvfp4_csf;
     _ = nvfp4_slice;
+    _ = nvfp4_rows;
     _ = registry;
     _ = tuning;
     _ = norms_ref;
