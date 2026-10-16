@@ -22,7 +22,7 @@ against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zi
 module on Metal (`zig/src/families/nemotron/config.zig`). Matrices at 4-bit in groups of 64 keep Nemotron's own
 kernels. Every other width runs on the shared row kernels in decode, and in prompt chunks past 128 rows on
 simd_qmm_bits' tiles (dense matrices in groups of 64) and Flash Next's width-general expert gathers (routed experts).
-Its CUDA and Intel GPU engines read Nemotron at 4-bit in groups of 64 only.
+For Nemotron's MLX affine checkpoints, its CUDA and Intel GPU engines read 4-bit in groups of 64 only.
 
 | Path | Formats |
 | --- | --- |
@@ -65,7 +65,9 @@ A dense tensor of another shape, size or dtype than the shipped projection, and 
 
 ## Scope and qualification
 
-These additions cover MLX affine safetensors checkpoints for the dense Qwen family.
+In the Python 0.6.6 engine, these additions cover MLX affine safetensors checkpoints for the dense Qwen family. The
+native engine's per-module readers are named under Backend paths above; for Nemotron, TensorFold's oQ4, oQ6 and oQ8 are
+the measured checkpoints.
 GGUF, AWQ, GPTQ, NVFP, MXFP and arbitrary 8-bit MoE expert formats require their own readers and kernels.
 Unsupported formats remain explicit errors.
 

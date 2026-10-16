@@ -70,7 +70,7 @@ The platform column names the hardware tested for each model.
 | Model | Checkpoint format | Qualified platform |
 | --- | --- | --- |
 | Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10, RTX 3090 and RTX PRO 6000 Blackwell |
-| Nemotron 3.5 Lightning 30B-A3B, oQ quants | MLX affine at a width per module, 2 to 8 bits in groups of 32, 64 or 128 | Metal on M3 Ultra |
+| Nemotron 3.5 Lightning 30B-A3B, oQ quants | TensorFold's oQ4, oQ6 and oQ8: MLX affine at a width per module, with the 4-bit checkpoint's MTP head copied in | Metal on M3 Ultra |
 | Nemotron 3.5 Lightning 30B-A3B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts and head, FP8 Mamba projections, bf16 attention | CUDA on GB10 (sm_90 or newer) |
 | Nemotron 3.5 Super VL 120B-A12B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts, FP8 Mamba, attention and head projections, bf16 latent projections; RADIO image tower | CUDA on one GB10, or two GB10s |
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
@@ -82,12 +82,14 @@ The platform column names the hardware tested for each model.
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
 Nemotron's Metal engine also reads MLX checkpoints whose `config.json` gives modules their own width, such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`.
+It admits 2, 3, 4, 5, 6 or 8 bits (not 7) in groups of 32, 64 or 128; those three checkpoints are the ones measured.
 Matrices at 4-bit in groups of 64 run on the 4-bit checkpoint's kernels.
-Other widths run on the shared row kernels in decode and on tiled kernels in long prompts.
+Other widths run on the shared row kernels in decode.
+In prompt chunks past 128 rows, dense matrices in groups of 64 run on tiled kernels and the routed experts on width-general gathers; dense matrices in other groups stay on the row kernels.
 These checkpoints have no MTP head.
 Copy `mtp-4bit.safetensors` from the 4-bit checkpoint into the folder to draft; without it Nemotron decodes one token a round.
 With that head on an M3 Ultra, greedy prose decodes at 162 tok/s with oQ4, 117 with oQ6 and 111 with oQ8, against 188 with the 4-bit checkpoint.
-CUDA and the Intel GPU engine read Nemotron at 4-bit in groups of 64 only, and refuse other widths by naming the first such module.
+For Nemotron's MLX affine checkpoints, CUDA and the Intel GPU engine read 4-bit in groups of 64 only, and refuse other widths by naming the first such module; NVIDIA's ModelOpt checkpoints are read as before.
 Flash Next and Qwen3.8-27B read widths per module too.
 Jundot's `Qwen3.8-27B-oQ4e-mtp` and `-oQ6e-mtp` and a Flash Next oQ5e checkpoint serve exactly on an M3 Ultra.
 NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
