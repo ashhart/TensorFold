@@ -138,10 +138,8 @@ test "refusals: one edit each, with the reason" {
     try refused("\"hidden_size\": 4096", "\"hidden_sz\": 4096", error.BadConfig, "hidden_size");
 }
 
-test "optional keys: no quantization reads bf16, a null q_lora_rank one q_proj, rope_interleave false NeoX" {
-    const a = try edit("\"q_lora_rank\": 1536", "\"q_lora_rank\": null");
-    defer t.allocator.free(a);
-    const b = try std.mem.replaceOwned(u8, t.allocator, a, "\"rope_interleave\": true", "\"rope_interleave\": false");
+test "optional keys: no quantization reads bf16, a null q_lora_rank one q_proj" {
+    const b = try edit("\"q_lora_rank\": 1536", "\"q_lora_rank\": null");
     defer t.allocator.free(b);
     const at = std.mem.indexOf(u8, b, "\"quantization_config\"").?;
     const end = std.mem.indexOf(u8, b[at..], "  },\n").? + at + 5;
@@ -151,7 +149,7 @@ test "optional keys: no quantization reads bf16, a null q_lora_rank one q_proj, 
     const c = try config.parse(t.allocator, c_json, &why);
     try t.expectEqual(config.Quant.bf16, c.quant);
     try t.expectEqual(@as(u32, 0), c.q_lora);
-    try t.expectEqual(config.RopeStyle.neox, c.rope_style);
+    try t.expectEqual(config.RopeStyle.gptj, c.rope_style);
     try t.expect(!c.scaled("model.layers.0.attention.q_proj"));
 }
 
@@ -200,4 +198,77 @@ test "EXL3 is refused naming #832; a glob matches whole names only" {
     try t.expect(config.glob("model.layers.*.attention*", "model.layers.12.attention.q_proj"));
     try t.expect(!config.glob("model.layers.1*", "model.layers.0.mlp"));
     try t.expect(config.glob("a*b*c", "a.b.x.c") and !config.glob("a*b*c", "a.c"));
+}
+
+const synth = @import("synth.zig");
+
+/// The tiny config (synth.zig, FP8) with `key` set to `value` (JSON text) and `also`'s pair, parsed.
+fn tiny(key: []const u8, value: []const u8, also: ?[2][]const u8, why: *config.Why) !config.Config {
+    var arena = std.heap.ArenaAllocator.init(t.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var root = try std.json.parseFromSliceLeaky(std.json.Value, a, try synth.configJson(a, .fp8_block128, 4), .{});
+    try root.object.put(a, key, try std.json.parseFromSliceLeaky(std.json.Value, a, value, .{}));
+    if (also) |kv| try root.object.put(a, kv[0], try std.json.parseFromSliceLeaky(std.json.Value, a, kv[1], .{}));
+    return config.parse(t.allocator, try std.json.Stringify.valueAlloc(a, root, .{}), why);
+}
+
+const Case = struct { key: []const u8, value: []const u8, err: anyerror, says: []const u8, also: ?[2][]const u8 = null };
+
+test "geometry the kernels do not take is refused at load, one value at a time on the tiny config, with the reason" {
+    const cases = [_]Case{
+        .{ .key = "head_dim", .value = "64", .err = error.KdaGeometry, .says = "head_dim 64" },
+        .{ .key = "head_dim", .value = "256", .err = error.KdaGeometry, .says = "128-wide heads" },
+        .{ .key = "short_conv_kernel_size", .value = "3", .err = error.KdaGeometry, .says = "short_conv_kernel_size 3" },
+        .{ .key = "short_conv_kernel_size", .value = "5", .err = error.KdaGeometry, .says = "4 taps" },
+        .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads" },
+        .{ .key = "num_attention_heads", .value = "0", .err = error.KdaGeometry, .says = "0 attention heads, 0", .also = .{ "num_key_value_heads", "0" } },
+        .{ .key = "num_key_value_heads", .value = "2", .err = error.KdaGeometry, .says = "2 key/value heads" },
+        .{ .key = "kv_lora_rank", .value = "256", .err = error.MlaGeometry, .says = "kv_lora_rank 256" },
+        .{ .key = "kv_lora_rank", .value = "1024", .err = error.MlaGeometry, .says = "take 512" },
+        .{ .key = "qk_nope_head_dim", .value = "64", .err = error.MlaGeometry, .says = "qk_nope_head_dim 64" },
+        .{ .key = "qk_nope_head_dim", .value = "192", .err = error.MlaGeometry, .says = "qk_nope_head_dim 192" },
+        .{ .key = "v_head_dim", .value = "256", .err = error.MlaGeometry, .says = "v_head_dim 256" },
+        .{ .key = "v_head_dim", .value = "64", .err = error.MlaGeometry, .says = "v_head_dim 64" },
+        .{ .key = "qk_rope_head_dim", .value = "32", .err = error.MlaGeometry, .says = "qk_rope_head_dim 32" },
+        .{ .key = "qk_rope_head_dim", .value = "128", .err = error.MlaGeometry, .says = "qk_rope_head_dim 128" },
+        .{ .key = "rope_interleave", .value = "false", .err = error.MlaGeometry, .says = "GPT-J" },
+        .{ .key = "q_lora_rank", .value = "768", .err = error.MlaGeometry, .says = "q_lora_rank 768" },
+        .{ .key = "q_lora_rank", .value = "1024", .err = error.MlaGeometry, .says = "q_lora_rank 1024" },
+        .{ .key = "hidden_size", .value = "1024", .err = error.Width, .says = "hidden_size 1024" },
+        .{ .key = "hidden_size", .value = "640", .err = error.Width, .says = "hidden_size 640" },
+        .{ .key = "intermediate_size", .value = "200", .err = error.Width, .says = "intermediate_size 200" },
+        .{ .key = "intermediate_size", .value = "0", .err = error.Width, .says = "intermediate_size 0" },
+        .{ .key = "moe_intermediate_size", .value = "96", .err = error.Width, .says = "moe_intermediate_size 96" },
+        .{ .key = "moe_intermediate_size", .value = "192", .err = error.Width, .says = "moe_intermediate_size 192" },
+        .{ .key = "moe_shared_expert_intermediate_size", .value = "64", .err = error.Width, .says = "shared expert's width 64" },
+        .{ .key = "tie_word_embeddings", .value = "true", .err = error.TiedHead, .says = "lm_head" },
+    };
+    for (cases) |x| {
+        var why: config.Why = .{};
+        const got = tiny(x.key, x.value, x.also, &why);
+        if (got) |_| {
+            std.debug.print("{s} {s}: accepted\n", .{ x.key, x.value });
+            return error.TestUnexpectedResult;
+        } else |e| if (e != x.err or std.mem.indexOf(u8, why.text(), x.says) == null) {
+            std.debug.print("{s} {s}: {t}, \"{s}\"\n", .{ x.key, x.value, e, why.text() });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "the shapes the kernels take are accepted: the tiny config as written and with these values, the real one" {
+    var why: config.Why = .{};
+    const ok = [_][2][]const u8{
+        .{ "head_dim", "128" },         .{ "short_conv_kernel_size", "4" },   .{ "num_key_value_heads", "4" },
+        .{ "q_lora_rank", "1536" },     .{ "q_lora_rank", "null" },           .{ "hidden_size", "4096" },
+        .{ "hidden_size", "1536" },     .{ "moe_intermediate_size", "1280" }, .{ "intermediate_size", "10240" },
+        .{ "rope_interleave", "true" },
+    };
+    for (ok) |kv| _ = tiny(kv[0], kv[1], null, &why) catch |e| {
+        std.debug.print("{s} {s}: {t}, \"{s}\"\n", .{ kv[0], kv[1], e, why.text() });
+        return e;
+    };
+    const c = try load();
+    try t.expect(c.kda_dim == config.fixed.kda_dim and c.conv == config.fixed.conv and c.kv_lora == config.fixed.kv_lora);
 }

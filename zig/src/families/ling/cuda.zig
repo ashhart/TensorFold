@@ -54,6 +54,13 @@ test {
     _ = native;
 }
 
+test "config's fixed widths are the kernels' own: KDA heads, the latent cache, the rope" {
+    const f = config.fixed;
+    try std.testing.expect(f.kda_dim == glm.kda.dk and f.kda_dim == glm.kda.dv);
+    try std.testing.expect(f.rope == glm.latent.rope_width and f.kv_lora + f.rope == state.cache_width);
+    try std.testing.expect(f.block == @import("cuda").fp8.block);
+}
+
 test "Ling's routing as glue.select takes it: 8 groups keeping 4, and select's own bounds hold" {
     var why: config.Why = .{};
     const c = try config.parse(std.testing.allocator, @embedFile("fixtures/config.json"), &why);

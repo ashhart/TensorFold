@@ -101,6 +101,15 @@ both formats. Each projection loads as a `qlinear.Weight` (`bf16`, `fp8g` or `nv
 `Fp8Experts`/`Nvfp4Experts`'s layouts on the GPU: `Packer.fp8Experts` and `Packer.fp4Experts`). There is no grouped bf16 expert kernel, so bf16 routed experts load as one lane weight
 per projection. The router must be bf16 (GLM's router kernel reads bf16); a quantized router is refused.
 
+### Shapes
+
+`config.parse` refuses, with a named error and the reason, every shape the kernels don't take, before anything is
+allocated or launched: KDA heads other than 128 wide, short convs other than 4 taps, key/value heads other than the
+query heads (`KdaGeometry`); a latent other than 512, nope or value heads other than 128, rope columns other than 64,
+NeoX rope pairs, a `q_lora_rank` without a norm instance (`MlaGeometry`); a hidden width other than 512, 1536 or 4096,
+MLP and expert widths outside whole 128-column blocks (`Width`); a tied head (`TiedHead`); routing past `glue.select`'s
+bounds (`Routing`).
+
 ### Loading
 
 Routed experts load in batches of `weights.Options.stage` bytes (512 MiB, 32 FP8 experts): eight threads copy the batch's

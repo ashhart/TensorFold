@@ -447,6 +447,71 @@ fn parseConfig(gpa: std.mem.Allocator, json: []const u8, why: *Why) !Config {
     };
     c.tie = try flag(o, "tie_word_embeddings", false, why);
     try tokens(o, &c, why);
+    try geometry(o, &c, why);
     try quantization(o, &c, why);
     return c;
+}
+
+/// The widths the kernels are built for (cuda.zig's tests hold them to glm_kda, glm_glue and the latent cache).
+pub const fixed = .{ .kda_dim = 128, .conv = 4, .kv_lora = 512, .nope = 128, .v_dim = 128, .rope = 64, .block = 128 };
+/// glue.rmsnorm's instances: the hidden width and q_lora_rank take one of these.
+pub const norm_widths = [_]u32{ 512, 1536, 4096 };
+
+fn normWidth(w: u32) bool {
+    return std.mem.indexOfScalar(u32, &norm_widths, w) != null;
+}
+
+/// Every shape the kernels take fixed, refused at load before anything is allocated or launched.
+fn geometry(o: std.json.ObjectMap, c: *const Config, why: *Why) !void {
+    // KDA: glm_kda.cu's 128-wide heads and 4 taps (a 3-row conv window); one key and value head per query head
+    if (c.kda_dim != fixed.kda_dim) {
+        why.set("head_dim {d}: the KDA kernels take {d}-wide heads", .{ c.kda_dim, fixed.kda_dim });
+        return error.KdaGeometry;
+    }
+    if (c.conv != fixed.conv) {
+        why.set("short_conv_kernel_size {d}: the KDA kernels take {d} taps", .{ c.conv, fixed.conv });
+        return error.KdaGeometry;
+    }
+    const kv_heads = if (o.get("num_key_value_heads")) |_| try int(o, "num_key_value_heads", why) else c.kda_heads;
+    if (c.kda_heads == 0 or kv_heads != c.kda_heads) {
+        why.set("{d} attention heads, {d} key/value heads: the engine runs one key/value head per query head", .{ c.kda_heads, kv_heads });
+        return error.KdaGeometry;
+    }
+    // MLA: the 512-wide latent, 128-wide nope and value heads, 64 GPT-J roped columns
+    const mla = [_]struct { []const u8, u32, u32 }{
+        .{ "kv_lora_rank", c.kv_lora, fixed.kv_lora },
+        .{ "qk_nope_head_dim", c.nope, fixed.nope },
+        .{ "v_head_dim", c.v_dim, fixed.v_dim },
+        .{ "qk_rope_head_dim", c.rope_dim, fixed.rope },
+    };
+    for (mla) |m| if (m[1] != m[2]) {
+        why.set("{s} {d}: the MLA kernels take {d}", .{ m[0], m[1], m[2] });
+        return error.MlaGeometry;
+    };
+    if (c.rope_style != .gptj) {
+        why.set("rope_interleave false: the MLA rope kernel pairs adjacent columns (GPT-J) only", .{});
+        return error.MlaGeometry;
+    }
+    if (c.q_lora != 0 and !normWidth(c.q_lora)) {
+        why.set("q_lora_rank {d}: q_a_layernorm runs at 512, 1536 or 4096", .{c.q_lora});
+        return error.MlaGeometry;
+    }
+    // widths: the norms' instances, and every linear's inputs in whole 128-column blocks (FP8's, the lanes' 64)
+    if (!normWidth(c.hidden)) {
+        why.set("hidden_size {d}: the norms and the router run at 512, 1536 or 4096", .{c.hidden});
+        return error.Width;
+    }
+    const widths = [_]struct { []const u8, u32, bool }{
+        .{ "intermediate_size", c.dense_inter, c.dense_layers > 0 },
+        .{ "moe_intermediate_size", c.moe_inter, true },
+        .{ "the shared expert's width", c.shared_inter, c.shared_inter > 0 },
+    };
+    for (widths) |x| if (x[2] and (x[1] == 0 or x[1] % fixed.block != 0)) {
+        why.set("{s} {d}: the projections and experts take whole blocks of {d}", .{ x[0], x[1], fixed.block });
+        return error.Width;
+    };
+    if (c.tie) {
+        why.set("tie_word_embeddings: the engine reads its own lm_head", .{});
+        return error.TiedHead;
+    }
 }
