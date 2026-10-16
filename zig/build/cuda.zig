@@ -51,6 +51,7 @@ const kernels = [_]Kernel{
     .{ .name = "drama_backbone", .flags = glue },
     .{ .name = "drama_backbone_gemm", .flags = &.{"-O3"} },
     .{ .name = "drama_tower", .flags = glue },
+    .{ .name = "drama_codec", .flags = glue },
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
@@ -146,6 +147,36 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     b.installArtifact(b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner }));
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.drama, mods.tokenizer, build_options, true).root_module.strip = strip;
+    const codec_oracle = b.addExecutable(.{ .name = "tf-drama-codec-oracle", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/drama_codec_oracle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "drama", .module = mods.drama } },
+    }) });
+    const install_oracle = b.addInstallArtifact(codec_oracle, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
+    b.step("drama-codec-oracle", "Build the production-codec numerical oracle driver; does not run a GPU").dependOn(&install_oracle.step);
+    const codec_rvq_replay = b.addExecutable(.{ .name = "tf-drama-codec-rvq-replay", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/drama_codec_rvq_replay.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "drama", .module = mods.drama } },
+    }) });
+    const install_codec_rvq_replay = b.addInstallArtifact(codec_rvq_replay, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
+    b.step("drama-codec-rvq-replay", "Build the isolated codec RVQ counterfactual; does not run a GPU").dependOn(&install_codec_rvq_replay.step);
+    const codec_weight_replay = b.addExecutable(.{ .name = "tf-drama-codec-weight-replay", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/drama_codec_weight_replay.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "drama", .module = mods.drama } },
+    }) });
+    const install_codec_weight_replay = b.addInstallArtifact(codec_weight_replay, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
+    b.step("drama-codec-weight-replay", "Build the isolated codec weight counterfactual; does not run a GPU").dependOn(&install_codec_weight_replay.step);
     const tower_oracle = b.addExecutable(.{ .name = "tf-drama-tower-oracle", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/drama_tower_oracle.zig"),
         .target = target,
@@ -186,6 +217,16 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     }) });
     const install_gdn_oracle = b.addInstallArtifact(gdn_oracle, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
     b.step("drama-gdn-canonical-oracle", "Build the GDN canonical controller verification driver; does not run a GPU").dependOn(&install_gdn_oracle.step);
+    const codec_trace = b.addExecutable(.{ .name = "tf-drama-codec-trace", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/drama_codec_trace.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .strip = strip,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "drama", .module = mods.drama } },
+    }) });
+    const install_trace = b.addInstallArtifact(codec_trace, .{ .dest_dir = .{ .override = .{ .custom = "oracle/bin" } } });
+    b.step("drama-codec-trace", "Build the production-codec trace/replay diagnostic; does not run a GPU").dependOn(&install_trace.step);
     const backbone_trace = b.addExecutable(.{ .name = "tf-drama-backbone-trace", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/drama_backbone_trace.zig"),
         .target = target,
