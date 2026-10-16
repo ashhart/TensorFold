@@ -6,6 +6,8 @@ const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
+const vision = @import("cuda_vision.zig");
+const vision_prompt = @import("cuda_vision_prompt.zig");
 const be = lanes.backend;
 
 pub const model_type = "qwen3_5";
@@ -16,7 +18,7 @@ pub const prompt_rows: u32 = E.max_rows;
 /// --drafter loads the DFlash2 draft model (openDrafter); the checkpoints have no head of their own.
 pub const takes_drafter = true;
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: bool = false };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
@@ -37,8 +39,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const e = try E.Engine.init(gpa, io, ctx, dir);
     errdefer e.deinit();
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
+    // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
+    const tower: ?*vision.Tower = if (!o.vision) null else blk: {
+        const vc = try vision.Config.read(gpa, io, dir) orelse return error.QwenCheckpointHasNoVision;
+        if (vc.out_hidden != e.g.hidden) return error.UnsupportedQwenVision;
+        break :blk try vision.Tower.load(gpa, io, ctx.d, e.stream, dir, vc);
+    };
+    errdefer if (tower) |t| t.deinit();
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .tower = tower };
     return .{
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
@@ -107,6 +116,10 @@ fn closeDrafter(p: *anyopaque) void {
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
         error.InvalidQwenPrompt => "the prompt and its reply exceed this server's context window: shorten it or lower max_tokens",
+        error.QwenVideoUnsupported => "video inputs are not supported by the Qwen CUDA engine yet: send images",
+        error.BadImagePlaceholders => "the image placeholders do not match the prepared images",
+        error.BadImageGrid, error.BadImagePatches => "an image's patches do not fit the vision tower",
+        error.QwenServedWithoutVision => "image inputs need the server started with --vision",
         error.OutOfMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         else => null,
     };
@@ -129,6 +142,8 @@ const Lanes = struct {
     io: std.Io,
     e: *E.Engine,
     capacity: usize,
+    /// --vision's tower: an image prompt's images encoded at its prefill.
+    tower: ?*vision.Tower = null,
     caches: std.AutoHashMapUnmanaged(*lanes.Stream, *E.Cache) = .empty,
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
@@ -139,6 +154,7 @@ const Lanes = struct {
         self.caches.deinit(self.gpa);
         for (self.pool.items) |cache| self.drop(cache);
         self.pool.deinit(self.gpa);
+        if (self.tower) |t| t.deinit();
         self.e.deinit();
         self.gpa.destroy(self);
     }
@@ -199,6 +215,14 @@ const Lanes = struct {
         const self = cast(ptr);
         const ids = stream.prompt();
         if (ids.len == 0 or ids.len + stream.max_new > self.capacity or self.caches.contains(stream)) return error.InvalidQwenPrompt;
+        // an image prompt: its images through the tower first, then every chunk at its t, h, w positions
+        var media: ?vision_prompt.Media = null;
+        if (stream.images.len > 0) {
+            const tower = self.tower orelse return error.QwenServedWithoutVision;
+            media = try vision_prompt.Media.init(self.gpa, tower, ids, stream.images);
+        }
+        defer if (media) |*m| m.deinit();
+        const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
         const cache = try self.take();
         errdefer self.give(cache);
         var at: usize = 0;
@@ -208,9 +232,11 @@ const Lanes = struct {
                 end = @min(end, boundary);
                 break;
             };
-            try self.e.forward(&.{.{ .cache = cache, .rows = end - at }}, ids[at..end], .last);
+            try self.e.forward(&.{.{ .cache = cache, .rows = end - at, .images = if (images) |*im| im else null }}, ids[at..end], .last);
             at = end;
         }
+        // the reply's rows rotate past the image prompt's positions (rope_delta)
+        if (media) |m| cache.delta = m.delta;
         try self.caches.put(self.gpa, stream, cache);
     }
 

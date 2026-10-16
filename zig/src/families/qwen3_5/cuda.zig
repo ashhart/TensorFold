@@ -4,6 +4,7 @@ pub const geometry = @import("cuda_geometry.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const native = @import("cuda_native.zig");
 pub const draft = @import("cuda_draft.zig");
+pub const vision = @import("cuda_vision.zig");
 
 test {
     _ = config;
@@ -11,4 +12,6 @@ test {
     _ = @import("draw.zig");
     _ = @import("cuda_draft_weights.zig");
     _ = draft;
+    _ = vision;
+    _ = @import("cuda_vision_prompt.zig");
 }
