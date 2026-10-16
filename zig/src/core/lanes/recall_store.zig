@@ -1,13 +1,14 @@
 //! Recall's record on disk: one tokenizer's ids in chunk files of a 0700 directory, the oldest dropped past the cap.
 const std = @import("std");
+const platform = @import("sys");
 const recall = @import("recall.zig");
 const rr = recall.record;
 const Admission = @import("learned_disk.zig").Admission;
 const Allocator = std.mem.Allocator;
 
-extern "c" fn flock(fd: c_int, operation: c_int) c_int;
-const lock_ex = 2;
-const lock_nb = 4;
+const flock = platform.c.flock;
+const lock_ex = platform.c.LOCK.EX;
+const lock_nb = platform.c.LOCK.NB;
 
 const magic = "TFRECALL";
 const version: u32 = 1;
@@ -122,7 +123,7 @@ pub const Store = struct {
         }
         if (s.writes) s.takeLock();
         errdefer if (s.lock_fd >= 0) {
-            _ = std.c.close(s.lock_fd);
+            _ = platform.c.close(s.lock_fd);
         };
         try s.load();
         return s;
@@ -130,7 +131,7 @@ pub const Store = struct {
 
     pub fn close(s: *Store) void {
         s.closeFile();
-        if (s.lock_fd >= 0) _ = std.c.close(s.lock_fd);
+        if (s.lock_fd >= 0) _ = platform.c.close(s.lock_fd);
         s.shared.record.deinit();
         s.gpa.free(s.name);
         s.gpa.free(s.dir);
@@ -139,8 +140,8 @@ pub const Store = struct {
 
     fn closeFile(s: *Store) void {
         if (s.file < 0) return;
-        _ = std.c.fsync(s.file);
-        _ = std.c.close(s.file);
+        _ = platform.c.fsync(s.file);
+        _ = platform.c.close(s.file);
         s.file = -1;
     }
 
@@ -189,10 +190,10 @@ pub const Store = struct {
     fn takeLock(s: *Store) void {
         var buf: [1100]u8 = undefined;
         const path = std.fmt.bufPrintSentinel(&buf, "{s}/lock", .{s.dir}, 0) catch return s.readOnly();
-        const fd = std.c.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDWR, .CREAT = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
         if (fd < 0) return s.readOnly();
         if (flock(fd, lock_ex | lock_nb) != 0) {
-            _ = std.c.close(fd);
+            _ = platform.c.close(fd);
             return s.readOnly();
         }
         s.lock_fd = fd;
@@ -226,10 +227,10 @@ pub const Store = struct {
     fn readChunk(s: *Store, seq: u64, pending: *std.ArrayList(u32), ids: []u32) !usize {
         var buf: [1100]u8 = undefined;
         const path = try s.chunkPath(&buf, seq);
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
         if (fd < 0) return error.RecallRead;
-        defer _ = std.c.close(fd);
-        const size = std.c.lseek(fd, 0, std.c.SEEK.END);
+        defer _ = platform.c.close(fd);
+        const size = platform.c.lseek(fd, 0, platform.c.SEEK.END);
         if (size < head_bytes) return error.RecallRead;
         var head: [head_bytes]u8 = undefined;
         if (!readAt(fd, &head, 0) or !std.mem.eql(u8, &head, &s.header())) return error.RecallRead;
@@ -260,13 +261,13 @@ pub const Store = struct {
             var buf: [1100]u8 = undefined;
             const path = s.chunkPath(&buf, seq) catch continue;
             if (k >= chunks or seq != s.seq0 + k) {
-                _ = std.c.unlink(path);
+                _ = platform.c.unlink(path);
             } else if (k + 1 == chunks) {
                 const keep = head_bytes + 4 * (@as(u64, r.end) - @as(u64, k) * rr.chunk_tokens);
-                const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+                const fd = platform.c.open(path, .{ .ACCMODE = .WRONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
                 if (fd >= 0) {
-                    _ = std.c.ftruncate(fd, @intCast(keep));
-                    _ = std.c.close(fd);
+                    _ = platform.c.ftruncate(fd, @intCast(keep));
+                    _ = platform.c.close(fd);
                 }
             }
         }
@@ -278,9 +279,9 @@ pub const Store = struct {
 
     /// The chunk files' numbers, ascending.
     fn listChunks(s: *Store, out: *std.ArrayList(u64)) !void {
-        const d = std.c.opendir(s.dir) orelse return error.RecallRead;
-        defer _ = std.c.closedir(d);
-        while (std.c.readdir(d)) |ent| {
+        const d = platform.c.opendir(s.dir) orelse return error.RecallRead;
+        defer _ = platform.c.closedir(d);
+        while (platform.c.readdir(d)) |ent| {
             const name = std.mem.sliceTo(&ent.name, 0);
             if (name.len != 20 or !std.mem.endsWith(u8, name, ".ids")) continue;
             const seq = std.fmt.parseInt(u64, name[0..16], 16) catch continue;
@@ -296,7 +297,7 @@ pub const Store = struct {
         if (s.writes) {
             var buf: [1100]u8 = undefined;
             if (s.chunkPath(&buf, s.seq0 + r.first - 1)) |path| {
-                _ = std.c.unlink(path);
+                _ = platform.c.unlink(path);
             } else |_| {}
         }
         return true;
@@ -394,16 +395,16 @@ pub const Store = struct {
         s.closeFile();
         var buf: [1100]u8 = undefined;
         const path = s.chunkPath(&buf, s.seq0 + k) catch return false;
-        var flags: std.c.O = .{ .ACCMODE = .WRONLY, .APPEND = true, .NOFOLLOW = true };
-        var fd = std.c.open(path, flags, @as(std.c.mode_t, 0));
+        var flags: platform.c.O = .{ .ACCMODE = .WRONLY, .APPEND = true, .NOFOLLOW = true };
+        var fd = platform.c.open(path, flags, @as(platform.c.mode_t, 0));
         if (fd < 0) {
             flags.CREAT = true;
             flags.EXCL = true;
-            fd = std.c.open(path, flags, @as(std.c.mode_t, 0o600));
+            fd = platform.c.open(path, flags, @as(platform.c.mode_t, 0o600));
             if (fd < 0) return false;
             const head = s.header();
             writeAll(fd, &head) catch {
-                _ = std.c.close(fd);
+                _ = platform.c.close(fd);
                 return false;
             };
         }
@@ -437,8 +438,8 @@ pub const Store = struct {
         for (seqs.items) |seq| {
             var buf: [1100]u8 = undefined;
             const path = s.chunkPath(&buf, seq) catch continue;
-            const rc = std.c.unlink(path);
-            const e = std.c.errno(rc);
+            const rc = platform.c.unlink(path);
+            const e = platform.c.errno(rc);
             if (rc == 0 or e == .NOENT or s.problem.len > 0) continue;
             s.note("{s} could not be removed ({s})", .{ path, @tagName(e) });
         }
@@ -494,18 +495,18 @@ fn makePath(dir: [:0]const u8) !void {
     buf[dir.len] = 0;
     for (1..dir.len) |i| if (buf[i] == '/') {
         buf[i] = 0;
-        _ = std.c.mkdir(@ptrCast(&buf), 0o700);
+        _ = platform.c.mkdir(@ptrCast(&buf), 0o700);
         buf[i] = '/';
     };
-    const rc = std.c.mkdir(dir, 0o700);
-    if (rc != 0 and std.c.errno(rc) != .EXIST) return error.RecallDir;
+    const rc = platform.c.mkdir(dir, 0o700);
+    if (rc != 0 and platform.c.errno(rc) != .EXIST) return error.RecallDir;
 }
 
 fn readSmall(a: Allocator, path: [:0]const u8) ![]u8 {
-    const fd = std.c.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
-    if (fd < 0) return if (std.c.errno(fd) == .NOENT) error.FileNotFound else error.RecallRead;
-    defer _ = std.c.close(fd);
-    const size = std.c.lseek(fd, 0, std.c.SEEK.END);
+    const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
+    if (fd < 0) return if (platform.c.errno(fd) == .NOENT) error.FileNotFound else error.RecallRead;
+    defer _ = platform.c.close(fd);
+    const size = platform.c.lseek(fd, 0, platform.c.SEEK.END);
     if (size < 0 or size > 4096) return error.RecallRead;
     const out = try a.alloc(u8, @intCast(size));
     if (!readAt(fd, out, 0)) return error.RecallRead;
@@ -516,21 +517,21 @@ fn readSmall(a: Allocator, path: [:0]const u8) ![]u8 {
 fn writeSmall(path: [:0]const u8, bytes: []const u8) !void {
     var buf: [1200]u8 = undefined;
     const part = try std.fmt.bufPrintSentinel(&buf, "{s}.part", .{path}, 0);
-    const flags: std.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true };
-    const fd = std.c.open(part, flags, @as(std.c.mode_t, 0o600));
+    const flags: platform.c.O = .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true };
+    const fd = platform.c.open(part, flags, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.RecallWrite;
     {
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         try writeAll(fd, bytes);
-        if (std.c.fsync(fd) != 0) return error.RecallWrite;
+        if (platform.c.fsync(fd) != 0) return error.RecallWrite;
     }
-    if (std.c.rename(part, path) != 0) return error.RecallWrite;
+    if (platform.c.rename(part, path) != 0) return error.RecallWrite;
 }
 
 fn writeAll(fd: c_int, bytes: []const u8) !void {
     var done: usize = 0;
     while (done < bytes.len) {
-        const n = std.c.write(fd, bytes.ptr + done, bytes.len - done);
+        const n = platform.c.write(fd, bytes.ptr + done, bytes.len - done);
         if (n <= 0) return error.RecallWrite;
         done += @intCast(n);
     }
@@ -539,7 +540,7 @@ fn writeAll(fd: c_int, bytes: []const u8) !void {
 fn readAt(fd: c_int, dest: []u8, at: u64) bool {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
         if (n <= 0) return false;
         done += @intCast(n);
     }
@@ -548,7 +549,7 @@ fn readAt(fd: c_int, dest: []u8, at: u64) bool {
 
 /// Where Recall keeps records unless --recall-dir names one: $HOME/.cache/tensorfold/recall/<tokenizer identity>.
 pub fn defaultDir(a: Allocator, identity: Identity) ![]const u8 {
-    const home = std.c.getenv("HOME") orelse return error.RecallDir;
+    const home = platform.c.getenv("HOME") orelse return error.RecallDir;
     const short = identity.short();
     return std.fmt.allocPrint(a, "{s}/.cache/tensorfold/recall/{s}", .{ std.mem.span(home), &short });
 }

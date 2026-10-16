@@ -1,6 +1,7 @@
 //! The HIP lanes backend's own costs, timed at load on scratch streams: what the depth rule weighs drafts against.
 
 const std = @import("std");
+const platform = @import("sys");
 const hip = @import("hip");
 const lanes = @import("lanes");
 const Engine = @import("engine.zig").Engine;
@@ -29,8 +30,8 @@ pub const Costs = struct {
 };
 
 pub fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

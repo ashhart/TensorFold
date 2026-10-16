@@ -17,7 +17,7 @@ pub const sockaddr = extern struct {
     family: u16,
     data: [14]u8,
 
-    pub const in = extern struct { family: u16, port: u16, addr: u32, zero: [8]u8 = @splat(0) };
+    pub const in = extern struct { family: u16 = AF.INET, port: u16, addr: u32, zero: [8]u8 = @splat(0) };
 };
 pub const timeval = c.timeval;
 
@@ -28,6 +28,7 @@ pub const AF = struct {
 };
 pub const SOCK = struct {
     pub const STREAM: u32 = 1;
+    pub const CLOEXEC: u32 = 0; // Winsock handles are not inherited by children unless asked
 };
 pub const SOL = struct {
     pub const SOCKET: i32 = 0xffff;
@@ -37,6 +38,16 @@ pub const SO = struct {
     pub const REUSEADDR: u32 = @bitCast(@as(i32, -5));
     pub const RCVTIMEO: u32 = 0x1006;
     pub const SNDTIMEO: u32 = 0x1005;
+    pub const KEEPALIVE: u32 = 0x0008;
+};
+pub const IPPROTO = struct {
+    pub const TCP: i32 = 6;
+};
+pub const TCP = struct {
+    pub const NODELAY: u32 = 1;
+    pub const KEEPIDLE: u32 = 3; // TCP_KEEPALIVE: seconds idle before the first probe
+    pub const KEEPINTVL: u32 = 17;
+    pub const KEEPCNT: u32 = 16;
 };
 pub const SHUT = struct {
     pub const RD: i32 = 0;
@@ -157,6 +168,14 @@ pub const system = struct {
         const n = ws.send(fd, buf, len32(len), 0);
         return if (n < 0) failed() else n;
     }
+    pub fn read(fd: socket_t, buf: [*]u8, len: usize) isize {
+        const n = ws.recv(fd, buf, len32(len), 0);
+        return if (n < 0) failed() else n;
+    }
+    pub fn poll(fds: [*]pollfd, n: usize, timeout_ms: i32) isize {
+        const got = posixPoll(fds[0..n], timeout_ms) catch return -1;
+        return @intCast(got);
+    }
     pub fn recvfrom(fd: socket_t, buf: [*]u8, len: usize, flags: u32, addr: ?*anyopaque, alen: ?*socklen_t) isize {
         _ = addr;
         _ = alen;
@@ -177,6 +196,8 @@ pub fn setsockopt(fd: socket_t, level: i32, opt: u32, value: []const u8) error{S
 }
 
 /// WSAPoll, with POSIX's rule that an entry whose fd is negative is skipped (WSAPoll would fail the call).
+const posixPoll = poll;
+
 pub fn poll(fds: []pollfd, timeout_ms: i32) error{PollFailed}!usize {
     start();
     var live: [64]pollfd = undefined;

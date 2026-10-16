@@ -134,10 +134,15 @@ pub extern "c" fn fopen(path: [*:0]const u8, mode: [*:0]const u8) ?*std.c.FILE;
 pub extern "c" fn fwrite(ptr: [*]const u8, size: usize, n: usize, f: *std.c.FILE) usize;
 pub extern "c" fn fclose(f: *std.c.FILE) c_int;
 pub extern "c" fn free(ptr: ?*anyopaque) void;
+pub extern "c" fn _exit(code: c_int) noreturn;
 pub extern "c" fn malloc(n: usize) ?*anyopaque;
 
 /// The UCRT's struct _stat64.
 const Stat64 = extern struct { dev: u32, ino: u16, mode: u16, nlink: i16, uid: i16, gid: i16, rdev: u32, size: i64, atime: i64, mtime: i64, ctime: i64 };
+
+const lock = @import("win_lock.zig");
+pub const LOCK = lock.LOCK;
+pub const flock = lock.flock;
 
 pub fn fail(e: E) c_int {
     _errno().* = @backingInt(e);
@@ -145,7 +150,7 @@ pub fn fail(e: E) c_int {
 }
 
 /// The errno a failed Win32 call means.
-fn lastError() E {
+pub fn lastError() E {
     return switch (GetLastError()) {
         2, 3, 15, 123, 161 => .NOENT, // file, path, drive not found; bad name
         5, 32, 33 => .ACCES, // access denied, sharing and lock violations
@@ -194,7 +199,7 @@ fn wide(buf: *Wide, path: []const u8) ?[*:0]const u16 {
 }
 
 /// Directory descriptors: open(O.DIRECTORY) remembers the path; openat and unlinkat join onto it.
-const dir_base: fd_t = 0x4000_0000;
+pub const dir_base: fd_t = 0x4000_0000;
 var dirs_lock: std.atomic.Mutex = .unlocked;
 var dir_paths: [256]?[:0]u8 = @splat(null);
 
@@ -202,7 +207,7 @@ fn lockDirs() void {
     while (!dirs_lock.tryLock()) std.atomic.spinLoopHint();
 }
 
-fn dirPath(fd: fd_t) ?[:0]const u8 {
+pub fn dirPath(fd: fd_t) ?[:0]const u8 {
     if (fd < dir_base or fd >= dir_base + dir_paths.len) return null;
     lockDirs();
     defer dirs_lock.unlock();
@@ -306,6 +311,7 @@ pub fn close(fd: fd_t) c_int {
         const p = slot.* orelse return fail(.BADF);
         std.heap.c_allocator.free(p);
         slot.* = null;
+        lock.release(fd - dir_base);
         return 0;
     }
     return _close(fd);

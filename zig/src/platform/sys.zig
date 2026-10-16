@@ -20,6 +20,18 @@ pub fn getenv(name: [*:0]const u8) ?[:0]const u8 {
 /// The CUDA driver's file name: nvcuda.dll comes with the display driver on Windows.
 pub const cuda_driver = if (windows) "nvcuda.dll" else "libcuda.so.1";
 
+/// The file a loaded library's `symbol` comes from, as dladdr's dli_fname, in `buf` on Windows.
+pub fn libraryOf(symbol: *const anyopaque, buf: []u8) ?[]const u8 {
+    if (!windows) @compileError("libraryOf: dladdr gives the path elsewhere");
+    var module: ?*anyopaque = null;
+    // GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | UNCHANGED_REFCOUNT: the module holding the address, not pinned
+    if (GetModuleHandleExA(0x4 | 0x2, @ptrCast(symbol), &module) == 0) return null;
+    const n = GetModuleFileNameA(module, buf.ptr, @intCast(@min(buf.len, std.math.maxInt(u32))));
+    return if (n == 0 or n >= buf.len) null else buf[0..n];
+}
+
+extern "kernel32" fn GetModuleHandleExA(flags: u32, name: ?[*]const u8, module: *?*anyopaque) callconv(.winapi) c_int;
+extern "kernel32" fn GetModuleFileNameA(module: ?*anyopaque, name: [*]u8, size: u32) callconv(.winapi) u32;
 extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.winapi) c_int;

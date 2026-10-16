@@ -32,7 +32,7 @@ pub fn load(w: *const u64) u64 {
 /// CLOCK_MONOTONIC in nanoseconds, the clock libmcdma-rpc waits on.
 pub fn nowNs() u64 {
     var ts: platform.c.timespec = undefined;
-    _ = platform.c.clock_gettime(.MONOTONIC, &ts);
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
@@ -44,7 +44,7 @@ pub fn pause(ns: u64) void {
 
 pub fn checkedNowNs() error{ClockUnavailable}!u64 {
     var ts: platform.c.timespec = undefined;
-    if (platform.c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) return error.ClockUnavailable;
+    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) return error.ClockUnavailable;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
