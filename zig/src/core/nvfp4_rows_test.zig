@@ -19,8 +19,7 @@ fn scale(byte: u8) f64 {
     const mag = byte & 127;
     if (mag == 127) return std.math.nan(f64);
     const e: i32 = @as(i32, mag >> 3) - 7;
-    const value = if (mag < 8) @as(f64, @floatFromInt(mag)) / 512 else
-        std.math.ldexp(1 + @as(f64, @floatFromInt(mag & 7)) / 8, e);
+    const value = if (mag < 8) @as(f64, @floatFromInt(mag)) / 512 else std.math.ldexp(1 + @as(f64, @floatFromInt(mag & 7)) / 8, e);
     return if (byte & 128 != 0) -value else value;
 }
 
