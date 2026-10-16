@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const embed = @import("cuda_embed.zig");
 const gdn = @import("cuda_gdn.zig");
 const wt = @import("cuda_prompt_wt.zig");
+const mixed = @import("cuda_mixed_experts.zig");
 const projections = @import("cuda_projection_load.zig");
 
 const layers_n = wt.layers_n;
@@ -78,6 +79,7 @@ pub const Layer = struct {
     /// Packed gate and up for every routed expert plus the shared expert at index 512.
     experts_up: cuda.DeviceBuffer,
     experts_down: cuda.DeviceBuffer,
+    native_experts: ?mixed.Owned = null,
 
     pub fn free(self: *Layer, gpa: std.mem.Allocator) void {
         _ = gpa;
@@ -100,6 +102,7 @@ pub const Layer = struct {
         self.nq.free();
         self.nc.free();
         self.ple_cw.free();
+        if (self.native_experts) |*e| e.free();
         self.experts_up.free();
         self.experts_down.free();
     }
@@ -192,13 +195,21 @@ fn stackUp(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, g
 }
 
 pub fn loadLayer(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, layer: usize) !Layer {
+    return loadLayerRank(gpa, driver, stream, store, pack_fn, layer, 1, 0);
+}
+
+pub fn loadLayerRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, layer: usize, world: usize, rank: usize) !Layer {
     var buf: [80]u8 = undefined;
     const base = try std.fmt.bufPrint(&buf, "language_model.model.layers.{d}", .{layer});
-    return loadLayerAt(gpa, driver, stream, store, pack_fn, base, linearLayer(layer), layer == ple_layer);
+    return loadLayerAtRank(gpa, driver, stream, store, pack_fn, base, linearLayer(layer), layer == ple_layer, world, rank);
 }
 
 /// The decoder layer under `base` (the MTP head's "language_model.mtp.layers.0": full attention, no n-gram branch).
 pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, base: []const u8, linear: bool, with_ple: bool) !Layer {
+    return loadLayerAtRank(gpa, driver, stream, store, pack_fn, base, linear, with_ple, 1, 0);
+}
+
+fn loadLayerAtRank(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.Stream, store: *Store, pack_fn: cuda.Function, base: []const u8, linear: bool, with_ple: bool, world: usize, rank: usize) !Layer {
     var buf: [200]u8 = undefined;
     var base_buf: [80]u8 = undefined;
     @memcpy(base_buf[0..base.len], base);
@@ -330,33 +341,49 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         pcw_b = try cuda.DeviceBuffer.fromHost(driver, conv.bytes);
     }
 
-    var shared: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
-    errdefer for (&shared) |*f| f.free(gpa);
-    // a folder Living Weights taught holds a wider shared expert (its 640 neurons, then the pocket's)
-    const width = (try store.hold(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj.weight", .{mlp_root}))).dim(0);
-    if (width != moe_w) return error.LearnedPocket;
-    shared[0] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.gate_proj", false, moe_w, dims);
-    shared[1] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.up_proj", false, moe_w, dims);
-    shared[2] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.down_proj", false, dims, moe_w);
-    var routed: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
-    errdefer for (&routed) |*f| f.free(gpa);
-    routed[0] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.gate_proj", true, moe_w, dims);
-    routed[1] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.up_proj", true, moe_w, dims);
-    routed[2] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.down_proj", true, dims, moe_w);
-    var gate_p = try packAll(driver, stream, pack_fn, routed[0], shared[0]);
-    errdefer gate_p.free();
-    var up_p = try packAll(driver, stream, pack_fn, routed[1], shared[1]);
-    errdefer up_p.free();
-    var down_p = try packAll(driver, stream, pack_fn, routed[2], shared[2]);
-    errdefer down_p.free();
-    for (&shared) |*f| f.free(gpa);
-    for (&routed) |*f| f.free(gpa);
-    shared = .{ blankFace(), blankFace(), blankFace() };
-    routed = .{ blankFace(), blankFace(), blankFace() };
-    var experts_up = try stackUp(gpa, driver, stream, gate_p, up_p);
+    var native_experts: ?mixed.Owned = null;
+    errdefer if (native_experts) |*e| e.free();
+    var experts_up = deadBuf(driver);
     errdefer experts_up.free();
-    gate_p.free();
-    up_p.free();
+    var experts_down = deadBuf(driver);
+    errdefer experts_down.free();
+    if (store.has(try std.fmt.bufPrint(&buf, "{s}.experts.0.gate_proj.weight", .{mlp_root}))) {
+        native_experts = try mixed.load(gpa, driver, store, mlp_root, world, rank);
+    } else {
+        if (world != 1 or rank != 0) return error.UnsupportedQuantization;
+        const legacy = legacy_block: {
+            var shared: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
+            errdefer for (&shared) |*f| f.free(gpa);
+            // a folder Living Weights taught holds a wider shared expert (its 640 neurons, then the pocket's)
+            const width = (try store.hold(try std.fmt.bufPrint(&buf, "{s}.shared_expert.gate_proj.weight", .{mlp_root}))).dim(0);
+            if (width != moe_w) return error.LearnedPocket;
+            shared[0] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.gate_proj", false, moe_w, dims);
+            shared[1] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.up_proj", false, moe_w, dims);
+            shared[2] = try keepFace(gpa, store, &buf, mlp_root, ".shared_expert.down_proj", false, dims, moe_w);
+            var routed: [3]OwnedFace = .{ blankFace(), blankFace(), blankFace() };
+            errdefer for (&routed) |*f| f.free(gpa);
+            routed[0] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.gate_proj", true, moe_w, dims);
+            routed[1] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.up_proj", true, moe_w, dims);
+            routed[2] = try keepFace(gpa, store, &buf, mlp_root, ".switch_mlp.down_proj", true, dims, moe_w);
+            var gate_p = try packAll(driver, stream, pack_fn, routed[0], shared[0]);
+            errdefer gate_p.free();
+            var up_p = try packAll(driver, stream, pack_fn, routed[1], shared[1]);
+            errdefer up_p.free();
+            var down_p = try packAll(driver, stream, pack_fn, routed[2], shared[2]);
+            errdefer down_p.free();
+            for (&shared) |*f| f.free(gpa);
+            for (&routed) |*f| f.free(gpa);
+            shared = .{ blankFace(), blankFace(), blankFace() };
+            routed = .{ blankFace(), blankFace(), blankFace() };
+            var combined_up = try stackUp(gpa, driver, stream, gate_p, up_p);
+            errdefer combined_up.free();
+            gate_p.free();
+            up_p.free();
+            break :legacy_block .{ combined_up, down_p };
+        };
+        experts_up = legacy[0];
+        experts_down = legacy[1];
+    }
     store.release();
     return .{
         .attn_hc = attn_hc,
@@ -380,6 +407,7 @@ pub fn loadLayerAt(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: *cuda.S
         .nc = nc_b,
         .ple_cw = pcw_b,
         .experts_up = experts_up,
-        .experts_down = down_p,
+        .experts_down = experts_down,
+        .native_experts = native_experts,
     };
 }

@@ -29,6 +29,8 @@ const Fns = struct {
     wb_slices: cuda.Function,
     normalize: cuda.Function,
     dense_mix: cuda.Function,
+    shared_swiglu: cuda.Function,
+    shared_scatter: cuda.Function,
     down: cuda.Function,
     reduce_act: cuda.Function,
     upmix: cuda.Function,
@@ -95,6 +97,8 @@ pub const Glue = struct {
             .wb_slices = try g.hc.function("fn_hc_writeback_slices"),
             .normalize = try g.hc.function("fn_hc_normalize"),
             .dense_mix = try g.hc.function("fn_hc_dense_mix"),
+            .shared_swiglu = try g.hc.function("fn_shared_swiglu"),
+            .shared_scatter = try g.hc.function("fn_shared_scatter"),
             .down = try g.hc.function("fn_hc_down"),
             .reduce_act = try g.hc.function("fn_hc_reduce_act"),
             .upmix = try g.hc.function("fn_hc_upmix"),
@@ -227,6 +231,21 @@ pub const Glue = struct {
         args.add(int(dims));
         args.add(int(streams));
         try cuda.launch.launch(g.f.dense_mix, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(dims / 32) }, .block = .{ .x = 32 } }, s, &args);
+    }
+
+    pub fn sharedSwiGLU(g: *const Glue, s: cuda.Stream, gate: u64, up: u64, act: u64, rows: usize, width: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ gate, up, act });
+        ints(&a, &.{width});
+        try go(g.f.shared_swiglu, s, .{ rows, cdiv(width, 256), 1 }, 256, 0, &a);
+    }
+
+    pub fn sharedScatter(g: *const Glue, s: cuda.Stream, shared: u64, out: u64, rows: usize, dims: usize, slots: usize) !void {
+        if (slots == 0) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ shared, out });
+        ints(&a, &.{ dims, slots });
+        try go(g.f.shared_scatter, s, .{ rows, cdiv(dims, 256), 1 }, 256, 0, &a);
     }
 
     pub fn hcReduceAct(g: *const Glue, s: cuda.Stream, part: u64, act: u64, xs: u64, inj: u64, sk: usize, rows: usize, streams: usize, low: usize, ndn: usize, has_inj: usize) !void {

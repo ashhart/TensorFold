@@ -99,6 +99,7 @@ pub const Kernels = struct {
     moe: cuda.experts.RowsExperts,
     lane: cuda.Function,
     native_lane: cuda.qmmf.Lane,
+    nvfp4: cuda.experts.Nvfp4Experts,
     front: cuda.Function,
     chain: cuda.Function,
     chain_to: cuda.Function,
@@ -125,6 +126,12 @@ pub const Kernels = struct {
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.capability(0)) / 10);
         errdefer k.native_lane.unload();
+        var device: c_int = 0;
+        var sms: c_int = 0;
+        try d.check(d.api.cuDeviceGet(&device, 0), "cuDeviceGet");
+        try d.check(d.api.cuDeviceGetAttribute(&sms, .multiprocessor_count, device), "cuDeviceGetAttribute");
+        k.nvfp4 = try cuda.experts.Nvfp4Experts.load(d, @intCast(sms));
+        errdefer k.nvfp4.unload();
         k.sum = try k.batch.function("fn_sum_slices");
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
@@ -136,6 +143,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.nvfp4.unload();
         k.native_lane.unload();
         k.batch.unload();
         k.rows.unload();
@@ -241,6 +249,10 @@ pub const Scratch = struct {
     rank: u64 = 0,
     hist: u64 = 0,
     moe_act: u64 = 0,
+    shared_gate: u64 = 0,
+    shared_up: u64 = 0,
+    shared_act: u64 = 0,
+    shared_out: u64 = 0,
     y: u64 = 0,
     branch: u64 = 0,
     ple_emb: u64 = 0,
@@ -318,6 +330,7 @@ pub const Scratch = struct {
         n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
         n += att_rows * (idw + 2) * 4;
         n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4;
+        n += cap * moe_w * 6 + cap * dims * 4;
         n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
         n += cap * dims * 2 + cap * (dims / 32) * 4 + cap * wide * 2 + cap * dims * 2 + 4 * cap * dims * 4;
         n += cap * wide * 2 * 2 + cap * streams * 4 + vocab * 2 + half * 4 + 4096;
@@ -373,6 +386,10 @@ pub const Scratch = struct {
         s.counts = try s.add(gpa, d, 8);
         s.rank = try s.add(gpa, d, pairs * 4);
         s.hist = try s.add(gpa, d, nblk * (experts_n + 1) * 4);
+        s.shared_gate = try s.add(gpa, d, cap * moe_w * 2);
+        s.shared_up = try s.add(gpa, d, cap * moe_w * 2);
+        s.shared_act = try s.add(gpa, d, cap * moe_w * 2);
+        s.shared_out = try s.add(gpa, d, cap * dims * 4);
         s.moe_act = try s.add(gpa, d, pairs * moe_w * 2);
         s.y = try s.add(gpa, d, pairs * dims * 4);
         s.branch = try s.add(gpa, d, cap * dims * 2);

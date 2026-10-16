@@ -369,6 +369,25 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.topkMany(s.router_l, s.picks, s.wts, n);
             const e = experts_n + 1;
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
+            if (lw.native_experts) |*native| {
+                const owned = &native.experts;
+                try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(s.y, 0, pairs * dims * 4, self.stream.handle), "cuMemsetD8Async");
+                try self.k.router.route(self.stream, s.picks, pairs, e, 16, plan);
+                const items = cuda.grouped.maxItems(pairs, e, 16);
+                try self.k.nvfp4.run(self.stream, .up, .{ .x = s.mixed, .stride = dims, .slots = slots }, owned.view(), plan, s.moe_act, items, experts_n);
+                try self.k.nvfp4.run(self.stream, .down_f32, .{ .x = s.moe_act, .stride = owned.width }, owned.view(), plan, s.y, items, experts_n);
+                if (native.rank == 0) {
+                    const glue = self.tri.own orelse return error.NativeGlueRequired;
+                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[0].native.?, s.shared_gate, s.native_part);
+                    try self.k.native_lane.matmul(self.stream, s.mixed, dims, n, native.shared[1].native.?, s.shared_up, s.native_part);
+                    try glue.sharedSwiGLU(self.stream, s.shared_gate, s.shared_up, s.shared_act, n, moe_w);
+                    try self.k.native_lane.matmulF32(self.stream, s.shared_act, moe_w, n, native.shared[2].native.?, s.shared_out, s.native_part);
+                    try glue.sharedScatter(self.stream, s.shared_out, s.y, n, dims, slots);
+                }
+                // Multi-rank admission remains refused until the owning engine provides its collective.
+                if (native.world != 1) return error.TensorParallelUnavailable;
+                return;
+            }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);
             const items = cdiv(pairs, rows_tile) + e;
             try self.k.moe.run(self.stream, true, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items);

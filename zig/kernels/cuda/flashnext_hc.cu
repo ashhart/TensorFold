@@ -432,3 +432,18 @@ extern "C" __global__ void fn_hc_dense_mix(const __nv_bfloat16* UP, const __nv_b
         XSM[static_cast<long long>(r) * (D / 32) + group] = sum;
     }
 }
+
+// Shared expert uses its own BF16 projection outputs and rounding boundaries.
+extern "C" __global__ void fn_shared_swiglu(const __nv_bfloat16* GATE, const __nv_bfloat16* UP,
+                                             __nv_bfloat16* ACT, int W) {
+    const int r = blockIdx.x, j = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j >= W) return;
+    const long long at = static_cast<long long>(r) * W + j;
+    ACT[at] = __float2bfloat16_rn(__fmul_rn(bsilu(bf(GATE[at])), bf(UP[at])));
+}
+
+// Write only the final reserved slot; routed slots retain their FP32 partial sums.
+extern "C" __global__ void fn_shared_scatter(const float* SHARED, float* Y, int D, int SLOTS) {
+    const int r = blockIdx.x, j = blockIdx.y * blockDim.x + threadIdx.x;
+    if (j < D) Y[(static_cast<long long>(r) * SLOTS + SLOTS - 1) * D + j] = SHARED[static_cast<long long>(r) * D + j];
+}
