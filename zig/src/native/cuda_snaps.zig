@@ -2,9 +2,10 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); `snap_grid`'s chunk starts and `warm_quiet`'s warm turns if declared.
+/// Any row, the head one token on (Nemotron's); `snap_grid`'s chunk starts, `snap_lookahead` and `warm_quiet` if declared.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
+    if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead;
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;

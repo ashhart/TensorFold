@@ -130,7 +130,9 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
         n += 1;
     };
     copy.* = .{ .host = try cuda.HostBuffer.alloc(e.d, l.total()), .len = l.total(), .at = at, .delta = cache.delta, .format = l.format, .images = images };
-    errdefer copy.host.free();
+    // a failed copy may leave earlier ones queued into the host buffer: freed only once the stream has drained them
+    errdefer if (e.stream.synchronize()) copy.host.free() else |_|
+        std.log.warn("qwen3_5: a failed save's host copy is kept: its stream did not drain", .{});
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
@@ -155,6 +157,8 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     if (copy.format != formatOf(e)) return error.KeptCacheFormat;
     if (!restorable(e, cache, copy, seen)) return error.BadReuse;
     const l: Layout = .{ .g = e.g, .format = copy.format, .cap = cache.cap, .at = copy.at };
+    // a failed copy may leave earlier ones reading the kept state: the stream drains before the caller can drop it
+    errdefer e.stream.synchronize() catch {};
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);

@@ -25,6 +25,7 @@ pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
 pub const snap_host = true;
 pub const snap_lookahead: u32 = 0;
+pub const snap_grid: u32 = E.max_rows;
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
@@ -274,7 +275,7 @@ const Lanes = struct {
         }
         defer if (media) |*m| m.deinit();
         const images: ?E.Images = if (media) |m| .{ .features = m.features.ptr, .src = m.src, .pos = m.pos } else null;
-        const seen = try self.seenOf(ids, stream.images);
+        const seen = try self.seenOf(stream.images);
         self.seen.put(self.gpa, stream, seen) catch |err| {
             self.gpa.free(seen);
             return err;
@@ -436,14 +437,9 @@ const Lanes = struct {
     }
 
     /// Each image's first placeholder row and digest: a kept state resumes only the same images.
-    fn seenOf(self: *Lanes, ids: []const u32, images: []const lanes.Image) ![]reuse.Seen {
-        if (images.len == 0) return self.gpa.alloc(reuse.Seen, 0);
-        const tower = self.tower orelse return error.QwenServedWithoutVision;
-        const runs = try self.gpa.alloc(vision_prompt.Run, images.len);
-        defer self.gpa.free(runs);
-        try vision_prompt.placeholders(tower.c, ids, images, runs);
+    fn seenOf(self: *Lanes, images: []const lanes.stream.Image) ![]reuse.Seen {
         const seen = try self.gpa.alloc(reuse.Seen, images.len);
-        for (seen, runs, images) |*s, r, im| s.* = .{ .at = @intCast(r.at), .digest = im.digest() };
+        for (seen, images) |*s, im| s.* = .{ .at = im.at, .digest = im.digest() };
         return seen;
     }
 };
