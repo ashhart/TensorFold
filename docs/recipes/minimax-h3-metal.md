@@ -109,6 +109,14 @@ does in its whole-sequence form: every row but the generated audio stays at the 
 audio rows go down the released model's grid of N + 1 points (audio shift 3), and the video rows are not moved.
 A case for it comes from `h3_revoice_case.py` on the fork's exporter branch, from a finished clip's rows.
 
+## Ref2VA: reference pictures, videos and audio
+
+The released Ref2VA transformer loads like FL2VA. A Ref2VA case (`h3_ref2va_case.py` on the fork's exporter branch,
+after `packing.reference_layout`) puts its rows in the engine's order: text, the references' video rows (held at the
+keyframe level, as a first frame's are), the audio rows with the references' clean audio first, then the clip's
+video. Its geometry has an eighth count, the reference audio rows: they enter on every pass at timestep 1 and are
+never stepped. `steps=N` on the released weights makes their own grid of N + 1 points (video shift 12, audio 3).
+
 ## Not done
 
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.

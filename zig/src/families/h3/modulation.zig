@@ -85,7 +85,7 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
     // a row's modality is the case's, fixed by the packing: its first step's line modulo the modalities
     const tags = try a.alloc(i32, rows);
     for (tags, m.adaln[0..rows]) |*t, line| t.* = @mod(line, schedule.modalities);
-    const p = try schedule.plan(a, .{ .text = m.text, .condition = m.condition, .audio = m.audio, .video = m.video, .hold = hold }, video.timesteps, audio.timesteps);
+    const p = try schedule.plan(a, .{ .text = m.text, .condition = m.condition, .audio = m.audio, .held_audio = m.held_audio, .video = m.video, .hold = hold }, video.timesteps, audio.timesteps);
     const adaln = try a.alloc(i32, p.index.len);
     for (adaln, p.index, 0..) |*o, i, at| o.* = i * schedule.modalities + tags[at % rows];
     m.adaln = adaln;
