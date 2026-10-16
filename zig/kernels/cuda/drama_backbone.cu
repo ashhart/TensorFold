@@ -38,6 +38,27 @@ __device__ __forceinline__ float block_sum(float x, float* scratch, int nwarps) 
 __device__ __forceinline__ float sigmoid(float x) { return 1.0f / (1.0f + expf(-x)); }
 __device__ __forceinline__ float silu(float x) { return x / (1.0f + expf(-x)); }
 
+__device__ __forceinline__ void load8(const __nv_bfloat16* p, float (&v)[8]) {
+    const uint4 u = *reinterpret_cast<const uint4*>(p);
+    const __nv_bfloat16* b = reinterpret_cast<const __nv_bfloat16*>(&u);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) v[i] = bf(b[i]);
+}
+
+__device__ __forceinline__ void store8(__nv_bfloat16* p, const float (&v)[8]) {
+    uint4 u;
+    __nv_bfloat16* b = reinterpret_cast<__nv_bfloat16*>(&u);
+#pragma unroll
+    for (int i = 0; i < 8; ++i) b[i] = tobf(v[i]);
+    *reinterpret_cast<uint4*>(p) = u;
+}
+
+// drama_act_quant's e4m3 byte of v under its group's multiplier inv = 448 / amax.
+__device__ __forceinline__ uint32_t e4m3(float v, float inv) {
+    const float c = fminf(fmaxf(v * inv, -448.0f), 448.0f);
+    return static_cast<uint32_t>(__nv_cvt_float_to_fp8(c, __NV_SATFINITE, __NV_E4M3));
+}
+
 }  // namespace drama
 
 using namespace drama;
@@ -58,21 +79,26 @@ extern "C" __global__ void __launch_bounds__(256) drama_semantic_mix(const int* 
     }
 }
 
-// GemmaRMSNorm in FlashInfer's CuTe order (8 values a lane, FMA squares, XOR 1..16) with one bf16 residual store.
+// GemmaRMSNorm in FlashInfer's CuTe order with one bf16 residual store; q / s (both or neither) add its FP8 groups.
 extern "C" __global__ void __launch_bounds__(256) drama_add_norm(const __nv_bfloat16* x, __nv_bfloat16* res,
                                                                 const __nv_bfloat16* w, __nv_bfloat16* y,
-                                                                int width, float eps, int first) {
+                                                                uint8_t* q, float* s, int width, float eps,
+                                                                int first) {
     __shared__ float square_sum;
     const size_t base = static_cast<size_t>(blockIdx.x) * width;
     const int t = threadIdx.x;
     if (t < 32) {
+        // Unrolled so every load is in flight before the FMA chain, which keeps the serial reference order.
         float sum = 0.f;
+#pragma unroll 8
         for (int block = 0; block < width; block += 256) {
+            float value[8], other[8];
+            load8(x + base + block + 8 * t, value);
+            if (!first) load8(res + base + block + 8 * t, other);
+#pragma unroll
             for (int v = 0; v < 8; ++v) {
-                const int i = block + 8 * t + v;
-                float value = bf(x[base + i]);
-                if (!first) value += bf(res[base + i]);
-                sum = fmaf(value, value, sum);
+                if (!first) value[v] += other[v];
+                sum = fmaf(value[v], value[v], sum);
             }
         }
         for (int offset = 1; offset < 32; offset <<= 1)
@@ -81,11 +107,38 @@ extern "C" __global__ void __launch_bounds__(256) drama_add_norm(const __nv_bflo
     }
     __syncthreads();
     const float rcp = rsqrtf(square_sum / static_cast<float>(width) + eps);
-    for (int i = t; i < width; i += blockDim.x) {
-        float value = bf(x[base + i]);
-        if (!first) value += bf(res[base + i]);
-        res[base + i] = tobf(value);
-        y[base + i] = tobf(value * rcp * (1.0f + bf(w[i])));
+    for (int c = 8 * t; c < width; c += 8 * blockDim.x) {
+        float value[8], other[8], weight[8], out[8];
+        load8(x + base + c, value);
+        if (!first) load8(res + base + c, other);
+        load8(w + c, weight);
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            if (!first) value[i] += other[i];
+            out[i] = value[i] * rcp * (1.0f + weight[i]);
+        }
+        store8(res + base + c, value);
+        store8(y + base + c, out);
+        if (q == nullptr) continue;
+        // A 128-wide group is 16 lanes; the max is exact in any order.
+        float amax = 0.f;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            out[i] = round_bf(out[i]);
+            amax = fmaxf(amax, fabsf(out[i]));
+        }
+#pragma unroll
+        for (int m = 8; m; m >>= 1) amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, m));
+        amax = fmaxf(amax, 1e-10f);
+        const float inv = __fdividef(448.0f, amax);
+        uint2 packed = {0u, 0u};
+#pragma unroll
+        for (int i = 0; i < 4; ++i) {
+            packed.x |= e4m3(out[i], inv) << (8 * i);
+            packed.y |= e4m3(out[4 + i], inv) << (8 * i);
+        }
+        *reinterpret_cast<uint2*>(q + base + c) = packed;
+        if ((t & 15) == 0) s[static_cast<size_t>(blockIdx.x) * (width / 128) + c / 128] = amax * (1.0f / 448.0f);
     }
 }
 
@@ -348,11 +401,7 @@ extern "C" __global__ void __launch_bounds__(128) drama_act_quant(const __nv_bfl
     const float inv = __fdividef(448.0f, amax);
     uint32_t packed = 0;
 #pragma unroll
-    for (int i = 0; i < 4; ++i) {
-        const float c = fminf(fmaxf(v[i] * inv, -448.0f), 448.0f);
-        const uint32_t b = static_cast<uint32_t>(__nv_cvt_float_to_fp8(c, __NV_SATFINITE, __NV_E4M3));
-        packed |= b << (8 * i);
-    }
+    for (int i = 0; i < 4; ++i) packed |= e4m3(v[i], inv) << (8 * i);
     *reinterpret_cast<uint32_t*>(q + static_cast<size_t>(r) * K + group * 128 + lane * 4) = packed;
     if (lane == 0) s[static_cast<size_t>(r) * (K / 128) + group] = sc;
 }

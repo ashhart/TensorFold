@@ -32,7 +32,7 @@ pub const Stage = enum { attention_input, attention_residual, attention_output, 
 /// Hashed by the trace driver so a capture names the exact forward it observed; unreferenced in production.
 pub const trace_source = @embedFile("backbone.zig");
 
-/// Diagnostic selector for Model.replayOperator: a layer's attention or moe; tf-drama-backbone-replay only.
+/// Diagnostic replayOperator selector: a layer's attention, or moe on the FP8 groups addNorm writes in forward.
 pub const ReplayOperator = enum { attention, moe };
 
 /// Bump offsets in one device allocation, 256-byte aligned.
@@ -289,18 +289,18 @@ pub const Model = struct {
         try k.embed.bf16(s, sc.ids, self.w.embed, sc.x, n, H);
         if (extra) |e| try k.semanticMix(s, sc.ids, sc.x, e.ptr, n, H, self.semantic_start, self.semantic_end);
         for (&self.w.layers, 0..) |*l, i| {
-            try k.addNorm(s, sc.x, sc.residual, l.ln1, sc.normed, n, H, config.eps, i == 0);
+            try k.addNorm(s, sc.x, sc.residual, l.ln1, sc.normed, null, null, n, H, config.eps, i == 0);
             try self.stage(trace, s, i, .attention_input, sc.normed, n);
             try self.stage(trace, s, i, .attention_residual, sc.residual, n);
             if (config.linear(i)) try self.deltaNet(s, phase, l, config.slot(i), n) else try self.fullAttention(s, l, config.slot(i), n);
             try self.stage(trace, s, i, .attention_output, sc.x, n);
-            try k.addNorm(s, sc.x, sc.residual, l.ln2, sc.normed, n, H, config.eps, false);
+            try k.addNorm(s, sc.x, sc.residual, l.ln2, sc.normed, sc.xq, sc.xs, n, H, config.eps, false);
             try self.stage(trace, s, i, .mlp_input, sc.normed, n);
             try self.stage(trace, s, i, .mlp_residual, sc.residual, n);
             try self.moe(s, l, n);
             try self.stage(trace, s, i, .mlp_output, sc.x, n);
         }
-        try k.addNorm(s, sc.x, sc.residual, self.w.final_norm, self.hidden_buf.ptr, n, H, config.eps, false);
+        try k.addNorm(s, sc.x, sc.residual, self.w.final_norm, self.hidden_buf.ptr, null, null, n, H, config.eps, false);
         try k.head(s, self.hidden_buf.ptr + (n - 1) * H * 2, self.w.head, weights.head_cols, H, self.logits_buf.ptr);
     }
 
@@ -338,7 +338,10 @@ pub const Model = struct {
                     try self.deltaNet(stream, .prefill, l, config.slot(layer), n)
                 else
                     try self.fullAttention(stream, l, config.slot(layer), n),
-                .moe => try self.moe(stream, l, n),
+                .moe => {
+                    try self.k.actQuant(stream, self.s.normed, H, self.s.xq, self.s.xs, n, H);
+                    try self.moe(stream, l, n);
+                },
             }
             const x: cuda.DeviceBuffer = .{ .d = self.d, .ptr = self.s.x, .len = bytes, .borrowed = true };
             try x.downloadAsync(0, output[at..][0..bytes], stream.handle);
@@ -410,7 +413,7 @@ pub const Model = struct {
         try k.gemm(s, sc.gated, width, n, l.attn_out, H, width, sc.x, H);
     }
 
-    /// Qwen2MoeSparseMoeBlock: top-8 routing, block-FP8 experts, SwiGLU, weighted down, sigmoid-gated shared expert.
+    /// Top-8 block-FP8 experts and the gated shared expert on Scratch.normed and its FP8 groups in xq / xs.
     fn moe(self: *Model, s: cuda.Stream, l: *const weights.Layer, n: usize) !void {
         const k = &self.k;
         const sc = &self.s;
@@ -419,7 +422,6 @@ pub const Model = struct {
         const I = config.expert_inner;
         try k.gemm(s, sc.normed, H, n, l.moe_in, ld, H, sc.moe_in, ld);
         try k.topk(s, sc.moe_in + weights.router_col * 2, ld, sc.picks, sc.routed, n, top);
-        try k.actQuant(s, sc.normed, H, sc.xq, sc.xs, n, H);
         const plan: cuda.grouped.Plan = .{ .members = sc.members, .items = sc.items, .counts = sc.counts, .rank = sc.rank, .hist = sc.hist };
         try k.router.route(s, sc.picks, pairs, config.experts, tile, plan);
         const items = cuda.grouped.maxItems(pairs, config.experts, tile);

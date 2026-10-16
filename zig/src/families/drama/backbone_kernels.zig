@@ -202,14 +202,16 @@ pub const Kernels = struct {
         try go(s, k.semantic_mix_fn, .{ rows, 1, 1 }, 256, &a);
     }
 
-    /// res = x (first) or bf16(x + res); y = bf16(norm(x + res) * (1 + w)).
-    pub fn addNorm(k: *const Kernels, s: cuda.Stream, x: u64, res: u64, w: u64, y: u64, rows: usize, width: usize, eps: f32, first: bool) !void {
-        if (width > 256 * 16) return error.DramaRowShape;
+    /// res = x (first) or bf16(x + res); y = bf16(norm(x + res) * (1 + w)), with q / scales also y's FP8 groups.
+    pub fn addNorm(k: *const Kernels, s: cuda.Stream, x: u64, res: u64, w: u64, y: u64, q: ?u64, scales: ?u64, rows: usize, width: usize, eps: f32, first: bool) !void {
+        if (width % 256 != 0 or (x | res | w | y | (q orelse 0)) % 16 != 0) return error.DramaRowShape;
         var a: cuda.Args = .{};
         a.add(x);
         a.add(res);
         a.add(w);
         a.add(y);
+        a.add(q orelse 0);
+        a.add(scales orelse 0);
         a.add(int(width));
         a.add(eps);
         a.add(@as(i32, @intFromBool(first)));
