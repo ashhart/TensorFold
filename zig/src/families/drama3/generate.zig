@@ -79,7 +79,8 @@ pub fn main(init: std.process.Init) !u8 {
         }
     }
     if (a.codec_check) |ref| return checks.codecCheck(gpa, io, a, ref);
-    if (a.model.len == 0) {
+    // --encode needs only the codec and the reference audio
+    if (a.model.len == 0 and (a.encode_out == null or a.check != null)) {
         std.debug.print("{s}", .{usage});
         return 2;
     }
@@ -144,6 +145,11 @@ extern "c" fn fflush(f: ?*anyopaque) c_int;
 extern "c" fn fclose(f: *anyopaque) c_int;
 extern "c" fn fdopen(fd: c_int, mode: [*:0]const u8) ?*anyopaque;
 
+/// One fwrite that fails loudly: a short write is an error, never a sample counted.
+fn writeAll(f: *anyopaque, b: []const u8) !void {
+    if (fwrite(b.ptr, 1, b.len, f) != b.len) return error.AudioWrite;
+}
+
 /// Where the samples go as they stream: a WAV file whose header is patched at the end, and / or raw PCM.
 const AudioOut = struct {
     gpa: std.mem.Allocator,
@@ -164,7 +170,7 @@ const AudioOut = struct {
             o.wav = fopen(z.ptr, "wb") orelse return error.WavOpen;
             var h: [44]u8 = undefined;
             d3.wav.header(&h, 44100, 0x7FFFFFF0 / 2);
-            _ = fwrite(&h, 1, 44, o.wav.?);
+            try writeAll(o.wav.?, &h);
         }
         if (pcm_path) |p| {
             if (std.mem.eql(u8, p, "-")) o.pcm = fdopen(1, "wb") else {
@@ -184,26 +190,35 @@ const AudioOut = struct {
         }
         const b = o.buf[0 .. x.len * 2];
         d3.wav.pcm16(x, b);
-        if (o.wav) |f| _ = fwrite(b.ptr, 1, b.len, f);
+        if (o.wav) |f| try writeAll(f, b);
         if (o.pcm) |f| {
-            _ = fwrite(b.ptr, 1, b.len, f);
-            _ = fflush(f);
+            try writeAll(f, b);
+            if (fflush(f) != 0) return error.AudioWrite;
         }
         o.samples += x.len;
         o.chunks += 1;
         if (o.verbose) std.debug.print("CHUNK {d} samples={d} total_s={d:.3} at_ms={d:.1}\n", .{ o.chunks, x.len, @as(f64, @floatFromInt(o.samples)) / 44100.0, @as(f64, @floatFromInt(d3.engine.nowNs(o.io) - o.t0)) / 1e6 });
     }
 
-    fn close(o: *AudioOut) void {
+    /// Patch the WAV header and close; any failure is returned before the request reports success.
+    fn close(o: *AudioOut) !void {
+        defer o.abandon();
         if (o.wav) |f| {
+            o.wav = null;
             var h: [44]u8 = undefined;
             d3.wav.header(&h, 44100, o.samples);
-            _ = fseek(f, 0, 0);
-            _ = fwrite(&h, 1, 44, f);
-            _ = fclose(f);
+            const ok = fseek(f, 0, 0) == 0 and fwrite(&h, 1, 44, f) == 44;
+            if (fclose(f) != 0 or !ok) return error.AudioWrite;
         }
-        if (o.pcm) |f| _ = fflush(f);
+        if (o.pcm) |f| if (fflush(f) != 0) return error.AudioWrite;
+    }
+
+    /// Release without reporting: the path taken when the request already failed.
+    fn abandon(o: *AudioOut) void {
+        if (o.wav) |f| _ = fclose(f);
+        o.wav = null;
         o.gpa.free(o.buf);
+        o.buf = &.{};
     }
 };
 
@@ -244,8 +259,9 @@ fn runRequest(gpa: std.mem.Allocator, io: std.Io, a: Args, e: *d3.Engine, tts: ?
     if (tts) |t| {
         var out = try AudioOut.open(ar, io, q.wav, q.pcm, a.verbose_chunks);
         out.t0 = t_req;
-        defer out.close();
+        errdefer out.abandon();
         const r = try t.speak(io, rows, q.smp, q.max_frames, .{ .first_chunk = a.first_chunk, .chunk = a.chunk }, .{ .ctx = &out, .audio = AudioOut.put });
+        try out.close();
         frames = r.frames;
         st = r.stats;
     } else {
