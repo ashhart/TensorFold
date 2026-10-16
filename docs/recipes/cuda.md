@@ -8,7 +8,7 @@ They are not the native Zig release's support matrix. The kernel paths, the prom
 (`--prefill-fp8`, `--no-prefill-fp8`, `--precision`) and the request and memory notes below are that engine's too,
 and the native binary refuses those flags.
 
-The native binary registers only Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40).
+The native binary registers Nemotron on CUDA, qualified on NVIDIA GB10 and on Ampere cards with compute capability 8.6 (the RTX 30 series, RTX A6000, A10 and A40), and Flash Next from its MLX 4-bit checkpoint, run on a GB10 ([Flash Next on CUDA](flash-next-cuda.md)).
 A user's receipt for 1.0.4 on a bare-metal RTX 3090, at 225 W and 350 W, is in [#592](https://github.com/ashhart/TensorFold/issues/592).
 GLM-5.3-Flash on CUDA, EXL3 loading and DFlash2 drafting remain Python-engine features, not native upgrade paths.
 Inspect the installed binary with `tensorfold-native --version` and `tensorfold-native capabilities --json`.

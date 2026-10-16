@@ -19,7 +19,8 @@ pub const Rules = pc.Rules;
 pub const Limits = struct { pages: usize = 0, snaps: usize = 0 };
 
 pub const Plan = pc.Plan;
-pub const Kept = pc.Kept;
+/// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
+pub const Kept = struct { held: bool, shared: usize };
 
 pub const Store = struct {
     tree: Tree,

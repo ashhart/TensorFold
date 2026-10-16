@@ -42,6 +42,7 @@ pub const Norms = struct {
     add_rms_h_fn: Function,
     add_rms_h_f32w_fn: Function,
     gated_fns: [3]Function, // head dim 64, 128, 256
+    rms_sums_fn: Function,
 
     pub fn load(d: *const Driver) !Norms {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -56,6 +57,7 @@ pub const Norms = struct {
             .add_rms_h_fn = try mod.function("tf_add_rms_rows_bf16h"),
             .add_rms_h_f32w_fn = try mod.function("tf_add_rms_rows_bf16h_f32w"),
             .gated_fns = .{ try mod.function("tf_gated_rms_rows_64"), try mod.function("tf_gated_rms_rows_128"), try mod.function("tf_gated_rms_rows_256") },
+            .rms_sums_fn = try mod.function("tf_rms_rows_sums"),
         };
     }
 
@@ -85,6 +87,20 @@ pub const Norms = struct {
         a.add(@as(i32, @intCast(width)));
         a.add(eps);
         try launch_.launch(n.rms_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
+    }
+
+    /// bf16 rows `x_ld` apart: y = bf16(rms(x) * w) [rows, width], fp32 w, and xs the stored y's sums of each `group`.
+    pub fn rmsSums(n: *const Norms, s: Stream, x: u64, x_ld: usize, w: u64, y: u64, xs: u64, rows: usize, width: usize, group: usize, eps: f32) !void {
+        if (group == 0 or width % group != 0 or x_ld < width) return error.RowShape;
+        if (rows == 0) return;
+        var a: launch_.Args = .{};
+        a.add(x);
+        a.add(@as(i64, @intCast(x_ld)));
+        for ([_]u64{ w, y, xs }) |v| a.add(v);
+        a.add(@as(i32, @intCast(width)));
+        a.add(@as(i32, @intCast(group)));
+        a.add(eps);
+        try launch_.launch(n.rms_sums_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = threads } }, s, &a);
     }
 
     /// The residual step: res (fp32, in place) += rms(x) * w1 (w1 null: res += x), then y = rms(res) * w2.

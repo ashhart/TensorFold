@@ -33,9 +33,13 @@ pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
 pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
+pub const route_rows = @import("route_rows.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const modelopt = @import("modelopt.zig");
+pub const gdn_train = @import("gdn_train.zig");
+pub const train_q4 = @import("train_q4.zig");
+pub const train_attn = @import("train_attn.zig");
 
 test {
     _ = @import("memory.zig");
@@ -43,6 +47,7 @@ test {
     _ = @import("qlinear.zig");
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
+    _ = @import("route_rows.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = launch;
@@ -54,4 +59,7 @@ test {
     _ = carveout;
     _ = @import("nvfp4.zig");
     _ = @import("modelopt.zig");
+    _ = @import("gdn_train.zig");
+    _ = @import("train_q4.zig");
+    _ = @import("train_attn.zig");
 }
