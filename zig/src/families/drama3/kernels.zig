@@ -12,11 +12,12 @@ pub const Sampling = extern struct {
 };
 
 const names = .{
-    "d3_gemv",        "d3_rmsnorm",    "d3_add_rmsnorm", "d3_embed_backbone", "d3_conv_silu",
-    "d3_gdn",         "d3_gated_norm", "d3_qk_rope",     "d3_attn_decode",    "d3_q_group",
-    "d3_causal_softmax", "d3_attn_gate", "d3_router",   "d3_swiglu",         "d3_moe_combine",
-    "d3_tower_mix",   "d3_sample_main", "d3_sample_code", "d3_argmax_main",   "d3_finish_frame",
-    "d3_copy_i32",    "d3_act_quant",  "d3_bf16_f32",  "d3_next_input", "d3_attn_partial", "d3_attn_merge", "d3_sample_main_fast", "d3_sample_code_fast",
+    "d3_gemv",           "d3_rmsnorm",          "d3_add_rmsnorm",      "d3_embed_backbone", "d3_conv_silu",
+    "d3_gdn",            "d3_gated_norm",       "d3_qk_rope",          "d3_attn_decode",    "d3_q_group",
+    "d3_causal_softmax", "d3_attn_gate",        "d3_router",           "d3_swiglu",         "d3_moe_combine",
+    "d3_tower_mix",      "d3_sample_main",      "d3_sample_code",      "d3_argmax_main",    "d3_finish_frame",
+    "d3_copy_i32",       "d3_act_quant",        "d3_bf16_f32",         "d3_next_input",     "d3_attn_partial",
+    "d3_attn_merge",     "d3_sample_main_fast", "d3_sample_code_fast",
 };
 
 pub const F = enum(u8) {
@@ -79,8 +80,8 @@ pub const Kernels = struct {
         k.sms = @intCast(try ctx.attribute(.multiprocessor_count));
         k.mod = try cuda.Module.load(d, cuda.kernels.drama3);
         inline for (names, 0..) |name, j| k.fns[j] = try k.mod.function(name);
-        try k.fns[@intFromEnum(F.sample_main)].allowDynamicShared(8192 * 8);
-        try k.fns[@intFromEnum(F.gemv)].allowDynamicShared(6144 * 2);
+        try k.fns[@backingInt(F.sample_main)].allowDynamicShared(8192 * 8);
+        try k.fns[@backingInt(F.gemv)].allowDynamicShared(6144 * 2);
         k.experts_mod = try cuda.Module.load(d, cuda.kernels.experts);
         k.plan = try cuda.grouped.Router.resolve(k.experts_mod);
         k.fp8a_mod = try cuda.Module.load(d, cuda.kernels.drama3_fp8);
@@ -103,7 +104,7 @@ pub const Kernels = struct {
     }
 
     fn f(k: *const Kernels, which: F) cuda.Function {
-        return k.fns[@intFromEnum(which)];
+        return k.fns[@backingInt(which)];
     }
 
     fn go(k: *const Kernels, which: F, s: cuda.Stream, gx: usize, gy: usize, block: usize, shared: usize, a: *cuda.Args) !void {

@@ -74,7 +74,7 @@ pub const Codec = struct {
     probe: ?Probe = null,
 
     fn f(c: *const Codec, which: F) cuda.Function {
-        return c.fns[@intFromEnum(which)];
+        return c.fns[@backingInt(which)];
     }
 
     pub fn go(c: *const Codec, which: F, s: cuda.Stream, gx: usize, gy: usize, block: usize, a: *cuda.Args) !void {
