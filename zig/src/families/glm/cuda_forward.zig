@@ -17,6 +17,7 @@ const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const state = @import("cuda_state.zig");
+const images_mod = @import("cuda_images.zig");
 const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 
@@ -150,6 +151,9 @@ pub const Rank = struct {
     segs: []const Seg = &.{},
 };
 
+/// The engine's image rows and the sequence the forward runs on (they splice into that sequence's rows only).
+pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
+
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
 pub const Seg = struct { st: *State, row0: usize, rows: usize };
 
@@ -162,6 +166,7 @@ pub const Forward = struct {
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE (the Python family's default): decode windows on KDA's three-kernel chain
     pieces: ?*const Pieces = null, // a prompt chunk's exchanges in row pieces on a second stream (null: whole)
     split: bool = true, // TF_GLM_PREFILL_REDUCE=split (the default with send/recv): each rank glues its own rows
+    images: ?ImageRows = null, // a prompt pass's image rows over their placeholders' embeddings (its sequence only)
 
     pub fn set(f: *const Forward) glue.Set {
         return .{ .glue = &f.m.glue };
@@ -456,6 +461,7 @@ pub const Forward = struct {
         }
         const c = &f.ranks[0].w.config;
         for (f.ranks) |r| try glue.embedB16(f.set(), f.stream, r.b.ids, r.w.embed, r.b.x, R, c.hidden, c.hc);
+        if (f.images) |im| for (f.ranks) |r| try im.v.splice(f.stream, im.slot, r.st.pos, r.st.pos + R, r.b.x, c.hc);
         var cut: [max_pieces][2]usize = undefined;
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
@@ -517,6 +523,8 @@ pub const Forward = struct {
             const m = r.w.mtp.?;
             const b = r.b;
             try glue.embedB16(f.set(), f.stream, b.ids, r.w.embed, b.me, n, D, 1);
+            // the head reads each row's next token: an image's rows one place on
+            if (f.images) |im| try im.v.splice(f.stream, im.slot, r.st.mtp_len + 1, r.st.mtp_len + 1 + n, b.me, 1);
             if (r.st.mtp_len == 0) try f.d.check(f.d.api.cuMemsetD8Async(b.me, 0, D * 2, f.stream.handle), "cuMemsetD8Async"); // position 0's embedding is zeroed
             try glue.rmsnorm(f.set(), f.stream, b.me, D, m.enorm, b.mcat, 2 * D, null, c.eps, n, D);
             try glue.rmsnorm(f.set(), f.stream, b.hin, D, m.hnorm, b.mcat + D * 2, 2 * D, null, c.eps, n, D);
