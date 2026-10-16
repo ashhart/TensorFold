@@ -44,6 +44,9 @@ const block_tests = @import("block_tests.zig");
 const act_rows_tests = @import("act_rows_tests.zig");
 const gdn_prep_tests = @import("gdn_prep_tests.zig");
 const qk_rows_tests = @import("qk_rows_tests.zig");
+const window_tests = @import("window_tests.zig");
+const moe_glue_tests = @import("moe_glue_tests.zig");
+const dense_rows_tests = @import("dense_rows_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -99,6 +102,9 @@ const usage =
     \\  exlr8-dense [DIR]         EXLR8 dense formats: decode bit-equal, FP64, row windows; DIR adds the real matrices
     \\  tree                      tree attention (committed keys and paths) against float64 references (synthetic)
     \\  block                     DFlash block attention over windowed contexts against float64 (synthetic)
+    \\  window                    sliding-window attention against float64 references (synthetic)
+    \\  moe-glue                  sigmoid top-k routing and the weighted combine against float64 references (synthetic)
+    \\  dense-rows                bf16 rows times weight rows (routers, heads) against float64 references (synthetic)
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
@@ -206,6 +212,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "window")) return window_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-glue")) return moe_glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "dense-rows")) return dense_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));

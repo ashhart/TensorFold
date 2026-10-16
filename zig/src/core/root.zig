@@ -32,6 +32,8 @@ pub const tree_round = @import("tree_round.zig");
 pub const attention_ref = @import("attention_ref.zig");
 pub const gdn_prep_ref = @import("gdn_prep_ref.zig");
 pub const qk_ref = @import("qk_ref.zig");
+pub const moe_ref = @import("moe_ref.zig");
+pub const dense_ref = @import("dense_ref.zig");
 
 test {
     _ = safetensors;
@@ -49,6 +51,8 @@ test {
     _ = attention_ref;
     _ = gdn_prep_ref;
     _ = qk_ref;
+    _ = moe_ref;
+    _ = dense_ref;
     _ = exl3_format;
     _ = exlr8;
     _ = eaq_container;
