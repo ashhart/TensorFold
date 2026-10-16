@@ -26,8 +26,8 @@ Start the newly built native server using the existing admitted configuration an
 Replace `local-model` and the URL below with the values exposed by that server.
 
 ```sh
-python3 tools/zig/check_glm_sampling.py http://127.0.0.1:8080 local-model --output glm-sampling-receipt.json
-python3 tools/bench_concurrent.py http://127.0.0.1:8080 local-model --tokens 64 --reps 2 --temperatures 0,1 --levels 1,4 --alone --serial --output glm-concurrent-receipt.json
+python3 tools/zig/check_glm_sampling.py http://127.0.0.1:8888 local-model --output glm-sampling-receipt.json
+python3 tools/bench_concurrent.py http://127.0.0.1:8888 local-model --tokens 64 --reps 2 --temperatures 0,1 --levels 1,4 --alone --serial --output glm-concurrent-receipt.json
 ```
 
 Require positive restored-token counts, native token hashes, drafted telemetry greater than zero, equality between
