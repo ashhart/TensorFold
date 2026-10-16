@@ -85,12 +85,14 @@ pub fn capacity(context: usize) usize {
 
 const Owned = struct {
     gpa: std.mem.Allocator,
-    lib: cuda.nccl.Library,
-    comm: cuda.nccl.Comm,
+    group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
     e: *engine.Engine,
     link: follow.Link,
     lanes: glm_lanes.Lanes,
 };
+
+/// The largest shard a rank sends by RoCE writes: a decode window's partials (8 rows of fp32) fit.
+const roce_cap = 512 << 10;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
@@ -104,23 +106,27 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
-    own.lib = try cuda.nccl.Library.open();
-    errdefer own.lib.close();
+    var lib = try cuda.nccl.Library.open();
+    errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
-    try own.lib.check(own.lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
-    own.comm = null;
-    try own.lib.check(own.lib.api.ncclCommInitRank(&own.comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
-    errdefer _ = own.lib.api.ncclCommDestroy(own.comm);
+    try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
+    var comm: cuda.nccl.Comm = null;
+    try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
+    own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
+    errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     const cap = capacity(o.context);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.lib, own.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set });
     errdefer own.e.deinit();
-    own.link = try follow.Link.init(gpa, ctx.d, &own.lib, own.comm, own.e.stream, cap);
+    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
+    errdefer if (own.group.fast) |f| f.deinit();
+    own.e.group = &own.group;
+    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, cap);
     errdefer own.link.deinit();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
     defer gpa.free(rooms);
     const mine: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    try ranks.gather(u64, ctx.d, &own.lib, own.comm, own.e.stream, p.rank, mine, rooms);
+    try ranks.gather(u64, ctx.d, &own.group.lib, own.group.comm, own.e.stream, p.rank, mine, rooms);
     var peer: ?Peer = null;
     for (rooms[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
         peer = .{ .bytes = r, .rank = q };
@@ -194,8 +200,7 @@ fn close(ptr: *anyopaque) void {
     own.lanes.deinit();
     own.link.deinit();
     own.e.deinit();
-    _ = own.lib.api.ncclCommDestroy(own.comm);
-    own.lib.close();
+    own.group.close();
     own.gpa.destroy(own);
 }
 

@@ -23,6 +23,8 @@ pub const Cancel = struct { ptr: ?*anyopaque, check: *const fn (?*anyopaque) boo
 
 /// The most drafts a chain holds (decode.DepthPolicy's top depth).
 pub const max_drafts = 3;
+/// A greedy pick as it crosses ranks: (value, id) and padding, so the RoCE gather (16-byte packs) can carry it.
+const pair_bytes = 16;
 
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
@@ -63,6 +65,7 @@ pub const Engine = struct {
     spans: []shard.Span, // every rank's vocabulary span
     lib: *const cuda.nccl.Library,
     comm: cuda.nccl.Comm,
+    group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     settings: ranks.Settings,
     m: fw.Modules,
     stream: cuda.Stream,
@@ -147,8 +150,9 @@ pub const Engine = struct {
         errdefer if (e.bs) |*b| b.deinit();
         e.hold = try cuda.DeviceBuffer.alloc(d, c.hidden * 2);
         errdefer e.hold.free();
-        e.pairs = try cuda.DeviceBuffer.alloc(d, 8 * world);
+        e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world);
         errdefer e.pairs.free();
+        try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world), "cuMemsetD8"); // each pair's padding stays zero
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
         errdefer e.smp.deinit();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
@@ -182,7 +186,7 @@ pub const Engine = struct {
     }
 
     fn exchange(e: *const Engine) fw.Exchange {
-        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm } };
+        return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .group = e.group } };
     }
 
     fn view(e: *Engine, b: *fw.Buffers, out: *[1]fw.Rank) fw.Forward {
@@ -462,7 +466,10 @@ pub const Engine = struct {
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
     fn draw(e: *Engine, logits: u64, rows: usize, first: u64, out: []u32) !void {
-        if (e.cur.sampling) |s| return e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
+        if (e.cur.sampling) |s| {
+            try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
+            return e.checkGathers(); // the draw read rows the forward's gathers made
+        }
         for (0..rows) |r| out[r] = try e.greedy(logits + r * e.share.vocab.len() * 2);
     }
 
@@ -473,12 +480,14 @@ pub const Engine = struct {
         a.add(logits);
         a.add(@as(i64, @intCast(e.share.vocab.len())));
         a.add(@as(u32, @intCast(e.share.vocab.lo)));
-        a.add(e.pairs.ptr + e.share.rank * 8);
+        a.add(e.pairs.ptr + e.share.rank * pair_bytes);
         try cuda.launch.launch(e.m.glue.top1, .{ .grid = .{ .x = 1 }, .block = .{ .x = 1024 } }, e.stream, &a);
-        try e.lib.check(e.lib.api.ncclAllGather(e.pairs.ptr + e.share.rank * 8, e.pairs.ptr, 2, .u32, e.comm, e.stream.handle), "ncclAllGather");
+        const mine = e.pairs.ptr + e.share.rank * pair_bytes;
+        if (e.group) |g| try g.allGather(e.stream, mine, e.pairs.ptr, pair_bytes) else try e.lib.check(e.lib.api.ncclAllGather(mine, e.pairs.ptr, pair_bytes, .u8, e.comm, e.stream.handle), "ncclAllGather");
         try e.stream.synchronize();
-        var all: [ranks.max_world][2]u32 = undefined; // Engine.init refuses a larger world
-        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * 8), "cuMemcpyDtoH");
+        try e.checkGathers();
+        var all: [ranks.max_world][4]u32 = undefined; // Engine.init refuses a larger world
+        try e.d.check(e.d.api.cuMemcpyDtoH_v2(&all, e.pairs.ptr, world * pair_bytes), "cuMemcpyDtoH");
         var pick = all[0];
         for (all[1..world]) |p| {
             const v: f32 = @bitCast(p[0]);
@@ -486,6 +495,11 @@ pub const Engine = struct {
             if (v > b or (v == b and p[1] < pick[1])) pick = p;
         }
         return pick[1];
+    }
+
+    /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
+    fn checkGathers(e: *const Engine) !void {
+        if (e.group) |g| try g.check();
     }
 
     fn heatRoot() []const u8 {

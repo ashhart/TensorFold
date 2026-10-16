@@ -134,7 +134,8 @@ pub const Pieces = struct {
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm },
+    // group: the main stream's all-gathers through it (RoCE writes for small ones on two ranks); side streams stay raw
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -175,6 +176,7 @@ pub const Forward = struct {
             },
             .nccl => |n| {
                 const r = f.ranks[0];
+                if (n.group) |g| return g.allGather(f.stream, r.b.gathered + r.w.share.rank * bytes, r.b.gathered, bytes);
                 const count = rows * c.hidden;
                 try n.lib.check(n.lib.api.ncclAllGather(r.b.gathered + r.w.share.rank * bytes, r.b.gathered, count, .f32, n.comm, f.stream.handle), "ncclAllGather");
             },
