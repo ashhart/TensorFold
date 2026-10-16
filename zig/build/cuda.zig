@@ -192,7 +192,7 @@ fn radioModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
 
 /// `zig build tf-h3 -Dnvcc=...`: libtf_h3.so, MiniMax H3's blocks for a host pipeline, with its own kernel image.
 fn h3Library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h3_image: ?std.Build.LazyPath) void {
-    const step = b.step("tf-h3", "libtf_h3.so: MiniMax H3 / FastH3's transformer blocks on CUDA in int8");
+    const step = b.step("tf-h3", "libtf_h3.so: MiniMax H3 / FastH3's transformer blocks on CUDA in bf16");
     const image = h3_image orelse {
         step.dependOn(&b.addFail("tf-h3 needs -Dnvcc").step);
         return;
