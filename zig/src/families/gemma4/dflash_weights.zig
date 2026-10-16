@@ -164,6 +164,14 @@ const Job = struct {
 
 /// The members' bf16 rows stacked along N, quantized to 4-bit groups of 64 on every core, packed for the reg kernel.
 fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
+    _ = try stackShape(c, prefix, members);
+    const bf16_env = std.c.getenv("GEMMA_DRAFT_BF16");
+    if (bf16_env != null and (std.mem.eql(u8, std.mem.span(bf16_env.?), "all") or std.mem.eql(u8, std.mem.span(bf16_env.?), members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
+    return quantized(gpa, device, c, owned, geo, prefix, members);
+}
+
+/// The stack's rows and columns: bf16 matrices of one width, n % 32 and k % 64 for the lane layout.
+fn stackShape(c: *const ckpt.Checkpoint, prefix: []const u8, members: []const []const u8) ![2]usize {
     var name: [160]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -175,8 +183,13 @@ fn quantizeStack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Chec
         k = t.shape[1];
     }
     if (k % 64 != 0 or n % 32 != 0) return error.BadDraftWeight;
-    const bf16_env = std.c.getenv("GEMMA_DRAFT_BF16");
-    if (bf16_env != null and (std.mem.eql(u8, std.mem.span(bf16_env.?), "all") or std.mem.eql(u8, std.mem.span(bf16_env.?), members[0]))) return bf16Stack(gpa, device, c, owned, prefix, members);
+    return .{ n, k };
+}
+
+/// The members' bf16 rows stacked along N, always 4-bit (the MTP assistant's linears and its tied head).
+pub fn quantized(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8) !Linear {
+    var name: [160]u8 = undefined;
+    const n, const k = try stackShape(c, prefix, members);
     const words = try gpa.alloc(u32, n * k / 8);
     defer gpa.free(words);
     const scales = try gpa.alloc(u16, n * k / 64);
@@ -233,7 +246,7 @@ fn parallel(gpa: std.mem.Allocator, job: Job, rows: usize) !void {
 }
 
 /// A bf16 vector copied into its own buffer (the checkpoint's buffers are released after load).
-fn vector(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), name: []const u8, len: usize) !Ref {
+pub fn vector(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), name: []const u8, len: usize) !Ref {
     const t = try c.get(name);
     if (t.dtype != .bf16 or t.count() != len) return error.BadDraftWeight;
     const buf = try device.buffer(len * 2, shared);
