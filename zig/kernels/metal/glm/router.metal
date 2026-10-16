@@ -172,6 +172,7 @@ inline float mul_add(float acc, float a, float b) { return a * b + acc; }
 inline float add_nc(float a, float b) { return a + b; }
 #pragma clang fp contract(on)
 template <int K, int NE, int RR, int C, int NT>
+[[max_total_threads_per_threadgroup(1024)]]
 [[kernel]] void custom_kernel_tf_glm5_fused_router_tg_331f012361__4096_288_1_8_1024_float_bfloat16_t_float(
   const device float* X [[buffer(0)]],
   const device bfloat16_t* RP [[buffer(1)]],

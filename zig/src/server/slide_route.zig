@@ -1,6 +1,7 @@
 //! A fact's questions asked about others the user knows, other things of its kind and the model: none of them its own.
 const std = @import("std");
 const wording = @import("slide_words.zig");
+const slide_span = @import("slide_span.zig");
 const Allocator = std.mem.Allocator;
 
 /// Whom a question about the user is also asked about: the nearest relations, most easily mistaken for the user's own.
@@ -16,9 +17,7 @@ pub fn others(a: Allocator, question: []const u8, subject: ?[]const u8, kinds: [
         const word = question[at[0]..at[1]];
         for (relations) |r| if (!std.ascii.eqlIgnoreCase(word, r)) try out.append(a, try std.mem.concat(a, u8, &.{ question[0..at[0]], r, question[at[1]..] }));
     } else for (relations) |r| if (try wording.about(a, question, r)) |q| try out.append(a, q);
-    if (subject) |s| if (std.ascii.findIgnoreCase(question, s)) |at| for (kinds) |k| {
-        try out.append(a, try std.mem.concat(a, u8, &.{ question[0..at], k, question[at + s.len ..] }));
-    };
+    if (subject) |s| for (kinds) |k| if (try slide_span.replace(a, question, s, k)) |other| try out.append(a, other);
     if (try wording.addressed(a, question)) |q| try out.append(a, q);
     return out.items;
 }
@@ -52,4 +51,20 @@ test "a fact's question is asked about other people, other things of its kind an
     var food = false;
     for (colour) |q| food = food or std.mem.eql(u8, q, "What food do I like best?");
     try std.testing.expect(food);
+}
+
+test "router alternatives replace each wording's own complete subject" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const projects = try others(a, "Who leads Project Aster?", "Project Aster", &.{"Project Boreal"});
+    try std.testing.expectEqual(@as(usize, 1), projects.len);
+    try std.testing.expectEqualStrings("Who leads Project Boreal?", projects[0]);
+    const people = try others(a, "What did Mira Solven build?", "Mira Solven", &.{"Odile Marchetti"});
+    try std.testing.expectEqual(@as(usize, 1), people.len);
+    try std.testing.expectEqualStrings("What did Odile Marchetti build?", people[0]);
+    try std.testing.expectEqual(@as(usize, 0), (try others(a, "Who leads Project Asterion?", "Project Aster", &.{"Project Boreal"})).len);
+    try std.testing.expectEqual(@as(usize, 0), (try others(a, "What is 17 plus 25?", null, &.{"Project Boreal"})).len);
+    // Another project wording follows a person and a null span; neither subject may carry across calls.
+    try std.testing.expectEqualStrings("Who leads Project Boreal?", (try others(a, "Who leads Project Aster?", "Project Aster", &.{"Project Boreal"}))[0]);
 }
