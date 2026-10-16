@@ -217,7 +217,10 @@ export class ModelLibrary {
     } finally { await handle.close() }
   }
 
-  private async inspect(root: Root, directory: string, names: string[], caps: EngineCapabilities, budget: ScanBudget, repo: string | null = null, revision: string | null = null, blobRoot: string | null = null): Promise<{ model: EngineLibraryModel; fingerprint: string }> {
+  private async inspect(root: Root, directory: string, rawNames: string[], caps: EngineCapabilities, budget: ScanBudget, repo: string | null = null, revision: string | null = null, blobRoot: string | null = null): Promise<{ model: EngineLibraryModel; fingerprint: string }> {
+    // macOS AppleDouble companions (._file) ride along on non-HFS+ volumes (exFAT drives);
+    // they are resource forks, never checkpoint assets, and their bytes are not safetensors.
+    const names = rawNames.filter((name) => !name.startsWith('._') || name === '._.')
     const model: EngineLibraryModel = { id: `local/${digest(directory)}`, repo, title: repo ?? path.basename(directory), path: directory, source: blobRoot ? 'huggingface' : 'folder', folderId: root.id, revision, modelType: null, format: null, complete: false, compatible: false, loadable: false, reason: null, weightsBytes: null, memoryFloorBytes: null, fitsMemory: null }
     let fingerprint = directory
     try {
