@@ -49,7 +49,13 @@ Receipts include token hashes supplied by the server, but the command does not r
 
 ## Publishing
 
-The receiver uses administrator-issued contributor tokens. Running locally needs no token or account.
+Running locally needs no token or account. Community contributors can get upload access immediately on [the benchmark board](https://tensorfold.dev/benchmarks), without an email request or administrator approval.
+
+To upload a saved receipt in your browser, choose **Upload result**, enter a public display name, select the JSON receipt and review its hardware, model and timing fields. Confirm the data to submit it; the browser creates upload access automatically. Nothing is sent during the receipt preview.
+
+To publish from the CLI, choose **Run the CLI** in that dialog, enter a display name and choose **Get upload access**. Copy the private token, then run the login command below. Keep the token private and save it before closing the page if you want to reuse it. It allows submissions and management of your own results, with up to 20 uploads per day; it does not grant administration access. Display names are self-chosen and do not verify an identity. Signup limits apply to reduce spam; complete standard runs publish automatically after the server checks them.
+
+Install or update the CLI using the [runbook](../RUNBOOK.md) before running the examples.
 
 ```sh
 # Paste an issued token at the hidden prompt.
@@ -70,7 +76,19 @@ tensorfold benchmark logout
 
 `TENSORFOLD_BENCHMARK_TOKEN` can supply a token for a single automation run; it is never saved into a receipt or printed. `--upload-url` selects another HTTPS receiver, and saved credentials are bound to that exact API URL. Redirects are not followed, and uploads and the public check connect directly: proxy variables are not used. Loopback HTTP is accepted for local development only. Before any upload, the receipt is checked with the board's own rules and the checkpoint must be public on Hugging Face.
 
-New submissions are pending moderation. Only approved submissions appear on [the benchmark board](https://tensorfold.dev/benchmarks). The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported.
+Complete standard community-v1 submissions are approved and published immediately on [the benchmark board](https://tensorfold.dev/benchmarks), after contributor authentication, daily quota checks, strict receipt validation, public-checkpoint lookup and server-side statistics/completeness checks. A complete standard run includes both workloads at the suite temperatures and seeds, five successful repetitions per cell, 256 output tokens, a managed single-rank execution, a checkpoint revision/configuration digest and reported GPU hardware. The same operation saves the receipt and its approval timestamp, and a successful upload returns the public result URL.
+
+Valid incomplete or nonstandard submissions remain pending review, and invalid submissions are rejected. Retries preserve the original submission status, so this policy does not automatically publish older pending or withdrawn results. The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported; automatic approval does not independently verify speed or hardware.
+
+## Contributor profiles and leaderboards
+
+Click a contributor name on [the benchmark dashboard](https://tensorfold.dev/benchmarks) to see their public benchmark history, model and hardware counts, personal best and earned milestones. Profiles include every approved receipt through pagination, not only the newest page. Profile links can be shared or opened directly. A contributor ID names an upload identity; self-chosen display names are not verified, and two identities with the same name remain separate.
+
+The performance map plots the visible protocol-complete greedy-chat medians by first-text latency and stream-delivery speed. Each point opens its receipt, with keyboard access; the sample count describes only the loaded page, and loading more adds older results. Model and hardware filters update the map and standings.
+
+**Most benchmarks** ranks contributors by their number of approved receipts. **Fastest run** ranks each contributor by their best protocol-complete greedy-chat stream-delivery median, using the same five-repeat, 256-token workload as the run board. The model, platform and hardware filters apply to both rankings and community counters. Different models and hardware have different limits; filter the view before comparing setups. All results remain community-reported.
+
+The profile achievement cabinet awards bronze, silver, gold and platinum trophies for published-run milestones at 1, 5, 10 and 100 runs, plus model and hardware exploration. Top contributor honours go to the highest global approved-run count; speed leader honours go to the highest global protocol-complete greedy-chat median. Awards use the unrounded global values, equal leaders share honours and missing speeds earn no speed trophy. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
 
 ## AMD (ROCm)
 
