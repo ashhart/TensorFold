@@ -137,3 +137,14 @@ pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
+
+/// Drama 3's kernels (drama3.metallib is built ahead of time); the kernel contract compiles them from this text.
+pub const drama3 = struct {
+    pub const common = @embedFile("drama3/d3_common.h");
+    pub const dense = @embedFile("drama3/dense.metal");
+    pub const gdn = @embedFile("drama3/gdn.metal");
+    pub const attn = @embedFile("drama3/attn.metal");
+    pub const moe = @embedFile("drama3/moe.metal");
+    pub const sample = @embedFile("drama3/sample.metal");
+    pub const codec = @embedFile("drama3/codec.metal");
+};
