@@ -4,6 +4,7 @@ const ckpt = @import("../../core/checkpoint.zig");
 const st = @import("../../core/safetensors.zig");
 const cfg = @import("config.zig");
 const affine = @import("affine.zig");
+const widths = @import("widths.zig");
 
 pub const Matrix = union(enum) {
     raw: ckpt.Tensor,
@@ -43,7 +44,7 @@ pub const Reader = struct {
             if (weight.shape[rank - 2] != n or weight.shape[rank - 1] != k or (rank == 3 and weight.shape[0] != experts)) return error.InvalidFlashMatrix;
             return .{ .raw = weight };
         }
-        const spec = (try r.config.quantization(path)) orelse return error.DisabledPackedProjection;
+        const spec = (try widths.quantization(r.config, path)) orelse return error.DisabledPackedProjection;
         const scales = try r.tensor(path, "scales");
         const biases = try r.tensor(path, "biases");
         const shape = try affine.matrix(entry(weight), entry(scales), entry(biases), spec);

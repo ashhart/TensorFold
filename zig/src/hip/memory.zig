@@ -61,6 +61,11 @@ pub const DeviceBuffer = struct {
         self.* = undefined;
     }
 
+    /// The device address of the first byte, as kernel arguments take it.
+    pub fn base(self: DeviceBuffer) u64 {
+        return @intFromPtr(self.ptr);
+    }
+
     /// The device address `offset` bytes in, as kernel arguments and device copies take it; past the end is refused.
     pub fn address(self: DeviceBuffer, offset: usize) runtime.Error!u64 {
         if (offset > self.len) return error.Invalid;
@@ -169,6 +174,17 @@ pub const HostBuffer = struct {
         try runtime.check(self.r.api.hipHostGetDevicePointer(&ptr, self.bytes.ptr, 0));
         if (ptr == null) return error.Invalid;
         return @intFromPtr(ptr);
+    }
+
+    /// Bytes `from..to` of this buffer, still pinned, for an async copy of part of it.
+    pub fn view(self: HostBuffer, from: usize, to: usize) HostBuffer {
+        return .{ .r = self.r, .bytes = self.bytes[from..to] };
+    }
+
+    /// The bytes as `T`s, the tail that does not fill one left out.
+    pub fn slice(self: HostBuffer, comptime T: type) []T {
+        const whole = self.bytes[0 .. self.bytes.len / @sizeOf(T) * @sizeOf(T)];
+        return @alignCast(std.mem.bytesAsSlice(T, @as([]align(@alignOf(T)) u8, @alignCast(whole))));
     }
 
     /// All streams using these bytes must have completed before release.
