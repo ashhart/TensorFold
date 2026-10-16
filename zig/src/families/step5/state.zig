@@ -103,7 +103,7 @@ pub const Cache = struct {
     }
 };
 
-const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order", "cat", "hid", "chain", "logits_all" };
+pub const fields = [_][]const u8{ "ids", "resid", "x", "q", "qn", "k", "v", "g", "o", "y", "shared", "gate", "up", "act", "eg", "eu", "ea", "ey", "logits32", "pick", "wts", "iq", "iqn", "ik", "iz", "iw", "scores", "sel", "xs", "sums", "offsets", "order", "cat", "hid", "chain", "logits_all" };
 
 /// Bytes of each Scratch buffer for `rows` rows at once, in `fields` order.
 fn sizes(c: *const cfg.Config, capacity: usize, rows: usize) [fields.len]usize {

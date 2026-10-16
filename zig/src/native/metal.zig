@@ -13,6 +13,7 @@ const glm_dsa = @import("glm_dsa_host.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const Slide = nemotron_slide.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
+const Resident = @import("resident.zig").Resident;
 
 pub const backends: []const []const u8 = &.{"metal"};
 pub const families: []const api.Family = &.{
@@ -64,7 +65,8 @@ const Host = struct {
     gpa: Allocator,
     m: *nemotron.Model,
     metal: *nemotron.backend.Metal,
-    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
+    warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
+    resident: ?Resident = null, // the weights, kept wired between requests by the ticker
     cfg: lanes.Config,
     clock: nemotron.timing.RoundClock,
     core: lanes.Engine,
@@ -94,6 +96,7 @@ const Host = struct {
         if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
+        if (h.resident) |*r| r.deinit();
         h.metal.deinit();
         h.m.deinit();
         h.gpa.destroy(h);
@@ -146,6 +149,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.m = m;
+    h.resident = null;
     const step = prefillStep(h.m.device);
     const capacity: usize = @intCast(if (window > 0) window else 1 << 18);
     h.metal = try nemotron.backend.Metal.init(gpa, h.m, .{
@@ -195,7 +199,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     errdefer if (h.learned) |*im| im.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
-    h.warm = .{ .queue = h.m.queue };
+    {
+        var list: std.ArrayList(mtl.Buffer) = .empty; // the shards and the weights in the kernels' layouts
+        defer list.deinit(gpa);
+        for (h.m.checkpoint.shards.items) |sh| try list.append(gpa, sh.buffer);
+        try list.appendSlice(gpa, h.m.weights.owned.items);
+        h.resident = try Resident.init(h.m.device, h.m.queue, list.items);
+    }
+    errdefer h.resident.?.deinit();
+    h.warm = (&h.resident.?).target();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
     if (o.slide) {

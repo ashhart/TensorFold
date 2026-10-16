@@ -5,12 +5,14 @@ const api = @import("engine_api");
 const tf = @import("tensorfold");
 const s5 = tf.step5;
 const lanes = tf.lanes;
+const Resident = @import("resident.zig").Resident;
 
 const Host = struct {
     gpa: std.mem.Allocator,
     model: *s5.Model,
     metal: *s5.backend.Metal,
-    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
+    warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
+    resident: ?Resident = null, // weights and scratch, kept wired between requests by the ticker
     config: lanes.Config,
     clock: lanes.backend.WallClock,
     core: lanes.Engine,
@@ -25,6 +27,7 @@ const Host = struct {
         if (h.cache) |*store| store.deinit();
         h.core.deinit();
         h.config.deinit(h.gpa);
+        if (h.resident) |*r| r.deinit();
         h.metal.deinit();
         h.model.deinit();
         h.gpa.destroy(h);
@@ -62,6 +65,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
+    h.resident = null;
     h.metal = try s5.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .streams = @max(o.lanes, 1), .budget = budget });
     errdefer h.metal.deinit();
     try h.metal.warm();
@@ -91,10 +95,27 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
         h.host.info_.prompt_cache = true;
         h.metal.room = .{ .ctx = h, .fit = fitCache };
     }
-    h.warm = .{ .queue = h.metal.model.queue };
+    try holdResident(h);
+    errdefer h.resident.?.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+}
+
+/// Weights, routers, both scratches and the tower's buffers join one residency set the idle keepalive uses.
+fn holdResident(h: *Host) !void {
+    var list: std.ArrayList(mtl.Buffer) = .empty;
+    defer list.deinit(h.gpa);
+    const m = h.model;
+    for (m.checkpoint.shards.items) |sh| try list.append(h.gpa, sh.buffer);
+    for (m.weights.layers) |l| if (l.ffn == .moe) try list.append(h.gpa, l.ffn.moe.router);
+    inline for (.{ &h.metal.scratch, &h.metal.prompt }) |sc| {
+        inline for (s5.state.fields) |f| try list.append(h.gpa, @field(sc, f));
+        try list.appendSlice(h.gpa, &sc.route);
+    }
+    if (m.vision) |v| try list.appendSlice(h.gpa, &.{ v.owned, v.scratch, v.patches.buf });
+    h.resident = try Resident.init(m.device, m.queue, list.items);
+    h.warm = (&h.resident.?).target();
 }
 
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.
