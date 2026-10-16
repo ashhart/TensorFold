@@ -45,6 +45,11 @@ test "the plan: the room pays the engine's own sequence, the other streams' fixe
     try expectEqual(@as(usize, 2), tight.pages);
     try expectEqual(@as(usize, 2), tight.snaps);
     try expectEqual(@as(u64, 104 * mib), tight.copied);
+    // no more pages than the streams beside the engine's hold at once, each at its window
+    const bounded = try kv.plan(nemotron, .{ .room = 40 * g, .engine = g, .lanes = 4, .window = 16384 + 16 });
+    try expectEqual(@as(usize, 3 * 33), bounded.pages);
+    try expectEqual(kv.split(2 * g, 48 * mib, null).snaps, p.snaps);
+    try expectEqual(@as(usize, kv.most_snaps), kv.split(16 * g, 48 * mib, 1000).snaps);
 }
 
 test "a promise holds pages from every other lease, take turns it into pages, finish gives all of it back" {

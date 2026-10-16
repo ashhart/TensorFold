@@ -32,15 +32,28 @@ __device__ __forceinline__ float half_sum(float v) {
     return v;
 }
 
+constexpr int PAGE = 512;  // rows a KV page holds: one attention chunk
+
+// Element offset of chunk c's first key row: contiguous rows, or the page the stream's table names (PT null: rows).
+__device__ __forceinline__ int64_t chunk_at(const int* PT, int64_t PS, int c, int KVD) {
+    return PT ? static_cast<int64_t>(PT[c]) * PS : static_cast<int64_t>(c) * PAGE * KVD;
+}
+
+// Element offset of key row k: its chunk's first row, then its row inside the chunk.
+__device__ __forceinline__ int64_t key_at(const int* PT, int64_t PS, int64_t k, int KVD) {
+    return chunk_at(PT, PS, static_cast<int>(k / PAGE), KVD) + (k % PAGE) * KVD;
+}
+
 }  // namespace
 
 // Row r's keys and values written at its position: K and V follow the query columns of each qkv row.
 extern "C" __global__ void tf_nemo_kv_write(const __nv_bfloat16* __restrict__ QKV, __nv_bfloat16* __restrict__ KC,
-                                             __nv_bfloat16* __restrict__ VC, const int* __restrict__ META, int NQKV, int QD, int KVD) {
-    const int64_t r = blockIdx.x, pos = META[0];
+                                             __nv_bfloat16* __restrict__ VC, const int* __restrict__ META, int NQKV, int QD, int KVD,
+                                             const int* __restrict__ PT, long long PS) {
+    const int64_t r = blockIdx.x, pos = META[0], at = key_at(PT, PS, pos + r, KVD);
     for (int o = threadIdx.x; o < KVD; o += blockDim.x) {
-        KC[(pos + r) * KVD + o] = QKV[r * NQKV + QD + o];
-        VC[(pos + r) * KVD + o] = QKV[r * NQKV + QD + KVD + o];
+        KC[at + o] = QKV[r * NQKV + QD + o];
+        VC[at + o] = QKV[r * NQKV + QD + KVD + o];
     }
 }
 
@@ -48,7 +61,8 @@ extern "C" __global__ void tf_nemo_kv_write(const __nv_bfloat16* __restrict__ QK
 extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_bfloat16* __restrict__ QKV, const __nv_bfloat16* __restrict__ KC,
                                                                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ META,
                                                                        float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                                                       int NQKV, int H, int HK, int G, int CH, int NCH, float scale) {
+                                                                       int NQKV, int H, int HK, int G, int CH, int NCH, float scale,
+                                                                       const int* __restrict__ PT, long long PS) {
     __shared__ __align__(16) float qs[GMAX][HD];
     __shared__ __align__(16) uint32_t kw[TILE][KW];
     __shared__ __align__(16) uint32_t vw[TILE][HD / 2];
@@ -66,11 +80,12 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk(const __nv_
         float m = -INFINITY, den = 0.0f, o[8];
 #pragma unroll
         for (int e = 0; e < 8; ++e) o[e] = 0.0f;
+        const int64_t cb = chunk_at(PT, PS, c, HK * HD) - static_cast<int64_t>(c) * CH * HK * HD;
         for (int key0 = c * CH; key0 < (c + 1) * CH && key0 < limit; key0 += TILE) {
             __syncthreads();
             for (int i = t; i < TILE * (HD / 2); i += 256) {
                 const int j = i / (HD / 2), w = i % (HD / 2);
-                const int64_t at = (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
+                const int64_t at = cb + (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
                 const bool in = key0 + j < limit;
                 kw[j][w] = in ? reinterpret_cast<const uint32_t*>(KC + at)[w] : 0u;
                 vw[j][w] = in ? reinterpret_cast<const uint32_t*>(VC + at)[w] : 0u;
@@ -187,6 +202,8 @@ struct AttnSegs {
     __nv_bfloat16* KC[MAXSEG];
     __nv_bfloat16* VC[MAXSEG];
     const int* META[MAXSEG];
+    const int* PT[MAXSEG];  // each stream's page table (null: its rows are contiguous)
+    long long PS;           // elements between pages
     int ROW0[MAXSEG];
     int N;
 };
@@ -201,10 +218,10 @@ extern "C" __global__ void tf_nemo_kv_write_segs(const AttnSegs sg, const __nv_b
     const int rq = blockIdx.x, k = seg_of(sg, rq);
     __nv_bfloat16* __restrict__ KC = sg.KC[k];
     __nv_bfloat16* __restrict__ VC = sg.VC[k];
-    const int64_t r = rq - sg.ROW0[k], pos = sg.META[k][0];
+    const int64_t r = rq - sg.ROW0[k], pos = sg.META[k][0], at = key_at(sg.PT[k], sg.PS, pos + r, KVD);
     for (int o = threadIdx.x; o < KVD; o += blockDim.x) {
-        KC[(pos + r) * KVD + o] = QKV[static_cast<int64_t>(rq) * NQKV + QD + o];
-        VC[(pos + r) * KVD + o] = QKV[static_cast<int64_t>(rq) * NQKV + QD + KVD + o];
+        KC[at + o] = QKV[static_cast<int64_t>(rq) * NQKV + QD + o];
+        VC[at + o] = QKV[static_cast<int64_t>(rq) * NQKV + QD + KVD + o];
     }
 }
 
@@ -231,11 +248,12 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_chunk_segs(const 
         float m = -INFINITY, den = 0.0f, o[8];
 #pragma unroll
         for (int e = 0; e < 8; ++e) o[e] = 0.0f;
+        const int64_t cb = chunk_at(sg.PT[k], sg.PS, c, HK * HD) - static_cast<int64_t>(c) * CH * HK * HD;
         for (int key0 = c * CH; key0 < (c + 1) * CH && key0 < limit; key0 += TILE) {
             __syncthreads();
             for (int i = t; i < TILE * (HD / 2); i += 256) {
                 const int j = i / (HD / 2), w = i % (HD / 2);
-                const int64_t at = (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
+                const int64_t at = cb + (static_cast<int64_t>(key0 + j) * HK + hk) * HD;
                 const bool in = key0 + j < limit;
                 kw[j][w] = in ? reinterpret_cast<const uint32_t*>(KC + at)[w] : 0u;
                 vw[j][w] = in ? reinterpret_cast<const uint32_t*>(VC + at)[w] : 0u;
@@ -350,7 +368,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_nemo_attn_merge_segs(const 
 extern "C" __global__ void __launch_bounds__(256, 2) tf_nemo_attn_chunk_pf(const __nv_bfloat16* __restrict__ QKV, const __nv_bfloat16* __restrict__ KC,
                                                                        const __nv_bfloat16* __restrict__ VC, const int* __restrict__ META,
                                                                        float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
-                                                                       int NQKV, int H, int HK, int G, int CH, int NCH, float scale) {
+                                                                       int NQKV, int H, int HK, int G, int CH, int NCH, float scale,
+                                                                       const int* __restrict__ PT, long long PS) {
     __shared__ __align__(16) float qs[GMAX][HD];
     __shared__ __align__(16) uint32_t kw[TILE][KW];
     __shared__ __align__(16) uint32_t vw[TILE][HD / 2];
@@ -370,11 +389,12 @@ extern "C" __global__ void __launch_bounds__(256, 2) tf_nemo_attn_chunk_pf(const
         for (int e = 0; e < 8; ++e) o[e] = 0.0f;
         constexpr int WPT = TILE * (HD / 2) / 256;  // a thread's words of a tile
         uint32_t nk[WPT], nv[WPT];                   // the next tile's, loading while this one computes
+        const int64_t cb = chunk_at(PT, PS, c, HK * HD) - static_cast<int64_t>(c) * CH * HK * HD;
         auto fetch = [&](int k0) {
 #pragma unroll
             for (int u = 0; u < WPT; ++u) {
                 const int i = t + 256 * u, j = i / (HD / 2), w = i % (HD / 2);
-                const int64_t at = (static_cast<int64_t>(k0 + j) * HK + hk) * HD;
+                const int64_t at = cb + (static_cast<int64_t>(k0 + j) * HK + hk) * HD;
                 const bool in = k0 + j < limit;
                 nk[u] = in ? reinterpret_cast<const uint32_t*>(KC + at)[w] : 0u;
                 nv[u] = in ? reinterpret_cast<const uint32_t*>(VC + at)[w] : 0u;

@@ -43,12 +43,20 @@ pub const Budget = struct {
     fixed: bool = false,
     /// The prompt cache's budget: its snapshot slots and its copied KV.
     cache: u64 = 0,
-    /// Snapshot slots (null: half the cache's bytes in slots, at most most_snaps).
+    /// Snapshot slots (null: half the cache's bytes in slots); most_snaps at most.
     snaps: ?usize = null,
+    /// Rows one stream holds at most (0: no bound): pages past what every other stream holds at once stay unmade.
+    window: u64 = 0,
 };
 
 /// The streams served, the cache's slots and copied-KV bytes, and the pages left for the streams.
 pub const Plan = struct { lanes: u32, snaps: usize, copied: u64, pages: usize };
+
+/// The prompt cache's split: slots for its snapshots, the rest for their copied KV rows (no slot: no cache).
+pub fn split(cache: u64, snap_bytes: u64, named: ?usize) struct { snaps: usize, copied: u64 } {
+    const snaps = @min(most_snaps, named orelse cache / 2 / snap_bytes, cache / snap_bytes);
+    return .{ .snaps = @intCast(snaps), .copied = if (snaps > 0) cache - snaps * snap_bytes else 0 };
+}
 
 /// The pool as room - engine - (lanes - 1) x fixed - snaps x snap_bytes - copied, a page a stream beside it at least.
 pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
@@ -59,12 +67,10 @@ pub fn plan(l: Layout, b: Budget) error{ NoStream, TooMany }!Plan {
     const fit = @min(extra, left / each);
     if (fit < extra and b.fixed) return error.TooMany;
     left -= fit * l.fixed_bytes;
-    const cache = @min(b.cache, left - fit * l.pageBytes());
-    const snaps = @min(b.snaps orelse @min(most_snaps, cache / 2 / l.snap_bytes), cache / l.snap_bytes);
-    const slots = snaps * l.snap_bytes;
-    const copied = if (snaps > 0) cache - slots else 0;
-    left -= slots + copied;
-    return .{ .lanes = @intCast(1 + fit), .snaps = @intCast(snaps), .copied = copied, .pages = @intCast(left / l.pageBytes()) };
+    const c = split(@min(b.cache, left - fit * l.pageBytes()), l.snap_bytes, b.snaps);
+    left -= c.snaps * l.snap_bytes + c.copied;
+    const most: u64 = if (b.window > 0) fit * l.pages(b.window) else std.math.maxInt(u64);
+    return .{ .lanes = @intCast(1 + fit), .snaps = c.snaps, .copied = c.copied, .pages = @intCast(@min(left / l.pageBytes(), most)) };
 }
 
 /// A stream's reservation: pages promised but not yet taken, and the pages it holds in token order (its table).

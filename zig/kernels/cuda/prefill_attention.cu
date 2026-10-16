@@ -1,4 +1,4 @@
-// Device code of src/tensorfold/cuda/kernels/prefill_attention.cu (lines 1-250, comments and ATen includes dropped), checked by zig/tests/cuda/copies.py.
+// Device code of src/tensorfold/cuda/kernels/prefill_attention.cu (comments, ATen includes dropped), paged keys added.
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
@@ -60,7 +60,7 @@ template <int D, int WARPS, int HPC, int NS>
 __global__ void __launch_bounds__(32 * WARPS, 1)
 pattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
              const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
-             int G, float scale) {
+             int G, float scale, const int* __restrict__ PT, long long PS) {
     constexpr bool causal = true;
     constexpr int skip = 0;
     const int HO = H;
@@ -75,6 +75,8 @@ pattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict_
            const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
            int G, float scale, int first, int skip) {
     constexpr bool causal = true;
+    constexpr const int* PT = nullptr;  // contiguous keys
+    constexpr long long PS = 0;
     const int HO = H;
     auto first_row = [=] { return first; };
 #include "prefill_attention_rows.cuh"
@@ -104,6 +106,8 @@ __global__ void __launch_bounds__(32 * WARPS, 1)
 full_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__ out, int W, int HO, float scale) {
     constexpr int HPC = 1, G = 1, p0 = 0, skip = 0;
     constexpr bool causal = false;
+    constexpr const int* PT = nullptr;  // contiguous keys
+    constexpr long long PS = 0;
     const int H = 3 * HO, HK = H;
     const __nv_bfloat16* __restrict__ q = qkv;
     const __nv_bfloat16* __restrict__ kc = qkv + HO * D;
@@ -245,7 +249,7 @@ vision_kernel(const __nv_bfloat16* __restrict__ qkv, __nv_bfloat16* __restrict__
 
 // Head dim 128, eight warps, eight query heads a block, eight staging slots (Nemotron's 16 heads a KV head).
 template __global__ void tf_prefill_attention::pattn_kernel<128, 8, 8, 8>(const __nv_bfloat16*,
-    const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float);
+    const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, int, int, int, int, int, float, const int*, long long);
 // Head dim 64, eight warps, four query heads a block, eight staging slots (LFM2's 4 heads a KV head, causal or trees).
 template __global__ void tf_prefill_attention::tree_kernel<64, 8, 4, 8>(const __nv_bfloat16*,
     const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*, const int*, int, int, int, int, int, float);

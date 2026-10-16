@@ -8,12 +8,14 @@ const Head = @import("cuda_mtp.zig").Head;
 const Lanes = @import("cuda_lanes.zig").Cuda;
 const lone = @import("cuda_lone.zig");
 const reuse = @import("cuda_reuse.zig");
+const pages_mod = @import("cuda_pages.zig");
+const kv = @import("core").kv_pool;
 
 pub const snap_bytes = reuse.bytes;
 pub const snap_save = reuse.save;
 pub const snap_restore = reuse.restore;
 pub const snap_drop = reuse.drop;
-pub const snap_ready = reuse.ready; // the spare Mamba buffers it sets aside come out of the cache's budget
+pub const snap_slots = reuse.slots; // the snapshot slots it makes come out of the cache's budget
 pub const kept_states = reuse; // their shape, a blank one and copies out and in, for the disk (--learn-conversations)
 const core = @import("core");
 
@@ -26,6 +28,7 @@ pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
+pub const window_rows: u32 = state.max_rows; // a request's last verify window: its pages hold that many rows past it
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null };
 pub const vision = @import("cuda_vision.zig");
@@ -56,7 +59,25 @@ pub const Loaded = struct {
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
     vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
     taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
+    /// The other streams' memory as one pool of KV pages (null: each allocates a window at its prefill).
+    layout: ?kv.Layout = null,
+    /// One kept snapshot's slot (its Mamba states).
+    snap_bytes: usize,
 };
+
+/// The pool behind the engine's own sequence: `streams` paged sequences and `pages` KV pages, made now.
+pub fn attach(p: *anyopaque, streams: u32, pages: usize) !void {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    own.pages = try pages_mod.Pages.init(own.gpa, own.e, streams, pages);
+    own.lanes.pages = own.pages;
+    own.lanes.paged_only = paging() == .all and streams > 0; // --parallel 1 has no paged stream: its own serves
+}
+
+/// Whether a request's caches fit now (the lane host's admission, on its engine thread).
+pub fn fits(p: *anyopaque, prompt: u32, max_tokens: u32) bool {
+    const own: *Owned = @ptrCast(@alignCast(p));
+    return own.lanes.fits(prompt, max_tokens);
+}
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
 pub fn linked(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]const u8 {
@@ -68,7 +89,7 @@ pub fn plainShared(arena: std.mem.Allocator, io: std.Io, dir: []const u8) !?[]co
     return core.shard_edit.plainShared(arena, io, dir);
 }
 
-const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null, taps: [1]u32 = undefined };
+const Owned = struct { gpa: std.mem.Allocator, e: *engine.Engine, head: ?*Head, lanes: Lanes, target: reuse.Target, carve: ?*cuda.Carveout, living: ?@import("cuda_sites.zig").Sites = null, taps: [1]u32 = undefined, pages: ?*pages_mod.Pages = null };
 
 /// Own-sequence graphs support both draw modes; drafting also captures the head.
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
@@ -114,6 +135,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
         .vision = e.vision,
         .taps = &own.taps,
+        .layout = if (o.slide or e.k.triton != null or paging() == .off) null else pages_mod.layout(e), // our glue pages; the learner reads windows
+        .snap_bytes = reuse.mambaBytes(e.c),
     };
 }
 
@@ -144,6 +167,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
 fn release(p: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(p));
     own.lanes.deinit();
+    if (own.pages) |x| x.deinit();
     if (own.living) |*s| s.deinit();
     if (own.head) |h| h.deinit();
     own.e.deinit();
@@ -168,6 +192,12 @@ fn openCarveout(gpa: std.mem.Allocator, ctx: *const cuda.Context) !?*cuda.Carveo
 fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
     c.close();
     gpa.destroy(c);
+}
+
+/// TF_KV_PAGES: 0 gives every stream a window at its prefill, as before the pool; all puts every stream on pages.
+fn paging() enum { off, on, all } {
+    const v = env("TF_KV_PAGES") orelse return .on;
+    return if (std.mem.eql(u8, v, "0")) .off else if (std.mem.eql(u8, v, "all")) .all else .on;
 }
 
 fn env(name: [:0]const u8) ?[]const u8 {

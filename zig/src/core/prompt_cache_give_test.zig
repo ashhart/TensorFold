@@ -76,3 +76,27 @@ test "kept states that cannot free enough all go but the restored one, and the s
     try std.testing.expectEqual(@as(usize, 0), s.entries.items.len);
     try std.testing.expectEqual(@as(usize, 0), f.live);
 }
+
+test "a store of `most` slots keeps no more states than that: a keep past them frees the least valuable first" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Fake = .{ .gpa = gpa };
+    var s = Store.init(gpa, f.snapshots(), .{ .min_prompt = 0 }, 1 << 20);
+    defer s.deinit();
+    s.most = 2;
+    try conversations(a, &f, &s);
+    var buf: [8]u32 = undefined;
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len); // the budget holds four, the slots two
+    try std.testing.expectEqualSlices(u32, &.{ 7, 8 }, ats(&s, &buf));
+    f.at = 10; // the pass stands at row 10
+    try std.testing.expect(s.keep(&c3_next, 10, null, &.{}, &.{})); // a keep no lookup made room for evicts first
+    try std.testing.expectEqual(@as(usize, 2), s.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 2), f.live);
+    _ = try s.lookup(a, &c2, 6, &.{}, &.{}, &.{}); // the pass will keep one state the store lacks: room made before it runs
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+    s.most = 0;
+    try std.testing.expect(!s.keep(&c2, 6, null, &.{}, &.{})); // no slot at all: refused, not saved
+    try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+}

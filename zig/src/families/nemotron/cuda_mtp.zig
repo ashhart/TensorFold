@@ -21,6 +21,7 @@ const meta_words = 32;
 pub const Part = struct {
     k_cache: u64,
     v_cache: u64,
+    table: u64 = 0, // its sequence's page table (0: contiguous rows)
     probs: u64,
     ids: u64,
     hidden: u64,
@@ -32,7 +33,7 @@ pub const Part = struct {
 };
 
 /// A stream's rows in a head forward: where they start, how many, its meta row and its head caches.
-const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64 };
+const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64, table: u64 = 0 };
 
 pub const Head = struct {
     e: *Engine,
@@ -148,15 +149,18 @@ pub const Head = struct {
         return @as(usize, h.e.max_len) * h.e.c.kv_heads * h.e.c.head_dim * 2;
     }
 
+    /// The head's caches zeroed (a paged sequence's pages are written before any read: not those) and position 0.
     pub fn reset(h: *Head) !void {
-        try h.e.ops().fill32(h.k_cache, 0, h.kvBytes() / 4);
-        try h.e.ops().fill32(h.v_cache, 0, h.kvBytes() / 4);
+        if (h.e.b.table == 0) {
+            try h.e.ops().fill32(h.k_cache, 0, h.kvBytes() / 4);
+            try h.e.ops().fill32(h.v_cache, 0, h.kvBytes() / 4);
+        }
         h.pos = 0;
     }
 
     /// MTPHead._forward: rows at the head's positions; with `tail`, the last row's output and draft-head logits.
     fn forward(h: *Head, rows: usize, tail: bool, meta: u64) !void {
-        return h.forwardSpans(&.{.{ .row0 = 0, .rows = rows, .meta = meta, .k_cache = h.k_cache, .v_cache = h.v_cache }}, tail);
+        return h.forwardSpans(&.{.{ .row0 = 0, .rows = rows, .meta = meta, .k_cache = h.k_cache, .v_cache = h.v_cache, .table = h.e.b.table }}, tail);
     }
 
     /// Each span's rows at its stream's head positions; with `tail`, each span's last row out as row k of the logits.
@@ -180,8 +184,10 @@ pub const Head = struct {
         for (spans) |s| {
             const r0: u64 = s.row0;
             const qkv = b.qkv + r0 * c.qkvDim() * 2;
-            try t.kvWrite(qkv, s.k_cache, s.v_cache, s.meta, s.rows, f.ashape());
-            try t.attention(qkv, s.k_cache, s.v_cache, s.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, f.ashape());
+            var at = f.ashape();
+            at.pt = s.table;
+            try t.kvWrite(qkv, s.k_cache, s.v_cache, s.meta, s.rows, at);
+            try t.attention(qkv, s.k_cache, s.v_cache, s.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
         }
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
         if (!tail) return;
@@ -333,7 +339,7 @@ pub const Head = struct {
         for (parts, spans[0..parts.len]) |p, *s| {
             try o.copy(h.hin + row0 * D * 2, p.hidden, p.keep * D * 2);
             try o.copy(h.tok + row0 * 4, p.sampled, p.keep * 4);
-            s.* = .{ .row0 = row0, .rows = p.keep, .meta = 0, .k_cache = p.k_cache, .v_cache = p.v_cache };
+            s.* = .{ .row0 = row0, .rows = p.keep, .meta = 0, .k_cache = p.k_cache, .v_cache = p.v_cache, .table = p.table };
             row0 += p.keep;
         }
         var live = parts.len;

@@ -1,4 +1,4 @@
-// The kernels' body; in scope: q, kc, vc, out, p0, W, H, HK, G, HO, scale, skip, causal and first_row().
+// The kernels' body; in scope: q, kc, vc, out, p0, W, H, HK, G, HO, scale, skip, causal, PT, PS and first_row().
     constexpr int C = D / 8, K16 = (D + 15) / 16, NB = 2 * K16;  // the head's 16-byte chunks, 16-dim steps, 8-dim tiles
     constexpr int CS = (NB + 7) / 8 * 8, RB = WARPS / HPC, THREADS = 32 * WARPS;  // CS: a staged key row's chunks
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
@@ -18,7 +18,9 @@
             const int key = key0 + i / NB, chunk = i % NB;
             const bool in = key < limit && (NB == C || chunk < C);  // past the filled keys or the head dim: zeros
             const int row = in ? key + (key < p0 ? 0 : skip) : 0;
-            cp16z(dst + sw<8 * CS>(i / NB, chunk), src + ((int64_t)row * HK + hk) * D + chunk * 8, in);
+            // a page's rows are contiguous: PT names each 512-row page, PS elements apart (null PT: one run of rows)
+            const int64_t at = PT ? (int64_t)PT[row / 512] * PS + (int64_t)(row % 512) * HK * D : (int64_t)row * HK * D;
+            cp16z(dst + sw<8 * CS>(i / NB, chunk), src + at + hk * D + chunk * 8, in);
         }
     };
     uint32_t qa[QREG ? K16 : 1][4];
