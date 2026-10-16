@@ -4,6 +4,8 @@ TensorFold 1.0.12 serves language models from a Zig binary on Apple Silicon and 
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
+Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
+
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
@@ -251,6 +253,7 @@ For cache-aware performance receipts, see [observed cache benchmark evidence](do
 The clients retain server usage and output fingerprints, and verify cold/reused states rather than inferring them.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for exactness, precision and performance gates.
+Coding agents should also load [docs/recipes/SKILL.md](docs/recipes/SKILL.md); agents that support skills can install it as `tensorfold-contributor`.
 TensorFold is Apache-2.0; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Contributors

@@ -12,7 +12,7 @@ This skill defines the conditions a contribution must satisfy; it does not appro
 
 Find the TensorFold checkout and its Git root before editing.
 A native checkout has `build.zig`, `.zig-version`, `zig/src/native/` and `docs/recipes/`.
-Read its scoped instructions, [CONTRIBUTING.md](../../CONTRIBUTING.md), [RUNBOOK.md](../../RUNBOOK.md) and [recipe index](README.md).
+Read any AGENTS.md in the folders you touch (the app has its own), [CONTRIBUTING.md](../../CONTRIBUTING.md), [RUNBOOK.md](../../RUNBOOK.md) and the [recipe index](README.md).
 For a GPU change, also read the complete [kernel contract](../kernel-contract.md) before choosing an implementation.
 Target `main`, the only branch, and preserve unrelated changes; a different local TensorFold checkout may be the frozen Python engine.
 
@@ -29,6 +29,8 @@ If that gate is missing, identify the missing decision before presenting the wor
 Do not silently lower a threshold, change its workload or replace an unavailable test with an easier one.
 The current `zig/gate.json` may have no entries; that is not permission to invent a release-wide speed target.
 Creating an issue, sending a PR, uploading results or changing a shared machine still needs the user's authorization.
+Keep one job per pull request; stack dependent ones, say what each sits on, and keep stacks short.
+Maintainers rebase at landing, so don't force-push a branch under review just to follow main.
 
 ## Read the right recipe and the code it describes
 
@@ -60,7 +62,9 @@ If documentation and implementation disagree, record the discrepancy and propose
 Adapt the family to the existing engine interfaces; do not add a parallel scheduler or a second copy of shared verification/cache machinery.
 An unsupported family is a bring-up task, not a reason to route production inference through Python, a CPU substitute or a serial-only workaround.
 Plain decoding remains the correctness oracle; disabling drafts must not be required for an advertised drafted path to work.
+Concurrent requests share rounds through the lane core, with drafting on for every stream the family admits; a drafts-off or serial fallback at some width or stream count is a bug, not a limit to document.
 Test the path the native server will actually call, including capability reporting and intentional refusals.
+A checkpoint whose config declares a vision tower needs image input in the engine's own kernels before the family is complete; until then, refuse image parts and `--vision` with a clear message and test that refusal.
 
 Keep stored weights and tokenizer assets unchanged.
 Respect each tensor's actual bit width, group size, strides, scales, bias convention and format metadata; mixed projections cannot share an incompatible fused kernel.
@@ -153,8 +157,10 @@ Inherited lean findings must be reported; the acceptance condition is zero new p
 Source modules stay at most 600 lines, with single-line comments/docstrings within 120 columns; put measurements in receipts or recipes.
 Run additional family/operator tests selected from the actual build targets and the affected recipe.
 CI runs `fuzz-cortheon` unconditionally; a focused local iteration is not the complete no-GPU receipt.
+Run a plain `zig build` as well, because the named steps skip some tools and only the plain build compiles every target.
 Use the existing packaging checks for changed assets or archives.
 
+Mac builds need Xcode's Metal toolchain (`xcrun metal`); Command Line Tools alone can't build the metallibs.
 On a Mac, a native build intended to run across supported Apple chips uses:
 
 ```sh
@@ -202,6 +208,8 @@ Keep receipts local unless upload has been explicitly authorized.
 Follow the existing [PR template](../../.github/pull_request_template.md).
 State the changed behavior, issue/gate, owning modules, commands, exit statuses, pass/fail/skip counts, exactness results, kernel summaries, before/after rates, cold-prefill impact and unrun platforms.
 Update the relevant recipe or capability documentation only as far as the new evidence supports it.
+Write the code for TensorFold rather than copying source, kernels or tables from other inference engines or projects.
+If something has to come from elsewhere, name its source and license in the PR and wait for the maintainer's decision.
 Preserve contributor authorship, required licenses and third-party notices; exclude private paths, hosts, credentials and confidential data from source, fixtures and public receipts.
 Commit under the contributor's GitHub noreply address with no AI-tool co-author or "Generated with" lines; a PR whose commits carry them lands as new commits credited with Co-authored-by and shows as closed, not merged.
 
