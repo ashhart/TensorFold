@@ -14,9 +14,9 @@ block FP8 (e4m3 in 128 x 128 blocks with `weight_scale_inv`).
 
 | Part | Where | Checked by |
 | --- | --- | --- |
-| Group-limited top-k routing, per-layer shared SwiGLU limit (GLM's bytes unchanged) | `ling-family`, commit 51c01573 | `glm-ref`, `glm-route-old`, `glm-route-ling` |
-| MLA at Ling's shape: 64 roped key columns, 128-wide heads, GPT-J rope, head-wise gate | f8e594f6, merged | `ling-mla`, `ling-mla-real`, `glm-mla-same` |
-| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), GLM's row path as is | b55aa13d, merged | `glm-kda-ling` |
+| Group-limited top-k routing, per-layer shared SwiGLU limit (GLM's bytes unchanged) | `glm_glue_moe.cuh` (`tf_glm_topk`) | `glm-ref`, `glm-route-old`, `glm-route-ling` |
+| MLA at Ling's shape: 64 roped key columns, 128-wide heads, GPT-J rope, head-wise gate | `glm_glue_attn.cuh`, `glm_glue_latent.cuh`, `block_mla.zig` | `ling-mla`, `ling-mla-real`, `glm-mla-same` |
+| KDA on Ling's layer 0 (q/k/v convs as one q\|k\|v conv), GLM's row path as is | `glm_kda.cu`, `block_kda.zig` | `glm-kda-ling` |
 | Config loader and weight map (all 214,025 names of the real index) | `zig/src/families/ling/config.zig`, `names.zig` | `zig build test-ling` |
 | Weight loader at TP=1: bf16, FP8 block, ModelOpt NVFP4 | `zig/src/families/ling/weights.zig`, `weights_proj.zig` | `ling-weights`, `ling-weights-real` |
 | Synthetic checkpoints in all three formats | `tf-cuda-test ling-synth` | its own name check |
@@ -121,7 +121,7 @@ disk / the sshfs mount:
 
 | Loader | cold load | host peak (VmHWM) | device peak |
 | --- | --- | --- | --- |
-| host packers per expert (c48be499) | 14.3 s / ~157 s | 8.0 GiB (the layer's mapped pages) | 7.9 GiB |
+| host packers per expert (before GPU packing) | 14.3 s / ~157 s | 8.0 GiB (the layer's mapped pages) | 7.9 GiB |
 | batches packed on the GPU | 6.1 s / 122 s | 1.3 GiB | 8.4 GiB (+ one stage) |
 
 From local disk the load runs at the read's rate (5-7 s to read the layer once single-threaded); from the mount the
@@ -134,14 +134,15 @@ Layers 64-71 clamp the shared expert and layers 65-71 the routed experts at L = 
 GLM's glue and the grouped expert kernels clamp the gate before SiLU, so Ling launches its own instances: the glue's
 `tf_ling_swiglu_512`/`_64` (`glue.swigluWith`) for the shared expert, dense and bf16 routed experts, and epilogue 4 of
 the FP8 and NVFP4 grouped kernels (decode and prompt), chosen by `experts.Layer.after`, which the Ling loader sets.
-Every kernel that existed before has the same SASS and resource usage as at a33dde0c (`cuobjdump`, all 40 fatbins);
-`ling-clamp-old` runs the kept FP8 (12 calls) and NVFP4 (13 calls) instances against a33dde0c's fatbins byte for byte.
+Every kernel that existed before has the same SASS and resource usage as at 6f583baf, the layer graph's commit
+(`cuobjdump`, all 40 fatbins); `ling-clamp-old` runs the kept FP8 (12 calls) and NVFP4 (13 calls) instances against
+6f583baf's fatbins byte for byte.
 
 At L = 10 the two orders give the same bf16 bytes: the kernels (and HF's bf16 `act_fn`) round SiLU to bf16 first, and
 bf16(silu(g)) is 10 for every bf16 g >= 10. They differ at small limits (L = 2: 16,255 of the 65,536 bf16 gates).
 `ling-clamp DIR` checks Ling's order against float64 at L = 10 and L = 2 on gates and ups straddling L: the glue at
 widths 1024 and 704 (worst 0.93 of 2^-7 relative; 0 bytes differ from GLM's order at 10, 6,794 at 2) and the clamped
-layer's grouped gate-up, decode and prompt rows (FP8 worst 0.090, NVFP4 0.102 of the bound). a33dde0c's binary and
+layer's grouped gate-up, decode and prompt rows (FP8 worst 0.090, NVFP4 0.102 of the bound). 6f583baf's binary and
 this one print the same digits on the real layers (71: rel L2 4.125e-3, 3.747e-3 without 7 flipped rows, decode rows
 3.893e-3; 65: 4.851e-3, 3.347e-3 without 14, 3.325e-3) and on the synthetic forward in all three formats, whose
 float64 references do not change either (the synthetic clamped layer never reaches g > 10). HF's clamp itself moves
@@ -158,8 +159,8 @@ upstream's `sample.cu` through GLM's sampler at TP=1. `native.zig` gives the ser
 16 rows, shared rounds unless `TF_LING_SHARED=0`; `TF_LING_PROMPT_STEPS=0` passes prompts whole) and the prompt
 cache's `snap_*` hooks: a kept state is the sequence's arena copied whole at a mark, and the lane backend restores it
 inside its own prompt pass. Ling's prompt arithmetic does not depend on where a chunk ends, so a mark may fall on any
-row (no `snap_grid`): the pass cuts its chunk there. There is no recorder hook (`features`): the drafter recorder
-(#848) is not on this branch.
+row (no `snap_grid`): the pass cuts its chunk there. There is no recorder hook (`features`) yet, so `--record` (#848)
+is refused for `bailing_hybrid`.
 
 `ling-lanes DIR OUT [REF] [--layers a,b]` drives the backend under upstream's round loop as the server's lane host
 does, prompts in 37-row chunks; every check compares tokens, and the engine-level ones bytes:
@@ -184,8 +185,8 @@ does, prompts in 37-row chunks; every check compares tokens, and the engine-leve
 | FP8 block | 2.09e-2 | 1.18e-2 | 2.10e-2 | 302/309 |
 | NVFP4 | 2.21e-2 | 1.38e-2 | 2.22e-2 | 294/309 |
 
-92 checks pass in each format. On the real FP8 release, `--layers 0,1,2,3` (the real embedding, layers 0-3, final
-norm and head; KDA and dense MLP only, 6 GB) passes the same 90 exactness checks; it has no float64 reference (an
+100 checks pass in each format. On the real FP8 release, `--layers 0,1,2,3` (the real embedding, layers 0-3, final
+norm and head; KDA and dense MLP only, 6 GB) passes the same exactness checks; it has no float64 reference (an
 MLA + MoE layer adds 8 GB). Mutations caught: committing every row on `keep`, a restore that keeps the fresh KDA copy
 bits, chunks not cut at marks, shared draws keyed one position early, a lane commit that keeps one row too many.
 
@@ -201,7 +202,7 @@ final-norm rows and the tokens after them), then chains up to 3 drafts, each ste
 `final_layernorm` output, as GLM's `decode.draft` does; the chain's rows are dropped before the next absorb. Kept
 prompt states copy the MTP cache too. The server loads it unless `--no-drafts`; the lane facts then say `mtp`.
 
-Checked (`ling-lanes ... --mtp`, 104 checks a format; acceptance on random weights says nothing about quality and is
+Checked (`ling-lanes ... --mtp`, 109 checks a format; acceptance on random weights says nothing about quality and is
 not reported as such): MTP-drafted replies, greedy and sampled, equal the plain ones; so do MTP-drafted passes
 resumed at 53 and 211 and every concurrent case; a prompt pass's MTP cache in 37-row chunks equals the serial MTP
 rows byte for byte; twins drafting chains of 3 and of 1 agree on tokens and first drafts over 6 windows, each
@@ -312,7 +313,7 @@ size.
 
 Each item stands alone.
 
-1. **Recorder.** Give `Lanes` a `features` hook (the final-norm rows `Engine.verify` already keeps) once #848 lands.
+1. **Recorder.** Give `Lanes` a `features` hook (the final-norm rows `Engine.verify` already keeps) for #848's recorder.
 2. **MTP acceptance.** Measure the MTP layer's acceptance on real text once a whole model runs (TP).
 3. **Fused projections.** Same-format q|k|v (and gate|up) rows as one weight per format, without the column copies.
 4. **Bf16 routed experts.** Add a grouped bf16 expert kernel, or quantize at load, and drop the per-expert lanes.
@@ -321,5 +322,3 @@ Each item stands alone.
 6. **EXL3.** Wire #832's reader behind the `config.Quant` extension point and lift the refusal.
 7. **An NVFP4 checkpoint.** Quantize the release with ModelOpt, keep the routers in bf16, and run `ling-weights` on
    it; the loader expects `weight`, `weight_scale`, `weight_scale_2` and `input_scale` per linear.
-8. **GPU packing of FP8 experts.** They pack on the host today (`Fp8Experts.packGateUp`); `modelopt.Packer` has the
-   NVFP4 experts' GPU packer to follow.
