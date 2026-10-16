@@ -9,6 +9,7 @@ const stream_k = @import("contract_stream.zig");
 const mamba_k = @import("contract_mamba.zig");
 const scan_k = @import("contract_scan.zig");
 const moe_k = @import("contract_nemo_moe.zig");
+const walk_k = @import("contract_walk.zig");
 
 const g = core.contract.gates;
 
@@ -86,6 +87,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&moes, [_]moe_k.Which{ .relu2, .combine, .combine_f32 }) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&moes) |*m| m.deinit();
     for (&moes) |*m| try kernels.append(a, m.kernel());
+    var walk = walk_k.Walk.init(a, &r, s, &l);
+    defer walk.deinit();
+    try kernels.append(a, walk.kernel());
     var streams: [stream_k.cases.len]stream_k.Stream = undefined;
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();

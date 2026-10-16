@@ -82,13 +82,24 @@ pub fn planCausal(l: *const Launcher, q: u64, out: u64, scores: u64, stats: u64,
     try c.add(d_c);
     try c.add(p.args);
     try c.add(layer_c);
-    try l.go(l.plan.apply[which], dim(tiles, blocks, rows), dim(256, 1, 1), 0, s, &c);
+    const apply = @divExact(heads, applyGroup(group, @intCast(tiles), heads, rows));
+    try l.go(l.plan.apply[which], dim(tiles, apply, rows), dim(256, 1, 1), 0, s, &c);
     var e: Args = .{};
     try e.add(partials);
     try e.add(out);
     try e.add(tiles);
     try e.add(d_c);
     try l.go(l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
+}
+
+/// Blocks under which the values' walk splits a KV head's query heads over more blocks.
+const apply_blocks = 128;
+
+/// Query heads an apply block takes: fewer while the grid is small (a head's sums do not depend on its block).
+fn applyGroup(group: usize, tiles: usize, heads: usize, rows: usize) usize {
+    var g = group;
+    while (g > 1 and tiles * @divExact(heads, g) * rows < apply_blocks) g = @divExact(g, smallestFactor(g));
+    return g;
 }
 
 fn smallestFactor(n: usize) usize {
@@ -185,4 +196,12 @@ pub fn planGdnReplay(l: *const Launcher, keep: u64, p: PlanRef, key_heads: usize
     try a.add(@as(c_int, @intCast(p.slots)));
     const wide: usize = if (dk == 128) 0 else 1;
     try l.go(l.plan.gdn_replay[wide], dim(@divExact(dv, 8), value_heads, p.slots * layers), dim(32, 8, 1), 0, s, &a);
+}
+
+test "a small walk splits the heads of a KV head, a wide one keeps them together" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, 1), applyGroup(16, 1, 32, 1));
+    try std.testing.expectEqual(@as(usize, 4), applyGroup(16, 2, 32, 8));
+    try std.testing.expectEqual(@as(usize, 16), applyGroup(16, 256, 32, 1));
+    try std.testing.expectEqual(@as(usize, 3), applyGroup(6, 16, 24, 1));
 }

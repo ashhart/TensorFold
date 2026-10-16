@@ -32,5 +32,6 @@ test {
     _ = @import("kernel_tests/flashnext_attn.zig");
     _ = @import("kernel_tests/nemotron/moe.zig");
     _ = @import("kernel_tests/nemotron/pick.zig");
+    _ = @import("kernel_tests/nemotron/attention.zig");
     _ = @import("kernel_tests/nemotron/fixture.zig");
 }

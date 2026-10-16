@@ -110,6 +110,20 @@ __device__ void plan_apply_body(const float* __restrict__ scores, const float* _
     for (int key = key0; key < stop;) {
         const int edge = min((key / kPageTokens + 1) * kPageTokens, stop);
         const long long slot0 = page_row(table[key / kPageTokens], plan.pool, kv, 0, d) + lane;
+        // eight values loaded ahead, then summed in key order: the loads overlap, the sums are the same
+        for (; key + 8 <= edge; key += 8) {
+            float ahead[8];
+#pragma unroll
+            for (int u = 0; u < 8; ++u)
+                ahead[u] = load(values, KIND, slot0 + static_cast<long long>((key + u) % kPageTokens) * d);
+#pragma unroll
+            for (int u = 0; u < 8; ++u) {
+#pragma unroll
+                for (int g = 0; g < kMaxGroup; ++g) {
+                    if (g < group) acc[g] += weights[g * 128 + key + u - key0] * ahead[u];
+                }
+            }
+        }
         for (; key < edge; ++key) {
             const float value = load(values, KIND, slot0 + static_cast<long long>(key % kPageTokens) * d);
 #pragma unroll

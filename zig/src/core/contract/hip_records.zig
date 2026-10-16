@@ -139,6 +139,92 @@ const own_records = [_]Record{
             .{ .vgprs = 9, .sgprs = 20, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    .{
+        .launch = .{
+            .name = "planned walk tf_plan_score_f16",
+            .symbol = "tf_plan_score_f16",
+            .image = "plan",
+            .threads = 128,
+            .dynamic = 16 * 128 * 4,
+        },
+        .usage = .{
+            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "planned walk tf_plan_score_bf16",
+            .symbol = "tf_plan_score_bf16",
+            .image = "plan",
+            .threads = 128,
+            .dynamic = 16 * 128 * 4,
+        },
+        .usage = .{
+            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 33, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 34, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 17, .sgprs = 29, .lds = 0, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "planned walk tf_softmax_stats",
+            .symbol = "tf_softmax_stats",
+            .image = "attention",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 9, .sgprs = 16, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 18, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 16, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 9, .sgprs = 18, .lds = 1024, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "planned walk tf_plan_apply_f16",
+            .symbol = "tf_plan_apply_f16",
+            .image = "plan",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "planned walk tf_plan_apply_bf16",
+            .symbol = "tf_plan_apply_bf16",
+            .image = "plan",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 57, .sgprs = 44, .lds = 8192, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "planned walk tf_sum_partials",
+            .symbol = "tf_sum_partials",
+            .image = "attention",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 5, .sgprs = 14, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 5, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 5, .sgprs = 14, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+            .{ .vgprs = 5, .sgprs = 16, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
+        },
+    },
 };
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
