@@ -79,6 +79,13 @@ pub const Engine = struct {
     }
 
     pub const addStream = open.add;
+    pub const addStreams = open.addStreams;
+    pub const max_together = open.max_together;
+
+    /// Whether the backend prefills several prompts in one pass (addStreams batches them).
+    pub fn batchesPrompts(e: *const Engine) bool {
+        return e.backend.vtable.prefill_many != null;
+    }
     pub const opened = open.opened;
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;

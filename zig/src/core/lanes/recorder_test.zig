@@ -22,7 +22,7 @@ const Case = struct {
     restored: u32 = 0,
 };
 
-const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true, chunks: usize = 0, planted: ?[2][]const u8 = null }; // chunks: prefill_step; planted: a link's target and name
+const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true, chunks: usize = 0, planted: ?[2][]const u8 = null, batched: bool = false, memory_lanes: ?usize = null }; // chunks: prefill_step; planted: a link's target and name
 
 var costs: [16]Cost = undefined;
 
@@ -64,13 +64,13 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
     const dir = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var cfg = try Config.init(gpa, model(mode), 16, 15);
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = mode.chunks };
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = mode.chunks, .memory_lanes = mode.memory_lanes };
     defer target.deinit();
     var recorder = try rec.Recorder.init(gpa, io, dir, &.{ 30, 31 });
     recorder.floor = 0;
     defer recorder.deinit();
     if (mode.planted) |p| try recorder.space.symLink(io, p[0], p[1], .{});
-    const inner = if (mode.chunks > 0) target.stepped() else target.backend();
+    const inner = if (mode.batched) target.batched() else if (mode.chunks > 0) target.stepped() else target.backend();
     var recorded = try rec.Recorded.init(inner, &recorder);
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, if (record) recorded.backend() else inner, clock.clock());
@@ -96,7 +96,14 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         s.deinit(gpa);
         p.deinit();
     };
-    for (streams) |*s| if (mode.chunks > 0) {
+    if (mode.batched) {
+        const ss = try a.alloc(*sm.Stream, streams.len);
+        for (streams, ss) |*s, *p| p.* = s;
+        const errs = try a.alloc(?anyerror, streams.len);
+        engine.addStreams(ss, errs);
+        for (errs) |err| if (err) |e| return e;
+        try std.testing.expectEqual(@as(usize, if (mode.memory_lanes == null) 1 else 0), target.many_passes);
+    } else for (streams) |*s| if (mode.chunks > 0) {
         var first = true;
         while (!try engine.fillStream(s, first)) first = false;
     } else try engine.addStream(s);
@@ -164,6 +171,11 @@ test "shared rounds: each stream's files hold its own rows, batched or not" {
     for ([_]bool{ true, false }) |shared| {
         try expectSame(&.{ .{ .prompt = &p1 }, .{ .prompt = &p2, .sampling = sampled }, .{ .prompt = &long, .drafts = false } }, .{ .shared = shared });
     }
+}
+
+test "batched prompts record each stream's own rows, also after a refused batch falls back to solo" {
+    try expectSame(&.{ .{ .prompt = &p1 }, .{ .prompt = &p2, .sampling = sampled }, .{ .prompt = &long, .drafts = false } }, .{ .batched = true });
+    try expectSame(&.{ .{ .prompt = &p1, .max_new = 1 }, .{ .prompt = &p2, .max_new = 1 } }, .{ .batched = true, .memory_lanes = 1 });
 }
 
 test "a restored prompt's files start at the first row the pass computed" {
