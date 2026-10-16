@@ -100,16 +100,16 @@ inline float h3_mod(float x, float inv, float w, float scale, float shift) {
   for (int j = 0; j < 128; j++) Y[base + j] = bfloat(float(Y[base + j]) + float(bfloat(c[j] * float(G[base + j]))));
 }
 
-// silu(gate) * value in bf16 from the fused first projection's rows [value | gate]. Threads [N, M, 1].
+// silu(gate) * value in bf16 from the first projection's rows, [value | gate] or with P[2] [gate | value]. [N, M, 1].
 [[kernel]] void h3_swiglu(
   const device bfloat* F [[buffer(0)]],
   const constant int32_t* P [[buffer(1)]],
   device bfloat* A [[buffer(2)]],
   uint3 at [[thread_position_in_grid]]) {
-  const int M = P[0], N = P[1];
+  const int M = P[0], N = P[1], gate = P[2] ? 0 : N;
   if (int(at.x) >= N || int(at.y) >= M) return;
   const device bfloat* f = F + long(at.y) * 2 * N;
-  const float g = float(f[N + at.x]), v = float(f[at.x]);
+  const float g = float(f[gate + at.x]), v = float(f[N - gate + at.x]);
   const float silu = float(bfloat(g * float(bfloat(1.0f / (1.0f + exp(-g))))));
   A[long(at.y) * N + at.x] = bfloat(silu * v);
 }

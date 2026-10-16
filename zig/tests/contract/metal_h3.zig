@@ -9,7 +9,7 @@ const ref = @import("metal_h3_ref.zig");
 const c = contract.spec;
 const g = contract.gates;
 
-pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, heads, pool, tile_scores, coarse, attention, modulation };
+pub const Which = enum { rows_in, rows_out, norm, final_norm, gate_add, gate_mix, swiglu, swiglu_gate_first, heads, pool, tile_scores, coarse, attention, modulation };
 
 /// The geometry the test kernels are compiled for: two heads, up to 16 tiles of 64 slots.
 const heads = 2;
@@ -54,6 +54,7 @@ pub fn spec(w: Which) c.Spec {
         .gate_add => .{ .name = "metal h3 gated add h3_gate_add", .accum = .none, .depth = none, .mids = 1, .out = .bf16, .in_place = true, .served = &.{.{ .rows = 16, .n = 5376, .k = 1 }} },
         .gate_mix => .{ .name = "metal h3 pooled branch mix h3_gate_mix", .accum = .none, .depth = none, .mids = 1, .out = .bf16, .in_place = true, .tiles = .{ .{ .size = 64 }, .{}, .{} }, .served = &.{.{ .rows = slots, .n = heads * 128, .k = 1 }} },
         .swiglu => .{ .name = "metal h3 SwiGLU h3_swiglu", .accum = .none, .depth = none, .ops = 4, .mids = 2, .out = .bf16, .tiles = .{ .{}, .{ .size = 256 }, .{} }, .served = &.{.{ .rows = 16, .n = 14336, .k = 1 }} },
+        .swiglu_gate_first => .{ .name = "metal h3 SwiGLU gate first h3_swiglu", .accum = .none, .depth = none, .ops = 4, .mids = 2, .out = .bf16, .tiles = .{ .{}, .{ .size = 256 }, .{} }, .served = &.{.{ .rows = 16, .n = 14336, .k = 1 }} },
         .heads => .{ .name = "metal h3 head layout h3_heads", .accum = .f32, .depth = headChain, .ops = 8, .mids = 2, .out = .bf16, .served = &.{ .{ .rows = slots, .n = heads * 128, .k = 64 }, .{ .rows = slots, .n = heads * 128, .k = 128 } }, .sums = norm_sums },
         .pool => .{ .name = "metal h3 tile means h3_pool", .accum = .f32, .depth = poolChain, .ops = 1, .out = .f32, .served = &.{.{ .rows = tiles, .n = 128, .k = 64 }}, .sums = .{ .bf16 = 0, .f16 = 0, .exact = false, .why = "a mean of at most 64 bf16 values: no sum reaches past fp16's range" } },
         .tile_scores => .{ .name = "metal h3 tile scores h3_tile_scores", .accum = .f32, .depth = kChain, .ops = 1, .out = .f32, .served = &.{.{ .rows = tiles, .n = tiles, .k = 128 }} },
@@ -72,7 +73,7 @@ fn function(w: Which) []const u8 {
         .final_norm => "h3_final_norm",
         .gate_add => "h3_gate_add",
         .gate_mix => "h3_gate_mix",
-        .swiglu => "h3_swiglu",
+        .swiglu, .swiglu_gate_first => "h3_swiglu",
         .heads => "h3_heads",
         .pool => "h3_pool",
         .tile_scores => "h3_tile_scores",
@@ -192,7 +193,8 @@ pub const H3 = struct {
             .final_norm => ref.finalNorm(self.in, s, scratch, want, mag),
             .gate_add => ref.gated(self.in, false, want, mag),
             .gate_mix => ref.gated(self.in, true, want, mag),
-            .swiglu => ref.swiglu(self.in, want, mag),
+            .swiglu => ref.swiglu(self.in, false, want, mag),
+            .swiglu_gate_first => ref.swiglu(self.in, true, want, mag),
             .heads => ref.heads(self.in, s, scratch, want, mag),
             .pool => ref.pool(self.in, s, scratch, want, mag),
             .tile_scores => ref.scores(self.in, s, scratch, want, mag),
