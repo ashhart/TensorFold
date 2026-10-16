@@ -22,6 +22,8 @@ pub const Kind = struct {
     draft_store: mtl.Pipeline,
     draft_add: mtl.Pipeline,
     draft_swiglu: mtl.Pipeline,
+    /// gemma_assist_input: the MTP assistant's rows, the pending token's embedding beside a hidden row.
+    assist_input: mtl.Pipeline,
     /// gemma_prompt_attention: a prompt chunk's rows over the cache, on the tensor units.
     prompt_attn: mtl.Pipeline,
     /// gemma_decode_attention: decode rows' partials on the tensor units, a key head's query heads as one tile.
@@ -32,11 +34,12 @@ pub const Kind = struct {
     block: usize,
     heads_per_kv: usize,
 
-    fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, global: bool) !Kind {
+    /// `q_only`: the projection gemma_qkv_prep reads is q alone (the MTP assistant's layers, which have no k or v).
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, global: bool, q_only: bool) !Kind {
         const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
         const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
         const shape: [3]usize = if (global) .{ 64, 1, 4 } else .{ 128, 4, 4 };
-        const width = geo.query_heads * dh + nk * dh * @as(usize, if (global) 1 else 2);
+        const width = geo.query_heads * dh + (if (q_only) 0 else nk * dh * @as(usize, if (global) 1 else 2));
         const text = try std.fmt.allocPrint(a,
             \\#define D {d}
             \\#define T 256
@@ -59,7 +62,7 @@ pub const Kind = struct {
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         var k: Kind = undefined;
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write", "gemma_draft_store", "gemma_draft_add", "gemma_draft_swiglu" }) |field, name|
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "assist_input" }, .{ "gemma_embed", "gemma_rms_looped", "gemma_qkv_prep", "gemma_attention_partial", "gemma_attention_merge", "gemma_attn_tail", "gemma_dense_tail", "gemma_geglu", "gemma_softcap", "gemma_rope_freqs", "gemma_kv_write", "gemma_draft_store", "gemma_draft_add", "gemma_draft_swiglu", "gemma_assist_input" }) |field, name|
             @field(k, field) = try mtl.Pipeline.init(device, lib, name, false);
         {
             const body = try frags.source(device, a, prompt_attention);
@@ -78,8 +81,8 @@ pub const Kind = struct {
         return k;
     }
 
-    fn deinit(k: Kind) void {
-        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "prompt_attn", "decode_attn" }) |field| @field(k, field).deinit();
+    pub fn deinit(k: Kind) void {
+        inline for (.{ "embed", "rms", "qkv", "partial", "merge", "attn_tail", "dense_tail", "geglu", "softcap", "freqs", "kv_write", "draft_store", "draft_add", "draft_swiglu", "assist_input", "prompt_attn", "decode_attn" }) |field| @field(k, field).deinit();
     }
 };
 
@@ -88,9 +91,9 @@ pub const Kernels = struct {
     global: Kind,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Kernels {
-        const s = try Kind.init(a, device, geo, false);
+        const s = try Kind.init(a, device, geo, false, false);
         errdefer s.deinit();
-        return .{ .sliding = s, .global = try Kind.init(a, device, geo, true) };
+        return .{ .sliding = s, .global = try Kind.init(a, device, geo, true, false) };
     }
 
     pub fn kind(k: *const Kernels, global: bool) *const Kind {

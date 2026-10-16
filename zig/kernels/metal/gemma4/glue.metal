@@ -454,3 +454,21 @@ kernel void gemma_draft_add(device bfloat* H [[buffer(0)]], const device bfloat*
                             uint i [[thread_position_in_grid]]) {
   H[i] = bfloat(float(H[i]) + float(Y[i]));
 }
+
+// The MTP assistant's rows [embedding | H's row], 2 D wide: gemma_embed's on ids[r * ist.x] (a pick), kept in vocab.
+kernel void gemma_assist_input(const device uint* ids [[buffer(0)]], constant uint2& ist [[buffer(1)]],
+                               const device uchar* weight [[buffer(2)]], const device bfloat* scales [[buffer(3)]],
+                               const device bfloat* biases [[buffer(4)]], const device bfloat* H [[buffer(5)]],
+                               device bfloat* out [[buffer(6)]], constant float& scale [[buffer(7)]],
+                               uint2 pos [[thread_position_in_grid]]) {
+  const uint b = pos.x, r = pos.y;
+  const size_t id = metal::min(ids[r * ist.x], ist.y - 1);
+  const uchar v = weight[id * (D / 2) + b];
+  const size_t g = id * (D / 64) + (2 * b) / 64;
+  const float s = float(scales[g]), z = float(biases[g]);
+  device bfloat* row = out + size_t(r) * 2 * D;
+  row[2 * b] = bfloat(float(bfloat(s * float(v & 0xf) + z)) * scale);
+  row[2 * b + 1] = bfloat(float(bfloat(s * float(v >> 4) + z)) * scale);
+  row[D + 2 * b] = H[size_t(r) * D + 2 * b];
+  row[D + 2 * b + 1] = H[size_t(r) * D + 2 * b + 1];
+}
