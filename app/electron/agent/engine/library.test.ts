@@ -207,6 +207,17 @@ try {
   const budgetFound = await budgeted.addFolder(bigModels)
   assert.equal(budgetFound.truncated, true)
   assert.match(budgetFound.warnings.join(' '), /safety limit/)
+  // The budget is the whole scan's: two checkpoints whose indexes each fit it stop the scan together.
+  const scanWide = path.join(root, 'Scan Budget')
+  const scanPad = `{"metadata":{"pad":"${'x'.repeat(4 * 1024 * 1024)}"},"weight_map":{"w":"model.safetensors"}}`
+  for (const name of ['first', 'second']) {
+    await checkpoint(path.join(scanWide, name))
+    await fs.writeFile(path.join(scanWide, name, 'model.safetensors.index.json'), scanPad)
+  }
+  const scanWideFound = await library({ appHome: path.join(root, 'scan-budget-app'), limits: { metadataBytes: 6 * 1024 * 1024 } }).addFolder(scanWide)
+  assert.equal(scanWideFound.truncated, true, 'two 4 MiB indexes pass a 6 MiB budget together')
+  assert.match(scanWideFound.warnings.join(' '), /safety limit/)
+  assert.equal(scanWideFound.models.length, 1, 'the first checkpoint fits the budget alone')
 
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')
