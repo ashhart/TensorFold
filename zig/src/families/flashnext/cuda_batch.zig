@@ -104,6 +104,14 @@ pub fn Pass(comptime Tri: type) type {
 
         /// qmm.cu's lane tile over m rows: out bf16 [m, n] (sk 1) or the unreduced fp32 slices [sk, m, n] in part.
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !void {
+            if (w.native) |native| {
+                if (sk == 1) return self.k.native_lane.matmul(self.stream, x, w.k, m, native, out, self.s.native_part);
+                // Legacy callers consume SK slices; the native lane has already reduced its own shape-driven slices.
+                try self.k.native_lane.matmulF32(self.stream, x, w.k, m, native, part, self.s.native_part);
+                const bytes = m * w.n * 4;
+                if (sk > 1) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), self.stream.handle), "cuMemsetD8Async");
+                return;
+            }
             const bm: usize = 16;
             const bn: usize = 64;
             const k = w.k;
@@ -184,6 +192,16 @@ pub fn Pass(comptime Tri: type) type {
             const norm = s.norm + r0 * wide * 2;
             const act = s.act + r0 * low * 2;
             const xs_act = s.xs_act + r0 * (low / 32) * 4;
+            if (hc_w.down.native) |down| {
+                const up = hc_w.up.native orelse return error.UnexpectedTensor;
+                try self.tri.hcNormalize(h, pss, hc_w.scale.ptr, norm, eps, n, dims, streams);
+                try self.k.native_lane.matmulF32(self.stream, norm, wide, n, down, s.hc_part, s.native_part);
+                const inj_ptr = if (hc_w.has_inj == 1) inj else act;
+                try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
+                try self.k.native_lane.matmul(self.stream, act, low, n, up, s.hc_up, s.native_part);
+                try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
+                return;
+            }
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
             const inj_ptr = if (hc_w.has_inj == 1) inj else act;
             try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, hc_sk, n, streams, low, hc_w.n_down, hc_w.has_inj);

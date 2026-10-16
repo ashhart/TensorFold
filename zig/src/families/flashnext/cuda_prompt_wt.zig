@@ -109,7 +109,9 @@ pub const Store = struct {
         self.nheld = 0;
     }
 
-    pub fn hold(self: *Store, key: []const u8) !Tensor {
+    pub fn hold(self: *Store, requested: []const u8) !Tensor {
+        var mapped: [512]u8 = undefined;
+        const key = try self.resolveKey(requested, &mapped);
         const file = try self.shard(key);
         for (self.held[0..self.nheld]) |*h| {
             if (std.mem.eql(u8, h.rel, file)) return h.file.get(key) orelse return error.MissingTensor;
@@ -136,6 +138,23 @@ pub const Store = struct {
         self.rel = &.{};
     }
 
+    pub fn resolveKey(self: *const Store, requested: []const u8, buf: []u8) ![]const u8 {
+        const wm = self.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
+        if (wm.object.contains(requested)) return requested;
+        const aliases = .{
+            .{ "language_model.model.", "model.language_model." },
+            .{ "language_model.lm_head.", "lm_head." },
+            .{ "language_model.mtp.", "mtp." },
+        };
+        inline for (aliases) |pair| {
+            if (std.mem.startsWith(u8, requested, pair[0])) {
+                const name = try std.fmt.bufPrint(buf, "{s}{s}", .{ pair[1], requested[pair[0].len..] });
+                if (wm.object.contains(name)) return name;
+            }
+        }
+        return error.MissingTensor;
+    }
+
     fn shard(self: *Store, key: []const u8) ![]const u8 {
         const wm = self.parsed.value.object.get("weight_map") orelse return error.MissingTensor;
         const v = wm.object.get(key) orelse {
@@ -154,7 +173,9 @@ pub const Store = struct {
         self.file = try Shard.load(self.gpa, self.io, self.path);
     }
 
-    pub fn tensor(self: *Store, key: []const u8) !Tensor {
+    pub fn tensor(self: *Store, requested: []const u8) !Tensor {
+        var mapped: [512]u8 = undefined;
+        const key = try self.resolveKey(requested, &mapped);
         try self.use(key);
         return self.file.?.get(key) orelse {
             std.debug.print("absent {s}\n", .{key});
@@ -179,24 +200,7 @@ pub const Face = struct {
     routed: bool,
 };
 
-pub const Q4 = struct {
-    w: cuda.DeviceBuffer,
-    s: cuda.DeviceBuffer,
-    b: cuda.DeviceBuffer,
-    n: usize,
-    k: usize,
-
-    pub fn free(self: *Q4) void {
-        self.w.free();
-        self.s.free();
-        self.b.free();
-    }
-
-    pub fn empty(d: *cuda.Driver) Q4 {
-        const z: cuda.DeviceBuffer = .{ .d = d, .ptr = 0, .len = 0 };
-        return .{ .w = z, .s = z, .b = z, .n = 0, .k = 0 };
-    }
-};
+pub const Q4 = @import("cuda_projection.zig").Projection;
 
 pub const HcW = struct {
     scale: cuda.DeviceBuffer,
@@ -254,6 +258,8 @@ pub fn cat(gpa: std.mem.Allocator, parts: []const []const u8) ![]u8 {
 pub fn hostOnly(name: []const u8) bool {
     return std.mem.indexOf(u8, name, ".ple_embedding.ngram_embedding.") != null or
         std.mem.startsWith(u8, name, "language_model.mtp.") or
+        std.mem.startsWith(u8, name, "mtp.") or
+        std.mem.startsWith(u8, name, "model.visual.") or
         std.mem.startsWith(u8, name, "vision_tower.");
 }
 
@@ -284,6 +290,7 @@ pub fn deviceBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
 pub fn asF32(gpa: std.mem.Allocator, t: Tensor) ![]f32 {
     if (t.rank != 1) return error.UnexpectedTensor;
     const out = try gpa.alloc(f32, t.dim(0));
+    errdefer gpa.free(out);
     if (t.dtype == .f32 and t.bytes.len == out.len * 4) {
         for (out, 0..) |*o, i| o.* = @bitCast(std.mem.readInt(u32, t.bytes[4 * i ..][0..4], .little));
     } else if (t.dtype == .bf16 and t.bytes.len == out.len * 2) {
@@ -330,6 +337,9 @@ pub fn join3(gpa: std.mem.Allocator, store: *Store, buf: []u8, prefix: []const u
 
 pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefix: []const u8, inject: bool) !HcW {
     var buf: [180]u8 = undefined;
+    const down_name = try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down.weight", .{prefix});
+    const down_tensor = try store.tensor(down_name);
+    if (down_tensor.dtype == .bf16) return loadDenseHc(gpa, driver, store, prefix, inject);
     const down = try join3(gpa, store, &buf, prefix, ".input_mix_weight_down");
     defer gpa.free(down.w);
     defer gpa.free(down.s);
@@ -379,6 +389,33 @@ pub fn loadHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefi
     return .{ .scale = scale_b, .down = down_q, .up = up_q, .n_down = n, .has_inj = @intFromBool(inject) };
 }
 
+fn loadDenseHc(gpa: std.mem.Allocator, driver: *cuda.Driver, store: *Store, prefix: []const u8, inject: bool) !HcW {
+    const projection = @import("cuda_projection.zig");
+    var buf: [200]u8 = undefined;
+    const n = low + if (inject) streams else @as(usize, 0);
+    const data = try gpa.alloc(u8, n * wide * 2);
+    defer gpa.free(data);
+    const down = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_down.weight", .{prefix}));
+    if (!down.is(.bf16, &.{ low, wide }) or down.bytes.len != low * wide * 2) return error.UnexpectedTensor;
+    @memcpy(data[0..down.bytes.len], down.bytes);
+    if (inject) {
+        const inj = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.block_inject_weight.weight", .{prefix}));
+        if (!inj.is(.bf16, &.{ streams, wide }) or inj.bytes.len != streams * wide * 2) return error.UnexpectedTensor;
+        @memcpy(data[low * wide * 2 ..], inj.bytes);
+    }
+    var dq = try projection.dense(gpa, driver, .{ .dtype = .bf16, .rank = 2, .shape = .{ n, wide, 1, 1, 1 }, .bytes = data });
+    errdefer dq.free();
+    const up = try store.tensor(try std.fmt.bufPrint(&buf, "{s}.input_mix_weight_up.weight", .{prefix}));
+    if (!up.is(.bf16, &.{ wide, low })) return error.UnexpectedTensor;
+    var uq = try projection.dense(gpa, driver, up);
+    errdefer uq.free();
+    const gamma = try asF32(gpa, try store.tensor(try std.fmt.bufPrint(&buf, "{s}.hc_norm.weight", .{prefix})));
+    defer gpa.free(gamma);
+    if (gamma.len != wide) return error.UnexpectedTensor;
+    const scale = try cuda.DeviceBuffer.fromHost(driver, std.mem.sliceAsBytes(gamma));
+    return .{ .scale = scale, .down = dq, .up = uq, .n_down = n, .has_inj = @intFromBool(inject) };
+}
+
 pub fn stitch(gpa: std.mem.Allocator, store: *Store, prefix: []const u8, names: []const []const u8) !struct { w: []u8, s: []u8, b: []u8, n: usize } {
     var buf: [180]u8 = undefined;
     var ws: [6][]u8 = undefined;
@@ -407,4 +444,21 @@ test "the n-gram tables, the draft head and the vision tower stay off the device
     try std.testing.expect(!hostOnly("language_model.model.layers.2.ple.ple_embedding.ngram_heads_offsets"));
     try std.testing.expect(!hostOnly("language_model.model.layers.0.mlp.switch_mlp.up_proj.weight"));
     try std.testing.expect(!hostOnly("language_model.lm_head.weight"));
+}
+
+test "canonical checkpoint aliases preserve exact stored namespace and prefer a direct key" {
+    const a = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"weight_map":{"model.language_model.layers.0.x.weight":"a","lm_head.weight":"b","mtp.x":"c","language_model.model.direct":"d","model.language_model.direct":"e"}}
+    , .{});
+    var store: Store = .{ .gpa = a, .io = std.testing.io, .dir = "", .parsed = parsed };
+    defer store.deinit();
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings("model.language_model.layers.0.x.weight", try store.resolveKey("language_model.model.layers.0.x.weight", &buf));
+    try std.testing.expectEqualStrings("lm_head.weight", try store.resolveKey("language_model.lm_head.weight", &buf));
+    try std.testing.expectEqualStrings("mtp.x", try store.resolveKey("language_model.mtp.x", &buf));
+    try std.testing.expectEqualStrings("language_model.model.direct", try store.resolveKey("language_model.model.direct", &buf));
+    try std.testing.expectError(error.MissingTensor, store.resolveKey("language_model.model.missing", &buf));
+    try std.testing.expect(hostOnly("model.visual.weight"));
+    try std.testing.expect(hostOnly("mtp.layers.0.weight"));
 }

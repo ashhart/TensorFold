@@ -5,6 +5,7 @@ const cuda = @import("cuda");
 const aot = cuda.aot;
 
 pub const embed = @import("cuda_embed.zig");
+pub const projection = @import("cuda_projection.zig");
 pub const hc = @import("cuda_hc.zig");
 pub const qmm = @import("cuda_qmm.zig");
 pub const gdn = @import("cuda_gdn.zig");
@@ -197,6 +198,17 @@ pub const Tri = struct {
             p("SC", "*fp32", sc),
             int("NB", nb),
         }, &.{ ci("HI", 4), ci("DI", 128), ci("RATIO", 4), ci("TOP", 512), ci("BB", 64) });
+    }
+
+    /// Dense connections always use native glue; a captured affine projection cannot replace these operators.
+    pub fn hcNormalize(t: Tri, h: u64, pss: u64, scale: u64, out: u64, eps: f32, rows: usize, dims: usize, streams: usize) !void {
+        const g = t.own orelse return error.NativeGlueRequired;
+        return g.hcNormalize(t.s, h, pss, scale, out, eps, rows, dims, streams);
+    }
+
+    pub fn hcDenseMix(t: Tri, up: u64, norm: u64, mixed: u64, sums: u64, rows: usize, dims: usize, streams: usize) !void {
+        const g = t.own orelse return error.NativeGlueRequired;
+        return g.hcDenseMix(t.s, up, norm, mixed, sums, rows, dims, streams);
     }
 
     /// glue.hc_reduce_act: split-K sum fused with hc_act. M folds to a constexpr when it is 1.

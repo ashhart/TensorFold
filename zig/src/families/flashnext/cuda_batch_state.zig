@@ -98,6 +98,7 @@ pub const Kernels = struct {
     router: cuda.grouped.Router,
     moe: cuda.experts.RowsExperts,
     lane: cuda.Function,
+    native_lane: cuda.qmmf.Lane,
     front: cuda.Function,
     chain: cuda.Function,
     chain_to: cuda.Function,
@@ -122,6 +123,8 @@ pub const Kernels = struct {
         try k.lane.allowDynamicShared(qmm_smem);
         k.router = try cuda.grouped.Router.resolve(k.experts);
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
+        k.native_lane = try cuda.qmmf.Lane.load(d, (try d.capability(0)) / 10);
+        errdefer k.native_lane.unload();
         k.sum = try k.batch.function("fn_sum_slices");
         k.shift = try k.batch.function("fn_shift_window");
         k.select = try k.batch.function("fn_qsa_select");
@@ -133,6 +136,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(k: *Kernels) void {
+        k.native_lane.unload();
         k.batch.unload();
         k.rows.unload();
         k.experts.unload();
@@ -200,6 +204,8 @@ pub const Scratch = struct {
     norm: u64 = 0,
     dn: u64 = 0,
     hc_part: u64 = 0,
+    hc_up: u64 = 0,
+    native_part: u64 = 0,
     act: u64 = 0,
     xs_act: u64 = 0,
     inj: u64 = 0,
@@ -332,6 +338,8 @@ pub const Scratch = struct {
         s.norm = try s.add(gpa, d, cap * wide * 2);
         s.dn = try s.add(gpa, d, cap * (low + 4) * 2);
         s.hc_part = try s.add(gpa, d, hc_sk * cap * (low + 4) * 4);
+        s.hc_up = try s.add(gpa, d, cap * wide * 2);
+        s.native_part = try s.add(gpa, d, 8 * cap * dims * 4);
         s.act = try s.add(gpa, d, cap * low * 2);
         s.xs_act = try s.add(gpa, d, cap * (low / 32) * 4);
         s.inj = try s.add(gpa, d, cap * streams * 2);

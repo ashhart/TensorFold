@@ -27,6 +27,8 @@ const Fns = struct {
     wb0: cuda.Function,
     wb_moe: cuda.Function,
     wb_slices: cuda.Function,
+    normalize: cuda.Function,
+    dense_mix: cuda.Function,
     down: cuda.Function,
     reduce_act: cuda.Function,
     upmix: cuda.Function,
@@ -91,6 +93,8 @@ pub const Glue = struct {
             .wb0 = try g.hc.function("fn_hc_writeback0"),
             .wb_moe = try g.hc.function("fn_hc_writeback_moe"),
             .wb_slices = try g.hc.function("fn_hc_writeback_slices"),
+            .normalize = try g.hc.function("fn_hc_normalize"),
+            .dense_mix = try g.hc.function("fn_hc_dense_mix"),
             .down = try g.hc.function("fn_hc_down"),
             .reduce_act = try g.hc.function("fn_hc_reduce_act"),
             .upmix = try g.hc.function("fn_hc_upmix"),
@@ -202,6 +206,23 @@ pub const Glue = struct {
         ptrs(&a, &.{ iq, pooled, pos, sc });
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
+    }
+
+    pub fn hcNormalize(g: *const Glue, s: cuda.Stream, h: u64, pss: u64, scale: u64, out: u64, eps: f32, rows: usize, dims: usize, streams: usize) !void {
+        var args: cuda.Args = .{};
+        for ([_]u64{ h, pss, scale, out }) |v| args.add(v);
+        args.add(eps);
+        args.add(int(dims));
+        args.add(int(streams));
+        try cuda.launch.launch(g.f.normalize, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(streams) }, .block = .{ .x = 256 } }, s, &args);
+    }
+
+    pub fn hcDenseMix(g: *const Glue, s: cuda.Stream, up: u64, norm: u64, mixed: u64, sums: u64, rows: usize, dims: usize, streams: usize) !void {
+        var args: cuda.Args = .{};
+        for ([_]u64{ up, norm, mixed, sums }) |v| args.add(v);
+        args.add(int(dims));
+        args.add(int(streams));
+        try cuda.launch.launch(g.f.dense_mix, .{ .grid = .{ .x = @intCast(rows), .y = @intCast(dims / 32) }, .block = .{ .x = 32 } }, s, &args);
     }
 
     pub fn hcReduceAct(g: *const Glue, s: cuda.Stream, part: u64, act: u64, xs: u64, inj: u64, sk: usize, rows: usize, streams: usize, low: usize, ndn: usize, has_inj: usize) !void {
