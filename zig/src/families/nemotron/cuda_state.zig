@@ -269,6 +269,9 @@ pub const Buffers = struct {
         s.carved = null; // the owner gives its planes back
         s.arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, total) };
         for (s.scratchPtrs(), scratch) |f, n| f.* = s.arena.take(n);
+        // the shared expert's plans and pair ids are written once, by the owner's load (initShared)
+        s.shared = b.shared;
+        s.sids = b.sids;
         return s;
     }
 

@@ -1,6 +1,7 @@
-//! A prompt pass keeping states inside chunks and where one ends, and passes resumed from each, against one uncut pass.
+//! Prompt passes kept inside chunks and at their ends, resumed from each keep, or in segments, against one uncut pass.
 
 const std = @import("std");
+const cuda = @import("cuda");
 const nemotron = @import("nemotron");
 const check = @import("check.zig");
 
@@ -38,12 +39,8 @@ const Kept = struct {
 /// At a 16k window: IDS_FILE uncut, then keeping states on and off chunk ends, then resumed from each keep.
 pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const gpa = gpu.gpa;
-    const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, ids_path, gpa, .limited(64 << 20));
-    defer gpa.free(text);
-    var ids: std.ArrayList(u32) = .empty;
+    var ids = try readIds(gpu, ids_path);
     defer ids.deinit(gpa);
-    var it = std.mem.tokenizeAny(u8, text, ", \n");
-    while (it.next()) |t| try ids.append(gpa, try std.fmt.parseInt(u32, t, 10));
     const n = ids.items.len;
     try check.expect(n > R + 64, "prompt-cuts: the prompt needs more than {d} tokens, has {d}", .{ R + 64, n });
     const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = true, .sampling = null, .segments = 1 });
@@ -95,6 +92,37 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     try check.expect(!aside.failed and aside.at.items.len == 1 and aside.at.items[0] == stood, "prompt-cuts: a background pass stepping aside kept {any}, not [{d}]", .{ aside.at.items, stood });
     try resumed(gpa, e, h, &target, ids.items, stood, aside.saved.items[0], plain);
     check.pass("prompt-cuts: a background pass equals the uncut pass, and one stepping aside keeps a state that resumes to it", .{});
+}
+
+/// At a 16k window: IDS_FILE uncut, then as 2 to segments.MAX staggered segments a call.
+pub fn segments(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
+    const gpa = gpu.gpa;
+    var ids = try readIds(gpu, ids_path);
+    defer ids.deinit(gpa);
+    const n = ids.items.len;
+    try check.expect(n > (cuda.segments.MAX - 1) * R, "prompt-segments: {d} segments need more than {d} tokens, has {d}", .{ cuda.segments.MAX, (cuda.segments.MAX - 1) * R, n });
+    const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = true, .sampling = null, .segments = 1 });
+    defer e.deinit();
+    const h = try nemotron.Head.init(e);
+    defer h.deinit();
+    try h.capture();
+    const plain = try digest(gpa, e, h, try e.prefill(ids.items, null, h), n - 1 - e.last_chunk);
+    for (2..cuda.segments.MAX + 1) |k| {
+        try e.setSegments(k);
+        const got = try digest(gpa, e, h, try e.prefill(ids.items, null, h), n - 1 - e.last_chunk);
+        try check.expect(std.meta.eql(got, plain), "prompt-segments: a pass as {d} segments a call differs from the uncut pass", .{k});
+    }
+    check.pass("prompt-segments: a {d}-token pass as 2 to {d} segments a call equals the uncut pass", .{ n, cuda.segments.MAX });
+}
+
+fn readIds(gpu: check.Gpu, path: []const u8) !std.ArrayList(u32) {
+    const text = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, gpu.gpa, .limited(64 << 20));
+    defer gpu.gpa.free(text);
+    var ids: std.ArrayList(u32) = .empty;
+    errdefer ids.deinit(gpu.gpa);
+    var it = std.mem.tokenizeAny(u8, text, ", \n");
+    while (it.next()) |t| try ids.append(gpu.gpa, try std.fmt.parseInt(u32, t, 10));
+    return ids;
 }
 
 /// Asked before each chunk: true from the call after `after` (a background pass steps aside there).
