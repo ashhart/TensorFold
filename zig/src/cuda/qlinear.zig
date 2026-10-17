@@ -34,6 +34,7 @@ pub const Affine4 = struct {
 pub const Weight = union(enum) {
     affine4: Affine4,
     fp8g: qmmf.Weight,
+    mxfp8: qmmf.Weight, // e4m3 with UE8M0 scale bytes per 32 inputs
     nvfp4: qmmf.Weight,
     fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
     bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
@@ -41,14 +42,14 @@ pub const Weight = union(enum) {
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
-            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.n,
+            .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.n,
         };
     }
 
     pub fn inputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.k,
-            .fp8g, .nvfp4, .fp8, .bf16 => |q| q.k,
+            .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.k,
         };
     }
 };
@@ -81,6 +82,7 @@ pub const Linear = struct {
                 return a.decode(s, in.x, in.sums, q, out, rows);
             },
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .mxfp8 => |q| return l.onLane(s, q, .mxfp8, in, out, rows),
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onLane(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
@@ -96,6 +98,7 @@ pub const Linear = struct {
                 return a.prompt(s, in.x, q, out, rows);
             },
             .fp8g => |q| return l.onLane(s, q, .fp8g, in, out, rows),
+            .mxfp8 => |q| return l.onLane(s, q, .mxfp8, in, out, rows),
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
@@ -385,6 +388,8 @@ test "a lane weight whose mode is not its format's is refused before any launch"
     const fp4: qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
     const s: Stream = undefined;
     try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatMismatch, l.prompt(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
     try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
     const f8: qmmf.Weight = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
     try std.testing.expectError(error.EpilogueNotBuilt, l.decodeF32(s, .{ .fp8g = f8 }, .{ .x = 0 }, 0, 1));

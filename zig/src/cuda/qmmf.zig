@@ -1,4 +1,4 @@
-//! The lane matmul (qmmf.cu) for FP4, FP8, FP8G and BF16 weights, with its kernel, tile and slices.
+//! The lane matmul (qmmf.cu) for FP4, FP8, MXFP8, FP8G and BF16 weights, with its kernel, tile and slices.
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -17,9 +17,9 @@ const bn = 64;
 const threads = 128; // WM 1 x WN 4 warps
 
 /// The packed formats (qmmf.cu Mode): FP4 with e4m3 scales a 16, e4m3 with one scale or fp32 a 64, and bf16.
-pub const Mode = enum(u3) { fp4 = 0, fp8 = 1, fp8g = 3, bf16 = 4 };
+pub const Mode = enum(u3) { fp4 = 0, fp8 = 1, mxfp8 = 2, fp8g = 3, bf16 = 4 };
 
-const modes = [_]Mode{ .fp4, .fp8, .fp8g, .bf16 };
+const modes = [_]Mode{ .fp4, .fp8, .mxfp8, .fp8g, .bf16 };
 
 fn modeIndex(mode: Mode) usize {
     return std.mem.indexOfScalar(Mode, &modes, mode).?;
@@ -29,10 +29,10 @@ fn modeIndex(mode: Mode) usize {
 pub fn sharedBytes(mode: Mode, bm: u32) u32 {
     const w: u32 = switch (mode) {
         .fp4 => bn * group / 2,
-        .fp8, .fp8g => bn * group,
+        .fp8, .mxfp8, .fp8g => bn * group,
         .bf16 => bn * group * 2,
     };
-    const s: u32 = if (mode == .fp4 or mode == .fp8g) bn * 4 else 0;
+    const s: u32 = if (mode == .fp4 or mode == .fp8g) bn * 4 else if (mode == .mxfp8) bn * 2 else 0;
     const stage = (bm * group * 2 + w + s + 127) / 128 * 128;
     const partials = (bm / 16) * 2 * 4 * threads * 4;
     return @max(4 * stage, partials);
@@ -220,6 +220,9 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp8g, 16));
     try std.testing.expectEqual(@as(u32, 33792), sharedBytes(.fp8g, 32));
     try std.testing.expectEqual(@as(u32, 50176), sharedBytes(.fp8g, 64));
+    try std.testing.expectEqual(@as(u32, 25088), sharedBytes(.mxfp8, 16));
+    try std.testing.expectEqual(@as(u32, 33280), sharedBytes(.mxfp8, 32));
+    try std.testing.expectEqual(@as(u32, 49664), sharedBytes(.mxfp8, 64));
     try std.testing.expectEqual(@as(u32, 17408), sharedBytes(.fp4, 16));
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp4, 32));
     try std.testing.expectEqual(@as(u32, 41984), sharedBytes(.fp4, 64));
@@ -243,6 +246,10 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
 }
 
 test "instance names are qmmf.cu's" {
+    try std.testing.expectEqualStrings(
+        "_ZN7tf_qmmf11qmmf_kernelILi2ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
+        symbol(.mxfp8, 16, true, false, false),
+    );
     try std.testing.expectEqualStrings(
         "_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
         symbol(.fp8g, 16, true, false, false),

@@ -7,6 +7,7 @@ const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
+const mx_k = @import("contract_mxfp8.zig");
 const rank_k = @import("contract_rank.zig");
 
 const contract = core.contract;
@@ -86,6 +87,12 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&mm) |*m| m.deinit();
     for (&mm) |*m| try kernels.append(a, m.kernel());
+    var mx = [_]mx_k.Product{
+        .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
+        .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },
+    };
+    defer for (&mx) |*m| m.deinit();
+    for (&mx) |*m| try kernels.append(a, m.kernel());
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());

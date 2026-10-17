@@ -32,6 +32,11 @@ __device__ __forceinline__ uint32_t fp8pair(uint32_t w) {
     return r;
 }
 
+// UE8M0 has no zero encoding: byte 0 is 2^-127, byte 255 is NaN.
+__device__ __forceinline__ float e8m0f(uint8_t b) {
+    return __uint_as_float(b == 0 ? 0x00400000u : b == 255 ? 0x7FC00000u : uint32_t(b) << 23);
+}
+
 __device__ __forceinline__ uint32_t comp(const uint4& v, int c) { return c == 0 ? v.x : c == 1 ? v.y : c == 2 ? v.z : v.w; }
 
 __device__ __forceinline__ float e4m3f(uint8_t b) {
@@ -193,8 +198,8 @@ __global__ void __launch_bounds__(WM * WN * 32) qmmf_kernel(
                             s0 = e4m3f(static_cast<uint8_t>(sq[j][0] >> (8 * blk)));
                             s1 = e4m3f(static_cast<uint8_t>(sq[j][1] >> (8 * blk)));
                         } else {
-                            s0 = __int_as_float(static_cast<int>((sq[j][0] >> (8 * blk)) & 0xFFu) << 23);
-                            s1 = __int_as_float(static_cast<int>((sq[j][1] >> (8 * blk)) & 0xFFu) << 23);
+                            s0 = e8m0f(static_cast<uint8_t>(sq[j][0] >> (8 * blk)));
+                            s1 = e8m0f(static_cast<uint8_t>(sq[j][1] >> (8 * blk)));
                         }
 #pragma unroll
                         for (int i = 0; i < T::MT; ++i)
@@ -292,6 +297,14 @@ __global__ void reduce_kernel(const float* __restrict__ part, void* __restrict__
     if (F32) reinterpret_cast<float*>(out)[i] = acc;
     else reinterpret_cast<__nv_bfloat16*>(out)[i] = __float2bfloat16_rn(acc);
 }
+
+template __global__ void qmmf_kernel<MXFP8, 16, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 16, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 32, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 32, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 64, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 64, 64, 1, 4, 4, false, true, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
+template __global__ void qmmf_kernel<MXFP8, 64, 64, 1, 4, 4, false, false, true>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
 
 // The instances the Zig launchers load by name (the Python host instantiates these through its launch switch).
 template __global__ void qmmf_kernel<FP8G, 16, 64, 1, 4, 4, false, false, false>(const __nv_bfloat16* __restrict__, const unsigned char* __restrict__, const uint8_t* __restrict__, float, void* __restrict__, float* __restrict__, int, int, int, int, int, int, int);
