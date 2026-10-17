@@ -369,3 +369,7 @@ test "memory info sees a new allocation" {
     try std.testing.expectEqual(before.total, after.total);
     try std.testing.expect(after.free + len <= before.free);
 }
+
+test {
+    _ = @import("engine_runtime_tests.zig");
+}

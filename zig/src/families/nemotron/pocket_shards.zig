@@ -51,6 +51,32 @@ pub fn Io(comptime core: type) type {
             return bytes;
         }
 
+        /// One layer's pocket, `up` and `down` [neurons, D], rounded in place to the 4-bit values `write` hands back.
+        pub fn round(gpa: std.mem.Allocator, d: usize, up: []f32, down: []f32) !void {
+            const neurons = up.len / d;
+            if (neurons % group != 0 or d % group != 0 or up.len != neurons * d or down.len != up.len) return error.BadPocket;
+            var arena_state = std.heap.ArenaAllocator.init(gpa);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+            const w = try arena.alloc(u32, @max(d, neurons) / 8);
+            const s = try arena.alloc(u16, @max(d, neurons) / group);
+            const b = try arena.alloc(u16, @max(d, neurons) / group);
+            // each up row on its own groups, as `expert` writes a learned row
+            for (0..neurons) |k| {
+                const x = up[k * d ..][0..d];
+                host4.quantize(x, w[0 .. d / 8], s[0 .. d / group], b[0 .. d / group]);
+                host4.dequantize(w[0 .. d / 8], s[0 .. d / group], b[0 .. d / group], x);
+            }
+            // each output's learned columns on their own groups, as `expert` writes down_proj's
+            const col = try arena.alloc(f32, neurons);
+            for (0..d) |o| {
+                for (col, 0..) |*x, k| x.* = down[k * d + o];
+                host4.quantize(col, w[0 .. neurons / 8], s[0 .. neurons / group], b[0 .. neurons / group]);
+                host4.dequantize(w[0 .. neurons / 8], s[0 .. neurons / group], b[0 .. neurons / group], col);
+                for (col, 0..) |x, k| down[k * d + o] = x;
+            }
+        }
+
         fn hasMtp(gpa: std.mem.Allocator, io: std.Io, path: []const u8) bool {
             var f = st.File.open(gpa, io, path) catch return false;
             defer f.close(io);

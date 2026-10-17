@@ -40,6 +40,34 @@ pub fn quantize(values: []const f32, words: []u32, scales: []u16, biases: []u16)
     }
 }
 
+/// MLX's affine 4-bit quantizer, groups of `gs`; the first group with a non-finite range, scale or bias, else null.
+pub fn quantizeMlx(comptime gs: usize, values: []const f32, words: []u32, scales: []u16, biases: []u16) ?usize {
+    @memset(words, 0);
+    for (0..values.len / gs) |g| {
+        const v = values[g * gs ..][0..gs];
+        for (v) |x| if (!std.math.isFinite(x)) return g;
+        const lo = std.mem.min(f32, v);
+        const hi = std.mem.max(f32, v);
+        const step = @max((hi - lo) / 15, 1e-7);
+        if (!std.math.isFinite(step)) return g;
+        const low_edge = @abs(lo) > @abs(hi);
+        const signed = if (low_edge) step else -step;
+        const edge = if (low_edge) lo else hi;
+        const q0 = @round(edge / signed);
+        const s: f32 = if (q0 == 0) signed else edge / q0;
+        const b: f32 = if (q0 == 0) 0 else edge;
+        if (!std.math.isFinite(s) or s == 0 or !std.math.isFinite(b)) return g;
+        scales[g] = bf16of(s);
+        biases[g] = bf16of(b);
+        if (!std.math.isFinite(f32of(scales[g])) or !std.math.isFinite(f32of(biases[g]))) return g;
+        for (v, g * gs..) |x, i| {
+            const q: u32 = @intFromFloat(std.math.clamp(@round((x - b) / s), 0, 15));
+            words[i / 8] |= q << @intCast(4 * (i % 8));
+        }
+    }
+    return null;
+}
+
 test "dequantized codes land within half a step, a flat group exactly on its bias; bf16 ties go to even" {
     var values: [2 * group]f32 = undefined;
     for (&values, 0..) |*v, i| v.* = @sin(@as(f32, @floatFromInt(i)) * 0.37) * 0.05;

@@ -67,6 +67,72 @@ pub fn cublaslt(gpu: Gpu) !void {
     check.pass("cuBLASLt {d}: bf16 x bf16 -> fp32 ({d}x{d}x{d}), reruns bit-equal, max abs error {e} vs fp64, workspace {d} B", .{ lt.api.cublasLtGetVersion(), m, n, k, worst, linear.workspace_need });
 }
 
+/// `nccl-pair RANK WORLD ID`: one rank of a multi-host communicator (id as hex in file ID): send/recv, sums, gathers.
+pub fn ncclPair(gpu: Gpu, rank: c_int, world: c_int, id_path: []const u8) !void {
+    const d = gpu.d;
+    var lib = try cuda.nccl.Library.open();
+    defer lib.close();
+    var id: cuda.nccl.UniqueId = undefined;
+    if (rank == 0) {
+        try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId");
+        const hex = std.fmt.bytesToHex(id.internal, .lower);
+        try std.Io.Dir.cwd().writeFile(gpu.io, .{ .sub_path = id_path, .data = &hex });
+    } else {
+        var hex: [256]u8 = undefined;
+        const got = try std.Io.Dir.cwd().readFile(gpu.io, id_path, &hex);
+        try expect(got.len == 256, "unique id file {s}: {d} hex digits", .{ id_path, got.len });
+        _ = try std.fmt.hexToBytes(&id.internal, &hex);
+    }
+    var comm: cuda.nccl.Comm = null;
+    try lib.check(lib.api.ncclCommInitRank(&comm, world, id, rank), "ncclCommInitRank");
+    defer _ = lib.api.ncclCommDestroy(comm);
+    const count: usize = 1 << 20;
+    const W: usize = @intCast(world);
+    const R: usize = @intCast(rank);
+    const mine = try gpu.gpa.alloc(f32, count);
+    defer gpu.gpa.free(mine);
+    for (mine, 0..) |*v, i| v.* = @floatFromInt(R * 1000 + i % 977);
+    var send = try cuda.DeviceBuffer.fromHost(d, std.mem.sliceAsBytes(mine));
+    defer send.free();
+    var recv = try cuda.DeviceBuffer.alloc(d, count * 4 * W);
+    defer recv.free();
+    var stream = try cuda.Stream.init(d, true);
+    defer stream.deinit();
+    try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+    for (0..W) |p| if (p != R) {
+        try lib.check(lib.api.ncclSend(send.ptr, count, .f32, @intCast(p), comm, stream.handle), "ncclSend");
+        try lib.check(lib.api.ncclRecv(recv.ptr + p * count * 4, count, .f32, @intCast(p), comm, stream.handle), "ncclRecv");
+    };
+    try lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd");
+    try stream.synchronize();
+    const got = try check.download(gpu, recv);
+    defer gpu.gpa.free(got);
+    const want = try gpu.gpa.alloc(f32, count);
+    defer gpu.gpa.free(want);
+    for (0..W) |p| if (p != R) {
+        for (want, 0..) |*v, i| v.* = @floatFromInt(p * 1000 + i % 977);
+        try check.sameBytes("send/recv from a peer", got[p * count * 4 ..][0 .. count * 4], std.mem.sliceAsBytes(want));
+    };
+    try lib.check(lib.api.ncclAllReduce(send.ptr, recv.ptr, count, .f32, .sum, comm, stream.handle), "ncclAllReduce");
+    try stream.synchronize();
+    try recv.download(0, got[0 .. count * 4]);
+    for (want, 0..) |*v, i| {
+        var s: f32 = 0;
+        for (0..W) |p| s += @floatFromInt(p * 1000 + i % 977);
+        v.* = s;
+    }
+    try check.sameBytes("all-reduce", got[0 .. count * 4], std.mem.sliceAsBytes(want));
+    // all-gather: every rank's pattern in rank order
+    try lib.check(lib.api.ncclAllGather(send.ptr, recv.ptr, count, .f32, comm, stream.handle), "ncclAllGather");
+    try stream.synchronize();
+    try recv.download(0, got);
+    for (0..W) |p| {
+        for (want, 0..) |*v, i| v.* = @floatFromInt(p * 1000 + i % 977);
+        try check.sameBytes("all-gather", got[p * count * 4 ..][0 .. count * 4], std.mem.sliceAsBytes(want));
+    }
+    check.pass("NCCL {d}: rank {d} of {d}, send/recv with every peer ({d} MiB each), all-reduce and all-gather exact", .{ try lib.version(), rank, world, count * 4 >> 20 });
+}
+
 pub fn nccl(gpu: Gpu) !void {
     const d = gpu.d;
     var lib = try cuda.nccl.Library.open();
@@ -96,5 +162,14 @@ pub fn nccl(gpu: Gpu) !void {
     try stream.synchronize();
     try recv.download(0, got);
     try check.sameBytes("one-rank all-gather", got, std.mem.sliceAsBytes(src));
-    check.pass("NCCL {d}: one-rank communicator, all-reduce and all-gather exact", .{version});
+    // a send to this rank and its receive, in one group (NCCL pairs them)
+    try recv.fill8(0, null);
+    try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
+    try lib.check(lib.api.ncclSend(send.ptr, count, .f32, 0, comms[0], stream.handle), "ncclSend");
+    try lib.check(lib.api.ncclRecv(recv.ptr, count, .f32, 0, comms[0], stream.handle), "ncclRecv");
+    try lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd");
+    try stream.synchronize();
+    try recv.download(0, got);
+    try check.sameBytes("one-rank send/recv", got, std.mem.sliceAsBytes(src));
+    check.pass("NCCL {d}: one-rank communicator, all-reduce, all-gather and send/recv to itself exact", .{version});
 }

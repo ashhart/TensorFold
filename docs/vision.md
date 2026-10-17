@@ -1,8 +1,9 @@
 # Image input
 
-This page describes image input in the Python engine, frozen at 0.6.6. Install that engine from the
-[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) to serve images. The native binary refuses every
-`--vision` flag at startup, reads no vision tower, and answers image parts with HTTP 400.
+This page describes image input in the Python engine, frozen at 0.6.6, until [The native server](#the-native-server),
+which covers the native binary: it reads images for GLM-5.3-Flash and Qwen3.8-27B on a Mac and refuses `--vision`
+for other models. Install the Python engine from the
+[`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6) for the rest.
 Parts of it came from pull requests: GLM-5.3-Flash images by @mgoldwasser
 ([#101](https://github.com/ashhart/TensorFold/pull/101)), Flash Next images on CUDA by @shantanugoel
 ([#146](https://github.com/ashhart/TensorFold/pull/146)) from @MiaAI-Lab's patch, video by @MiaAI-Lab
@@ -141,6 +142,114 @@ Image requests currently start with a fresh KV cache and do not write reusable p
 This prevents identical image-placeholder token IDs from reusing another image's state; ordinary text requests retain their prefix caching.
 Multi-turn image conversations work when the request includes the original image content parts, but image-prefix reuse and persisted image KV are not implemented.
 For Qwen, each image request carries its own multimodal rotary positions and continuation offset, including during concurrent lane rounds. GLM uses its native KDA/NoPE attention state.
+
+## The native server
+
+`tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
+4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash and Qwen3.8-27B on one Mac,
+and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at startup.
+
+- Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
+  `--vision`), a part may name a public HTTPS URL instead, fetched as 0.6.6 fetched it: port 443 without credentials
+  or a fragment; every address the host resolves to public (no private, loopback, link-local, carrier-grade NAT,
+  documentation, multicast or metadata address, and for IPv6 global unicast only, without 6to4 or Teredo); TLS
+  verified for the host against the system's certificates, on the address that was checked; up to 3 redirects,
+  each checked again; a declared `image/jpeg`, `image/png` or `image/webp`, uncompressed; 10 MB an image and 20 MB
+  a request across data URLs and downloads; 10 s a download and 30 s a request's downloads. The refusals are
+  0.6.6's words; a TLS failure, like any other failed connection, is "image download failed or timed out". Host
+  names that aren't ASCII and IPv6 address literals are refused. Without the flag, an HTTPS URL is refused with the
+  flag's name.
+- PNG and JPEG are decoded to the pixels 0.6.6 decoded with Pillow 12.3 (`zig/src/core/picture/`, which d1-3B's
+  pictures on CUDA use too): PNG from the PNG specification, JPEG by libjpeg-turbo 3.1.4.1's TurboJPEG library
+  (`libturbojpeg`, the release Pillow 12.3 bundles) at Pillow's settings. TensorFold does not ship that library; the
+  server loads it at the first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
+  folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
+  libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
+  release; PNG images still serve. WebP is refused by name until a decoder exists; other formats are refused.
+- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the GLM5-Next
+  processor's sizing and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
+  `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
+  purpose: a CMYK JPEG is refused, and a JPEG holding several pictures (MPO) gives its first, which 0.6.6 refused.
+- Images are counted from the request's image parts. A user or tool message whose text spells the model's image
+  markers (GLM's `<|image|>`, `<|begin_of_image|>`, `<|end_of_image|>`; Qwen's `<|vision_start|>`, `<|image_pad|>`,
+  `<|vision_end|>`) is tokenized as ordinary text, so only the chat template's own markers, one wrapper for each image
+  part, become image tokens.
+- The prompt cache keys each image's placeholder rows by the image's content, so a kept state resumes the same image
+  and never another one under the same placeholders. Image conversations reuse their history like text ones.
+
+### Qwen3.8-27B
+
+With `--vision`, the 27B loads its checkpoint's image tower (the `vision_tower.*` tensors of
+`TensorFold/Qwen3.8-27B-MLX-4bit`, kept in bf16) beside the language model. Without the flag nothing of the tower
+loads. An image is prepared as transformers' Qwen2-VL processor prepares it: decoded as above, sized by `smart_resize`
+to multiples of 32 pixels between the processor's 65,536 pixels and the image's share of `--vision-image-tokens`
+(split evenly over the request's images, 1,024 pixels a token, at most 16,777,216 pixels), resized with Pillow's
+bicubic, and cut into 16-pixel patches. The tower runs once an image as its request's prompt pass starts, on the GPU
+in bf16 with fp32 sums. Its 2 x 2 merged rows replace the `<|image_pad|>` placeholders' embeddings. The text's
+attention layers turn each image row by its row and column (M-RoPE), and the rows after an image carry the shift those
+positions leave, through decoding, drafts and later turns. Text-only requests get the tokens they got without the
+flag. Video parts are refused with HTTP 400.
+
+The tower, its scratch and a request's image rows take 1.79 GiB at the default 4,096 image tokens, and the server
+counts them against the 70% load limit and the prompt cache's budget. On an M3 Ultra, six test pictures got the
+processor's grids, token counts and patches bit for bit, and the tower's rows came closer to transformers' float32
+tower than its bf16 run does (mean row error 1.0 to 2.2% against 1.6 to 4.1%). A 1,120-token photo takes 0.6 s in the
+tower there. With an image, drafted replies equal `"draft": false`, four requests at once equal each alone, a later
+turn resumes past its image and equals a fresh server's reply, and DFlash2 keeps 2.6 to 3.0 tokens a round where the
+same asks without the image get 2.8 to 3.4.
+
+### Video on the native server
+
+With `--vision`, GLM-5.3-Flash also reads `video_url` parts in user messages, as transformers 5.19's
+`Glm5NextProcessor` prepares them:
+- **Sampling:** 2 frames a second, deduplicated and padded to an even count, at most 256 frames.
+- **Frame pairs:** each pair of frames is one image to the tower.
+- **Prompt:** the template's `<|begin_of_video|><|video|><|end_of_video|>` holds one
+  `<|begin_of_image|>…<|end_of_image|>T.T seconds` block a pair.
+- **Budget:** a request's videos share `--vision-video-tokens` visual tokens (default 16,384; the processor's
+  `max_image_tokens`). The frames are sized under it and resized with torch's antialiased uint8 bicubic.
+
+Video needs `libtfvideo`, an optional library over FFmpeg 9.0.2 (the release PyAV 19.0.1 ships). The server loads it
+when the first video arrives and refuses videos by name without it:
+
+```sh
+tools/zig/build_ffmpeg.sh ~/ffmpeg-9.0.2        # static FFmpeg: H.264, HEVC, VP8, VP9, MPEG-4; MP4/MOV, MKV/WebM
+zig build video -Dffmpeg=$HOME/ffmpeg-9.0.2     # zig-out/native/lib/libtfvideo.dylib, beside the server
+```
+
+- **Limits (0.6.6's):** 2 videos a request, 16 MB each and 20 MB together, an hour of footage, 8192 pixels a side.
+  Data URLs work, and with `--vision-urls` public HTTPS URLs too (MP4, WebM, QuickTime or Matroska; 20 s a download,
+  120 s a request).
+- **Too short:** a clip too short for one sampled frame (under half a second) is refused, as the processor samples
+  nothing.
+- **Frame counts:** a container without one (Matroska, WebM) is counted by its video packets. transformers' PyAV loader
+  can't read these at all.
+- **Checks:** `tools/zig/glm_video_fixtures.py` checks the patches bit for bit against the processor on frames PyAV
+  decodes, over 13 clips. `tools/zig/video_served.py` checks a served model's prompt ids against the processor's.
+
+### Nemotron 3.5 Super VL on CUDA
+
+With `--vision`, Nemotron 3.5 Super VL reads images through the checkpoint's own RADIO tower and projector, run in
+TensorFold's CUDA kernels (`zig/src/families/radio/`).
+
+- **Processor:** the checkpoint's. Each image becomes one tile whose patch grid (16 pixels a patch, an even number each
+  way) holds up to 13,312 patches and at least 1,024, except that a picture smaller than that sent with
+  `"detail": "low"` keeps its own grid, down to 2 x 2 patches and one token. It is resized with torch's antialiased
+  bicubic on float samples and normalized with CLIP's mean and deviation. The pixels equal the checkpoint processor's
+  bit for bit. An image takes a quarter of its patches as tokens (at most 3,328), written between `<img>` and `</img>`.
+- **Budget:** a request's images share `--vision-image-tokens`, 13,312 by default for Super VL, so up to four images
+  keep the size NVIDIA's processor gives them; a smaller budget makes them smaller. Four full-size images on one GB10
+  took 13,124 prompt tokens and 11.45 s to the first token.
+- **Tower:** the checkpoint's bf16 weights as stored, bf16 activations and fp32 sums. Against a float32 run of the
+  checkpoint's own modules on the same pixels, its rows' error equals the modules' own bf16 run's (1.2% to 1.9% a row,
+  relative, on six pictures). The tower and projector take about 2.1 GiB of GPU memory beside the language model, and
+  a 13,000-patch image about 0.9 s on a GB10. On two GB10s the first runs the tower; the second holds only its share
+  of the experts.
+- **Not read yet:** video and audio. The checkpoint's video embedder and sound encoder stay unloaded, and video and
+  audio parts are refused.
+- **Checks:** `tf-cuda-test radio-processor` compares the decoded pictures, the processor's pixels, its resizes and
+  3,000 patch grids with the checkpoint's processor; `tf-cuda-test radio` compares the tower's and projector's rows
+  with a float32 reference.
 
 ## Verification
 
