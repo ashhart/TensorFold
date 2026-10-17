@@ -71,44 +71,66 @@ extern "C" __global__ void __launch_bounds__(256)
     dst[i] = src[(e * n + tile * 64 + c) * (ks / 16) + (k0 + g * 64) / 16 + q];
 }
 
-// A warp: a plan item's pairs (16 at most) by 64 columns; EPI 1 relu^2 of bf16(alpha_e sum) to bf16, EPI 0 fp32 sums.
-template <int EPI>
+// One 64-input step a warp reads: rows g and g + 8's codes and block scales, then each n8 tile's weights and scales.
+template <int TJ>
+struct Step {
+    uint32_t a[4], sa;
+    uint2 b[TJ];
+    uint32_t s[TJ];
+};
+
+// A warp: a plan item's pairs (16 at most) by TJ n8 tiles, U steps read ahead; EPI 1 relu^2 to bf16, EPI 0 fp32 sums.
+template <int EPI, int TJ, int U>
 __device__ __forceinline__ void grouped(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,
                                         const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws,
                                         const float* __restrict__ alpha, int K, int N, const int* __restrict__ items,
                                         const int* __restrict__ counts, const int* __restrict__ members,
                                         void* __restrict__ out) {
-    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3, NB = N / 64, KG = K / 64;
-    const int units = __ldg(counts) * NB;
+    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3, NG = N / (8 * TJ), KG = K / 64;
+    const int units = __ldg(counts) * NG;
     for (int unit = blockIdx.x * 4 + (threadIdx.x >> 5); unit < units; unit += gridDim.x * 4) {
-        const int it = unit / NB, cb = unit - it * NB;
+        const int it = unit / NG, n0 = (unit - it * NG) * 8 * TJ;
         const int e = __ldg(items + 3 * it), first = __ldg(items + 3 * it + 1), cnt = __ldg(items + 3 * it + 2);
         const bool v0 = g < cnt, v1 = g + 8 < cnt;
         const int p0 = v0 ? __ldg(members + first + g) : 0, p1 = v1 ? __ldg(members + first + g + 8) : 0;
         const int x0 = slots ? p0 / slots : p0, x1 = slots ? p1 / slots : p1;
         const uint8_t* c0 = codes + static_cast<size_t>(x0) * (K / 2);
         const uint8_t* c1 = codes + static_cast<size_t>(x1) * (K / 2);
-        const uint8_t* s0 = xs + static_cast<size_t>(x0) * (K / 16);
-        const uint8_t* s1 = xs + static_cast<size_t>(x1) * (K / 16);
-        const size_t tile = (static_cast<size_t>(e) * NB + cb) * KG;
-        float acc[8][4];
+        const bool hi = t & 1;  // lanes t 0 and 1 give rows g and g + 8's four block scales; t 2, 3 are not read
+        const bool vr = hi ? v1 : v0;
+        const uint8_t* sr = xs + static_cast<size_t>(hi ? x1 : x0) * (K / 16);
+        const size_t tile = (static_cast<size_t>(e) * (N / 64) + n0 / 64) * KG;  // the 64-column tile holding n0
+        const uint2* wb = reinterpret_cast<const uint2*>(w) + tile * 256 + n0 % 64 / 8 * 32 + lane;
+        const uint32_t* sw = reinterpret_cast<const uint32_t*>(ws) + tile * 64 + n0 % 64 + g;
+        auto fetch = [&](int kg, Step<TJ>& f) {  // rows past cnt: zeros
+            f.a[0] = v0 ? __ldg(reinterpret_cast<const uint32_t*>(c0 + kg * 32 + 4 * t)) : 0u;
+            f.a[1] = v1 ? __ldg(reinterpret_cast<const uint32_t*>(c1 + kg * 32 + 4 * t)) : 0u;
+            f.a[2] = v0 ? __ldg(reinterpret_cast<const uint32_t*>(c0 + kg * 32 + 16 + 4 * t)) : 0u;
+            f.a[3] = v1 ? __ldg(reinterpret_cast<const uint32_t*>(c1 + kg * 32 + 16 + 4 * t)) : 0u;
+            f.sa = vr ? __ldg(reinterpret_cast<const uint32_t*>(sr + kg * 4)) : 0u;
 #pragma unroll
-        for (int j = 0; j < 8; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.0f;
-        for (int kg = 0; kg < KG; ++kg) {
-            uint32_t a[4];  // rows g and g + 8, inputs 8t .. and 32 + 8t .. of this step (rows past cnt: zeros)
-            a[0] = v0 ? __ldg(reinterpret_cast<const uint32_t*>(c0 + kg * 32 + 4 * t)) : 0u;
-            a[1] = v1 ? __ldg(reinterpret_cast<const uint32_t*>(c1 + kg * 32 + 4 * t)) : 0u;
-            a[2] = v0 ? __ldg(reinterpret_cast<const uint32_t*>(c0 + kg * 32 + 16 + 4 * t)) : 0u;
-            a[3] = v1 ? __ldg(reinterpret_cast<const uint32_t*>(c1 + kg * 32 + 16 + 4 * t)) : 0u;
-            const bool hi = t & 1;  // lanes t 0 and 1 give rows g and g + 8's four block scales; t 2, 3 are not read
-            const bool vr = hi ? v1 : v0;
-            const uint32_t sa = vr ? __ldg(reinterpret_cast<const uint32_t*>((hi ? s1 : s0) + kg * 4)) : 0u;
-            const uint2* wb = reinterpret_cast<const uint2*>(w) + (tile + kg) * 256;
-            const uint32_t* sw = reinterpret_cast<const uint32_t*>(ws) + (tile + kg) * 64;
+            for (int j = 0; j < TJ; ++j) {
+                f.b[j] = __ldg(wb + kg * 256 + j * 32);
+                f.s[j] = __ldg(sw + kg * 64 + j * 8);
+            }
+        };
+        float acc[TJ][4];
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const uint2 b = __ldg(wb + j * 32 + lane);
-                mma4::mma_fp4(acc[j], a, b.x, b.y, sa, __ldg(sw + j * 8 + g));
+        for (int j = 0; j < TJ; ++j) acc[j][0] = acc[j][1] = acc[j][2] = acc[j][3] = 0.0f;
+        Step<TJ> st[U];
+#pragma unroll
+        for (int u = 0; u < U - 1; ++u)
+            if (u < KG) fetch(u, st[u]);
+        for (int k0 = 0; k0 < KG; k0 += U) {  // a column's sum takes its steps in order whatever TJ and U are
+            // step k0 + u's slot is u: indices known at compile time keep st in registers
+#pragma unroll
+            for (int u = 0; u < U; ++u) {
+                const int kg = k0 + u;
+                if (kg + U - 1 < KG) fetch(kg + U - 1, st[(u + U - 1) % U]);
+                if (kg < KG)
+#pragma unroll
+                    for (int j = 0; j < TJ; ++j)
+                        mma4::mma_fp4(acc[j], st[u].a, st[u].b[j].x, st[u].b[j].y, st[u].sa, st[u].s[j]);
             }
         }
         const float al = __ldg(alpha + e);
@@ -117,8 +139,8 @@ __device__ __forceinline__ void grouped(const uint8_t* __restrict__ codes, const
             if (!(h ? v1 : v0)) continue;
             const size_t row = static_cast<size_t>(h ? p1 : p0) * N;
 #pragma unroll
-            for (int j = 0; j < 8; ++j) {
-                const int col = cb * 64 + j * 8 + 2 * t;
+            for (int j = 0; j < TJ; ++j) {
+                const int col = n0 + j * 8 + 2 * t;
                 const float a0 = acc[j][2 * h] * al, a1 = acc[j][2 * h + 1] * al;
                 if constexpr (EPI == 0) {
                     *reinterpret_cast<float2*>(reinterpret_cast<float*>(out) + row + col) = make_float2(a0, a1);
@@ -132,13 +154,16 @@ __device__ __forceinline__ void grouped(const uint8_t* __restrict__ codes, const
     }
 }
 
-#define TF_CK4(NAME, EPI)                                                                                              \
+#define TF_CK4(NAME, EPI, TJ, U)                                                                                       \
     extern "C" __global__ void __launch_bounds__(128)                                                                  \
         NAME(const uint8_t* __restrict__ codes, const uint8_t* __restrict__ xs, int slots,                            \
              const uint32_t* __restrict__ w, const uint8_t* __restrict__ ws, const float* __restrict__ alpha, int K,  \
              int N, const int* __restrict__ items, const int* __restrict__ counts, const int* __restrict__ members,   \
              void* __restrict__ out) {                                                                                 \
-        grouped<EPI>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);                              \
+        grouped<EPI, TJ, U>(codes, xs, slots, w, ws, alpha, K, N, items, counts, members, out);                       \
     }
-TF_CK4(tf_ck4_up_relu2, 1)
-TF_CK4(tf_ck4_down_f32, 0)
+// Prompt chunks: 64 columns a warp, a step at a time; decode-sized calls: 32 a warp, four steps in flight. Same bits.
+TF_CK4(tf_ck4_up_relu2, 1, 8, 1)
+TF_CK4(tf_ck4_down_f32, 0, 8, 1)
+TF_CK4(tf_ck4_up_relu2_few, 1, 4, 4)
+TF_CK4(tf_ck4_down_f32_few, 0, 4, 4)
