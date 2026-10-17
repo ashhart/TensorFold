@@ -385,6 +385,22 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
         problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
         return null;
     }
+    const paired = o.speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null;
+    if (tf.flashnext_batch_meta.refusal(o.lanes_fixed, o.lanes, paired, o.learn != null)) |text| {
+        problem.* = text;
+        return null;
+    }
+    if (tf.flashnext_batch_meta.shared(o.lanes_fixed, o.lanes, paired, o.learn != null)) {
+        var why: []const u8 = "";
+        const shared: ?api.Opened = shared: {
+            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
+                problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
+                return null;
+            };
+            break :shared opened;
+        };
+        if (shared) |opened| return opened;
+    }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     var why: []const u8 = "";

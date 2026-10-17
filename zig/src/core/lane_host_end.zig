@@ -40,6 +40,7 @@ pub fn takeCancels(h: *LaneHost) void {
 
 /// A failed round ends every stream it held, with the backend's error.
 pub fn failAll(h: *LaneHost, message: []const u8) void {
+    h.core.sweep() catch {};
     h.lock();
     const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
     h.admitted.clearRetainingCapacity();
