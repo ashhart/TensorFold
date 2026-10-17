@@ -1,5 +1,4 @@
-//! The CUDA half of the root build: kernel fatbins with each Python extension's nvcc flags, the runtime, Nemotron, the
-//! CLI.
+//! The CUDA half of the root build: kernel fatbins with their Python extensions' nvcc flags, the runtime, the CLI.
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
@@ -42,10 +41,8 @@ const kernels = [_]Kernel{
     .{ .name = "affine8", .flags = &.{"-O3"} }, // ours: MLX affine 2 to 8 bits on lane_gemv tiles of their own width
     .{ .name = "affine_prefill", .flags = &.{"-O3"} }, // ours: qmm_prefill's prompt GEMM over affine8's tiles
     .{ .name = "fp8_experts", .flags = &.{"-O3"} }, // fp8/experts.cu's device code, tensorfold_fp8_experts_v6
-    // ours: EXLR8 lane projections, the Metal kernels' order
-    .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } },
-    // ours: EXLR8 dense matrices by row, the Metal order
-    .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } },
+    .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
+    .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
@@ -232,7 +229,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
     b.installArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }));
-    const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = drama3Module(b, target, optimize, cuda, mods.core) } } });
+    const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, mods.core) } } });
     const d3_exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = d3_tool });
     b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
 }
@@ -275,10 +272,6 @@ fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
-fn drama3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
-}
-
 fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const mod = b.createModule(.{
@@ -291,7 +284,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "engine_api", .module = api },
             .{ .name = "lanes", .module = lanes },
             .{ .name = "nemotron", .module = nemotron },
-            .{ .name = "drama3", .module = drama3Module(b, target, optimize, cuda, core) },
+            .{ .name = "drama3", .module = @import("drama3_host.zig").module(b, target, optimize, cuda, core) },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision) },
@@ -332,8 +325,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return exe;
 }
 
-/// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any
-/// host.
+/// Host tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
@@ -436,14 +428,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         run.has_side_effects = true;
         video_step.dependOn(&run.step);
     }
-    const drama3 = drama3Module(b, host, .debug, cuda, mods.core);
-    @import("drama3_host.zig").compile(b, b.step("check-drama-cuda-host", "Compile Drama CUDA GPU entry points without running them"), drama3, "drama_cuda_host");
-
-    b.step("test-drama-owner", "Drama's real Tts and Codec owners with mocked CUDA waits").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drama3, .filters = &.{"drama owner:"} })).step);
-    const drama_run = b.addRunArtifact(b.addTest(.{ .root_module = drama3 }));
-    drama_run.has_side_effects = true;
-    step.dependOn(&drama_run.step);
-    b.step("test-drama-host", "Drama shared config, prompt and WAV host tests").dependOn(&drama_run.step);
+    const drama3 = @import("drama3_host.zig").hostTests(b, step, cuda, mods.core);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
     @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");

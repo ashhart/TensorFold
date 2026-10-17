@@ -41,3 +41,20 @@ pub fn metal(b: *std.Build, core: *std.Build.Module, api: *std.Build.Module) voi
     compile(b, step, family, "drama_metal_host");
     native(b, step, family, core, api, null, "drama_metal_native_host");
 }
+
+/// Drama's family module over a runtime and the core; its tests run on the host with mocked CUDA waits.
+pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+}
+
+/// Drama's CUDA-side host steps (its tests, the owners' filter, the CUDA entry points compiled); returns its module.
+pub fn hostTests(b: *std.Build, step: *std.Build.Step, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    const drama3 = module(b, b.graph.host, .debug, cuda, core);
+    compile(b, b.step("check-drama-cuda-host", "Compile Drama CUDA GPU entry points without running them"), drama3, "drama_cuda_host");
+    b.step("test-drama-owner", "Drama's real Tts and Codec owners with mocked CUDA waits").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drama3, .filters = &.{"drama owner:"} })).step);
+    const run = b.addRunArtifact(b.addTest(.{ .root_module = drama3 }));
+    run.has_side_effects = true;
+    step.dependOn(&run.step);
+    b.step("test-drama-host", "Drama shared config, prompt and WAV host tests").dependOn(&run.step);
+    return drama3;
+}
