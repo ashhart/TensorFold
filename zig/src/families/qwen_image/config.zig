@@ -19,7 +19,10 @@ pub const pixels_per_row = 16;
 /// The latent grid of a width x height image: rows (height / 16) by columns (width / 16).
 pub fn grid(width: usize, height: usize) !struct { rows: usize, columns: usize } {
     if (width == 0 or height == 0 or width % pixels_per_row != 0 or height % pixels_per_row != 0) return error.BadImageSize;
-    return .{ .rows = height / pixels_per_row, .columns = width / pixels_per_row };
+    const rows = height / pixels_per_row;
+    const columns = width / pixels_per_row;
+    _ = std.math.mul(usize, rows, columns) catch return error.BadImageSize;
+    return .{ .rows = rows, .columns = columns };
 }
 
 /// Accepts the transformer config this family runs (QwenImage21Transformer2DModel at its released size), else an error.
@@ -77,6 +80,8 @@ test "the released transformer config passes; another depth, rotary or class doe
     try std.testing.expectEqual(@as(usize, 48), (try grid(1344, 768)).rows);
     try std.testing.expectEqual(@as(usize, 84), (try grid(1344, 768)).columns);
     try std.testing.expectError(error.BadImageSize, grid(1000, 768));
+    const huge = std.math.maxInt(usize) / 16 * 16;
+    try std.testing.expectError(error.BadImageSize, grid(huge, huge));
 }
 
 test "a config whose eps is not the kernels' constant is refused" {

@@ -10,26 +10,49 @@ const Ref = @import("../../core/qwen_vl/weights.zig").Ref;
 const H = cfg.hidden;
 const D = cfg.head_dim;
 
-/// One buffer's parts for `text` prompt rows and `image` rows, each 256-aligned.
+/// One buffer's parts for `text` prompt rows and `image` rows, each 256-aligned, and the prompt store's bytes.
 pub const Scratch = struct {
     parts: [18]usize,
+    store: usize,
 
-    pub fn of(text: usize, image: usize) Scratch {
+    /// Every size checked: error.ScratchTooLarge when a product, the aligned total or a u32 row count would overflow.
+    pub fn of(text: usize, image: usize) error{ScratchTooLarge}!Scratch {
+        const keys = std.math.add(usize, text, image) catch return error.ScratchTooLarge;
+        if (keys > std.math.maxInt(u32)) return error.ScratchTooLarge;
         const rows = @max(text, image);
-        const keys = text + image;
-        const wide = rows * H * 2;
-        const mlp = rows * cfg.mlp_width * 2;
-        const lat = image * cfg.channels * 2;
-        const rope = keys * D / 2 * 4;
-        return .{ .parts = .{ wide, wide, wide, wide, wide, wide, wide, mlp, mlp, wide, keys * H * 2, keys * H * 2, lat, lat, text * cfg.context * 2, rope, rope, 5 * H * 2 } };
+        const wide = try product(&.{ rows, H, 2 });
+        const mlp = try product(&.{ rows, cfg.mlp_width, 2 });
+        const lat = try product(&.{ image, cfg.channels, 2 });
+        const rope = try product(&.{ keys, D / 2, 4 });
+        const kv = try product(&.{ keys, H, 2 });
+        const txt = try product(&.{ text, cfg.context, 2 });
+        const s: Scratch = .{
+            .parts = .{ wide, wide, wide, wide, wide, wide, wide, mlp, mlp, wide, kv, kv, lat, lat, txt, rope, rope, 5 * H * 2 },
+            .store = try product(&.{ 2, cfg.layers, text, H, 2 }),
+        };
+        _ = try s.total();
+        return s;
+    }
+
+    fn total(s: Scratch) error{ScratchTooLarge}!usize {
+        var sum: usize = 0;
+        for (s.parts) |n| {
+            if (n > std.math.maxInt(usize) - 255) return error.ScratchTooLarge;
+            sum = std.math.add(usize, sum, std.mem.alignForward(usize, n, 256)) catch return error.ScratchTooLarge;
+        }
+        return sum;
     }
 
     pub fn bytes(s: Scratch) usize {
-        var total: usize = 0;
-        for (s.parts) |n| total += std.mem.alignForward(usize, n, 256);
-        return total;
+        return s.total() catch unreachable; // of() checked it
     }
 };
+
+fn product(factors: []const usize) error{ScratchTooLarge}!usize {
+    var p: usize = 1;
+    for (factors) |f| p = std.math.mul(usize, p, f) catch return error.ScratchTooLarge;
+    return p;
+}
 
 pub const Timing = struct { wall: f64, gpu: f64, host: f64 };
 
@@ -83,11 +106,11 @@ pub const Model = struct {
         errdefer t.k.deinit();
         t.w = try wts.load(gpa, io, device, dir);
         errdefer t.w.deinit();
-        const plan = Scratch.of(text, t.image);
+        const plan = try Scratch.of(text, t.image);
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
         t.scratch = try device.buffer(plan.bytes(), opts);
         errdefer t.scratch.deinit();
-        t.store = try device.buffer(2 * cfg.layers * text * H * 2, opts);
+        t.store = try device.buffer(plan.store, opts);
         errdefer t.store.deinit();
         var at: usize = 0;
         const views = [_]*Ref{ &t.x, &t.xn, &t.qr, &t.kr, &t.vr, &t.att, &t.y, &t.wa, &t.wb, &t.q, &t.k_, &t.v, &t.lat, &t.vel, &t.txt, &t.cos, &t.sin, &t.mods };
@@ -228,6 +251,16 @@ pub const Model = struct {
 };
 
 test "scratch for a 1344 x 768 image after a 94-row prompt" {
-    const s = Scratch.of(94, 4032);
+    const s = try Scratch.of(94, 4032);
     try std.testing.expectEqual(@as(usize, 533_978_112), s.bytes()); // the two MLP halves the largest parts
+    try std.testing.expectEqual(@as(usize, 2 * cfg.layers * 94 * H * 2), s.store);
+}
+
+test "scratch for shapes whose products overflow is refused by name" {
+    const max = std.math.maxInt(usize);
+    try std.testing.expectError(error.ScratchTooLarge, Scratch.of(max, 1));
+    try std.testing.expectError(error.ScratchTooLarge, Scratch.of(1, max));
+    // more rows than the kernels' u32 row counts hold
+    try std.testing.expectError(error.ScratchTooLarge, Scratch.of(@as(usize, std.math.maxInt(u32)) + 1, 0));
+    try std.testing.expectError(error.ScratchTooLarge, Scratch.of(1 << 31, 1 << 31));
 }
