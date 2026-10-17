@@ -5,7 +5,7 @@ const exlr8_build = @import("exlr8.zig");
 const golden_build = @import("golden.zig");
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
-const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
+pub const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
 
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
@@ -156,6 +156,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("glm_cuda", glm_cuda);
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
+    // DeepSeek-V4.1's own images (`fatbins-dsv41`), only in its binaries; host-only bindings without them
+    const dsv41 = @import("dsv41.zig");
+    const dk = dsv41.withImages(b, target, optimize, cuda, dsv41.images(b, nvcc, prebuilt, version, sms));
+    b.installArtifact(dsv41.runner(b, target, optimize, cuda, dk, strip));
+    b.installArtifact(dsv41.tool(b, target, optimize, cuda, dk, strip)); // tf-dsv41: checks and the engine without HTTP
+    b.installArtifact(dsv41.server(b, target, optimize, cuda, dk, build_options)); // tensorfold-dsv41
+    @import("sampling.zig").gpu(b, target, optimize, cuda, dk); // tf-dsv41-samp: the keyed sampler's device steps
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
@@ -222,7 +229,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
-    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
+    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe, tokenizer, lanes); // json, the family's text side
     if (!install_native) {
         exe.root_module.strip = true;
         return exe;
@@ -251,7 +258,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
     });
-    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug, mods.tokenizer, mods.lanes);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
     const server_step = b.step(
@@ -277,7 +284,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
     // the tool-call parser's tests, run beside the server's on Macs: the GLM calls the CUDA port serves
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
-    _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
+    _ = @import("server.zig").addTo(b, parse_tests, host, .debug, mods.tokenizer, mods.lanes);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
@@ -290,7 +297,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
 }
 
 /// nvcc -fatbin with torch's flags, the kernel's own and one -gencode per SASS target, as the Python build passes them.
-fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
+pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
     const run = b.addSystemCommand(&.{ nvcc, "-fatbin" });
     run.addFileInput(version);
     run.addArgs(&torch_flags);
