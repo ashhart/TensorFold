@@ -120,4 +120,37 @@ fn lattice(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Confi
     };
     return @import("runtime_lattice.zig").read(b.allocator, &b.frame, output, projected, c, h);
 }
-pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort };
+/// Rows [first, first + rows) of `x`, an alias in the frame.
+fn rowsOf(b: *Backend, x: op.View, first: u32, rows: u32) !op.View {
+    if (first > x.rows or rows > x.rows - first) return error.DraftOperatorShape;
+    const r = try b.frame.ref(x);
+    return b.frame.add(.{ .buf = r.buf, .off = r.off + @as(usize, first) * x.stride * x.dtype.size() }, rows, x.width, x.stride, x.dtype);
+}
+fn lattices(ptr: *anyopaque, epoch: u64, h: op.Head, projected: op.View, c: Config, block: u32, out: []op.Lattice) !void {
+    const b = backend(ptr);
+    _ = try b.encoder(epoch);
+    if (block < 2 or h.logits.rows != out.len * block or out.len > 8) return error.DraftOperatorShape;
+    // top-k takes one stream's rows a call (at most 16), all before the frame's one wait
+    var heads: [8]op.Head = undefined;
+    var picks: [8]op.View = undefined;
+    for (heads[0..out.len], picks[0..out.len], 0..) |*hs, *pick, s| {
+        const first: u32 = @intCast(s * block + 1); // a stream's anchor row drafts nothing
+        hs.* = .{ .logits = try rowsOf(b, h.logits, first, block - 1), .token_ids = h.token_ids };
+        pick.* = try b.frame.alloc(block - 1, @sizeOf(@import("core").bf16_topk.Row), .u8);
+        const logits = try b.frame.ref(hs.logits);
+        const rows = try b.frame.ref(pick.*);
+        try b.topk.encode(b.frame.encoder, .{ .buf = logits.buf, .off = logits.off }, .{ .buf = rows.buf, .off = rows.off }, .{ .rows = block - 1, .vocab = hs.logits.width, .k = c.topk, .stride = hs.logits.stride });
+    }
+    b.frame.encoder.barrier();
+    b.frame.finish() catch |err| {
+        b.failed = true;
+        return err;
+    };
+    var made: usize = 0;
+    errdefer for (out[0..made]) |*l| l.deinit();
+    for (out, heads[0..out.len], picks[0..out.len], 0..) |*l, hs, pick, s| {
+        l.* = try @import("runtime_lattice.zig").read(b.allocator, &b.frame, pick, try rowsOf(b, projected, @intCast(s * block + 1), block - 1), c, hs);
+        made += 1;
+    }
+}
+pub const vtable = op.Ops.VTable{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = context.attention, .swiglu = swiglu, .mask_rows = maskRows, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = context.begin, .context_append = context.append, .context_commit = context.commit, .context_stage = context.stage, .context_abort = context.abort, .stream_append = context.streamAppend };

@@ -311,6 +311,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     errdefer if (h.draft) |d| d.deinit();
     h.back = try lb.Metal.init(gpa, &h.runner, h.draft);
     errdefer h.back.deinit();
+    h.back.chunk = h.runner.promptRows(q.model.promptRows());
     h.back.grow = .{ .ctx = h, .room = Host.roomFor, .added = Host.added };
     h.back.vision = o.images;
     if (h.draft != null) try h.back.measure(io);
@@ -320,7 +321,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
     const offer: ?api.Vision = if (o.images) |v| .{ .ctx = h, .prepare = Host.prepareImage, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.capacity, .max_images = v.max_images, .explain = tf.qwen_vl.geometry.problem } else null;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = 128, .vision = offer });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "qwen27", .lanes = slots, .context_window = capacity, .prefill_step = @intCast(h.back.chunk), .vision = offer });
     h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
@@ -367,7 +368,7 @@ fn holdResident(h: *Host, io: std.Io) !void {
     try list.appendSlice(h.gpa, &h.model.frame.buffers);
     try list.appendSlice(h.gpa, &h.runner.gdn.buffers);
     try h.runner.readyBuffers(h.gpa, &list);
-    for (h.back.rings) |r| if (r) |x| try list.append(h.gpa, x.buf);
+    for (h.back.contexts) |c| if (c) |x| try x.buffers(&list, h.gpa);
     if (h.draft) |d| {
         for (d.model.checkpoint.shards.items) |s| try list.append(h.gpa, s.buffer);
         try list.append(h.gpa, d.model.pending);

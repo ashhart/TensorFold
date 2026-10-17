@@ -68,10 +68,21 @@ pub fn main(init: std.process.Init) !void {
     var generation = try q.dflash.generation.Generation.init(init.gpa, &runner, draft);
     defer generation.deinit();
     const load_ns = load_start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
+    var trace = profile.Trace{ .queue = target.queue };
+    const prompt_profiled = std.c.getenv("QWEN27_PROFILE_PROMPT") != null;
+    if (prompt_profiled) {
+        runner.profile(&trace);
+        trace.enabled = true;
+    }
     const start = std.Io.Clock.awake.now(io);
     try generation.prefill(prompt, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
-    var trace = profile.Trace{ .queue = target.queue };
+    if (prompt_profiled) {
+        inline for (@typeInfo(profile.Class).@"enum".field_names, 0..) |name, ci| std.debug.print("PROMPT class={s} calls={d} ms={d:.2}\n", .{ name, trace.calls[ci], trace.seconds[ci] * 1e3 });
+        for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("PROMPT shape n={d} k={d} sk={d} bits={d} calls={d} ms={d:.2}\n", .{ sh.n, sh.k, sh.sk, sh.bits, sh.calls, sh.gpu_seconds * 1e3 });
+        trace = .{ .queue = target.queue };
+        runner.profile(null);
+    }
     const profiled = platform.c.getenv("QWEN27_PROFILE") != null;
     if (profiled) {
         runner.profile(&trace);

@@ -1,6 +1,6 @@
 //! Deterministic BF16 picks and verified-tree result decoding.
 const std = @import("std");
-pub const max_rows = 16;
+pub const max_rows = 64;
 pub const invalid_token = std.math.maxInt(u32);
 pub const Pick = extern struct { token: u32 = invalid_token, nonfinite: u32 = 0 };
 pub const Argmax = extern struct { rows: u32, vocab: u32, stride: u32 };
@@ -144,7 +144,7 @@ test "finite ties choose first token and nonfinite kinds invalidate a row" {
     try std.testing.expectEqual(Pick{ .token = 0 }, rowArgmax(&.{ 0x8000, 0, 0x8000 }));
     try std.testing.expectEqual(Pick{ .token = 1 }, rowArgmax(&.{ 0xbf80, 0x3f80, 0x3f80 }));
     try std.testing.expectEqual(Pick{ .token = invalid_token, .nonfinite = 7 }, rowArgmax(&.{ 0x7fc1, 0x7f80, 0xff80, 0x3f80 }));
-    try std.testing.expectError(error.BadRoundShape, checkArgmax(.{ .rows = 17, .vocab = 1, .stride = 1 }));
+    try std.testing.expectError(error.BadRoundShape, checkArgmax(.{ .rows = max_rows + 1, .vocab = 1, .stride = 1 }));
     try std.testing.expectError(error.BadRoundShape, checkArgmax(.{ .rows = 1, .vocab = 2, .stride = 1 }));
     try std.testing.expectError(error.BadRoundShape, checkMatch(.{ .rows = 0, .vocab = 1, .budget = 1 }));
 }

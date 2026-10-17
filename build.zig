@@ -156,9 +156,11 @@ pub fn build(b: *std.Build) void {
     const gemma4_contract_host = @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
     if (b.graph.host.result.os.tag == .macos) {
         const gemma4_host_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
-        gemma4_host_mods.sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-compile-empty.metallib", "") });
+        gemma4_host_mods.sources.addImport("nemotron_packed_metallib", embedded(b, b.addWriteFiles().add("gemma4-compile-empty.metallib", ""), "nemotron_packed.metallib"));
         @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
+        @import("zig/build/qwen27_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
     }
+    @import("zig/build/qwen27_host.zig").tests(b);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     @import("zig/build/gradient_host.zig").add(b);

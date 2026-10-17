@@ -6,6 +6,7 @@ struct TfDeltaParams {
   uint rows, nk, nv, dk, dv, taps, slots, weight_flags;
   float eps;
   uint zba_stride;  // 0: z, a and b in their own rows; else one fused row of this many values (z, b, a)
+  uint advance;     // 1: a shared round's one-row windows (always kept) step their state in place; the replay skips them
 };
 struct TfDeltaSegment { uint first, rows, state_slot, next_slot; };
 struct TfDeltaKeep { uint first, rows, state_slot, next_slot; };
@@ -310,8 +311,21 @@ kernel void tf_delta_gdn_replay(device const bfloat* key [[buffer(0)]],
                            device const TfDeltaKeep* keeps [[buffer(6)]],
                            constant TfDeltaParams& p [[buffer(7)]],
                            device float* next [[buffer(8)]],
+                           device const TfDeltaSegment* segments [[buffer(9)]],
+                           device const float* before [[buffer(10)]],
                            uint3 position [[thread_position_in_grid]],
                            uint lane [[thread_index_in_simdgroup]]) {
+  const uint segment = position.z / p.nv;
+  if (p.advance != 0 && segments[segment].rows == 1) {
+    const TfDeltaKeep keep = keeps[segment];
+    if (keep.rows == 0) {
+      const uint stride = p.nv * p.dv * p.dk;
+      const uint column = ((position.z % p.nv) * p.dv + position.y) * p.dk + lane * 4;
+      for (uint part = 0; part < 4; ++part)
+        next[keep.next_slot * stride + column + part] = before[keep.state_slot * stride + column + part];
+    }
+    return;
+  }
   if (p.dk == 128) tf_delta_gdn_replay_body<4>(key, value, decay, mixing, committed, kept_rows, keeps, p, next, position, lane);
   else tf_delta_gdn_replay_body<0>(key, value, decay, mixing, committed, kept_rows, keeps, p, next, position, lane);
 }
@@ -568,6 +582,7 @@ kernel void tf_delta_gdn_clear(device uint* state [[buffer(0)]],
                           uint2 at [[thread_position_in_grid]]) {
   const uint state_width = p.nv * p.dv * p.dk;
   const uint conv_width = (p.taps - 1) * (2 * p.nk * p.dk + p.nv * p.dv);
-  if (at.x < state_width) state[(at.y * p.slots + slot) * state_width + at.x] = 0u;
-  if (at.x < conv_width) conv[(at.y * p.slots + slot) * conv_width + at.x] = 0u;
+  const ulong row = ulong(at.y) * p.slots + slot; // the whole pool's words pass 32 bits past 113 slots of a 27B
+  if (at.x < state_width) state[row * state_width + at.x] = 0u;
+  if (at.x < conv_width) conv[row * conv_width + at.x] = 0u;
 }

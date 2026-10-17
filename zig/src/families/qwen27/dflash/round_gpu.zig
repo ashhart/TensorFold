@@ -13,7 +13,7 @@ pub const Matcher = struct {
         var buffers: [5]mtl.Buffer = undefined;
         var made: usize = 0;
         errdefer for (buffers[0..made]) |buffer| buffer.deinit();
-        for (&buffers, [_]usize{ 16 * 4, 16 * 4, 16 * @sizeOf(contract.Pick), 16 * 4, @sizeOf(contract.Result) }) |*buffer, bytes| {
+        for (&buffers, [_]usize{ contract.max_rows * 4, contract.max_rows * 4, contract.max_rows * @sizeOf(contract.Pick), 16 * 4, @sizeOf(contract.Result) }) |*buffer, bytes| {
             buffer.* = try device.buffer(bytes, options);
             made += 1;
         }
@@ -24,7 +24,7 @@ pub const Matcher = struct {
         for (m.buffers) |buffer| buffer.deinit();
     }
     pub fn encode(m: *Matcher, e: mtl.ComputeEncoder, logits: core.tree_round_gpu.Ref, ids: []const u32, parents: []const i32, vocab: u32, budget: u32, eos: []const u32) !contract.Match {
-        if (ids.len == 0 or ids.len > 16 or parents.len != ids.len or eos.len > 16) return error.BadRoundShape;
+        if (ids.len == 0 or ids.len > contract.max_rows or parents.len != ids.len or eos.len > 16) return error.BadRoundShape;
         @memcpy(m.buffers[0].slice(u32, ids.len), ids);
         @memcpy(m.buffers[1].slice(i32, parents.len), parents);
         @memcpy(m.buffers[3].slice(u32, eos.len), eos);

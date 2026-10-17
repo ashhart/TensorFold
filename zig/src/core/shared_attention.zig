@@ -22,6 +22,10 @@ pub const Shape = struct {
     }
 };
 pub const Ref = struct { buf: mtl.Buffer, off: usize = 0 };
+/// 256-key chunks covering `keys` (tf_shared_lane_attention_split's TF_CHUNK).
+fn chunksOf(keys: usize) usize {
+    return (keys + 255) / 256;
+}
 const Args = extern struct { rows: u32, keys: u32 = 0, mask_stride: u32 = 0, heads: u32 = 0, scale_bits: u32 = 0 };
 
 pub fn source(a: std.mem.Allocator, s: Shape) ![]u8 {
@@ -37,6 +41,10 @@ pub const Attention = struct {
     decode: mtl.Pipeline,
     rope: mtl.Pipeline,
     append: mtl.Pipeline,
+    split: mtl.Pipeline,
+    merge: mtl.Pipeline,
+    /// encodeSplit's chunk partials: [16 rows][kv heads][chunks][query heads a kv head][head_dim + 2] fp32.
+    part: mtl.Buffer,
 
     pub fn init(a: std.mem.Allocator, device: mtl.Device, s: Shape) !Attention {
         const text = try source(a, s);
@@ -51,14 +59,49 @@ pub const Attention = struct {
         errdefer rope.deinit();
         const append = try mtl.Pipeline.init(device, lib, "tf_lane_append_kv", false);
         errdefer append.deinit();
-        if (attend.simdWidth() != 32 or attend.maxThreads() < 32) return error.UnsupportedAttentionPipeline;
-        return .{ .shape = s, .attend = attend, .decode = decode, .rope = rope, .append = append };
+        const split = try mtl.Pipeline.init(device, lib, "tf_shared_lane_attention_split", false);
+        errdefer split.deinit();
+        const merge = try mtl.Pipeline.init(device, lib, "tf_shared_lane_attention_merge", false);
+        errdefer merge.deinit();
+        if (attend.simdWidth() != 32 or attend.maxThreads() < 32 or split.simdWidth() != 32 or merge.simdWidth() != 32) return error.UnsupportedAttentionPipeline;
+        const part = try device.buffer(16 * s.query_heads * chunksOf(s.capacity) * (s.head_dim + 2) * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        return .{ .shape = s, .attend = attend, .decode = decode, .rope = rope, .append = append, .split = split, .merge = merge, .part = part };
     }
     pub fn deinit(p: Attention) void {
         p.attend.deinit();
         p.decode.deinit();
         p.rope.deinit();
         p.append.deinit();
+        p.split.deinit();
+        p.merge.deinit();
+        p.part.deinit();
+    }
+
+    /// Encode 256-key chunks and merge their fp32 partials in chunk order.
+    pub fn encodeSplit(p: Attention, e: mtl.ComputeEncoder, rows: usize, keys: usize, stride: usize, scale: f32, q: Ref, k: Ref, v: Ref, mask: Ref, out: Ref) !void {
+        if (rows == 0 or rows > 16 or keys == 0 or keys > p.shape.capacity or stride < keys or stride > std.math.maxInt(u32) or
+            !std.math.isFinite(scale)) return error.InvalidAttentionView;
+        try check(q, rows * p.shape.query_heads * p.shape.head_dim * 2, 2);
+        try check(out, rows * p.shape.query_heads * p.shape.head_dim * p.outputBytes(), p.outputBytes());
+        try check(k, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        try check(v, keys * p.shape.kv_heads * p.shape.head_dim * 2, 2);
+        try check(mask, try std.math.mul(usize, rows, stride), 1);
+        try disjoint(out, q);
+        try disjoint(out, k);
+        try disjoint(out, v);
+        try disjoint(out, mask);
+        const args = Args{ .rows = @intCast(rows), .keys = @intCast(keys), .mask_stride = @intCast(stride), .scale_bits = @bitCast(scale) };
+        e.setPipeline(p.split);
+        for ([_]Ref{ q, k, v, mask }, 0..) |r, i| e.setBuffer(r.buf, r.off, i);
+        e.setValue(args, 4);
+        e.setBuffer(p.part, 0, 5);
+        e.dispatchGroups(mtl.Size.of(p.shape.kv_heads, rows, chunksOf(keys)), mtl.Size.of(32, 1, 1));
+        e.barrier();
+        e.setPipeline(p.merge);
+        e.setBuffer(p.part, 0, 0);
+        e.setValue(args, 1);
+        e.setBuffer(out.buf, out.off, 2);
+        e.dispatchGroups(mtl.Size.of(p.shape.query_heads, rows, 1), mtl.Size.of(32, 1, 1));
     }
 
     /// Q is rotated, cached K was rotated at append; no causal mask is inferred: mask[row*stride+key] decides.

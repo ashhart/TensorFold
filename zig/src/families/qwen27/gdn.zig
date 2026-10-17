@@ -13,7 +13,7 @@ pub const Span = struct {
         try abi.checkSpan(s.buffer.length(), s.offset, s.bytes, required, 2);
     }
 
-    fn bind(s: Span, encoder: metal.ComputeEncoder, index: usize) void {
+    pub fn bind(s: Span, encoder: metal.ComputeEncoder, index: usize) void {
         encoder.setBuffer(s.buffer, s.offset, index);
     }
 
@@ -21,6 +21,8 @@ pub const Span = struct {
         return a.buffer.id == b.buffer.id and a.offset < b.offset + b.bytes and b.offset < a.offset + a.bytes;
     }
 };
+
+pub const TreeMode = enum { auto, snapshot };
 
 pub const Pipelines = @import("core_delta").Pipelines;
 
@@ -45,6 +47,7 @@ pub const Buffers = struct {
     recurrent: Span,
     output: Span,
     next_state: Span,
+    before: ?Span = null,
     next_history: Span,
     parents: Span,
     windows: Span,
@@ -52,9 +55,14 @@ pub const Buffers = struct {
     segments: Span,
     keeps: Span,
     kept_rows: Span,
+    slot_steps: Span,
 
     pub fn check(b: Buffers, sizes: abi.Bytes, kinds: abi.WeightKinds, p: abi.Params, plan: Plan) !void {
         try b.qkv.check(sizes.qkv);
+        if (b.before) |before| {
+            try before.check(sizes.state);
+            if (before.offset % 4 != 0) return error.BadGdnBuffer;
+        }
         inline for (.{ "a", "b", "mixing" }) |name| try @field(b, name).check(sizes.heads);
         try b.z.check(sizes.value);
         try b.conv_weight.check(sizes.conv_weight);
@@ -73,11 +81,14 @@ pub const Buffers = struct {
         try b.row_slots.check(try abi.countBytes(u32, p.rows, 1));
         try b.segments.check(try abi.countBytes(abi.Segment, plan.segments.len, 1));
         try b.keeps.check(try abi.countBytes(abi.Keep, plan.keeps.len, 1));
+        try b.slot_steps.check(plan.slot_steps.len * @sizeOf(@import("core").tree_slots.Step));
         try b.kept_rows.check(try abi.countBytes(u32, plan.kept_rows.len, 1));
-        inline for (.{ "state", "next_state", "decay", "snapshots", "parents", "windows", "row_slots", "segments", "keeps", "kept_rows" }) |name| if (@field(b, name).offset % 4 != 0) return error.BadGdnBuffer;
+        inline for (.{ "state", "next_state", "decay", "snapshots", "parents", "windows", "row_slots", "segments", "keeps", "kept_rows", "slot_steps" }) |name| if (@field(b, name).offset % 4 != 0) return error.BadGdnBuffer;
         if ((kinds.conv == .f32 and b.conv_weight.offset % 4 != 0) or (kinds.a_log == .f32 and b.a_log.offset % 4 != 0) or (kinds.dt == .f32 and b.dt.offset % 4 != 0) or (kinds.norm == .f32 and b.norm.offset % 4 != 0)) return error.BadGdnBuffer;
-        const reads = [_]Span{ b.qkv, b.a, b.b, b.z, b.conv_weight, b.a_log, b.dt, b.norm, b.history, b.state, b.parents, b.windows, b.row_slots, b.segments, b.keeps, b.kept_rows };
-        const writes = [_]Span{ b.query, b.key, b.value, b.decay, b.mixing, b.tails, b.snapshots, b.recurrent, b.output, b.next_state, b.next_history };
+        const reads = [_]Span{ b.qkv, b.a, b.b, b.z, b.conv_weight, b.a_log, b.dt, b.norm, b.history, b.state, b.parents, b.windows, b.row_slots, b.segments, b.keeps, b.kept_rows, b.slot_steps };
+        // an in-place round's next state is its state: each scan thread reads its own words before it writes them
+        const in_place = b.next_state.buffer.id == b.state.buffer.id and b.next_state.offset == b.state.offset and b.next_state.bytes == b.state.bytes;
+        const writes = [_]Span{ b.query, b.key, b.value, b.decay, b.mixing, b.tails, b.snapshots, b.recurrent, b.output, if (in_place) .{ .buffer = b.state.buffer, .bytes = 0 } else b.next_state, b.next_history, b.before orelse Span{ .buffer = b.state.buffer, .bytes = 0 } };
         inline for (writes, 0..) |write, index| {
             inline for (reads) |read| if (write.overlaps(read)) return error.AliasedGdnState;
             inline for (writes[0..index]) |other| if (write.overlaps(other)) return error.AliasedGdnState;
@@ -91,13 +102,19 @@ pub const Round = struct {
     pipelines: Pipelines,
     segments: usize,
     conv_width: usize,
+    tree_mode: TreeMode = .auto,
+    compact: bool,
+    slot_kernel: usize, // which tree_slots kernel holds the plan's peak of live states
 
     pub fn init(shape: abi.Shape, kinds: abi.WeightKinds, p: abi.Params, plan: Plan, b: Buffers, pipelines: Pipelines) !Round {
-        if (plan.parents.len != p.rows or plan.segments.len == 0 or plan.keeps.len != plan.segments.len) return error.BadGdnPlan;
+        if (plan.parents.len != p.rows or plan.segments.len == 0 or plan.keeps.len != plan.segments.len or (plan.compact and plan.slot_steps.len != p.rows)) return error.BadGdnPlan;
         try b.check(try abi.Bytes.init(shape, p, kinds), kinds, p, plan);
         inline for (.{ pipelines.pre, pipelines.post, pipelines.conv_commit }) |pipeline| if (pipeline.simdWidth() != 32 or pipeline.maxThreads() < 32) return error.UnsupportedGdnPipeline;
         inline for (.{ pipelines.tree, pipelines.replay }) |pipeline| if (pipeline.simdWidth() != 32 or pipeline.maxThreads() < 128) return error.UnsupportedGdnPipeline;
-        return .{ .p = p, .b = b, .pipelines = pipelines, .segments = plan.segments.len, .conv_width = shape.conv };
+        for (pipelines.tree_slots) |pipeline| if (pipeline.simdWidth() != 32 or pipeline.maxThreads() < 128) return error.UnsupportedGdnPipeline;
+        const slots = @import("core_delta").slotKernel(plan.slot_peak);
+        if (plan.compact) for (plan.segments) |segment| try @import("core").tree_slots.validate(plan.parents[segment.first..][0..segment.rows], plan.slot_steps[segment.first..][0..segment.rows], segment.first, @import("core_delta").slot_kernels[slots]);
+        return .{ .slot_kernel = slots, .compact = plan.compact, .p = p, .b = b, .pipelines = pipelines, .segments = plan.segments.len, .conv_width = shape.conv };
     }
 
     pub fn prepare(r: Round, e: metal.ComputeEncoder) void {
@@ -120,11 +137,20 @@ pub const Round = struct {
         e.barrier();
     }
 
+    pub fn usesSlots(r: Round) bool {
+        return r.p.dk == 128 and r.compact and r.tree_mode != .snapshot;
+    }
+
     pub fn forward(r: Round, e: metal.ComputeEncoder) void {
-        e.setPipeline(r.pipelines.tree);
+        e.setPipeline(if (r.usesSlots()) r.pipelines.tree_slots[r.slot_kernel] else r.pipelines.tree);
         bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.parents, r.b.segments }, 0);
         e.setValue(r.p, 8);
         bind(e, .{ r.b.recurrent, r.b.snapshots }, 9);
+        if (r.usesSlots()) {
+            r.b.slot_steps.bind(e, 11);
+            r.b.state.bind(e, 12);
+            (r.b.before orelse r.b.state).bind(e, 13);
+        }
         r.stateGrid(e);
         e.barrier();
         e.setPipeline(r.pipelines.post);
@@ -171,6 +197,8 @@ pub const Round = struct {
         bind(e, .{ r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.kept_rows, r.b.keeps }, 0);
         e.setValue(r.p, 7);
         r.b.next_state.bind(e, 8);
+        r.b.segments.bind(e, 9);
+        (r.b.before orelse r.b.state).bind(e, 10);
         r.stateGrid(e);
         e.barrier();
         e.setPipeline(r.pipelines.conv_commit);

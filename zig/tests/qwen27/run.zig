@@ -115,7 +115,7 @@ pub fn main(init: std.process.Init) !void {
         const value = args[i];
         if (std.mem.eql(u8, arg, "--model")) model = value else if (std.mem.eql(u8, arg, "--tokens")) file = value else if (std.mem.eql(u8, arg, "--reference")) reference = value else if (std.mem.eql(u8, arg, "--max-tokens")) count = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--chunk")) chunk = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--profile-steps")) profile_steps = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--compare-chunk")) compare = try std.fmt.parseInt(usize, value, 10) else if (std.mem.eql(u8, arg, "--seams")) seam_every = try std.fmt.parseInt(usize, value, 10) else return error.UnknownOption;
     }
-    if (!run or model == null or file == null or chunk == 0 or chunk > 128 or compare > 128 or count > 65536 or (seam_every > 0 and compare == 0)) return error.BadOptions;
+    if (!run or model == null or file == null or chunk == 0 or chunk > 2048 or compare > 2048 or count > 65536 or (seam_every > 0 and compare == 0)) return error.BadOptions;
     const ids = try tokens(a, io, file.?);
     if (ids.len == 0 or ids.len + count > 262144) return error.BadPrompt;
     const expected = if (reference) |path| try tokens(a, io, path) else null;
@@ -123,7 +123,7 @@ pub fn main(init: std.process.Init) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const load_start = std.Io.Clock.awake.now(io);
-    const m = try q.model.Model.load(init.gpa, io, model.?, 128, null);
+    const m = try q.model.Model.load(init.gpa, io, model.?, @intCast(@max(128, @max(chunk, compare))), null);
     defer m.deinit();
     for (ids) |token| if (token >= m.config.vocab) return error.BadTokenId;
     if (expected) |values| for (values) |token| if (token >= m.config.vocab) return error.BadTokenId;

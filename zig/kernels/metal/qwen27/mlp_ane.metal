@@ -1,12 +1,13 @@
-// The Neural Engine's MLP share for prompt chunks of up to 128 rows: its fp16 input planes, SwiGLU on its planes.
+// Neural Engine MLP prompt slices use 128-row fp16 planes and SwiGLU.
 #include <metal_stdlib>
 using namespace metal;
 Q27_SPECIALIZE
 
-// X bf16 [rows][H] into fp16 planes [H][128]; rows past the chunk are zero.
-[[kernel]] void q27_ane_input(const device bfloat* X [[buffer(0)]], const device int32_t* dims [[buffer(1)]], device half* Y [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
+// X bf16 rows [base, base + 128) of [rows][H] into fp16 planes [H][128]; rows past the chunk are zero.
+[[kernel]] void q27_ane_input(const device bfloat* X [[buffer(0)]], const device int32_t* dims [[buffer(1)]], device half* Y [[buffer(2)]], constant int& base [[buffer(3)]], uint2 pos [[thread_position_in_grid]]) {
   const uint m = pos.x, k = pos.y;
-  Y[k * 128 + m] = int(m) < dims[0] ? half(float(X[m * H + k])) : half(0.0h);
+  const int r = base + int(m);
+  Y[k * 128 + m] = r < dims[0] ? half(float(X[r * H + k])) : half(0.0h);
 }
 
 // q27_mlp_xs over 64-column groups from `first`; gate and up below A come from the Neural Engine's fp16 planes.
@@ -39,8 +40,9 @@ Q27_SPECIALIZE
   }
 }
 
-// The down projection: the GPU's fp32 partial plus the Neural Engine's fp16 partial planes, rounded once to bf16.
-[[kernel]] void q27_add_ane(const device float* P [[buffer(0)]], const device half* PLANES [[buffer(1)]], device bfloat* Y [[buffer(2)]], uint2 pos [[thread_position_in_grid]]) {
+// Down projection adds the GPU and ANE partials once for rows from `base`.
+[[kernel]] void q27_add_ane(const device float* P [[buffer(0)]], const device half* PLANES [[buffer(1)]], device bfloat* Y [[buffer(2)]], constant int& base [[buffer(3)]], uint2 pos [[thread_position_in_grid]]) {
   const uint o = pos.x, m = pos.y;
-  Y[m * H + o] = bfloat(P[m * H + o] + float(PLANES[o * 128 + m]));
+  const int r = base + int(m);
+  Y[r * H + o] = bfloat(P[r * H + o] + float(PLANES[o * 128 + m]));
 }

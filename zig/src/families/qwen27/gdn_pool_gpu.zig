@@ -10,7 +10,7 @@ const Tensor = @import("gpu_weights.zig").Tensor;
 const profile = @import("core").gpu_profile;
 const Kernels = @import("gdn_library.zig").Kernels;
 
-const Field = enum { state, next_state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
+const Field = enum { state, before, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
 
 pub const Metadata = struct {
     parents: Ref,
@@ -19,14 +19,15 @@ pub const Metadata = struct {
     segments: Ref,
     keeps: Ref,
     kept_rows: Ref,
+    slot_steps: Ref,
 
     pub fn upload(m: Metadata, plan: Plan) !void {
-        inline for (.{ "parents", "windows", "row_slots", "segments", "keeps", "kept_rows" }) |name| {
+        inline for (.{ "parents", "windows", "row_slots", "segments", "keeps", "kept_rows", "slot_steps" }) |name| {
             const r = @field(m, name);
             const bytes = std.mem.sliceAsBytes(@field(plan, name));
             if (r.offset > r.buffer.length() or bytes.len > r.buffer.length() - r.offset) return error.ShortGdnMetadata;
         }
-        inline for (.{ "parents", "windows", "row_slots", "segments", "keeps", "kept_rows" }) |name| {
+        inline for (.{ "parents", "windows", "row_slots", "segments", "keeps", "kept_rows", "slot_steps" }) |name| {
             const r = @field(m, name);
             const bytes = std.mem.sliceAsBytes(@field(plan, name));
             @memcpy(r.buffer.contents()[r.offset..][0..bytes.len], bytes);
@@ -55,7 +56,9 @@ pub const Pool = struct {
     buffers: [std.enums.values(Field).len]metal.Buffer,
     kernels: Kernels,
     profiler: ?*profile.Trace = null,
+    tree_mode: gdn.TreeMode = .auto,
 
+    /// One state a slot: every round's keeps stay in their slots and update them in place.
     pub fn init(device: metal.Device, shape: abi.Shape, layers: usize, slots: usize, capacity: usize) !Pool {
         const budget = try Budget.init(shape, layers, slots, capacity);
         if (capacity % 16 != 0) return error.BadGdnProjectionCapacity;
@@ -114,8 +117,8 @@ pub const Pool = struct {
             if (keep.rows != segment.rows) return error.NotAcceptedChain;
             for (0..segment.rows) |row| if (plan.host.parents[segment.first + row] != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
         }
-        var prepared = try pool.round(layer, plan, refs);
         // Each scan thread reads and writes only its own state words, so a chain that keeps its slots scans in place.
+        var prepared = try pool.round(layer, plan, refs);
         const in_place = inPlace(plan.host);
         if (in_place) prepared.b.next_state = prepared.b.state;
         // one row a slot kept in place: its prepare writes the next conv window, so no commit or publication follows
@@ -139,22 +142,12 @@ pub const Pool = struct {
         errdefer publication.cancel();
         const e = publication.encoder;
         prepared.commitConv(e);
-        const p = prepared.p;
-        if (in_place) {
-            e.setPipeline(pool.kernels.publish_conv);
-            gdn.bind(e, .{prepared.b.next_history}, 0);
-            e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 1);
-            e.setValue(p, 2);
-            gdn.bind(e, .{prepared.b.history}, 3);
-            e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
-        } else {
-            e.setPipeline(pool.kernels.publish);
-            gdn.bind(e, .{ prepared.b.next_state, prepared.b.next_history }, 0);
-            e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 2);
-            e.setValue(p, 3);
-            gdn.bind(e, .{ prepared.b.state, prepared.b.history }, 4);
-            e.dispatchThreads(.{ .width = pool.budget.shape.state, .height = plan.host.keeps.len }, .{ .width = 32 });
-        }
+        e.setPipeline(pool.kernels.publish_conv);
+        gdn.bind(e, .{prepared.b.next_history}, 0);
+        e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 1);
+        e.setValue(prepared.p, 2);
+        gdn.bind(e, .{prepared.b.history}, 3);
+        e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
         e.barrier();
         try publication.end();
     }
@@ -173,23 +166,32 @@ pub const Pool = struct {
         e.barrier();
     }
 
-    /// A commit's replay and conv window, unfenced; the replay writes in place when every keep stays in its slot.
+    /// A commit's replay, in place, and its conv window, unfenced.
     pub fn commitScan(pool: *Pool, layer: usize, plan: DevicePlan, e: metal.ComputeEncoder) !void {
         try @import("gdn_pool.zig").validatePlan(pool.budget.shape, pool.budget.slots, pool.budget.rows, plan.host);
+        if (!inPlace(plan.host)) return error.GdnSlotMoves;
         const kinds = abi.WeightKinds{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 };
-        const p = try pool.budget.shape.params(plan.host.parents.len, pool.budget.slots, kinds);
+        var p = try pool.budget.shape.params(plan.host.parents.len, pool.budget.slots, kinds);
+        p.advance = @intFromBool(pool.advances(plan.host));
         const state = try pool.layerSpan(.state, layer);
         const history = try pool.layerSpan(.history, layer);
         const next_history = try pool.layerSpan(.next_history, layer);
         const m = plan.metadata;
-        e.setPipeline(pool.kernels.pipelines.replay);
-        gdn.bind(e, .{ try pool.layerSpan(.key, layer), try pool.layerSpan(.value, layer), try pool.layerSpan(.decay, layer), try pool.layerSpan(.mixing, layer), state }, 0);
-        e.setBuffer(m.kept_rows.buffer, m.kept_rows.offset, 5);
-        e.setBuffer(m.keeps.buffer, m.keeps.offset, 6);
-        e.setValue(p, 7);
-        const out = if (inPlace(plan.host)) state else try pool.layerSpan(.next_state, layer);
-        e.setBuffer(out.buffer, out.offset, 8);
-        e.dispatchThreads(.{ .width = 32, .height = p.dv, .depth = p.nv * plan.host.keeps.len }, .{ .width = 32, .height = 4 });
+        // windows the verify stepped in place replay nothing: skip the launch when that is all of them
+        const replays = p.advance == 0 or for (plan.host.segments, plan.host.keeps) |segment, keep| {
+            if (segment.rows > 1 or keep.rows == 0) break true;
+        } else false;
+        if (replays) {
+            e.setPipeline(pool.kernels.pipelines.replay);
+            e.setBuffer(m.segments.buffer, m.segments.offset, 9);
+            (try pool.layerSpan(.before, layer)).bind(e, 10);
+            gdn.bind(e, .{ try pool.layerSpan(.key, layer), try pool.layerSpan(.value, layer), try pool.layerSpan(.decay, layer), try pool.layerSpan(.mixing, layer), state }, 0);
+            e.setBuffer(m.kept_rows.buffer, m.kept_rows.offset, 5);
+            e.setBuffer(m.keeps.buffer, m.keeps.offset, 6);
+            e.setValue(p, 7);
+            e.setBuffer(state.buffer, state.offset, 8);
+            e.dispatchThreads(.{ .width = 32, .height = p.dv, .depth = p.nv * plan.host.keeps.len }, .{ .width = 32, .height = 4 });
+        }
         e.setPipeline(pool.kernels.pipelines.conv_commit);
         gdn.bind(e, .{ history, try pool.layerSpan(.qkv, layer) }, 0);
         e.setBuffer(m.kept_rows.buffer, m.kept_rows.offset, 2);
@@ -200,30 +202,18 @@ pub const Pool = struct {
         e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
     }
 
-    /// After commitScan's fence: the new conv window (and the state, when it went to next_state) into place, unfenced.
+    /// After commitScan's fence: the new conv window into place, unfenced.
     pub fn commitPublish(pool: *Pool, layer: usize, plan: DevicePlan, e: metal.ComputeEncoder) !void {
+        if (!inPlace(plan.host)) return error.GdnSlotMoves;
         const kinds = abi.WeightKinds{ .conv = .bf16, .a_log = .bf16, .dt = .bf16, .norm = .bf16 };
         const p = try pool.budget.shape.params(plan.host.parents.len, pool.budget.slots, kinds);
-        const state = try pool.layerSpan(.state, layer);
         const history = try pool.layerSpan(.history, layer);
-        const next_history = try pool.layerSpan(.next_history, layer);
-        const m = plan.metadata;
-        if (inPlace(plan.host)) {
-            e.setPipeline(pool.kernels.publish_conv);
-            gdn.bind(e, .{next_history}, 0);
-            e.setBuffer(m.keeps.buffer, m.keeps.offset, 1);
-            e.setValue(p, 2);
-            e.setBuffer(history.buffer, history.offset, 3);
-            e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
-            return;
-        }
-        e.setPipeline(pool.kernels.publish);
-        gdn.bind(e, .{ try pool.layerSpan(.next_state, layer), next_history }, 0);
-        e.setBuffer(m.keeps.buffer, m.keeps.offset, 2);
-        e.setValue(p, 3);
-        e.setBuffer(state.buffer, state.offset, 4);
-        e.setBuffer(history.buffer, history.offset, 5);
-        e.dispatchThreads(.{ .width = pool.budget.shape.state, .height = plan.host.keeps.len }, .{ .width = 32 });
+        e.setPipeline(pool.kernels.publish_conv);
+        gdn.bind(e, .{try pool.layerSpan(.next_history, layer)}, 0);
+        e.setBuffer(plan.metadata.keeps.buffer, plan.metadata.keeps.offset, 1);
+        e.setValue(p, 2);
+        e.setBuffer(history.buffer, history.offset, 3);
+        e.dispatchThreads(.{ .width = pool.budget.shape.conv, .height = plan.host.keeps.len }, .{ .width = 32 });
     }
 
     pub fn clearSlot(pool: *Pool, slot: u32, e: metal.ComputeEncoder) !void {
@@ -259,6 +249,7 @@ pub const Pool = struct {
             .norm = refs.scalars.norm,
             .history = try pool.layerSpan(.history, layer),
             .state = try pool.layerSpan(.state, layer),
+            .before = try pool.layerSpan(.before, layer),
             .query = try pool.layerSpan(.query, layer),
             .key = try pool.layerSpan(.key, layer),
             .value = try pool.layerSpan(.value, layer),
@@ -268,7 +259,7 @@ pub const Pool = struct {
             .snapshots = try refSpan(.{ .buffer = pool.get(.snapshots) }, bytes.snapshots),
             .recurrent = try refSpan(.{ .buffer = pool.get(.recurrent) }, bytes.value),
             .output = try refSpan(refs.output, bytes.value),
-            .next_state = try pool.layerSpan(.next_state, layer),
+            .next_state = if (inPlace(plan)) try pool.layerSpan(.state, layer) else return error.GdnSlotMoves,
             .next_history = try pool.layerSpan(.next_history, layer),
             .parents = try refSpan(m.parents, plan.parents.len * 4),
             .windows = try refSpan(m.windows, plan.windows.len * 4),
@@ -276,8 +267,17 @@ pub const Pool = struct {
             .segments = try refSpan(m.segments, plan.segments.len * @sizeOf(abi.Segment)),
             .keeps = try refSpan(m.keeps, plan.keeps.len * @sizeOf(abi.Keep)),
             .kept_rows = try refSpan(m.kept_rows, plan.kept_rows.len * 4),
+            .slot_steps = try refSpan(m.slot_steps, plan.slot_steps.len * @sizeOf(@import("core").tree_slots.Step)),
         };
-        return gdn.Round.init(pool.budget.shape, refs.scalars.kinds, p, plan, b, pool.kernels.pipelines);
+        var result = try gdn.Round.init(pool.budget.shape, refs.scalars.kinds, p, plan, b, pool.kernels.pipelines);
+        result.tree_mode = pool.tree_mode;
+        result.p.advance = @intFromBool(pool.advances(plan));
+        return result;
+    }
+
+    /// Whether a round's one-row windows step their state in its slot scan (shared rounds), so the replay skips them.
+    fn advances(pool: *const Pool, plan: Plan) bool {
+        return plan.segments.len > 1 and plan.compact and pool.budget.shape.c.dk == 128 and pool.tree_mode != .snapshot;
     }
 
     fn get(pool: *const Pool, field: Field) metal.Buffer {

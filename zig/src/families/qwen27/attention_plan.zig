@@ -1,7 +1,8 @@
 //! Absolute key tiles and ancestor paths preserve a row's attention independently of siblings and stream packing.
 const std = @import("std");
-pub const max_streams = 8;
-pub const max_rows = 128;
+pub const max_streams = 128;
+pub const max_rows = 128; // a tree round's; a chain takes up to the frame's
+const chain_rows = @import("gpu_frame.zig").max_rows;
 pub const path_width = 128;
 pub const global_words = 8;
 pub const stream_words = 12;
@@ -30,6 +31,10 @@ pub const Geometry = struct {
     pub fn check(g: Geometry) !void {
         if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
     }
+    pub fn promptRows(g: Geometry, requested: u32) u32 {
+        return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
+    }
+
     pub fn group(g: Geometry) u32 {
         return g.heads / g.kv_heads;
     }
@@ -63,9 +68,9 @@ pub const Plan = struct {
             fused = false;
         };
         for (windows, 0..) |w, st| {
-            if (w.parents.len == 0 or w.parents.len > max_rows or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
+            if (w.parents.len == 0 or w.parents.len > @as(usize, if (fused) chain_rows else max_rows) or w.start > w.capacity or @as(u64, w.start) + w.parents.len > w.capacity or w.capacity > std.math.maxInt(i32) / geometry.dim) return error.AttentionCapacity;
             if (w.parents[0] != -1) return error.AttentionParents;
-            var depths: [max_rows]u32 = undefined;
+            var depths: [chain_rows]u32 = undefined;
             for (w.parents, 0..) |p, r| {
                 if (p < -1 or p >= r) return error.AttentionParents;
                 depths[r] = if (p < 0) 0 else depths[@intCast(p)] + 1;
@@ -99,7 +104,7 @@ pub const Plan = struct {
             ca_max = @max(ca_max, ca);
             cb_max = @max(cb_max, cb);
         }
-        if (row_count > max_rows) return error.AttentionRows;
+        if (row_count > @as(u32, if (fused) chain_rows else max_rows)) return error.AttentionRows;
         meta[0] = @intCast(windows.len);
         meta[1] = @intCast(ca_max);
         meta[2] = @intCast(tile_count);
@@ -137,6 +142,7 @@ pub const Plan = struct {
                 // a chain's merge reads every chunk up to its own key, another round's the whole ones before its tail
                 nodes[node * node_words + 3] = @intCast(if (fused) (position + ck) / ck else pt / ck);
                 positions[node] = @intCast(position);
+                if (depth >= path_width) continue; // prompt chains place rows by position
                 if (parent >= 0) @memcpy(paths[node * path_width ..][0..depth], paths[(first + @as(usize, @intCast(parent))) * path_width ..][0..depth]);
                 paths[node * path_width + depth] = @intCast(r);
             }

@@ -267,6 +267,70 @@ fn run(device: mtl.Device, queue: mtl.Queue, n: usize, prompt: usize, dims: [4]u
     std.debug.print("PASS N{d} P{d} QH{d}/KVH{d} D{d} RoPE{d} {s} {s}: data masks, peer-current visibility, serial-row equality, prompt unchanged\n", .{ n, prompt, s.query_heads, s.kv_heads, s.head_dim, s.rotary_dim, @tagName(mode), @tagName(output) });
 }
 
+/// Compare split attention to serial attention and fp64 at draft shapes and trained-block masks.
+fn splitCase(device: mtl.Device, queue: mtl.Queue, keys: usize, counts: *Counts) !void {
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const rows = 16;
+    const s = shared.Shape{ .query_heads = 32, .kv_heads = 8, .head_dim = 128, .rotary_dim = 128, .capacity = 2064, .output = .f32 };
+    const p = try shared.Attention.init(a, device, s);
+    defer p.deinit();
+    const qw = s.query_heads * s.head_dim;
+    const kw = s.kv_heads * s.head_dim;
+    const q = try buffer(device, rows * qw * 2);
+    defer q.deinit();
+    const k = try buffer(device, keys * kw * 2);
+    defer k.deinit();
+    const v = try buffer(device, keys * kw * 2);
+    defer v.deinit();
+    const masks = try buffer(device, rows * keys);
+    defer masks.deinit();
+    const serial = try buffer(device, rows * qw * 4);
+    defer serial.deinit();
+    const split = try buffer(device, rows * qw * 4);
+    defer split.deinit();
+    for (values(q, u16, rows * qw), 0..) |*x, i| x.* = data(i, 1);
+    for (values(k, u16, keys * kw), 0..) |*x, i| x.* = data(i, 2);
+    for (values(v, u16, keys * kw), 0..) |*x, i| x.* = data(i, 3);
+    const m = values(masks, u8, rows * keys);
+    const context = keys - rows;
+    for (0..rows) |r| for (0..keys) |key| {
+        const hidden_old = key < context and key < (r * 37) % 64; // a window's oldest keys
+        const late = key >= context + 8 and r < 8; // trained slots see no later slot
+        m[r * keys + key] = @intFromBool(!hidden_old and !late);
+    };
+    const scale: f32 = 1.0 / @sqrt(128.0);
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    try p.encode(e, rows, keys, keys, scale, ref(q, 0), ref(k, 0), ref(v, 0), ref(masks, 0), ref(serial, 0));
+    e.barrier();
+    try p.encodeSplit(e, rows, keys, keys, scale, ref(q, 0), ref(k, 0), ref(v, 0), ref(masks, 0), ref(split, 0));
+    e.end();
+    try finish(cb);
+    for ([_]mtl.Buffer{ q, k, v, masks, serial, split }) |b| try guards(b);
+    const want = try a.alloc(f64, s.head_dim);
+    defer a.free(want);
+    const got_serial = values(serial, f32, rows * qw);
+    const got_split = values(split, f32, rows * qw);
+    for (0..rows) |r| for (0..s.query_heads) |h| {
+        try cpuAttention(s, values(q, u16, rows * qw), values(k, u16, keys * kw), values(v, u16, keys * kw), m, keys, r, h, scale, want);
+        for (0..s.head_dim) |d| {
+            const at = (r * s.query_heads + h) * s.head_dim + d;
+            const bound = 1e-5 * @max(1.0, @abs(want[d]));
+            for ([_]f32{ got_serial[at], got_split[at] }) |got| {
+                const err = @abs(@as(f64, got) - want[d]);
+                if (err > bound) {
+                    std.debug.print("split case keys {d} row {d} head {d} dim {d}: want {d} serial {d} split {d}\n", .{ keys, r, h, d, want[d], got_serial[at], got_split[at] });
+                    return error.SplitAttentionMismatch;
+                }
+                counts.max_error = @max(counts.max_error, err);
+            }
+            counts.cpu_values += 1;
+        }
+    };
+    counts.cases += 1;
+}
+
 pub fn main(_: std.process.Init) !void {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
@@ -283,5 +347,6 @@ pub fn main(_: std.process.Init) !void {
         try run(device, queue, 1, 5, dims, mode, .bf16, &counts);
         try run(device, queue, 8, 5, dims, mode, .bf16, &counts);
     };
+    for ([_]usize{ 300, 1100, 2063 }) |keys| try splitCase(device, queue, keys, &counts);
     std.debug.print("PASS {d} cases, {d} ordinary N=1 comparisons, {d} batch/serial rows, {d} fp32 CPU attention values, {d} bf16 values, {d} RoPE values, {d} prompt bytes preserved, max fp32 error {d:.9}, max bound fraction {d:.6}\n", .{ counts.cases, counts.ordinary, counts.rows, counts.cpu_values, counts.bf16_values, counts.rope_values, counts.prompt_bytes, counts.max_error, counts.max_fraction });
 }

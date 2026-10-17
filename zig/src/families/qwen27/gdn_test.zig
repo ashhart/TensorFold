@@ -12,10 +12,46 @@ fn config() Config {
 const native = abi.WeightKinds{ .conv = .bf16, .a_log = .f32, .dt = .bf16, .norm = .f32 };
 
 test "GDN Metal records have fixed offsets without enum padding" {
-    try std.testing.expectEqual(@as(usize, 40), @sizeOf(abi.Params));
+    try std.testing.expectEqual(@as(usize, 44), @sizeOf(abi.Params));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(abi.Params, "eps"));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(abi.Segment));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(abi.Keep));
+    try std.testing.expectEqual(@as(usize, 12), @sizeOf(@import("core").tree_slots.Step));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(@import("core").tree_slots.Step, "read_slot"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(@import("core").tree_slots.Step, "write_slot"));
+}
+
+test "compact GDN schedules isolate unequal streams and overflow keeps the snapshot plan valid" {
+    const a = std.testing.allocator;
+    const slots = @import("core").tree_slots;
+    var parents: [33]i32 = undefined;
+    for (&parents, 0..) |*parent, row| parent.* = if (row == 0) -1 else @intCast((row - 1) / 2);
+    var bush = try Window.init(a, 100, &parents, 4, 128);
+    defer bush.deinit();
+    var chain = try Window.init(a, 200, &.{ -1, 0, 1, 2, 3 }, 4, 512);
+    defer chain.deinit();
+    const shape = try abi.Shape.init(config());
+    const p = try shape.params(38, 4, native);
+    const inputs = [_]plan_mod.Input{ .{ .window = bush, .state_slot = 3, .next_slot = 0, .path = &.{ 0, 2, 5 } }, .{ .window = chain, .state_slot = 2, .next_slot = 1, .path = &.{} } };
+    var plan = try plan_mod.Plan.init(a, p, &inputs);
+    defer plan.deinit();
+    try std.testing.expect(plan.compact);
+    try @import("gdn_pool.zig").validatePlan(shape, 4, 64, plan);
+    try slots.validate(&parents, plan.slot_steps[0..33], 0, 16);
+    try slots.validate(chain.parents, plan.slot_steps[33..], 33, 16);
+    try std.testing.expectEqual(@as(i32, -1), plan.slot_steps[33].read_slot);
+    const saved = plan.slot_steps[1];
+    plan.slot_steps[1].read_slot = 15;
+    try std.testing.expectError(error.BadGdnPoolPlan, @import("gdn_pool.zig").validatePlan(shape, 4, 64, plan));
+    plan.slot_steps[1] = saved;
+    var fallback = try plan_mod.Plan.initSlots(a, p, &inputs, 1);
+    defer fallback.deinit();
+    try std.testing.expect(!fallback.compact);
+    try @import("gdn_pool.zig").validatePlan(shape, 4, 64, fallback);
+    try std.testing.expectEqualSlices(i32, plan.parents, fallback.parents);
+    try std.testing.expectEqualSlices(u32, plan.kept_rows, fallback.kept_rows);
+    try std.testing.expectError(error.BadSlotPlan, plan_mod.Plan.initSlots(a, p, &inputs, 0));
+    try std.testing.expectError(error.BadSlotPlan, plan_mod.Plan.initSlots(a, p, &inputs, 17));
 }
 
 test "native storage keeps all sixteen combinations and refuses an implicit F16 cast" {
@@ -49,7 +85,7 @@ test "wrong shape flags and dimensions refuse before an encoder exists" {
     try std.testing.expectError(error.UnsupportedGdnShape, abi.Shape.init(c));
     const shape = try abi.Shape.init(config());
     try std.testing.expectError(error.BadGdnDispatch, shape.params(0, 4, native));
-    try std.testing.expectError(error.BadGdnDispatch, shape.params(8, 65, native));
+    try std.testing.expectError(error.BadGdnDispatch, shape.params(8, 129, native));
     var p = try shape.params(8, 4, native);
     p.dk = 64;
     try std.testing.expectError(error.BadGdnDispatch, abi.Bytes.init(shape, p, native));
@@ -112,7 +148,12 @@ test "snapshot scratch scales with the aggregate round instead of layers or slot
     try std.testing.expectEqual(@as(usize, 786432 * 4), try four.stateOffset(0, 1));
     try std.testing.expectEqual(@as(usize, 48 * 786432 * 4 * 4), four.state);
     try std.testing.expectError(error.BadGdnPoolIndex, four.stateOffset(48, 0));
-    try std.testing.expectError(error.BadGdnPool, Budget.init(shape, 48, 4, 129));
+    try std.testing.expectError(error.BadGdnPool, Budget.init(shape, 48, 4, @import("gpu_frame.zig").max_rows + 1));
+    // a prompt chain's rows past a tree's keep no snapshots: the slab stays at the tree's
+    const tree = try Budget.init(shape, 48, 1, 128);
+    const chain = try Budget.init(shape, 48, 1, 512);
+    try std.testing.expectEqual(tree.snapshots, chain.snapshots);
+    try std.testing.expectEqual(4 * tree.projections, chain.projections);
 }
 
 test "native byte spans accept BF16 alignment and reject unsafe range arithmetic" {

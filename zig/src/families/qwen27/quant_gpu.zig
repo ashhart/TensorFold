@@ -117,7 +117,7 @@ pub const Kernels = struct {
         const e = span.encoder;
 
         _ = dims;
-        if (rows == 0 or rows > 128 or p.tile != 32) return error.BadCoreProjectionRows;
+        if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or p.tile != 32) return error.BadCoreProjectionRows;
         if (p.raw) |raw| if (raw.bits == 4 and raw.group == 64 and raw.sum == .f32 and raw.n % 8 == 0) {
             const m = row.simd.Matrix{ .w = raw.w, .w_off = raw.w_off, .scales = raw.scales, .s_off = raw.s_off, .biases = raw.biases, .b_off = raw.b_off, .n = raw.n, .k = raw.k };
             const scalar = try k.twin(m); // loads the tiles before they're read
@@ -259,13 +259,14 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// Prompt rows into the Neural Engine's fp16 input planes [hidden][128].
-    pub fn aneInput(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, planes: Ref, hidden: u32, width: u32, columns: u32) !void {
+    /// Prompt rows [base, base + 128) into the Neural Engine's fp16 input planes [hidden][128].
+    pub fn aneInput(k: *Kernels, input_encoder: mtl.ComputeEncoder, x: Ref, dims: Ref, planes: Ref, hidden: u32, width: u32, columns: u32, base: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .copy);
         errdefer span.cancel();
         const e = span.encoder;
         e.setPipeline(try k.get(.{ .kind = .ane_input, .k = hidden, .n = width, .tile = columns }));
         bind(e, .{ x, dims, planes });
+        e.setValue(@as(i32, @intCast(base)), 3);
         e.dispatchThreads(mtl.Size.of(128, hidden, 1), mtl.Size.of(128, 1, 1));
         try span.end();
     }
@@ -282,13 +283,14 @@ pub const Kernels = struct {
         try span.end();
     }
 
-    /// The down projection: bf16(fp32 partial + the Neural Engine's fp16 partial planes [hidden][128]) for `rows` rows.
-    pub fn addAne(k: *Kernels, input_encoder: mtl.ComputeEncoder, partial: Ref, planes: Ref, y: Ref, hidden: u32, width: u32, columns: u32, rows: u32) !void {
+    /// Add the ANE fp16 partial to the GPU fp32 partial for these rows, rounding once to bf16.
+    pub fn addAne(k: *Kernels, input_encoder: mtl.ComputeEncoder, partial: Ref, planes: Ref, y: Ref, hidden: u32, width: u32, columns: u32, rows: u32, base: u32) !void {
         var span = profile.begin(k.profiler, input_encoder, .copy);
         errdefer span.cancel();
         const e = span.encoder;
         e.setPipeline(try k.get(.{ .kind = .add_ane, .k = hidden, .n = width, .tile = columns }));
         bind(e, .{ partial, planes, y });
+        e.setValue(@as(i32, @intCast(base)), 3);
         e.dispatchThreads(mtl.Size.of(hidden, rows, 1), mtl.Size.of(256, 1, 1));
         try span.end();
     }

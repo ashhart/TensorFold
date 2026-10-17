@@ -21,10 +21,11 @@ fn rotate(ops: op.Ops, frame: u64, x: op.View, positions: []const u64, heads: u3
     try y.check(x.rows, x.width, .bf16);
     return y;
 }
-fn convolve(ops: op.Ops, frame: u64, x: op.View, dynamic: op.View, weights: w.Conv, branch: u32, residual: ?op.View, c: Config) !op.View {
+/// `block`: rows a conv window spans; a batched pass stacks several streams' blocks.
+fn convolve(ops: op.Ops, frame: u64, x: op.View, dynamic: op.View, weights: w.Conv, branch: u32, residual: ?op.View, c: Config, block: u32) !op.View {
     try dynamic.check(x.rows, c.dynamicWidth(), .bf16);
     if (residual) |r| try r.check(x.rows, x.width, .bf16);
-    const y = try ops.vtable.conv(ops.ptr, frame, x, .{ .dynamic = dynamic, .base = weights.base, .branch = branch, .group = c.group, .block = x.rows, .residual = residual });
+    const y = try ops.vtable.conv(ops.ptr, frame, x, .{ .dynamic = dynamic, .base = weights.base, .branch = branch, .group = c.group, .block = block, .residual = residual });
     try y.check(x.rows, c.hidden, .bf16);
     return y;
 }
@@ -53,7 +54,12 @@ fn checkAppend(g: *const w.Graph, preparation: op.Preparation, context: op.Conte
     try taps.check(@intCast(positions.len), c.tapWidth(), .bf16);
 }
 
+/// Where appended keys and values go: a transaction's context, or a batched pass's stream.
+const Sink = union(enum) { transaction: u64, stream: u32 };
 fn encodeAppend(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, taps: op.View, positions: []const u64, frame: u64, transaction: u64) !void {
+    return encodeAppendTo(ops, g, preparation, taps, positions, frame, .{ .transaction = transaction });
+}
+fn encodeAppendTo(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, taps: op.View, positions: []const u64, frame: u64, sink: Sink) !void {
     const c = g.config;
     const fusion = try project(ops, frame, taps, g.fusion, preparation.mode);
     const hidden = try norm(ops, frame, fusion, g.hidden_norm, c.eps, 1, c.hidden);
@@ -61,7 +67,10 @@ fn encodeAppend(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, tap
         const raw_keys = try project(ops, frame, hidden, layer.attention.k, preparation.mode);
         const keys = try rotate(ops, frame, try norm(ops, frame, raw_keys, layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions, c.kv_heads, c);
         const values = try project(ops, frame, hidden, layer.attention.v, preparation.mode);
-        try ops.vtable.context_append(ops.ptr, transaction, frame, @intCast(i), keys, values, positions);
+        switch (sink) {
+            .transaction => |t| try ops.vtable.context_append(ops.ptr, t, frame, @intCast(i), keys, values, positions),
+            .stream => |k| try ops.vtable.stream_append(ops.ptr, frame, k, @intCast(i), keys, values, positions),
+        }
     }
 }
 
@@ -93,44 +102,80 @@ fn start(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: o
     return ops.vtable.begin(ops.ptr);
 }
 fn encode(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: op.Context, anchor: u32, frame: u64, block: u32, given: []const u32) !Output {
+    return encodeStreams(ops, g, preparation, &.{.{ .context = context, .anchor = anchor }}, frame, block, given);
+}
+
+/// A stream of a batched block pass: its context and anchor (its caches are the backend's batch, in stream order).
+pub const Stream = struct { context: op.Context, anchor: u32 };
+
+/// Every stream's block stacked in one pass, weights read once; each stream attends to its own context.
+fn encodeStreams(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, streams: []const Stream, frame: u64, block: u32, given: []const u32) !Output {
     const c = g.config;
-    var ids: [16]u32 = @splat(c.mask);
-    ids[0] = anchor;
+    const n: u32 = @intCast(streams.len);
+    const rows = n * block;
+    if (n == 0 or rows > 128 or (n > 1 and given.len > 0)) return error.BadRuntimeBlock;
+    var ids: [128]u32 = @splat(c.mask);
+    var positions: [128]u64 = undefined;
+    var contexts: [8]op.Context = undefined;
+    if (n > contexts.len) return error.BadRuntimeBlock;
+    for (streams, 0..) |s, k| {
+        contexts[k] = s.context;
+        ids[k * block] = s.anchor;
+        for (positions[k * block ..][0..block], 0..) |*p, i| p.* = try std.math.add(u64, s.context.end, i);
+    }
     for (given, 1..) |t, i| ids[i] = t;
-    var positions: [16]u64 = undefined;
-    for (positions[0..block], 0..) |*p, i| p.* = try std.math.add(u64, context.end, i);
-    var hidden = try ops.vtable.embed(ops.ptr, frame, g.embed, ids[0..block]);
-    try hidden.check(block, c.hidden, .bf16);
+    var hidden = try ops.vtable.embed(ops.ptr, frame, g.embed, ids[0..rows]);
+    try hidden.check(rows, c.hidden, .bf16);
     for (g.layers, 0..) |layer, i| {
         var residual = hidden;
         const xn = try norm(ops, frame, hidden, layer.input_norm, c.eps, 1, c.hidden);
         const dynamic = try project(ops, frame, xn, layer.attention_conv.projection, preparation.mode);
-        const input = try convolve(ops, frame, xn, dynamic, layer.attention_conv, 0, null, c);
-        const query = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.q, preparation.mode), layer.attention.q_norm, c.eps, c.heads, c.head_dim), positions[0..block], c.heads, c);
-        const keys = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.k, preparation.mode), layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions[0..block], c.kv_heads, c);
+        const input = try convolve(ops, frame, xn, dynamic, layer.attention_conv, 0, null, c, block);
+        const query = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.q, preparation.mode), layer.attention.q_norm, c.eps, c.heads, c.head_dim), positions[0..rows], c.heads, c);
+        const keys = try rotate(ops, frame, try norm(ops, frame, try project(ops, frame, input, layer.attention.k, preparation.mode), layer.attention.k_norm, c.eps, c.kv_heads, c.head_dim), positions[0..rows], c.kv_heads, c);
         const values = try project(ops, frame, input, layer.attention.v, preparation.mode);
-        const attended = try ops.vtable.attention(ops.ptr, frame, .{ .context = context, .config = c, .layer = @intCast(i), .query = query, .keys = keys, .values = values, .positions = positions[0..block] });
-        try attended.check(block, c.qWidth(), .bf16);
-        hidden = try convolve(ops, frame, try project(ops, frame, attended, layer.attention.o, preparation.mode), dynamic, layer.attention_conv, 1, residual, c);
+        const attended = try ops.vtable.attention(ops.ptr, frame, .{ .context = streams[0].context, .config = c, .layer = @intCast(i), .query = query, .keys = keys, .values = values, .positions = positions[0..rows], .streams = if (n > 1) contexts[0..n] else &.{}, .block = block });
+        try attended.check(rows, c.qWidth(), .bf16);
+        hidden = try convolve(ops, frame, try project(ops, frame, attended, layer.attention.o, preparation.mode), dynamic, layer.attention_conv, 1, residual, c, block);
         residual = hidden;
         const post = try norm(ops, frame, hidden, layer.post_norm, c.eps, 1, c.hidden);
         const dyn_mlp = try project(ops, frame, post, layer.mlp_conv.projection, preparation.mode);
-        const mlp_input = try convolve(ops, frame, post, dyn_mlp, layer.mlp_conv, 0, null, c);
+        const mlp_input = try convolve(ops, frame, post, dyn_mlp, layer.mlp_conv, 0, null, c, block);
         const gate = try project(ops, frame, mlp_input, layer.mlp.gate, preparation.mode);
         const up = try project(ops, frame, mlp_input, layer.mlp.up, preparation.mode);
         const activated = try ops.vtable.swiglu(ops.ptr, frame, gate, up);
-        try activated.check(block, c.intermediate, .bf16);
-        hidden = try convolve(ops, frame, try project(ops, frame, activated, layer.mlp.down, preparation.mode), dyn_mlp, layer.mlp_conv, 1, residual, c);
+        try activated.check(rows, c.intermediate, .bf16);
+        hidden = try convolve(ops, frame, try project(ops, frame, activated, layer.mlp.down, preparation.mode), dyn_mlp, layer.mlp_conv, 1, residual, c, block);
     }
-    const masks = try ops.vtable.mask_rows(ops.ptr, frame, hidden, 1, block - 1);
-    try masks.check(block - 1, c.hidden, .bf16);
+    // one stream heads only its mask rows; a batch heads every row and each stream's lattice skips its anchor
+    const masks = if (n == 1) try ops.vtable.mask_rows(ops.ptr, frame, hidden, 1, block - 1) else hidden;
+    const headed = if (n == 1) block - 1 else rows;
+    try masks.check(headed, c.hidden, .bf16);
     const final = try norm(ops, frame, masks, g.norm, c.eps, 1, c.hidden);
     const head = try ops.vtable.head(ops.ptr, frame, final);
-    if (head.logits.handle == 0 or head.logits.rows != block - 1 or head.logits.dtype != .bf16 or head.logits.width == 0 or head.logits.width > c.vocab or head.logits.stride < head.logits.width) return error.DraftOperatorShape;
+    if (head.logits.handle == 0 or head.logits.rows != headed or head.logits.dtype != .bf16 or head.logits.width == 0 or head.logits.width > c.vocab or head.logits.stride < head.logits.width) return error.DraftOperatorShape;
     if (head.token_ids) |mapping| try mapping.check(1, head.logits.width, .u32) else if (head.logits.width != c.vocab) return error.DraftCandidateId;
     const projected = try project(ops, frame, final, g.hidden_projection, preparation.mode);
     return .{ .head = head, .projected = projected };
 }
+/// A stream's new taps for a batched pass: absorbed into its caches before its block reads them.
+pub const Absorb = struct { taps: op.View, positions: []const u64 };
+
+/// In one frame, absorb taps per stream, draft 2-8 blocks and build each lattice without its anchor row.
+pub fn absorbBlocks(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, frame: u64, absorbs: []const ?Absorb, streams: []const Stream, block: u32, out: []op.Lattice) !void {
+    try preparation.check();
+    try g.config.check();
+    if (block < 2 or block > 16 or streams.len < 2 or streams.len * block > 128 or out.len != streams.len or absorbs.len != streams.len) return error.BadRuntimeBlock;
+    for (streams) |s| if (s.anchor >= g.config.vocab or s.context.cache == 0 or s.context.begin > s.context.end or s.context.end - s.context.begin > g.config.window - 1) return error.BadDraftContext;
+    for (absorbs, 0..) |a, k| if (a) |x| {
+        try x.taps.check(@intCast(x.positions.len), g.config.tapWidth(), .bf16);
+        try encodeAppendTo(ops, g, preparation, x.taps, x.positions, frame, .{ .stream = @intCast(k) });
+    };
+    const output = try encodeStreams(ops, g, preparation, streams, frame, block, &.{});
+    try ops.vtable.lattices(ops.ptr, frame, output.head, output.projected, g.config, block, out);
+    for (out) |l| try l.check(g.config);
+}
+
 pub fn forwardToBlock(ops: op.Ops, g: *const w.Graph, preparation: op.Preparation, context: op.Context, anchor: u32, block: u32, consumer: Consumer) !void {
     if (block < 2 or block > 16) return error.BadRuntimeBlock;
     const frame = try start(ops, g, preparation, context, anchor);

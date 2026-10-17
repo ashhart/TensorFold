@@ -42,5 +42,5 @@ fn refs(weight: Weights.Gdn, frame: *Frame) !pool_gpu.Refs {
 }
 
 fn devicePlan(plan: Plan, frame: *Frame) pool_gpu.DevicePlan {
-    return .{ .host = plan, .metadata = .{ .parents = frame.get(.parents), .windows = frame.get(.windows), .row_slots = frame.get(.row_slots), .segments = frame.get(.segments), .keeps = frame.get(.keeps), .kept_rows = frame.get(.kept_rows) } };
+    return .{ .host = plan, .metadata = .{ .parents = frame.get(.parents), .windows = frame.get(.windows), .row_slots = frame.get(.row_slots), .segments = frame.get(.segments), .keeps = frame.get(.keeps), .kept_rows = frame.get(.kept_rows), .slot_steps = frame.get(.slot_steps) } };
 }

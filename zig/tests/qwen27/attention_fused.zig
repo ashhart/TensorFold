@@ -64,7 +64,7 @@ fn run(queue: mtl.Queue, op: *const attn.Attention, scratch: *attn.Scratch, bind
 }
 
 /// A chain's attention over 16 layers of one command buffer, each with its own cache, timed per layer at a context.
-fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const attn.Attention, rng: *Rng, context: u32, rows: u32) !void {
+fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const attn.Attention, rng: *Rng, context: u32, rows: u32, tree: bool) !void {
     const layers = 16;
     const cap = context + 64;
     const limits = attn.Limits{ .rows = rows, .streams = 1, .keys = cap };
@@ -89,7 +89,7 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
     const out = try buffer(device, rng, rows * 6144 * 2, false);
     defer for ([_]mtl.Buffer{ query, key, value, raw_gate, out }) |b| b.deinit();
     var parents: [max_rows]i32 = undefined;
-    for (parents[0..rows], 0..) |*p, r| p.* = @as(i32, @intCast(r)) - 1;
+    for (parents[0..rows], 0..) |*p, r| p.* = if (tree and r > 1) @intCast(r / 2) else @as(i32, @intCast(r)) - 1; // a tree: row r under r/2
     var plan = try attn.Plan.init(a, &.{.{ .parents = parents[0..rows], .start = context, .capacity = cap }}, .{});
     defer plan.deinit();
     try scratch.upload(plan);
@@ -106,7 +106,9 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
         t.* = cb.gpuSeconds() * 1e6 / layers;
     }
     std.mem.sort(f64, &times, {}, std.sort.asc(f64));
-    std.debug.print("attention bench: rows {d} context {d}: {d:.1} us per layer (median of 9; min {d:.1}, max {d:.1})\n", .{ rows, context, times[4], times[0], times[8] });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(out.contents()[0 .. rows * 6144 * 2], &digest, .{});
+    std.debug.print("attention bench: rows {d} context {d} {s}: {d:.1} us per layer (median of 9; min {d:.1}, max {d:.1}) out {x}\n", .{ rows, context, if (tree) "tree" else "chain", times[4], times[0], times[8], digest[0..6] });
 }
 
 /// What every plan runs on: scratch and bindings with and without a shared prefix, caches, inputs and outputs.
@@ -396,7 +398,12 @@ pub fn main(init: std.process.Init) !void {
     defer op.deinit();
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--bench")) {
         var brng = Rng{ .s = 0x1234567 };
-        for ([_]u32{ 1, 4, 16, 32 }) |rows| for ([_]u32{ 2048, 16384 }) |context| try bench(a, device, queue, &op, &brng, context, rows);
+        if (args.len >= 4) { // --bench CONTEXTS ROWS [tree]: comma-separated contexts
+            var it = std.mem.tokenizeScalar(u8, args[2], ',');
+            while (it.next()) |c| try bench(a, device, queue, &op, &brng, try std.fmt.parseInt(u32, c, 10), try std.fmt.parseInt(u32, args[3], 10), args.len >= 5);
+            return;
+        }
+        for ([_]u32{ 1, 4, 16, 32 }) |rows| for ([_]u32{ 2048, 16384 }) |context| try bench(a, device, queue, &op, &brng, context, rows, false);
         return;
     }
     const limits = attn.Limits{ .rows = round_rows, .streams = 8, .keys = capacity };

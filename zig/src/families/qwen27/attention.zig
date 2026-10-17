@@ -19,15 +19,15 @@ pub const Binding = struct {
     limits: Limits,
     uploaded: ?[32]u8 = null,
     streams: u32 = 0,
-    pointers: [8]CachePtrs = @splat(.{ .keys = 0, .values = 0 }),
-    strides: [8][2]u32 = @splat(.{ 0, 0 }),
+    pointers: [planning.max_streams]CachePtrs = @splat(.{ .keys = 0, .values = 0 }),
+    strides: [planning.max_streams][2]u32 = @splat(.{ 0, 0 }),
     kept: ?u32 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Binding {
         try validLimits(limits);
         var buffers: [3]mtl.Buffer = undefined;
         var made: usize = 0;
         errdefer for (buffers[0..made]) |buffer| buffer.deinit();
-        for ([_]usize{ 104 * 4, 8 * 16, limits.rows * 16 }, &buffers) |allocation_bytes, *buffer| {
+        for ([_]usize{ (planning.global_words + planning.max_streams * planning.stream_words) * 4, planning.max_streams * @sizeOf(CachePtrs), limits.rows * 16 }, &buffers) |allocation_bytes, *buffer| {
             buffer.* = try device.buffer(allocation_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             made += 1;
         }
@@ -42,7 +42,7 @@ pub const Binding = struct {
     pub fn upload(b: *Binding, plan: Plan, caches: []const Cache) !void {
         if (plan.rows > b.limits.rows or plan.streams > b.limits.streams or caches.len != plan.streams) return error.AttentionLimits;
         var meta = plan.meta;
-        var table: [8]CachePtrs = @splat(.{ .keys = 0, .values = 0 });
+        var table: [planning.max_streams]CachePtrs = @splat(.{ .keys = 0, .values = 0 });
         for (caches, 0..) |cache, i| {
             const at = 8 + i * 12;
             const start: u32 = @intCast(meta[at + 4]);
@@ -61,7 +61,7 @@ pub const Binding = struct {
             meta[at + 7] = @intCast(ks);
             meta[at + 8] = @intCast(vs);
         }
-        @memcpy(b.get(.caches).buffer.slice(CachePtrs, 8), &table);
+        @memcpy(b.get(.caches).buffer.slice(CachePtrs, planning.max_streams), &table);
         @memcpy(b.get(.meta).buffer.slice(i32, meta.len), &meta);
         b.uploaded = fingerprint(plan);
         b.streams = plan.streams;
@@ -154,7 +154,7 @@ pub const Scratch = struct {
     }
 };
 fn validLimits(limits: Limits) !void {
-    if (limits.rows == 0 or limits.rows > 128 or limits.streams == 0 or limits.streams > 8 or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / 256) return error.AttentionLimits;
+    if (limits.rows == 0 or limits.rows > @import("gpu_frame.zig").max_rows or limits.streams == 0 or limits.streams > planning.max_streams or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / 256) return error.AttentionLimits;
 }
 fn span(r: Ref, bytes: usize) !void {
     try spanAligned(r, bytes, 2);
@@ -218,7 +218,7 @@ pub const Attention = struct {
         errdefer timing.cancel();
         const e = timing.encoder;
 
-        if (p.rows == 0 or p.rows > 128 or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
+        if (p.rows == 0 or p.rows > @import("gpu_frame.zig").max_rows or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
         try span(p.qg, @as(usize, p.rows) * 12288 * 2);
         try span(p.key, @as(usize, p.rows) * 1024 * 2);
         try span(p.q_gain, 256 * 2);
@@ -341,7 +341,7 @@ pub const Attention = struct {
         e.barrier();
         const scale: f32 = 0.0625;
         if (plan.prefix_chunks > 0) {
-            const sg: u32 = @min(plan.tiles, 4); // 8 simdgroups a threadgroup, a pair a tile
+            const sg: u32 = @min(plan.tiles, if (plan.prefix_chunks >= 64) @as(u32, 6) else 4); // a pair a tile; a long cache reads each chunk once for six tiles
             e.setPipeline(a.prefix[sg - 1]);
             bind(e, .{ scratch.get(.qa), binding.get(.caches) });
             e.setValue(scale, 2);

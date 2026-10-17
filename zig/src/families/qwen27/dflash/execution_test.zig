@@ -76,6 +76,12 @@ const Fake = struct {
     fn head(ptr: *anyopaque, _: u64, x: op.View) !op.Head {
         return .{ .logits = self(ptr).view(x.rows, fixtures.toy.vocab) };
     }
+    fn lattices(_: *anyopaque, _: u64, _: op.Head, _: op.View, _: cfg.Config, _: u32, _: []op.Lattice) !void {
+        return error.FakeBatchedHead;
+    }
+    fn streamAppend(_: *anyopaque, _: u64, _: u32, _: u32, _: op.View, _: op.View, _: []const u64) !void {
+        return error.FakeBatchedHead;
+    }
     fn lattice(_: *anyopaque, _: u64, _: op.Head, projected: op.View, c: cfg.Config) !op.Lattice {
         if (projected.rows == 0 or projected.rows > 15 or projected.width != c.rank) return error.FakeProjectionShape;
         const a = std.testing.allocator;
@@ -110,7 +116,7 @@ const Fake = struct {
         self(ptr).aborts += 1;
     }
     fn ops(f: *Fake) op.Ops {
-        return .{ .ptr = f, .vtable = &.{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = attention, .swiglu = swiglu, .mask_rows = mask, .head = head, .lattice = lattice, .context_begin = contextBegin, .context_append = append, .context_commit = commit, .context_stage = stage, .context_abort = abort } };
+        return .{ .ptr = f, .vtable = &.{ .begin = begin, .release = release, .project = project, .norm = norm, .embed = embed, .conv = conv, .rope = rope, .attention = attention, .swiglu = swiglu, .mask_rows = mask, .head = head, .lattice = lattice, .lattices = lattices, .context_begin = contextBegin, .context_append = append, .context_commit = commit, .context_stage = stage, .context_abort = abort, .stream_append = streamAppend } };
     }
 };
 fn batch() session.Batch {

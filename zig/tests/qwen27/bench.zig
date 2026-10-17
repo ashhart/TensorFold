@@ -6,7 +6,7 @@ const q = tf.qwen27;
 const Round = q.round_plan.Round;
 const Linear = q.projection.Linear;
 const Ref = q.projection.Ref;
-const help = "tf-qwen27-bench --model DIR [--ms 30] [--rounds 24]";
+const help = "tf-qwen27-bench --model DIR [--ms 30] [--rounds 24] [--widths chain|tree|dflash|slots|shared]";
 
 /// Where a projection reads its rows and their group sums in the frame, as forward.zig and the mixers dispatch it.
 const Input = enum { input, activated, mixer_out };
@@ -66,17 +66,20 @@ pub fn main(init: std.process.Init) !void {
     var dir: ?[]const u8 = null;
     var burst_ms: usize = 30;
     var rounds: usize = 24;
+    var shape: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--help")) return std.debug.print("{s}\n", .{help});
         if (i + 1 >= args.len) return error.MissingValue;
         i += 1;
-        if (std.mem.eql(u8, args[i - 1], "--model")) dir = args[i] else if (std.mem.eql(u8, args[i - 1], "--ms")) burst_ms = try std.fmt.parseInt(usize, args[i], 10) else if (std.mem.eql(u8, args[i - 1], "--rounds")) rounds = try std.fmt.parseInt(usize, args[i], 10) else return error.UnknownFlag;
+        if (std.mem.eql(u8, args[i - 1], "--model")) dir = args[i] else if (std.mem.eql(u8, args[i - 1], "--ms")) burst_ms = try std.fmt.parseInt(usize, args[i], 10) else if (std.mem.eql(u8, args[i - 1], "--rounds")) rounds = try std.fmt.parseInt(usize, args[i], 10) else if (std.mem.eql(u8, args[i - 1], "--widths")) shape = args[i] else return error.UnknownFlag;
     }
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const m = try q.model.Model.load(gpa, io, dir orelse return error.MissingModel, 128, null);
     defer m.deinit();
+    if (shape) |sh| if (std.mem.eql(u8, sh, "shared")) return shared(gpa, io, m, rounds);
+    if (shape) |sh| return if (std.mem.eql(u8, sh, "slots")) slotsCheck(gpa, m) else widths(gpa, m, rounds, if (std.mem.eql(u8, sh, "tree")) .binary else if (std.mem.eql(u8, sh, "dflash")) .dflash else .chain);
     const w = m.weights;
     var gdn: ?q.gpu_weights.Gdn = null;
     var attn: ?q.gpu_weights.Attention = null;
@@ -226,8 +229,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("projections-only one-row step: {d} calls, {d:.2} ms GPU\n", .{ calls + 1, cb.gpuSeconds() * 1e3 });
     }
 
-    // shared decode rounds: N streams, one row each, verified and kept as the lane core does
-    const slots = 8;
+    try shared(gpa, io, m, rounds);
+}
+
+/// Shared decode rounds: N streams, one row each, verified and kept as the lane core does (wall and verify GPU ms).
+fn shared(gpa: std.mem.Allocator, io: std.Io, m: *q.model.Model, rounds: usize) !void {
+    const slots = 128;
     var r = try q.decode_round.Runner.init(gpa, m, slots, 1024);
     defer r.deinit();
     var pending: [slots]u32 = undefined;
@@ -239,43 +246,164 @@ pub fn main(init: std.process.Init) !void {
         pending[k] = try s.greedy();
     }
     std.debug.print("shared rounds ({d} a stream count, one row a stream):\n", .{rounds});
-    for ([_]usize{ 1, 2, 4, 8 }) |n| {
+    for ([_]usize{ 1, 16, 32, 64, 128 }) |n| {
         var wall: f64 = 0;
         var gpu: f64 = 0;
         var parts: [4]f64 = .{ 0, 0, 0, 0 };
         for (0..rounds + 2) |round| {
-            var inputs: [slots]q.round_plan.Input = undefined;
-            var ids: [slots][1]u32 = undefined;
-            for (0..n) |k| {
-                ids[k] = .{pending[k]};
-                inputs[k] = .{ .slot = @intCast(k), .start = r.offsets[k], .capacity = r.capacity, .ids = &ids[k] };
-            }
             const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
-            var plan = try Round.init(gpa, inputs[0..n], @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
-            defer plan.deinit();
-            const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
-            const advance = std.c.getenv("QWEN27_ADVANCE") != null; // one-row rounds kept by their verify, no keep
-            if (advance) try r.advance(&plan, .all) else try r.verifyHead(&plan, .all);
-            const t2 = std.Io.Clock.awake.now(io).toNanoseconds();
-            const verify_gpu = r.last_gpu_seconds;
-            const words = logits.buffer.slice(u16, n * vocab);
-            for (0..n) |k| pending[k] = try q.session.argmax(words[k * vocab ..][0..vocab]);
-            const t3 = std.Io.Clock.awake.now(io).toNanoseconds();
-            const zero = [_]u32{0};
-            var paths: [slots][]const u32 = @splat(&zero);
-            if (!advance) try r.keep(&plan, paths[0..n]);
-            const t4 = std.Io.Clock.awake.now(io).toNanoseconds();
-            const ms = @as(f64, @floatFromInt(t4 - t0)) / 1e6;
+            var timing: [4]f64 = @splat(0);
+            const verify_gpu = try sharedRound(gpa, io, m, &r, pending[0..n], &timing);
+            const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e6;
             if (round < 2) continue; // the first rounds of a width warm its pipelines
             wall += ms;
             gpu += verify_gpu * 1e3;
-            parts[0] += @as(f64, @floatFromInt(t1 - t0)) / 1e6;
-            parts[1] += @as(f64, @floatFromInt(t2 - t1)) / 1e6;
-            parts[2] += @as(f64, @floatFromInt(t3 - t2)) / 1e6;
-            parts[3] += @as(f64, @floatFromInt(t4 - t3)) / 1e6;
+            for (&parts, timing) |*part, t| part.* += t;
         }
         const per = wall / @as(f64, @floatFromInt(rounds));
         const nr: f64 = @floatFromInt(rounds);
         std.debug.print("  {d} streams: {d:.2} ms a round ({d:.2} ms verify GPU), {d:.1} tok/s in all; plan {d:.2}, verify wall {d:.2}, argmax {d:.2}, keep {d:.2} ms\n", .{ n, per, gpu / nr, @as(f64, @floatFromInt(n)) * 1000 / per, parts[0] / nr, parts[1] / nr, parts[2] / nr, parts[3] / nr });
+        if (std.c.getenv("QWEN27_PROFILE") == null or n != slots) continue;
+        var trace = tf.gpu_profile.Trace{ .queue = m.queue };
+        r.profile(&trace);
+        trace.enabled = true;
+        for (0..4) |_| _ = try sharedRound(gpa, io, m, &r, pending[0..n], null);
+        r.profile(null);
+        inline for (@typeInfo(tf.gpu_profile.Class).@"enum".field_names, 0..) |name, ci| if (trace.calls[ci] > 0) std.debug.print("  PROFILE {d} streams class={s} ms/round={d:.2}\n", .{ n, name, trace.seconds[ci] * 1e3 / 4 });
+        for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("  SHAPE n={d} k={d} sk={d} calls/round={d} ms/round={d:.2} TFLOPS={d:.1}\n", .{ sh.n, sh.k, sh.sk, sh.calls / 4, sh.gpu_seconds * 1e3 / 4, 2.0 * @as(f64, @floatFromInt(n * sh.n * sh.k * sh.calls)) / sh.gpu_seconds / 1e12 });
     }
+}
+
+/// One round of a one-row window a slot, `pending` the slots' next tokens in and out; the verify's GPU seconds.
+fn sharedRound(gpa: std.mem.Allocator, io: std.Io, m: *q.model.Model, r: *q.decode_round.Runner, pending: []u32, timing: ?*[4]f64) !f64 {
+    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const most = q.attention_plan.max_streams;
+    const n = pending.len;
+    const vocab = m.config.vocab;
+    var inputs: [most]q.round_plan.Input = undefined;
+    var ids: [most][1]u32 = undefined;
+    for (0..n) |k| {
+        ids[k] = .{pending[k]};
+        inputs[k] = .{ .slot = @intCast(k), .start = r.offsets[k], .capacity = r.capacity, .ids = &ids[k] };
+    }
+    var plan = try Round.init(gpa, inputs[0..n], @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
+    defer plan.deinit();
+    const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const advance = std.c.getenv("QWEN27_ADVANCE") != null;
+    if (advance) try r.advance(&plan, .all) else try r.verifyHead(&plan, .all);
+    const t2 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const gpu = r.last_gpu_seconds;
+    const words = m.frame.get(.logits).buffer.slice(u16, n * vocab);
+    for (0..n) |k| pending[k] = try q.session.argmax(words[k * vocab ..][0..vocab]);
+    const t3 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const zero = [_]u32{0};
+    var paths: [most][]const u32 = @splat(&zero);
+    if (!advance) try r.keep(&plan, paths[0..n]);
+    const t4 = std.Io.Clock.awake.now(io).toNanoseconds();
+    if (timing) |ts| for (ts, [_]i128{ t1 - t0, t2 - t1, t3 - t2, t4 - t3 }) |*t, dt| {
+        t.* = @as(f64, @floatFromInt(dt)) / 1e6;
+    };
+    return gpu;
+}
+
+/// A width sweep's window: a chain, a binary tree, or a main path with a side branch every third row.
+const Shape = enum { chain, binary, dflash };
+fn widths(gpa: std.mem.Allocator, m: *q.model.Model, rounds: usize, shape: Shape) !void {
+    var r = try q.decode_round.Runner.init(gpa, m, 1, 4096);
+    defer r.deinit();
+    const vocab = m.config.vocab;
+    var prompt: [64]u32 = undefined;
+    for (&prompt, 0..) |*t, j| t.* = @intCast((j * 7919 + 13) % 150000 + 1000);
+    const s = q.session.Session{ .runner = &r };
+    try s.prefill(&prompt, 64);
+    var pending = try s.greedy();
+    var times: [64]f64 = undefined;
+    const n = @min(rounds, times.len);
+    for ([_]u32{ 1, 8, 16, 17, 24, 32, 48, 64, 96, 128 }) |rows| {
+        var ids: [128]u32 = undefined;
+        var parents: [128]i32 = undefined;
+        var digest: [32]u8 = undefined;
+        for (0..n + 2) |round| {
+            ids[0] = pending;
+            for (1..rows) |j| ids[j] = @intCast((j * 104729 + round * 31) % 150000 + 1000);
+            for (parents[0..rows], 0..) |*p, j| p.* = if (j == 0) -1 else switch (shape) {
+                .chain => @intCast(j - 1),
+                .binary => @intCast((j - 1) / 2),
+                .dflash => @intCast(if (j % 3 == 0) j - 2 else j - 1),
+            };
+            var plan = try Round.init(gpa, &.{.{ .slot = 0, .start = r.offsets[0], .capacity = r.capacity, .ids = ids[0..rows], .parents = parents[0..rows] }}, @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
+            defer plan.deinit();
+            try r.verifyHead(&plan, .all);
+            if (round >= 2) times[round - 2] = r.last_gpu_seconds * 1e3;
+            std.crypto.hash.sha2.Sha256.hash(std.mem.sliceAsBytes(m.frame.get(.logits).buffer.slice(u16, rows * vocab)), &digest, .{});
+            pending = try q.session.argmax(m.frame.get(.logits).buffer.slice(u16, vocab));
+            const root = [_]u32{0};
+            try r.keep(&plan, &.{&root});
+        }
+        std.mem.sort(f64, times[0..n], {}, std.sort.asc(f64));
+        std.debug.print("{s} rows {d:>3}: verify {d:.2} ms GPU (median of {d}; min {d:.2}) logits {x}\n", .{ @tagName(shape), rows, times[n / 2], n, times[0], digest[0..6] });
+        if (std.c.getenv("QWEN27_PROFILE") == null or (rows != 16 and rows != 17 and rows != 32)) continue;
+        var trace = tf.gpu_profile.Trace{ .queue = m.queue };
+        r.profile(&trace);
+        trace.enabled = true;
+        for (0..4) |round| {
+            ids[0] = pending;
+            for (1..rows) |j| ids[j] = @intCast((j * 104729 + round * 31) % 150000 + 1000);
+            var plan = try Round.init(gpa, &.{.{ .slot = 0, .start = r.offsets[0], .capacity = r.capacity, .ids = ids[0..rows], .parents = parents[0..rows] }}, @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
+            defer plan.deinit();
+            try r.verifyHead(&plan, .all);
+            pending = try q.session.argmax(m.frame.get(.logits).buffer.slice(u16, vocab));
+            const root = [_]u32{0};
+            try r.keep(&plan, &.{&root});
+        }
+        r.profile(null);
+        inline for (@typeInfo(tf.gpu_profile.Class).@"enum".field_names, 0..) |name, ci| if (trace.calls[ci] > 0) std.debug.print("  PROFILE rows {d} class={s} ms/round={d:.2}\n", .{ rows, name, trace.seconds[ci] * 1e3 / 4 });
+        for (trace.shapes[0..trace.shape_count]) |sh| std.debug.print("  PROFILE rows {d} shape n={d} k={d} sk={d} ms/round={d:.2}\n", .{ rows, sh.n, sh.k, sh.sk, sh.gpu_seconds * 1e3 / 4 });
+    }
+}
+
+/// Compare slot and snapshot scans at widths 2-48 after one prompt, checking every logit byte.
+fn slotsCheck(gpa: std.mem.Allocator, m: *q.model.Model) !void {
+    var runners: [2]q.decode_round.Runner = undefined;
+    for (&runners) |*r| r.* = try q.decode_round.Runner.init(gpa, m, 1, 4096);
+    defer for (&runners) |*r| r.deinit();
+    runners[0].gdn.tree_mode = .snapshot;
+    const vocab = m.config.vocab;
+    var prompt: [64]u32 = undefined;
+    for (&prompt, 0..) |*t, j| t.* = @intCast((j * 7919 + 13) % 150000 + 1000);
+    var pending: u32 = 0;
+    for (&runners) |*r| {
+        const s = q.session.Session{ .runner = r };
+        try s.prefill(&prompt, 64);
+        pending = try s.greedy();
+    }
+    const saved = try gpa.alloc(u16, 48 * vocab);
+    defer gpa.free(saved);
+    var cases: usize = 0;
+    for ([_]u32{ 2, 5, 8, 11, 16, 17, 24, 32, 48 }) |rows| for (0..3) |shape| {
+        var ids: [48]u32 = undefined;
+        var parents: [48]i32 = undefined;
+        ids[0] = pending;
+        for (1..rows) |j| ids[j] = @intCast((j * 104729 + rows * 7 + shape) % 150000 + 1000);
+        for (parents[0..rows], 0..) |*p, j| p.* = if (j == 0) -1 else switch (shape) {
+            0 => @as(i32, @intCast(j - 1)),
+            1 => @intCast((j - 1) / 2),
+            else => @intCast(if (j < 6) j - 1 else (j * 5) % j),
+        };
+        for (&runners, 0..) |*r, k| {
+            var plan = try Round.init(gpa, &.{.{ .slot = 0, .start = r.offsets[0], .capacity = r.capacity, .ids = ids[0..rows], .parents = parents[0..rows] }}, @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
+            defer plan.deinit();
+            try r.verifyHead(&plan, .all);
+            const logits = m.frame.get(.logits).buffer.slice(u16, rows * vocab);
+            if (k == 0) @memcpy(saved[0 .. rows * vocab], logits) else if (!std.mem.eql(u16, saved[0 .. rows * vocab], logits)) {
+                std.debug.print("slots DIFF: rows {d} shape {d}\n", .{ rows, shape });
+                return error.SlotsDiffer;
+            }
+            if (k == 0) pending = try q.session.argmax(logits[0..vocab]);
+            const root = [_]u32{0};
+            try r.keep(&plan, &.{&root});
+        }
+        cases += 1;
+    };
+    std.debug.print("slots check: {d} rounds, every logit equal\n", .{cases});
 }

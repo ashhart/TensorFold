@@ -9,9 +9,11 @@ const lanes = tf.lanes;
 const be = lanes.backend;
 pub const Draft = @import("qwen27_draft.zig").Draft;
 const slots = @import("qwen27_slots.zig");
+const draft_fns = @import("qwen27_drafts.zig");
 const Round = q.round_plan.Round;
 const Tree = q.dflash.selector.Tree;
 const Ring = q.tap_ring.Ring;
+const Context = q.dflash.runtime_model.Context;
 const Landing = @import("qwen27_landing.zig").Landing;
 const contract = tf.tree_round;
 
@@ -19,6 +21,8 @@ const contract = tf.tree_round;
 pub const max_rows = 16;
 /// A shared round's rows at most: the frame's.
 pub const batch_rows = 128;
+/// Streams a runner holds at most (the attention plan's).
+pub const max_streams = q.attention_plan.max_streams;
 const ring = 64;
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -32,33 +36,28 @@ pub const Grow = struct {
     added: *const fn (ctx: *anyopaque, buffers: []const mtl.Buffer) void,
 };
 
-/// A slot's own copy of the drafter's taps ring (slots past 0, when a drafter is attached).
-const SlotRing = struct {
-    buf: mtl.Buffer,
-    end: u64 = 0,
-};
-
 pub const Metal = struct {
     gpa: std.mem.Allocator,
     runner: *q.decode_round.Runner,
     draft: ?*Draft,
     chunk: usize = 128, // prompt rows a pass
     nodes: u32 = max_rows - 1, // a tree's drafts at most
-    owners: [8]?*lanes.Stream = @splat(null), // the stream each runner slot holds
-    rings: [8]?SlotRing = @splat(null), // slots past 0: their taps, so a kept state carries them
+    owners: [max_streams]?*lanes.Stream = @splat(null), // the stream each runner slot holds
+    contexts: [max_streams]?*Context = @splat(null), // slots past 0: their taps (a kept state carries them) and drafter state
+    draft_slots: u32 = 1, // slots below this draft their own trees while no more streams are live (TF_Q27_DRAFT_SLOTS)
     release_hook: ?Release = null,
     grow: ?Grow = null,
     drawn: [ring]u32 = undefined, // drawn tokens by handle
     next: u64 = 0,
     round: ?Round = null, // the last verify, until its rows are kept
-    windows: [8]u32 = undefined, // the last verify's slots, in window order
-    widths: [8]u32 = undefined, // and their rows
+    windows: [max_streams]u32 = undefined, // the last verify's slots, in window order
+    widths: [max_streams]u32 = undefined, // and their rows
     count: usize = 0, // the last verify's windows
-    early: usize = 0, // slot 0's kept rows its drafter absorbed before a shared round's keep
+    early: [max_streams]usize = @splat(0), // a slot's kept rows its drafter absorbed before a shared round's keep
     ids: [batch_rows]u32 = undefined,
     parents: [batch_rows]i32 = undefined,
     rows: usize = 0,
-    tree: ?Tree = null, // the drafts held for slot 0's next round
+    trees: [max_streams]?Tree = @splat(null), // the drafts held for each slot's next round
     ops: tf.tree_round_gpu.Ops,
     picks: mtl.Buffer,
     kept: mtl.Buffer, // a keep's gathered rows, by round row
@@ -72,7 +71,7 @@ pub const Metal = struct {
     vision: ?*@import("qwen27_images.zig").Vision = null, // --vision: the image tower and a prompt pass's image rows
 
     pub fn init(gpa: std.mem.Allocator, runner: *q.decode_round.Runner, draft: ?*Draft) !*Metal {
-        if (runner.slots == 0 or runner.slots > 8 or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
+        if (runner.slots == 0 or runner.slots > max_streams or runner.model.frame.capacity < batch_rows) return error.TargetBinding;
         const device = runner.model.device;
         const ops = try tf.tree_round_gpu.Ops.init(device);
         errdefer ops.deinit();
@@ -82,20 +81,20 @@ pub const Metal = struct {
         errdefer kept.deinit();
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);
-        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept };
-        errdefer b.freeRings();
+        b.* = .{ .gpa = gpa, .runner = runner, .draft = draft, .ops = ops, .picks = picks, .kept = kept, .draft_slots = draftSlots() };
+        errdefer b.freeContexts();
         if (draft) |d| {
             const g = d.model.ring();
             b.gathered_taps = try device.buffer(batch_rows * g.stride, opts);
-            for (b.rings[1..runner.ready]) |*r| r.* = .{ .buf = try device.buffer(@as(usize, g.window) * g.stride, opts) };
+            for (b.contexts[1..runner.ready], 1..) |*x, slot| x.* = try Context.init(gpa, d.model, slot < b.draft_slots);
         }
         return b;
     }
 
-    fn freeRings(b: *Metal) void {
-        for (&b.rings) |*r| if (r.*) |x| {
-            x.buf.deinit();
-            r.* = null;
+    fn freeContexts(b: *Metal) void {
+        for (&b.contexts) |*c| if (c.*) |x| {
+            x.deinit(b.gpa);
+            c.* = null;
         };
         if (b.gathered_taps) |t| t.deinit();
         b.gathered_taps = null;
@@ -104,7 +103,7 @@ pub const Metal = struct {
     pub fn deinit(b: *Metal) void {
         b.dropRound();
         b.dropTree();
-        b.freeRings();
+        b.freeContexts();
         b.kept.deinit();
         b.picks.deinit();
         b.ops.deinit();
@@ -120,7 +119,7 @@ pub const Metal = struct {
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .probabilities = probabilitiesFn, .tree = treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -129,7 +128,7 @@ pub const Metal = struct {
         const shared = b.runner.slots > 1;
         // a lone stream drafts DFlash2 trees, as in 1.0.5: copies land less often there (TF_QWEN27_COPIES=1 opts in)
         const lone_copies = if (platform.c.getenv("TF_QWEN27_COPIES")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
-        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies };
+        return .{ .exact_width = if (drafting or shared) max_rows else 1, .mtp = drafting, .speculate = drafting, .speculate_early = false, .drafts = b.nodes, .draft_probabilities = true, .window_costs = b.costs[0..b.timed], .hidden_rows = shared, .streams_exact = true, .batch_rows = if (shared) batch_rows else max_rows, .max_streams = b.runner.slots, .lone_copies = lone_copies, .draft_streams = drafting and b.draft_slots > 1 };
     }
 
     /// The slot holding `s`.
@@ -142,9 +141,18 @@ pub const Metal = struct {
     pub fn ringOf(b: *Metal, slot: u32) ?Ring {
         const d = b.draft orelse return null;
         if (slot == 0) return d.model.ring();
-        const g = d.model.ring();
-        const r = &(b.rings[slot] orelse return null);
-        return .{ .buf = r.buf, .end = &r.end, .window = g.window, .stride = g.stride };
+        const x = b.contexts[slot] orelse return null;
+        return x.ring(d.model.graph.config);
+    }
+
+    /// Whether `slot`'s stream drafts its own trees.
+    pub fn draftsOwn(b: *const Metal, slot: u32) bool {
+        if (b.draft == null) return false;
+        if (slot == 0) return true;
+        const x = b.contexts[slot] orelse return false;
+        var live: u32 = 0;
+        for (b.owners[0..b.runner.slots]) |o| live += @intFromBool(o != null);
+        return slot < b.draft_slots and live <= b.draft_slots and x.caches.len > 0;
     }
 
     /// Each window width's ms (verify, draws, keep) on a scratch context in slot 0; resets it. Kept per build.
@@ -209,11 +217,11 @@ pub const Metal = struct {
         return (mtl.clock.seconds() - t0) * 1e3;
     }
 
-    fn self(ptr: *anyopaque) *Metal {
+    pub fn self(ptr: *anyopaque) *Metal {
         return @ptrCast(@alignCast(ptr));
     }
 
-    fn slotFor(b: *const Metal, s: *const lanes.Stream) !u32 {
+    pub fn slotFor(b: *const Metal, s: *const lanes.Stream) !u32 {
         return b.slotOf(s) orelse error.UnknownStream;
     }
 
@@ -223,7 +231,7 @@ pub const Metal = struct {
         return b.next - 1;
     }
 
-    fn value(b: *const Metal, feed: be.Feed) !u32 {
+    pub fn value(b: *const Metal, feed: be.Feed) !u32 {
         return switch (feed) {
             .value => |v| v,
             .handle => |h| if (h < b.next and b.next - h <= ring) b.drawn[h % ring] else error.NoSuchToken,
@@ -234,16 +242,20 @@ pub const Metal = struct {
         if (b.round) |*r| r.deinit();
         b.round = null;
         b.count = 0;
-        b.early = 0;
+        b.early = @splat(0);
         b.advanced = false;
     }
 
     pub fn dropTree(b: *Metal) void {
-        if (b.tree) |*t| t.deinit();
-        b.tree = null;
+        for (0..max_streams) |slot| b.dropTreeOf(@intCast(slot));
     }
 
-    /// Slot 0's stream drafts with the DFlash2 head once a drafter is attached.
+    pub fn dropTreeOf(b: *Metal, slot: u32) void {
+        if (b.trees[slot]) |*t| t.deinit();
+        b.trees[slot] = null;
+    }
+
+    /// Slot 0's stream runs its prompt and single steps through the drafter's own generation.
     pub fn drafter(b: *const Metal, slot: u32) ?*Draft {
         return if (slot == 0) b.draft else null;
     }
@@ -258,17 +270,33 @@ pub const Metal = struct {
             for (out[0..rows], positions[0..rows], first..) |*t, p, r| t.* = try tf.qwen35.backend.draw(b.gpa, words[r * vocab ..][0..vocab], sampling, p, &.{});
             return;
         }
+        try b.argmaxRows(first, rows);
+        try b.picked(first, rows, out);
+    }
+
+    /// Rows [first, first + rows)'s greedy picks into `picks` at the same rows: one command buffer and one wait.
+    fn argmaxRows(b: *Metal, first: usize, rows: usize) !void {
+        const logits = b.runner.model.frame.get(.logits);
+        const vocab: u32 = @intCast(b.runner.model.config.vocab);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const cb = b.runner.model.queue.commandBuffer();
         const e = cb.compute(.serial);
-        try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + first * vocab * 2 }, .{ .buf = b.picks }, .{ .rows = @intCast(rows), .vocab = vocab, .stride = vocab });
+        var at = first;
+        while (at < first + rows) : (at += contract.max_rows) {
+            const n = @min(first + rows - at, contract.max_rows);
+            try b.ops.argmax(e, .{ .buf = logits.buffer, .off = logits.offset + at * vocab * 2 }, .{ .buf = b.picks, .off = at * @sizeOf(contract.Pick) }, .{ .rows = @intCast(n), .vocab = vocab, .stride = vocab });
+        }
         e.end();
         cb.commit();
         cb.wait();
         if (q.decode_round.gpuFailed(cb, "a draw")) return error.DrawGpuFailure;
+    }
+
+    /// The tokens argmaxRows picked for rows [first, first + rows).
+    fn picked(b: *const Metal, first: usize, rows: usize, out: []u32) !void {
         const picks: [*]const contract.Pick = @ptrCast(@alignCast(b.picks.contents()));
-        for (out[0..rows], picks[0..rows]) |*t, p| {
+        for (out[0..rows], picks[first..][0..rows]) |*t, p| {
             if (p.token == contract.invalid_token or p.nonfinite != 0) return error.NonfiniteLogits;
             t.* = p.token;
         }
@@ -307,7 +335,7 @@ pub const Metal = struct {
         var n: usize = 0;
         const rows = b.kept.slice(u32, batch_rows);
         for (paths, round.firsts, b.windows[0..b.count]) |path, first, slot| {
-            if (slot == 0 and b.early > 0) continue;
+            if (b.early[slot] > 0) continue;
             for (path) |row| {
                 rows[n] = first + row;
                 n += 1;
@@ -324,7 +352,7 @@ pub const Metal = struct {
         var at: usize = 0;
         for (paths, b.windows[0..b.count]) |path, slot| {
             const g = b.ringOf(slot).?;
-            if (slot != 0 or b.early == 0) {
+            if (b.early[slot] == 0) {
                 try g.absorb(out, at * g.stride, @intCast(path.len));
                 at += path.len;
             }
@@ -371,7 +399,7 @@ pub const Metal = struct {
         if (b.round == null) return;
         var rows: [batch_rows]u32 = undefined;
         for (&rows, 0..) |*p, i| p.* = @intCast(i);
-        var paths: [8][]const u32 = undefined;
+        var paths: [max_streams][]const u32 = undefined;
         for (paths[0..b.count], b.widths[0..b.count]) |*p, w| p.* = rows[0..w];
         try b.keepPaths(paths[0..b.count]);
     }
@@ -384,7 +412,7 @@ pub const Metal = struct {
         b.dropRound();
         const slot = b.slotOf(s) orelse (b.freeSlot() orelse return error.NoFreeSlot);
         try b.ready(slot, s);
-        if (slot == 0) b.dropTree();
+        b.dropTreeOf(slot);
         b.owners[slot] = s;
         errdefer b.owners[slot] = null;
         const pool = mtl.objc.Pool.push();
@@ -424,7 +452,7 @@ pub const Metal = struct {
         if (windows.len == 0 or windows.len > b.runner.slots or windows.len != out.len) return error.BadWindows;
         try b.settle();
         const r = b.runner;
-        var inputs: [8]q.round_plan.Input = undefined;
+        var inputs: [max_streams]q.round_plan.Input = undefined;
         var total: usize = 0;
         b.from_tree = 0;
         var plain = b.draft == null; // every window one undrafted row: the verify keeps it, as a prompt's rows are
@@ -432,12 +460,12 @@ pub const Metal = struct {
             if (w.rows() != 1 or w.held != 0) plain = false;
             const slot = try b.slotFor(w.stream);
             if (w.held > 0 and w.tokens.len > 0) return error.HeldAndHostDrafts;
-            if (w.held > 0 and slot != 0) return error.HeldWithoutDrafter;
+            if (w.held > 0 and !b.draftsOwn(slot)) return error.HeldWithoutDrafter;
             const rows = w.rows();
             if (rows > max_rows or total + rows > batch_rows) return error.WindowTooWide;
             const ids = b.ids[total..][0..rows];
             ids[0] = w.pending;
-            if (w.held > 0) b.heldChain(ids[1..], w.pending) else @memcpy(ids[1..], w.tokens);
+            if (w.held > 0) b.heldChain(slot, ids[1..], w.pending) else @memcpy(ids[1..], w.tokens);
             if (slot == 0 and windows.len == 1) b.from_tree = b.treeRows(w);
             const parents = b.parents[total..][0..rows];
             if (w.parents) |p| @memcpy(parents, p) else for (parents, 0..) |*p, row| {
@@ -448,7 +476,7 @@ pub const Metal = struct {
             b.widths[i] = @intCast(rows);
             total += rows;
         }
-        // a tree held for slot 0 is spent by this round, alone or shared
+        // every tree held is spent by this round, alone or shared
         if (windows.len > 1) b.dropTree();
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
@@ -458,9 +486,13 @@ pub const Metal = struct {
         if (plain) try r.advance(&b.round.?, .all) else try r.verifyHead(&b.round.?, .all);
         b.advanced = plain;
         b.rows = total;
+        // every greedy window's rows from one argmax over the round; a sampled window draws on the host
+        var greedy = false;
+        for (windows) |w| greedy = greedy or w.stream.sampling == null;
+        if (greedy) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
-            try b.draw(w.stream, first, rows, w.positions, o.sampled);
+            if (w.stream.sampling != null) try b.draw(w.stream, first, rows, w.positions, o.sampled) else try b.picked(first, rows, o.sampled);
             @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
         }
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);
@@ -468,7 +500,7 @@ pub const Metal = struct {
 
     /// How many drafts are the held tree's first nodes with their own parents (0: copies, fills or a chain).
     fn treeRows(b: *const Metal, w: be.Window) usize {
-        const t = b.tree orelse return 0;
+        const t = b.trees[0] orelse return 0;
         const n = w.tokens.len;
         if (w.held > 0 or n == 0 or n > t.tokens.len or !std.mem.eql(u32, w.tokens, t.tokens[0..n])) return 0;
         const parents = w.parents orelse return if (isChain(t.parents[0..n])) n else 0;
@@ -482,14 +514,14 @@ pub const Metal = struct {
     }
 
     /// A node's own log-probability under the drafter (its path score less its parent's).
-    fn local(t: Tree, i: usize) f64 {
+    pub fn local(t: Tree, i: usize) f64 {
         const parent = t.parents[i];
         return t.scores[i] - (if (parent >= 0) t.scores[@intCast(parent)] else 0);
     }
 
     /// Count every proposed node whose parent row was kept, and those the target drew, by own log-probability.
     fn observe(b: *Metal, path: []const u32) void {
-        const t = b.tree orelse return;
+        const t = b.trees[0] orelse return;
         if (b.from_tree == 0) return;
         const keyed = if (b.owners[0]) |s| s.sampling != null else true;
         var kept: [max_rows]bool = @splat(false);
@@ -502,9 +534,9 @@ pub const Metal = struct {
     }
 
     /// Held drafts the core reads as a chain (a first round): the tree's first-child path, last token repeated.
-    fn heldChain(b: *const Metal, out: []u32, pending: u32) void {
+    fn heldChain(b: *const Metal, slot: u32, out: []u32, pending: u32) void {
         var n: usize = 0;
-        if (b.tree) |t| {
+        if (b.trees[slot]) |t| {
             var parent: i32 = -1;
             for (t.tokens, t.parents, 0..) |token, p, i| {
                 if (n == out.len) break;
@@ -525,69 +557,13 @@ pub const Metal = struct {
         try b.keepPaths(paths);
     }
 
-    /// Slot 0's drafter proposes its next tree; in a shared round its kept rows' taps reach it here, before the keep.
-    fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
-        const b = self(ptr);
-        for (requests) |r| {
-            const slot = try b.slotFor(r.stream);
-            const d = b.drafter(slot) orelse continue;
-            const pool = mtl.objc.Pool.push();
-            defer pool.pop();
-            if (b.count > 1) try b.absorbEarly(d, r.rows orelse return error.NoKeptRows) else try b.settle();
-            b.dropTree();
-            const g = &d.generation;
-            const stands = b.runner.offsets[0] + b.early;
-            if (g.draft.committed_end != stands) return error.BadDraftPosition;
-            const room = b.runner.capacity - stands;
-            if (r.depth == 0 or room < 2) continue;
-            const pending = if (r.rows != null) r.follow[r.follow.len - 1] else try b.value(r.first orelse return error.NoFirstToken);
-            const nodes: u32 = @intCast(@min(@min(r.depth, b.nodes), room - 1));
-            b.tree = if (g.proposer) |p| try p.call(p.ptr, pending, nodes) else try g.draft.propose(pending, nodes);
-        }
-    }
-
-    /// Slot 0's kept rows of a shared round's verify, gathered from its taps for the drafter before the keep.
-    fn absorbEarly(b: *Metal, d: *Draft, path: []const u32) !void {
-        if (b.early > 0) return error.AbsorbedTwice;
-        const r = b.runner;
-        const w = std.mem.indexOfScalar(u32, b.windows[0..b.count], 0) orelse return error.UnknownStream;
-        const first = b.round.?.firsts[w];
-        const rows = b.kept.slice(u32, path.len);
-        for (rows, path) |*x, row| x.* = first + row;
-        const cb = r.model.queue.commandBuffer();
-        const e = cb.compute(.serial);
-        try r.taps.accepted(r.model.glue, e, rows, .{ .buffer = b.kept }, .{ .buffer = b.gathered_taps.? });
-        e.end();
-        cb.commit();
-        cb.wait();
-        if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
-        try d.generation.draft.absorb(.{ .buf = b.gathered_taps.? }, @intCast(path.len));
-        b.early = path.len;
-    }
-
-    /// Each held node's chance of landing: its own given its parent (e^own as the prior) times its parent's.
-    fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
-        const b = self(ptr);
-        if (b.slotOf(s) != 0) return false;
-        const t = b.tree orelse return false;
-        if (out.len > t.scores.len) return false;
-        for (out, t.parents[0..out.len], 0..) |*p, parent, i| {
-            p.* = b.landing.chance(s.sampling != null, local(t, i)) * (if (parent >= 0) out[@intCast(parent)] else 1);
-        }
-        return true;
-    }
-
-    /// Slot 0's held tree as host tokens; any other stream holds no drafts (its windows verify copies or one row).
-    fn treeFn(ptr: *anyopaque, s: *lanes.Stream, gpa: std.mem.Allocator) anyerror!?lanes.stream.Held {
-        const b = self(ptr);
-        const slot = b.slotOf(s) orelse return null;
-        const t = (if (slot == 0) b.tree else null) orelse return .{ .count = 0, .tokens = try gpa.alloc(u32, 0) };
-        const tokens = try gpa.dupe(u32, t.tokens);
-        errdefer gpa.free(tokens);
-        return .{ .count = @intCast(t.tokens.len), .tokens = tokens, .parents = try gpa.dupe(i32, t.parents) };
-    }
-
     fn releaseFn(ptr: *anyopaque, s: *lanes.Stream) void {
         self(ptr).unbind(s);
     }
 };
+
+/// Streams that draft their own trees in shared rounds, while no more are live (TF_Q27_DRAFT_SLOTS; 1: slot 0 alone).
+fn draftSlots() u32 {
+    const v = std.c.getenv("TF_Q27_DRAFT_SLOTS") orelse return 8;
+    return std.math.clamp(std.fmt.parseInt(u32, std.mem.span(v), 10) catch 8, 1, max_streams);
+}

@@ -4,6 +4,8 @@ const state = @import("state.zig");
 const gdn = @import("gdn_plan.zig");
 const abi = @import("gdn_contract.zig");
 
+const frame_rows = @import("gpu_frame.zig").max_rows;
+
 pub const Input = struct { slot: u32, start: u32, capacity: u32, ids: []const u32, parents: ?[]const i32 = null };
 
 pub const Round = struct {
@@ -16,18 +18,18 @@ pub const Round = struct {
     firsts: []u32,
 
     pub fn init(a: std.mem.Allocator, inputs: []const Input, taps: u32, slots: u32, vocab: u32) !Round {
-        if (inputs.len == 0 or inputs.len > 64 or slots == 0 or slots > 64 or vocab == 0) return error.BadRoundPlan;
+        if (inputs.len == 0 or inputs.len > 128 or slots == 0 or slots > 128 or vocab == 0) return error.BadRoundPlan;
         var rows: usize = 0;
-        var used: u64 = 0;
+        var used: u128 = 0; // slots past 64 need the wider set
         for (inputs) |input| {
-            if (input.slot >= slots or input.ids.len == 0 or input.ids.len > 128 or @as(u64, input.start) + input.ids.len > input.capacity) return error.BadRoundPlan;
-            const bit = @as(u64, 1) << @intCast(input.slot);
+            if (input.slot >= slots or input.ids.len == 0 or input.ids.len > frame_rows or @as(u64, input.start) + input.ids.len > input.capacity) return error.BadRoundPlan;
+            const bit = @as(u128, 1) << @intCast(input.slot);
             if (used & bit != 0) return error.DuplicateRoundSlot;
             used |= bit;
             rows = try std.math.add(usize, rows, input.ids.len);
             for (input.ids) |id| if (id >= vocab) return error.BadTokenId;
         }
-        if (rows > 128) return error.BadRoundPlan;
+        if (rows > frame_rows) return error.BadRoundPlan;
         const ids = try a.alloc(u32, rows);
         errdefer a.free(ids);
         const feed = try a.alloc(i32, rows);
@@ -46,7 +48,7 @@ pub const Round = struct {
         errdefer a.free(firsts);
         var first: usize = 0;
         for (inputs, 0..) |input, i| {
-            var chain: [128]i32 = undefined;
+            var chain: [frame_rows]i32 = undefined;
             chain[0] = -1;
             for (1..input.ids.len) |r| chain[r] = @intCast(r - 1);
             const parents = input.parents orelse chain[0..input.ids.len];

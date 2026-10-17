@@ -70,6 +70,76 @@ inline void tf_context_row(const device bfloat* Q, const device bfloat* K, const
     tf_context_row<true>(Q, K, V, mask, O, tg.y, tg.x, args.keys, args.mask_stride, as_type<float>(args.scale_bits), lane);
 }
 
+#define TF_CHUNK 256
+#define TF_G (TF_QH / TF_KVH)
+
+// Split over 256-key chunks: one simdgroup takes a KV head's query heads for one row, reading each key once for them.
+[[kernel]] void tf_shared_lane_attention_split(const device bfloat* Q [[buffer(0)]],
+    const device bfloat* K [[buffer(1)]], const device bfloat* V [[buffer(2)]],
+    const device uchar* mask [[buffer(3)]], constant tf_context_args& args [[buffer(4)]],
+    device float* part [[buffer(5)]], uint lane [[thread_index_in_simdgroup]],
+    uint3 tg [[threadgroup_position_in_grid]]) {
+  const uint kh = tg.x, row = tg.y, chunk = tg.z, chunks = (args.keys + TF_CHUNK - 1) / TF_CHUNK;
+  if (kh >= TF_KVH || row >= args.rows || chunk >= chunks) return;
+  const float scale = as_type<float>(args.scale_bits);
+  float q[TF_G][TF_D / 32], out[TF_G][TF_D / 32], maximum[TF_G], total[TF_G];
+  for (uint g = 0; g < TF_G; ++g) {
+    const size_t qi = ((size_t)row * TF_QH + kh * TF_G + g) * TF_D;
+    for (uint d = 0; d < TF_D / 32; ++d) { q[g][d] = float(Q[qi + lane + d * 32]); out[g][d] = 0.0f; }
+    maximum[g] = -INFINITY;
+    total[g] = 0.0f;
+  }
+  const uint last = min(args.keys, (chunk + 1) * TF_CHUNK);
+  for (uint key = chunk * TF_CHUNK; key < last; ++key) {
+    if (mask[(size_t)row * args.mask_stride + key] == 0) continue;
+    const size_t ki = ((size_t)key * TF_KVH + kh) * TF_D;
+    float k[TF_D / 32], v[TF_D / 32];
+    for (uint d = 0; d < TF_D / 32; ++d) { k[d] = float(K[ki + lane + d * 32]); v[d] = float(V[ki + lane + d * 32]); }
+    for (uint g = 0; g < TF_G; ++g) {
+      float dot = 0.0f;
+      for (uint d = 0; d < TF_D / 32; ++d) dot = fma(q[g][d], k[d], dot);
+      const float score = simd_sum(dot) * scale;
+      const float next = max(maximum[g], score);
+      const float old_weight = maximum[g] == -INFINITY ? 0.0f : exp(maximum[g] - next);
+      const float weight = exp(score - next);
+      total[g] = fma(total[g], old_weight, weight);
+      for (uint d = 0; d < TF_D / 32; ++d) out[g][d] = fma(out[g][d], old_weight, weight * v[d]);
+      maximum[g] = next;
+    }
+  }
+  // partials [row][kv head][chunk][query head][D + 2]: outputs, then the chunk's maximum and total
+  for (uint g = 0; g < TF_G; ++g) {
+    device float* p = part + ((((size_t)row * TF_KVH + kh) * chunks + chunk) * TF_G + g) * (TF_D + 2);
+    for (uint d = 0; d < TF_D / 32; ++d) p[lane + d * 32] = out[g][d];
+    if (lane == 0) { p[TF_D] = maximum[g]; p[TF_D + 1] = total[g]; }
+  }
+}
+
+// One query head and row: its chunks' partials rescaled to the largest maximum and added in chunk order.
+[[kernel]] void tf_shared_lane_attention_merge(const device float* part [[buffer(0)]],
+    constant tf_context_args& args [[buffer(1)]], device TF_OUT* O [[buffer(2)]],
+    uint lane [[thread_index_in_simdgroup]], uint2 tg [[threadgroup_position_in_grid]]) {
+  const uint head = tg.x, row = tg.y, chunks = (args.keys + TF_CHUNK - 1) / TF_CHUNK;
+  if (head >= TF_QH || row >= args.rows) return;
+  const uint kh = head / TF_G, g = head % TF_G;
+  const device float* first = part + (((size_t)row * TF_KVH + kh) * chunks * TF_G + g) * (TF_D + 2);
+  const size_t step = (size_t)TF_G * (TF_D + 2);
+  float maximum = -INFINITY;
+  for (uint c = 0; c < chunks; ++c) maximum = max(maximum, first[c * step + TF_D]);
+  float out[TF_D / 32];
+  for (uint d = 0; d < TF_D / 32; ++d) out[d] = 0.0f;
+  float total = 0.0f;
+  for (uint c = 0; c < chunks; ++c) {
+    const device float* p = first + c * step;
+    if (p[TF_D] == -INFINITY) continue;
+    const float w = exp(p[TF_D] - maximum);
+    total = fma(p[TF_D + 1], w, total);
+    for (uint d = 0; d < TF_D / 32; ++d) out[d] = fma(p[lane + d * 32], w, out[d]);
+  }
+  const size_t qi = ((size_t)row * TF_QH + head) * TF_D;
+  for (uint d = 0; d < TF_D / 32; ++d) O[qi + lane + d * 32] = TF_OUT(total == 0.0f ? 0.0f : out[d] / total);
+}
+
 // Ordinary one-sequence decode over all keys: the same fp32 order, with no mask or lane indexing.
 [[kernel]] void tf_core_decode_attention(const device bfloat* Q [[buffer(0)]],
     const device bfloat* K [[buffer(1)]], const device bfloat* V [[buffer(2)]],

@@ -5,7 +5,7 @@ pub const Conv = extern struct { rows: u32, channels: u32, taps: u32, streams: u
 pub const Recur = extern struct { rows: u32, nk: u32, nv: u32, dv: u32, streams: u32, pad0: u32 = 0, pad1: u32 = 0, pad2: u32 = 0 };
 
 pub fn checkConv(a: Conv) !void {
-    if (a.rows == 0 or a.rows > 2048 or a.channels == 0 or a.channels > 65536 or a.taps < 2 or a.taps > 8 or a.streams == 0 or a.streams > 64) return error.BadPromptConv;
+    if (a.rows == 0 or a.rows > 2048 or a.channels == 0 or a.channels > 65536 or a.taps < 2 or a.taps > 8 or a.streams == 0 or a.streams > 128) return error.BadPromptConv;
     if (@as(u64, a.rows) * a.channels * a.streams > std.math.maxInt(u32)) return error.BadPromptConv;
 }
 
