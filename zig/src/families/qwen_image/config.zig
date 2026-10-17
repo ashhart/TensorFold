@@ -43,6 +43,17 @@ pub fn check(gpa: std.mem.Allocator, text: []const u8) !void {
     const rope = o.get("axes_dims_rope") orelse return error.BadConfig;
     if (rope != .array or rope.array.items.len != 3) return error.BadConfig;
     for (rope.array.items, axes) |v, a| if (v != .integer or v.integer != a) return error.UnsupportedGeometry;
+    // the norm kernels take `eps` as this fixed constant: a checkpoint trained with another is refused, not run with it
+    const e = o.get("eps") orelse return error.BadConfig;
+    const given: f64 = switch (e) {
+        .float => |f| f,
+        .integer => |i| @floatFromInt(i),
+        else => return error.EpsilonMismatch,
+    };
+    if (@as(f32, @floatCast(given)) != eps) {
+        std.log.warn("qwen image: eps is {e}; the norm kernels run with {e} only", .{ given, eps });
+        return error.EpsilonMismatch;
+    }
 }
 
 const sample =
@@ -66,4 +77,20 @@ test "the released transformer config passes; another depth, rotary or class doe
     try std.testing.expectEqual(@as(usize, 48), (try grid(1344, 768)).rows);
     try std.testing.expectEqual(@as(usize, 84), (try grid(1344, 768)).columns);
     try std.testing.expectError(error.BadImageSize, grid(1000, 768));
+}
+
+test "a config whose eps is not the kernels' constant is refused" {
+    const a = std.testing.allocator;
+    // the released value written another way still passes
+    const same = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06", "\"eps\": 0.000001");
+    defer a.free(same);
+    try check(a, same);
+    inline for (.{ "\"eps\": 1e-05", "\"eps\": 0", "\"eps\": 1", "\"eps\": \"1e-06\"", "\"eps\": null" }) |other| {
+        const text = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06", other);
+        defer a.free(text);
+        try std.testing.expectError(error.EpsilonMismatch, check(a, text));
+    }
+    const none = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06, ", "");
+    defer a.free(none);
+    try std.testing.expectError(error.BadConfig, check(a, none));
 }
