@@ -247,3 +247,51 @@ test "required tools: Gemma constrained JSON arguments preserve punctuation insi
     const arguments = try value(g, result.calls.?[0].get("function").?.strField("arguments").?);
     try std.testing.expectEqualStrings("a,b:c {d:e}", arguments.strField("q").?);
 }
+
+test "qwen27 tool calls: required and named calls use the masked lane fake through both routes" {
+    const witness = @import("tool_required_witness.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const g = arena.allocator();
+    var stub: Stub = .{};
+    var compile: Compile = .{};
+    var compiler = compile.compiler();
+    for ([_]bool{ false, true }) |response| for ([_]bool{ false, true }) |named| for ([_]@FieldType(Text, "form"){ .xml, .json, .gemma, .unknown }) |form| {
+        var text: Text = .{ .form = form };
+        const srv = try Server.init(a, std.testing.io, stub.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+        defer srv.deinit();
+        srv.info.structures = @import("qwen27_masks").supported;
+        srv.grammars = &compiler;
+        var cx: errors.Cx = .{ .a = g };
+        const choice = if (!named) "\"required\"" else if (response) "{\"type\":\"function\",\"name\":\"now\"}" else "{\"type\":\"function\",\"function\":{\"name\":\"now\"}}";
+        const input = try openai.chatInput(srv, &cx, try body(&cx, response, choice));
+        try std.testing.expect(input.fields.get("tool_call_required").?.truthy());
+        try std.testing.expectEqual(@as(usize, if (named) 1 else 2), input.tools.len);
+        var request: api.Request = .{ .prompt = &.{1}, .max_tokens = 512 };
+        try srv.checkFeatures(&cx, input.fields, true, false, &.{1}, input.tools, &request);
+        const structure = request.structure.?;
+        const root = try value(g, structure.text);
+        const format = root.get("format").?;
+        try std.testing.expectEqualStrings("sequence", format.strField("type").?);
+        try std.testing.expectEqual(@as(usize, 3), format.get("elements").?.array.len);
+        const reply = try witness.text(g, root);
+        try std.testing.expect(std.mem.startsWith(u8, reply, if (form == .gemma) "<|tool_call>call:" else "<tool_call>"));
+        if (named) try std.testing.expect(std.mem.indexOf(u8, structure.text, "lookup") == null);
+        const want = try Text.encode(undefined, g, reply, false);
+        for ([_]u64{ 1235, 1236 }) |seed| {
+            const plain = try witness.runTarget(want, 0, seed, @import("qwen27_mask_fake").Adapter);
+            defer a.free(plain.tokens);
+            for ([_]u32{ 1, 4 }) |depth| {
+                const drafted = try witness.runTarget(want, depth, seed, @import("qwen27_mask_fake").Adapter);
+                defer a.free(drafted.tokens);
+                try std.testing.expectEqualSlices(u32, plain.tokens, drafted.tokens);
+                try std.testing.expect(drafted.drafted > 0);
+            }
+            const decoded = try Text.decode(undefined, g, plain.tokens);
+            const result = try parse.parse(g, decoded, input.tools, 1);
+            try std.testing.expectEqualStrings("", result.content);
+            try std.testing.expectEqual(@as(usize, 1), result.calls.?.len);
+            try std.testing.expectEqualStrings(if (named) "now" else "lookup", result.calls.?[0].get("function").?.strField("name").?);
+        }
+    };
+}

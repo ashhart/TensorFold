@@ -119,7 +119,7 @@ pub const Metal = struct {
     const refill = slots.refill;
 
     pub fn backend(b: *Metal) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draft_fns.draftFn, .probabilities = draft_fns.probabilitiesFn, .tree = draft_fns.treeFn, .release = releaseFn, .reports_fill = true } };
     }
 
     /// What the round loop reads at setup: slot 0's stream drafts trees; every stream verifies copies.
@@ -261,13 +261,18 @@ pub const Metal = struct {
     }
 
     /// Logits rows [first, first + rows) drawn at their positions: argmax on the GPU, or the stream's keyed sampler.
-    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32) !void {
+    fn draw(b: *Metal, s: *const lanes.Stream, first: usize, rows: usize, positions: []const u64, out: []u32, masks: []const u32) !void {
         const logits = b.runner.model.frame.get(.logits);
         const vocab: u32 = @intCast(b.runner.model.config.vocab);
-        if (s.sampling) |sampling| {
+        const width = (@as(usize, vocab) + 31) / 32;
+        if (masks.len != 0 and masks.len != rows * width) return error.InvalidQwenMasks;
+        if (s.sampling != null or masks.len > 0) {
             const words: [*]const u16 = @ptrCast(@alignCast(logits.buffer.contents() + logits.offset));
             // the 2B's draw: top-k candidates, then the shared keyed sampler (the whole row's token)
-            for (out[0..rows], positions[0..rows], first..) |*t, p, r| t.* = try tf.qwen35.backend.draw(b.gpa, words[r * vocab ..][0..vocab], sampling, p, &.{});
+            for (out[0..rows], positions[0..rows], 0..) |*t, p, row| {
+                const mask = if (masks.len == 0) &.{} else masks[row * width ..][0..width];
+                t.* = try @import("qwen27_masks.zig").draw(tf.qwen35.backend.draw, b.gpa, words[(first + row) * vocab ..][0..vocab], s.sampling, p, mask);
+            }
             return;
         }
         try b.argmaxRows(first, rows);
@@ -424,7 +429,15 @@ pub const Metal = struct {
         const b = self(ptr);
         _ = try b.slotFor(s);
         var token: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &token);
+        try b.draw(s, 0, 1, &.{position}, &token, &.{});
+        return b.push(token[0]);
+    }
+
+    fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const b = self(ptr);
+        _ = try b.slotFor(s);
+        var token: [1]u32 = undefined;
+        try b.draw(s, 0, 1, &.{position}, &token, mask);
         return b.push(token[0]);
     }
 
@@ -438,7 +451,7 @@ pub const Metal = struct {
             if (b.ringOf(slot)) |g| try b.ringChunk(g, 1);
         }
         var next: [1]u32 = undefined;
-        try b.draw(s, 0, 1, &.{position}, &next);
+        try b.draw(s, 0, 1, &.{position}, &next, &.{});
         return b.push(next[0]);
     }
 
@@ -462,6 +475,8 @@ pub const Metal = struct {
             if (w.held > 0 and w.tokens.len > 0) return error.HeldAndHostDrafts;
             if (w.held > 0 and !b.draftsOwn(slot)) return error.HeldWithoutDrafter;
             const rows = w.rows();
+            const words = (r.model.config.vocab + 31) / 32;
+            if (w.masks.len != 0 and w.masks.len != rows * words) return error.InvalidQwenMasks;
             if (rows > max_rows or total + rows > batch_rows) return error.WindowTooWide;
             const ids = b.ids[total..][0..rows];
             ids[0] = w.pending;
@@ -488,11 +503,11 @@ pub const Metal = struct {
         b.rows = total;
         // every greedy window's rows from one argmax over the round; a sampled window draws on the host
         var greedy = false;
-        for (windows) |w| greedy = greedy or w.stream.sampling == null;
+        for (windows) |w| greedy = greedy or (w.stream.sampling == null and w.masks.len == 0);
         if (greedy) try b.argmaxRows(0, total);
         for (windows, out, b.round.?.firsts) |w, o, first| {
             const rows = w.rows();
-            if (w.stream.sampling != null) try b.draw(w.stream, first, rows, w.positions, o.sampled) else try b.picked(first, rows, o.sampled);
+            if (w.stream.sampling != null or w.masks.len > 0) try b.draw(w.stream, first, rows, w.positions, o.sampled, w.masks) else try b.picked(first, rows, o.sampled);
             @memcpy(o.drafts, b.ids[first + 1 ..][0 .. rows - 1]);
         }
         if (windows.len == 1) @memcpy(b.sampled[0..b.rows], out[0].sampled);

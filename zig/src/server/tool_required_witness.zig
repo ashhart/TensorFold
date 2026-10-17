@@ -39,6 +39,10 @@ pub const Result = struct { tokens: []u32, drafted: u64 };
 
 /// The actual lane engine walks the fixture rules, masks first/verify draws and rolls speculative paths back.
 pub fn run(want: []const u32, depth: u32, seed: u64) !Result {
+    return runTarget(want, depth, seed, lanes.fake.Fake);
+}
+
+pub fn runTarget(want: []const u32, depth: u32, seed: u64, comptime Target: type) !Result {
     const a = std.testing.allocator;
     var seq: lanes.grammar.Sequence = .{ .want = want, .stop = 96, .gpa = a };
     defer seq.log.deinit(a);
@@ -51,7 +55,7 @@ pub fn run(want: []const u32, depth: u32, seed: u64) !Result {
     try std.testing.expect(!lanes.grammar.allows(first, 'A' - 32));
     var cfg = try lanes.Config.init(a, .{ .exact_width = 8, .mtp = true, .speculate = true, .drafts = depth, .hidden_rows = true, .streams_exact = true, .batch_rows = 8, .max_streams = 2, .draft_streams = true }, 8, 7);
     defer cfg.deinit(a);
-    var fake: lanes.fake.Fake = .{ .gpa = a };
+    var fake: Target = .{ .gpa = a };
     defer fake.deinit();
     var clock: lanes.fake.FixedClock = .{};
     var engine = lanes.Engine.init(a, &cfg, fake.backend(), clock.clock());

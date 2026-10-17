@@ -43,6 +43,13 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
         }
     }
     if (n > 0) try proposeAll(b, batch[0..n], owners[0..n]);
+    for (requests) |r| {
+        const slot = b.slotOf(r.stream) orelse continue;
+        if (b.trees[slot]) |*t| {
+            const opening = if (r.rows == null) try b.value(r.first orelse return error.NoFirstToken) else null;
+            try @import("qwen27_masks.zig").prune(b.gpa, r.stream.grammar, opening, t);
+        }
+    }
 }
 
 /// The batch's trees: a stream alone takes its own pass (slot 0's fused absorb and block); several share one.

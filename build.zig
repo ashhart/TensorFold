@@ -188,6 +188,7 @@ pub fn build(b: *std.Build) void {
     const disk_run = b.addRunArtifact(disk_cpu);
     test_step.dependOn(&disk_run.step);
     b.step("test-learn-recovery", "CPU learned-state recovery and admission tests").dependOn(&disk_run.step);
+    @import("zig/build/qwen27_required.zig").tests(b, lanes_cpu);
     glm_expiry_build.steps(b, test_step, lanes_cpu);
     const warning = b.addExecutable(.{ .name = "learned-warning-test", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/learned_warning_test.zig"),
@@ -237,6 +238,12 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = living } },
     });
+    // the required-tools tests' 27B mask policy and lane fake, on the engine API's own lanes module
+    if (api.import_table.get("lanes")) |lanes_mod| {
+        const q27 = @import("zig/build/qwen27_required.zig").modules(b, lanes_mod);
+        server_tests.addImport("qwen27_mask_fake", q27.fake);
+        server_tests.addImport("qwen27_masks", q27.masks);
+    }
     const server_json = server_build.addTo(b, server_tests, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_json })).step);

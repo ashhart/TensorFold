@@ -215,6 +215,7 @@ pub const Constraint = struct {
     pub fn next(c: *Constraint, a: Allocator) !?[]u32 {
         if (!c.active or c.finished()) return null;
         const bits = try a.alloc(u32, c.words);
+        errdefer a.free(bits);
         try c.fill(bits);
         return bits;
     }
@@ -476,4 +477,8 @@ test "a chain grows past its last kept row with the grammar's own drafts, never 
     // forced rows never grow
     const f = try c.window(a, &.{ 9, 5 }, &.{ -1, 0 }, true, 16);
     try std.testing.expectEqual(@as(usize, 0), f.extra.len);
+}
+
+test {
+    _ = @import("grammar_error_test.zig");
 }
