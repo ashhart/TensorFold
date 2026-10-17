@@ -13,3 +13,8 @@ pub const extra = [_]R{
 test "paging records: every paging launch fits every SM by its measured record" {
     for (extra) |r| try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{r}, true));
 }
+
+/// The paging launch nvcc 13.2 compiles differently, from every SM's image.
+pub const cuda_132 = [_]@import("registry.zig").Override{
+    .{ .name = "paging tf_nemo_attn_chunk_segs", .usage = .{ .{ .regs = 78, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 } } },
+};
