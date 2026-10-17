@@ -207,7 +207,7 @@ const Exchange = struct {
 };
 
 /// A refusal's body, up to 16 KiB, read for at most 100 ms past its head, after its sample's time and code are set.
-fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
+pub fn errorBody(a: Allocator, io: std.Io, resp: *const std.http.Client.Response) []const u8 {
     if (resp.head.transfer_encoding != .none) return "";
     var wait: BodyWait = .{ .in = resp.request.reader.in, .want = @min(resp.head.content_length orelse 16 << 10, 16 << 10) };
     if (wait.in.buffered().len < wait.want) _ = bounded(io, deadlineAfter(io, 0.1), BodyWait.run, &wait);

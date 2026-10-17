@@ -319,7 +319,6 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
         &.{.{ .bytes = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<html>x</html>\n" }},
         try fake.jsonReply(a, "400 Bad Request", "{\"error\": \"bad\\u001b[31m red\\u0007\\nline\"}"),
         try fake.jsonReply(a, "400 Bad Request", try std.mem.concat(a, u8, &.{ "{\"detail\": \"", &long, "\"}" })),
-        &.{ .{ .bytes = late_head, .pause_ms = 20 }, .{ .bytes = "{\"error\": {\"message\": \"soon\"}}" } },
         &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
         &.{ .{ .bytes = late_head, .pause_ms = 400 }, .{ .bytes = late_body } },
     } }});
@@ -341,8 +340,6 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
     }
     _ = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
     try std.testing.expect(said.len == "HTTP 400: ".len + 303 and std.mem.endsWith(u8, said, "y..."));
-    _ = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
-    try std.testing.expectEqualStrings("HTTP 400: soon", said);
     const started = stream.now(io);
     const late = stream.attempt(a, io, &client, target, opts(4, false, 5), suite.fixtures[0], 0.0, 1234, 0, &said);
     const took: f64 = @floatFromInt(@as(i64, @intCast(stream.now(io) - started)));
@@ -351,4 +348,31 @@ test "a refused attempt keeps its fixed sample and code and hands back the serve
     try std.testing.expectEqualStrings("HTTP 400", said);
     const cut = stream.attempt(a, io, &client, target, opts(4, false, 0.05), suite.fixtures[0], 0.0, 1234, 0, &said);
     try std.testing.expect(cut.error_code.? == .http_error and cut.status == .@"error");
+}
+
+test "an unbuffered refusal body is read after its head without a timed sender pause" {
+    const io = std.testing.io;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var gate: std.Io.Event = .unset;
+    const refusal_body = "{\"error\": {\"message\": \"soon\"}}";
+    const head = try std.fmt.allocPrint(a, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{refusal_body.len});
+    const f = try fake.Fake.start(std.testing.allocator, &.{.{ .method = "GET", .path = "/reason", .replies = &.{&.{ .{ .bytes = head, .after = &gate }, .{ .bytes = refusal_body } }} }});
+    defer {
+        gate.set(io);
+        f.stop();
+    }
+    var client: std.http.Client = .{ .allocator = std.heap.smp_allocator, .io = io };
+    defer client.deinit();
+    var req = try client.request(.GET, try std.Uri.parse(try f.url(a, "/reason")), .{ .keep_alive = false });
+    defer {
+        gate.set(io);
+        req.deinit();
+    }
+    try req.sendBodiless();
+    const resp = try req.receiveHead(&.{});
+    try std.testing.expectEqual(@as(usize, 0), resp.request.reader.in.buffered().len);
+    gate.set(io);
+    try std.testing.expectEqualStrings(refusal_body, stream.errorBody(a, io, &resp));
 }
