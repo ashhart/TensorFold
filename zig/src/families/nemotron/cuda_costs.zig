@@ -10,6 +10,7 @@ const state = @import("cuda_state.zig");
 const rule = lanes.cost_rule;
 const profile_window = @import("cuda_profile_window.zig");
 const regime = cuda.launch.few_rows; // windows past it take the router's and the lanes' wider kernels
+const prefix = 16; // text tokens before the timed windows, at any window width: a window's ms depends on its tokens
 
 // Windows hold this prefix's pending token, then the text's next tokens as drafts, after the head drafts as in a round.
 const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
@@ -77,9 +78,9 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     const ids = try tok.encode(gpa, text);
     defer gpa.free(ids);
     const rows = state.windowRows(e.c);
-    if (ids.len < 2 * rows + 2) return error.CostTextTooShort;
-    const pending = try e.prefill(ids[0..rows], null, h);
-    const last_hidden = e.b.p_hidden + (rows - 1) * @as(u64, e.c.hidden) * 2;
+    if (ids.len < prefix + rows) return error.CostTextTooShort;
+    const pending = try e.prefill(ids[0..prefix], null, h);
+    const last_hidden = e.b.p_hidden + (prefix - 1) * @as(u64, e.c.hidden) * 2;
     var saved = try e.b.snapshot(e.ops());
     defer saved.free();
     var head_saved = try h.snapshot();
@@ -88,7 +89,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
     var last_saved = try cuda.DeviceBuffer.alloc(e.ctx.d, e.c.hidden * 2);
     defer last_saved.free();
     try e.ops().copy(last_saved.ptr, last_hidden, e.c.hidden * 2);
-    const cont = ids[rows..];
+    const cont = ids[prefix..];
     var next = try cuda.DeviceBuffer.alloc(e.ctx.d, rows * 4); // the text's own next tokens: the window's drafts
     defer next.free();
     try e.ops().upload(next.ptr, std.mem.sliceAsBytes(cont[0..rows]));
@@ -103,14 +104,13 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
         saved: cuda.DeviceBuffer,
         head_saved: cuda.DeviceBuffer,
         head_pos: usize,
-        pos: usize,
         last: u64,
         pending: u32,
         continuation: u64,
 
         pub fn restore(w: *@This()) !void {
             try w.e.b.restore(w.e.ops(), w.saved);
-            w.e.pos = w.pos;
+            w.e.pos = prefix;
             w.e.parity = 0;
             w.e.prev_keep = 0;
         }
@@ -163,7 +163,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             return l.t.ms(l.e);
         }
     };
-    const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .pos = rows, .last = last_saved.ptr, .pending = pending, .continuation = next.ptr };
+    const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .last = last_saved.ptr, .pending = pending, .continuation = next.ptr };
     var chains: rule.ChainLevel(L) = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending } };
     try rule.measureWidths(windows, &chains, raw.verify[1 .. rows + 1], again);
     if (!again) raw.verify[0] = 0;
