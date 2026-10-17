@@ -34,6 +34,13 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
+    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ")) {
+        text = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
+        } else return error.UnknownLaunch;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
+        text = @import("h3_kernels").source;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];
         text = for (sources.glm.all) |k| {

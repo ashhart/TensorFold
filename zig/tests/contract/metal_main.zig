@@ -8,6 +8,8 @@ const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
 const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
+const h3_k = @import("metal_h3.zig");
+const h3_topk = @import("metal_h3_topk.zig");
 
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro]";
@@ -108,6 +110,21 @@ pub fn main(init: std.process.Init) !u8 {
         try proj_list.append(a, p);
         try kernels.append(a, p.kernel());
     };
+    var h3_list: std.ArrayList(*h3_k.H3) = .empty;
+    defer for (h3_list.items) |x| x.deinit();
+    if (tensor) for (std.enums.values(h3_k.Which)) |w| {
+        if (!wanted(o, h3_k.spec(w).name)) continue;
+        const x = try a.create(h3_k.H3);
+        x.* = try h3_k.H3.init(a, device, queue, w);
+        try h3_list.append(a, x);
+        try kernels.append(a, x.kernel());
+    };
+    var h3_top: ?h3_topk.TopK = null;
+    defer if (h3_top) |*x| x.deinit();
+    if (wanted(o, h3_topk.spec().name)) {
+        h3_top = try h3_topk.TopK.init(a, device, queue);
+        try kernels.append(a, h3_top.?.kernel());
+    }
     var tile_p = try tf.tile_qmm.Pipelines.load(device);
     defer tile_p.deinit();
     var tiles: [2 * tf.tile_qmm.bit_widths.len]tile_k.Tile = undefined;
