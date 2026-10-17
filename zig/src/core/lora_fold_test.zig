@@ -185,3 +185,54 @@ test "groups other than 32, 64 and 128 are refused before anything is written, f
         try absent(&s, "merged");
     };
 }
+
+const hf = "model.language_model.layers.0.linear_attn.out_proj"; // a dense source's spelling
+const mlx = "language_model.model.layers.0.linear_attn.out_proj"; // an MLX conversion's
+
+test "the fold finds a module named in either namespace under the checkpoint's own spelling" {
+    for ([_][2][]const u8{ .{ hf, mlx }, .{ mlx, hf } }) |c| { // the adapter's name, then the checkpoint's
+        var s = try fx.Scratch.init();
+        defer s.deinit();
+        const base = try fx.makeNamed(&s, &.{.{ .dense = c[1], .shipped = c[1] }});
+        const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = c[0], .value = 0.1 }} });
+        var buf: [4096]u8 = undefined;
+        const r = try fx.fold(&s, base, adapter, &buf);
+        try std.testing.expectEqual(@as(u8, 0), r.code);
+        var big: [16384]u8 = undefined;
+        try std.testing.expect((try fx.foldGates(&s, base, adapter, &big)).ok);
+        var a = try st.File.open(std.testing.allocator, io, try s.path(&.{ "base", "model.safetensors" }));
+        defer a.close(io);
+        var b = try st.File.open(std.testing.allocator, io, try s.path(&.{ "merged", "model.safetensors" }));
+        defer b.close(io);
+        const weight = try std.fmt.allocPrint(s.arena.allocator(), "{s}.weight", .{c[1]});
+        try std.testing.expect(!std.mem.eql(u8, a.get(weight).?.bytes, b.get(weight).?.bytes));
+    }
+}
+
+test "the fold refuses a module whose two spellings the checkpoint both stores, naming both" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    const base = try fx.makeNamed(&s, &.{ .{ .dense = hf, .shipped = hf }, .{ .dense = mlx, .shipped = mlx } });
+    for ([_][]const u8{ hf, mlx }) |name| {
+        const adapter = try fx.makeAdapter(&s, .{ .specs = &.{.{ .module = name }} });
+        var buf: [4096]u8 = undefined;
+        const r = try fx.fold(&s, base, adapter, &buf);
+        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expect(contains(r.err, "ambiguous") and contains(r.err, hf ++ ".weight") and contains(r.err, mlx ++ ".weight"));
+        try absent(&s, "merged");
+    }
+}
+
+test "two adapter modules that resolve to one projection are refused before anything is written, in both modes" {
+    for ([_]bool{ false, true }) |fresh| {
+        var s = try fx.Scratch.init();
+        defer s.deinit();
+        const base = try fx.makeNamed(&s, &.{.{ .dense = hf, .shipped = mlx }});
+        const adapter = try fx.makeAdapter(&s, .{ .specs = &.{ .{ .module = hf }, .{ .module = mlx } } });
+        var buf: [4096]u8 = undefined;
+        const r = if (fresh) try fx.merge(&s, base, adapter, &buf) else try fx.fold(&s, base, adapter, &buf);
+        try std.testing.expectEqual(@as(u8, 1), r.code);
+        try std.testing.expect(contains(r.err, "one adapter module a projection") and contains(r.err, hf) and contains(r.err, mlx));
+        try absent(&s, "merged");
+    }
+}

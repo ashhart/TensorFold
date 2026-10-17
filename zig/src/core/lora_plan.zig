@@ -116,10 +116,15 @@ pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: ?*Sh
     if (pairs.count() == 0) return refuse(w, "adapter_model.safetensors", "names no tensors");
     var jobs: std.ArrayList(Job) = .empty;
     var checked: std.StringHashMapUnmanaged(void) = .empty;
+    var targets: std.StringHashMapUnmanaged([]const u8) = .empty; // each projection written and the module naming it
     for (pairs.keys(), pairs.values()) |module, pair| {
         const a_name = pair.a orelse return refuse(w, module, "lora_A is missing");
         const b_name = pair.b orelse return refuse(w, module, "lora_B is missing");
         const names = try sh.resolve(arena, w, dense, shipped, module);
+        // two spellings of one projection would each be merged from the shipped tensor, the last one kept alone
+        const target = try targets.getOrPut(arena, names.shipped);
+        if (target.found_existing) return refuse(w, module, try std.fmt.allocPrint(arena, "resolves to {s}, which {s} names too: one adapter module a projection", .{ names.shipped, target.value_ptr.* }));
+        target.value_ptr.* = module;
         const lay = try layoutOf(arena, w, shipped, quant, names.shipped);
         const shard = shipped.shardOf(try std.fmt.allocPrint(arena, "{s}.weight", .{names.shipped})).?;
         if (!(try checked.getOrPut(arena, shard)).found_existing) try checkDisjoint(w, shipped, shard);

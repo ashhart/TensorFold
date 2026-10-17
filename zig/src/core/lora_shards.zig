@@ -127,7 +127,11 @@ pub fn resolve(arena: Allocator, w: *Io.Writer, dense: ?*Shards, shipped: *Shard
     try cands.append(arena, .{ .dense = module, .shipped = module });
     for (prefix_rewrites) |r| {
         if (std.mem.startsWith(u8, module, r[0])) try cands.append(arena, .{ .dense = module, .shipped = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[1], module[r[0].len..] }) });
-        if (dense != null and std.mem.startsWith(u8, module, r[1])) try cands.append(arena, .{ .dense = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] }), .shipped = module });
+        if (std.mem.startsWith(u8, module, r[1])) {
+            const other = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] });
+            // with a dense base the other spelling is its name; alone, the checkpoint may store the module under it
+            try cands.append(arena, if (dense != null) .{ .dense = other, .shipped = module } else .{ .dense = module, .shipped = other });
+        }
     }
     var found: std.ArrayList(Names) = .empty;
     var list: std.ArrayList(u8) = .empty;
