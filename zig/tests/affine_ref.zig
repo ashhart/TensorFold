@@ -20,8 +20,9 @@ fn fromBf(v: u16) f64 {
     return @as(f32, @bitCast(@as(u32, v) << 16));
 }
 
-/// Synthetic MLX affine weights [n, k] (codes little-endian in bytes) and `wide` rows of x; `deq` is s q + b exactly.
+/// Synthetic MLX affine weights [n, k] (codes little-endian in bytes) and `wide` rows of x; `deq` s q + b exactly.
 const Synth = struct {
+    deqr: []f64, // bf16(fma(s, q, b)): the weights as affine_mm's tile dequantizes them
     n: usize,
     k: usize,
     bits: u8,
@@ -36,7 +37,7 @@ const Synth = struct {
         var prng = std.Random.DefaultPrng.init(seed);
         const r = prng.random();
         const sn = n * (k / group);
-        const self = Synth{ .n = n, .k = k, .bits = bits, .group = group, .x = try device.buffer(wide * k * 2, opts), .w = try device.buffer(n * k * bits / 8, opts), .s = try device.buffer(sn * 2, opts), .b = try device.buffer(sn * 2, opts), .deq = try a.alloc(f64, n * k) };
+        const self = Synth{ .n = n, .k = k, .bits = bits, .group = group, .x = try device.buffer(wide * k * 2, opts), .w = try device.buffer(n * k * bits / 8, opts), .s = try device.buffer(sn * 2, opts), .b = try device.buffer(sn * 2, opts), .deq = try a.alloc(f64, n * k), .deqr = try a.alloc(f64, n * k) };
         for (self.x.slice(u16, wide * k)) |*v| v.* = toBf(r.float(f32) * 2 - 1);
         r.bytes(self.w.slice(u8, n * k * bits / 8));
         for (self.s.slice(u16, sn), self.b.slice(u16, sn)) |*s, *b| {
@@ -45,7 +46,10 @@ const Synth = struct {
         }
         for (0..n) |j| for (0..k) |i| {
             const g = j * (k / group) + i / group;
-            self.deq[j * k + i] = fromBf(self.s.slice(u16, sn)[g]) * @as(f64, @floatFromInt(self.code(j, i))) + fromBf(self.b.slice(u16, sn)[g]);
+            const s32: f32 = @floatCast(fromBf(self.s.slice(u16, sn)[g]));
+            const b32: f32 = @floatCast(fromBf(self.b.slice(u16, sn)[g]));
+            self.deq[j * k + i] = @as(f64, s32) * @as(f64, @floatFromInt(self.code(j, i))) + @as(f64, b32);
+            self.deqr[j * k + i] = fromBf(toBf(@mulAdd(f32, s32, @floatFromInt(self.code(j, i)), b32)));
         };
         return self;
     }
@@ -53,6 +57,7 @@ const Synth = struct {
     fn deinit(self: Synth) void {
         for ([_]mtl.Buffer{ self.x, self.w, self.s, self.b }) |x| x.deinit();
         a.free(self.deq);
+        a.free(self.deqr);
     }
 
     fn code(self: Synth, j: usize, i: usize) u32 {
@@ -65,25 +70,20 @@ const Synth = struct {
         return (v >> @intCast(at % 8)) & ((@as(u32, 1) << @intCast(self.bits)) - 1);
     }
 
-    /// y = x W^T in float64, and the sizes the fp32 sums carry when codes enter as q + off (affine_mm's 4-bit: 128).
-    fn reference(self: Synth, off: f64) !Ref {
+    /// y = x W^T in float64 on deq or (`rounded`) deqr, the sizes its fp32 sums carry, and the scales' share.
+    fn reference(self: Synth, rounded: bool) !Ref {
         const n = self.n;
         const k = self.k;
         const groups = k / self.group;
         const ref = Ref{ .want = try a.alloc(f64, wide * n), .mag = try a.alloc(f64, wide * n), .scaled = try a.alloc(f64, wide * n) };
         const x = self.x.slice(u16, wide * k);
         const sc = self.s.slice(u16, n * groups);
-        const bi = self.b.slice(u16, n * groups);
         const xd = try a.alloc(f64, k);
         defer a.free(xd);
-        const xg = try a.alloc(f64, groups); // each group's sum of |x|
-        defer a.free(xg);
+        const bi = self.b.slice(u16, n * groups);
+        const w = if (rounded) self.deqr else self.deq;
         for (0..wide) |r| {
-            @memset(xg, 0);
-            for (xd, 0..) |*v, i| {
-                v.* = fromBf(x[r * k + i]);
-                xg[i / self.group] += @abs(v.*);
-            }
+            for (xd, 0..) |*v, i| v.* = fromBf(x[r * k + i]);
             for (0..n) |j| {
                 var sum: f64 = 0;
                 var mag: f64 = 0;
@@ -91,14 +91,17 @@ const Synth = struct {
                 for (0..groups) |g| {
                     var qx: f64 = 0;
                     var qxs: f64 = 0;
+                    var xg: f64 = 0;
                     for (g * self.group..(g + 1) * self.group) |i| {
                         const q: f64 = @floatFromInt(self.code(j, i));
-                        sum += xd[i] * self.deq[j * k + i];
-                        qx += (q + off) * @abs(xd[i]);
+                        sum += xd[i] * w[j * k + i];
+                        if (rounded) mag += @abs(xd[i] * w[j * k + i]);
+                        qx += q * @abs(xd[i]);
                         qxs += q * xd[i];
+                        xg += @abs(xd[i]);
                     }
                     const s = fromBf(sc[j * groups + g]);
-                    mag += s * qx + @abs(fromBf(bi[j * groups + g]) - off * s) * xg[g];
+                    if (!rounded) mag += s * qx + @abs(fromBf(bi[j * groups + g])) * xg;
                     scaled += s * qxs;
                 }
                 ref.want[r * n + j] = sum;
@@ -135,14 +138,14 @@ const Out = struct {
     }
 };
 
-/// The bound: fp32 sums of a group's products, its row sum and a chain of groups, plus one bf16 ulp of the value.
-fn bound(want: f64, mag: f64, s: *const Synth, f32_out: bool, extra: usize) f64 {
-    const terms: f64 = @floatFromInt(s.group + s.k / s.group + 8 + extra);
+/// The bound: fp32 sums over 16-deep tensor-unit slices and their chain, or a group and a chain of groups; a bf16 ulp.
+fn bound(want: f64, mag: f64, s: *const Synth, f32_out: bool, extra: usize, tensor: bool) f64 {
+    const terms: f64 = @floatFromInt((if (tensor) 16 + s.k / 16 else s.group + s.k / s.group) + 8 + extra);
     return terms * unit * mag + (if (f32_out) 0 else @abs(want) * 0x1p-7) + 1e-30;
 }
 
 /// `rows` rows of `out` against the float64 reference: the worst column's max abs and relative error, and the bound.
-fn compare(t: *Tally, name: []const u8, out: Out, rows: usize, ref: Ref, s: *const Synth, extra: usize) void {
+fn compare(t: *Tally, name: []const u8, out: Out, rows: usize, ref: Ref, s: *const Synth, extra: usize, tensor: bool) void {
     const n = s.n;
     var col: usize = 0;
     var col_abs: f64 = -1;
@@ -156,7 +159,7 @@ fn compare(t: *Tally, name: []const u8, out: Out, rows: usize, ref: Ref, s: *con
         for (0..rows) |r| {
             const i = r * n + j;
             const d = @abs(out.get(i) - ref.want[i]);
-            const tol = bound(ref.want[i], ref.mag[i], s, out.f32_out, extra);
+            const tol = bound(ref.want[i], ref.mag[i], s, out.f32_out, extra, tensor);
             const q = d / tol;
             ctl = @max(ctl, @abs(out.get(i) - ref.want[i] - 0.01 * ref.scaled[i]) / tol);
             if (!(d <= abs)) abs = d;
@@ -216,17 +219,15 @@ fn commit(cb: anytype, e: mtl.ComputeEncoder) !void {
 
 const Kernel = enum { dense, gather };
 
-/// affine_mm over rows [start, start + m): its row sums, then the dense product or a gather with one expert.
-fn affineWindow(e: mtl.ComputeEncoder, p: mm.Pipes, s: *const Synth, sums: mtl.Buffer, offs: mtl.Buffer, y: Out, kernel: Kernel, start: usize, m: usize) void {
+/// affine_mm over rows [start, start + m): the dense product or a gather with one expert.
+fn affineWindow(e: mtl.ComputeEncoder, p: mm.Pipes, s: *const Synth, offs: mtl.Buffer, y: Out, kernel: Kernel, start: usize, m: usize) void {
     const x = .{ .buf = s.x, .off = start * s.k * 2 };
-    const xs = .{ .buf = sums, .off = start * (s.k / s.group) * 4 };
     const yo = .{ .buf = y.buf, .off = start * s.n * y.esize() };
     const z: usize = 0;
     const q = .{ .w = .{ .buf = s.w, .off = z }, .s = .{ .buf = s.s, .off = z }, .b = .{ .buf = s.b, .off = z }, .n = @as(u32, @intCast(s.n)), .k = @as(u32, @intCast(s.k)) };
-    mm.rowSums(e, p, @intCast(s.group), x, xs, @intCast(m), @intCast(s.k));
     switch (kernel) {
-        .dense => mm.dense(e, p, x, xs, q, yo, @intCast(m)),
-        .gather => mm.gather(e, p, x, xs, q, .{ .buf = offs, .off = z }, yo, @intCast(m), 1),
+        .dense => mm.dense(e, p, x, q, yo, @intCast(m)),
+        .gather => mm.gather(e, p, x, q, .{ .buf = offs, .off = z }, yo, @intCast(m), 1),
     }
 }
 
@@ -239,8 +240,6 @@ fn affine(t: *Tally, device: mtl.Device, queue: mtl.Queue, s: *const Synth, ref:
     var p: mm.Pipes = undefined;
     for (mm.names, 0..) |name, i| p[i] = try mtl.Pipeline.init(device, lib, name, false);
     defer for (p) |x| x.deinit();
-    const sums = try device.buffer(wide * (s.k / s.group) * 4, opts);
-    defer sums.deinit();
     const offs = try device.buffer(4, opts);
     defer offs.deinit();
     offs.slice(i32, 1)[0] = 0;
@@ -251,9 +250,9 @@ fn affine(t: *Tally, device: mtl.Device, queue: mtl.Queue, s: *const Synth, ref:
         defer all.buf.deinit();
         const cb = queue.commandBuffer();
         const e = cb.compute(.serial);
-        affineWindow(e, p, s, sums, offs, all, kernel, 0, wide);
+        affineWindow(e, p, s, offs, all, kernel, 0, wide);
         try commit(cb, e);
-        compare(t, label, all, wide, ref, s, 0);
+        compare(t, label, all, wide, ref, s, 0, true);
         var same = true;
         for (windows) |m| {
             const got = try newOut(device, s, f32_out);
@@ -261,7 +260,7 @@ fn affine(t: *Tally, device: mtl.Device, queue: mtl.Queue, s: *const Synth, ref:
             const wb = queue.commandBuffer();
             const we = wb.compute(.serial);
             var start: usize = 0;
-            while (start + m <= wide) : (start += m) affineWindow(we, p, s, sums, offs, got, kernel, start, m);
+            while (start + m <= wide) : (start += m) affineWindow(we, p, s, offs, got, kernel, start, m);
             try commit(wb, we);
             same = sameRows(t, label, m, all, got, wide / m * m, s.n) and same;
         }
@@ -286,7 +285,7 @@ fn simd(t: *Tally, device: mtl.Device, queue: mtl.Queue, p: *const sq.Pipelines,
     try simdWindow(e, p, s, all, false, 0, wide);
     try commit(cb, e);
     const extra = std.math.log2_int(u32, sq.splits(s.n)) + 1; // the chunks' fixed tree
-    compare(t, label, all, wide, ref, s, extra);
+    compare(t, label, all, wide, ref, s, extra, false);
     var same = true;
     for (windows) |m| {
         const got = try newOut(device, s, false);
@@ -310,7 +309,7 @@ fn simd(t: *Tally, device: mtl.Device, queue: mtl.Queue, p: *const sq.Pipelines,
         var start: usize = 0;
         while (start + m <= wide) : (start += m) try simdWindow(we, p, s, got, true, start, m);
         try commit(wb, we);
-        compare(t, twin, got, wide / m * m, ref, s, 0);
+        compare(t, twin, got, wide / m * m, ref, s, 0, false);
         const rows = wide / m * m;
         const eq = std.mem.eql(u8, all.buf.slice(u8, rows * s.n * 2), got.buf.slice(u8, rows * s.n * 2));
         std.debug.print("RESULT {s}: {s} the tiles' bits; twinExact says {s}{s}\n", .{ twin, if (eq) "equals" else "differs from", if (exact) "equal" else "differ", if (exact and !eq) " FAIL" else "" });
@@ -332,14 +331,14 @@ pub fn main(_: std.process.Init) !void {
         seed += 1;
         const s = try Synth.init(device, shape[0], shape[1], bits, group, seed);
         defer s.deinit();
-        const ref = try s.reference(if (bits == 4) 128 else 0);
+        const ref = try s.reference(true);
         defer ref.deinit();
         for ([_]bool{ false, true }) |f32_out| try affine(&t, device, queue, &s, ref, f32_out);
     };
     for ([_][2]usize{ .{ 192, 1024 }, .{ 256, 4096 } }) |shape| for ([_]usize{ 32, 64 }) |group| { // 2 bits: oQ2's experts
         const s = try Synth.init(device, shape[0], shape[1], 2, group, 0x2716 + shape[0] + group);
         defer s.deinit();
-        const ref = try s.reference(0);
+        const ref = try s.reference(true);
         defer ref.deinit();
         for ([_]bool{ false, true }) |f32_out| try affine(&t, device, queue, &s, ref, f32_out);
     };
@@ -356,7 +355,7 @@ pub fn main(_: std.process.Init) !void {
             0x3716 + 100 * @as(usize, bits) + shape[0] + group,
         );
         defer s.deinit();
-        const ref = try s.reference(0);
+        const ref = try s.reference(true);
         defer ref.deinit();
         for ([_]bool{ false, true }) |f32_out| try affine(&t, device, queue, &s, ref, f32_out);
     };
@@ -366,7 +365,7 @@ pub fn main(_: std.process.Init) !void {
         seed += 1;
         const s = try Synth.init(device, shape[0], shape[1], 4, 64, seed);
         defer s.deinit();
-        const ref = try s.reference(0);
+        const ref = try s.reference(false);
         defer ref.deinit();
         try simd(&t, device, queue, &p, &s, ref);
     }

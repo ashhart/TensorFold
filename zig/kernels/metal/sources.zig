@@ -5,6 +5,14 @@ pub const nemotron = @import("nemotron/kernels.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
+/// Gemma 4 dense decode glue around the core lane projections (families/gemma4/kernels.zig).
+pub const gemma4_glue = @embedFile("gemma4/glue.metal");
+/// Gemma 4 decode glue as the reg lane kernel's prologues and epilogue (families/gemma4/weights.zig).
+pub const gemma4_fused = @embedFile("gemma4/fused.metal");
+/// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).
+pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
+/// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
+pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("gemma4/vision.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
 pub const lfm2 = @embedFile("lfm2/lfm2.metal");

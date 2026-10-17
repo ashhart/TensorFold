@@ -129,8 +129,7 @@ const Nax = struct {
     w: row.Weights,
     fn encode(t: Nax, e: mtl.ComputeEncoder, p: Probe) !void {
         const pipes = p.m.kernels.naxPipes(t.w.bits) orelse return error.NoTensorPipelines; // the matrix's own width
-        am.rowSums(e, pipes, 64, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, rows, @intCast(t.w.k));
-        am.dense(e, pipes, Ref{ .buf = p.x }, Ref{ .buf = p.sums }, affine(t.w), Ref{ .buf = p.y[1] }, rows);
+        am.dense(e, pipes, Ref{ .buf = p.x }, affine(t.w), Ref{ .buf = p.y[1] }, rows);
     }
 };
 
@@ -212,15 +211,13 @@ fn glu(p: Probe, x: q.weights.Moe, worse: *usize) !void {
             tile.encodeSums(e, t, b.gate.k, pr.x, 0, pr.sums, rows);
             tile.encodeWork(e, t, b.starts, 64, b.work);
             try tile.encodeGroupedGlu(e, t, g, u, 64, pr.x, pr.sums, b.ident, pr.y[0], rows, b.starts, b.work);
-            const sums = Ref{ .buf = pr.sums };
             const pipes = pr.m.kernels.naxPipes(b.gate.bits) orelse return error.NoTensorPipelines;
-            am.rowSums(e, pipes, 64, Ref{ .buf = pr.x }, sums, rows, @intCast(b.gate.k));
             const offsets = Ref{ .buf = b.starts };
             const order = Ref{ .buf = b.ident };
             const y = Ref{ .buf = pr.y[1] };
             const ga = affine(b.gate);
             const ua = affine(b.up);
-            am.gatherGlu(e, pipes, Ref{ .buf = pr.x }, sums, ga, ua, offsets, order, y, rows, 64, 1, 0);
+            am.gatherGlu(e, pipes, Ref{ .buf = pr.x }, ga, ua, offsets, order, y, rows, 64, 1, 0);
             try tile.encodeTwinGlu(e, t, g, u, pr.x, pr.y[2], b.zeros, null, rows, 1);
         }
     };

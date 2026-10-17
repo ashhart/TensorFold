@@ -62,8 +62,8 @@ pub fn gamma(k: usize) f64 {
     return @as(f64, @floatFromInt(k / 8 + 64)) * 0x1p-24;
 }
 
-/// out row i vs fp64 on every column within the fp32 sums' bound; `scale` != 1: a control, columns past it counted.
-fn against(q: affine.Affine, w: []const u8, s: []const u16, b: []const u16, x: []const u16, out: []const u16, pitch: usize, i: usize, t: *Tally, scale: f64) !void {
+/// out row i vs fp64 within the fp32 sums' bound, weights bf16(fma(s, q, b)) when `rounded`; `scale` != 1: a control.
+fn against(q: affine.Affine, w: []const u8, s: []const u16, b: []const u16, x: []const u16, out: []const u16, pitch: usize, i: usize, t: *Tally, scale: f64, rounded: bool) !void {
     const k: usize = q.k;
     const g_n = k / q.group;
     const rb = k * q.bits / 8;
@@ -80,7 +80,7 @@ fn against(q: affine.Affine, w: []const u8, s: []const u16, b: []const u16, x: [
                 const kk = g * q.group + j;
                 const xv = fromBf(x[i * k + kk]);
                 const cv: f64 = @floatFromInt(code(w[c * rb ..][0..rb], kk, q.bits));
-                y += xv * (sc * cv + bi);
+                y += xv * (if (rounded) fromBf(toBf(@mulAdd(f32, @floatCast(sc), @floatCast(cv), @floatCast(bi)))) else sc * cv + bi);
                 dot += @abs(xv * cv);
                 sum += @abs(xv);
             }
@@ -123,11 +123,9 @@ fn rowsLaunch(e: mtl.ComputeEncoder, p: *const wide.Pipes, q: affine.Affine, x: 
     wide.dense(p, e, q, .{ .in = (affine.Ref{ .buf = x }).at(at), .ldx = q.k, .out = .{ .buf = out }, .ldo = q.n, .rows = m });
 }
 
-fn mmLaunch(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: mtl.Buffer, sums: mtl.Buffer, out: mtl.Buffer, m: u32) void {
+fn mmLaunch(e: mtl.ComputeEncoder, mm: affine_mm.Pipes, q: affine.Affine, x: mtl.Buffer, out: mtl.Buffer, m: u32) void {
     const xr: affine.Ref = .{ .buf = x };
-    const sr: affine.Ref = .{ .buf = sums };
-    affine_mm.rowSums(e, mm, 64, xr, sr, m, q.k);
-    affine_mm.dense(e, mm, xr, sr, q, affine.Ref{ .buf = out }, m);
+    affine_mm.dense(e, mm, xr, q, affine.Ref{ .buf = out }, m);
 }
 
 /// Each class at its widths (g64): decode rows (alone == windowed) and the prompt's product vs fp64, every column.
@@ -141,7 +139,7 @@ pub fn check(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !Tally 
         const np = std.mem.alignForward(usize, n, 64); // the loader's padded rows (affine_mm reads whole 64-row tiles)
         const w_bytes = np * k * bits / 8;
         const tables = np * (k / 64);
-        const bufs = [_]mtl.Buffer{ try device.buffer(w_bytes, opts), try device.buffer(tables * 2, opts), try device.buffer(tables * 2, opts), try device.buffer(prompt_rows * k * 2, opts), try device.buffer(prompt_rows * np * 2, opts), try device.buffer(prompt_rows * np * 2, opts), try device.buffer(prompt_rows * (k / 64) * 4, opts) };
+        const bufs = [_]mtl.Buffer{ try device.buffer(w_bytes, opts), try device.buffer(tables * 2, opts), try device.buffer(tables * 2, opts), try device.buffer(prompt_rows * k * 2, opts), try device.buffer(prompt_rows * np * 2, opts), try device.buffer(prompt_rows * np * 2, opts) };
         defer for (bufs) |x| x.deinit();
         r.bytes(bufs[0].slice(u8, w_bytes));
         for (bufs[1].slice(u16, tables)) |*v| v.* = toBf(r.float(f32) * 0.02 + 0.001);
@@ -160,17 +158,17 @@ pub fn check(p: *const wide.Pipes, device: mtl.Device, queue: mtl.Queue) !Tally 
             if (!std.mem.eql(u16, bufs[5].slice(u16, n), bufs[4].slice(u16, rows * n)[i * n ..][0..n])) return error.WindowDiffersFromRowAlone;
             t.pairs += n;
         }
-        for ([_]usize{ 0, rows - 1 }) |i| try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, i, &t, 1);
+        for ([_]usize{ 0, rows - 1 }) |i| try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, i, &t, 1, false);
         const dec = t.worst;
-        try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, 0, &t, 1.01); // scales 1% off must be seen
+        try against(q, w, s, b, x, bufs[4].slice(u16, rows * n), n, 0, &t, 1.01, false); // scales 1% off must be seen
         if (t.caught == 0) return error.ControlNotCaught;
         // prompt: the chunk's product at rows 0 and 32; on the row kernels every row's bits equal the decode's
         const mm: ?affine_mm.Pipes = wide.mm(p, q); // prompt.zig's (2: the routed experts' gathers)
         const on_mm = mm != null;
-        if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, q, bufs[3], bufs[6], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
+        if (mm) |pipes| try submit(queue, mmLaunch, .{ pipes, q, bufs[3], bufs[5], prompt_rows }) else try submit(queue, rowsLaunch, .{ p, q, bufs[3], 0, bufs[5], prompt_rows });
         t.worst = 0;
         const pitch = if (on_mm) np else n;
-        for ([_]usize{ 0, prompt_rows - 1 }) |i| try against(q, w, s, b, x, bufs[5].slice(u16, prompt_rows * pitch), pitch, i, &t, 1);
+        for ([_]usize{ 0, prompt_rows - 1 }) |i| try against(q, w, s, b, x, bufs[5].slice(u16, prompt_rows * pitch), pitch, i, &t, 1, on_mm);
         if (!on_mm and !std.mem.eql(u16, bufs[5].slice(u16, rows * n), bufs[4].slice(u16, rows * n))) return error.PromptDiffersFromDecode;
         std.debug.print("{s} [{d}, {d}] q{d}: decode worst err/bound {d:.4}, prompt ({s}) {d:.4} at col {d}; max |err| {e:.3} = {e:.3} of max |y|; scales 1% off caught in {d} of {d} columns\n", .{ cl.name, n, k, bits, dec, if (on_mm) "affine_mm" else "row kernels", t.worst, t.worst_col, t.err, t.err / t.ymax, t.caught, n });
         all.values += t.values;

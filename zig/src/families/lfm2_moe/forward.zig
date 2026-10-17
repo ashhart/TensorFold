@@ -52,14 +52,11 @@ const Encoder = struct {
         if (!self.prompt) return null;
         return self.m.kernels.naxPipes(bits);
     }
-    /// y[rows] = x[rows] W^T: the prompt tiles (on x's group sums), or their twin at decode and window rows.
+    /// y[rows] = x[rows] W^T: the tensor-unit prompt GEMM, else the tiles (on x's group sums) or their twin.
     fn projection(self: Encoder, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize) void {
         const t = &self.m.kernels.tiles;
         if (self.nax(w.bits)) |p| {
-            const xr = Ref{ .buf = x, .off = x_off };
-            const sums = Ref{ .buf = self.s.sums };
-            am.rowSums(self.e, p, c.group, xr, sums, @intCast(rows), @intCast(w.k));
-            am.dense(self.e, p, xr, sums, affine(w), Ref{ .buf = y, .off = y_off }, @intCast(rows));
+            am.dense(self.e, p, Ref{ .buf = x, .off = x_off }, affine(w), Ref{ .buf = y, .off = y_off }, @intCast(rows));
             return;
         }
         if (self.prompt or !self.m.kernels.twin) {
@@ -289,16 +286,13 @@ fn moe(enc: Encoder, s: *st.Scratch, x: wts.Moe, scale: f32, total: usize) bool 
     enc.groups(.{ 1, 1, 1 }, .{ c.experts * 16, 1, 1 });
     if (enc.nax(x.gate.one.bits)) |p| {
         // Sorted slot j reads token row tokens[j]; gate and up SwiGLU'd into act, then down over act's sorted rows.
-        const sums = Ref{ .buf = s.sums };
         const starts = Ref{ .buf = s.starts };
         const act = Ref{ .buf = s.act };
-        am.rowSums(e, p, c.group, Ref{ .buf = s.x }, sums, @intCast(total), c.hidden);
         const gate = affine(x.gate.one);
         const up = affine(x.up.one);
         const tokens = Ref{ .buf = s.tokens };
-        am.gatherGlu(e, p, Ref{ .buf = s.x }, sums, gate, up, starts, tokens, act, @intCast(slots), c.experts, 1, 0);
-        am.rowSums(e, p, c.group, act, sums, @intCast(slots), c.moe_intermediate);
-        am.gather(e, p, act, sums, affine(x.down.one), starts, Ref{ .buf = s.experts }, @intCast(slots), c.experts);
+        am.gatherGlu(e, p, Ref{ .buf = s.x }, gate, up, starts, tokens, act, @intCast(slots), c.experts, 1, 0);
+        am.gather(e, p, act, affine(x.down.one), starts, Ref{ .buf = s.experts }, @intCast(slots), c.experts);
     } else {
         tile.encodeWork(e, &enc.m.kernels.tiles, s.starts, c.experts, s.work);
         tile.encodeSums(e, t, c.hidden, s.x, 0, s.sums, total);
