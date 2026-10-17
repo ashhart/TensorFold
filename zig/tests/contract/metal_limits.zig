@@ -39,6 +39,8 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
         text = for (sources.glm.all) |k| {
             if (std.mem.eql(u8, k.key, key)) break k.source;
         } else return error.UnknownLaunch;
+    } else if (std.mem.startsWith(u8, d.name, "flash next grammar ")) {
+        text = tf.flashnext_grammar.source;
     } else if (std.mem.startsWith(u8, d.name, "qwen vision ")) {
         text = sources.core_qwen_vision;
         frags = true;

@@ -144,6 +144,46 @@ test "a warm pass with no request after it runs once the engine has been quiet" 
     try std.testing.expectEqual(@as(usize, 3), chunks.n.load(.monotonic)); // every chunk ran
 }
 
+test "a warm pass its cache keeps nothing of runs no chunk: no planned mark, and the end a lookahead short" {
+    const gpa = std.testing.allocator;
+    const pc = api.prompt_cache;
+    var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
+    defer cfg.deinit(gpa);
+    var target: lanes.fake.Fake = .{ .gpa = gpa, .prefill_chunks = 3 };
+    defer target.deinit();
+    var chunks: WarmChunks = .{};
+    target.prefill_hook = WarmChunks.hook;
+    target.prefill_hook_ctx = &chunks;
+    var clock: lanes.fake.FixedClock = .{};
+    var core = lanes.Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer core.deinit();
+    const Snaps = struct {
+        fn bytes(_: *anyopaque, at: u32) u64 {
+            return 64 + 4 * @as(u64, at);
+        }
+        fn save(_: *anyopaque, _: ?*anyopaque, _: u32) anyerror!pc.Saved {
+            return error.NothingToKeep;
+        }
+        fn restore(_: *anyopaque, _: ?*anyopaque, _: pc.Saved) anyerror!void {
+            return error.BackendRestores;
+        }
+        fn drop(_: *anyopaque, _: pc.Saved) void {}
+    };
+    // Flash Next's rules: states at chunk starts only, a token of lookahead; a short prompt's only start is 0
+    var store = pc.Store.init(gpa, .{ .ptr = &target, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop } }, .{ .lookahead = 1, .planned = true, .warm = .on }, 400);
+    defer store.deinit();
+    var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2, .warm_turns = true });
+    host.cache = &store;
+    try host.start();
+    defer host.stop();
+    const prompt = [_]u32{ 2, 7, 1, 8, 2, 8 };
+    var warm: Box = .{};
+    const warm_request: Request = .{ .prompt = &prompt, .max_tokens = 0, .background = true, .history_len = prompt.len, .born = 4 };
+    try host.engine().submit(1, &warm_request, .{ .ctx = &warm, .event = Box.event });
+    try std.testing.expectEqual(Reason.cancelled, warm.wait());
+    try std.testing.expectEqual(@as(usize, 0), chunks.n.load(.monotonic)); // the GPU never ran a chunk of it
+}
+
 /// Status polls taken at each prompt chunk, the warm pass's apart from the request's.
 const FillPolls = struct {
     engine: Engine = undefined,

@@ -101,8 +101,9 @@ MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 an
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm
 (4 bits) and simd_qmm_bits (3, 6 and 8 bits), and the lane projection (6-bit groups of 32 on every chip; 4- and 8-bit
-formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
-prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
+formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), tile_qmm's
+prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles), and Flash Next's grammar mask
+(`fz_mask_rows`: in place, byte-exact by its stated rule at 1 to 16 rows of the 248,320-token vocabulary). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, qmm_group's cluster
 tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4
