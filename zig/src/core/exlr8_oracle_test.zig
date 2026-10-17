@@ -1,6 +1,7 @@
 //! EXLR8 decoding against fixtures the reference loader (MIT) wrote outside the tree: layers 0, 3, 40, 78, vocab.
 
 const std = @import("std");
+const platform = @import("sys");
 const codec = @import("exlr8_codec.zig");
 const ex = @import("exlr8_experts.zig");
 const dense = @import("exlr8_dense.zig");
@@ -169,7 +170,7 @@ const Layers = struct {
 };
 
 test "expert halves of layers 3, 40 and 78: stored checksums, the reference's tiles and W bits" {
-    const root = std.testing.environ.getPosix("TF_EXLR8_DIR") orelse return error.SkipZigTest;
+    const root = platform.getenv("TF_EXLR8_DIR") orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -193,7 +194,7 @@ test "expert halves of layers 3, 40 and 78: stored checksums, the reference's ti
         h.suh(suh[0..h.rows()]);
         h.svh(svh[0..h.cols()]);
         try checkSamples(codes, h.rows(), h.cols(), suh[0..h.rows()], svh[0..h.cols()], unit.w_samples, false, &stats);
-        if (std.testing.environ.getPosix("TF_EXLR8_ORACLE_FULL")) |full| try wholeHalf(full, unit, codes, h, suh[0..h.rows()], svh[0..h.cols()]);
+        if (platform.getenv("TF_EXLR8_ORACLE_FULL")) |full| try wholeHalf(full, unit, codes, h, suh[0..h.rows()], svh[0..h.cols()]);
     }
     stats.print("expert halves");
 }
@@ -233,7 +234,7 @@ fn wholeHalf(dir: []const u8, unit: Unit, codes: []const u8, h: ex.Half, suh: []
 }
 
 test "every half of every stored width verifies, as the reference's --verify counts them" {
-    const root = std.testing.environ.getPosix("TF_EXLR8_DIR") orelse return error.SkipZigTest;
+    const root = platform.getenv("TF_EXLR8_DIR") orelse return error.SkipZigTest;
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const fx = try load(arena.allocator());
@@ -260,7 +261,7 @@ test "every half of every stored width verifies, as the reference's --verify cou
 }
 
 test "dense and vocabulary files: records, checksums, every format bit for bit, plain tensors as shipped" {
-    const root = std.testing.environ.getPosix("TF_EXLR8_DIR") orelse return error.SkipZigTest;
+    const root = platform.getenv("TF_EXLR8_DIR") orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -331,7 +332,7 @@ fn denseBits(m: dense.Matrix, unit: DenseUnit) !void {
 }
 
 test "the eight manifests parse to the reference's widths, and every width they ask of a present layer is stored" {
-    const root = std.testing.environ.getPosix("TF_EXLR8_DIR") orelse return error.SkipZigTest;
+    const root = platform.getenv("TF_EXLR8_DIR") orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -371,7 +372,7 @@ test "the eight manifests parse to the reference's widths, and every width they 
 }
 
 test "every present release file matches its published sha256 and size" {
-    const root = std.testing.environ.getPosix("TF_EXLR8_DIR") orelse return error.SkipZigTest;
+    const root = platform.getenv("TF_EXLR8_DIR") orelse return error.SkipZigTest;
     const gpa = std.testing.allocator;
     var checked: usize = 0;
     for ([_][]const u8{ "experts", "dense" }) |sub| {

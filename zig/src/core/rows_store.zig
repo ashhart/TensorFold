@@ -1,5 +1,6 @@
 //! Conversation states on disk (--learn-conversations): rows in blocks states share, each state's own parts in a file.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const pc = @import("prompt_cache.zig");
 const modes = @import("cache_modes.zig");
@@ -89,7 +90,7 @@ pub const Rows = struct {
         try r.scan();
         r.settle();
         r.stamp();
-        r.verify = if (std.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
+        r.verify = if (platform.c.getenv("TF_IMPRINT_VERIFY")) |v| v[0] == '1' else false;
         return r;
     }
 
@@ -307,11 +308,11 @@ pub const Rows = struct {
         const today = dayNow();
         var buf: [1100]u8 = undefined;
         const p = std.fmt.bufPrintSentinel(&buf, "{s}/written", .{r.root}, 0) catch return .{ .day = today, .bytes = std.math.maxInt(u64) };
-        const fd = std.c.open(p, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(p, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
         if (fd < 0) return .{ .day = today, .bytes = 0 };
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         var d: Day = undefined;
-        if (std.c.pread(fd, std.mem.asBytes(&d), @sizeOf(Day), 0) != @sizeOf(Day) or d.day != today) return .{ .day = today, .bytes = 0 };
+        if (platform.c.pread(fd, std.mem.asBytes(&d), @sizeOf(Day), 0) != @sizeOf(Day) or d.day != today) return .{ .day = today, .bytes = 0 };
         return d;
     }
 
@@ -323,10 +324,10 @@ pub const Rows = struct {
         d.bytes +|= bytes;
         var buf: [1100]u8 = undefined;
         const p = std.fmt.bufPrintSentinel(&buf, "{s}/written", .{r.root}, 0) catch return;
-        const fd = std.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+        const fd = platform.c.open(p, .{ .ACCMODE = .WRONLY, .CREAT = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
         if (fd < 0) return;
-        defer _ = std.c.close(fd);
-        _ = std.c.pwrite(fd, std.mem.asBytes(&d), @sizeOf(Day), 0);
+        defer _ = platform.c.close(fd);
+        _ = platform.c.pwrite(fd, std.mem.asBytes(&d), @sizeOf(Day), 0);
     }
 
     /// Every state and block of this identity forgotten (DELETE /v1/imprint); the queue too. The bytes freed.
@@ -348,15 +349,15 @@ pub const Rows = struct {
 
     /// The files under the store's directory: states read back and checked by name, blocks by size; leftovers go.
     fn scan(r: *Rows) !void {
-        const d = std.c.opendir(r.dir) orelse return error.RowsDir;
-        defer _ = std.c.closedir(d);
-        while (std.c.readdir(d)) |ent| {
-            if (ent.type != std.c.DT.REG) continue;
+        const d = platform.c.opendir(r.dir) orelse return error.RowsDir;
+        defer _ = platform.c.closedir(d);
+        while (platform.c.readdir(d)) |ent| {
+            if (ent.type != platform.c.DT.REG) continue;
             const name = std.mem.sliceTo(&ent.name, 0);
             var buf: [1200]u8 = undefined;
             const p = std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ r.dir, name }, 0) catch continue;
             if (std.mem.endsWith(u8, name, ".part")) {
-                _ = std.c.unlink(p);
+                _ = platform.c.unlink(p);
                 continue;
             }
             const n = parseName(name) orelse continue;
@@ -365,7 +366,7 @@ pub const Rows = struct {
                 try r.blocks.put(r.gpa, n, .{ .bytes = bytes });
             } else if (std.mem.endsWith(u8, name, ".st")) {
                 r.readState(p) catch {
-                    _ = std.c.unlink(p);
+                    _ = platform.c.unlink(p);
                 };
             }
         }
@@ -448,8 +449,8 @@ pub fn withAt(a: Allocator, starts: []const u32, at: u32, planned: bool) ![]u32 
 }
 
 fn dayNow() u64 {
-    var t: std.c.timespec = undefined;
-    if (std.c.clock_gettime(std.c.CLOCK.REALTIME, &t) != 0 or t.sec < 0) return 0;
+    var t: platform.c.timespec = undefined;
+    if (platform.c.clock_gettime(platform.c.CLOCK.REALTIME, &t) != 0 or t.sec < 0) return 0;
     return @as(u64, @intCast(t.sec)) / 86400;
 }
 
@@ -465,28 +466,28 @@ fn parseName(name: []const u8) ?chain.Stem {
 pub fn unlinkName(dir: []const u8, n: anytype, ext: []const u8) void {
     var buf: [1200]u8 = undefined;
     const p = file.path(&buf, dir, &chain.hex(n), ext, false) catch return;
-    _ = std.c.unlink(p);
+    _ = platform.c.unlink(p);
 }
 
 fn readWord(p: [:0]const u8) u64 {
-    const fd = std.c.open(p, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(p, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd < 0) return 0;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     var w: u64 = 0;
-    return if (std.c.pread(fd, std.mem.asBytes(&w), 8, 0) == 8) w else 0;
+    return if (platform.c.pread(fd, std.mem.asBytes(&w), 8, 0) == 8) w else 0;
 }
 
 fn writeWord(p: [:0]const u8, w: u64) void {
     var buf: [1200]u8 = undefined;
     const part = std.fmt.bufPrintSentinel(&buf, "{s}.part", .{p}, 0) catch return;
-    const fd = std.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(part, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return;
-    defer _ = std.c.close(fd);
-    if (std.c.write(fd, std.mem.asBytes(&w), 8) != 8) {
-        _ = std.c.unlink(part);
+    defer _ = platform.c.close(fd);
+    if (platform.c.write(fd, std.mem.asBytes(&w), 8) != 8) {
+        _ = platform.c.unlink(part);
         return;
     }
-    _ = std.c.rename(part, p);
+    _ = platform.c.rename(part, p);
 }
 
 /// `dir` and its parents, 0700.
@@ -495,11 +496,11 @@ fn makePath(gpa: Allocator, dir: [:0]const u8) !void {
     defer gpa.free(tmp);
     for (tmp[1..], 1..) |ch, i| if (ch == '/') {
         tmp[i] = 0;
-        _ = std.c.mkdir(tmp.ptr, 0o700);
+        _ = platform.c.mkdir(tmp.ptr, 0o700);
         tmp[i] = '/';
     };
-    const rc = std.c.mkdir(tmp.ptr, 0o700);
-    if (rc != 0 and std.c.errno(rc) != .EXIST) return error.RowsDir;
+    const rc = platform.c.mkdir(tmp.ptr, 0o700);
+    if (rc != 0 and platform.c.errno(rc) != .EXIST) return error.RowsDir;
 }
 
 test {

@@ -1,5 +1,6 @@
 //! Prompt matmul kernels compiled from .metal files at run time: chained speed at one shape, bits against the first, error against fp64.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 
@@ -17,7 +18,7 @@ const Strides = extern struct { x_row: i32 = 0, y_row: i32 = 0, sums_row: i32 = 
 const Kernel = struct { path: []const u8, bm: u32 = 64, bn: u32 = 64, threads: u32 = 128, entry: []const u8 = "tf_affine_mm", lib: mtl.Library = undefined, pipe: mtl.Pipeline = undefined, sums_pipe: mtl.Pipeline = undefined, sums: mtl.Buffer = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined, sums_ms: f64 = 0 };
 
 fn envInt(name: [:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
+    const v = platform.c.getenv(name) orelse return default;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
 }
 
@@ -55,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     const trials = @min(envInt("MM_TRIALS", 5), 64);
     const copies = envInt("MM_COPIES", 4);
     const check_rows = @min(envInt("MM_CHECK_ROWS", 16), M);
-    const out_f32 = std.c.getenv("MM_F32") != null;
+    const out_f32 = platform.c.getenv("MM_F32") != null;
     const ob: usize = if (out_f32) 4 else 2;
     const kernels = try arena.alloc(Kernel, args.len - 4);
     for (kernels, args[4..]) |*k, s| k.* = try parseKernel(s);
