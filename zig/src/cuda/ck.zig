@@ -118,14 +118,19 @@ pub const Ck = struct {
 
     /// e4m3 rows [m, k] at `x8` times the `.fp8` weight `w` under input scale `act`, bf16 at `y` [m, n].
     pub fn lane8(c: *const Ck, s: Stream, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
+        const ti: usize = if (m >= prompt_tokens) 4 else if (m <= 16) 0 else if (m <= 32) 1 else if (m % 64 == 0) 2 else 3;
+        return c.lane8Tile(s, ti, x8, m, w, act, y, part);
+    }
+
+    /// lane8 on row tile `ti` of `lane`'s order: 16, 32, 64 (whole tiles of m), 64 skipping, 128 skipping.
+    pub fn lane8Tile(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
         if (w.mode != .fp8) return error.FormatMismatch;
         const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
-        const prompt = m >= prompt_tokens;
-        const bm: usize = if (prompt) 128 else if (m <= 16) 16 else if (m <= 32) 32 else 64;
+        const prompt = ti == 4;
+        const bm: usize = ([_]usize{ 16, 32, 64, 64, 128 })[ti];
         const bn: usize = if (prompt and cluster) 128 else 64;
-        const ti: usize = if (prompt) 4 else if (bm == 16) 0 else if (bm == 32) 1 else if (m % 64 == 0) 2 else 3;
         const f = c.lane[ti * 2 + @intFromBool(cluster)];
         const stage = (bm * 64 + bn * 64 + 127) / 128 * 128;
         const smem: u32 = @intCast(@max(4 * stage, if (cluster) bm * bn * 4 else 0));

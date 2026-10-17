@@ -12,23 +12,35 @@ const g = contract.gates;
 const Dense = contract.dense.Dense;
 const glue = nemotron.glue;
 
+/// The K slices the engine cuts a router into: Super's latent router (4,096 inputs) its own, Nano's the glue's.
+fn slices(k: usize) usize {
+    return if (k == 4096) nemotron.latent.routerSlices(k) else glue.routerShape(k).sk;
+}
+
 /// One fma chain a K slice (two a bf16 word pair).
 fn sliceChain(s: c.Shape) usize {
-    return s.k / glue.routerShape(s.k).sk + 2;
+    return s.k / slices(s.k) + 2;
 }
 
 pub fn logitsSpec() c.Spec {
     return .{ .name = "cuda nemotron router logits tf_nemo_router", .accum = .f32, .depth = sliceChain, .out = .f32, .tiles = .{ .{ .size = 16 }, .{ .size = 16 }, .{} }, .served = &.{ .{ .rows = 16, .n = 128, .k = 2688 }, .{ .rows = 33, .n = 128, .k = 2688 } } };
 }
 
-/// x [rows, D] bf16 times the router's W [E, D] bf16: fp32 partials [slices][rows][E].
+/// Nano's router and Super's (512 experts) past 32 rows.
+pub fn tilesSpec() c.Spec {
+    return .{ .name = "cuda nemotron router logits tf_nemo_router_tiles", .accum = .f32, .depth = sliceChain, .out = .f32, .replaces = "tf_nemo_router", .tiles = .{ .{ .size = 128 }, .{ .size = 128, .step = 16, .min = 16 }, .{} }, .served = &.{ .{ .rows = 300, .n = 128, .k = 2688 }, .{ .rows = 129, .n = 512, .k = 4096 }, .{ .rows = 4100, .n = 512, .k = 4096 } } };
+}
+
+/// x [rows, D] bf16 times the router's W [E, D] bf16: fp32 partials [slices][rows][E]; `tiles` runs in place of `f`.
 pub const Logits = struct {
     rig: rig_.Rig,
     f: cuda.Function,
+    tiles: ?cuda.Function = null,
     d: ?Dense = null,
     x: u64 = 0,
     w: u64 = 0,
     out: u64 = 0,
+    base: u64 = 0,
 
     pub fn deinit(self: *Logits) void {
         if (self.d) |d| d.deinit();
@@ -36,18 +48,18 @@ pub const Logits = struct {
     }
 
     pub fn kernel(self: *Logits) g.Kernel {
-        return .{ .spec = logitsSpec(), .ctx = self, .vt = &vt };
+        return .{ .spec = if (self.tiles != null) tilesSpec() else logitsSpec(), .ctx = self, .vt = &vt };
     }
 
     const vt = g.hooks(Logits);
 
     pub fn prepare(self: *Logits, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
-        if (shape.k % 64 != 0 or shape.n > 256 or shape.n == 0 or shape.rows == 0) return false;
+        if (shape.k % 64 != 0 or (self.tiles == null and shape.n > 256) or shape.n == 0 or shape.rows == 0) return false;
         if (self.d) |d| d.deinit();
         self.d = null;
         self.rig.reset();
         const a = self.rig.gpu.gpa;
-        const d = try Dense.init(a, shape, glue.routerShape(shape.k).sk);
+        const d = try Dense.init(a, shape, slices(shape.k));
         self.d = d;
         d.fillX(fill, seed, 1);
         const bits = try a.alloc(u16, d.w.len);
@@ -65,18 +77,31 @@ pub const Logits = struct {
         self.x = try self.rig.input(std.mem.sliceAsBytes(d.x));
         self.w = try self.rig.input(std.mem.sliceAsBytes(bits));
         self.out = try self.rig.output(d.outputs() * 4);
+        self.base = try self.rig.scratch(d.outputs() * 4);
         return true;
     }
 
     pub fn run(self: *Logits) !void {
-        const d = self.d.?;
-        const shape = glue.routerShape(d.shape.k);
-        var a: cuda.Args = .{};
-        for ([_]u64{ self.x, self.w, self.out }) |p| a.add(p);
-        for ([_]usize{ d.shape.rows, d.shape.k, d.shape.n, shape.sk }) |v| a.add(@as(c_int, @intCast(v)));
-        const grid: cuda.Dim3 = .{ .x = @intCast((d.shape.rows + 15) / 16), .y = @intCast((d.shape.n + 15) / 16), .z = @intCast(shape.sk) };
-        try cuda.launch.launch(self.f, .{ .grid = grid, .block = .{ .x = 256 }, .shared = glue.routerShared(d.shape.k / shape.sk) }, self.rig.s, &a);
+        try self.launch(self.tiles != null, self.out);
         try self.rig.s.synchronize();
+    }
+
+    /// tf_nemo_router's 16-row tiles, or tf_nemo_router_tiles' 128, on the prepared rows.
+    fn launch(self: *Logits, tiles: bool, out: u64) !void {
+        const d = self.d.?;
+        const sk = slices(d.shape.k);
+        var a: cuda.Args = .{};
+        for ([_]u64{ self.x, self.w, out }) |p| a.add(p);
+        for ([_]usize{ d.shape.rows, d.shape.k, d.shape.n, sk }) |v| a.add(@as(c_int, @intCast(v)));
+        const t: usize = if (tiles) 128 else 16;
+        const grid: cuda.Dim3 = .{ .x = @intCast((d.shape.rows + t - 1) / t), .y = @intCast((d.shape.n + t - 1) / t), .z = @intCast(sk) };
+        const f = if (tiles) self.tiles.? else self.f;
+        try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = 256 }, .shared = if (tiles) glue.tiles_shared else glue.routerShared(d.shape.k / sk) }, self.rig.s, &a);
+    }
+
+    pub fn replaced(self: *Logits) ![]const u8 {
+        try self.launch(false, self.base);
+        return self.rig.bytes(self.base, self.count() * 4);
     }
 
     pub fn count(self: *Logits) usize {

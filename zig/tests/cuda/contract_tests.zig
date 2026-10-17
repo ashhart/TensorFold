@@ -10,6 +10,8 @@ const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
 const ck_k = @import("contract_ck.zig");
+const lane8_k = @import("contract_ck_lane.zig");
+const latent_k = @import("contract_latent.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -23,7 +25,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_lane", "ck_experts", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -72,6 +74,8 @@ pub fn run(gpu: check.Gpu) !void {
     for (row_list[0..nrows]) |*r| try kernels.append(a, r.kernel());
     var logits = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_router") };
     defer logits.deinit();
+    var logits_tiles = router_k.Logits{ .rig = .{ .gpu = gpu, .s = s }, .f = logits.f, .tiles = try mods[0].function("tf_nemo_router_tiles") };
+    defer logits_tiles.deinit();
     var topk = router_k.TopK{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[0].function("tf_nemo_topk") };
     defer topk.deinit();
     var latent = try nemotron.latent.Fns.load(gpu.d);
@@ -79,8 +83,13 @@ pub fn run(gpu: check.Gpu) !void {
     var latent_topk = router_k.LatentTopK{ .rig = .{ .gpu = gpu, .s = s }, .fns = &latent };
     defer latent_topk.deinit();
     try kernels.append(a, logits.kernel());
+    try kernels.append(a, logits_tiles.kernel());
     try kernels.append(a, topk.kernel());
     try kernels.append(a, latent_topk.kernel());
+    var sums: [2]latent_k.Sums = undefined;
+    for (std.enums.values(latent_k.Kind), &sums) |kind, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .fns = &latent };
+    defer for (&sums) |*x| x.deinit();
+    for (&sums) |*x| try kernels.append(a, x.kernel());
     const kinds = comptime std.enums.values(mm_k.Kind);
     var mm: [kinds.len]mm_k.Mm = undefined;
     for (kinds, &mm) |kind, *m| {
@@ -97,16 +106,34 @@ pub fn run(gpu: check.Gpu) !void {
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
     var ck: ?cuda.ck.Ck = null;
-    if (cap >= 120) ck = try cuda.ck.Ck.load(gpu.d, cap / 10, sms) else std.debug.print("N/A  ck experts: the block-scaled FP4 mma needs sm_120a, this GPU is sm_{d}\n", .{cap});
+    var ck_reduce: ?cuda.ck.Ck = null; // no clusters: the FP8 slices meet in tf_ck8_reduce
+    if (cap >= 120) {
+        ck = try cuda.ck.Ck.load(gpu.d, cap / 10, sms);
+        ck_reduce = try cuda.ck.Ck.load(gpu.d, 8, sms);
+    } else std.debug.print("N/A  ck experts: the block-scaled FP4 mma needs sm_120a, this GPU is sm_{d}\n", .{cap});
     defer if (ck) |*q| q.unload();
-    var ck_experts: [2]ck_k.Experts = undefined;
+    defer if (ck_reduce) |*q| q.unload();
+    var packer = try cuda.modelopt.Packer.load(gpu.d);
+    defer packer.unload();
+    const ck_kinds = comptime std.enums.values(ck_k.Kind);
+    var ck_experts: [ck_kinds.len]ck_k.Experts = undefined;
+    var lanes: [2]lane8_k.Lane = undefined;
     var nck: usize = 0;
+    var nlane: usize = 0;
     defer for (ck_experts[0..nck]) |*x| x.deinit();
-    if (ck) |*q| for ([_]ck_k.Kind{ .up, .down }) |kind| {
-        ck_experts[nck] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = q, .router = try cuda.grouped.Router.resolve(mods[6]) };
-        try kernels.append(a, ck_experts[nck].kernel());
-        nck += 1;
-    };
+    defer for (lanes[0..nlane]) |*x| x.deinit();
+    if (ck) |*q| {
+        for (ck_kinds) |kind| {
+            ck_experts[nck] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = q, .router = try cuda.grouped.Router.resolve(mods[6]), .latent = &latent };
+            try kernels.append(a, ck_experts[nck].kernel());
+            nck += 1;
+        }
+        for ([_]lane8_k.Kind{ .cluster, .reduce }, [_]*const cuda.ck.Ck{ q, &ck_reduce.? }) |kind, by| {
+            lanes[nlane] = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .ck = by, .packer = &packer };
+            try kernels.append(a, lanes[nlane].kernel());
+            nlane += 1;
+        }
+    }
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
