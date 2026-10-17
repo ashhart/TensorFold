@@ -1,18 +1,20 @@
 # TensorFold on Windows (native)
 
 `tensorfold-native.exe` runs on Windows with an NVIDIA GPU through the same CUDA engine the Linux build uses. Only the
-CUDA backend is built on Windows; Metal is macOS's and HIP is not built. It is tested on an RTX 4090 (x86_64); the
-host code also cross-compiles for `aarch64-windows` with the GB10 (sm_121) kernels, untested on hardware so far.
+CUDA backend is built on Windows; Metal is macOS's and HIP is not built. Windows is supported from source only.
+The PR reports RTX 4090 (`x86_64-windows`, `sm_89`) and NVIDIA RTX Spark N1X (`aarch64-windows`, `sm_121`) runs.
+Those device receipts have not been reproduced on the maintained tree.
 
 ## What you need
 
 - An NVIDIA GPU and a current display driver (it ships `nvcuda.dll`; no CUDA toolkit is needed to run).
 - To build: [Zig 0.17.0](https://ziglang.org/download/) (the version in `.zig-version`), the CUDA Toolkit
-  (13.x tested) for `nvcc`, and Visual Studio Build Tools with the C++ workload (`cl.exe`, nvcc's host compiler).
+  (13.x tested) for `nvcc`, and MSVC C++ Build Tools with the C++ workload (`cl.exe`, nvcc's host compiler).
 
 ## Build
 
-From a "x64 Native Tools" prompt (or after running `vcvars64.bat`), so `cl.exe` is on `PATH`:
+From a "x64 Native Tools" prompt (or after running `vcvars64.bat`, or `vcvarsall.bat arm64_amd64` on Windows ARM64), so
+`cl.exe` is on `PATH`:
 
 ```bat
 zig build native install -Dsm=89 -Dstrip=true ^
@@ -20,8 +22,9 @@ zig build native install -Dsm=89 -Dstrip=true ^
 ```
 
 `-Dsm` takes the GPU's compute capability without the dot, comma separated for several: 86 (RTX 30), 89 (RTX 40),
-120 (RTX 50). The server is `zig-out\native\bin\tensorfold-native.exe`; `zig-out\bin\tf-cuda-test.exe` runs the GPU
-suites (`tf-cuda-test info`, `smoke`, `glue`, `sample`, `quant-ref`, `affine8`, `modelopt`, `exlr8`).
+120 (RTX 50), 121 (GB10 / RTX Spark N1X). The server is `zig-out\native\bin\tensorfold-native.exe`;
+`zig-out\bin\tf-cuda-test.exe` runs the GPU suites (`tf-cuda-test info`, `smoke`, `glue`, `sample`, `quant-ref`,
+`affine8`, `modelopt`, `exlr8`).
 
 `zig build test` runs the host tests without a GPU.
 
@@ -97,10 +100,13 @@ loads and runs exactly as before.
 - The Hugging Face cache links snapshot files to blobs. Windows allows symlinks only with Developer Mode or elevation,
   so `pull` falls back to hard links (no extra space).
 - Checkpoint reads use threads (io_uring is Linux's).
+- Integrated unified-memory GPUs on Windows (such as RTX Spark N1X `sm_121`) admit against the WDDM CUDA device pool
+  (`cuMemGetInfo_v2`) while keeping the unified 10% reserve and 4 GiB default floor. A fresh device receipt must check
+  the WDDM budget, allocation deltas and equality cells; source admission alone does not qualify the device.
 - The API key file is checked for type and size; Windows keeps access in ACLs, not mode bits, so the "unreadable by
   other users" check is the folder's ACL rather than `chmod 600`.
 
 ## Differences from Linux
 
-- No io_uring, `ulimit` or GB10 carveout, and no `SIGHUP` (the key file is still reread when it changes).
+- No io_uring, `ulimit` or Linux `/proc/meminfo` probe, and no `SIGHUP` (the key file is still reread when it changes).
 - `TF_HEAT_*` thermal pacing reads Linux's `/sys/class/thermal` and does nothing on Windows.

@@ -32,6 +32,7 @@ pub fn libraryOf(symbol: *const anyopaque, buf: []u8) ?[]const u8 {
 
 extern "kernel32" fn GetModuleHandleExA(flags: u32, name: ?[*]const u8, module: *?*anyopaque) callconv(.winapi) c_int;
 extern "kernel32" fn GetModuleFileNameA(module: ?*anyopaque, name: [*]u8, size: u32) callconv(.winapi) u32;
+extern "kernel32" fn GetFullPathNameW(name: [*:0]const u16, len: u32, buf: [*]u16, part: ?*?[*:0]u16) callconv(.winapi) u32;
 extern "kernel32" fn LoadLibraryW(name: [*:0]const u16) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GetProcAddress(module: *anyopaque, name: [*:0]const u8) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn FreeLibrary(module: *anyopaque) callconv(.winapi) c_int;
@@ -45,6 +46,17 @@ const WinDynLib = struct {
         var buf: [1024:0]u16 = undefined;
         const n = std.unicode.wtf8ToWtf16Le(buf[0 .. buf.len - 1], path) catch return error.InvalidWtf8;
         buf[n] = 0;
+        if (std.mem.indexOfAny(u8, path, "/\\") != null) {
+            for (buf[0..n]) |*ch| if (ch.* == '/') {
+                ch.* = '\\';
+            };
+            var full: [1024:0]u16 = undefined;
+            const fn_len = GetFullPathNameW(buf[0..n :0].ptr, full.len, &full, null);
+            if (fn_len > 0 and fn_len < full.len) {
+                full[fn_len] = 0;
+                return .{ .module = LoadLibraryW(full[0..fn_len :0].ptr) orelse return error.FileNotFound };
+            }
+        }
         return .{ .module = LoadLibraryW(buf[0..n :0].ptr) orelse return error.FileNotFound };
     }
 

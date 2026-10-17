@@ -123,7 +123,7 @@ test "hardware names pass only the allowlist; Mac and NVIDIA probes keep only na
     try std.testing.expectEqualStrings("Intel(R) Xeon(R) CPU E5-2680 v4", host.modelName(a, "  Intel(R)  Xeon(R) CPU E5-2680 v4 @ 2.40GHz\n").?);
     try std.testing.expectEqualStrings("Apple M5 Max", host.modelName(a, "Apple M5 Max").?);
     const long = try std.mem.concat(a, u8, &.{ "NVIDIA ", try a.dupe(u8, &(@as([121]u8, @splat('a')))) });
-    for ([_][]const u8{ "private-machine", "/home/example/private", "NVIDIA /home/example/private", long, "Apple M5 Max Extra", "Apple M", "Intel user@example.test" }) |bad| try std.testing.expect(host.modelName(a, bad) == null);
+    for ([_][]const u8{ "private-machine", "/home/example/private", "NVIDIA /home/example/private", "NVIDIA NPU", long, "Apple M5 Max Extra", "Apple M", "Intel user@example.test" }) |bad| try std.testing.expect(host.modelName(a, bad) == null);
     const gib128: u64 = 128 << 30;
     const profiler = "{\"SPDisplaysDataType\": [{\"sppci_model\": \"Apple M5 Max\", \"sppci_cores\": \"40\", \"serial_number\": \"private-device-value\", \"_name\": \"private-computer\", \"sppci_device_id\": \"private-id\"}]}";
     const mac = host.summarize("Apple M5 Max", gib128, host.macGpus(a, profiler, gib128), true);
@@ -140,6 +140,9 @@ test "hardware names pass only the allowlist; Mac and NVIDIA probes keep only na
     try std.testing.expect(std.mem.eql(u8, cuda.memory_type, "dedicated") and std.mem.eql(u8, cuda.source, "partial"));
     const one = host.nvidiaRows(a, smi, "1");
     try std.testing.expect(one.len == 1 and std.mem.eql(u8, host.summarize(null, 1, &.{.{ .name = one[0].name }}, false).memory_type, "unified"));
+    const spark = host.nvidiaRows(a, "NVIDIA RTX Spark N1X (6144-core Blackwell RTX GPU), 64000, 617.42\nNVIDIA NPU, [N/A], 617.42\n", null);
+    try std.testing.expect(spark.len == 1 and spark[0].memory_bytes.? == 64000 << 20);
+    try std.testing.expectEqualStrings("unified", host.summarize("ARMv8", gib128, &.{.{ .name = spark[0].name, .memory_bytes = spark[0].memory_bytes }}, false).memory_type);
     for ([_][]const u8{ "GPU-private-selector", "-1", "", " " }) |sel| try std.testing.expect(host.nvidiaRows(a, smi, sel).len == 0);
     try std.testing.expect(host.nvidiaRows(a, "/home/example/private-device, 1234, 123\n", null).len == 0);
     const none = host.summarize(null, null, &.{}, false);

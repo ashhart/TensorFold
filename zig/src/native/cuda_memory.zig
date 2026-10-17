@@ -125,7 +125,7 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return @min(room -| streams, want);
 }
 
-/// Integrated GPUs require validated host counts; discrete devices use CUDA's counts.
+/// Integrated GPUs on Linux require validated /proc/meminfo counts; Windows and discrete devices use CUDA's counts.
 pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryUnavailable}!MemInfo {
     if (unified) return meminfo(text orelse return error.HostMemoryUnavailable) orelse error.HostMemoryUnavailable;
     return card;
