@@ -346,7 +346,7 @@ pub const Decision = struct {
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque, follow: ?*const fn (*anyopaque) anyerror!void = null };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
@@ -362,27 +362,8 @@ pub const MemorySource = struct {
     read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
 };
 
-pub const Status = struct {
-    /// Requests in prefill or decode, and those waiting for a lane.
-    running: u32 = 0,
-    waiting: u32 = 0,
-    decode_tokens_per_second: f64 = 0,
-    prefill_tokens_per_second: f64 = 0,
-    /// Requests that gave a lane up to a later one; null when the engine does not count them.
-    preemptions: ?u64 = null,
-    warming: bool = false,
-    /// Live streams written to the caller's buffer: tokens each holds.
-    streams: usize = 0,
-    /// Generated tokens held by live streams, excluding their prompts.
-    generation_tokens: u64 = 0,
-    /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
-    fill_prompt_tokens: ?u32 = null,
-    fill_tokens_left: ?u32 = null,
-    /// A prompt pass is running whose backend reports no `fill_at`: the totals stay null rather than guessed.
-    fill_unknown: bool = false,
-    /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
-    fill_run: u64 = 0,
-};
+pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
 

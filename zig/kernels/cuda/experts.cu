@@ -280,3 +280,8 @@ __global__ void plan_scatter(const int* __restrict__ picks, int P, int E, const 
     int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
 TF_EXPERT(1)
 TF_EXPERT(0)
+// Groups of 32: SwiGLU gate and up together (epilogue 2), and the down projection to fp32.
+template __global__ void tf_experts::expert_kernel<32, 2, 2, 2, 4>(const __nv_bfloat16*, \
+    int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
+template __global__ void tf_experts::expert_kernel<32, 1, 0, 2, 4>(const __nv_bfloat16*, \
+    int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);

@@ -126,7 +126,7 @@ pub const Affine4Experts = struct {
         return if (up) .{ .ptr = l.up, .kg = l.dims / 64, .n = l.width } else .{ .ptr = l.down, .kg = l.width / 64, .n = l.dims };
     }
 
-    fn args(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) launch_.Args {
+    pub fn argsOf(x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize) launch_.Args {
         var a: launch_.Args = .{};
         a.add(x);
         a.add(int(x_stride));
@@ -144,7 +144,7 @@ pub const Affine4Experts = struct {
     pub fn run(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_units: usize) !void {
         const grid = @min((max_units + 3) / 4, e.resident[if (up) 0 else 1]);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
+        var a = argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
         try launch_.launch(if (up) e.up_fn else e.down_fn, cfg, s, &a);
     }
@@ -153,7 +153,7 @@ pub const Affine4Experts = struct {
     pub fn runPrompt(e: *const Affine4Experts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, max_items: usize) !void {
         const grid = max_items * ((nb + 3) / 4);
         if (grid < 1) return;
-        var a = args(x, x_stride, slots, w, kg, nb, p, out, n);
+        var a = argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 256 }, .shared = prompt_smem };
         try launch_.launch(if (up) e.pre_up_fn else e.pre_down_fn, cfg, s, &a);
     }
@@ -171,6 +171,38 @@ pub const Affine4Experts = struct {
     /// Bytes of e experts' blocks for n outputs from k inputs ([E][n/32][k/64][288] int32).
     pub fn bytes(count: usize, n: usize, k: usize) usize {
         return count * (n / 32) * (k / 64) * 288 * 4;
+    }
+};
+
+/// Affine-4 SwiGLU experts at groups of 32 over pair rows (experts_rows.cu): each row's bits are those it gets alone.
+pub const RowsExperts = struct {
+    up_fn: Function,
+    down_fn: Function,
+
+    /// Pairs a plan item holds: the kernel's two row tiles of 16.
+    pub const tile: usize = 32;
+
+    /// The instances' names (cuobjdump -symbols of the experts_rows fatbin): gate and up with SwiGLU, then down.
+    pub const symbols = struct {
+        pub const up = "_ZN15tf_experts_rows11expert_rowsILi32ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const down = "_ZN15tf_experts_rows11expert_rowsILi32ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        /// experts.cu's one-row forms at groups of 32, whose bits these give every row (tf-cuda-test experts-rows).
+        pub const decode_up = "_ZN10tf_experts13expert_kernelILi32ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+        pub const decode_down = "_ZN10tf_experts13expert_kernelILi32ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+    };
+
+    /// From a loaded experts_rows module.
+    pub fn resolve(mod: Module) !RowsExperts {
+        return .{ .up_fn = try mod.function(symbols.up), .down_fn = try mod.function(symbols.down) };
+    }
+
+    /// `items` plan items: `up` maps token rows to SwiGLU's bf16, else pair rows to fp32; K in `kg` groups of 32.
+    pub fn run(e: *const RowsExperts, s: Stream, up: bool, x: u64, x_stride: usize, slots: usize, w: u64, kg: usize, nb: usize, p: Plan, out: u64, n: usize, items: usize) !void {
+        const grid = @min((items * nb + 3) / 4, 4096);
+        if (grid < 1) return;
+        var a = Affine4Experts.argsOf(x, x_stride, slots, w, kg, nb, p, out, n);
+        const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128 }, .shared = 0 };
+        try launch_.launch(if (up) e.up_fn else e.down_fn, cfg, s, &a);
     }
 };
 
@@ -273,6 +305,7 @@ pub const Nvfp4Experts = struct {
     fns: [4]Function, // by Epi, then relu^2 up
     resident: [4]usize, // blocks the grid may hold: per SM times SMs
     prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
+    warps: usize = 4,
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -295,14 +328,36 @@ pub const Nvfp4Experts = struct {
         return stages * stage;
     }
 
+    pub fn decodeWarps(value: ?[]const u8) !usize {
+        const v = value orelse return 4;
+        if (std.mem.eql(u8, v, "1")) return 1;
+        if (std.mem.eql(u8, v, "4")) return 4;
+        return error.BadExpertWarps;
+    }
+
     pub fn load(d: *const Driver, sms: usize) !Nvfp4Experts {
+        const value = if (std.c.getenv("TF_NVFP4_DECODE_WARPS")) |v| std.mem.span(v) else null;
+        return loadWarps(d, sms, try decodeWarps(value));
+    }
+
+    /// Every warp owns independent tiles; changing CTA grouping preserves each tile's arithmetic.
+    pub fn loadWarps(d: *const Driver, sms: usize, warps: usize) !Nvfp4Experts {
+        if (warps != 1 and warps != 4) return error.BadExpertWarps;
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
-        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined };
+        var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined, .warps = warps };
         for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
-            e.fns[i] = try mod.function(name);
-            e.resident[i] = @max(1, try e.fns[i].occupancy(128, 0)) * sms;
+            var narrow: [256]u8 = undefined;
+            const selected = if (warps == 1) blk: {
+                const marker = std.mem.indexOf(u8, name, "ELi4E") orelse return error.MissingSymbol;
+                @memcpy(narrow[0..name.len], name);
+                narrow[marker + 3] = '1';
+                narrow[name.len] = 0;
+                break :blk narrow[0..name.len :0];
+            } else name;
+            e.fns[i] = try mod.function(selected);
+            e.resident[i] = @max(1, try e.fns[i].occupancy(@intCast(warps * 32), 0)) * sms;
         }
         for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
@@ -321,7 +376,7 @@ pub const Nvfp4Experts = struct {
         const kg = (if (gate) l.dims else l.width) / 32;
         const nb = (if (gate) l.width else l.dims) / cols;
         const ei: usize = if (gate and l.relu2) 3 else @backingInt(epi);
-        const grid = @min((items * nb + 3) / 4, e.resident[ei]);
+        const grid = @min((items * nb + e.warps - 1) / e.warps, e.resident[ei]);
         if (grid < 1) return;
         var a: launch_.Args = .{};
         a.add(in.x);
@@ -335,7 +390,7 @@ pub const Nvfp4Experts = struct {
         a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
-        try launch_.launch(e.fns[ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+        try launch_.launch(e.fns[ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = @intCast(e.warps * 32), .y = 1, .z = 1 } }, s, &a);
     }
 
     /// Prompt rows on a plan of at most `items` items of 64 pairs: up (relu^2 or SwiGLU by the layer), bf16 sums down.
@@ -491,4 +546,11 @@ test "a format that is not loaded, or an option it was not built with, is refuse
     try std.testing.expectError(error.EpilogueNotBuilt, h.decode(s, .down_bf16, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.EpilogueNotBuilt, h.prompt(s, .down_f32, .{ .x = 0, .stride = 64 }, la, p, 0, 1, -1));
     try std.testing.expectError(error.OptionNotBuilt, h.decode(s, .up, .{ .x = 0, .stride = 64 }, la, p, 0, 1, 3));
+}
+
+test "NVFP4 decode CTA geometry is explicit, bounded and defaults to four warps" {
+    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps(null));
+    try std.testing.expectEqual(@as(usize, 1), try Nvfp4Experts.decodeWarps("1"));
+    try std.testing.expectEqual(@as(usize, 4), try Nvfp4Experts.decodeWarps("4"));
+    for ([_][]const u8{ "0", "2", "8", "", "garbage" }) |v| try std.testing.expectError(error.BadExpertWarps, Nvfp4Experts.decodeWarps(v));
 }

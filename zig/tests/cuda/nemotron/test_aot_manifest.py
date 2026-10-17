@@ -37,10 +37,10 @@ def fake_cache(cache: Path) -> dict:
              for leaf in ("__grp__fake_kernel.json", "fake_kernel.cubin", "fake_kernel.ptx")}
     info = {"name": "fake_kernel", "function": "fakemod.FakeKernel",
             "source": {"file": "tensorfold/families/nemotron_h/cuda/kernels.py", "line": 10},
-            "params": ["p0", "n", "BLOCK", "SCALE"],
-            "signature": {"p0": "*i8", "n": "i32", "BLOCK": "constexpr", "SCALE": "constexpr"},
+            "params": ["p0", "n", "BLOCK", "SCALE", "ROPE"],
+            "signature": {"p0": "*i8", "n": "i32", "BLOCK": "constexpr", "SCALE": "constexpr", "ROPE": "constexpr"},
             "constexprs": {"BLOCK": 64, "SCALE": {"float": 0.125, "fp32_bits": "0x3e000000",
-                                                  "fp64_bits": "0x3fc0000000000000"}, "n": 3},
+                                                  "fp64_bits": "0x3fc0000000000000"}, "n": 3, "ROPE": None},
             "attrs": {"p0": [["tt.divisibility", 16]], "n": [["tt.contiguity", 1]]},
             "metadata": {"num_warps": 4}, "files": files, "n_regs": 24, "n_spills": 0}
     return {"generator": "test", "written_unix": 0, "kernels": {HASH: info},
@@ -73,7 +73,7 @@ def main() -> int:
         assert k["launches"] == {"startup": 3} and k["grids"] == [[128, 1, 1]]
 
         jit = out / "jit.json"
-        jit.write_text(json.dumps({"fakemod.FakeKernel": {"params": ["p0", "n", "BLOCK", "SCALE"],
+        jit.write_text(json.dumps({"fakemod.FakeKernel": {"params": ["p0", "n", "BLOCK", "SCALE", "ROPE"],
                                                           "do_not_specialize": [], "no_align": []}}) + "\n")
         # the manifest shape, with a cache and a jit file named on the command line
         packed = work / "packed"
@@ -112,7 +112,18 @@ def main() -> int:
             print(r.stdout + r.stderr)
             return 1
         assert (default / "aot.json").read_text() == (packed / "aot.json").read_text()
-        print("test_aot_manifest: one kernel through the manifest, the dump and the defaults; entries checked")
+
+        # a second capture's jit.json beside the first: merged, the same set again
+        jit2 = out / "jit2.json"
+        jit2.write_text(json.dumps({"othermod.Other": {"params": ["x"], "do_not_specialize": ["x"], "no_align": []}}))
+        merged = work / "merged"
+        r = subprocess.run([sys.executable, "-B", str(PACK), "--manifest", str(manifest), "--cache", str(cache),
+                            "--jit", str(jit), "--jit", str(jit2), "--out", str(merged)], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stdout + r.stderr)
+            return 1
+        assert (merged / "aot.json").read_text() == (packed / "aot.json").read_text()
+        print("test_aot_manifest: one kernel through the manifest, the dump, the defaults and two jit files; entries checked")
         return 0
 
 

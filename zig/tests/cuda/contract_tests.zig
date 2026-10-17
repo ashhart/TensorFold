@@ -7,7 +7,13 @@ const check = @import("check.zig");
 const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
+const mx_k = @import("contract_mxfp8.zig");
+const wide_k = @import("contract_projection_f32.zig");
 const rank_k = @import("contract_rank.zig");
+const writeback_k = @import("contract_flashnext_writeback.zig");
+const utility_k = @import("contract_utility.zig");
+const best_k = @import("contract_row_best.zig");
+const qsa_k = @import("contract_qsa_select.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -21,7 +27,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -86,9 +92,57 @@ pub fn run(gpu: check.Gpu) !void {
     }
     defer for (&mm) |*m| m.deinit();
     for (&mm) |*m| try kernels.append(a, m.kernel());
+    var mx = [_]mx_k.Product{
+        .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
+        .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },
+    };
+    defer for (&mx) |*m| m.deinit();
+    for (&mx) |*m| try kernels.append(a, m.kernel());
+    var wide: [wide_k.modes.len * 2]wide_k.Product = undefined;
+    for (wide_k.modes, 0..) |mode, i| {
+        wide[i * 2] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .mode = mode, .clusters = true };
+        wide[i * 2 + 1] = .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .mode = mode, .clusters = false };
+    }
+    defer for (&wide) |*m| m.deinit();
+    for (&wide) |*m| try kernels.append(a, m.kernel());
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var hc = try cuda.Module.load(gpu.d, kk.flashnext_hc);
+    defer hc.unload();
+    var writebacks: [3]writeback_k.Writeback = undefined;
+    for (std.enums.values(writeback_k.Mode), &writebacks) |mode, *w| {
+        const symbol: [:0]const u8 = switch (mode) {
+            .sums => "fn_hc_writeback0",
+            .moe => "fn_hc_writeback_moe",
+            .slices => "fn_hc_writeback_slices",
+        };
+        w.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try hc.function(symbol), .mode = mode };
+    }
+    defer for (&writebacks) |*w| w.deinit();
+    for (&writebacks) |*w| try kernels.append(a, w.kernel());
+    var batch = try cuda.Module.load(gpu.d, kk.flashnext_batch);
+    defer batch.unload();
+    var sums: [2]utility_k.Sum = undefined;
+    var shifts: [2]utility_k.Shift = undefined;
+    for ([_]bool{ false, true }, &sums, &shifts) |variant, *sum, *shift| {
+        sum.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_sum_slices"), .bf16 = variant };
+        shift.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_shift_window"), .padded = variant };
+    }
+    defer for (&sums) |*sum| sum.deinit();
+    defer for (&shifts) |*shift| shift.deinit();
+    for (&sums) |*sum| try kernels.append(a, sum.kernel());
+    for (&shifts) |*shift| try kernels.append(a, shift.kernel());
+    var mtp = try cuda.Module.load(gpu.d, kk.flashnext_mtp);
+    defer mtp.unload();
+    var best = best_k.Best{ .rig = .{ .gpu = gpu, .s = s }, .f = try mtp.function("fn_row_best") };
+    defer best.deinit();
+    try kernels.append(a, best.kernel());
+    var selections: [2]qsa_k.Select = undefined;
+    for ([_]bool{ false, true }, &selections) |padded, *selection|
+        selection.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = try batch.function("fn_qsa_select"), .padded = padded };
+    defer for (&selections) |*selection| selection.deinit();
+    for (&selections) |*selection| try kernels.append(a, selection.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
