@@ -10,6 +10,29 @@ tensorfold pull z-lab/Qwen3.8-27B-DFlash2
 tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --drafter z-lab/Qwen3.8-27B-DFlash2 --name bench
 ```
 
+Measured on an M5 Ultra (macOS 27) through the served API against mlx-lm 0.32.0 on the same checkpoint, raw prompts
+from this repository's docs, 100 greedy tokens, prefill from the time to the first token:
+
+| Prompt | Native prefill tok/s | mlx-lm prefill | Native decode tok/s | mlx-lm decode | Native with DFlash2 |
+|---|---|---|---|---|---|
+| 2k | 1325 | 1216 | 51.6 | 54.7 | 162-226 |
+| 8k | 1269 | 1860 | 49.4 | 52.8 | 102 |
+| 32k | 1171 | 1699 | 46.2 | 46.5 | 120 |
+
+A plain one-row round is 19.5 ms on the M5 Ultra (`tf-qwen27-bench`, `QWEN27_ADVANCE`): its 321 projections read
+14.1 GB in 16.2 ms, each shape at the K split it streams fastest at over every layer's matrix (`QWEN27_DISTINCT`;
+a matrix called again sits in the system cache and misleads), and an undrafted one-row window is kept by its own
+verify, as a prompt's rows are, rather than by a keep command buffer the host waited on (1.1 ms a token). Decode
+attention scores each row's keys in 128-key chunks while the row's position is below 8,192 and 512-key chunks
+from it (`attention_plan.chunkFor`, the chunk a row's node carries): at a 2k context a row's four key heads
+were eight threadgroups of 512 keys on an 80-core GPU, 96 µs a layer. A row's chunks follow its own position, so
+it merges the same partials as its one-row step in a chain, a tree, a window across 8,192 or beside other streams,
+and drafted rows stay byte-equal to plain ones. A one-row round's
+DeltaNet step is three dispatches a layer rather than five: `tf_delta_gdn_pre_step` writes each slot's next conv
+window into its history as it reads it, so the commit and publication kernels go, and spreads a 128-wide head over
+four simdgroups (each lane's squares still summed in order); 1.19 ms a token where 1.75 (`QWEN27_STEPCHECK` checks
+the state, history and logits bytes against the general path).
+
 The rest of this page describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Its flags, commands and paths belong to that
 engine. @nood-co1, @jkuepker and @Arminova worked on its CUDA path; see [credits](../credits.md).

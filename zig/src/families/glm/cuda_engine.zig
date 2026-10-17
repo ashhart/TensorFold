@@ -118,6 +118,7 @@ pub const Engine = struct {
             checkpoint,
         );
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
+        if (o.settings.split) try ranks.probeSplit(d, lib, comm, stream, rank, world);
         const share = try shard.Share.of(&c, rank, world);
         const spans = try gpa.alloc(shard.Span, world);
         errdefer gpa.free(spans);

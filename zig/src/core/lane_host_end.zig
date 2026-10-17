@@ -1,61 +1,68 @@
 //! How a lane host ends jobs it will not run on: cancellations named since the last round, a failed round, a close.
 const std = @import("std");
-const api = @import("engine_api.zig");
 const fill = @import("lane_host_fill.zig");
+const lane_halt = @import("lane_halt.zig");
 const LaneHost = @import("lane_host.zig").LaneHost;
 const Job = LaneHost.Job;
-const Id = api.Id;
 
-/// Cancels queued and admitted jobs named since the last round.
+/// Cancels queued and admitted jobs named since the last round; the names are taken whole, so none is lost to memory.
 pub fn takeCancels(h: *LaneHost) void {
-    h.mutex.lockUncancelable(h.io);
-    const ids = h.gpa.dupe(Id, h.cancels.items) catch &.{};
-    h.cancels.clearRetainingCapacity();
-    var dropped: std.ArrayList(*Job) = .empty;
-    for (ids) |id| {
-        for (h.queued.items, 0..) |job, i| if (job.id == id) {
-            dropped.append(h.gpa, h.queued.orderedRemove(i)) catch {};
-            break;
-        };
-    }
-    h.mutex.unlock(h.io);
-    for (dropped.items) |job| h.finish(job, .cancelled, "");
-    dropped.deinit(h.gpa);
-    for (ids) |id| {
+    h.lock();
+    var ids = h.cancels;
+    h.cancels = .empty;
+    h.unlock();
+    defer ids.deinit(h.gpa);
+    for (ids.items) |id| {
         var found: ?*Job = null;
         // the status reader walks `admitted` under this lock: the removal joins the walk's critical section
         h.lock();
-        for (h.admitted.items, 0..) |job, i| if (job.id == id) {
+        for (h.queued.items, 0..) |job, i| if (job.id == id) {
+            found = h.queued.orderedRemove(i);
+            break;
+        };
+        if (found == null) for (h.admitted.items, 0..) |job, i| if (job.id == id) {
             fill.unfill(h, job);
-            if (!job.stream.finished) h.core.discard(&job.stream);
-            _ = h.admitted.orderedRemove(i);
-            found = job;
+            if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+            found = h.admitted.orderedRemove(i);
             break;
         };
         h.unlock();
         if (found) |job| h.finish(job, .cancelled, "");
     }
-    h.gpa.free(ids);
 }
 
-/// A failed round ends every stream it held, with the backend's error.
+/// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
 pub fn failAll(h: *LaneHost, message: []const u8) void {
+    std.log.warn("lane host: a round failed ({s}): every admitted stream fails", .{message});
     h.lock();
-    const jobs = h.gpa.dupe(*Job, h.admitted.items) catch &.{};
-    h.admitted.clearRetainingCapacity();
+    var jobs = h.admitted;
+    h.admitted = .empty;
     h.filling.clearRetainingCapacity();
     h.unlock();
-    for (jobs) |job| {
-        if (!job.stream.finished) h.core.discard(&job.stream);
+    defer jobs.deinit(h.gpa);
+    for (jobs.items) |job| {
+        // a job admitted this round has no stream yet when the planner's admitted callback fails
+        if (job.started and !job.stream.finished) h.core.discard(&job.stream);
         h.finish(job, .failed, message);
     }
-    h.gpa.free(jobs);
 }
 
+/// Ends every queued and admitted job cancelled (the cancellations named before it first), copying nothing.
 pub fn closeAll(h: *LaneHost) void {
-    h.lock();
-    for (h.queued.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-    for (h.admitted.items) |job| h.cancels.append(h.gpa, job.id) catch {};
-    h.unlock();
+    if (h.halt_reason) |reason| return lane_halt.haltAll(h, reason);
     takeCancels(h);
+    h.lock();
+    var queued = h.queued;
+    h.queued = .empty;
+    var admitted = h.admitted;
+    h.admitted = .empty;
+    h.filling.clearRetainingCapacity();
+    h.unlock();
+    defer queued.deinit(h.gpa);
+    defer admitted.deinit(h.gpa);
+    for (admitted.items) |job| {
+        if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+        h.finish(job, .cancelled, "");
+    }
+    for (queued.items) |job| h.finish(job, .cancelled, "");
 }

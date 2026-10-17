@@ -112,12 +112,12 @@ pub const Scratch = struct {
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
         const tiles = (limits.rows * 6 + 15) / 16 + limits.streams;
-        const chunks = (limits.keys + 511) / 512;
+        const chunks = @max((limits.keys + 511) / 512, (planning.fine_until + 128 + planning.fine_chunk - 1) / planning.fine_chunk); // fine chunks below fine_until
         const rp: usize = tiles * 16;
         const a: usize = if (limits.shared_prefix) 4 * @as(usize, chunks) * rp else 0;
-        const tail_chunks = if (limits.shared_prefix) 2 else chunks;
+        const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
         const b: usize = 4 * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
-        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * 2 * 4, limits.rows * 128 * 4, limits.rows * 4, 4 * rp * 256 * 2, 4 * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * 4 * 256 * 2, limits.rows * 4 * 256 * 2 };
+        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * 128 * 4, limits.rows * 4, 4 * rp * 256 * 2, 4 * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * 4 * 256 * 2, limits.rows * 4 * 256 * 2 };
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
         var made: usize = 0;
@@ -350,6 +350,7 @@ pub const Attention = struct {
             e.setBuffer(scratch.get(.poa).buffer, 0, 5);
             e.setBuffer(scratch.get(.pma).buffer, 0, 6);
             e.setBuffer(scratch.get(.pla).buffer, 0, 7);
+            e.setBuffer(scratch.get(.nodes).buffer, 0, 8);
             e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
             e.barrier();
         }

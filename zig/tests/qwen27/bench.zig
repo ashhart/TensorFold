@@ -137,6 +137,69 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    // each shape by K split over every layer's matrix of its kind, one row: the weights stream from memory, not a cache
+    if (std.c.getenv("QWEN27_DISTINCT") != null) {
+        const kinds = [_]struct { name: []const u8, from: Input }{ .{ .name = "gdn_qkv", .from = .input }, .{ .name = "gdn_zba", .from = .input }, .{ .name = "gdn_out", .from = .mixer_out }, .{ .name = "attn_q", .from = .input }, .{ .name = "attn_kv", .from = .input }, .{ .name = "attn_out", .from = .mixer_out }, .{ .name = "gate_up", .from = .input }, .{ .name = "down", .from = .activated } };
+        for ([_]Input{ .input, .activated }) |from| try fillSums(m, .{ .name = "", .lin = if (from == .input) l0.gu else l0.down, .from = from }, 1);
+        for (kinds) |kind| {
+            var lins: std.ArrayList(Linear) = .empty;
+            defer lins.deinit(gpa);
+            for (w.layers) |l| {
+                const pick: ?Linear = switch (l.mixer) {
+                    .linear => |g| if (std.mem.eql(u8, kind.name, "gdn_qkv")) g.qkv else if (std.mem.eql(u8, kind.name, "gdn_zba")) g.zba else if (std.mem.eql(u8, kind.name, "gdn_out")) g.out else null,
+                    .attention => |x| if (std.mem.eql(u8, kind.name, "attn_q")) x.q else if (std.mem.eql(u8, kind.name, "attn_kv")) x.kv else if (std.mem.eql(u8, kind.name, "attn_out")) x.out else null,
+                };
+                const chosen = pick orelse (if (std.mem.eql(u8, kind.name, "gate_up")) l.gu else if (std.mem.eql(u8, kind.name, "down")) l.down else null);
+                if (chosen) |c| try lins.append(gpa, c);
+            }
+            if (lins.items.len == 0) continue;
+            const first = lins.items[0];
+            std.debug.print("{s} N {d} K {d} x {d} matrices, shipped split {d}:", .{ kind.name, first.n, first.k, lins.items.len, first.slices });
+            for ([_]u32{ 1, 2, 4, 8 }) |sk| {
+                if (first.k / 64 % sk != 0) continue;
+                var best: f64 = 1e9;
+                for (0..5) |_| {
+                    const pool2 = mtl.objc.Pool.push();
+                    defer pool2.pop();
+                    const cb = m.queue.commandBuffer();
+                    const e = cb.compute(.serial);
+                    for (lins.items) |lin| {
+                        var variant = lin;
+                        variant.slices = sk;
+                        try m.kernels.quant(e, variant, source(f, kind.from), sumsOf(f, kind.from, 1), f.get(.dims), logits, 1);
+                    }
+                    e.end();
+                    cb.commit();
+                    cb.wait();
+                    if (cb.failure() != null) return error.BenchGpuFailure;
+                    best = @min(best, cb.gpuSeconds() * 1e6 / @as(f64, @floatFromInt(lins.items.len)));
+                }
+                const bytes = @as(f64, @floatFromInt(first.n)) * @as(f64, @floatFromInt(first.k)) * 0.5625;
+                std.debug.print("  sk{d} {d:.1} us ({d:.0} GB/s)", .{ sk, best, bytes / best / 1e3 });
+            }
+            std.debug.print("\n", .{});
+        }
+    }
+
+    // one-row rounds through the step prepare against the general prepare, commit and publication: the same state bytes
+    if (std.c.getenv("QWEN27_STEPCHECK") != null) {
+        var prints: [2][32]u8 = undefined;
+        for ([_]bool{ true, false }, 0..) |on, k| {
+            q.gdn_pool_gpu.step_rounds = on;
+            var rr = try q.decode_round.Runner.init(gpa, m, 1, 1024);
+            defer rr.deinit();
+            const s = q.session.Session{ .runner = &rr, .slot = 0 };
+            var prompt: [96]u32 = undefined;
+            for (&prompt, 0..) |*t, j| t.* = @intCast((j * 7919 + 13) % 150000 + 1000);
+            try s.prefill(&prompt, 64);
+            for (0..24) |_| try s.step(try s.greedy());
+            prints[k] = try s.fingerprint();
+        }
+        q.gdn_pool_gpu.step_rounds = true;
+        std.debug.print("step prepare vs general prepare, 24 one-row steps: states and logits {s}\n", .{if (std.mem.eql(u8, &prints[0], &prints[1])) "byte-equal" else "DIFFER"});
+        return;
+    }
+
     // projections-only floor: every projection of a one-row step in one command buffer
     {
         const pool2 = mtl.objc.Pool.push();
@@ -179,6 +242,7 @@ pub fn main(init: std.process.Init) !void {
     for ([_]usize{ 1, 2, 4, 8 }) |n| {
         var wall: f64 = 0;
         var gpu: f64 = 0;
+        var parts: [4]f64 = .{ 0, 0, 0, 0 };
         for (0..rounds + 2) |round| {
             var inputs: [slots]q.round_plan.Input = undefined;
             var ids: [slots][1]u32 = undefined;
@@ -189,19 +253,29 @@ pub fn main(init: std.process.Init) !void {
             const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
             var plan = try Round.init(gpa, inputs[0..n], @intCast(m.config.conv_kernel), r.slots, @intCast(vocab));
             defer plan.deinit();
-            try r.verifyHead(&plan, .all);
+            const t1 = std.Io.Clock.awake.now(io).toNanoseconds();
+            const advance = std.c.getenv("QWEN27_ADVANCE") != null; // one-row rounds kept by their verify, no keep
+            if (advance) try r.advance(&plan, .all) else try r.verifyHead(&plan, .all);
+            const t2 = std.Io.Clock.awake.now(io).toNanoseconds();
             const verify_gpu = r.last_gpu_seconds;
             const words = logits.buffer.slice(u16, n * vocab);
             for (0..n) |k| pending[k] = try q.session.argmax(words[k * vocab ..][0..vocab]);
+            const t3 = std.Io.Clock.awake.now(io).toNanoseconds();
             const zero = [_]u32{0};
             var paths: [slots][]const u32 = @splat(&zero);
-            try r.keep(&plan, paths[0..n]);
-            const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(io).toNanoseconds() - t0)) / 1e6;
+            if (!advance) try r.keep(&plan, paths[0..n]);
+            const t4 = std.Io.Clock.awake.now(io).toNanoseconds();
+            const ms = @as(f64, @floatFromInt(t4 - t0)) / 1e6;
             if (round < 2) continue; // the first rounds of a width warm its pipelines
             wall += ms;
             gpu += verify_gpu * 1e3;
+            parts[0] += @as(f64, @floatFromInt(t1 - t0)) / 1e6;
+            parts[1] += @as(f64, @floatFromInt(t2 - t1)) / 1e6;
+            parts[2] += @as(f64, @floatFromInt(t3 - t2)) / 1e6;
+            parts[3] += @as(f64, @floatFromInt(t4 - t3)) / 1e6;
         }
         const per = wall / @as(f64, @floatFromInt(rounds));
-        std.debug.print("  {d} streams: {d:.2} ms a round ({d:.2} ms verify GPU), {d:.1} tok/s in all\n", .{ n, per, gpu / @as(f64, @floatFromInt(rounds)), @as(f64, @floatFromInt(n)) * 1000 / per });
+        const nr: f64 = @floatFromInt(rounds);
+        std.debug.print("  {d} streams: {d:.2} ms a round ({d:.2} ms verify GPU), {d:.1} tok/s in all; plan {d:.2}, verify wall {d:.2}, argmax {d:.2}, keep {d:.2} ms\n", .{ n, per, gpu / nr, @as(f64, @floatFromInt(n)) * 1000 / per, parts[0] / nr, parts[1] / nr, parts[2] / nr, parts[3] / nr });
     }
 }
