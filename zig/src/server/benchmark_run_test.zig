@@ -4,6 +4,7 @@ const fake = @import("benchmark_fake.zig");
 const cli = @import("benchmark_cli_test.zig");
 const Run = cli.Run;
 const benchmark = @import("benchmark.zig");
+const receipt = @import("benchmark_receipt.zig");
 
 const short = [_][]const u8{ "--tokens", "4", "--reps", "1", "--temperatures", "0" };
 
@@ -230,7 +231,7 @@ test "a greedy-only engine's refusal is printed once with its reason and what to
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, answered));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, greedy));
     try std.testing.expect(std.mem.indexOf(u8, text, "code T=1 warm-up: error\n" ++ answered ++ greedy ++ "code T=1 repeat 1/1: error\n") != null);
-    try std.testing.expect(f.count() == 8 and r.has("Receipt saved"));
+    try std.testing.expect(f.count() == 9 and r.has("Receipt saved")); // the manifest, then eight replies
     const saved = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20));
     try std.testing.expectEqual(@as(usize, 4), std.mem.count(u8, saved, "\"error_code\":\"http_error\""));
     try std.testing.expect(std.mem.indexOf(u8, saved, "greedily") == null and std.mem.indexOf(u8, saved, "Bad Request") == null);
@@ -289,4 +290,37 @@ test "a serve child's load-limit hint is printed with its error, and a big check
     try std.testing.expect(at < std.mem.indexOf(u8, r.out.written(), "code T=0 warm-up").?);
     try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ ckpt, "--startup-timeout", "900" })));
     try std.testing.expect(!r.has("--startup-timeout sets another limit"));
+}
+
+const two_ranks =
+    \\{"schema_version":1,"rank_count":2,"runtime":{"tensorfold_version":"9.8.7","backend":"cuda","python_version":"none",
+    \\"platform":"linux","driver":"1.2.3"},"model":{"revision":"0123456789abcdef0123456789abcdef01234567"},
+    \\"hardware":{"system_memory_bytes":1000,"memory_type":"unified","gpus":[{"name":"Example GPU","memory_bytes":null,
+    \\"cores":null}],"gpu_count":1,"source":"partial"}}
+;
+
+test "an attached run copies an accepted server manifest into its receipt and is not called unranked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const routes = try a.dupe(fake.Route, &.{
+        .{ .method = "GET", .path = "/v1/benchmark/manifest", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", two_ranks)}) },
+        .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
+        .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+    });
+    const f = try fake.Fake.start(std.testing.allocator, routes);
+    defer f.stop();
+    const out = try r.path("run.json");
+    try std.testing.expectEqual(@as(u8, 0), try r.command(try cli.runArgs(&r, try f.url(a, ""), out)));
+    try std.testing.expect(r.has("Receipt saved") and !r.has("unranked") and f.count() == 5);
+    var problem: []const u8 = "";
+    const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
+    const settings = v.get("settings").?;
+    try std.testing.expect(!settings.get("managed").?.bool and settings.get("rank_count").?.int64() == 2);
+    try std.testing.expectEqualStrings("9.8.7", v.get("runtime").?.get("tensorfold_version").?.string);
+    try std.testing.expectEqualStrings("partial", v.get("hardware").?.get("source").?.string);
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", v.get("model").?.get("revision").?.string);
 }

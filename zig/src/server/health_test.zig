@@ -1,4 +1,4 @@
-//! /health: the open body's keys in order with the identity the builder reads, and the keyed body over a socket.
+//! /health: the open body's keys in order with the builder's identity; the keyed body and the manifest by socket.
 const std = @import("std");
 const api = @import("engine_api");
 const auth = @import("auth.zig");
@@ -294,4 +294,49 @@ test "unavailable health is minimal HTTP 503 with keys enabled or disabled and w
             try std.testing.expectEqualStrings("{\"status\": \"unavailable\"}", try bodyOf(reply));
         }
     }
+}
+
+const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
+
+/// The manifest a server with `environ` sends over a socket, parsed back as a client reads it.
+fn manifestServed(a: Allocator, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    const identity = build_identity.of(WithGpu, a, "9.8.7", 1);
+    const config: server.Config = .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity, .environ = environ };
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), config, null);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    const reply = try exchange(a, lis.port(), manifest_get);
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 "));
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, try bodyOf(reply), .{});
+    return doc.object;
+}
+
+test "the manifest names the rank count and revision from the server's environment, and nothing it was not given" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("TF_NEMOTRON_WORLD", "2");
+    try env.put("TF_CHECKPOINT_REVISION", "0123456789abcdef0123456789abcdef01234567");
+    const o = try manifestServed(a, &env);
+    try std.testing.expectEqual(@as(i64, 1), o.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), o.get("rank_count").?.integer);
+    try std.testing.expectEqualStrings("9.8.7", o.get("runtime").?.object.get("tensorfold_version").?.string);
+    try std.testing.expectEqualStrings("cuda", o.get("runtime").?.object.get("backend").?.string);
+    const rev = o.get("model").?.object.get("revision").?.string;
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", rev);
+    try env.put("TF_NEMOTRON_WORLD", "3"); // a count the board does not rank, and a revision that names no commit
+    try env.put("TF_CHECKPOINT_REVISION", "main");
+    const odd = try manifestServed(a, &env);
+    try std.testing.expect(odd.get("rank_count") == null);
+    try std.testing.expect(odd.get("model").?.object.get("revision") == null);
+    const bare = try manifestServed(a, null);
+    try std.testing.expect(bare.get("rank_count") == null);
+    try std.testing.expect(bare.get("model").?.object.get("revision") == null);
 }
