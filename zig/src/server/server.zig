@@ -70,6 +70,8 @@ pub const Config = struct {
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
+    /// TF_SSE_KEEPALIVE_S: a silent stream's keepalive period before its first token (serve.zig; 0: none)
+    sse_keepalive_s: f64 = 15,
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
 };
@@ -96,6 +98,10 @@ pub const Server = struct {
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    /// A stop is draining (serve.zig): new generation requests get 503 with Retry-After, /health answers "draining"
+    draining: std.atomic.Value(bool) = .init(false),
+    /// Generation requests in progress (routes.post), what a drain waits for; counted before `draining` is read
+    generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
@@ -173,7 +179,8 @@ pub const Server = struct {
         const options = try json.newObject(cx.a);
         const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
-        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const asked = try fields.parseNumbers(cx, f);
+        try merge(options, cx, asked);
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
         if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
