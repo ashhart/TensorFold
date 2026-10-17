@@ -28,6 +28,7 @@ test {
     _ = disk;
     _ = jobs;
     _ = store;
+    _ = @import("prefix_fail_test.zig");
     _ = @import("disk_test.zig");
     _ = @import("store_test.zig");
 }
