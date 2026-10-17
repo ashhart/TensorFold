@@ -16,6 +16,7 @@ const mlp = @import("cuda_mlp.zig");
 const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
+const taps_mod = @import("cuda_taps.zig");
 const state = @import("cuda_state.zig");
 const mm_mod = @import("cuda_mm.zig");
 const prof_mod = @import("cuda_prof.zig");
@@ -180,6 +181,7 @@ pub const Forward = struct {
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     images: ?ImageRows = null, // a prompt pass's image rows over their placeholders' embeddings (its sequence only)
     prof: ?*prof_mod.Prof = null, // TF_GLM_PROF=1: events between the sections
+    taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
 
     pub fn set(f: *const Forward) glue.Set {
         return .{ .glue = &f.m.glue, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs };
@@ -439,6 +441,7 @@ pub const Forward = struct {
             for (f.ranks) |r| try f.ffn(r, r.w.layers[j], R, null);
             try f.exchangePieces(p, j, .ffn, cut);
             try f.gluePieces(p, j, .ffn, cut);
+            if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, R);
             switch (layers[j].mixer) {
                 .kda => li += 1,
                 .mla => di += 1,
@@ -493,6 +496,7 @@ pub const Forward = struct {
             if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             try f.gather(R);
             for (f.ranks) |r| try f.post(r, R);
+            if (f.taps) |t| try t.at(f.stream, j, f.ranks[0].b.x, R);
             if (f.prof) |p| p.mark(f.stream, .gather_b);
             switch (f.ranks[0].w.layers[j].mixer) {
                 .kda => li += 1,

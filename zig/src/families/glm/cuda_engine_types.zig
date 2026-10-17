@@ -34,4 +34,5 @@ pub const Options = struct {
     mtp: bool, // load the MTP head (drafts)
     settings: ranks.Settings,
     vision: ?images_mod.Limits = null, // --vision's limits (null: off): every rank must hold the rows rank 0 sends
+    drafter: bool = false, // DFlash2 loads after rank agreement
 };

@@ -28,6 +28,8 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
         }
         opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
     }
+    if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter;
+    if (comptime @hasField(F.Options, "drafter_bits")) opts.drafter_bits = o.drafter_bits;
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     return true;
 }
