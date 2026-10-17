@@ -159,14 +159,83 @@ test "/proc text gives the CPU name and memory" {
     try std.testing.expectEqual(@as(?u64, null), host.meminfo("MemTotal: 5 MB\n"));
 }
 
-test "a rocm probe runs no nvidia-smi, names no GPU or driver, and passes the save rules" {
+const rocminfo_strix =
+    \\ROCk module is loaded
+    \\HSA Agents
+    \\*******
+    \\Agent 1
+    \\*******
+    \\  Name:                    AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+    \\  Uuid:                    CPU-XX
+    \\  Marketing Name:          AMD RYZEN AI MAX+ 395 w/ Radeon 8060S
+    \\  Vendor Name:             CPU
+    \\  Device Type:             CPU
+    \\  Compute Unit:            32
+    \\  Pool Info:
+    \\    Pool 1
+    \\      Segment:                 GLOBAL; FLAGS: FINE GRAINED
+    \\      Size:                    127838212(0x79ea604) KB
+    \\*******
+    \\Agent 2
+    \\*******
+    \\  Name:                    gfx1151
+    \\  Uuid:                    GPU-XX
+    \\  Marketing Name:          Radeon 8060S Graphics
+    \\  Vendor Name:             AMD
+    \\  Device Type:             GPU
+    \\  Chip ID:                 5510(0x1586)
+    \\  Compute Unit:            40
+    \\  Pool Info:
+    \\    Pool 1
+    \\      Segment:                 GLOBAL; FLAGS: COARSE GRAINED
+    \\      Size:                    125829120(0x7800000) KB
+    \\    Pool 2
+    \\      Segment:                 GROUP
+    \\      Size:                    64(0x40) KB
+    \\  ISA Info:
+    \\    ISA 1
+    \\      Name:                    amdgcn-amd-amdhsa--gfx1151
+    \\
+;
+
+const rocminfo_two_dgpus =
+    \\*******
+    \\Agent 2
+    \\*******
+    \\  Marketing Name:          AMD Radeon PRO W7800
+    \\  Vendor Name:             AMD
+    \\  Device Type:             GPU
+    \\  Compute Unit:            70
+    \\      Segment:                 GLOBAL; FLAGS: COARSE GRAINED
+    \\      Size:                    50331648(0x3000000) KB
+    \\*******
+    \\Agent 3
+    \\*******
+    \\  Marketing Name:          AMD Radeon PRO V620
+    \\  Vendor Name:             AMD
+    \\  Device Type:             GPU
+    \\  Compute Unit:            72
+    \\      Segment:                 GLOBAL; FLAGS: COARSE GRAINED
+    \\      Size:                    31440896(0x1dfc000) KB
+    \\
+;
+
+test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no driver, and passes the save rules" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    try std.testing.expect(host.gpuQuery("rocm") == null and std.mem.eql(u8, host.gpuQuery("cuda").?[0], "nvidia-smi"));
-    const probe = host.linux(a, "AMD EPYC 9004", 128 << 30, "", null);
-    try std.testing.expect(probe.driver == null and probe.hardware.gpus.len == 0);
-    try std.testing.expect(std.mem.eql(u8, probe.hardware.source, "partial") and std.mem.eql(u8, probe.hardware.memory_type, "unknown"));
+    try std.testing.expect(std.mem.eql(u8, host.gpuQuery("rocm").?[0], "rocminfo") and std.mem.eql(u8, host.gpuQuery("cuda").?[0], "nvidia-smi"));
+    // Strix Halo's /proc/cpuinfo name has a "/", outside the board's name pattern, so the CPU stays unknown.
+    const cpu = host.cpuinfo(a, "model name\t: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S\n");
+    try std.testing.expect(cpu == null);
+    const probe = host.rocm(a, cpu, 128 << 30, rocminfo_strix, null);
+    try std.testing.expect(probe.driver == null and probe.hardware.gpus.len == 1);
+    const g = probe.hardware.gpus[0];
+    try std.testing.expectEqualStrings("AMD Radeon 8060S Graphics", g.name);
+    try std.testing.expectEqual(@as(?u64, 125829120 * 1024), g.memory_bytes);
+    try std.testing.expectEqual(@as(?u64, 40), g.cores);
+    try std.testing.expect(std.mem.eql(u8, probe.hardware.source, "partial") and std.mem.eql(u8, probe.hardware.memory_type, "unified"));
+    try std.testing.expectEqualStrings("detected", host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_strix, null).hardware.source);
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux", .driver = probe.driver };
     const sample: suite.Sample = .{ .fixture_id = "code", .temperature = 0, .repeat = -1, .seed = 1, .status = .@"error", .error_code = .server_error };
     const v = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .repo_id = "example-org/test-model", .local = false }, runtime, probe.hardware, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true }, &.{sample});
@@ -176,4 +245,18 @@ test "a rocm probe runs no nvidia-smi, names no GPU or driver, and passes the sa
         return error.TestUnexpectedResult;
     }
     try std.testing.expect(v.get("runtime").?.get("dependencies").?.object.count() == 0);
+}
+
+test "rocm GPUs: discrete cards are dedicated, visible-device indices select, and missing rocminfo leaves the GPUs unknown" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const both = host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_two_dgpus, null);
+    try std.testing.expect(both.hardware.gpus.len == 2 and std.mem.eql(u8, both.hardware.memory_type, "dedicated"));
+    try std.testing.expectEqualStrings("AMD Radeon PRO V620", both.hardware.gpus[1].name);
+    const second = host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_two_dgpus, "1");
+    try std.testing.expect(second.hardware.gpus.len == 1 and second.hardware.gpus[0].cores.? == 72);
+    for ([_][]const u8{ "-1", "", "x" }) |sel| try std.testing.expect(host.rocm(a, null, null, rocminfo_two_dgpus, sel).hardware.gpus.len == 0);
+    const none = host.rocm(a, "AMD EPYC 9004", 128 << 30, "", null);
+    try std.testing.expect(none.hardware.gpus.len == 0 and std.mem.eql(u8, none.hardware.source, "partial") and std.mem.eql(u8, none.hardware.memory_type, "unknown"));
 }

@@ -1,4 +1,5 @@
 //! The hardware allowlist per OS: CPU and GPU names, memory, cores, and the CUDA driver version.
+//! On ROCm the GPUs come from rocminfo's GPU agents; the amdgpu driver has no version to report.
 const std = @import("std");
 const builtin = @import("builtin");
 const json = @import("json");
@@ -22,14 +23,86 @@ pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, bac
     }
     const cpu = cpuinfo(a, readProc(a, io, "/proc/cpuinfo") orelse "");
     const memory = meminfo(readProc(a, io, "/proc/meminfo") orelse "") orelse (std.process.totalSystemMemory() catch null);
-    const csv = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
-    return linux(a, cpu, memory, csv, env.get("CUDA_VISIBLE_DEVICES"));
+    const out = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
+    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, env.get("HIP_VISIBLE_DEVICES") orelse env.get("ROCR_VISIBLE_DEVICES"));
+    return linux(a, cpu, memory, out, env.get("CUDA_VISIBLE_DEVICES"));
 }
 
-/// The GPU query behind a backend's facts: nvidia-smi for cuda; none for rocm, whose GPUs and driver stay unknown.
+/// The GPU query behind a backend's facts: nvidia-smi for cuda, rocminfo for rocm; none otherwise.
 pub fn gpuQuery(backend: []const u8) ?[]const []const u8 {
+    if (std.mem.eql(u8, backend, "rocm")) return &.{"rocminfo"};
     if (!std.mem.eql(u8, backend, "cuda")) return null;
     return &.{ "nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits" };
+}
+
+/// ROCm facts from the CPU and memory probes and rocminfo's GPU agents, kept by ``HIP_VISIBLE_DEVICES`` indices.
+/// An AMD APU (a GPU named "... Graphics", such as Radeon 8060S Graphics) shares system memory: ``unified``.
+pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visible: ?[]const u8) Probe {
+    const all = amdGpus(a, text);
+    const gpus = select(Gpu, a, all, visible) orelse return .{ .hardware = summarize(cpu, memory, &.{}, false) };
+    var h = summarize(cpu, memory, gpus, false);
+    if (gpus.len > 0) h.memory_type = for (gpus) |g| {
+        if (!std.mem.endsWith(u8, g.name, " Graphics")) break "dedicated";
+    } else "unified";
+    return .{ .hardware = h };
+}
+
+/// GPU agents from ``rocminfo``: the vendor-prefixed marketing name, the first GLOBAL pool size and the compute units.
+pub fn amdGpus(a: Allocator, text: []const u8) []const Gpu {
+    var out: std.ArrayList(Gpu) = .empty;
+    var agents = std.mem.splitSequence(u8, text, "*******");
+    while (agents.next()) |block| {
+        var marketing: []const u8 = "";
+        var vendor: []const u8 = "";
+        var gpu = false;
+        var g: Gpu = .{ .name = "" };
+        var lines = std.mem.splitScalar(u8, block, '\n');
+        var segment_global = false;
+        while (lines.next()) |l| {
+            const colon = std.mem.indexOfScalar(u8, l, ':') orelse continue;
+            const key = std.mem.trim(u8, l[0..colon], " \t");
+            const value = std.mem.trim(u8, l[colon + 1 ..], " \t\r");
+            if (std.mem.eql(u8, key, "Marketing Name")) marketing = value;
+            if (std.mem.eql(u8, key, "Vendor Name")) vendor = value;
+            if (std.mem.eql(u8, key, "Device Type")) gpu = std.mem.eql(u8, value, "GPU");
+            if (std.mem.eql(u8, key, "Compute Unit") and g.cores == null) g.cores = std.fmt.parseInt(u64, value, 10) catch null;
+            if (std.mem.eql(u8, key, "Segment")) segment_global = std.mem.startsWith(u8, value, "GLOBAL");
+            if (std.mem.eql(u8, key, "Size") and segment_global and g.memory_bytes == null) g.memory_bytes = kib(value);
+        }
+        if (!gpu) continue;
+        const full = if (vendor.len > 0 and !std.mem.startsWith(u8, marketing, vendor))
+            std.fmt.allocPrint(a, "{s} {s}", .{ vendor, marketing }) catch return &.{}
+        else
+            marketing;
+        g.name = modelName(a, full) orelse continue;
+        out.append(a, g) catch return &.{};
+    }
+    return out.items;
+}
+
+/// rocminfo's ``125829120(0x7800000) KB`` in bytes.
+fn kib(value: []const u8) ?u64 {
+    var end: usize = 0;
+    while (end < value.len and std.ascii.isDigit(value[end])) end += 1;
+    if (end == 0 or !std.mem.endsWith(u8, value, " KB")) return null;
+    const n = std.fmt.parseInt(u64, value[0..end], 10) catch return null;
+    return if (n > 0 and n < 1 << 43) n * 1024 else null;
+}
+
+/// Items kept by a comma-separated index list (``CUDA_VISIBLE_DEVICES`` rules); null when the list is malformed.
+fn select(comptime T: type, a: Allocator, items: []const T, visible: ?[]const u8) ?[]const T {
+    const v = visible orelse return items;
+    const sel = std.mem.trim(u8, v, " \t\n\r");
+    if (sel.len == 0 or std.mem.eql(u8, sel, "-1")) return &.{};
+    var kept: std.ArrayList(T) = .empty;
+    var it = std.mem.splitScalar(u8, v, ',');
+    while (it.next()) |raw| {
+        const index = std.mem.trim(u8, raw, " \t");
+        for (index) |ch| if (!std.ascii.isDigit(ch)) return null;
+        const n = std.fmt.parseInt(usize, index, 10) catch return null;
+        if (n < items.len) kept.append(a, items[n]) catch return null;
+    }
+    return kept.items;
 }
 
 /// Linux facts from the CPU and memory probes and the nvidia-smi rows, empty when no query ran.
