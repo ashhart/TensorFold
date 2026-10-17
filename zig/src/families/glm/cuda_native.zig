@@ -116,8 +116,11 @@ fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
     try s.synchronize();
 }
 
-/// The largest shard a rank sends by RoCE writes: a decode window's partials (8 rows of fp32) fit.
-const roce_cap = 512 << 10;
+/// TF_ROCE_MAX_KB: a RoCE gather's largest shard (default 4096 KiB; 512 cost glm_cuda 24-43% at 8 streams).
+fn roceCap() usize {
+    const v = std.c.getenv("TF_ROCE_MAX_KB") orelse return 4096 << 10;
+    return (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 4096) << 10;
+}
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
@@ -143,6 +146,9 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.gpa = gpa;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+    // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
+    if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = setenv("NCCL_CUMEM_ENABLE", "0", 0);
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
@@ -163,7 +169,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         };
     }
     errdefer if (own.e.images) |v| v.deinit();
-    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
+    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roceCap()); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));

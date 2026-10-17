@@ -13,6 +13,8 @@ const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
 const images_mod = @import("cuda_images.zig");
+const tile = @import("cuda_tile.zig");
+const mm_mod = @import("cuda_mm.zig");
 const prof_mod = @import("cuda_prof.zig");
 
 pub const Options = struct {
@@ -71,6 +73,7 @@ pub const Engine = struct {
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
+    packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     checkpoint_digest: [32]u8,
@@ -145,18 +148,30 @@ pub const Engine = struct {
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
+        const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
+        if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
-            mk: *const @import("cuda_mm.zig").Kernels,
+            gpa: std.mem.Allocator,
+            mk: *const mm_mod.Kernels,
             s: cuda.Stream,
             d: *const cuda.Driver,
             enabled: bool,
+            dense: u8,
+            head: u8,
+            packs: *mm_mod.Packed,
             fn apply(t: @This(), w: *weights.Weights) !void {
-                if (t.enabled) try weights.tileLinears(w, t.mk, t.s, t.d);
+                if (t.enabled) t.packs.* = try tile.tileLinears(t.gpa, w, t.mk, t.s, t.d, t.dense, t.head);
             }
         };
-        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), Tile{ .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled }, Tile.apply);
+        const tiler: Tile = .{ .gpa = gpa, .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled, .dense = o.settings.dense_bits, .head = o.settings.head_bits, .packs = &e.packs };
+        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), tiler, Tile.apply);
         errdefer e.w.deinit();
+        errdefer {
+            gpa.free(e.packs.ptrs);
+            gpa.free(e.packs.bits);
+        }
         e.m.tiled = o.settings.tiled;
+        if (o.settings.tiled) e.m.packs = &e.packs;
         try e.bind(0);
         errdefer {
             e.free(0);
@@ -194,6 +209,8 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.gpa.free(e.packs.ptrs);
+        e.gpa.free(e.packs.bits);
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
         e.snaps.deinit(e.gpa);
