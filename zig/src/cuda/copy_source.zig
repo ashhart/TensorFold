@@ -251,6 +251,22 @@ pub fn keepDriver(d: *const Driver) bool {
         _ = std.c.pthread_cond_wait(&changed, &mutex);
     }
 }
+/// A pinned buffer no wait proved free: quarantine counts it and frees it after a later wait on its stream succeeds.
+pub fn retainPinned(d: *const Driver, host: memory.HostBuffer, stream: streams.Stream) void {
+    const n = newNode() catch {
+        std.log.warn("copy source: {d} pinned bytes stay allocated: no quarantine node for them", .{host.bytes.len});
+        return;
+    };
+    budget.charge(host.bytes.len);
+    n.* = .{ .charge = n.charge + host.bytes.len, .failed = true, .driver = @intFromPtr(d), .context = current_context, .stream = stream.handle, .data = .{ .pinned = .{
+        .bytes = host.bytes,
+        .free = d.api.cuMemFreeHost,
+        .event = null,
+        .destroy = null,
+        .query = null,
+    } } };
+    publish(n);
+}
 pub fn retained() usize {
     lock();
     defer unlock();
@@ -560,6 +576,10 @@ fn reap(d: *const Driver) void {
 
 test {
     _ = @import("copy_source_test.zig");
+    _ = @import("copy_source_context_test.zig");
+    _ = @import("copy_source_limits_test.zig");
+    _ = @import("copy_source_capture_test.zig");
+    _ = @import("copy_source_spare_test.zig");
 }
 
 test "driver close waits through reaper query, event destruction and host release" {
@@ -570,19 +590,4 @@ test "driver close waits through completion release callbacks" {
 }
 test "driver close frees the spare a reaper parks while close waits on it" {
     try @import("copy_source_close_test.zig").run(reap);
-}
-test {
-    _ = @import("copy_source_context_test.zig");
-}
-
-test {
-    _ = @import("copy_source_limits_test.zig");
-}
-
-test {
-    _ = @import("copy_source_capture_test.zig");
-}
-
-test {
-    _ = @import("copy_source_spare_test.zig");
 }

@@ -13,6 +13,12 @@ pub fn acquire(size: usize, count: usize) error{CopySourceLimit}!void {
     bytes += size;
     nodes += count;
 }
+/// Custody that already exists (a buffer a failed wait left in use) counts even past the limit.
+pub fn charge(size: usize) void {
+    _ = std.c.pthread_mutex_lock(&mutex);
+    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    bytes += size;
+}
 pub fn release(size: usize, count: usize) void {
     _ = std.c.pthread_mutex_lock(&mutex);
     defer _ = std.c.pthread_mutex_unlock(&mutex);

@@ -146,7 +146,8 @@ pub fn saveCache(e: *Engine, cache: *const Cache, at: usize, seen: []const Seen)
 /// A failed save's host buffer: earlier copies may still be queued into it, so it is freed once the stream drains.
 fn drainThenFree(e: *Engine, host: *cuda.HostBuffer) void {
     e.stream.synchronize() catch {
-        std.log.warn("qwen3_5: a failed save's host copy is kept: its stream did not drain", .{});
+        std.log.warn("qwen3_5: a failed save's host copy goes to the copy-source quarantine: its stream did not drain", .{});
+        cuda.copy_source.retainPinned(e.d, host.*, e.stream);
         return;
     };
     host.free();
@@ -198,12 +199,15 @@ pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     dropCopy(t.e, @ptrCast(@alignCast(saved)));
 }
 
-/// Frees a kept state's host copy; after a failed restore, only once this drop's own wait proves the copies done.
+/// Frees a kept state's host copy; after a failed restore whose copies no wait proves done, quarantine takes it.
 pub fn dropCopy(e: *Engine, copy: *Copy) void {
     if (copy.reading) if (e.stream.synchronize()) |_| {
         copy.reading = false;
     } else |_| {};
-    if (copy.reading) std.log.warn("qwen3_5: a kept state's host copy stays: a restore's copies from it did not drain", .{}) else copy.host.free();
+    if (copy.reading) {
+        std.log.warn("qwen3_5: a kept state's host copy goes to the copy-source quarantine: a restore's copies did not drain", .{});
+        cuda.copy_source.retainPinned(e.d, copy.host, e.stream);
+    } else copy.host.free();
     e.gpa.free(copy.images);
     e.gpa.destroy(copy);
 }
@@ -363,8 +367,14 @@ test "a failed restore's host copy stays through a drop until a wait, the restor
         try std.testing.expectError(error.NotReady, restoreCache(&e, &cache, copy, &.{}));
         try std.testing.expectEqual(@as(usize, 2), RestoreFake.copies); // the state queued, the first head's rows refused
         RestoreFake.stuck = stuck[1];
+        const before = cuda.copy_source.retained();
         dropCopy(&e, copy);
-        // a stream that will not drain may still read the copy: the drop leaves it; once drained, the drop frees it
+        // a stream that will not drain may still read the copy: quarantine holds it, counted; once drained, it is freed
         try std.testing.expectEqual(@as(usize, @intFromBool(!stuck[1])), RestoreFake.freed);
+        try std.testing.expectEqual(before + @intFromBool(stuck[1]), cuda.copy_source.retained());
+        RestoreFake.stuck = false;
+        try e.stream.synchronize();
+        try std.testing.expectEqual(@as(usize, 1), RestoreFake.freed);
+        try std.testing.expectEqual(before, cuda.copy_source.retained());
     }
 }

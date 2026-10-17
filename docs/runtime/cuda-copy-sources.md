@@ -6,8 +6,9 @@ need their own completion boundary. The source owner does not replace those guar
 
 Not every host-to-device copy goes through the owner. Qwen's kept prompt states (families/qwen3_5/cuda_reuse.zig)
 restore from their own pinned snapshot with direct copies on the engine's stream. A restore marks the snapshot read
-until a stream wait proves those copies done; dropping a marked snapshot waits once more and frees it only if that
-wait succeeds, else keeps it with a warning.
+until a stream wait proves those copies done; dropping a marked snapshot waits once more and frees it if that wait
+succeeds, else hands it to the quarantine (`copy_source.retainPinned`), which counts its bytes against the limit and
+frees it after a later wait on that stream or its context succeeds. A failed save's buffer goes the same way.
 
 Admission charges CPU source bytes, pinned buffer capacities and Node sizes before allocation. The process-wide
 limit is 1 GiB and 4096 owners. It includes active reusable storage, quarantine, and owners inside disposal callbacks.
