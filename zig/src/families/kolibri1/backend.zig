@@ -46,6 +46,11 @@ pub const Kolibri = struct {
     steps: []?fwd.Model.Step, // a slot's one-row step, captured at its first use (null: not yet)
     graphed: bool, // TENSORFOLD_KOLIBRI_GRAPHS=0 runs every step eager
 
+    /// The device bytes `init` allocates: a round's logits, the token ring, and each slot's last row and rule.
+    pub fn openBytes(vocab: usize, slots: usize) usize {
+        return round_rows * vocab * 6 + (ring + round_rows) * 4 + round_rows * 16 + slots * (vocab * 4 + @sizeOf(cuda.sample.Rule));
+    }
+
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, m: *fwd.Model, k: *const kern.Kernels, s: cuda.Stream) !Kolibri {
         const v = m.c.vocab;
         const free = try gpa.alloc(bool, m.slots);

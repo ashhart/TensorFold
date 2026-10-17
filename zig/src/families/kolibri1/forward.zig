@@ -43,10 +43,15 @@ pub const Model = struct {
     origin: u64, // the bf16 base tree attention's cache offsets count from
     s: Scratch,
     buffers: std.ArrayList(DeviceBuffer) = .empty,
+    planned: ?usize = null, // a plan: the bytes counted, nothing allocated
 
     const Scratch = struct { ids: u64, pos: u64, slot: u64, res: u64, x: u64, qkv: u64, q: u64, kn: u64, vn: u64, att: u64, o: u64, part: u64, logits_e: u64, pick: u64, wts: u64, plan: grouped.Plan, act: u64, y: u64, mo: u64, flat: u64, paths: u64, depths: u64, offs: u64, sel: u64, win: u64, tree: u64 };
 
     fn alloc(m: *Model, bytes: usize) !u64 {
+        if (m.planned) |*p| {
+            p.* += @max(bytes, 256);
+            return 0;
+        }
         const b = try DeviceBuffer.alloc(m.d, @max(bytes, 256));
         errdefer {
             var x = b;
@@ -58,6 +63,7 @@ pub const Model = struct {
 
     fn zeros(m: *Model, s: cuda.Stream, bytes: usize) !u64 {
         const p = try m.alloc(bytes);
+        if (m.planned != null) return p;
         try m.d.check(m.d.api.cuMemsetD8Async(p, 0, @max(bytes, 256), s.handle), "cuMemsetD8Async");
         return p;
     }
@@ -71,10 +77,34 @@ pub const Model = struct {
 
     /// Caches for `slots` streams of `context` positions, RoPE tables, and scratch for `max_rows` rows a forward.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize) !Model {
+        var m = blank(gpa, d, w, context, slots, max_rows);
+        errdefer m.deinit();
+        try m.build(s, k);
+        return m;
+    }
+
+    /// The device bytes `init` allocates for these sizes, counted by the same path without allocating.
+    pub fn openBytes(gpa: std.mem.Allocator, d: *const cuda.Driver, s: cuda.Stream, w: *const wts.Weights, k: *const kern.Kernels, context: usize, slots: usize, max_rows: usize) !usize {
+        var m = blank(gpa, d, w, context, slots, max_rows);
+        defer m.deinit();
+        m.planned = 0;
+        try m.build(s, k);
+        return m.planned.?;
+    }
+
+    fn blank(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const wts.Weights, context: usize, slots: usize, max_rows: usize) Model {
         var c = w.config;
         c.layers = w.layers.len; // a model loaded with fewer layers (checks) runs those alone
-        var m: Model = .{ .gpa = gpa, .d = d, .w = w, .c = c, .context = context, .slots = slots, .ring = ringSize(prompt_rows, c.window), .max_rows = max_rows, .groups = TreeAttention.groups(context + tree.max_rows), .k = &.{}, .v = &.{}, .norms = &.{}, .cos = 0, .sin = 0, .origin = 0, .s = undefined };
-        errdefer m.deinit();
+        return .{ .gpa = gpa, .d = d, .w = w, .c = c, .context = context, .slots = slots, .ring = ringSize(prompt_rows, c.window), .max_rows = max_rows, .groups = TreeAttention.groups(context + tree.max_rows), .k = &.{}, .v = &.{}, .norms = &.{}, .cos = 0, .sin = 0, .origin = 0, .s = undefined };
+    }
+
+    fn build(m: *Model, s: cuda.Stream, k: *const kern.Kernels) !void {
+        const gpa = m.gpa;
+        const d = m.d;
+        const c = m.c;
+        const w = m.w;
+        const slots = m.slots;
+        const context = m.context;
         const dh = c.head_dim;
         m.k = try gpa.alloc(u64, c.layers);
         m.v = try gpa.alloc(u64, c.layers);
@@ -85,6 +115,7 @@ pub const Model = struct {
             m.k[i] = try m.zeros(s, bytes);
             m.v[i] = try m.zeros(s, bytes);
             m.norms[i] = try m.alloc(2 * dh * 4);
+            if (m.planned != null) continue;
             const L = w.layers[i];
             try d.check(d.api.cuMemcpyDtoDAsync_v2(m.norms[i], L.q_norm, dh * 4, s.handle), "cuMemcpyDtoDAsync");
             try d.check(d.api.cuMemcpyDtoDAsync_v2(m.norms[i] + dh * 4, L.k_norm, dh * 4, s.handle), "cuMemcpyDtoDAsync");
@@ -92,8 +123,7 @@ pub const Model = struct {
         try m.rope(s);
         m.origin = try m.zeros(s, 256);
         try m.scratch(k);
-        try s.synchronize();
-        return m;
+        if (m.planned == null) try s.synchronize();
     }
 
     pub fn deinit(m: *Model) void {
@@ -107,6 +137,11 @@ pub const Model = struct {
     /// RoPE tables: angle p / theta^(2j / D) in float64, cos and sin rounded to fp32, the halves repeated (neox).
     fn rope(m: *Model, s: cuda.Stream) !void {
         const dh = m.c.head_dim;
+        if (m.planned != null) {
+            m.cos = try m.alloc(m.context * dh * 4);
+            m.sin = try m.alloc(m.context * dh * 4);
+            return;
+        }
         const cos = try m.gpa.alloc(f32, m.context * dh);
         defer m.gpa.free(cos);
         const sin = try m.gpa.alloc(f32, m.context * dh);
