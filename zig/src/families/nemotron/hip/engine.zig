@@ -13,6 +13,9 @@ const prefix = @import("prefix.zig");
 const rounds = @import("round.zig");
 const graphs = @import("graphs.zig");
 
+/// Prompt rows a forward takes at most: the routed experts see enough rows a tile, within the scratch admit counts.
+pub const prompt_rows: usize = 2048;
+
 pub const Options = struct {
     device: c_int = 0,
     rank: usize = 0,
@@ -24,7 +27,7 @@ pub const Options = struct {
     /// Positions a stream holds at most.
     capacity: usize = 4096,
     /// Prompt rows a forward takes at most.
-    chunk: usize = 512,
+    chunk: usize = prompt_rows,
     /// Streams the KV pool holds at the full capacity, and pages beside them (a prompt cache's).
     streams: usize = 1,
     extra_pages: usize = 0,

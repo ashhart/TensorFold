@@ -22,7 +22,7 @@ const Args = struct {
     steps: usize = 32,
     streams: usize = 3,
     mtp: bool = true,
-    chunk: usize = 512,
+    chunk: usize = nem.engine.prompt_rows,
     g: group.Group = .{},
 };
 
