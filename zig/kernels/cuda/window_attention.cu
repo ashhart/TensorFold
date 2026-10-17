@@ -439,10 +439,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
             tm0 = fmaxf(tm0, __shfl_xor_sync(0xffffffffu, tm0, x));
             tm1 = fmaxf(tm1, __shfl_xor_sync(0xffffffffu, tm1, x));
         }
-        const bool act = tm0 != -INFINITY; // the keys' mask is the same for every head
-        const float n0 = act ? fmaxf(m0, tm0) : m0, n1 = act ? fmaxf(m1, tm1) : m1;
-        const float a0 = act ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-        const float a1 = act ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+        const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY; // each head's own: a NaN head moves only its row
+        const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
+        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
+        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
         float c0 = 0.0f, c1 = 0.0f;
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
