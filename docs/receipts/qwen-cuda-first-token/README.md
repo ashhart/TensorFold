@@ -112,6 +112,24 @@ receipts do not isolate a kernel or scheduler cause for the timing changes.
 The reported prefill timing boundary moves with the handoff; it does not show
 faster prefill arithmetic.
 
+## Replay
+
+[harness/](harness/README.md) is the HTTP collector used for these runs:
+`run_panel.py`, `run_startup.py` and `run_safety.py`, with the pinned corpus.
+It needs Python 3.11 or newer and a local server. The five host checks in
+that directory pass without a GPU.
+
+[requests.csv](requests.csv) is one row per served request from the loaded
+panel, both startup orders and the smoke run: 774 rows, 387 per arm. The
+376 timing pairs are the 196 panel, 90 forward and 90 reverse rows on each
+arm. The other 22 rows are the smoke and safety requests, including the six
+smoke pairs. `sent`, `first`, `last` and `done` are the client clock in
+seconds and are comparable only inside one server process. `ttft_s` and
+`full_response_s` are the durations. `output_sha256` and
+`request_body_sha256` are full hashes. `token_sha` is the 12-hex prefix
+recorded by the collector. The prompts are the synthetic corpus in the
+harness, not a private transcript.
+
 ## Correctness and checks
 
 - 376 paired timing requests match baseline/candidate request bodies, tokens
