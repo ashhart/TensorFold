@@ -203,7 +203,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
 }
 
 /// The facts' examples as a lesson gathers them.
-const Parts = struct {
+pub const Parts = struct {
     train: std.ArrayList(api.Example) = .empty,
     held_ex: std.ArrayList(api.Example) = .empty,
     held: std.ArrayList(Held) = .empty,
@@ -313,19 +313,20 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
 }
 
 /// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
-fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, language: ?[]const u8, supplied: []const []const u8, gone: anytype) !bool {
+pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, language: ?[]const u8, supplied: []const []const u8, gone: anytype) !bool {
     const a = cx.a;
     const asked = try askBase(srv, cx, null, try questionsFor(a, parts.document, fact, probes, language), 32 * probes, gone);
     // the caller's own questions go first, judged as the model's are: a lesson's wording need not name the subject
-    const qs = try supplied_questions.ahead(a, supplied, try wording.questions(a, asked.content, probes));
+    const written = try wording.questions(a, asked.content, probes);
+    const qs = try supplied_questions.ahead(a, supplied, written);
     if (supplied.len > 0) log.line("slide: {d} questions supplied with \"{s}\"", .{ supplied.len, fact });
     var got: Got = .{ .entity = try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
     var phrase: []const u8 = "";
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);
         phrase = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
-        got.words = try slide_subject.factSubject(a, phrase, fact, qs, parts.document);
-        got.named = try slide_subject.named(a, got.words, fact, qs);
+        got.words = try slide_subject.factSubject(a, phrase, fact, written, parts.document);
+        got.named = try slide_subject.named(a, got.words, fact, written);
         log.line("slide: its subject is \"{s}\": {s} (a question names it by {s})", .{ phrase, try std.mem.join(a, " ", got.words), try std.mem.join(a, " or ", if (got.named.len > 0) got.named else got.words) });
         if (got.words.len == 0) got.entity = false;
     }

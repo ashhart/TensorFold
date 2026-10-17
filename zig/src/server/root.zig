@@ -127,3 +127,7 @@ test {
 test {
     _ = @import("slide_save_failure_test.zig");
 }
+
+test {
+    _ = @import("slide_subject_guard_test.zig");
+}
