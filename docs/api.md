@@ -264,8 +264,8 @@ macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dx
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
 `zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
-structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
-answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
+structured request gets HTTP 400. Nemotron (Metal and CUDA), Qwen3.5-2B (Metal) and Qwen3.8 Flash Next on shared
+sessions (Metal, `--parallel` 2 or more) enforce it; other native engines answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
 before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
 and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
 

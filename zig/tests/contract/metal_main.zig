@@ -6,6 +6,7 @@ const contract = @import("contract");
 const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
+const mask_k = @import("metal_mask.zig");
 const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
 
@@ -100,6 +101,12 @@ pub fn main(init: std.process.Init) !u8 {
     if (wanted(o, topk_k.spec().name)) {
         topk = try topk_k.TopK.init(a, device, queue);
         try kernels.append(a, topk.?.kernel());
+    }
+    var mask: ?mask_k.Mask = null;
+    defer if (mask) |*m| m.deinit();
+    if (wanted(o, mask_k.spec().name)) {
+        mask = try mask_k.Mask.init(a, device, queue);
+        try kernels.append(a, mask.?.kernel());
     }
     for ([_][]const Reg{ &common, if (tensor) &m5_only else &.{} }) |list| for (list) |v| {
         if (!wanted(o, v.name)) continue;

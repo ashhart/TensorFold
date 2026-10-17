@@ -159,9 +159,9 @@ pub const VideoOffer = struct {
     prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
     /// The token the chat template writes once per video, expanded to its groups.
     video_token: u32,
-    /// The tokens around each group's image tokens; the group's time follows as text.
-    group_open: u32,
+    group_open: u32, // the tokens around each group's image tokens; the group's time follows as text
     group_close: u32,
+    time_first: ?u32 = null, // Qwen3VLProcessor's layout: each group's "<X.Y seconds>" first, its rows this token
     /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
     markers: []const u32 = &.{},
     /// Video tokens one request may hold in all, videos, and frames sampled a video.

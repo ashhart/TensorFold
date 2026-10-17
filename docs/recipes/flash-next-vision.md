@@ -2,9 +2,9 @@
 
 This recipe describes the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). @shantanugoel added Flash Next images on CUDA in
-[#146](https://github.com/ashhart/TensorFold/pull/146), adapting @MiaAI-Lab's vision patch. The native binary refuses
-`--vision`, has no Flash Next CUDA backend, reads no vision tower and does not read the `TENSORFOLD_VISION_*`
-variables below.
+[#146](https://github.com/ashhart/TensorFold/pull/146), adapting @MiaAI-Lab's vision patch. The native binary has no Flash Next CUDA backend and does not read the
+`TENSORFOLD_VISION_*` variables below; on a Mac it reads Flash Next images and videos itself (see
+[Qwen3.8 Flash Next](../vision.md#qwen38-flash-next)).
 
 Run a complete local Flash Next checkpoint with `--vision --parallel 2` (or more), on one CUDA GPU.
 This port supports images, including multiple images within the existing 4096 visual-token budget; video and
