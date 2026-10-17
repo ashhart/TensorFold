@@ -133,7 +133,7 @@ fn layer(w: Experts, count: usize, dims: usize, width: usize, limit: f32) common
 }
 fn shape(dims: usize, width: usize) common.Layer {
     const w: Experts = .{ .gt = 0, .ut = 0, .dt = 0, .k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .shx = false };
-    return layer(w, 4096, dims, width, 0);
+    return layer(w, cuda.grouped.max_experts, dims, width, 0);
 }
 /// A chunk's compacted picks ahead of the common scratch, 256-aligned; the usize keeps @min from narrowing to u7.
 fn picksBytes(rows: usize) usize {

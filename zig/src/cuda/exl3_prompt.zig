@@ -22,7 +22,7 @@ fn aligned(n: usize) !usize {
     return (try add(n, 255)) / 256 * 256;
 }
 fn sizes(l: ex.Layer, rows: usize, slots: usize) ![4]usize {
-    if (!eligible(l) or rows == 0 or slots == 0 or slots > 32 or l.experts == 0 or l.experts > 4096) return error.Exl3Shape;
+    if (!eligible(l) or rows == 0 or slots == 0 or slots > 32 or l.experts == 0 or l.experts > grouped.max_experts) return error.Exl3Shape;
     const pairs = try mul(rows, slots);
     if (pairs > std.math.maxInt(i32) or l.dims > std.math.maxInt(i32) or l.width > std.math.maxInt(i32)) return error.Exl3Shape;
     const rotated = try aligned(try mul(try mul(if (l.shared_input) rows else pairs, l.dims), 2));

@@ -9,6 +9,7 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 
 pub const small = 1024; // pairs the one-block plan takes; wider plans rank in blocks of 1024 pairs
+pub const max_experts = 1024; // experts.cu's EMAX: the plan counts each expert's pairs in a shared array that long
 
 /// experts.max_items: an item per used expert plus one per `tile` pairs past its first.
 pub fn maxItems(pairs: usize, experts: usize, tile: usize) usize {

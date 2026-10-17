@@ -158,6 +158,19 @@ test "exl3 prompt: the common dispatch requires verified mcg4 geometry and keeps
     try std.testing.expectError(error.Exl3Shape, P.scratch(std.math.maxInt(u64) - 255, l, 1, 1));
 }
 
+test "exl3 prompt: the common entry takes as many experts as the grouped router counts, and refuses one more" {
+    const P = ex.prompt;
+    var l: ex.Layer = .{ .gate = 0, .up = 0, .down = 0, .gate_k2 = 0, .up_k2 = 0, .down_k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .dims = 512, .width = 256, .experts = cuda.grouped.max_experts, .codebook = .mcg, .uniform_k2 = 8 };
+    try std.testing.expectEqual(@as(usize, 1024), cuda.grouped.max_experts);
+    for ([_]usize{ 1, 1024, 2048 }) |rows| {
+        l.experts = cuda.grouped.max_experts;
+        _ = try P.scratch(4096, l, rows, 8);
+        l.experts = cuda.grouped.max_experts + 1;
+        try std.testing.expectError(error.Exl3Shape, P.bytes(l, rows, 8));
+        try std.testing.expectError(error.Exl3Shape, P.scratch(4096, l, rows, 8));
+    }
+}
+
 fn reply(drafts: bool, neighbors: usize, seed: ?u64) ![32]u32 {
     const a = std.testing.allocator;
     var model: glm.engine.Engine = undefined;
