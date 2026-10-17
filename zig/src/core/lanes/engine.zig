@@ -13,6 +13,7 @@ const plan_lanes = @import("plan_lanes.zig");
 const fill = @import("fill.zig");
 const trail = @import("trail.zig");
 const open = @import("open.zig");
+const handover = @import("handover.zig");
 const trim = @import("trim.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
@@ -99,36 +100,9 @@ pub const Engine = struct {
     pub const opened = open.opened;
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
-
-    /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
-    pub fn adopt(e: *Engine, s: *Stream) !void {
-        try e.live.append(e.gpa, s);
-    }
-
-    /// Give a live stream to another driver between rounds, its round state dropped (adopt takes it back).
-    pub fn detach(e: *Engine, s: *Stream) bool {
-        if (s.inflight != null or s.finished) return false;
-        for (e.live.items, 0..) |x, i| {
-            if (x != s) continue;
-            _ = e.live.orderedRemove(i);
-            s.dropRoundState(e.gpa);
-            return true;
-        }
-        return false;
-    }
-
-    /// Release a cancelled stream between rounds: no pending draws or drafts.
-    pub fn discard(e: *Engine, s: *Stream) void {
-        s.finished = true;
-        s.reason = .cancelled;
-        for (e.live.items, 0..) |x, i| {
-            if (x == s) {
-                _ = e.live.orderedRemove(i);
-                break;
-            }
-        }
-        e.release(s);
-    }
+    pub const adopt = handover.adopt;
+    pub const detach = handover.detach;
+    pub const discard = handover.discard;
 
     /// One round for every live stream (Python `_family_step`).
     pub fn step(e: *Engine) !void {

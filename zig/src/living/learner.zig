@@ -1,6 +1,5 @@
 //! Living Weights' lessons, one learner for every family and backend over a host that gives the trainer and hooks.
 const std = @import("std");
-const platform = @import("sys");
 const adapters = @import("learn_shape.zig");
 const choice = @import("choice.zig");
 const router = @import("router.zig");
@@ -100,7 +99,7 @@ pub fn Learner(comptime H: type) type {
         plain: [4]std.ArrayList(Example) = @splat(.empty), // a lesson's lists as this learner reads them (readable)
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
-            return .{ .gpa = gpa, .io = io, .b = b, .whole = !has_sites or platform.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
+            return .{ .gpa = gpa, .io = io, .b = b, .whole = !has_sites or @import("sys").c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
         }
 
         pub fn deinit(l: *Self) void {
