@@ -111,13 +111,18 @@ pub const Backend = struct {
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
-            if (snap.at < prompt.len and b.sl.usable(snap)) {
+            const resident = b.sl.usable(snap); // the lookup's borrower holds the snap through this pass
+            if (snap.at < prompt.len and resident) {
                 if (snap.home != i) try b.copyOut(i, 0); // the restore writes every one of this slot's rows
                 try mirror.send(e, .restore, &.{ i, snap.id });
                 try b.sl.restore(i, snap.id);
                 at = snap.at;
                 s.cached = at;
-            } else s.reuse_failed = true;
+            } else {
+                const why: []const u8 = if (resident) "state past the prompt" else "state no longer resident";
+                std.log.warn("glm: prompt cache restore refused ({s}): kept {d} of {d} prompt tokens", .{ why, snap.at, prompt.len });
+                s.reuse_failed = true;
+            }
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
         s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored

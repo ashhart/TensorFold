@@ -83,3 +83,32 @@ test "budget pressure refuses a keep rather than evicting an outstanding lookup"
     f.sum = fresh(other[0..4]);
     try std.testing.expect(s.keep(&other, 4, null, &.{}, &.{}));
 }
+
+test "a failed restore on a valid state counts one failure and hides the entry" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    s.resumed(entry, &prompt, false); // the backend refused: the pass prefills from the start
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expectEqual(@as(usize, 0), f.live); // the failed report dropped the state
+    try std.testing.expect(s.find(&prompt, &.{}, &.{}) == null); // expired entries stay hidden
+}
+
+test "a failed restore on an already expired state counts its failure too" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    s.expired(entry.saved); // a concurrent admission invalidated it between lookup and restore
+    s.resumed(entry, &prompt, false);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expectEqual(@as(usize, 0), f.live);
+    try std.testing.expect(s.find(&prompt, &.{}, &.{}) == null);
+}
