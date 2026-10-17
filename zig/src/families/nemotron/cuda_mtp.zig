@@ -9,13 +9,14 @@ const state = @import("cuda_state.zig");
 const Engine = @import("cuda_engine.zig").Engine;
 const streams = @import("cuda_engine.zig").max_streams;
 
-pub const max_chain = 15; // drafts a window holds beside the pending token
+pub const max_chain = state.max_rows - 1; // drafts a window holds beside the pending token
 /// What a sequence keeps of the head between rounds: its caches and its drafts' confidences.
 pub const seq_fields = [_][]const u8{ "k_cache", "v_cache", "probs" };
-const host_drafts = 32; // pinned layout: meta at 0, drafts at 32, confidences at 64 (int32 words)
-const host_probs = 64;
-const host_metas = 128 + state.pass_rows; // after the prompt tokens: a meta row a stream for `chains`
-const meta_words = 32;
+const meta_words = 1 + state.max_rows; // a meta row: the head's position, then each window row's
+const host_drafts = meta_words; // pinned layout: meta, drafts, confidences, then a prompt chunk's tokens (int32 words)
+const host_probs = host_drafts + max_chain;
+const host_tokens = host_probs + max_chain;
+const host_metas = host_tokens + state.pass_rows; // a meta row a stream for `chains`
 
 /// One stream of a batched draft (`chains`): its head and target buffers, kept rows and depth.
 pub const Part = struct {
@@ -81,7 +82,7 @@ pub const Head = struct {
         const kv: usize = @as(usize, e.max_len) * c.kv_heads * c.head_dim * 2;
         const n = e.w.draft_count;
         const S: usize = streams;
-        const sizes = [_]usize{ kv, kv, 17 * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, n * 4, sampler.max_candidates * 4, sampler.max_candidates * 8, sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(1, n), 4 };
+        const sizes = [_]usize{ kv, kv, meta_words * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, n * 4, sampler.max_candidates * 4, sampler.max_candidates * 8, sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(1, n), 4 };
         var total: usize = 0;
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
         const h = try e.gpa.create(Head);
@@ -246,11 +247,12 @@ pub const Head = struct {
     /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
     pub fn capture(h: *Head) !void {
         const m = @intFromBool(h.e.sampling != null);
-        for (1..state.max_rows + 1) |k| {
+        const rows = state.windowRows(h.e.c);
+        for (1..rows + 1) |k| {
             if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try h.record(k, 0);
             h.first_graphs[m][k] = try h.record(k, 1);
         }
-        for (2..max_chain + 1) |j| h.chain_graphs[m][j] = try h.record(1, j);
+        for (2..rows) |j| h.chain_graphs[m][j] = try h.record(1, j);
     }
 
     fn record(h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
@@ -260,7 +262,7 @@ pub const Head = struct {
     /// MTPHead.begin: the head absorbs the last window's first `keep` rows, then drafts the positions after them.
     pub fn begin(h: *Head, keep: usize) !void {
         try h.copied.synchronize();
-        const m = h.pinned.slice(u32)[0..17];
+        const m = h.pinned.slice(u32)[0..meta_words];
         m[0] = @intCast(h.pos);
         for (0..max_chain + 1) |j| m[1 + j] = @intCast(h.pos + keep + j);
         try h.e.ops().upload(h.meta, std.mem.sliceAsBytes(m));
@@ -293,7 +295,7 @@ pub const Head = struct {
 
     /// The lane core's draft request: absorb `follow.len` kept rows (follow: the token after each), then `depth` levels.
     pub fn chain(h: *Head, follow: []const u32, depth: usize) !void {
-        if (follow.len < 1 or follow.len > state.max_rows or depth > max_chain) return error.BadDraftRequest;
+        if (follow.len < 1 or follow.len > state.windowRows(h.e.c) or depth >= state.windowRows(h.e.c)) return error.BadDraftRequest;
         try h.e.ops().upload(h.e.b.sampled, std.mem.sliceAsBytes(follow));
         try h.begin(follow.len);
         if (depth == 0) return h.launch(0);
@@ -309,10 +311,10 @@ pub const Head = struct {
         if (parts.len < 1 or parts.len > streams) return error.BadDraftRequest;
         var total: usize = 0;
         for (parts) |p| {
-            if (p.keep < 1 or p.depth < 1 or p.depth > max_chain) return error.BadDraftRequest;
+            if (p.keep < 1 or p.depth < 1 or p.depth >= state.windowRows(e.c)) return error.BadDraftRequest;
             total += p.keep;
         }
-        if (total > state.max_rows) return error.BadDraftRequest;
+        if (total > state.windowRows(e.c)) return error.BadDraftRequest;
         // the deepest first: the streams still drafting at a level are the leading rows of the last level's output
         std.mem.sort(Part, parts, {}, struct {
             fn deeper(_: void, x: Part, y: Part) bool {
@@ -322,7 +324,7 @@ pub const Head = struct {
         try h.copied.synchronize();
         const host = h.pinned.slice(u32)[host_metas..][0 .. parts.len * meta_words];
         for (parts, 0..) |p, k| {
-            const m = host[k * meta_words ..][0..17];
+            const m = host[k * meta_words ..][0..meta_words];
             m[0] = @intCast(p.pos);
             for (0..max_chain + 1) |j| m[1 + j] = @intCast(p.pos + p.keep + j);
         }
@@ -393,7 +395,7 @@ pub const Head = struct {
         const rows = tokens.len;
         if (rows == 0) return;
         try h.copied.synchronize();
-        const host = h.pinned.slice(u32)[128..][0..tokens.len];
+        const host = h.pinned.slice(u32)[host_tokens..][0..tokens.len];
         @memcpy(host, tokens);
         try o.upload(h.atok, std.mem.sliceAsBytes(host));
         try f.embed(h.atok, h.emb, rows);
