@@ -51,8 +51,8 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloa
         const int key = t * BN + i / d;
         const bool in = key >= lo && key <= p;
         const int64_t at = ((base + (in ? key : lo) % ring) * hk + kh) * d + i % d;
-        kt[(i % d) * KT + i / d] = kc[at];
-        vs[i] = vc[at];
+        kt[(i % d) * KT + i / d] = in ? kc[at] : __float2bfloat16_rn(0.0f); // outside the window: zeros
+        vs[i] = in ? vc[at] : __float2bfloat16_rn(0.0f);
     }
     __syncthreads();
     for (int i = threadIdx.x; i < g * BN; i += NT) { // score (head i / BN, key i % BN)
