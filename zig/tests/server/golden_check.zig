@@ -47,13 +47,12 @@ fn logDiff(a: std.mem.Allocator, want: []const u8, got: []const u8) ![]const []c
     return out.items;
 }
 
-/// Reads a spawned server's stdout to its end, so its log lines never fill the pipe (4 KiB on Windows).
+/// Reads a spawned server's stdout to its end, so its log lines never fill the pipe (4 KiB on Windows), then closes it.
 fn drainStdout(io: Io, out: Io.File) void {
+    defer out.close(io);
     var buf: [4096]u8 = undefined;
     var reader = out.reader(io, &buf);
-    while (true) {
-        _ = reader.interface.discardShort(buf.len) catch return;
-    }
+    while ((reader.interface.discardShort(buf.len) catch return) == buf.len) {}
 }
 
 /// The parent's SystemRoot, which a Windows child needs for Winsock; null elsewhere.
@@ -429,15 +428,16 @@ fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []con
         .stderr = .inherit,
         .environ_map = &map,
     });
-    // the startup lines until the port
+    // the startup lines until the port, each taken with its newline (one before PORT: a raised open-file limit's)
     var rbuf: [4096]u8 = undefined;
     var reader = child.stdout.?.reader(io, &rbuf);
     while (true) {
-        const line = reader.interface.takeDelimiterExclusive('\n') catch return error.NoPortLine;
+        const line = (reader.interface.takeDelimiter('\n') catch return error.NoPortLine) orelse return error.NoPortLine;
         if (std.mem.startsWith(u8, line, "PORT ")) {
             const port = try std.fmt.parseInt(u16, std.mem.trim(u8, line[5..], " \r"), 10);
             // the server's log lines keep coming on stdout: drained, or a full pipe blocks the server
             const drain = try std.Thread.spawn(.{}, drainStdout, .{ io, child.stdout.? });
+            child.stdout = null; // the drain owns it; closed by wait, its number would go to the next server's pipe
             drain.detach();
             return .{ .child = child, .port = port, .log_path = log_path, .key_path = key_path };
         }
