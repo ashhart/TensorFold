@@ -33,7 +33,7 @@ tensorfold serve example-org/public-checkpoint --name local-model
 tensorfold benchmark example-org/public-checkpoint --server http://127.0.0.1:8080 --model-id local-model --backend mlx
 ```
 
-Attached-server results do not claim the client's hardware is the server's hardware. They carry unknown hardware, versions and checkpoint revisions and remain unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.
+Attached-server results do not claim the client's hardware is the server's hardware. The client reads `GET /v1/benchmark/manifest` from the server it attached to. A manifest that passes the receipt checks fills the version, hardware, checkpoint hashes, revision and rank count (1 or 2). Without that document, or if any field fails those checks, the receipt keeps unknown hardware and an unknown revision and remains unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.
 
 The runner records failures, incomplete streams, missing usage, early EOS and cancellations. Exit code 0 means every measured attempt completed its requested output with a delivery interval; 1 means an error, and with `--publish` the receipt is still saved when the run finished; 2 means incomplete attempts remain in the saved receipt; 130 means the run was cancelled with Ctrl-C: an attempt in flight is kept in the receipt, and a cancel during server startup saves nothing. SIGTERM and SIGHUP exit 143 and 129 without a receipt. Errors never silently disappear from an average.
 
