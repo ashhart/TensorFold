@@ -126,7 +126,7 @@ fn holdResident(h: *Host) !void {
 /// Metal.room's fit: the kept states' budget is what the streams leave, at most the cap; the least valuable go first.
 fn fitCache(ctx: *anyopaque, bytes: u64, restoring: ?*anyopaque, prompt: []const u32) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
-    const store = &(h.cache orelse return);
+    const store = if (h.cache) |*owned| owned else return;
     store.budget = @min(h.cache_cap, bytes);
     const Left = struct {
         s: *const api.prompt_cache.Store,
@@ -145,4 +145,73 @@ fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_to
     for (p.pieces, pieces) |x, *y| y.* = .{ .pixels = x.pixels, .gh = x.gh, .gw = x.gw, .tokens = x.tokens, .before = x.before, .after = x.after };
     const last = p.pieces[p.pieces.len - 1];
     return .{ .pixels = last.pixels, .gh = last.gh, .gw = last.gw, .tokens = p.tokens, .hash = p.hash, .pieces = pieces };
+}
+
+const CacheFixture = struct {
+    live: usize = 0,
+    fn bytes(_: *anyopaque, at: u32) u64 {
+        return 100 + at;
+    }
+    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) !api.prompt_cache.Saved {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        const held = try std.testing.allocator.create(u32);
+        held.* = at;
+        self.live += 1;
+        return held;
+    }
+    fn restore(_: *anyopaque, _: ?*anyopaque, _: api.prompt_cache.Saved) !void {}
+    fn drop(ptr: *anyopaque, saved: api.prompt_cache.Saved) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        std.testing.allocator.destroy(@as(*u32, @ptrCast(@alignCast(saved))));
+        self.live -= 1;
+    }
+    fn snapshots(self: *@This()) api.prompt_cache.Snapshots {
+        return .{ .ptr = self, .vtable = &.{ .bytes = bytes, .save = save, .restore = restore, .drop = drop } };
+    }
+};
+
+test "T50 cache callback updates the owned store rather than a temporary value" {
+    var f: CacheFixture = .{};
+    var h: Host = undefined;
+    h.cache_cap = 500;
+    h.cache = api.prompt_cache.Store.init(std.testing.allocator, f.snapshots(), .{ .min_prompt = 0 }, 500);
+    defer h.cache.?.deinit();
+    fitCache(&h, 200, null, &.{});
+    try std.testing.expectEqual(@as(u64, 200), h.cache.?.budget);
+    fitCache(&h, 800, null, &.{});
+    try std.testing.expectEqual(@as(u64, 500), h.cache.?.budget);
+}
+
+test "T50 cache callback evicts from the real store and preserves the restored entry" {
+    var f: CacheFixture = .{};
+    var h: Host = undefined;
+    h.cache_cap = 1000;
+    h.cache = api.prompt_cache.Store.init(std.testing.allocator, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer h.cache.?.deinit();
+    const store = &h.cache.?;
+    try std.testing.expect(store.keep(&.{ 1, 1, 1, 1, 9 }, 4, null, &.{}, &.{}));
+    try std.testing.expect(store.keep(&.{ 2, 2, 2, 2, 2, 2, 9 }, 6, null, &.{}, &.{}));
+    try std.testing.expectEqual(@as(u64, 210), store.held);
+    const kept = store.entries.items[0].saved;
+    fitCache(&h, 110, kept, &.{ 1, 1, 1, 1, 9 });
+    try std.testing.expectEqual(@as(u64, 110), store.budget);
+    try std.testing.expectEqual(@as(u64, 104), store.held);
+    try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
+    try std.testing.expect(store.entries.items[0].saved == kept);
+    try std.testing.expectEqual(@as(usize, 1), f.live);
+    try std.testing.expectEqual(@as(u64, 1), store.counts.evicted);
+    fitCache(&h, 110, kept, &.{ 1, 1, 1, 1, 9 });
+    try std.testing.expectEqual(@as(u64, 1), store.counts.evicted);
+    fitCache(&h, 0, null, &.{});
+    try std.testing.expectEqual(@as(u64, 0), store.held);
+    try std.testing.expectEqual(@as(usize, 0), store.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 0), f.live);
+    try std.testing.expectEqual(@as(u64, 2), store.counts.evicted);
+}
+
+test "T50 cache callback with no configured cache leaves no state to mutate" {
+    var h: Host = undefined;
+    h.cache = null;
+    fitCache(&h, 0, null, &.{});
+    try std.testing.expect(h.cache == null);
 }
