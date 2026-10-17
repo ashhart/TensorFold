@@ -305,7 +305,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
         if (args.model_id != null) return fail(ctx, "--model-id applies only to an attached server");
         if (args.startup_timeout) |s| if (s > 3600) return fail(ctx, "Startup timeout must be greater than 0 and at most 3600 seconds");
         const dir = try hub.resolve(a, ctx.io, ctx.environ, args.target, &problem) orelse return fail(ctx, problem);
-        const config = model.readConfig(a, ctx.io, dir) orelse return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
+        const config = (model.readConfig(a, ctx.io, dir, &problem) catch |e| {
+            if (e == error.OutOfMemory) return e;
+            return fail(ctx, problem);
+        }) orelse return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
         if (config.value != .object) return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
         const kind = model.modelType(config.value) orelse "unknown";
         for (ctx.engines.families) |f| {
@@ -328,7 +331,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             null;
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
-            .model = try model.describe(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label),
+            .model = try model.describeConfig(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label, config),
             .hardware = probe.hardware,
             .runtime = .{ .tensorfold_version = ctx.engines.version, .backend = backend, .python_version = "none", .platform = if (builtin.os.tag == .macos) "macos" else "linux", .driver = probe.driver },
         };

@@ -96,7 +96,10 @@ pub fn main(init: std.process.Init) !u8 {
     const dir = try hub.resolve(a, io, init.environ_map, args.model, &problem) orelse return fail(problem);
     // A drafter is named like a model: a directory, or a repo id `tensorfold pull` cached.
     if (args.drafter) |d| args.drafter = try hub.resolve(a, io, init.environ_map, d, &problem) orelse return fail(problem);
-    const model_type = modelType(a, io, dir);
+    const model_type = modelType(a, io, dir, &problem) catch |e| {
+        if (e == error.OutOfMemory) return e;
+        return fail(problem);
+    };
     // the model folder held while this process reads it, so a rollback refuses it: exclusive with --slide, else shared
     var unheld: []const u8 = "";
     const held = api.originals.serving(a, dir, args.slide, &unheld) catch |e| switch (e) {
@@ -160,9 +163,8 @@ fn fail(message: []const u8) u8 {
     return 1;
 }
 
-fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8) []const u8 {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return "unknown";
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return "unknown";
+fn modelType(a: std.mem.Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) ![]const u8 {
+    const bytes = (try @import("checkpoint_config").read(a, io, dir, problem)) orelse return "unknown";
     const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return "unknown";
     if (doc != .object) return "unknown";
     const t = doc.object.get("model_type") orelse return "unknown";

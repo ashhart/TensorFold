@@ -9,32 +9,37 @@ const Value = json.Value;
 
 pub const Model = receipt.Model;
 
-const config_limit = 4 << 20;
+const config_file = @import("checkpoint_config");
 const tokenizer_limit = 256 << 20;
 const tokenizer_files = [_][]const u8{ "tokenizer.json", "tokenizer.model", "tokenizer_config.json", "special_tokens_map.json", "vocab.json", "merges.txt", "chat_template.jinja" };
 
 /// ``config.json``'s bytes and its parsed value.
 pub const Config = struct { bytes: []const u8, value: Value };
 
-/// Null when missing or past 4 MiB; ``value`` is ``.null`` when the file is not a JSON object.
-pub fn readConfig(a: Allocator, io: std.Io, dir: []const u8) ?Config {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return null;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(config_limit + 1)) catch return null;
-    const parsed = json.parse(a, bytes) catch return null;
-    return switch (parsed) {
-        .ok => |v| .{ .bytes = bytes, .value = if (v == .object) v else .null },
-        .err => .{ .bytes = bytes, .value = .null },
-    };
+/// Missing is null; failed reads keep the shared reader's diagnostic and error.
+pub fn readConfig(a: Allocator, io: std.Io, dir: []const u8, problem: *[]const u8) !?Config {
+    const bytes = (try config_file.read(a, io, dir, problem)) orelse return null;
+    const parsed = try json.parse(a, bytes);
+    if (parsed != .ok or parsed.ok != .object) {
+        problem.* = try std.fmt.allocPrint(a, "Cannot parse config.json as a JSON object (size {d} bytes; limit {d} bytes)", .{ bytes.len, config_file.limit });
+        return error.InvalidConfig;
+    }
+    return .{ .bytes = bytes, .value = parsed.ok };
 }
 
 /// Checkpoint facts; a local directory gives hashes and labels but no name; ``drafter`` is a repo id or null.
 pub fn describe(a: Allocator, io: std.Io, target: []const u8, dir: []const u8, local_dir: bool, families: []const api.Family, drafter: ?[]const u8) !Model {
+    var problem: []const u8 = "";
+    return describeConfig(a, io, target, dir, local_dir, families, drafter, try readConfig(a, io, dir, &problem));
+}
+
+/// A managed benchmark reuses the admitted bytes so its labels and hash describe the same config.
+pub fn describeConfig(a: Allocator, io: std.Io, target: []const u8, dir: []const u8, local_dir: bool, families: []const api.Family, drafter: ?[]const u8, config: ?Config) !Model {
     const repo: ?[]const u8 = if (!local_dir and check.repoId(target)) target else null;
     var out: Model = .{ .repo_id = repo, .local = repo == null };
     const name = std.fs.path.basename(dir);
     const parent = std.fs.path.basename(std.fs.path.dirname(dir) orelse "");
     if (repo != null and std.mem.eql(u8, parent, "snapshots") and (name.len == 40 or name.len == 64) and lowerHex(name)) out.revision = name;
-    const config = readConfig(a, io, dir);
     if (config) |c| out.config_sha256 = try hexDigest(a, c.bytes);
     const value: Value = if (config) |c| c.value else .null;
     if (modelType(value)) |kind| for (families) |f| {

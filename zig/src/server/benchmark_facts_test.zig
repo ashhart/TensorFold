@@ -80,7 +80,7 @@ test "a known drafter is named only for a target of its family and shape" {
     }
 }
 
-test "the tokenizer hash covers the chat template and not the weights; limits give nulls" {
+test "the tokenizer hash covers the chat template and not the weights; malformed config is refused" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -96,8 +96,7 @@ test "the tokenizer hash covers the chat template and not the weights; limits gi
     const big = try a.alloc(u8, (4 << 20) + 1);
     @memset(big, ' ');
     try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ dir, "config.json" }), .data = big });
-    const m = try model.describe(a, io, dir, dir, true, &families, null);
-    try std.testing.expect(m.config_sha256 == null and m.family == null and m.quantization == null);
+    try std.testing.expectError(error.InvalidConfig, model.describe(a, io, dir, dir, true, &families, null));
 }
 
 test "quantization labels come only from the allowlist" {

@@ -23,6 +23,13 @@ pub fn run(a: Allocator, io: std.Io, out: *std.Io.Writer, env: ?*const std.proce
         try out.print("{s} is neither a directory nor a Hugging Face repo id (owner/name)\n", .{model});
         return 1;
     };
+    var problem: []const u8 = "";
+    const bytes = @import("checkpoint_config").read(a, io, dir, &problem) catch |e| {
+        if (e == error.OutOfMemory) return e;
+        try out.print("{s}: {s}\n", .{ model, problem });
+        return 1;
+    };
+    if (bytes) |b| a.free(b);
     const model_type = hub.modelType(a, io, dir);
     const family = hub.family(model_type) orelse {
         try out.print("{s}: no registered Zig family serves model_type {s}; the 0.6 line may: tensorfold@0.6\n", .{ model, model_type });
@@ -81,4 +88,34 @@ fn has(text: []const u8, needle: []const u8) bool {
     if (std.mem.indexOf(u8, text, needle) != null) return true;
     std.debug.print("missing \"{s}\" in:\n{s}\n", .{ needle, text });
     return false;
+}
+
+test "issue 934: info reads the same large config and reports an oversized config with its limit" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const bytes = try a.alloc(u8, 8_668_620);
+    @memset(bytes, ' ');
+    const prefix = "{\"model_type\":\"nemotron_h_omni\",\"max_position_embeddings\":65536}";
+    @memcpy(bytes[0..prefix.len], prefix);
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = bytes });
+    var out: std.Io.Writer.Allocating = .init(a);
+    if (hub.family("nemotron_h_omni") != null) {
+        try std.testing.expectEqual(@as(u8, 0), try run(a, io, &out.writer, null, null, dir));
+        try std.testing.expect(has(out.written(), "family: Nemotron 3.5 Super VL (nemotron_h_omni)"));
+        try std.testing.expect(has(out.written(), "context: 65536"));
+    } else { // a platform that serves no Super VL: the model type still came from the whole large config
+        try std.testing.expectEqual(@as(u8, 1), try run(a, io, &out.writer, null, null, dir));
+        try std.testing.expect(has(out.written(), "serves model_type nemotron_h_omni"));
+    }
+    const file = try tmp.dir.createFile(io, "config.json", .{});
+    try file.setLength(io, 67_108_865);
+    file.close(io);
+    out.clearRetainingCapacity();
+    try std.testing.expectEqual(@as(u8, 1), try run(a, io, &out.writer, null, null, dir));
+    try std.testing.expect(has(out.written(), "config.json is 67108865 bytes, over the 67108864-byte limit"));
 }

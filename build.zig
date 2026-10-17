@@ -186,6 +186,7 @@ pub fn build(b: *std.Build) void {
     grammar_build.steps(b, target, xgrammar);
     contract_build.hostTests(b, gemma4_contract_host);
     sys_build.wire(b);
+    @import("zig/build/checkpoint_config.zig").wire(b);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).

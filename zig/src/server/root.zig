@@ -110,3 +110,7 @@ test {
         _ = @import("benchmark_run_test.zig");
     }
 }
+
+test {
+    _ = @import("benchmark_config_test.zig");
+}
