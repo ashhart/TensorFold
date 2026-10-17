@@ -256,6 +256,7 @@ const Generation = struct {
     streaming_done: bool = false,
     first_ns: ?i96 = null,
     last_ns: ?i96 = null,
+    wrote_ns: ?i96 = null,
     reason: ?[]const u8 = null, // the server ended the reply (a stop string, the length) before the engine said so
     engine_done: bool = false,
     consumed: usize = 0,
@@ -344,6 +345,7 @@ const Generation = struct {
             g.cancel();
             return error.Cancelled;
         };
+        g.wrote_ns = nowNs(g.srv.io);
     }
 
     /// Ends the request and waits for the engine; one it ended unfinished counts as a disconnect, as the Mac scheduler counts it.
@@ -388,6 +390,15 @@ const Generation = struct {
             if (gone.check()) {
                 g.cancel();
                 return error.Cancelled;
+            }
+            if (chunk == null and @hasDecl(@TypeOf(gone), "beat")) {
+                const now = nowNs(g.srv.io);
+                const since = g.wrote_ns orelse now;
+                if (g.wrote_ns == null) g.wrote_ns = now;
+                if (gone.beat(now - since) catch {
+                    g.cancel();
+                    return error.Cancelled;
+                }) g.wrote_ns = now;
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
