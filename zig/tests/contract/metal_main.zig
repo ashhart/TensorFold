@@ -9,6 +9,7 @@ const topk_k = @import("metal_topk.zig");
 const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
 
+const gemma = @import("metal_gemma4.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro]";
 
@@ -83,7 +84,27 @@ pub fn main(init: std.process.Init) !u8 {
         try @import("metal_repro.zig").affineInf(a, device, queue);
         return 0;
     }
+    try gemma.requireComplete(gemma.entries);
+    var gemma_list: std.ArrayList(*gemma.Probe) = .empty;
+    defer {
+        for (gemma_list.items) |p| {
+            p.deinit();
+            a.destroy(p);
+        }
+        gemma_list.deinit(a);
+    }
     var kernels: std.ArrayList(g.Kernel) = .empty;
+    for (gemma.entries) |v| {
+        if (!wanted(o, v.name)) continue;
+        if (!tensor) {
+            std.debug.print("UNSUPPORTED {s}: tensor units required; Gemma coverage unchecked\n", .{v.name});
+            return error.TensorUnitsRequired;
+        }
+        try gemma.append(a, device, queue, v, false, &gemma_list, &kernels);
+        if (v.geo.hidden == 5376 and (v.kind != 1 or std.mem.endsWith(u8, v.name, "sliding"))) {
+            try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
+        }
+    }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
     defer for (rows_list.items) |r| r.deinit();
@@ -125,7 +146,10 @@ pub fn main(init: std.process.Init) !u8 {
     if (o.gates) try g.runAll(a, kernels.items, o.seed, &t);
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
-    if (o.limits) lim = try limits_k.gate(a, init.io, device, o.offline);
+    if (o.limits) {
+        lim = try limits_k.gate(a, init.io, device, o.offline);
+        lim += try gemma.limits(a, device, o.only);
+    }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {
         fn of(x: std.Io.Timestamp, y: std.Io.Timestamp) i64 {

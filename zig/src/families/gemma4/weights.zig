@@ -150,8 +150,9 @@ pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayL
     errdefer sb.deinit();
     try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sb.slice(u16, l.metadataElements()));
     try lane.regOrder(device, &.{.{ .w = .{ .buf = wb }, .n = n, .k = k }});
-    try owned.append(gpa, wb);
-    try owned.append(gpa, sb);
+    try owned.ensureUnusedCapacity(gpa, 2);
+    owned.appendAssumeCapacity(wb);
+    owned.appendAssumeCapacity(sb);
     return .{ .w = wb, .sb = sb, .n = n, .k = k };
 }
 

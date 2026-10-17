@@ -102,20 +102,35 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.picks = try round.Ops.init(m.device);
         errdefer m.picks.deinit();
-        {
-            const text = try affine_mm.source(m.device, gpa, .{});
-            defer gpa.free(text);
-            const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
-            defer lib.deinit();
-            for (&m.mm, affine_mm.names) |*p, name| p.* = try mtl.Pipeline.init(m.device, lib, name, false);
-        }
-        const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        m.inv_sliding = try m.device.buffer(cfg.sliding_dim / 2 * 4, opts);
-        m.inv_global = try m.device.buffer(cfg.global_dim / 2 * 4, opts);
-        try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, false, m.inv_sliding.slice(f32, cfg.sliding_dim / 2));
-        try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, true, m.inv_global.slice(f32, cfg.global_dim / 2));
+        try m.loadPromptPipelines();
         return m;
     }
+
+    pub fn loadPromptPipelines(m: *Model) !void {
+        try @import("model_parts.zig").load(m, PromptOps);
+    }
+    const PromptOps = struct {
+        pub fn pipelines(m: *Model) !affine_mm.Pipes {
+            const text = try affine_mm.source(m.device, m.gpa, .{});
+            defer m.gpa.free(text);
+            const lib = try mtl.Library.fromSource(m.device, text, mtl.CompileOptions.mlx());
+            defer lib.deinit();
+            var out: affine_mm.Pipes = undefined;
+            var made: usize = 0;
+            errdefer for (out[0..made]) |pipe| pipe.deinit();
+            for (&out, affine_mm.names) |*pipe, name| {
+                pipe.* = try mtl.Pipeline.init(m.device, lib, name, false);
+                made += 1;
+            }
+            return out;
+        }
+        pub fn buffer(m: *Model, global: bool) !mtl.Buffer {
+            return m.device.buffer((if (global) @as(usize, cfg.global_dim) else cfg.sliding_dim) / 2 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        }
+        pub fn inverse(m: *Model, global: bool, buf: mtl.Buffer) !void {
+            try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, global, buf.slice(f32, (if (global) @as(usize, cfg.global_dim) else cfg.sliding_dim) / 2));
+        }
+    };
 
     /// The checkpoint's image input (the 12B's embedder, the 31B's tower); error.NoGemmaVision when it has none.
     pub fn loadVision(m: *Model, io: std.Io, dir: []const u8) !void {

@@ -7,9 +7,12 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 }
 
 /// `test-kernel-contract` on every host: the gates' own tests and every registered launch against every chip's limits.
-pub fn hostTests(b: *std.Build) void {
+pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const run = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, .debug) }));
-    b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip").dependOn(&run.step);
+    run.has_side_effects = true;
+    const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
+    step.dependOn(&run.step);
+    step.dependOn(family);
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.

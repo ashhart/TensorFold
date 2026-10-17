@@ -126,11 +126,11 @@ pub fn build(b: *std.Build) void {
     }
     const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
     gemma4_host_sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-host-empty.metallib", "") });
-    @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
+    const gemma4_contract_host = @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
     if (b.graph.host.result.os.tag == .macos) {
         const gemma4_host_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         gemma4_host_mods.sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-compile-empty.metallib", "") });
-        @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+        @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes, gemma4_host_mods.sources);
     }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
@@ -169,7 +169,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&warning_run.step);
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
-    contract_build.hostTests(b);
+    contract_build.hostTests(b, gemma4_contract_host);
     sys_build.wire(b);
 }
 

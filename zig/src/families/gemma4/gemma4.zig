@@ -27,3 +27,6 @@ test {
 }
 
 pub const affine_mm = @import("affine_mm.zig");
+
+pub const contracts = @import("contracts.zig");
+pub const fused_lane = @import("fused_lane.zig");
