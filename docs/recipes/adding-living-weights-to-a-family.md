@@ -9,7 +9,11 @@ few hooks. The steps are in order. It comes from three families:
   Its relu^2 shared experts carry the pocket at the MoE layers.
 - Qwen3.8 Flash Next on CUDA (#895 and #896). A SwiGLU shared expert behind its own gate at every layer, with
   hyper-connections, Gated DeltaNet and gated attention below it.
-- Qwen3.8-27B on CUDA, our port on #726 (not sent yet). A dense SwiGLU MLP at every layer, with no experts at all.
+- Qwen3.8-27B on CUDA, a port on #726's branch that is not a pull request yet. A dense SwiGLU MLP at every layer, with
+  no experts at all.
+
+Only Nemotron learns in this tree. Flash Next's and the 27B's learning have not landed, so their file names and
+numbers below come from those branches.
 
 Bring the family up on the Zig engine first, exact and at speed ([adding a Zig family](adding-a-zig-family.md)). The
 learner trains through the engine's own forward, so everything below assumes that forward is done.
@@ -51,12 +55,19 @@ projection, so the first save makes the projection 64 neurons wider and any MLX 
 
 **The neuron's kind.** A relu^2 neuron is exactly zero below its threshold. A SwiGLU neuron is not: `silu` leaks
 below zero. A SwiGLU neuron fitted as `u` is written as gate row `sharp u` and up row `u / sharp`
-(`living/neuron.zig`), which is relu(u x)^2 within 1e-7 on its rows, and its margin is 0.5 so that what leaks there
-is at most `sigmoid(-8)`, 3e-4, of it. Keep `sharp` a power of two, so `u` comes back exactly from the up row.
+(`living/neuron.zig`), so at z = u x it fires `z^2 sigmoid(sharp z)`, which is relu(z)^2 only where z is well above
+zero: `neuron.zig`'s test checks the two agree within 1e-6, relative, at z = 1, 1.5 and 3 with `sharp` 16, and at
+z = 0.1 they differ by about 0.0017. The output fit reads each neuron through its own activation (`Pocket.act`), not
+as relu^2. Rows a neuron stays silent on are fitted to z at or below `-margin`, and with margin 0.5 what leaks there
+is at most `0.25 sigmoid(-8)`, about 8.4e-5 (the test checks z from -0.5 down to -20). Keep `sharp` a power of two, so
+the up row gives `u` back bit for bit in fp32 while `u / sharp` stays a normal number and `sharp u` finite. A save
+still rounds every row to the family's affine format, so the checks read the rows as saved (#877).
 
-`Family.check()` refuses a description whose inputs do not match the neuron, or whose pocket is not a whole number of
-groups. Add your family to the tests in `families.zig` and `family.zig`: its model type is found, and a tensor name of
-its expert gives the layer back while a similar one (a gate, the MTP head's) does not.
+`Family.check()` refuses a description whose inputs do not match the neuron, whose code width is 0 or does not divide
+a 32-bit word, whose group or pocket is empty or not a whole number of groups, or, for SwiGLU, whose `sharp` is not a
+whole power of two from 1 up (`living/family.zig`). Add your family to the tests in `families.zig` and `family.zig`:
+its model type is found, and a tensor name of its expert gives the layer back while a similar one (a gate, the MTP
+head's) does not.
 
 ## 2. The pocket in every pass
 
@@ -186,8 +197,8 @@ On a fresh copy for each run, greedy, with the checkpoint's revision, the GPU, d
 - **A taught folder serves.** Restart without `--slide` and with it: the same replies as after the last lesson.
   Drafted equals `"draft": false`, concurrent equals solo, a resumed prompt equals a fresh one, and the decode cost of
   the pocket (Flash Next: 5% drafted and 1% plain with three facts).
-- **Tests.** `zig build test-cuda-host` and `zig build test-living` from a fresh cache, `zig fmt --check build.zig zig`,
-  and `python3 tools/zig/lean_check.py` with no new problems.
+- **Tests.** A plain `zig build` (every step), `zig build test-cuda-host` and `zig build test-living` from a fresh
+  cache, `zig fmt --check build.zig zig`, and `python3 tools/zig/lean_check.py` with no new problems.
 
 ## Traps
 
