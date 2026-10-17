@@ -524,6 +524,16 @@ pub const LaneHost = struct {
         };
     }
 
+    /// Sends replies and finishes jobs only after the core has reaped terminal streams.
+    fn deliverPending(h: *LaneHost) void {
+        var i: usize = 0;
+        while (i < h.admitted.items.len) {
+            const job = h.admitted.items[i];
+            if (h.deliver(job)) continue;
+            i += 1;
+        }
+    }
+
     fn run(h: *LaneHost) void {
         if (h.on_thread) |t| t.run(t.ctx) catch |e| std.log.err("lane host: the engine thread's init failed ({t})", .{e});
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
@@ -534,6 +544,11 @@ pub const LaneHost = struct {
             learn.refuse(h);
             while (h.admitOne()) {}
             h.fillOne();
+            h.core.sweep() catch |err| {
+                ends.failAll(h, @errorName(err));
+                continue;
+            };
+            h.deliverPending();
             status.noteLive(h);
             h.lock();
             if (h.closing) {
@@ -568,12 +583,7 @@ pub const LaneHost = struct {
                 ends.failAll(h, @errorName(e));
                 continue;
             };
-            var i: usize = 0;
-            while (i < h.admitted.items.len) {
-                const job = h.admitted.items[i];
-                if (h.deliver(job)) continue; // it left the list: the next job slid into slot i
-                i += 1;
-            }
+            h.deliverPending();
             lone.reclaim(h);
         }
     }

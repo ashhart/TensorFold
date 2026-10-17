@@ -15,8 +15,14 @@ pub const ResidencySet = struct {
 
     /// Whether a set holding `held` bytes may take `added` more, the margin inside the share of `ram` (null: never).
     pub fn fits(held: u64, added: u64, ram: ?u64) bool {
+        return fitsUnder(held, added, ram, null);
+    }
+
+    /// As fits, under a validated load limit when supplied; the margin stays inside it and RAM must be known.
+    pub fn fitsUnder(held: u64, added: u64, ram: ?u64, limit: ?u64) bool {
         const total = ram orelse return false;
-        return held +| added +| margin <= total / 100 * share_percent;
+        const cap = if (limit) |n| @min(n, total) else total / 100 * share_percent;
+        return held <= cap and added <= cap - held and margin <= cap - held - added;
     }
 
     /// Why `fits` said no, logged for `name`: RAM that could not be read, or the bytes past the share.
@@ -36,10 +42,26 @@ pub const ResidencySet = struct {
 
     /// `fits` on this Mac's RAM, read now; a refusal is logged for `name`.
     pub fn within(name: []const u8, held: u64, added: u64) bool {
+        return withinUnder(name, held, added, null);
+    }
+
+    /// As within, using the family's already validated load limit rather than parsing its environment again.
+    pub fn withinUnder(name: []const u8, held: u64, added: u64, limit: ?u64) bool {
         const ram = std.process.totalSystemMemory() catch null;
-        if (fits(held, added, ram)) return true;
-        refused(name, held, added, ram);
+        if (fitsUnder(held, added, ram, limit)) return true;
+        refusedUnder(name, held, added, ram, limit);
         return false;
+    }
+
+    /// A refusal against the selected bound; the default keeps its existing RAM-share diagnostic.
+    pub fn refusedUnder(name: []const u8, held: u64, added: u64, ram: ?u64, limit: ?u64) void {
+        const cap = if (limit) |n| @min(n, ram orelse return refused(name, held, added, ram)) else return refused(name, held, added, ram);
+        const gib: f64 = 1 << 30;
+        if (held == 0) {
+            std.log.warn("{s}: no residency set: its {d:.1} GiB and a {d} GiB margin pass the {d:.1} GiB load limit", .{ name, @as(f64, @floatFromInt(added)) / gib, margin >> 30, @as(f64, @floatFromInt(cap)) / gib });
+        } else {
+            std.log.info("{s}: {d:.1} GiB more would take its residency set past the {d:.1} GiB load limit: it stays out", .{ name, @as(f64, @floatFromInt(added)) / gib, @as(f64, @floatFromInt(cap)) / gib });
+        }
     }
 
     /// Where buffers a model makes or frees after its set was built report, so the set follows them.

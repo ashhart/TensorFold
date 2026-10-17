@@ -67,6 +67,7 @@ pub const Engine = struct {
                 .family_costs = &cfg.family_costs,
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
+                .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
                 .batch_rows = cfg.batch_rows,
@@ -105,6 +106,7 @@ pub const Engine = struct {
     pub const adopt = handover.adopt;
     pub const detach = handover.detach;
     pub const discard = handover.discard;
+    pub const sweep = handover.sweep;
 
     /// One round for every live stream (Python `_family_step`).
     pub fn step(e: *Engine) !void {
@@ -144,17 +146,7 @@ pub const Engine = struct {
             }
         }
         try trail.resolve(e);
-        var kept: usize = 0;
-        for (e.live.items) |s| {
-            if (s.finished) {
-                try trail.finish(e, s);
-                e.release(s);
-                continue;
-            }
-            e.live.items[kept] = s;
-            kept += 1;
-        }
-        e.live.shrinkRetainingCapacity(kept);
+        try e.sweep();
         try trail.state(e);
     }
 
@@ -300,7 +292,10 @@ pub const Engine = struct {
         }
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
-            const ms = e.clock.elapsedMs(.overhead);
+            // the drafts budgets priced past each stream's first are no part of the round's overhead
+            var steps: i64 = 0;
+            for (budgets) |d| steps += @max(0, d - 1);
+            const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
         }

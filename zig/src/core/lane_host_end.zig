@@ -34,6 +34,7 @@ pub fn takeCancels(h: *LaneHost) void {
 /// A failed round ends every job it admitted, with the backend's error; the list is taken whole, not copied.
 pub fn failAll(h: *LaneHost, message: []const u8) void {
     std.log.warn("lane host: a round failed ({s}): every admitted stream fails", .{message});
+    h.core.sweep() catch {};
     h.lock();
     var jobs = h.admitted;
     h.admitted = .empty;

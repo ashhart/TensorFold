@@ -87,7 +87,7 @@ const Classes = struct {
     fn freeFn(_: *anyopaque) void {}
 };
 
-fn model() !Config {
+pub fn model() !Config {
     return modelWith(true);
 }
 
@@ -585,4 +585,8 @@ test "a round's finished prompts get their first drafts in one call (Python's _w
     try std.testing.expectEqual(@as(usize, 3), m1);
     try std.testing.expectEqual(@as(usize, 4), c0);
     try std.testing.expectEqual(@as(usize, 1), m0);
+}
+
+test {
+    _ = @import("engine_sweep_test.zig");
 }

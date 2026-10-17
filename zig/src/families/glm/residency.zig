@@ -6,7 +6,8 @@ const Engine = @import("engine.zig").Engine;
 /// The set when GLM_RESIDENCY asks for one and its bytes fit the bound, then the idle keepalive's target either way.
 pub fn wire(e: *Engine) void {
     // opt-in: wiring 181 GB leaves macOS nothing to reclaim if another model shares the Mac (Flash Next runs without)
-    const want = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.within("glm", 0, bytes(e));
+    const cap: ?u64 = if (e.limit.asked) e.limit.bytes else null;
+    const want = std.c.getenv("GLM_RESIDENCY") != null and mtl.ResidencySet.withinUnder("glm", 0, bytes(e), cap);
     if (!want) {} else if (e.device.residencySet(e.w.buffers.items.len + e.arena.buffers.items.len + if (e.vision) |v| v.buffers().len else 0)) |set| {
         for (e.w.buffers.items) |b| set.add(b);
         for (e.arena.buffers.items) |b| set.add(b);

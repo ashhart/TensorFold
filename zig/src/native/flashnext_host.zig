@@ -34,6 +34,7 @@ pub const Host = struct {
     warm: mtl.keepalive.Target = undefined, // the engine's queue, for the server's idle ticker
     resident: ?Resident = null, // the engine's buffers, kept wired between requests
     info_: api.Info,
+    load_limit: u64 = 0,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
     queued: std.ArrayList(*Job) = .empty,
@@ -177,8 +178,8 @@ pub const Host = struct {
         };
     }
 
-    fn memoryFn(_: *anyopaque, reset_peak: bool) ?api.Memory {
-        return cache_fit.hostMemory(0, reset_peak); // the process footprint; no configured load limit
+    fn memoryFn(ctx: *anyopaque, reset_peak: bool) ?api.Memory {
+        return cache_fit.hostMemory(self(ctx).load_limit, reset_peak);
     }
 
     fn emit(job: *Job, event: api.Event) void {
@@ -397,9 +398,14 @@ fn ms(ns: i96) f64 {
 }
 
 /// The prompt cache's plan (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
-fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
+fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, limit: ?u64, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
     const dev = eng.r.device;
+    if (limit) |cap| {
+        const ready = cache_fit.footprint() orelse return error.NoMemoryReading;
+        if (ready +| cache_fit.MARGIN > cap) return error.OverMemoryLimit;
+        return cache_fit.budgetUnder(cap, gib, over, dev.maxWorkingSet() -| dev.allocated(), a, why, rank);
+    }
     return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
@@ -427,15 +433,24 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
         std.log.err("flash next: warm-up failed: {s}", .{@errorName(err)});
         return err;
     };
-    const cache_plan = try cacheBudget(eng, cache_gib, over_cap, a, why);
+    return openWarmed(gpa, io, eng, window, cache_gib, over_cap, learn, null, a, why);
+}
+
+/// Takes an already warmed engine without loading or warming again; the caller retains ownership on error.
+pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over_cap: bool, learn: ?Learn, limit: ?u64, a: Allocator, why: *[]const u8) !*Host {
+    const cache_plan = try cacheBudget(eng, cache_gib, over_cap, limit, a, why);
     const budget = cache_plan.budget_bytes;
     eng.peer_budget = budget; // rank 1: its kept states and free buffers stay inside the same budget
     eng.snap_pool.max = budget;
     const follower: ?std.Thread = if (eng.followsPeer()) try std.Thread.spawn(.{}, follow, .{eng}) else null; // rank 1
+    errdefer if (follower) |th| {
+        eng.stopFollowing();
+        th.join();
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    const context_limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
     if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
@@ -459,7 +474,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
 
 /// The engine's buffers in one residency set the idle keepalive's ticks use; buffers made later join it or stay out.
 fn holdResident(h: *Host) !void {
-    h.resident = try Resident.hold(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
+    h.resident = try Resident.holdUnder(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next", if (h.load_limit > 0) h.load_limit else null) orelse return;
     const r = &h.resident.?;
     h.warm = r.target();
     h.eng.r.follow = r.follow();

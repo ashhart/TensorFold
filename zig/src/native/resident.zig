@@ -1,4 +1,4 @@
-//! A served model's buffers in one residency set, kept wired by the server's idle keepalive, inside the 70% limit.
+//! A served model's buffers in one residency set, kept wired by the server's idle keepalive, inside its load limit.
 const std = @import("std");
 const mtl = @import("metal");
 const cache_fit = @import("cache_fit.zig");
@@ -11,11 +11,16 @@ pub const Resident = struct {
 
     /// One set of `buffers` that `work` holds, requested resident at once; null (logged for `name`) past the 70% limit.
     pub fn hold(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer, name: []const u8) !?Resident {
+        return holdUnder(gpa, io, device, work, buffers, name, null);
+    }
+
+    /// As hold, under a family's validated load limit when supplied, keeping the margin inside it.
+    pub fn holdUnder(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, work: mtl.Queue, buffers: []const mtl.Buffer, name: []const u8, limit: ?u64) !?Resident {
         const set = try device.residencySet(buffers.len + 1);
         errdefer set.deinit();
         const scratch = try device.buffer(64, mtl.ResourceOptions.shared);
         errdefer scratch.deinit();
-        var held = try Held(mtl.ResidencySet, mtl.Buffer).init(gpa, io, set, buffers, scratch, name, cache_fit.ram()) orelse {
+        var held = try Held(mtl.ResidencySet, mtl.Buffer).initUnder(gpa, io, set, buffers, scratch, name, cache_fit.ram(), limit) orelse {
             scratch.deinit();
             set.deinit();
             return null;
@@ -23,7 +28,9 @@ pub const Resident = struct {
         errdefer held.deinit();
         set.requestResidency();
         work.addResidencySet(set);
-        std.log.info("{s}: {d:.1} GiB kept wired between requests, inside 70% of {d:.0} GiB of RAM", .{ name, cache_fit.gibs(held.bytes), cache_fit.gibs(held.ram.?) });
+        if (limit) |n| {
+            std.log.info("{s}: {d:.1} GiB kept wired between requests, inside the {d:.1} GiB load limit", .{ name, cache_fit.gibs(held.bytes), cache_fit.gibs(@min(n, held.ram.?)) });
+        } else std.log.info("{s}: {d:.1} GiB kept wired between requests, inside 70% of {d:.0} GiB of RAM", .{ name, cache_fit.gibs(held.bytes), cache_fit.gibs(held.ram.?) });
         return .{ .held = held, .work = work, .scratch = scratch };
     }
 
@@ -75,7 +82,7 @@ pub const Resident = struct {
     }
 };
 
-/// What a residency set holds and what waits to join it, inside the 70% limit (`Set` is a counting fake in tests).
+/// What a residency set holds and what waits to join it, inside its load limit (`Set` is a counting fake in tests).
 pub fn Held(comptime Set: type, comptime Buf: type) type {
     return struct {
         const Self = @This();
@@ -86,6 +93,7 @@ pub fn Held(comptime Set: type, comptime Buf: type) type {
         set: Set,
         name: []const u8,
         ram: ?u64,
+        limit: ?u64 = null,
         bytes: u64 = 0, // the set's buffers and those waiting to join it: what the bound counts
         members: std.AutoHashMapUnmanaged(usize, Member) = .empty,
         joining: std.ArrayList(Buf) = .empty, // added and committed at the next flush, never during a request
@@ -93,12 +101,17 @@ pub fn Held(comptime Set: type, comptime Buf: type) type {
 
         /// `buffers` and `extra` in `set`, committed, if together they fit; else null and nothing is added.
         pub fn init(gpa: std.mem.Allocator, io: std.Io, set: Set, buffers: []const Buf, extra: Buf, name: []const u8, ram: ?u64) !?Self {
+            return initUnder(gpa, io, set, buffers, extra, name, ram, null);
+        }
+
+        /// A family-selected ceiling applies at creation and to every later join.
+        pub fn initUnder(gpa: std.mem.Allocator, io: std.Io, set: Set, buffers: []const Buf, extra: Buf, name: []const u8, ram: ?u64, limit: ?u64) !?Self {
             const bytes = sum(buffers) + extra.length();
-            if (!cache_fit.residentFits(0, bytes, ram)) {
-                mtl.ResidencySet.refused(name, 0, bytes, ram);
+            if (!mtl.ResidencySet.fitsUnder(0, bytes, ram, limit)) {
+                mtl.ResidencySet.refusedUnder(name, 0, bytes, ram, limit);
                 return null;
             }
-            var h: Self = .{ .gpa = gpa, .io = io, .set = set, .name = name, .ram = ram, .bytes = bytes };
+            var h: Self = .{ .gpa = gpa, .io = io, .set = set, .name = name, .ram = ram, .limit = limit, .bytes = bytes };
             errdefer h.members.deinit(gpa);
             try h.members.ensureTotalCapacity(gpa, @intCast(buffers.len + 1));
             for (buffers) |b| h.place(b);
@@ -123,8 +136,8 @@ pub fn Held(comptime Set: type, comptime Buf: type) type {
                 more += b.length();
             };
             if (more == 0) return true;
-            if (!cache_fit.residentFits(h.bytes, more, h.ram)) {
-                mtl.ResidencySet.refused(h.name, h.bytes, more, h.ram);
+            if (!mtl.ResidencySet.fitsUnder(h.bytes, more, h.ram, h.limit)) {
+                mtl.ResidencySet.refusedUnder(h.name, h.bytes, more, h.ram, h.limit);
                 return false;
             }
             h.members.ensureUnusedCapacity(h.gpa, @intCast(buffers.len)) catch return false;
@@ -317,4 +330,57 @@ test "a join whose bookkeeping cannot grow refuses whole: nothing counted, stage
         try std.testing.expectEqual(Fake{ .adds = later.len, .removes = later.len, .commits = 1 + later.len }, f);
         try std.testing.expectEqual(before, h.bytes);
     }
+}
+
+test "an operator load ceiling holds the shared host and stays in force for later buffers" {
+    const GiB = cache_fit.GiB;
+    const ids: [4]u8 = @splat(0);
+    const buffers = [_]Fake.Buffer{.{ .id = &ids[0], .len = 194 * GiB }};
+    const scratch: Fake.Buffer = .{ .id = &ids[1], .len = 64 };
+    const state: Fake.Buffer = .{ .id = &ids[2], .len = 3 * GiB };
+    const more: Fake.Buffer = .{ .id = &ids[3], .len = GiB };
+    const cap: u64 = 214_700_000_000;
+    const H = Held(FakeSet, Fake.Buffer);
+    var f: Fake = .{};
+    try std.testing.expect((try H.init(std.testing.allocator, std.testing.io, .{ .f = &f }, &buffers, scratch, "test", 256 * GiB)) == null);
+    try std.testing.expect((try H.initUnder(std.testing.allocator, std.testing.io, .{ .f = &f }, &buffers, scratch, "test", null, cap)) == null);
+    try std.testing.expectEqual(Fake{}, f);
+    const opened = try H.initUnder(std.testing.allocator, std.testing.io, .{ .f = &f }, &buffers, scratch, "test", 256 * GiB, cap);
+    try std.testing.expect(opened != null);
+    var h = opened.?;
+    defer h.deinit();
+    try std.testing.expectEqual(Fake{ .adds = 2, .commits = 1 }, f);
+    try std.testing.expectEqual(cap, h.limit.?);
+    f = .{};
+    try std.testing.expect(h.join(&.{state}));
+    try std.testing.expect(!h.join(&.{more}));
+    try std.testing.expectEqual(197 * GiB + 64, h.bytes);
+    try std.testing.expectEqual(Fake{}, f);
+    h.flush();
+    try std.testing.expectEqual(Fake{ .adds = 1, .commits = 1 }, f);
+    h.leave(state);
+    try std.testing.expectEqual(Fake{ .adds = 1, .removes = 1, .commits = 2 }, f);
+    try std.testing.expect(h.join(&.{more}));
+    try std.testing.expectEqual(195 * GiB + 64, h.bytes);
+}
+
+test "an explicit residency ceiling keeps the margin, RAM backstop and overflow checks" {
+    const gib: u64 = 1 << 30;
+    const ram = 256 * gib;
+    const cap: u64 = 214_700_000_000;
+    for ([_]u64{ 1787, 1798, 1826, 1940 }) |tenths| {
+        const bytes = tenths * gib / 10;
+        try std.testing.expect(!mtl.ResidencySet.fits(0, bytes, ram));
+        try std.testing.expect(mtl.ResidencySet.fitsUnder(0, bytes, ram, cap));
+    }
+    try std.testing.expect(mtl.ResidencySet.fitsUnder(0, cap - mtl.ResidencySet.margin, ram, cap));
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(0, cap - mtl.ResidencySet.margin + 1, ram, cap));
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(0, 1, null, cap));
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(0, 1, ram, 0));
+    try std.testing.expect(mtl.ResidencySet.fitsUnder(0, 8 * gib, ram, 10 * gib));
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(0, 8 * gib + 1, ram, 10 * gib));
+    try std.testing.expect(mtl.ResidencySet.fitsUnder(0, 254 * gib, ram, 512 * gib));
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(0, 254 * gib + 1, ram, 512 * gib));
+    const most = std.math.maxInt(u64);
+    try std.testing.expect(!mtl.ResidencySet.fitsUnder(most - 16, 32, most, most));
 }

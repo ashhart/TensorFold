@@ -1,0 +1,60 @@
+KNOWN-DIFFER tools/two_tools-stream
+  reply 0 body differs at 313: golden [content": "\n"}, "finish_reason": null}]}
+
+data: {"id": "<id] zig [tool_calls": [{"index": 0, "id": "<id2>", "type": "function"]
+KNOWN-DIFFER tools/two_tools-single-stream
+  reply 0 body differs at 313: golden [content": "\n"}, "finish_reason": null}]}
+
+data: {"id": "<id] zig [tool_calls": [{"index": 0, "id": "<id2>", "type": "function"]
+KNOWN-DIFFER errors/format-json
+  reply 0 body differs at 41: golden [needs the checkpoint's config.json vocab_size", "type": "inv] zig [(response_format and the guided_* fields) is not supported b]
+  reply 0 headers differ
+KNOWN-DIFFER errors/stream-structured
+  connection after: golden closed, zig open
+  reply 0 status: golden HTTP/1.1 200 OK, zig HTTP/1.1 400 Bad Request
+  reply 0 body differs at 0: golden [data: {"id": "<id1>", "object": "chat.completion.chunk", "cr] zig [{"error": {"message": "structured output (response_format an]
+KNOWN-DIFFER anthropic/tool-use-stream
+  reply 0 body differs at 702: golden [\n"}}
+
+event: content_block_stop
+data: {"type": "content_blo] zig ["}}
+
+event: content_block_stop
+data: {"type": "content_block]
+KNOWN-DIFFER anthropic/refuse-format
+  reply 0 body differs at 91: golden [needs the checkpoint's config.json vocab_size"}}] zig [(response_format and the guided_* fields) is not supported b]
+  reply 0 headers differ
+KNOWN-DIFFER cancel/metrics-after
+  reply 0 body differs at 307: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER metrics-open/metrics
+  reply 0 body differs at 307: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER metrics-open/v1-metrics
+  reply 0 body differs at 487: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+KNOWN-DIFFER keys/metrics-counted
+  reply 0 body differs at 887: golden [prompt_tokens_total Prompt tokens of finished requests.
+# TY] zig [generation_tokens_running Generated tokens held by live stre]
+        chat   16 equal    0 differ   0 known
+    thinking   16 equal    0 differ   0 known
+       stops   13 equal    0 differ   0 known
+       usage   10 equal    0 differ   0 known
+       tools   50 equal    0 differ   2 known
+      errors   37 equal    0 differ   2 known
+ completions   15 equal    0 differ   0 known
+   responses   29 equal    0 differ   0 known
+   anthropic   27 equal    0 differ   2 known
+      tokens   19 equal    0 differ   0 known
+      status   11 equal    0 differ   0 known
+     framing   42 equal    0 differ   0 known
+      cancel    1 equal    0 differ   1 known
+   lifecycle    2 equal    0 differ   0 known
+metrics-open    2 equal    0 differ   2 known
+        keys   19 equal    0 differ   1 known
+309/319 equal to the frozen Python answers, 0 unexpected differences
+Build Summary: 4/4 steps succeeded
+test-golden success
++- run exe golden_check success 1m
+   +- compile exe golden_check debug native-native success 1s MaxRSS:291M
+   +- compile exe fake_serve debug native-native success 3s MaxRSS:588M

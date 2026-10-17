@@ -58,6 +58,8 @@ pub const Fake = struct {
     many_streams: usize = 0, // streams those calls prefilled
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
+    release_hook: ?*const fn (ctx: *anyopaque, s: *Stream) void = null, // after a stream's release, as a backend ending another
+    release_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
     ranked: bool = false, // the head gives its held chain back (alternatives)
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
@@ -423,6 +425,7 @@ pub const Fake = struct {
             var l = kv.value;
             freeLane(x.gpa, &l);
         }
+        if (x.release_hook) |hook| hook(x.release_hook_ctx.?, s);
     }
 };
 

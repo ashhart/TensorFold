@@ -30,6 +30,8 @@ jobs:
       # Cortheon's readers of untrusted web bytes under the fuzz harness: seeds, 100,000 edits, linear time.
       - name: zig build fuzz-cortheon
         run: zig build fuzz-cortheon
+      - name: Served Flash Next gate regressions
+        run: python3 -m unittest discover -s tools/zig -p flashnext_batch_serve_test.py
       # The lean rule (600-line files, one-line comments within 120 columns): no problem the base branch lacks.
       - name: lean check
         env:
