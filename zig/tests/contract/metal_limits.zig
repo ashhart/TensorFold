@@ -102,14 +102,14 @@ pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: b
 
 /// Gate 5: declarations against every family, each pipeline on this GPU, and offline M1/M2 compiles when asked.
 pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8) !usize {
-    var n = try registry.checkMetal(a, &registry.gather_metal, false);
-    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.gather_metal.len, n });
-    for (registry.gather_metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    var n = try registry.checkMetal(a, &registry.metal, false);
+    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.metal.len, n });
+    for (registry.metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
         std.debug.print("CONTROL {s} {s}: {d} limit problems\n", .{ if (red > 0) "red as planted," else "MISSED", d.name, red });
     }
-    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.gather_metal ++ registry.metal_controls), launchOf, device);
+    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.metal ++ registry.metal_controls), launchOf, device);
     return n;
 }

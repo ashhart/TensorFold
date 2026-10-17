@@ -441,6 +441,8 @@ pub const metal = [_]M{
     .{ .name = "tile_qmm twin picks by expert tf_tile_qmv_group", .threads = 128, .tg_memory = 1024, .m1 = 1024, .m2 = 1024 },
     .{ .name = "tile_qmm group sums tf_tile_xsum", .threads = 256, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "glm hc_expand_10 custom_kernel_tf_glm5_fused_hc_expand_cc77af98f2__4096_1_0_0_0_bfloat16_t_bfloat16_t_float_float_floatc_bfloat16_t_float_float", .threads = 1024, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "glm gather glm_gather_glu", .threads = 64, .tg_memory = 0, .m1 = 512, .m2 = 512 },
+    .{ .name = "glm gather glm_gather_down", .threads = 64, .tg_memory = 0, .m1 = 576, .m2 = 576 },
     .{ .name = "h3 rows in h3_rows_in", .threads = 1024, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 modulated norm h3_norm", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
     .{ .name = "h3 gated add h3_gate_add", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
@@ -577,21 +579,4 @@ pub const all_cuda = blk: {
 test {
     _ = learning;
     _ = paging;
-}
-/// Gather launches and shared row-source recompiles need measured limits before gate 5 can pass again.
-pub const gather_metal = blk: {
-    var rows = metal;
-    for (&rows) |*r| if (std.mem.startsWith(u8, r.name, "row projection ")) {
-        r.m1 = 0;
-        r.m2 = 0;
-    };
-    break :blk rows ++ [_]M{
-        .{ .name = "glm gather glm_gather_glu", .threads = 64, .tg_memory = 0 },
-        .{ .name = "glm gather glm_gather_down", .threads = 64, .tg_memory = 0 },
-    };
-};
-test "GLM gathers: unmeasured launch limits keep the resource gate red" {
-    for (gather_metal) |r| if (std.mem.startsWith(u8, r.name, "glm gather ") or std.mem.startsWith(u8, r.name, "row projection ")) {
-        try std.testing.expect(try checkMetal(std.testing.allocator, &.{r}, true) > 0);
-    };
 }
