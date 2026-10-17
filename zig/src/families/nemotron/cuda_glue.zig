@@ -207,7 +207,7 @@ pub const Glue = struct {
     pub fn scan(g: Glue, proj: u64, xc: u64, dt: u64, state: u64, a_: u64, dsk: u64, dtb: u64, meta: u64, y: u64, rows: usize, lo: f32, hi: f32, m: Shape) !void {
         if (g.tri()) |t| return t.scan(proj, xc, dt, state, a_, dsk, dtb, meta, y, rows, lo, hi, m);
         if (m.state != 128 or m.dh % 32 != 0) return error.ScanShape;
-        if (m.rmax > 16 or rows > m.rmax) return error.ScanShape; // the kernel steps at most 32 kept and window rows
+        if (rows > m.rmax) return error.ScanShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ proj, xc, dt, state, a_, dsk, dtb, meta, y });
         a.add(int(rows));

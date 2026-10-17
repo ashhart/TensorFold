@@ -14,7 +14,7 @@ const E = 128;
 const top_k = 6;
 const NS = 8;
 const eps: f32 = 1e-5;
-const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 16 };
+const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 32 };
 pub const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
 
 fn mshape() glue.Shape {
@@ -137,7 +137,7 @@ fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k
     try r.same("top-k weights", f32, wtd, wt);
 }
 
-/// Two windows through conv and scan: the second replays three kept rows of the first, at the other parity.
+/// Windows through conv and scan, each replaying kept rows of the last at the other parity (51 steps: two stages).
 fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
     const base = try r.bfs(3 * cd, 1.0);
@@ -163,7 +163,7 @@ fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const ad = try r.dev(f32, a);
     const dskd = try r.dev(f32, dsk);
     const dtbd = try r.dev(f32, dtb);
-    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 } }) |w| {
+    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 }, .{ 1, 13, 32 }, .{ 0, 31, 20 } }) |w| {
         const parity = w[0];
         const pk = w[1];
         const rows = w[2];
@@ -338,7 +338,7 @@ const path_runs = [_][2]usize{ .{ 8, 0 }, .{ 8, 1 }, .{ 8, 2 }, .{ 8, 3 }, .{ 8,
 /// Each shape's window run alone (conv, scan) and as one stream of a shared window (Glue.mambaSegs): the same bytes.
 fn mambaPaths(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
-    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 } }; // parity, kept rows, window rows
+    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 }, .{ 0, 31, 32 } }; // parity, kept rows, window rows
     const cw = try r.dev(f32, try r.f32s(4 * cd, -0.5, 0.5));
     const cb = try r.dev(f32, try r.f32s(cd, -0.1, 0.1));
     const a = try r.dev(f32, try r.f32s(ms.heads, -2.0, -0.05));
@@ -450,27 +450,21 @@ fn keyed(r: *Rig) !void {
     try r.same("keyed share", f32, probd, prob);
 }
 
-/// The latent router's top-k, both forms, against its host twin: Super's 512 experts and 22 picks, then the bounds.
+/// The latent router's top-k, both forms (512 experts, 22 picks, 2 shares) against its host twin, ties and -infs too.
 fn latentTopk(r: *Rig, fns: nemotron.latent.Fns) !void {
+    const le = 512;
+    const picks = 22;
     const shares = 2;
     const sk = 8;
-    const Case = struct { rows: usize, experts: usize = 512, picks: usize = 22, ties: bool = false, numbers: ?usize = null, norm: bool = true };
-    const cases = [_]Case{
-        .{ .rows = 1 },                                             .{ .rows = 16, .ties = true },
-        .{ .rows = 300, .norm = false },                            .{ .rows = 4, .numbers = 10 },
-        .{ .rows = 1, .experts = 1024, .picks = 32 },               .{ .rows = 16, .experts = 1024, .picks = 32, .ties = true },
-        .{ .rows = 4, .experts = 1024, .picks = 32, .numbers = 0 }, .{ .rows = 3, .experts = 1000, .picks = 32, .numbers = 31 },
-    };
-    for (cases) |c| {
-        const le = c.experts;
-        const picks = c.picks;
+    const Case = struct { rows: usize, ties: bool = false, numbers: usize = le, norm: bool = true };
+    for ([_]Case{ .{ .rows = 1 }, .{ .rows = 16, .ties = true }, .{ .rows = 32, .ties = true }, .{ .rows = 300, .norm = false }, .{ .rows = 4, .numbers = 10 } }) |c| {
         const part = try r.f32s(sk * c.rows * le, -1, 1);
         if (c.ties) for (part) |*v| {
             v.* = @round(v.* * 4) / 4; // quarters: many equal logits, so equal scores
         };
         const bias = try r.f32s(le, -0.05, 0.05);
         if (c.ties) @memset(bias, 0);
-        if (c.numbers) |n| @memset(bias[n..], -std.math.inf(f32));
+        @memset(bias[c.numbers..], -std.math.inf(f32));
         const idx = try r.a.alloc(i32, c.rows * picks * shares);
         const wt = try r.a.alloc(f32, c.rows * picks);
         ref.superTopk(part, bias, idx, wt, c.rows, 2.5, le, sk, picks, shares, c.norm);

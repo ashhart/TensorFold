@@ -357,7 +357,7 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
     check.pass("nvfp4 relu^2 experts: rms error / rms(fp64) up {e:.3} (decode {e:.3}), down {e:.3} (decode {e:.3}); 13-row launch bytes == 40-row", .{ rel[1][0], rel[0][0], rel[1][1], rel[0][1] });
 }
 
-/// cuda/ck.zig's experts at 1 and 16 token rows (the _few kernels) byte-equal to the same pairs in a 40-row call.
+/// cuda/ck.zig's experts at 1, 16 and 32 token rows (the _few kernels) byte-equal to the same pairs in a 40-row call.
 fn checkpointExperts(gpu: Gpu, rng: std.Random, s: cuda.Stream, major: u32) !void {
     const a = gpu.gpa;
     const e = 6;
@@ -418,10 +418,10 @@ fn checkpointExperts(gpu: Gpu, rng: std.Random, s: cuda.Stream, major: u32) !voi
     defer aq.free();
     var y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * dims * 4);
     defer y.free();
-    var outs: [3][2][]u8 = undefined; // 40 rows (prompt kernels), then 1 and 16 (decode-sized): act, y
+    var outs: [4][2][]u8 = undefined; // 40 rows (prompt kernels), then 1, 16 and 32 (decode-sized): act, y
     var got: usize = 0;
     defer for (outs[0..got]) |o| for (o) |b| a.free(b);
-    for ([3]usize{ rows, 1, 16 }) |nrows| {
+    for ([4]usize{ rows, 1, 16, 32 }) |nrows| {
         const np = nrows * slots;
         try router.route(s, dp.ptr, np, e, 16, plan);
         const items = cuda.grouped.maxItems(np, e, 16);
@@ -435,11 +435,11 @@ fn checkpointExperts(gpu: Gpu, rng: std.Random, s: cuda.Stream, major: u32) !voi
         outs[got] = .{ try check.download(gpu, act), try check.download(gpu, y) };
         got += 1;
     }
-    for (outs[1..], [2]usize{ 1, 16 }) |o, nrows| {
+    for (outs[1..], [3]usize{ 1, 16, 32 }) |o, nrows| {
         try check.sameBytes("checkpoint up, decode-sized against 40 rows", o[0][0 .. nrows * slots * width * 2], outs[0][0][0 .. nrows * slots * width * 2]);
         try check.sameBytes("checkpoint down, decode-sized against 40 rows", o[1][0 .. nrows * slots * dims * 4], outs[0][1][0 .. nrows * slots * dims * 4]);
     }
-    check.pass("checkpoint nvfp4 experts: 1 and 16 token rows (32 columns a warp, four steps in flight) byte-equal to the same pairs in a 40-row call (64 columns a warp)", .{});
+    check.pass("checkpoint nvfp4 experts: 1, 16 and 32 token rows (32 columns a warp, four steps in flight) byte-equal to the same pairs in a 40-row call (64 columns a warp)", .{});
 }
 
 /// Weight [r, c] of expert `x` of [n, k] NVFP4 matrices: e2m1 code times its e4m3 block scale.

@@ -5,7 +5,7 @@ const nemotron = @import("nemotron");
 
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
-    if (o.mtp_drafts) |n| if (n > 15) return "--mtp-drafts: the CUDA engine drafts at most 15";
+    if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (o.mtp_drafts != null or o.mtp_confidence != null) {
         if (!std.mem.eql(u8, o.model_type, nemotron.native.model_type) and
@@ -109,10 +109,10 @@ test "--learn-conversations opens Nemotron only, the one CUDA family whose state
 }
 
 test "CUDA MTP controls respect window and probability bounds" {
-    for ([_]u32{ 0, 8, 12, 15 }) |n| {
+    for ([_]u32{ 0, 8, 15, 23, 31 }) |n| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h_omni", .mtp_drafts = n }) == null);
     }
-    try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h_omni", .mtp_drafts = 16 }) != null);
+    try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h_omni", .mtp_drafts = 32 }) != null);
     for ([_]f64{ 0, 0.5, 1 }) |c| {
         try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .mtp_confidence = c }) == null);
     }

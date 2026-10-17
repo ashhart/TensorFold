@@ -11,12 +11,18 @@ const seq_graphs = @import("cuda_seq_graphs.zig");
 const latent = @import("cuda_latent.zig");
 const worker = @import("cuda_worker.zig");
 
-pub const max_rows = 16; // a verify window's rows (the row tile of the row-parallel kernels)
+pub const max_rows = 32; // a verify window's rows at most (the widest row tile of the row-parallel kernels)
 pub const prefill_rows = 2048; // rows of a staggered segment's chunk, and of a pass under dumps or lessons
 pub const pass_rows = 2 * prefill_rows; // rows a serial prompt pass runs at most (a row's bits are the same at any cut)
 pub const yield_rows = 256; // rows of a background pass's chunk: a request that arrives waits for one at most
 pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute positions
-const shared_words = 2 * max_rows + 8 * max_rows; // the shared expert's members, then (items, counts) a row count
+const shared_rows = cuda.qlinear.Affine4Kernels.max_rows; // rows a shared plan covers (windowRows without a latent MoE)
+const shared_words = 2 * shared_rows + 8 * shared_rows; // the shared expert's members, then (items, counts) a row count
+
+/// A verify window's rows for `c`: max_rows for a latent MoE, else the 16 rows MLX affine-4 decode kernels tile.
+pub fn windowRows(c: Config) usize {
+    return if (c.latent > 0) max_rows else cuda.qlinear.Affine4Kernels.max_rows;
+}
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
@@ -76,7 +82,7 @@ pub fn mambaPlanes(c: Config) [2]usize {
 }
 
 fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
-    const W: usize = max_rows;
+    const W: usize = windowRows(c);
     const nm: usize = c.count(.mamba);
     const kv = c.count(.attention) * max_len * kvRowBytes(c);
     const cd: usize = c.convDim();
@@ -100,7 +106,7 @@ const scratch_count = 44;
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const R: usize = pass_rows;
-    const W: usize = max_rows;
+    const W: usize = windowRows(c);
     const D: usize = c.hidden;
     const ns: usize = c.slots();
     const qd: usize = c.heads * c.head_dim;
@@ -340,7 +346,7 @@ pub const Buffers = struct {
 
     /// The shared expert's plan at `rows` rows: halves `experts` and `experts + 1` over slots top_k and top_k + 1.
     pub fn sharedPlan(b: *const Buffers, rows: usize) kern.Plan {
-        const items = b.shared + (2 * max_rows + 8 * @as(u64, rows - 1)) * 4;
+        const items = b.shared + (2 * shared_rows + 8 * @as(u64, rows - 1)) * 4;
         return .{ .members = b.shared, .items = items, .counts = items + 6 * 4, .rank = 0, .hist = 0 };
     }
 
@@ -351,14 +357,14 @@ pub const Buffers = struct {
             return ops.s.synchronize();
         }
         var w: [shared_words]u32 = undefined;
-        for (0..max_rows) |r| {
+        for (0..shared_rows) |r| {
             w[r] = @intCast(r * c.slots() + c.top_k);
-            w[max_rows + r] = @intCast(r * c.slots() + c.top_k + 1);
+            w[shared_rows + r] = @intCast(r * c.slots() + c.top_k + 1);
         }
-        for (1..max_rows + 1) |rows| {
-            const at = 2 * max_rows + 8 * (rows - 1);
+        for (1..shared_rows + 1) |rows| {
+            const at = 2 * shared_rows + 8 * (rows - 1);
             const n: u32 = @intCast(rows);
-            w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), max_rows, n, 2, 2 };
+            w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), shared_rows, n, 2, 2 };
         }
         try ops.upload(b.shared, std.mem.sliceAsBytes(&w));
         if (c.latent > 0) {

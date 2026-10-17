@@ -333,7 +333,7 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     } else {
         try go(g.f.router, g.s, .{ (rows + 15) / 16, (c.experts + 15) / 16, sk }, 256, @intCast(2 * 16 * (per / 2 + 1) * 4), &a);
     }
-    try f.ops.k.latent.?.picks(g.s, rows <= cuda.launch.few_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
+    try f.ops.k.latent.?.picks(g.s, rows <= state.max_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).

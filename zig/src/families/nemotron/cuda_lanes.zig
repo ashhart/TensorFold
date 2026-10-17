@@ -135,7 +135,7 @@ pub const Cuda = struct {
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
         const self = of(ptr);
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
-        if (out.len + 1 > state.max_rows) return error.WindowTooWide;
+        if (out.len + 1 > state.windowRows(self.e.c)) return error.WindowTooWide;
         self.e.bind(l.seq);
         const held = self.pinned.slice(u32)[0..out.len];
         try self.e.ops().download(std.mem.sliceAsBytes(held), self.e.b.ids + 4);
@@ -150,30 +150,31 @@ pub const Cuda = struct {
         return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
     }
 
-    /// The facts the round loop reads at setup: windows up to 16 rows, one stream a forward, this GPU's costs.
+    /// The facts the round loop reads at setup: windows of the checkpoint's width, one stream a forward, this GPU's costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
+        const width = state.windowRows(self.e.c);
         return .{
-            .exact_width = state.max_rows,
+            .exact_width = if (drafting) @intCast(width) else 1,
             .copy_drafts = self.copy_drafts,
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
-            .drafts = @intCast(self.draftControls().limit(mtp.max_chain)),
+            .drafts = @intCast(self.draftControls().limit(width - 1)),
             .draft_confidence = self.mtp_confidence,
             .draft_probabilities = self.mtp_confidence != null,
             .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
-            .hidden_rows = true, // several streams' windows share a forward (Engine.verifyShared)
-            .batch_rows = state.max_rows,
-            .max_streams = engine.max_streams,
+            .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
+            .batch_rows = @intCast(width),
+            .max_streams = if (drafting) engine.max_streams else 1,
         };
     }
 
-    /// costs.measure on the engine's own sequence: windows of 1 to 16 rows and a head level, in ms.
+    /// costs.measure on the engine's own sequence: windows of every width it takes and a head level, in ms.
     pub fn measure(self: *Cuda, io: std.Io, model_dir: []const u8) !void {
         const h = self.head orelse return;
         self.e.bind(&self.e.own);
@@ -299,9 +300,9 @@ pub const Cuda = struct {
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
-            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's state.max_rows
+            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's rows
             if (self.prompt_logits == null) self.prompt_logits = cuda.DeviceBuffer.alloc(e.ctx.d, prompt_rows.batch_rows * e.c.vocab * 2) catch null;
-            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.max_rows;
+            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.windowRows(e.c);
             const words = self.prompt_out.slice(u32);
             const picks_at = rows * row_words; // after the rows
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
@@ -379,7 +380,7 @@ pub const Cuda = struct {
             if (start < t.from or start + count > t.from + t.prompt.items.len / d) return error.RowsNotHeld;
             return .{ .buffer = @intFromPtr(t.prompt.items.ptr), .offset = (start - t.from) * d, .rows = count, .row_bytes = @intCast(d), .space = .host, .dtype = .bf16 };
         }
-        if (start != t.verified.? or count > state.max_rows) return error.RowsNotHeld;
+        if (start != t.verified.? or count > state.windowRows(self.e.c)) return error.RowsNotHeld;
         self.e.bind(l.seq);
         const host = self.tapped.?.slice(u8)[0 .. count * d];
         try self.e.ops().download(host, self.e.b.hidden);
@@ -422,7 +423,7 @@ pub const Cuda = struct {
         const e = self.e;
         verified(self.gpa, l, e.pos);
         const rows = w.rows();
-        if (rows > state.max_rows) return error.WindowTooWide;
+        if (rows > state.windowRows(e.c)) return error.WindowTooWide;
         for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
         var ids: [state.max_rows]u32 = undefined;
         ids[0] = w.pending;
@@ -518,12 +519,12 @@ pub const Cuda = struct {
                 first[0] = self.value(r.first orelse return error.NoFirstToken);
                 break :blk first[0..];
             };
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.max_rows) {
+            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
                 try h.chain(follow, r.depth);
                 l.keep = h.keep;
                 continue;
             }
-            if (r.depth > mtp.max_chain) return error.BadDraftRequest;
+            if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
             parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows

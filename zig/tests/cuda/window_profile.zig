@@ -45,7 +45,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, widths_text: []const u8, ids_path:
 
 /// Graph ms and eager class ms for each width, shared expert forked and on one stream, as medians of 5.
 fn profile(gpa: std.mem.Allocator, e: *nemotron.Engine, ids: []const u32, widths: []const usize) !void {
-    const most = nemotron.state.max_rows;
+    const most = nemotron.state.windowRows(e.c);
     if (ids.len < most + 2) return error.PromptTooShort;
     const prompt = ids[0 .. ids.len - most - 1];
     const cont = ids[prompt.len..];

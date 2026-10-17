@@ -20,6 +20,7 @@ const h3_prep = @import("contract_h3_prep.zig");
 const h3_topk_k = @import("contract_h3_topk.zig");
 const drama3_k = @import("contract_drama3.zig");
 const ck_k = @import("contract_ck.zig");
+const scan_k = @import("contract_scan.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -38,7 +39,7 @@ const h3_image = struct {
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "norms", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "glm_mm", "glm_dflash" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "glm_mm", "glm_dflash", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -54,10 +55,10 @@ pub fn run(gpu: check.Gpu) !void {
     defer s.deinit();
     var norms = try cuda.norms.Norms.load(gpu.d);
     defer norms.unload();
-    var mods: [7]cuda.Module = undefined;
+    var mods: [8]cuda.Module = undefined;
     var loaded: usize = 0;
     defer for (mods[0..loaded]) |*m| m.unload();
-    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &controls.bytes, kk.experts }, 0..) |img, i| {
+    for ([_][]const u8{ kk.nemotron_route, kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, &controls.bytes, kk.experts, kk.nemotron_mamba }, 0..) |img, i| {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
@@ -96,6 +97,9 @@ pub fn run(gpu: check.Gpu) !void {
     try kernels.append(a, logits.kernel());
     try kernels.append(a, topk.kernel());
     try kernels.append(a, latent_topk.kernel());
+    var scan = scan_k.Scan{ .rig = .{ .gpu = gpu, .s = s }, .f = try mods[7].function("tf_nemo_scan"), .host = .init(a) };
+    defer scan.deinit();
+    try kernels.append(a, scan.kernel());
     const kinds = comptime std.enums.values(mm_k.Kind);
     var mm: [kinds.len]mm_k.Mm = undefined;
     for (kinds, &mm) |kind, *m| {

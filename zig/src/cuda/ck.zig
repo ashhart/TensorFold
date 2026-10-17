@@ -14,6 +14,9 @@ const Function = module.Function;
 const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 
+/// Token rows an expert call takes as decode-sized (the _few kernels): a verify window's, up to 32.
+pub const few_tokens = 32;
+
 /// One fp32 factor: the checkpoint's runtimes multiply the input scale by the weight's in fp32.
 pub fn alpha(act: f32, scale: f32) f32 {
     return act * scale;
@@ -182,13 +185,13 @@ pub const Ck = struct {
 
     /// relu^2 up over a plan: NVFP4 rows (quant4's, at `rows`, `k` wide; row = pair / slots) to bf16 [pairs][width].
     pub fn up(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, out: u64, items: usize) !void {
-        const few = @intFromBool(nrows <= launch_.few_rows);
+        const few = @intFromBool(nrows <= few_tokens);
         return run(s, c.up_fns[few], c.resident[few][0], warp_columns[few], rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out, items);
     }
 
     /// down over a plan: NVFP4 pair rows (quant4's, at `rows`) of `tokens` token rows to fp32 [pairs][dims].
     pub fn down(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, tokens: usize, p: Plan, out: u64, items: usize) !void {
-        const few = @intFromBool(tokens <= launch_.few_rows);
+        const few = @intFromBool(tokens <= few_tokens);
         return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 

@@ -19,7 +19,7 @@ const decode = nemotron.decode;
 const usage =
     \\usage: tensorfold run MODEL --tokens ID,ID,... [--max-tokens N] [--no-drafts] [--report PATH] [--kernels DIR|native] [--device N]
     \\         [--temperature T] [--top-k K] [--top-p P] [--min-p M] [--seed S]   (temperature 0: greedy)
-    \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MS16,LEVEL]
+    \\         [--context N] [--ignore-eos] [--eager] [--costs MS1,...,MSW,LEVEL]   (W window rows: 32 for a latent MoE, else 16)
     \\         [--carveout]   (KV caches in GB10's display memory first; also TF_CUDA_CARVEOUT=1,
     \\         sized by TF_CUDA_CARVEOUT_MIB (default 1792), card TF_DRM_CARD (default /dev/dri/card0))
     \\         [--tokens-file PATH] [--segments N]   (N whole 2048-row prompt chunks a call as staggered segments,
@@ -41,7 +41,7 @@ const usage =
     \\       tensorfold kl MODEL --tokens ID,... [--gold ID,...] [--max-tokens N] (--dump FILE | --against FILE) [--precision P]
     \\                (logits rows to FILE, fed --gold then greedy; or FILE's tokens fed: KL, top-1 and NLL against its rows)
     \\       tensorfold widths MODEL --tokens ID,... [--max-tokens N] [--eager] [sampling as run]
-    \\                (every verify width 1-16 against serial decoding, a wrong draft every third window)
+    \\                (every verify width, 1-32 for a latent MoE else 1-16, against serial decoding, a wrong draft every third window)
     \\       tensorfold models
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
@@ -327,7 +327,8 @@ fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, o: Options) !u8 
     defer if (drafter) |*d| d.deinit();
     if (drafter) |d| {
         const v = d.rule.costs.verify;
-        std.debug.print("up to 15 MTP drafts a round, each verified while it pays for its row (measured: {d:.2}/{d:.2}/{d:.2}/{d:.2}/{d:.2} ms at 1/2/4/8/16 rows, {d:.3} ms a draft)\n", .{ v[1], v[2], v[4], v[8], v[16], d.rule.costs.level });
+        const w = d.rule.costs.rows;
+        std.debug.print("up to {d} MTP drafts a round, each verified while it pays for its row (measured: {d:.2}/{d:.2}/{d:.2}/{d:.2}/{d:.2} ms at 1/2/4/8/{d} rows, {d:.3} ms a draft)\n", .{ w - 1, v[1], v[2], v[4], v[8], v[w], w, d.rule.costs.level });
     }
     const res = try decode.generate(gpa, io, e, if (drafter) |*d| d else null, o.tokens, count, .{ .stop_eos = o.stop_eos });
     defer gpa.free(res.tokens);

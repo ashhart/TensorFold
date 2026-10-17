@@ -165,22 +165,22 @@ pub fn draws(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, dir: []con
     return if (bad == 0) 0 else 1;
 }
 
-/// Replay serial tokens as drafts at widths 1-16, injecting a wrong token every third window.
+/// Replay serial tokens as drafts at every width the engine takes, injecting a wrong token every third window.
 pub fn widths(gpa: std.mem.Allocator, e: *nemotron.Engine, prompt: []const u32, count: usize) !u8 {
-    const rows_max = nemotron.state.max_rows;
+    const rows_max = nemotron.state.windowRows(e.c);
     var ref: std.ArrayList(u32) = .empty;
     defer ref.deinit(gpa);
     try ref.append(gpa, try e.prefill(prompt, null, null));
     while (ref.items.len < count) try ref.append(gpa, try e.step(ref.items[ref.items.len - 1], null));
     if (try e.prefill(prompt, null, null) != ref.items[0]) return error.FirstTokenDiffers;
-    var rows_seen: [rows_max + 1]usize = @splat(0);
-    var rows_bad: [rows_max + 1]usize = @splat(0);
+    var rows_seen: [nemotron.state.max_rows + 1]usize = @splat(0);
+    var rows_bad: [nemotron.state.max_rows + 1]usize = @splat(0);
     var at: usize = 0;
     var width: usize = 1;
     var window: usize = 0;
     while (at + 1 < ref.items.len) : (window += 1) {
         const rows = @min(width, ref.items.len - 1 - at); // every row's draw has serial's token to meet
-        var ids: [rows_max]u32 = undefined;
+        var ids: [nemotron.state.max_rows]u32 = undefined;
         @memcpy(ids[0..rows], ref.items[at..][0..rows]);
         var keep = rows;
         if (window % 3 == 2 and rows > 2) { // a wrong draft: the rows from it on read a token serial never fed
