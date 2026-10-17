@@ -9,7 +9,7 @@ const U = limits.Usage;
 /// A CUDA launch and what nvcc made of it for sm_80, sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
 pub const CudaRecord = struct { launch: C, usage: [limits.sms.len]U };
 
-const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
+pub const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
 const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
 const gemv_symbol = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
 const prompt_symbol = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
@@ -594,21 +594,7 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         try std.testing.expectEqual(topk.usage[0], usageFor(topk, c[0])[0]);
     }
 }
-
-test "train launch records: every new gradient launch stays unqualified without compiler receipts" {
-    try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);
-    for (gradient_pending) |record| try std.testing.expect(try checkCuda(std.testing.allocator, &.{record}, true) > 0);
-}
-
-pub const gradient_pending = @import("gradient_pending.zig").records;
-pub const refreshed_cuda = blk: {
-    var records = cuda;
-    for (&records) |*record| {
-        if (std.mem.eql(u8, record.launch.symbol, "fn_attn_prep") or
-            std.mem.eql(u8, record.launch.symbol, "fn_qsa_pool")) record.usage = none;
-    }
-    break :blk records;
-};
-pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
-pub const all_cuda = refreshed_cuda ++ gradient_pending ++ qwen_learning_pending;
-test { _ = @import("qwen_learning_pending.zig"); }
+pub const gradient_pending = @import("registry_learning.zig").gradient_pending;
+pub const qwen_learning_pending = @import("registry_learning.zig").qwen_learning_pending;
+pub const all_cuda = @import("registry_learning.zig").all_cuda;
+test { _ = @import("registry_learning.zig"); }

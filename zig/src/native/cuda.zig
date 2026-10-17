@@ -595,7 +595,6 @@ test "nemotron learning safety: direct Nemotron trainer destruction drains befor
 test "trainer close: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
-
 test "trainer close: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
