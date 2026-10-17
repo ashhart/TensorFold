@@ -98,10 +98,18 @@ pub const Tower = struct {
         const w = &t.w;
         const gh: usize = img.gh;
         const gw: usize = img.gw;
-        const n = gh * gw;
+        const n = std.math.mul(usize, gh, gw) catch return error.ImageShape;
+        if (n == 0 or n > c.max_patches or gh % 2 != 0 or gw % 2 != 0 or n / 4 != img.tokens or c.patch == 0) return error.ImageShape;
+        if (c.video_temporal != 0 and c.video_temporal != 2) return error.ImageShape;
+        const image_width = std.math.mul(usize, 3, std.math.mul(usize, c.patch, c.patch) catch return error.ImageShape) catch return error.ImageShape;
+        const video_width = std.math.mul(usize, c.video_temporal, image_width) catch return error.ImageShape;
+        const video_values = std.math.mul(usize, n, video_width) catch return error.ImageShape;
+        const video = c.video_temporal == 2 and img.pixels.len == video_values;
+        const pw = if (video) video_width else image_width;
+        const values = std.math.mul(usize, n, pw) catch return error.ImageShape;
+        const room = std.math.mul(usize, c.max_patches, image_width) catch return error.ImageShape;
+        if (img.pixels.len != values or values > room) return error.ImageShape;
         const hd = c.hidden;
-        const pw = c.patchWidth();
-        if (n == 0 or n > c.max_patches or gh % 2 != 0 or gw % 2 != 0 or n / 4 != img.tokens or img.pixels.len != n * pw) return error.ImageShape;
         // the float patches land in the f32 products' room (the patch Linear has no bias), cast to bf16 on the GPU
         try t.scratch.uploadAsync(b.acc - t.scratch.ptr, std.mem.sliceAsBytes(img.pixels), s.handle);
         try k.cast(s, b.acc, b.px, n * pw);
@@ -109,7 +117,7 @@ pub const Tower = struct {
         const rows = n + c.prefix;
         const feats = b.h + 2 * c.prefix * hd;
         try t.scratch.copyFrom(b.h - t.scratch.ptr, w.cls, 2 * c.prefix * hd, s.handle);
-        try g.run(s, b.px, w.patch, b.x, n, hd, pw, .bf16);
+        try g.run(s, b.px, if (video) w.video_patch else w.patch, b.x, n, hd, pw, .bf16);
         try k.positionAdd(s, b.x, w.table, feats, gh, gw, c.side, hd);
         const dim = c.dim();
         const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));

@@ -53,6 +53,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-urls", .kind = .store_true, .native = true },
     .{ .name = "--vision-offload", .kind = .store_true },
     .{ .name = "--vision-max-images", .native = true },
+    .{ .name = "--vision-max-videos", .native = true },
     .{ .name = "--vision-image-tokens", .native = true },
     .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
@@ -192,6 +193,7 @@ pub const Args = struct {
     vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
     vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
     vision_max_images: u32 = 4,
+    vision_max_videos: u32 = 2,
     vision_image_tokens: u32 = 4096,
     vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
@@ -311,6 +313,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
+    } else if (is(name, "--vision-max-videos")) {
+        const n = try int(u, a, name, v);
+        if (n < 1 or n > 16) return fail(u, a, "argument --vision-max-videos: expected 1 to 16 videos: '{s}'", .{v});
+        out.vision_max_videos = @intCast(n);
     } else if (is(name, "--vision-video-tokens")) {
         const n = try int(u, a, name, v);
         if (n < 64 or n > 262144) return fail(u, a, "argument --vision-video-tokens: expected 64 to 262144 tokens: '{s}'", .{v});
@@ -435,7 +441,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
-        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .video_tokens = args.vision_video_tokens } else null,
+        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
     };
 }
 

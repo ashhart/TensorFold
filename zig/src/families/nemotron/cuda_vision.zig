@@ -4,9 +4,10 @@ const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
 const radio = @import("radio");
+pub const video = radio.video;
 
 /// What a request may hold: image tokens in all (the rows buffer), and images.
-pub const Limits = struct { image_tokens: u32, max_images: u32 };
+pub const Limits = struct { image_tokens: u32, max_images: u32, video_tokens: u32 = 0 };
 
 pub const Vision = struct {
     gpa: std.mem.Allocator,
@@ -34,9 +35,11 @@ pub const Vision = struct {
             problem.* = "the tokenizer lacks <image>, <img> or </img>, or its <image> is not config.json's img_context_token_id";
             return null;
         };
+        const capacity = try reservation(limits, cfg.video_temporal == 2);
         var tower = try radio.Tower.init(gpa, io, d, dir, cfg);
         errdefer tower.deinit();
-        var rows = try radio.Rows.init(d, limits.image_tokens, cfg.text_hidden);
+        // a request's images and videos are budgeted apart but planned together: the rows hold both budgets
+        var rows = try radio.Rows.init(d, capacity, cfg.text_hidden);
         errdefer rows.deinit();
         const v = try gpa.create(Vision);
         v.* = .{ .gpa = gpa, .io = io, .cfg = cfg, .tower = tower, .rows = rows, .marks = marks, .limits = limits, .mark_ids = marks.markers() };
@@ -79,8 +82,18 @@ pub const Vision = struct {
     /// The words for a prepare error the server cannot word (a JPEG library this machine lacks).
     pub const explain = radio.decoderProblem;
 
+    /// A decoded video as the tower reads it: its frames sampled, sized and paired, with the words before each pair.
+    pub fn prepareVideo(v: *const Vision, a: std.mem.Allocator, src: radio.video.Source, max_tokens: u32, max_frames: u32) !radio.video.Prepared {
+        return radio.video.prepare(a, &v.cfg, src, max_tokens, max_frames);
+    }
+
     /// An image's bytes as the tower reads them, at most `max_tokens` tokens (the server's prepare).
     pub fn prepare(v: *const Vision, a: std.mem.Allocator, data: []const u8, max_tokens: u32) !radio.image.Prepared {
         return radio.image.prepare(v.io, a, &v.cfg, data, max_tokens);
     }
 };
+
+/// Request rows before any tower or device allocation.
+pub fn reservation(limits: Limits, has_video: bool) !u32 {
+    return std.math.add(u32, limits.image_tokens, if (has_video) limits.video_tokens else 0) catch error.BadVisionLimits;
+}

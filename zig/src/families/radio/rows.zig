@@ -15,10 +15,10 @@ pub fn plan(a: Allocator, images: []const Image, from: u32) ![]Span {
     var end: u32 = 0;
     for (images, 0..) |img, i| {
         if (img.at < end or img.tokens == 0) return error.ImageSpans; // in order, apart, each with rows
-        end = img.at + img.tokens;
+        end = std.math.add(u32, img.at, img.tokens) catch return error.ImageSpans;
         if (end <= from) continue; // a restored prefix holds these rows' states already
         try out.append(a, .{ .at = img.at, .n = img.tokens, .row = row, .image = @intCast(i) });
-        row += img.tokens;
+        row = std.math.add(u32, row, img.tokens) catch return error.ImageSpans;
     }
     return out.toOwnedSlice(a);
 }
@@ -38,7 +38,10 @@ pub const Rows = struct {
     limit: u32,
 
     pub fn init(d: *const cuda.Driver, limit: u32, hidden: usize) !Rows {
-        return .{ .d = d, .buf = try cuda.DeviceBuffer.alloc(d, @as(usize, limit) * hidden * 2), .hidden = hidden, .limit = limit };
+        if (limit == 0 or hidden == 0) return error.ImageRows;
+        const elements = std.math.mul(usize, limit, hidden) catch return error.ImageRows;
+        const row_bytes = std.math.mul(usize, elements, 2) catch return error.ImageRows;
+        return .{ .d = d, .buf = try cuda.DeviceBuffer.alloc(d, row_bytes), .hidden = hidden, .limit = limit };
     }
 
     pub fn deinit(r: *Rows) void {

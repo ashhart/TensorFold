@@ -14,11 +14,11 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
         if (o.vision) |vo| {
             const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
             opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
-            if (comptime @hasField(@typeInfo(@FieldType(F.Options, "vision")).optional.child, "video_tokens")) { // a family that reads videos
-                opts.vision.?.video_tokens = vo.video_tokens;
-                opts.vision.?.max_videos = vo.max_videos;
-                opts.vision.?.max_frames = vo.max_frames;
-            }
+            // a family that reads videos takes the counts its tower holds (Nemotron Omni's only a token budget)
+            const L = @typeInfo(@FieldType(F.Options, "vision")).optional.child;
+            if (comptime @hasField(L, "video_tokens")) opts.vision.?.video_tokens = vo.video_tokens;
+            if (comptime @hasField(L, "max_videos")) opts.vision.?.max_videos = vo.max_videos;
+            if (comptime @hasField(L, "max_frames")) opts.vision.?.max_frames = vo.max_frames;
         }
     }
     if (o.precision) |p| {

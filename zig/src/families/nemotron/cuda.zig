@@ -56,3 +56,7 @@ test {
     _ = @import("cuda_identity.zig");
     _ = worker;
 }
+
+test {
+    _ = @import("cuda_vision_test.zig");
+}

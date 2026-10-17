@@ -81,6 +81,11 @@ uses a separate serial engine. The default requested context is 16,384 tokens, s
 memory admission; `--context` sets an explicit window. Inspect the reported capacity before sending
 long requests. Both backends use the same public draft list below.
 
+## Native Omni video
+
+The maintained CUDA Bolt family shares RADIO with image input. See the [video recipe](nemotron-omni-video.md)
+for checkpoint requirements, request parts, limits and qualification status.
+
 ## Draft vocabulary provenance
 
 This section describes the Python 0.6.6 engine's list,

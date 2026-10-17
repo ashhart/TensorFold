@@ -401,6 +401,13 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&compile_bolt.step);
     for ([_]*std.Build.Module{ mods.nemotron, mods.lanes, mods.radio }) |m|
         bolt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
+    const video_step = b.step("test-omni-video-host", "Actual RADIO and Bolt video boundaries without a GPU or decoder library");
+    const video_filter = b.option([]const u8, "omni-video-filter", "One Omni video regression");
+    for ([_]*std.Build.Module{ mods.nemotron, mods.radio }) |m| {
+        const run = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = if (video_filter) |f| &.{f} else &.{} }));
+        run.has_side_effects = true;
+        video_step.dependOn(&run.step);
+    }
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
     const load_check = b.step("test-bolt-load-host", "Bolt load destination and native-parent retention without a GPU");
@@ -412,10 +419,13 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         load_check.dependOn(&check.step);
     }
 
+    const offer_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_vision_offer.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "qwen35", .module = mods.qwen35 } } }), .filters = if (video_filter) |f| &.{f} else &.{} }));
+    offer_tests.has_side_effects = true;
+    video_step.dependOn(&offer_tests.step);
     const compile_modules = engines(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision);
-    const startup = b.addObject(.{ .name = "bolt-load-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/bolt_load_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "native", .module = compile_modules.engines }} }) });
-    _ = startup.getEmittedBin();
-    b.step("compile-bolt-load-host", "Compile actual native CUDA startup without GPU images").dependOn(&startup.step);
+    const open_object = b.addObject(.{ .name = "omni-video-native-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/omni_video_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "native", .module = compile_modules.engines }} }) });
+    _ = open_object.getEmittedBin();
+    b.step("compile-omni-video-host", "Compile actual native CUDA startup and offer for Linux without images or GPU execution").dependOn(&open_object.step);
 
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });

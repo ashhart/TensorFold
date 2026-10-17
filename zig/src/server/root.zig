@@ -44,6 +44,7 @@ test {
     _ = @import("request_log.zig");
     _ = @import("messages.zig");
     _ = @import("images.zig");
+    _ = @import("images_video_marker_test.zig");
     _ = @import("image_key.zig");
     _ = @import("media_fetch.zig");
     _ = @import("videos.zig");

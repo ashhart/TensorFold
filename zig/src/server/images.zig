@@ -146,12 +146,17 @@ fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
 /// A quoted marker's stand-in while the template renders: two private-use code points, the second naming the marker.
 const sentinel = "\u{F0000}";
 
-/// The image markers' text (Vision.markers), longest first so one never matches inside another.
+/// Media marker spellings, longest first so one never matches inside another.
 pub fn markerText(text: model_text.Text, a: std.mem.Allocator, v: api.Vision) ![]const []const u8 {
     var out: std.ArrayList([]const u8) = .empty;
     for (v.markers) |id| {
         const s = try text.tokenString(a, id);
         if (s.len > 0) try out.append(a, s);
+    }
+    if (v.video) |o| {
+        const s = try text.tokenString(a, o.video_token);
+        if (s.len > 0) try out.append(a, s);
+        if (o.video_text.len > 0 and !std.mem.eql(u8, o.video_text, s)) try out.append(a, o.video_text);
     }
     std.mem.sort([]const u8, out.items, {}, struct {
         fn longer(_: void, x: []const u8, y: []const u8) bool {
@@ -238,7 +243,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
     if (video_marks != n_videos) return cx.fail(.server, "the chat template wrote {d} video placeholders for {d} video parts", .{ video_marks, n_videos });
     if (ps.len == 0) return null;
     if (n_images > v.max_images) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request may hold at most {d} images (--vision-max-images); it has {d}", .{ v.max_images, n_images }));
-    if (n_videos > videos.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{videos.max_videos}));
+    if (v.video) |o| if (n_videos > o.max_videos) return cx.refuse(try std.fmt.allocPrint(cx.a, "a request supports at most {d} videos", .{o.max_videos}));
     const budget: u32 = if (n_images > 0) v.image_tokens / @as(u32, @intCast(n_images)) else 0;
     if (n_images > 0 and budget < 1) return cx.refuse("the image count exceeds the visual-token budget");
     const prepared = try cx.a.alloc(api.PreparedImage, n_images);
@@ -293,12 +298,18 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
             const o = v.video.?;
             const clip = clips[kv];
             kv += 1;
-            for (clip.groups, clip.times) |g, secs| {
+            for (clip.groups, clip.times, 0..) |g, secs, gi| {
+                if (clip.labels.len > gi) { // the family's own words before the group, its time among them
+                    const words = text.encodePlain(cx.a, clip.labels[gi]) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's label", .{});
+                    try out_ids.appendSlice(cx.a, words);
+                    try key.appendSlice(cx.a, words);
+                }
                 try out_ids.append(cx.a, o.group_open);
                 try key.append(cx.a, o.group_open);
                 try placeImage(cx.a, &out_ids, &key, &imgs, v.image_token, g, true);
                 try out_ids.append(cx.a, o.group_close);
                 try key.append(cx.a, image_key.close(g.hash));
+                if (clip.labels.len > 0) continue;
                 var buf: [64]u8 = undefined;
                 const words = videos.seconds(&buf, secs) catch unreachable; // a time within the hour's limit
                 const time = text.encodePlain(cx.a, words) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's time", .{});

@@ -43,8 +43,8 @@ pub const FrameSink = struct {
     take: *const fn (ctx: *anyopaque, k: usize, rgb: []const u8, width: u32, height: u32, stride: usize) anyerror!void,
 };
 
-/// A video prepared for the tower: each group of frames an image, and each group's time in seconds.
-pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64 };
+/// A video for the tower: each group of frames an image, its time in seconds, and the words before it (``labels``).
+pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64, labels: []const []const u8 = &.{} };
 
 /// Video input an engine serves (``Vision.video``): how a decoded video becomes images and how the prompt holds them.
 pub const VideoOffer = struct {
@@ -52,6 +52,8 @@ pub const VideoOffer = struct {
     prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
     /// The token the chat template writes once per video, expanded to its groups.
     video_token: u32,
+    /// The text the template writes for a video, swapped for ``video_token``'s text before encoding (Omni's `<video>`).
+    video_text: []const u8 = "",
     /// The tokens around each group's image tokens; the group's time follows as text.
     group_open: u32,
     group_close: u32,
