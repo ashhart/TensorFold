@@ -8,21 +8,31 @@ const Allocator = std.mem.Allocator;
 
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 pub fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
+    return poolFor(@import("sys").windows, Sources, a, io, ctx, problem);
+}
+const Sources = struct {
+    pub const procText = budget.procText;
+    pub const env = getenv;
+};
+/// The served pool decision with only the OS and host probes supplied by a fixture.
+pub fn poolFor(comptime windows: bool, comptime Host: type, a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
-    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+    const host_counts = budget.hostCounts(unified, windows);
+    const text = if (host_counts) Host.procText(a, io, "/proc/meminfo") else null;
+    defer if (text) |bytes| a.free(bytes);
+    const available = budget.counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
     const free = available.available;
     const total = available.total;
-    const reserve = budget.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
+    const reserve = budget.reserveBytes(Host.env("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ Host.env("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
         return null;
     };
-    const limit = budget.limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
+    const limit = budget.limitBytes(Host.env("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{Host.env("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
         return null;
     };
     return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
@@ -67,4 +77,8 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
     try std.testing.expectEqual(@as(u64, 30), try room(Single, &context, 30));
     try std.testing.expectEqual(@as(u64, 19), try room(Pair, &context, 30));
     try std.testing.expectEqual(@as(u64, 7), try room(Pair, &context, 7));
+}
+
+test {
+    _ = @import("cuda_family_memory_test.zig");
 }

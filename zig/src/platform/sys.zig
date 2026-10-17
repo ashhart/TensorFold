@@ -43,22 +43,17 @@ const WinDynLib = struct {
     pub const Error = error{ FileNotFound, NameTooLong, InvalidWtf8 };
 
     pub fn open(path: []const u8) Error!WinDynLib {
-        var buf: [1024:0]u16 = undefined;
-        const n = std.unicode.wtf8ToWtf16Le(buf[0 .. buf.len - 1], path) catch return error.InvalidWtf8;
-        buf[n] = 0;
-        if (std.mem.indexOfAny(u8, path, "/\\") != null) {
-            for (buf[0..n]) |*ch| if (ch.* == '/') {
-                ch.* = '\\';
-            };
-            var full: [1024:0]u16 = undefined;
-            const fn_len = GetFullPathNameW(buf[0..n :0].ptr, full.len, &full, null);
-            if (fn_len > 0 and fn_len < full.len) {
-                full[fn_len] = 0;
-                return .{ .module = LoadLibraryW(full[0..fn_len :0].ptr) orelse return error.FileNotFound };
-            }
-        }
-        return .{ .module = LoadLibraryW(buf[0..n :0].ptr) orelse return error.FileNotFound };
+        return .{ .module = try @import("windows_library.zig").open(Kernel, path) };
     }
+    const Kernel = struct {
+        pub const Handle = *anyopaque;
+        pub fn fullPath(path: [:0]const u16, out: []u16) usize {
+            return GetFullPathNameW(path.ptr, @intCast(out.len), out.ptr, null);
+        }
+        pub fn load(path: [:0]const u16) ?Handle {
+            return LoadLibraryW(path.ptr);
+        }
+    };
 
     pub fn openZ(path: [*:0]const u8) Error!WinDynLib {
         return open(std.mem.span(path));

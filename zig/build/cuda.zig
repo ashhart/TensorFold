@@ -348,6 +348,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const drama3 = @import("drama3_host.zig").hostTests(b, step, cuda, mods.core);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
+    const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
     @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");
     @import("drama3_host.zig").metal(b, mods.core, native_modules.api);
     const nemo_safety = b.step("test-nemotron-learning-host", "Actual Nemotron CUDA close, checked pocket reads and retry under fake driver failures");
@@ -389,6 +390,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    windows_port.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"hardware names"} })).step);
     b.step("test-benchmark-manifest-host", "Manifest identity through the HTTP server without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"manifest"} })).step);
     b.step("test-slide-subject-host", "Supplied questions through the production lesson without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"slide subject:"} })).step);
     b.step("test-issue-934", "Benchmark config admission and receipt regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 934:"} })).step);

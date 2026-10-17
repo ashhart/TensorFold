@@ -125,6 +125,11 @@ pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     return @min(room -| streams, want);
 }
 
+/// Linux integrated devices use procfs; Windows retains the unified reserve but reads the CUDA pool.
+pub fn hostCounts(unified: bool, windows: bool) bool {
+    return unified and !windows;
+}
+
 /// Integrated GPUs on Linux require validated /proc/meminfo counts; Windows and discrete devices use CUDA's counts.
 pub fn counts(unified: bool, card: MemInfo, text: ?[]const u8) error{HostMemoryUnavailable}!MemInfo {
     if (unified) return meminfo(text orelse return error.HostMemoryUnavailable) orelse error.HostMemoryUnavailable;
@@ -213,9 +218,10 @@ test "memory limit refuses an oversized finite value and the rounded u64 boundar
 pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) procText(a, io, "/proc/meminfo") else null;
+    const host_counts = hostCounts(unified, @import("sys").windows);
+    const text = if (host_counts) procText(a, io, "/proc/meminfo") else null;
     defer if (text) |bytes| a.free(bytes);
-    const available = counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+    const available = counts(host_counts, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
