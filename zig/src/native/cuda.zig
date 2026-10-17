@@ -11,6 +11,7 @@ const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
+const drama_host = @import("drama_host.zig");
 const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 
@@ -22,9 +23,10 @@ pub const records = true;
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
-    var out: [registry.len + 1]api.Family = undefined;
+    var out: [registry.len + 2]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
     out[registry.len] = lfm2.family;
+    out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
     const final = out;
     break :blk &final;
 };
@@ -55,28 +57,6 @@ fn contextWindow(requested: ?i64, native: i64, default: i64) error{ Negative, No
     if (r == 0) return if (native > 0) native else error.NoNative;
     if (native > 0 and r > native) return error.PastNative;
     return r;
-}
-
-/// The pool now, read on the thread whose context is current; `problem` names a bad variable.
-fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
-    const unified = (try ctx.attribute(.integrated)) != 0;
-    const card = try ctx.memInfo();
-    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
-    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
-        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
-        return null;
-    };
-    const free = available.available;
-    const total = available.total;
-    const reserve = budget.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
-        return null;
-    };
-    const limit = budget.limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
-        return null;
-    };
-    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
 }
 
 fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
@@ -211,6 +191,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
@@ -223,6 +204,32 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     }
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
+}
+
+fn openDrama(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (refusals.drama(o)) |why| {
+        problem.* = why;
+        return null;
+    }
+    const window = o.context orelse 8192;
+    if (window < 1025 or window > 8192) {
+        problem.* = "Drama 3 supports --context 1025 through 8192";
+        return null;
+    }
+    const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
+    const segments = try setting(a, o.segments, "TF_CUDA_SEGMENTS", 1, problem) orelse return null;
+    if (segments != 1) {
+        problem.* = "Drama 3 uses one prompt segment at a time: use --segments 1";
+        return null;
+    }
+    if (getenv("TENSORFOLD_CUDA_KERNELS")) |path| if (path.len > 0 and !std.mem.eql(u8, path, "native")) {
+        problem.* = "Drama 3 uses embedded native kernels, not captured kernel sets: unset TENSORFOLD_CUDA_KERNELS or set it to native";
+        return null;
+    };
+    return drama_host.open(gpa, io, o.dir, "", .{ .context = @intCast(window), .device = device }) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native Drama 3 CUDA engine could not load the checkpoint ({s})", .{@errorName(e)});
+        return null;
+    };
 }
 
 /// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
@@ -299,7 +306,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         },
     };
-    const before = try pool(a, io, &g.ctx, problem) orelse return null;
+    const before = try budget.readPool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const whole = budget.weightBytes(io, o.dir);
     const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
@@ -313,7 +320,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem: *[]const u8,
         fn read(p: *anyopaque) ?u64 {
             const self: *@This() = @ptrCast(@alignCast(p));
-            const now = (pool(self.a, self.io, self.ctx, self.problem) catch return null) orelse return null;
+            const now = (budget.readPool(self.a, self.io, self.ctx, self.problem) catch return null) orelse return null;
             return now.room(cuda.usage(false).device - self.held);
         }
     };
@@ -371,7 +378,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     const model = cuda.usage(false).device - held0;
-    const after = try pool(a, io, &g.ctx, problem) orelse return null;
+    const after = try budget.readPool(a, io, &g.ctx, problem) orelse return null;
     var room = after.room(model) -| loaded.learn_bytes;
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
@@ -489,10 +496,11 @@ test "the lane core sees a family's prefill_step through the lane backend, so a 
     try std.testing.expect(h.backend().vtable.prefill_step != null);
 }
 
-test "every registered family and d1's decision engine are listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
+test "every registered family, d1's decision engine and Drama 3 are listed for capabilities" {
+    try std.testing.expectEqual(@as(usize, registry.len + 2), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
+    try std.testing.expectEqualStrings("fish_omni", families[registry.len + 1].model_type);
 }
 
 test "context windows: the family default inside the model's, 0 for the model's, never past it" {
