@@ -57,19 +57,26 @@ pub const Config = struct {
         return parse(gpa, text);
     }
 
+    /// config.json's text; a field of the wrong JSON kind is refused by name (error.ConfigNotObject and so on).
     pub fn parse(gpa: std.mem.Allocator, text: []const u8) !Config {
         var tree = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
         defer tree.deinit();
-        const root = tree.value.object;
-        const tc = (root.get("text_config") orelse return error.BadConfig).object;
-        const ac = (root.get("audio_decoder_config") orelse return error.BadConfig).object;
+        const root = switch (tree.value) {
+            .object => |o| o,
+            else => {
+                std.log.warn("drama3 config.json is not a JSON object", .{});
+                return error.ConfigNotObject;
+            },
+        };
+        const tc = try object(root, "text_config");
+        const ac = try object(root, "audio_decoder_config");
         var c: Config = undefined;
         c.ids = .{
-            .eos = @intCast(try int(root, "eos_token_id")),
-            .pad = @intCast(try int(root, "pad_token_id")),
-            .sem_begin = @intCast(try int(root, "semantic_start_token_id")),
-            .sem_end = @intCast(try int(root, "semantic_end_token_id")),
-            .audio_pad = @intCast(try int(root, "audio_pad_token_id")),
+            .eos = try id(root, "eos_token_id"),
+            .pad = try id(root, "pad_token_id"),
+            .sem_begin = try id(root, "semantic_start_token_id"),
+            .sem_end = try id(root, "semantic_end_token_id"),
+            .audio_pad = try id(root, "audio_pad_token_id"),
         };
         const checks = .{
             .{ tc, "hidden_size", hidden },                     .{ tc, "num_hidden_layers", layers },
@@ -92,55 +99,90 @@ pub const Config = struct {
                 return error.UnsupportedConfig;
             }
         }
-        if (c.ids.sem_end - c.ids.sem_begin + 1 != codebook_size) return error.UnsupportedConfig;
-        const lt = (tc.get("layer_types") orelse return error.BadConfig).array;
-        if (lt.items.len != layers) return error.BadConfig;
-        for (lt.items, 0..) |v, i| {
-            const s = v.string;
+        if (@as(i64, c.ids.sem_end) - c.ids.sem_begin + 1 != codebook_size) return error.UnsupportedConfig;
+        const lt = try field(tc, "layer_types");
+        const items = switch (lt) {
+            .array => |a| a.items,
+            else => return wrongKind("layer_types", "an array", error.ConfigNotArray),
+        };
+        if (items.len != layers) return error.BadConfig;
+        for (items, 0..) |v, i| {
+            const s = switch (v) {
+                .string => |str| str,
+                else => return wrongKind("layer_types", "an array of strings", error.ConfigNotString),
+            };
             c.full_attention[i] = std.mem.eql(u8, s, "full_attention");
             if (!c.full_attention[i] and !std.mem.eql(u8, s, "linear_attention")) return error.BadConfig;
         }
-        const rot = (ac.get("rotary_interleaved") orelse return error.BadConfig).bool;
+        const rot = switch (try field(ac, "rotary_interleaved")) {
+            .bool => |b| b,
+            else => return wrongKind("rotary_interleaved", "a boolean", error.ConfigNotBool),
+        };
         if (!rot) return error.UnsupportedConfig;
         return c;
     }
 };
 
-fn int(o: std.json.ObjectMap, name: []const u8) !usize {
-    const v = o.get(name) orelse {
+fn field(o: std.json.ObjectMap, name: []const u8) !std.json.Value {
+    return o.get(name) orelse {
         std.log.err("drama3 config.json has no {s}", .{name});
         return error.BadConfig;
     };
-    return switch (v) {
-        .integer => |x| std.math.cast(usize, x) orelse error.BadConfig,
-        else => error.BadConfig,
+}
+
+fn wrongKind(name: []const u8, kind: []const u8, err: anytype) @TypeOf(err) {
+    std.log.warn("drama3 config.json: {s} is not {s}", .{ name, kind });
+    return err;
+}
+
+fn object(o: std.json.ObjectMap, name: []const u8) !std.json.ObjectMap {
+    return switch (try field(o, name)) {
+        .object => |v| v,
+        else => wrongKind(name, "an object", error.ConfigNotObject),
     };
 }
 
+fn int(o: std.json.ObjectMap, name: []const u8) !usize {
+    return switch (try field(o, name)) {
+        .integer => |x| std.math.cast(usize, x) orelse error.BadConfig,
+        else => wrongKind(name, "an integer", error.ConfigNotInteger),
+    };
+}
+
+/// A token id: a non-negative integer that fits the kernels' int32.
+fn id(o: std.json.ObjectMap, name: []const u8) !i32 {
+    return std.math.cast(i32, try int(o, name)) orelse {
+        std.log.warn("drama3 config.json: {s} does not fit int32", .{name});
+        return error.BadConfig;
+    };
+}
+
+/// The shipped checkpoint's config.json, in the fields parse reads.
+const shipped =
+    \\{"eos_token_id": 248046, "pad_token_id": 248044, "semantic_start_token_id": 248099,
+    \\ "semantic_end_token_id": 252194, "audio_pad_token_id": 248076,
+    \\ "text_config": {"hidden_size": 2048, "num_hidden_layers": 40, "vocab_size": 252288,
+    \\  "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256, "num_experts": 256,
+    \\  "num_experts_per_tok": 8, "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512,
+    \\  "linear_num_key_heads": 16, "linear_num_value_heads": 32, "linear_key_head_dim": 128,
+    \\  "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4,
+    \\  "layer_types": ["linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention",
+    \\   "linear_attention","linear_attention","linear_attention","full_attention"]},
+    \\ "audio_decoder_config": {"dim": 2048, "n_head": 16, "n_local_heads": 2, "head_dim": 256,
+    \\  "intermediate_size": 6144, "num_codebooks": 10, "vocab_size": 4096, "shared_enrichment_layers": 4,
+    \\  "vq_backbone_codebooks": 1, "rotary_interleaved": true}}
+;
+
 test "the shipped Drama 3 config parses" {
-    const text =
-        \\{"eos_token_id": 248046, "pad_token_id": 248044, "semantic_start_token_id": 248099,
-        \\ "semantic_end_token_id": 252194, "audio_pad_token_id": 248076,
-        \\ "text_config": {"hidden_size": 2048, "num_hidden_layers": 40, "vocab_size": 252288,
-        \\  "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256, "num_experts": 256,
-        \\  "num_experts_per_tok": 8, "moe_intermediate_size": 512, "shared_expert_intermediate_size": 512,
-        \\  "linear_num_key_heads": 16, "linear_num_value_heads": 32, "linear_key_head_dim": 128,
-        \\  "linear_value_head_dim": 128, "linear_conv_kernel_dim": 4,
-        \\  "layer_types": ["linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention",
-        \\   "linear_attention","linear_attention","linear_attention","full_attention"]},
-        \\ "audio_decoder_config": {"dim": 2048, "n_head": 16, "n_local_heads": 2, "head_dim": 256,
-        \\  "intermediate_size": 6144, "num_codebooks": 10, "vocab_size": 4096, "shared_enrichment_layers": 4,
-        \\  "vq_backbone_codebooks": 1, "rotary_interleaved": true}}
-    ;
-    const c = try Config.parse(std.testing.allocator, text);
+    const c = try Config.parse(std.testing.allocator, shipped);
     try std.testing.expect(c.full_attention[3] and !c.full_attention[0] and c.full_attention[39]);
     try std.testing.expectEqual(@as(usize, 4097), c.candidates());
 }
@@ -151,4 +193,33 @@ test "a checkpoint whose shape differs from the kernels' is refused" {
         \\ "audio_pad_token_id": 3, "text_config": {"hidden_size": 4096}, "audio_decoder_config": {}}
     ;
     try std.testing.expectError(error.UnsupportedConfig, Config.parse(std.testing.allocator, text));
+}
+
+/// The shipped config with `from` replaced by `to` (once), for the refusal cases.
+fn shippedWith(gpa: std.mem.Allocator, from: []const u8, to: []const u8) ![]u8 {
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, shipped, from));
+    return std.mem.replaceOwned(u8, gpa, shipped, from, to);
+}
+
+test "a field of the wrong JSON kind is refused by name, not trapped on" {
+    const gpa = std.testing.allocator;
+    const cases = .{
+        .{ "\"hidden_size\": 2048", "\"hidden_size\": \"2048\"", error.ConfigNotInteger },
+        .{ "\"hidden_size\": 2048", "\"hidden_size\": 2048.0", error.ConfigNotInteger },
+        .{ "\"eos_token_id\": 248046", "\"eos_token_id\": null", error.ConfigNotInteger },
+        .{ "\"eos_token_id\": 248046", "\"eos_token_id\": 4294967296", error.BadConfig },
+        .{ "\"eos_token_id\": 248046", "\"eos_token_id\": -1", error.BadConfig },
+        .{ "\"text_config\": {", "\"text_config\": [], \"x\": {", error.ConfigNotObject },
+        .{ "\"audio_decoder_config\": {", "\"audio_decoder_config\": \"fish\", \"x\": {", error.ConfigNotObject },
+        .{ "\"layer_types\": [", "\"layer_types\": {}, \"x\": [", error.ConfigNotArray },
+        .{ "[\"linear_attention\",", "[1,", error.ConfigNotString },
+        .{ "\"rotary_interleaved\": true", "\"rotary_interleaved\": 1", error.ConfigNotBool },
+    };
+    inline for (cases) |c| {
+        const text = try shippedWith(gpa, c[0], c[1]);
+        defer gpa.free(text);
+        try std.testing.expectError(c[2], Config.parse(gpa, text));
+    }
+    try std.testing.expectError(error.ConfigNotObject, Config.parse(gpa, "[1, 2]"));
+    try std.testing.expectError(error.ConfigNotObject, Config.parse(gpa, "\"config\""));
 }
