@@ -1,4 +1,4 @@
-//! Native FP32 layouts corresponding to tools/drama3/codec_convert.py; no FP16 decoder image is reused.
+//! The codec's tensors in native FP32 layouts, read from codec.pth; no FP16 decoder image is reused.
 const std = @import("std");
 const pth = @import("codec_pth.zig");
 const A = std.mem.Allocator;

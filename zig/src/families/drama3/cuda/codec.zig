@@ -21,7 +21,7 @@ const Ru = struct { a1: u64, c7: u64, c7_b: u64, a2: u64, c1: u64, c1_b: u64 };
 const DecBlock = struct { alpha: u64, wa: u64, wb: u64, b: u64, ru: [3]Ru, cin: usize, cout: usize, s: usize };
 const EncBlock = struct { ru: [3]Ru, alpha: u64, wa: u64, wb: u64, b: u64, cin: usize, dim: usize, s: usize, tf: ?Tf };
 
-/// Diagnostics: a device fp32 tensor [rows, cols] by name (the codec_convert.py --ref names).
+/// Diagnostics: a device fp32 tensor [rows, cols] by its codec.pth name.
 pub const Probe = struct { ctx: *anyopaque, f: *const fn (ctx: *anyopaque, name: []const u8, ptr: u64, rows: usize, cols: usize) anyerror!void };
 
 pub const Options = struct { max_chunk: usize = 32, ring: usize = 512 };
