@@ -588,3 +588,10 @@ test "Flash Next takes --vision at family admission" {
 test {
     _ = @import("cuda_vision_offer.zig");
 }
+
+test "nemotron learning safety: actual native close drains Nemotron before any source, trainer or parent free" {
+    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);
+}
+test "nemotron learning safety: direct Nemotron trainer destruction drains before its first owner free" {
+    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, true);
+}

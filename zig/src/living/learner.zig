@@ -12,7 +12,6 @@ const probe = @import("probe.zig");
 const pocket = @import("pocket.zig");
 const whole_lessons = @import("whole.zig");
 const examples = @import("lesson_examples.zig");
-
 pub const Example = examples.Example;
 pub const Lesson = examples.Lesson;
 const max_steps = examples.max_steps;
@@ -23,7 +22,6 @@ const pick = examples.pick;
 const own = examples.own;
 const disown = examples.disown;
 const disownLesson = examples.disownLesson;
-
 /// A projection's 4-bit codes as a backend holds them live, on the grid of their scales and biases.
 pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
@@ -103,6 +101,7 @@ pub fn Learner(comptime H: type) type {
         }
 
         pub fn deinit(l: *Self) void {
+            if (l.trainer) |t| if (@hasDecl(H, "drain")) H.drain(t);
             if (has_edits) l.edits.deinit();
             if (has_edits) l.probe.deinit();
             if (has_pocket) l.pockets.deinit();

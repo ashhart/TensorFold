@@ -18,16 +18,12 @@ const prefix = @import("cuda_train_prefix.zig");
 const Count = @import("living").pocket_clock.Count;
 const Source = @import("cuda_source.zig").Source;
 const taps = @import("cuda_train_tap.zig");
-
 /// Rows a sequence learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
-
 /// Rows a pass holds at most, its sequences side by side.
 pub const pack_rows = 1024;
-
 /// Sequences a pass holds at most.
 pub const max_seqs = 32;
-
 pub const Mode = train_mode.Mode;
 pub const Result = train_mode.Result;
 pub const Nudge = train_mode.Nudge;
@@ -36,10 +32,8 @@ pub const Span = train_mode.Span;
 pub const Answer = train_mode.Answer;
 pub const Turn = lesson_route.Turn;
 const reads = train_mode.reads;
-
 /// Where the candidate projections start in the mapped host block (after targets, weights, stats and scales).
 const proj_at = pack_rows * 20;
-
 /// The trainer's own sequence: cache rows enough for a step, one attention chunk.
 const seq_len = state.chunk_keys;
 
@@ -242,7 +236,12 @@ pub const Trainer = struct {
         return @as(f64, @floatFromInt(b.toNanoseconds() - a.toNanoseconds())) / 1e9;
     }
 
+    pub fn drain(t: *Trainer) void {
+        cuda.completion.drain(t.e.ctx.d, t.e.stream, "the Nemotron trainer did not drain; its owners stay alive");
+    }
+
     pub fn deinit(t: *Trainer) void {
+        t.drain();
         const gpa = t.gpa;
         if (t.tap) |*x| x.deinit();
         t.prefixes.deinit(gpa);

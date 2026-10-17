@@ -42,7 +42,7 @@ pub fn Hooks(comptime H: type) type {
             return H.pocket(f.b, layer, up, down, used);
         }
 
-        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32) usize {
+        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32) !usize {
             return H.pocketRead(f.b, layer, up, down);
         }
 
@@ -60,7 +60,7 @@ pub fn Hooks(comptime H: type) type {
             return H.pocketSwiglu(f.b, layer, gate, up, down, used);
         }
 
-        pub fn pocketReadSwiglu(f: Self, layer: usize, gate: []f32, up: []f32, down: []f32) usize {
+        pub fn pocketReadSwiglu(f: Self, layer: usize, gate: []f32, up: []f32, down: []f32) !usize {
             return H.pocketReadSwiglu(f.b, layer, gate, up, down);
         }
 

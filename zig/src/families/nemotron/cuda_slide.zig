@@ -43,6 +43,10 @@ const Host = struct {
         return train.Trainer.init(gpa, io, m.e, m.dir, m.living);
     }
 
+    pub fn drain(t: *Trainer) void {
+        t.drain();
+    }
+
     pub fn free(t: *Trainer, _: std.mem.Allocator) void {
         t.deinit();
     }
@@ -95,16 +99,18 @@ const Host = struct {
     }
 
     /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
-    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) usize {
+    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) !usize {
         const blk = m.e.w.blocks[l];
-        if (blk.kind != .moe) return 0;
+        if (blk.kind != .moe) return error.NotAnMoeLayer;
         const p = blk.moe.pocket orelse return 0;
         const d = m.e.c.hidden;
-        if (p.n * d != up.len or p.n * d != down.len) return 0;
+        const count = std.math.mul(usize, p.n, d) catch return error.PocketShape;
+        if (count != up.len or count != down.len) return error.PocketShape;
         const o = m.e.ops();
-        o.download(std.mem.sliceAsBytes(up), p.up) catch return 0;
-        o.download(std.mem.sliceAsBytes(down), p.down) catch return 0;
-        m.e.stream.synchronize() catch return 0;
+        errdefer cuda.completion.drain(m.e.k.d, m.e.stream, "a pocket read did not drain; its candidate rows stay alive");
+        try o.download(std.mem.sliceAsBytes(up), p.up);
+        try o.download(std.mem.sliceAsBytes(down), p.down);
+        try m.e.stream.synchronize();
         var used: usize = 0;
         for (0..p.n) |j| {
             if (std.mem.indexOfNone(f32, up[j * d ..][0..d], &.{0}) != null) used = j + 1;
@@ -161,4 +167,8 @@ pub fn recapture(e: *engine.Engine) !void {
             set[rows] = fresh;
         };
     }
+}
+
+test "nemotron learning safety: actual Nemotron reads reject download, wait and shape failures and retry original rows" {
+    try @import("cuda_slide_read_test.zig").run(Host);
 }

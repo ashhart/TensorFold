@@ -433,6 +433,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native = native_modules.engines;
     @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");
     @import("drama3_host.zig").metal(b, mods.core, native_modules.api);
+    const nemo_safety = b.step("test-nemotron-learning-host", "Actual Nemotron CUDA close, checked pocket reads and retry under fake driver failures");
+    for ([_]*std.Build.Module{ native, mods.nemotron }) |m| nemo_safety.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"nemotron learning safety:"} })).step);
     const load_check = b.step("test-bolt-load-host", "Bolt load destination and native-parent retention without a GPU");
     const load_filter = b.option([]const u8, "bolt-load-filter", "Select one load regression");
     const load_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_load_gpu.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nemotron", .module = mods.nemotron } } });

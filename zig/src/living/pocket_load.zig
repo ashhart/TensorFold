@@ -8,6 +8,11 @@ pub fn load(p: anytype, host: anytype) !void {
     if (p.moe.items.len > 0) return;
     const lay = host.layout();
     if (lay.layers > 64) return error.TooManyLayers; // a step's nudges mark their layers in a u64
+    errdefer {
+        inline for (.{ "moe", "up", "down", "gate", "scratch", "used" }) |f| @field(p, f).clearRetainingCapacity();
+        p.hidden = 0;
+        p.layers = 0;
+    }
     p.hidden = lay.hidden;
     p.layers = lay.layers;
     for (0..lay.layers) |l| if (lay.learn.isSet(l)) try p.moe.append(p.gpa, l);
@@ -23,8 +28,12 @@ pub fn load(p: anytype, host: anytype) !void {
         const up = p.up.items[j * n ..][0..n];
         const down = p.down.items[j * n ..][0..n];
         if (P.swiglu) {
-            p.used.items[j] = host.pocketReadSwiglu(l, p.gate.items[j * n ..][0..n], p.scratch.items, down);
+            p.used.items[j] = try checked(host.pocketReadSwiglu(l, p.gate.items[j * n ..][0..n], p.scratch.items, down));
             neuron_math.fromUp(P.of.neuron, p.scratch.items, up);
-        } else p.used.items[j] = host.pocketRead(l, up, down);
+        } else p.used.items[j] = try checked(host.pocketRead(l, up, down));
     }
+}
+
+fn checked(value: anytype) !usize {
+    return if (@typeInfo(@TypeOf(value)) == .error_union) try value else value;
 }
