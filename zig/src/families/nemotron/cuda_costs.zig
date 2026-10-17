@@ -9,6 +9,7 @@ const Head = @import("cuda_mtp.zig").Head;
 const state = @import("cuda_state.zig");
 const rule = lanes.cost_rule;
 const profile_window = @import("cuda_profile_window.zig");
+const regime = cuda.launch.few_rows; // windows past it take the router's and the lanes' wider kernels
 
 // Windows hold this prefix's pending token, then the text's next tokens as drafts, after the head drafts as in a round.
 const text = "The river had been rising for three days, and by the time the ferry stopped running the town had moved its " ++
@@ -54,10 +55,10 @@ pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_d
     var raw: Raw = undefined;
     try timeAll(gpa, io, e, h, model_dir, &raw, false);
     const widths = state.windowRows(e.c) + 1;
-    var costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level);
+    var costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level, regime);
     if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, rk)) |ref| if (drifted(costs, ref)) {
         try timeAll(gpa, io, e, h, model_dir, &raw, true);
-        costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level);
+        costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level, regime);
     };
     if (k) |key| lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, key, costs);
     lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, rk, costs);
