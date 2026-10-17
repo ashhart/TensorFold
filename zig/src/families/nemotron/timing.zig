@@ -86,7 +86,7 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     };
     var caches: [64]st.Cache = undefined;
     const n = @min(b.o.batch_rows / 2, caches.len);
-    for (caches[0..n]) |*x| x.* = try st.Cache.init(b.m.device, c, timed_len + st.max_rows, b.head != null);
+    try makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b });
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
     _ = try timeWindows(b, caches[0..1], backend.max_window, 12);
@@ -189,6 +189,54 @@ test "a retained table is refused when lone windows and the head hold but one sh
         odd.shared[2].ms = bad;
         try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{}, odd, true, 3));
     }
+}
+
+/// `items` made in turn by `maker`; when one fails, the ones made before it go back through `maker.free` first.
+fn makeEach(comptime T: type, items: []T, maker: anytype) !void {
+    for (items, 0..) |*x, i| x.* = maker.make() catch |err| {
+        for (items[0..i]) |*y| maker.free(y);
+        return err;
+    };
+}
+
+/// A timing pass's cache: a reply's early tokens and the widest window, with the head's rows when it drafts.
+const CacheMaker = struct {
+    b: *backend.Metal,
+    fn make(m: CacheMaker) !st.Cache {
+        return st.Cache.init(m.b.m.device, m.b.m.config, timed_len + st.max_rows, m.b.head != null);
+    }
+    fn free(m: CacheMaker, x: *st.Cache) void {
+        x.deinit(&m.b.pool);
+    }
+};
+
+test "a timing cache that fails to make releases the ones made before it, and only those" {
+    const Maker = struct {
+        made: *usize,
+        freed: *usize,
+        fail_at: usize,
+        fn make(m: @This()) !u32 {
+            if (m.made.* == m.fail_at) return error.OutOfMemory;
+            m.made.* += 1;
+            return @intCast(m.made.*);
+        }
+        fn free(m: @This(), x: *u32) void {
+            std.debug.assert(x.* >= 1 and x.* <= m.made.*);
+            m.freed.* += 1;
+        }
+    };
+    var items: [6]u32 = undefined;
+    for ([_]usize{ 0, 3, 5 }) |at| {
+        var made: usize = 0;
+        var freed: usize = 0;
+        try std.testing.expectError(error.OutOfMemory, makeEach(u32, &items, Maker{ .made = &made, .freed = &freed, .fail_at = at }));
+        try std.testing.expectEqual(at, freed);
+    }
+    var made: usize = 0;
+    var freed: usize = 0;
+    try makeEach(u32, &items, Maker{ .made = &made, .freed = &freed, .fail_at = items.len });
+    try std.testing.expectEqual(items.len, made);
+    try std.testing.expectEqual(@as(usize, 0), freed);
 }
 
 /// Windows past 16 rows, timed for the lanes' wider trees.
