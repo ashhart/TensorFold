@@ -17,6 +17,7 @@ const usage =
     \\
     \\--model (or $TF_MUSIC3_MODEL) is the folder holding Comfy-Org's three MiniMax-Music3 files; it is required.
     \\--caption / --lyrics take the text itself. WAV out: 16-bit PCM stereo 44.1 kHz.
+    \\--flash, --dav-tf32 and --graphs choose CUDA kernels; the Metal build accepts and ignores them.
     \\
 ;
 

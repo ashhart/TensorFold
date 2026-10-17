@@ -1,0 +1,1 @@
+{"columns": ["song", "seed", "weights", "score", "found", "words"], "rows": [["hiphop", 7, "int8", 99, 143, 145], ["pop", 11, "int8", 100, 78, 78], ["long", 5, "int8", 97, 56, 58], ["hiphop", 7, "bf16", 98, 121, 124], ["pop", 11, "bf16", 100, 70, 70], ["long", 5, "bf16", 100, 46, 46]]}

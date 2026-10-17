@@ -31,6 +31,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "music3 ")) {
+        const m3 = @import("metal_music3.zig");
+        const pre = try m3.source(a, d.name, true);
+        return .{ .decl = d, .function = fun, .here = if (device.tensorUnits()) try m3.source(a, d.name, false) else pre, .pre_m5 = pre };
+    }
     if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
