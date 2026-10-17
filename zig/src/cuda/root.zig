@@ -60,8 +60,10 @@ pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
+pub const exl3_grouped = @import("exl3_grouped.zig");
 
 test {
+    _ = exl3_grouped;
     _ = @import("memory.zig");
     _ = memory_receipt;
     _ = @import("grouped.zig");

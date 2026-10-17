@@ -108,6 +108,8 @@ pub const Experts = struct {
     grouped: [3]Function, // one per codebook
     gateup: Function,
     down_combine: Function,
+    plan_rotate: Function = undefined,
+    plan_finish: Function = undefined,
 
     pub fn load(d: *const Driver) !Experts {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -120,6 +122,8 @@ pub const Experts = struct {
             .down_combine = undefined,
         };
         errdefer e.mod.unload();
+        e.plan_rotate = try e.mod.function("tf_exl3_plan_rotate");
+        e.plan_finish = try e.mod.function("tf_exl3_plan_finish");
         e.group = try e.mod.function("tf_exl3_group");
         try e.group.allowDynamicShared(64 * 1024);
         e.rot_in = try e.mod.function("tf_exl3_experts_rot_in");
@@ -201,6 +205,8 @@ pub const Experts = struct {
         g.add(i32d(maxu));
         g.add(@as(i32, 2));
         g.add(i32d(l.gu_stride));
+        g.add(@as(i32, 0));
+        g.add(@as(i32, -1));
         try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(w / 128), .z = @intCast(2 * g_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &g);
 
         var ep: launch_.Args = .{};
@@ -238,6 +244,8 @@ pub const Experts = struct {
         dn.add(i32d(maxu));
         dn.add(@as(i32, 1));
         dn.add(@as(i32, 0));
+        dn.add(@as(i32, 0));
+        dn.add(@as(i32, -1));
         try launch_.launch(e.grouped[@backingInt(l.codebook)], .{ .grid = .{ .x = @intCast(maxu), .y = @intCast(d / 128), .z = @intCast(d_sk * mt) }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &dn);
 
         var cb: launch_.Args = .{};

@@ -307,6 +307,14 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda = runtime(b, host, .debug, &.{});
     const mods = family(b, host, .debug, cuda, draft_ids);
     const exl3_host = b.step("test-exl3-cuda-host", "EXL3 loader and CUDA host regressions without a GPU");
+    const exl3_compile = b.addObject(.{ .name = "exl3_host_compile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/exl3_compile.zig"),
+        .target = host,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } },
+    }) });
+    step.dependOn(&exl3_compile.step);
+    exl3_host.dependOn(&exl3_compile.step);
     for ([_]*std.Build.Module{ cuda, mods.core }) |m| {
         exl3_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     }
