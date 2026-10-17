@@ -45,6 +45,11 @@ pub const Seg = struct {
     mask_row: ?usize = null, // structured output: its rows' grammar bits from this row of Forward.masks
 };
 
+/// A matrix simd_qmm_bits' tiles read: groups of 64 with fp32 sums at a width they unpack.
+pub fn tiled(w: row.Weights) bool {
+    return w.group == 64 and w.sum == .f32 and w.n % 8 == 0 and w.k % 64 == 0 and std.mem.indexOfScalar(u8, &row.simd_bits.bit_widths, w.bits) != null;
+}
+
 pub fn ints8(values: []const i32) [8]i32 {
     var out: [8]i32 = @splat(0);
     @memcpy(out[0..values.len], values);
@@ -76,6 +81,7 @@ pub const Forward = struct {
     /// lane_qmm's coop kernel for this projection shape and row count (key: in, out, down, qkv, head, eh, draft).
     pub fn coop(self: Forward, e: *Enc, comptime key: []const u8, lin: wts.Linear, x: Buffer, x_off: usize, xs: Buffer, y: Buffer, rows: usize) void {
         if (self.rowCall(e, lin, x, x_off, y, 0, rows, false)) return;
+        const t = lin.tiles.?; // a projection without lane tiles has rows, and row pipelines were loaded for it
         const m = mp(rows);
         const block = if (m <= 32) m else 32;
         const tmr = block / 16;
@@ -89,18 +95,24 @@ pub const Forward = struct {
         e.pipe(p);
         e.buf(x, x_off, 0);
         e.buf(xs, 0, 1);
-        e.buf(lin.w, 0, 2);
-        e.buf(lin.sbt, 0, 3);
+        e.buf(t.w, 0, 2);
+        e.buf(t.sbt, 0, 3);
         e.bytes(mdims(rows), 4);
         e.buf(y, 0, 5);
         e.run(.{ lin.n / 64 * 64 * sk, (m + block - 1) / block, 1 }, .{ 64 * sk, 1, 1 });
     }
 
-    /// The core's row kernels on a chip without tensor units (the projection in its row layout); false on the tensor path.
+    /// The core's row kernels on the projection's row layout (no tensor units, or a width but 4/64); false: lane tiles.
     pub fn rowCall(self: Forward, e: *Enc, lin: wts.Linear, x: Buffer, x_off: usize, y: Buffer, y_off: usize, rows: usize, relu2: bool) bool {
-        const w = lin.rows orelse return false;
         const p = &(self.k.rows orelse return false);
-        const c = row.call(p, w, rows, relu2) catch unreachable;
+        for (lin.stack[0..lin.stacked]) |m| self.rowRun(e, row.callStrided(p, m.rows, rows, lin.n) catch unreachable, m.rows, x, x_off, y, y_off + m.first * 2);
+        if (lin.stacked > 0) return true;
+        const w = lin.rows orelse return false;
+        self.rowRun(e, row.call(p, w, rows, relu2) catch unreachable, w, x, x_off, y, y_off);
+        return true;
+    }
+
+    fn rowRun(_: Forward, e: *Enc, c: row.Call, w: row.Weights, x: Buffer, x_off: usize, y: Buffer, y_off: usize) void {
         e.pipe(c.pipeline);
         e.buf(x, x_off, 0);
         e.buf(w.w, w.w_off, 1);
@@ -109,7 +121,48 @@ pub const Forward = struct {
         e.bytes(c.dims, 4);
         e.buf(y, y_off, 5);
         e.run(.{ c.groups * c.threads, 1, 1 }, .{ c.threads, 1, 1 });
+    }
+
+    /// simd_qmm_bits' tiles for a prompt chunk at a width but 4/64 (groups of 64), member by member; false where not.
+    pub fn wide(self: Forward, e: *Enc, lin: wts.Linear, x: Buffer, y: Buffer, rows: usize) bool {
+        const p = self.k.bits orelse return false;
+        var single: [1]wts.Member = undefined;
+        const parts: []const wts.Member = if (lin.stacked > 0) lin.stack[0..lin.stacked] else blk: {
+            single[0] = .{ .first = 0, .rows = lin.rows orelse return false };
+            break :blk &single;
+        };
+        var calls: [3]row.simd_bits.Call = undefined;
+        for (parts, 0..) |m, i| {
+            if (!tiled(m.rows)) return false;
+            calls[i] = row.simd_bits.call(p, m.rows.bits, m.rows.n, m.rows.k, rows, lin.n, false) catch return false;
+        }
+        for (parts, calls[0..parts.len]) |m, c| {
+            e.pipe(c.pipeline);
+            e.buf(x, 0, 0);
+            e.buf(m.rows.w, m.rows.w_off, 1);
+            e.buf(m.rows.scales, m.rows.s_off, 2);
+            e.buf(m.rows.biases, m.rows.b_off, 3);
+            e.bytes(c.args, 4);
+            e.buf(y, m.first * 2, 5);
+            e.run(.{ c.groups.width * c.threads, c.groups.height, 1 }, .{ c.threads, 1, 1 });
+        }
         return true;
+    }
+
+    /// Routed experts on the core's indexed row kernels: slot i takes expert ids[i] on input row i / repeat.
+    pub fn indexed(self: Forward, e: *Enc, x: row.Experts, repeat: usize, slots: usize, relu2: bool, in: Buffer, ids: Buffer, out: Buffer) void {
+        var one = x;
+        one.repeat = repeat;
+        const c = row.callIndexed(&self.k.rows.?, one, slots, relu2) catch unreachable;
+        e.pipe(c.pipeline);
+        e.buf(in, 0, 0);
+        e.buf(x.one.w, x.one.w_off, 1);
+        e.buf(x.one.scales, x.one.s_off, 2);
+        e.buf(x.one.biases, x.one.b_off, 3);
+        e.bytes(c.dims, 4);
+        e.buf(out, 0, 5);
+        e.buf(ids, 0, 6);
+        e.run(.{ c.groups * c.threads, c.slots, 1 }, .{ c.threads, 1, 1 });
     }
 
     /// The same coop math with each K slice its own threadgroup (more threadgroups than cores), summed in slice order.
@@ -132,15 +185,16 @@ pub const Forward = struct {
         e.pipe(p);
         e.buf(x, x_off, 0);
         e.buf(xs, 0, 1);
-        e.buf(lin.w, 0, 2);
-        e.buf(lin.sbt, 0, 3);
+        e.buf(lin.tiles.?.w, 0, 2);
+        e.buf(lin.tiles.?.sbt, 0, 3);
         e.bytes(mdims(rows), 4);
         e.buf(self.s.part, 0, 5);
         e.run(.{ lin.n / 64 * 64, (m + block - 1) / block, sk }, .{ 64, 1, 1 });
     }
 
-    /// Whether coop() splits this projection's K slices at `rows` rows (and how many).
+    /// Whether coop() splits this projection's K slices at `rows` rows (and how many; 0 without lane tiles).
     pub fn splitsAt(self: Forward, comptime key: []const u8, lin: wts.Linear, rows: usize) usize {
+        if (lin.tiles == null) return 0;
         const sk = splitK(lin.n, lin.k);
         return if (comptime splits(key)) (if (sk > 1 and splitOn() and mp(rows) <= mp(self.s.rows)) sk else 0) else 0;
     }
@@ -296,17 +350,23 @@ pub const Forward = struct {
         e.run(.{ 1024 * rows, 1, 1 }, .{ 1024, 1, 1 });
     }
 
-    /// The embedding rows of the token ids at `ids` + `ids_off` into `out` [rows, D].
+    /// The embedding rows of the token ids at `ids` + `ids_off` into `out` [rows, D], at the table's width.
     pub fn embed(self: Forward, e: *Enc, rows: usize, ids: Buffer, ids_off: usize, out: Buffer) void {
         const d = self.c.hidden;
-        e.pipe(self.k.get("tf_embed_q4"));
+        const w = self.w.embed_width;
+        e.pipe(if (w.four()) self.k.get("tf_embed_q4") else self.k.get("tf_embed_bits"));
         e.buf(ids, ids_off, 0);
         e.buf(self.w.embed[0].buffer, self.w.embed[0].offset, 1);
         e.buf(self.w.embed[1].buffer, self.w.embed[1].offset, 2);
         e.buf(self.w.embed[2].buffer, self.w.embed[2].offset, 3);
         e.buf(out, 0, 4);
-        e.bytes(@as(u32, @intCast(d)), 5);
-        e.run(.{ d / 2, rows, 1 }, .{ 256, 1, 1 });
+        if (w.four()) {
+            e.bytes(@as(u32, @intCast(d)), 5);
+            e.run(.{ d / 2, rows, 1 }, .{ 256, 1, 1 });
+        } else {
+            e.bytes([4]u32{ @intCast(d), w.bits, w.group, 0 }, 5);
+            e.run(.{ d, rows, 1 }, .{ 256, 1, 1 });
+        }
     }
 
     /// MLX's RMS norm of `rows` rows of D (`stride` and `out_stride` elements apart) with weight `w`.

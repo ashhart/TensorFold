@@ -1,9 +1,10 @@
 //! vLLM's /tokenize and /detokenize (the ids the chat and completion routes would run), and a reply's token SHA.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const messages = @import("messages.zig");
+const images = @import("images.zig");
 const prompt = @import("prompt.zig");
 const tool_specs = @import("tool_specs.zig");
 const routes = @import("routes.zig");
@@ -29,7 +30,7 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
     var ids: []const u32 = undefined;
     if (body.has("messages")) {
         const generation = try flag(cx, body, "add_generation_prompt", true);
-        const msgs = try messages.normalize(cx, body.get("messages"), "system", srv.needs_user_after_tool);
+        const msgs = try messages.normalizeWith(cx, body.get("messages"), "system", srv.needs_user_after_tool, .of(srv.info.vision));
         const tools = tool_specs.active(cx, body.get("tools"), body.get("tool_choice")) catch |e| switch (e) {
             error.Refused => return cx.refuse(cx.message), // a ValueError here is a RequestError
             else => |x| return x,
@@ -40,6 +41,8 @@ fn tokenize(srv: *Server, cx: *Cx, body: Value) errors.Refused!Value {
             error.Refused => return cx.other(cx.message),
             else => |x| return x,
         };
+        // media expanded as the chat route expands them: each image's tokens, each video's frame groups
+        if (try images.expand(srv.info.vision, if (srv.config.vision_urls) images.Fetch.network(srv.io) else null, srv.text, cx, msgs, ids, 0)) |x| ids = x.ids;
     } else {
         const text = body.get("prompt");
         if (text == null or text.? != .string) return cx.refuse("prompt must be a string (or send messages)");
@@ -98,7 +101,7 @@ pub fn post(srv: *Server, conn: *Conn, a: Allocator, detok: bool) void {
 }
 
 /// The reply's token ids hashed: drafted and ``"draft": false`` replies must match.
-pub fn tokenSha(tokens: []const u32) [12]u8 {
+pub fn tokenSha256(tokens: []const u32) [64]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     var buf: [16]u8 = undefined;
     for (tokens, 0..) |t, i| {
@@ -107,8 +110,24 @@ pub fn tokenSha(tokens: []const u32) [12]u8 {
     }
     var d: [32]u8 = undefined;
     h.final(&d);
-    var out: [12]u8 = undefined;
-    const hex = std.fmt.bytesToHex(d[0..6].*, .lower);
-    @memcpy(&out, &hex);
-    return out;
+    return std.fmt.bytesToHex(d, .lower);
+}
+
+/// The existing short token fingerprint remains available to clients.
+pub fn tokenSha(tokens: []const u32) [12]u8 {
+    return tokenSha256(tokens)[0..12].*;
+}
+
+test "full token SHA hashes decimal ids with commas and preserves the short fingerprint" {
+    const ids = [_]u32{ 1, 23, 456, 0xffffffff };
+    try std.testing.expectEqualStrings(
+        "59ce3a8d28d46b5fe396be42f190dd3dd26a64b88007ad56d7cd3609fd42bf8c",
+        &tokenSha256(&ids),
+    );
+    try std.testing.expectEqualStrings(tokenSha256(&ids)[0..12], &tokenSha(&ids));
+    try std.testing.expectEqualStrings(
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        &tokenSha256(&.{}),
+    );
+    try std.testing.expect(!std.mem.eql(u8, &tokenSha256(&.{ 1, 23 }), &tokenSha256(&.{ 12, 3 })));
 }

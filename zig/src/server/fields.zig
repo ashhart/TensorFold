@@ -1,6 +1,6 @@
 //! Request field checks shared by every route: numbers, stops, thinking switches, efforts, probabilities.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
