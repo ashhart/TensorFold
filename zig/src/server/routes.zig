@@ -13,6 +13,7 @@ const systemone = @import("systemone.zig");
 const status = @import("status_routes.zig");
 const memory = @import("memory_routes.zig");
 const slide = @import("slide.zig");
+const speech = @import("speech.zig");
 const recall = @import("recall_routes.zig");
 const imprint = @import("imprint_routes.zig");
 const slide_forget = @import("slide_forget.zig");
@@ -75,6 +76,7 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/imprint/resume")) return imprint.post(srv, conn, a, .where);
     if (std.mem.eql(u8, route, "/v1/imprint/load")) return imprint.post(srv, conn, a, .load);
