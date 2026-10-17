@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    // draining: the engine is not asked, it may be stopping
+    if (srv.draining.load(.seq_cst)) return routes.sendDraining(conn, try std.fmt.allocPrint(a, "{{\"status\": \"draining\", \"requests_in_progress\": {d}}}", .{srv.generating.load(.seq_cst)}));
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
 }
