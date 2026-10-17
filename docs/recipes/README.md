@@ -36,6 +36,8 @@ New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md)
 one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the contributor guides cover
 [adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
 [CUDA implementation rules](cuda.md).
+[Training a drafter](training-a-drafter.md) takes a target's `--record` output to a learned block drafter, with
+what each step gained on Kolibri-1.
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
 module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
 any codebook, any width per tensor, one grouped launch per MoE projection.
