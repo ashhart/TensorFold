@@ -137,6 +137,9 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.gpa = gpa;
     // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
     if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+    // NCCL's cuMem host buffers wore out GB10's driver pool under load (NV_ERR_NO_MEMORY; next ranks failed to start)
+    if (std.c.getenv("NCCL_CUMEM_HOST_ENABLE") == null) _ = setenv("NCCL_CUMEM_HOST_ENABLE", "0", 0);
+    if (std.c.getenv("NCCL_CUMEM_ENABLE") == null) _ = setenv("NCCL_CUMEM_ENABLE", "0", 0);
     var lib = try cuda.nccl.Library.open();
     errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
