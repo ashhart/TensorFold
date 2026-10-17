@@ -45,8 +45,15 @@ pub const Geometry = struct {
         return g.heads == other.heads and g.kv_heads == other.kv_heads and g.dim == other.dim and g.rotary == other.rotary;
     }
 
+    /// The qualified head counts: the 27B's 24 over 4 and the 35B-A3B's 16 over 2.
     pub fn check(g: Geometry) !void {
-        if (g.heads != 24 or g.kv_heads != 4 or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
+        const heads = (g.heads == 24 and g.kv_heads == 4) or (g.heads == 16 and g.kv_heads == 2);
+        if (!heads or g.dim != 256 or g.rotary != 64) return error.TargetAttentionShape;
+    }
+    /// The kernels' defines for these head counts: none for the 27B's 24 over 4, the kernels' defaults.
+    pub fn defines(g: Geometry, buf: []u8) ![]const u8 {
+        if (g.heads == 24 and g.kv_heads == 4) return "";
+        return std.fmt.bufPrint(buf, "#define Q27_GROUP {d}\n#define Q27_KV_HEADS {d}\n", .{ g.group(), g.kv_heads });
     }
     pub fn promptRows(g: Geometry, requested: u32) u32 {
         return @min(requested, @as(u32, if (g.shared_prefix and g.fuse_chain) chain_rows else max_rows));
@@ -54,6 +61,13 @@ pub const Geometry = struct {
 
     pub fn group(g: Geometry) u32 {
         return g.heads / g.kv_heads;
+    }
+    /// A row's query and key widths in elements.
+    pub fn qWidth(g: Geometry) usize {
+        return @as(usize, g.heads) * g.dim;
+    }
+    pub fn kvWidth(g: Geometry) usize {
+        return @as(usize, g.kv_heads) * g.dim;
     }
 };
 pub const Plan = struct {

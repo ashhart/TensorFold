@@ -69,7 +69,7 @@ pub const Host = struct {
     fn added(ptr: *anyopaque, buffers: []const mtl.Buffer) void {
         const h = of(ptr);
         if (h.resident) |*r| r.addNow(buffers); // its first round reads them: committed now, as before staging
-        std.log.info("Qwen3.8-27B: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
+        std.log.info("qwen27: a slot took its memory ({d} of {d} ready)", .{ h.runner.ready, h.runner.slots });
     }
 
     /// A finished reply's state stands where a prompt pass of prompt and reply would: keep it for the next turn.
@@ -163,8 +163,8 @@ fn takeRoom(cache: ?*pc.Store, free: usize, bytes: usize, restoring: ?pc.Saved, 
     const held = if (cache) |c| c.held else 0;
     const ok = if (cache) |c| c.giveBack(restoring, prompt, Left{ .room = free, .store = c, .held = held, .bytes = bytes }) else free >= bytes;
     const freed = held - (if (cache) |c| c.held else 0);
-    if (!builtin.is_test and freed > 0) std.log.info("Qwen3.8-27B: kept prompt states gave {d:.1} GiB back for a stream's slot", .{cache_fit.gibs(freed)});
-    if (!builtin.is_test and !ok) std.log.info("Qwen3.8-27B: a slot needs {d:.1} GiB and {d:.1} GiB is free beside the weights and an 8 GiB margin: the request waits for a stream to end", .{ cache_fit.gibs(bytes), cache_fit.gibs(free + freed) });
+    if (!builtin.is_test and freed > 0) std.log.info("qwen27: kept prompt states gave {d:.1} GiB back for a stream's slot", .{cache_fit.gibs(freed)});
+    if (!builtin.is_test and !ok) std.log.info("qwen27: a slot needs {d:.1} GiB and {d:.1} GiB is free beside the weights and an 8 GiB margin: the request waits for a stream to end", .{ cache_fit.gibs(bytes), cache_fit.gibs(free + freed) });
     return ok;
 }
 
@@ -356,7 +356,7 @@ pub fn attach(gpa: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q.df
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
-    std.log.info("Qwen3.8-27B: {d} streams of {d} tokens{s}{s}", .{ slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
+    std.log.info("{s}: {d} streams of {d} tokens{s}{s}", .{ if (h.model.config.moe()) "Qwen3.6-35B-A3B" else "Qwen3.8-27B", slots, capacity, if (h.draft != null) ", DFlash2 drafts for one of them" else "", if (o.images != null) ", images read" else "" });
     return h;
 }
 
