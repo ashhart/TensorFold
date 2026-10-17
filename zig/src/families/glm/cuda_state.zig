@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const exl3 = @import("cuda_exl3.zig");
 const weights = @import("cuda_weights.zig");
 const kda = @import("cuda_kda.zig");
 const b16 = @import("cuda_b16.zig");
@@ -18,6 +19,8 @@ const kda_block = @import("cuda_kda_block.zig");
 pub const prefill_rows = 2048;
 /// A decode window's rows (Engine's max_rows).
 pub const window_rows = 8;
+/// Prompts one prompt pass takes together (cuda_prompts): a prompt buffer's logits rows, one a prompt.
+pub const prompt_heads = 16;
 /// The context the buffers' dense attention partials reach (Buffers' min(capacity, 2560)).
 pub const dense_reach = 2560;
 
@@ -46,7 +49,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 }
 
 /// A rank's B16 matmul shapes ([n, k]) whose split-K partials the buffers hold.
-fn b16Shapes(w: *const weights.Weights) [10][2]usize {
+fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const c = &w.config;
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
@@ -56,6 +59,8 @@ fn b16Shapes(w: *const weights.Weights) [10][2]usize {
         .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
         .{ c.i_heads * c.i_dim, c.q_lora },  .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
         .{ c.hidden, 2 * c.hidden }, // the MTP head's eh_proj
+        if (c.exl3) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
+        if (c.exl3) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
     };
 }
 
@@ -123,6 +128,7 @@ pub const Buffers = struct {
         var mm: usize = 4;
         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
         for (b16Shapes(w)) |sh_| mm = @max(mm, b16.partBytes(@min(rows, b16.rows_from - 1), sh_[0], sh_[1]));
+        const x3: [4]usize = if (c.exl3) exl3.scratchBytes(rows, D, ew, prefill, w.exl3_shx) else @splat(4);
         const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
         const sizes = [_]usize{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
@@ -157,13 +163,14 @@ pub const Buffers = struct {
             rows * sh * 2,
             rows * (sh / 64) * 4, rows * D * 4, // sxs, sy
             rows * D * 2,         rows * D * 2,
-            rows * (D / 64) * 4,  (if (prefill) 1 else rows) * s.vocab.len() * 2,
+            rows * (D / 64) * 4,  (if (prefill) prompt_heads else rows) * s.vocab.len() * 2,
             rows * D * 2, rows * D * 2, rows * 2 * D * 2, rows * D * 2, // hin, me, mcat, mx
             rows * D * 4, // part: this rank's fp32 partial rows a split exchange sends from
+            x3[0], x3[1], x3[2], x3[3], // EXL3 experts: 8-slot picks, rotated inputs, a decode window's partials
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &sizes, &p);
-        return .{
+        var out: Buffers = .{
             .arena = a,
             .rows = rows,
             .prefill = prefill,
@@ -201,7 +208,7 @@ pub const Buffers = struct {
                 .mm_part = p[42],
                 .at = p[43],
             },
-            .dense = .{ .tmp = p[44], .gu = p[45], .act = p[46], .xs_act = p[47] },
+            .dense = .{ .tmp = p[44], .gu = p[45], .act = p[46], .xs_act = p[47], .mm_part = p[42] },
             .moe = .{ .mlog = p[48], .router_part = p[26], .pick = p[49], .wts = p[50], .plan = .{ .members = p[51], .items = p[52], .counts = p[53], .rank = p[54], .hist = p[55] }, .eact = p[56], .ey = p[57], .sgu = p[58], .sact = p[59], .sxs = p[60], .sy = p[61], .mm_part = p[42] },
             .hidden = p[62],
             .fnormed = p[63],
@@ -213,6 +220,8 @@ pub const Buffers = struct {
             .mx = p[69],
             .part = p[70],
         };
+        out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
+        return out;
     }
 
     pub fn deinit(b: *Buffers) void {

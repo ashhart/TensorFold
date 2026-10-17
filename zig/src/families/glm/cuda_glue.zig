@@ -2,9 +2,14 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const mm_mod = @import("cuda_mm.zig");
 
-/// What the forward's kernels launch from: our glue's functions.
-pub const Set = struct { glue: *const Kernels };
+/// What the forward's kernels launch from: our glue's functions, glm_mm's (tiled weights), a prompt pass's flag.
+pub const Set = struct {
+    glue: *const Kernels,
+    mm: ?*const mm_mod.Kernels = null,
+    prompt: bool = false, // glm_mm's one-slice blocks at any rows: a prompt's sums alike alone or batched
+};
 
 /// Our glm_glue.cu's functions.
 pub const Kernels = struct {

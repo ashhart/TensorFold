@@ -3,10 +3,13 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
+const images_mod = @import("cuda_images.zig");
+const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
+const prompts = @import("cuda_prompts.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, many };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -88,6 +91,12 @@ pub const Link = struct {
         }
     }
 
+    /// `bytes` at `ptr` from rank 0 into every rank's `ptr` (image rows: the follower's buffer is the same size).
+    pub fn rows(l: *Link, ptr: u64, bytes: usize) !void {
+        if (bytes == 0) return;
+        try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
+    }
+
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
         try l.bcast(64);
@@ -153,6 +162,16 @@ pub const Leader = struct {
         try x.e.begin(c);
     }
 
+    /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
+    pub fn images(x: Leader, v: *const images_mod.Images) !void {
+        try x.flush();
+        var words: [3 * 64]u32 = undefined;
+        if (v.spans.items.len * 3 > words.len) return error.TooManyImages;
+        for (v.spans.items, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
+        try x.send(.{ .kind = @backingInt(Kind.image) }, words[0 .. 3 * v.spans.items.len]);
+        try x.link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
+    }
+
     /// `cancel` (rank 0's), asked before each chunk, decides for every rank; `from` every rank holds; `marks` rank 0's.
     pub fn prefill(x: Leader, ids: []const u32, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !u32 {
         try x.flush();
@@ -192,6 +211,22 @@ pub const Leader = struct {
         try x.e.verifyShared(parts);
     }
 
+    /// Whole prompts in one prompt pass on every rank (Engine.prefillMany): their slots and lengths, then the ids.
+    pub fn prefillMany(x: Leader, parts: []const engine.Prompt, firsts: []u32) !void {
+        if (!prompts.fits(parts, x.e.capacity)) return error.BadPrompts;
+        try x.flush();
+        var buf: [2 * engine.max_together + engine.prompt_rows]u32 = undefined;
+        var n: usize = 2 * parts.len;
+        for (parts, 0..) |p, i| {
+            buf[2 * i] = p.slot;
+            buf[2 * i + 1] = @intCast(p.ids.len);
+            @memcpy(buf[n..][0..p.ids.len], p.ids);
+            n += p.ids.len;
+        }
+        try x.send(.{ .kind = @backingInt(Kind.many), .depth = @intCast(parts.len) }, buf[0..n]);
+        try x.e.prefillMany(parts, firsts);
+    }
+
     pub fn keep(x: Leader, n: usize) !void {
         try x.flush();
         try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
@@ -218,9 +253,9 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .many) try e.bind(h.slot);
         switch (kind) {
-            .begin => try e.begin(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
+            .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
@@ -256,11 +291,30 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 }
                 try e.verifyShared(parts[0..k]);
             },
+            .many => {
+                const k = h.depth;
+                if (k == 0 or k > engine.max_together or step.ids.len < 2 * k) return error.BadStep;
+                var parts: [engine.max_together]engine.Prompt = undefined;
+                var at: usize = 2 * k;
+                for (parts[0..k], 0..) |*p, i| {
+                    const n = step.ids[2 * i + 1];
+                    if (at + n > step.ids.len) return error.BadStep;
+                    p.* = .{ .slot = step.ids[2 * i], .ids = step.ids[at..][0..n] };
+                    at += n;
+                }
+                var firsts: [engine.max_together]u32 = undefined;
+                try e.prefillMany(parts[0..k], &firsts);
+            },
             .keep => try e.keep(@intCast(h.a)),
             .draft => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
                 try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+            },
+            .image => {
+                const v = e.images orelse return error.NoVision; // the ranks agreed on --vision (cuda_ranks)
+                try v.take(h.slot, step.ids);
+                try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),

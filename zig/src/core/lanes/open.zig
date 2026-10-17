@@ -1,4 +1,5 @@
 //! A stream's way into the rounds: its prompt pass whole or a chunk a round, then its first token and drafts.
+const std = @import("std");
 const Engine = @import("engine.zig").Engine;
 const sm = @import("stream.zig");
 const be = @import("backend.zig");
@@ -21,6 +22,38 @@ pub fn add(e: *Engine, s: *Stream) !void {
         return err;
     };
     try opened(e, s);
+}
+
+/// Streams a backend prefills in one pass at most.
+pub const max_together = 16;
+
+/// `add` for several streams, prompts in one pass when the backend takes them; `errs[i]`: stream i's error, or null.
+pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (errs) |*x| x.* = null;
+    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs);
+    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs);
+    _ = e.arena.reset(.retain_capacity);
+    for (ss) |s| trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) }) catch {};
+    const together = many(e.backend.ptr, ss) catch |err| blk: { // one stream's refusal is its own: each goes alone
+        std.log.warn("{d} prompts together: {s}; each goes alone", .{ ss.len, @errorName(err) });
+        break :blk false;
+    };
+    if (!together) return addEach(e, ss, errs);
+    for (ss, errs) |s, *x| opened(e, s) catch |err| { // a stream cancelled in the pass gets no first token
+        x.* = err;
+    };
+}
+
+/// Whether `s` may join a batched prompt pass beside chunked fills: short, text only, nothing kept to resume from.
+pub fn batchable(e: *const Engine, s: *const Stream) bool {
+    const n = e.backend.vtable.many_rows;
+    return n > 0 and s.prompt_len <= n and s.images.len == 0 and s.reuse.saved == null;
+}
+
+fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (ss, errs) |s, *x| add(e, s) catch |err| {
+        x.* = err;
+    };
 }
 
 /// After the prompt pass: the first token drawn and committed, the first drafts asked; rounds from the next.
