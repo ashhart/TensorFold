@@ -71,7 +71,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 8, // this struct's version
+    layout: u32 = 9, // this struct's version
     world: u32,
     rank: u32,
     tiled: u32,
@@ -90,7 +90,7 @@ pub const Fingerprint = extern struct {
     heat_low: f64,
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
-    checkpoint: [64]u8, // hex SHA-256 of the checkpoint weights and index
+    checkpoint: [64]u8, // hex digest of the checkpoint's metadata and every shard byte, through the digest cache
 
     pub const Field = enum {
         layout,
@@ -274,7 +274,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .heat_low => "TF_HEAT_LOW",
         .config => "config.json",
         .program => "the executable",
-        .checkpoint => "the checkpoint weight/index content digest",
+        .checkpoint => "checkpoint metadata or shard bytes",
     };
 }
 
@@ -461,25 +461,43 @@ test "every scheduling and identity field that differs stops the ranks" {
     }
 }
 
-pub const artifact = @import("cuda_artifact.zig").digest;
+/// The checkpoint digest a rank sends: its metadata and every shard byte, read again only for a file that changed.
+pub fn artifact(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
+    return @import("core").checkpoint_identity.fullIdentity(gpa, io, dir);
+}
 
 test "ranks with different TF_GLM_MM choices disagree" {
     const h: [32]u8 = @splat(0);
     const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, hashBytes("/model")), Fingerprint.of(2, 1, .{ .tiled = false }, 8192, true, h, h, hashBytes("/model")) };
     try std.testing.expect(mismatch(&all) != null);
 }
-test "checkpoints in folders of the same name agree only on equal bytes" {
+fn digestFixture(io: std.Io, dir: std.Io.Dir, sub: []const u8, byte: u8) !void {
+    try dir.createDirPath(io, sub);
+    var d = try dir.openDir(io, sub, .{});
+    defer d.close(io);
+    try d.writeFile(io, .{ .sub_path = "config.json", .data = "{}" });
+    const header = "{\"dense\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}}";
+    var bytes: [8 + header.len + 4]u8 = undefined;
+    std.mem.writeInt(u64, bytes[0..8], header.len, .little);
+    @memcpy(bytes[8..][0..header.len], header);
+    @memset(bytes[8 + header.len ..], byte);
+    try d.writeFile(io, .{ .sub_path = "model.safetensors", .data = &bytes });
+}
+
+test "ranks disagree on tensor bytes under identical headers, and agree on a copy in a folder of the same name" {
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.createDirPath(io, "a/model");
-    try tmp.dir.createDirPath(io, "b/model");
-    try tmp.dir.writeFile(io, .{ .sub_path = "a/model/model.safetensors", .data = "weights A" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "b/model/model.safetensors", .data = "weights B" });
-    const left = try tmp.dir.realPathFileAlloc(io, "a/model", a);
-    defer a.free(left);
-    const right = try tmp.dir.realPathFileAlloc(io, "b/model", a);
-    defer a.free(right);
-    try std.testing.expect(!std.mem.eql(u8, &try artifact(a, io, left), &try artifact(a, io, right)));
+    try digestFixture(io, tmp.dir, "a/model", 1);
+    try digestFixture(io, tmp.dir, "b/model", 2);
+    try digestFixture(io, tmp.dir, "c/model", 1);
+    var paths: [3][:0]u8 = undefined;
+    for ([_][]const u8{ "a/model", "b/model", "c/model" }, &paths) |sub, *p| p.* = try tmp.dir.realPathFileAlloc(io, sub, a);
+    defer for (paths) |p| a.free(p);
+    const h: [32]u8 = @splat(7);
+    var all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, try artifact(a, io, paths[0])), Fingerprint.of(2, 1, .{}, 8192, true, h, h, try artifact(a, io, paths[1])) };
+    try std.testing.expectEqual(Mismatch{ .field = .checkpoint, .rank = 1 }, mismatch(&all).?);
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h, h, try artifact(a, io, paths[2]));
+    try std.testing.expect(mismatch(&all) == null);
 }
