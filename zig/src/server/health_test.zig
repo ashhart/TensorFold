@@ -8,7 +8,7 @@ const listener = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server = @import("server.zig");
 const status_routes = @import("status_routes.zig");
-const posix = std.posix;
+const posix = @import("sys").posix;
 const Threaded = std.Io.Threaded;
 const Allocator = std.mem.Allocator;
 

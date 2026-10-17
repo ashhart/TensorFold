@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's weights in the Python family's layout (stacked projections and experts, repacked mixes), read by parallel preads.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("../../core/safetensors.zig");
 const cfg = @import("config.zig");

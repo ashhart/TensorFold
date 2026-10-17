@@ -60,7 +60,9 @@ pub const Drafted = struct {
         m.plain_guard = d.plain_guard;
         m.draft_streams = d.batched;
         m.draft_probabilities = false;
-        m.head_trees = false;
+        m.head_trees = d.trees;
+        if (d.window_costs.len > 0) m.window_costs = d.window_costs;
+        if (d.lane_costs.len > 0) m.lane_costs = d.lane_costs;
         return m;
     }
 
@@ -157,15 +159,17 @@ pub const Drafted = struct {
         x.holds.clearRetainingCapacity();
         try x.firsts.resize(x.gpa, requests.len);
         for (requests, x.firsts.items) |r, *tok| {
-            if (r.lanes != null) return error.TreesNotBuilt;
+            if (r.lanes != null and !x.drafter.facts().trees) return error.TreesNotBuilt;
             const lane = x.lanes.getPtr(r.stream) orelse return error.NotDrafting;
             lane.filler = 0; // a new request supersedes fillers a copy round left unused
             var pending: u32 = undefined;
             if (r.rows) |rows| {
-                for (rows, 0..) |row, i| if (row != i) return error.TreesNotBuilt;
-                const n: u32 = @intCast(rows.len);
+                // a tree's kept path names the window's rows out of order: the features of all up to its last
+                var prefix = true;
+                for (rows, 0..) |row, i| prefix = prefix and row == i;
+                const n: u32 = @intCast(if (prefix) rows.len else rows[rows.len - 1] + 1);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len] });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows });
                 pending = r.follow[rows.len - 1];
                 lane.rows = true;
             } else {
@@ -187,7 +191,7 @@ pub const Drafted = struct {
                 lane.filler = r.depth;
                 continue;
             }
-            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth });
+            try x.holds.append(x.gpa, .{ .stream = r.stream, .pending = pending, .position = r.position, .depth = r.depth, .lanes = r.lanes });
         }
         if (x.absorbs.items.len > 0) try x.drafter.absorb(x.absorbs.items);
         if (x.holds.items.len > 0) try x.drafter.hold(x.holds.items);

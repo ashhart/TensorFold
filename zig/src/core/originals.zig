@@ -1,5 +1,6 @@
 //! A model folder's original files, cloned once before --slide first teaches it, and put back by `slide rollback`.
 const std = @import("std");
+const platform = @import("sys");
 const disk = @import("lanes").learned_disk;
 const files = @import("originals_files.zig");
 const Allocator = std.mem.Allocator;
@@ -50,10 +51,10 @@ pub const Restored = struct {
 
 /// A process's hold on a model folder, gone when it is released or the process ends.
 pub const Hold = struct {
-    fd: std.c.fd_t,
+    fd: platform.c.fd_t,
 
     pub fn release(h: Hold) void {
-        _ = std.c.close(h.fd);
+        _ = platform.c.close(h.fd);
     }
 };
 
@@ -61,11 +62,11 @@ pub const Hold = struct {
 pub fn hold(a: Allocator, dir: []const u8, exclusive: bool) error{ Busy, Unlockable, OutOfMemory }!Hold {
     const fd = files.openFolder(try a.dupeSentinel(u8, dir, 0));
     if (fd < 0) return error.Unlockable;
-    const kind: c_int = if (exclusive) std.c.LOCK.EX else std.c.LOCK.SH;
-    const rc = std.c.flock(fd, kind | std.c.LOCK.NB);
+    const kind: c_int = if (exclusive) platform.c.LOCK.EX else platform.c.LOCK.SH;
+    const rc = platform.c.flock(fd, kind | platform.c.LOCK.NB);
     if (rc == 0) return .{ .fd = fd };
-    const busy = std.c.errno(rc) == .AGAIN;
-    _ = std.c.close(fd);
+    const busy = platform.c.errno(rc) == .AGAIN;
+    _ = platform.c.close(fd);
     return if (busy) error.Busy else error.Unlockable;
 }
 
@@ -124,7 +125,7 @@ fn keepFiles(io: Io, dir: []const u8, graph: ?[]const u8, o: Options, a: Allocat
     }
     const part = try std.fs.path.join(a, &.{ dir, partial_name });
     Io.Dir.cwd().deleteTree(io, part) catch {};
-    if (std.c.mkdir(try a.dupeSentinel(u8, part, 0), 0o755) != 0) return error.SnapshotFolder;
+    if (platform.c.mkdir(try a.dupeSentinel(u8, part, 0), 0o755) != 0) return error.SnapshotFolder;
     errdefer Io.Dir.cwd().deleteTree(io, part) catch {};
     const names = try learnables(a, io, dir);
     if (names.len == 0) {
@@ -216,11 +217,11 @@ fn rollbackFiles(io: Io, dir: []const u8, o: Options, a: Allocator, why: *[]cons
     }
     // nothing is put back before every clone is made and the copies fit; a stop at any point leaves no temp behind
     errdefer for (backs) |b| {
-        _ = std.c.unlink(b.tmp);
+        _ = platform.c.unlink(b.tmp);
     };
     var largest: u64 = 0;
     for (backs) |*b| {
-        _ = std.c.unlink(b.tmp); // an interrupted rollback's
+        _ = platform.c.unlink(b.tmp); // an interrupted rollback's
         b.cloned = try cloneIf(o, b.src, b.tmp);
         if (b.cloned) out.cloned += 1 else largest = @max(largest, b.size);
     }
@@ -380,7 +381,7 @@ fn removeAdded(a: Allocator, io: Io, dir: []const u8, entries: []const Entry) ![
         if ((try d.statFile(io, e.name, .{ .follow_symlinks = false })).kind == .directory) continue;
         try gone.append(a, try a.dupe(u8, e.name));
     }
-    for (gone.items) |name| if (std.c.unlink(try join(a, dir, name)) != 0) return error.RemoveFailed;
+    for (gone.items) |name| if (platform.c.unlink(try join(a, dir, name)) != 0) return error.RemoveFailed;
     return gone.items;
 }
 
@@ -426,7 +427,7 @@ fn removeGraphs(a: Allocator, io: Io, snap: []const u8) ![]const []const u8 {
         const text = Io.Dir.cwd().readFileAlloc(io, path, a, .limited(1 << 26)) catch continue;
         const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch continue;
         if (v != .object or v.object.get("facts") == null or v.object.get("next") == null) continue;
-        if (std.c.unlink(try a.dupeSentinel(u8, path, 0)) != 0) return error.RemoveFailed;
+        if (platform.c.unlink(try a.dupeSentinel(u8, path, 0)) != 0) return error.RemoveFailed;
         try gone.append(a, path);
     }
     return gone.items;

@@ -4,7 +4,7 @@ Decode tok/s = (completion tokens - 1) / (last token time - first token time), t
 CUDA engine's bench times (the first sampled token excluded). Standard library only, so it runs on
 a bare host.
 
-  python3 tools/bench_openai.py http://127.0.0.1:8080 MODEL --tokens 64 --reps 5 --output out.json
+  python3 tools/bench_openai.py http://127.0.0.1:8888 MODEL --tokens 64 --reps 5 --output out.json
 """
 
 import argparse
