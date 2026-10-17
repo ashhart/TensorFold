@@ -140,6 +140,13 @@ pub const Pipelines = struct {
     rotate_out: mtl.Pipeline,
     prefill: ?mtl.Pipeline = null,
     dense: mtl.Pipeline,
+    /// Two columns per SIMD group, for products too small to fill the GPU with sixteen-column groups.
+    matmul_pairs: mtl.Pipeline,
+    /// Products whose sixteen-column grid has at most this many groups use matmul_pairs (0: never).
+    /// Same bits either way. M5 Max, one row, best of 20: n 512 2.15x, n 1024 1.34x, n 1280 1.23x
+    /// faster at k 4096 to 5120; n 2304 (144 groups) 0.73x. TF_EXL3_PAIRS_UP_TO_GROUPS overrides it
+    /// for tuning on a GPU with more cores.
+    pairs_up_to_groups: usize = 128,
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -154,7 +161,9 @@ pub const Pipelines = struct {
         errdefer ro.deinit();
         const dn = try mtl.Pipeline.init(device, lib, "tf_exl3_dense", false);
         errdefer dn.deinit();
-        for ([_]mtl.Pipeline{ ri, mm, ro }) |p|
+        const mp = try mtl.Pipeline.init(device, lib, "tf_exl3_matmul_pairs", false);
+        errdefer mp.deinit();
+        for ([_]mtl.Pipeline{ ri, mm, ro, mp }) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
         var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
         if (prefill) |pf| {
@@ -163,7 +172,11 @@ pub const Pipelines = struct {
                 prefill = null;
             }
         }
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .dense = dn };
+        errdefer if (prefill) |pf| pf.deinit();
+        var out: Pipelines = .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill, .dense = dn, .matmul_pairs = mp };
+        if (std.c.getenv("TF_EXL3_PAIRS_UP_TO_GROUPS")) |v|
+            out.pairs_up_to_groups = std.fmt.parseInt(usize, std.mem.span(v), 10) catch return error.InvalidExl3PairsGroups;
+        return out;
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
@@ -171,6 +184,7 @@ pub const Pipelines = struct {
         p.rotate_out.deinit();
         if (p.prefill) |pf| pf.deinit();
         p.dense.deinit();
+        p.matmul_pairs.deinit();
     }
 };
 
@@ -390,7 +404,9 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
     e.barrier();
     const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
-    e.setPipeline(if (shared) p.prefill.? else p.matmul);
+    const row_groups: usize = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + 7) / 8;
+    const pairs = !shared and a.n / 16 * row_groups <= p.pairs_up_to_groups;
+    e.setPipeline(if (shared) p.prefill.? else if (pairs) p.matmul_pairs else p.matmul);
     bind(e, scratch, 0);
     bind(e, trellis, 1);
     bind(e, sums, 2);
@@ -398,7 +414,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     bind(e, routes, 4);
     bind(e, descriptors, 5);
     const group_rows: usize = if (shared) 32 else 8;
-    e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
+    e.dispatchGroups(.{ .width = if (pairs) a.n / 2 else a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
     e.barrier();
     e.setPipeline(p.rotate_out);
     bind(e, sums, 0);
