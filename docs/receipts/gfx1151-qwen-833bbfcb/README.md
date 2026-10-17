@@ -58,7 +58,7 @@ while ignoring only `draft` gives **33 groups with zero token-hash mismatches**.
 - All three model gates skipped `radix memory: too few ids` at the default 1536 synthetic IDs; the control needs 1548.
   It was run afterwards with 2048 IDs and passed on all three checkpoints (see Follow-up below).
 - The four unexercised HTTP drafting comparisons above are separate from those eleven model skips.
-- Extended `serve_rewind.py` ran on the 9B for 9 exchanges and was stopped (`rc=-15`); it is incomplete and unqualified.
+- Extended `serve_rewind.py` ran on the 9B and was stopped (`rc=-15`); it is incomplete and unqualified, and its partial exchanges are omitted.
   The final requests in `9b-server-8092.log`, ending with one marked `reason=client-left`, are from that stopped run.
   For every later run, `record-served.py` found its `skip-extended` marker and exited 77 before starting `serve_rewind.py`
   or `structured_served.py`, so neither upstream script ran on the 35B or 27B, nor `structured_served.py` on the 9B.
@@ -108,16 +108,29 @@ Run the same day with the same binaries, checkpoints and serve flags.
 | --- | ---: | ---: | ---: | ---: | --- |
 | Qwen3.5-9B | 43 | 0 | 4 | 8 of 8 | 3 ok, failed 0 |
 | Qwen3.6-35B-A3B + MTP | 47 | 0 | 0 | 8 of 8 | 3 ok, failed 0 |
-| Qwen3.8-27B | 43 | 0 | 4 | 8 of 8 | 3 ok, failed 0 |
+| Qwen3.8-27B | 43 | 0 | 4 | 8 of 8 | **failed 3 of 3** |
 
 The remaining skips are the drafting controls of the two checkpoints without a draft head.
 [ids2048.npy](ids2048.npy) holds `1000 + (i * 7919) % 50000` for `i < 2048`, the upstream synthetic formula made longer.
-After each cancelled long prompt, the next short request took as long as one alone (9B 0.84 s and 0.84 s,
-35B 0.21 s and 0.20 s, 27B 1.79 s and 1.88 s).
+`serve_cancel.py` ran with 2,200 prompt words (14,994 tokens), so the long prompt fits the receipt's
+16,384-token window; its default 3,000 words (20,438 tokens) are refused before prefill and would test nothing.
+Each server log shows the three long requests reaching prefill and ending `reason=client-left` with no tokens,
+and no request refused. The script passes when the next short request finishes within 3 s of a solo one:
+
+| Checkpoint | Long request ended, s after it arrived | Next short request | Alone | Result |
+| --- | ---: | ---: | ---: | --- |
+| Qwen3.5-9B | 1.66 s | 2.09 s | 0.85 s | pass |
+| Qwen3.6-35B-A3B + MTP | 0.79 to 0.84 s | 0.56 to 0.62 s | 0.20 s | pass |
+| Qwen3.8-27B | 5.04 to 5.07 s | 6.49 to 6.51 s | 1.90 s | **fail** |
+
+The server's `after=` time counts from when the request arrived; the script drops the connection 0.4 s after sending,
+and the time from disconnect to release is not measured separately. On the 27B the cancelled request ended about 5 s
+after it arrived, and the next short request waited behind it.
+The server prefills in 1024-row chunks; that the cancel waits for the running chunk is our inference, not measured.
 
 ```sh
 ./zig-out/bin/tf-qwen35-test check "$MODEL" --ids ids2048.npy --only invariants
-python3 zig/tests/qwen35/serve_cancel.py http://127.0.0.1:8092 "$NAME"
+python3 zig/tests/qwen35/serve_cancel.py http://127.0.0.1:8092 "$NAME" 2200
 ```
 
 ## Published evidence

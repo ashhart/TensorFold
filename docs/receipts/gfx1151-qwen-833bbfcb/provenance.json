@@ -8,7 +8,7 @@
   "hip": "7.1.52801-9999",
   "clang": "Ubuntu clang 21.1.8",
   "zig": "0.17.0",
-  "build_command": "~/zig/zig-x86_64-linux-0.17.0/zig build native-hip tf-qwen35-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dhip-include=/usr/include -Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode -Doptimize=ReleaseFast -Dversion=1.0.12 -j4",
+  "build_command": "$ZIG_DIR/zig build native-hip tf-qwen35-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dhip-include=/usr/include -Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode -Doptimize=ReleaseFast -Dversion=1.0.12 -j4",
   "build_exit": 0,
   "binaries_sha256": {
     "zig-out/bin/tf-qwen35-test": "2ece4599706ef60e9ac8b5efc0e51f0160370e47b90529b000e2c581164e2834",

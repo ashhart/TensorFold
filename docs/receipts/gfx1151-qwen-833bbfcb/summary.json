@@ -9,7 +9,7 @@
     "hip": "7.1.52801-9999",
     "clang": "Ubuntu clang 21.1.8",
     "zig": "0.17.0",
-    "build_command": "~/zig/zig-x86_64-linux-0.17.0/zig build native-hip tf-qwen35-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dhip-include=/usr/include -Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode -Doptimize=ReleaseFast -Dversion=1.0.12 -j4",
+    "build_command": "$ZIG_DIR/zig build native-hip tf-qwen35-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dhip-include=/usr/include -Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode -Doptimize=ReleaseFast -Dversion=1.0.12 -j4",
     "build_exit": 0,
     "binaries_sha256": {
       "zig-out/bin/tf-qwen35-test": "2ece4599706ef60e9ac8b5efc0e51f0160370e47b90529b000e2c581164e2834",
@@ -530,8 +530,9 @@
   "limits": [
     "Single-GPU Qwen invariants and scoped HTTP equality checks only; no cross-engine accuracy reference, multi-GPU, other-family or all-feature AMD claim.",
     "9B and 27B carry no draft head: four model draft controls and two HTTP draft comparisons per checkpoint were not exercised.",
-    "Extended serve_rewind ran on the 9B for 9 exchanges and was stopped (rc=-15), incomplete and unqualified; the recorder then skipped serve_rewind and structured_served on every later run (rc=77, its own skip marker), so neither upstream script ran there. Neither is qualified by this receipt.",
-    "0 of 183 HTTP requests were rejected (all returned 200); content refusal behavior was not tested and no deliberate refusal case was sent."
+    "Extended serve_rewind ran on the 9B and was stopped (rc=-15), incomplete and unqualified, its partial exchanges omitted; the recorder then skipped serve_rewind and structured_served on every later run (rc=77, its own skip marker), so neither upstream script ran there. Neither is qualified by this receipt.",
+    "0 of 183 HTTP requests were rejected (all returned 200); content refusal behavior was not tested and no deliberate refusal case was sent.",
+    "serve_cancel.py fails on the 27B: a cancelled 14,994-token request ended about 5 s after it arrived (the client left at 0.4 s; disconnect-to-release is not measured separately), and the next short request took 6.5 s against 1.9 s alone; it passes on the 9B and 35B."
   ],
   "totals": {
     "model_passed": 130,
@@ -548,7 +549,7 @@
     "raw_upstream_ok_lines_are_not_exercised_counts": true
   },
   "follow_up": {
-    "description": "Follow-up on the same pinned binaries and checkpoints: the radix-memory control with 2048 synthetic IDs (ids2048.npy, the upstream synthetic formula 1000 + (i*7919) % 50000, longer than the default 1536 the control needs 1548 of), run as tf-qwen35-test check --ids ids2048.npy --only invariants; and the upstream serve_cancel.py against the same serve flags.",
+    "description": "Follow-up on the same pinned binaries and checkpoints: the radix-memory control with 2048 synthetic IDs (ids2048.npy, the upstream synthetic formula 1000 + (i*7919) % 50000, longer than the default 1536 the control needs 1548 of), run as tf-qwen35-test check --ids ids2048.npy --only invariants; and the upstream serve_cancel.py against the same serve flags with 2,200 prompt words (14,994 tokens; the default 3,000 words give 20,438 tokens, refused by the 16,384 window before prefill).",
     "models": [
       {
         "checkpoint": "Qwen3.5-9B",
@@ -563,7 +564,11 @@
         ],
         "serve_cancel": {
           "ok_lines": 3,
-          "failed": 0
+          "fail_lines": 0,
+          "failed": 0,
+          "long_requests_ended_client_left": 3,
+          "refused": 0,
+          "result": "pass"
         }
       },
       {
@@ -579,7 +584,11 @@
         ],
         "serve_cancel": {
           "ok_lines": 3,
-          "failed": 0
+          "fail_lines": 0,
+          "failed": 0,
+          "long_requests_ended_client_left": 3,
+          "refused": 0,
+          "result": "pass"
         }
       },
       {
@@ -594,8 +603,12 @@
           "PASS radix memory: 8 requests sharing 1100 system tokens, 1420 tokens each: the tree holds 1065.8 MiB (42 pages 168.0 MiB, 6 snapshots 897.8 MiB); copies of the caches at each cut held 2312.3 MiB; 7616 prompt tokens came from the tree"
         ],
         "serve_cancel": {
-          "ok_lines": 3,
-          "failed": 0
+          "ok_lines": 0,
+          "fail_lines": 3,
+          "failed": 3,
+          "long_requests_ended_client_left": 3,
+          "refused": 0,
+          "result": "fail"
         }
       }
     ]

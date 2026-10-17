@@ -1,28 +1,25 @@
 [tensorfold] HIP rank 0 of 1: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots
 [tensorfold] open-file limit raised: soft 1024 -> 524288
-[tensorfold] HIP gfx1151 device 0, rank 0 of 1: model 18.71 GiB; 4 streams at once, 0.38 GiB each at a 16384-token window, of 84.2 GiB left after a 12.2 GiB reserve; prompt cache 1.00 GiB (417 pages, 8 snapshots); prompts in 1024-row chunks
-[tensorfold] serving amd-35b at http://127.0.0.1:8092/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: on; context: 16384; loaded in 12.9s)
+[tensorfold] HIP gfx1151 device 0, rank 0 of 1: model 18.71 GiB; 4 streams at once, 0.38 GiB each at a 16384-token window, of 84.7 GiB left after a 12.2 GiB reserve; prompt cache 1.00 GiB (417 pages, 8 snapshots); prompts in 1024-row chunks
+[tensorfold] serving amd-35b at http://127.0.0.1:8092/v1 (sampling: temperature 1.0, top_k 20, top_p 0.95; drafts: on; context: 16384; loaded in 37.3s)
 [tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
-[tensorfold] done chatcmpl-a9e1f5d4addc897dbc10c6743f5f38b0 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] done chatcmpl-aa0fe0f3a24b4444b5c99920f5ed20f6 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-[tensorfold] done chatcmpl-e20e782562adcaf09fbcb5a508187ea7 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] done chatcmpl-a41901cab4f0d5fe8aad5f831a1726bb prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-[tensorfold] done chatcmpl-225833803b567822ce710c64c3ae9bc6 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] done chatcmpl-c7a29dbaf961ab8e8961bac959b1b69f prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-[tensorfold] refused chatcmpl-a35012cced3be9f70204e1d7d606a940: This server's maximum context length is 16384 tokens, but the rendered prompt has 20438 tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.
-[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 400 -
-[tensorfold] done chatcmpl-53166075b23318ba754b3bb4ae03487b prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] ended chatcmpl-55c3bf290bb48a0816d197e48fc49883 reason=client-left prompt=14994 tokens=0 after=0.79s
+[tensorfold] done chatcmpl-82250a8086e1789e00fd86c4e933a8db prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-[tensorfold] refused chatcmpl-18f2b91e843c7d447bb54d761059e72e: This server's maximum context length is 16384 tokens, but the rendered prompt has 20438 tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.
-[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 400 -
-[tensorfold] done chatcmpl-d1c02c395436d720270a02f1356bf960 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] ended chatcmpl-96c57ddb6e55b56e8996c589bb793069 reason=client-left prompt=14994 tokens=0 after=0.83s
+[tensorfold] done chatcmpl-b0a57f664c5cb05796f6ae1406469829 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-[tensorfold] refused chatcmpl-5d1980ee168654cf54b4266a21a95c7a: This server's maximum context length is 16384 tokens, but the rendered prompt has 20438 tokens and leaves no room for a reply, which exceeds the context window. Compact or shorten the conversation.
-[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 400 -
-[tensorfold] done chatcmpl-6b376575a3639c909b0a1b617f7dc5fa prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
+[tensorfold] ended chatcmpl-afebdbc8ae9f1f162ff8c4986917bb81 reason=client-left prompt=14994 tokens=0 after=0.84s
+[tensorfold] done chatcmpl-bf7816d5f9a6d9cde04ab14564199425 prompt=20 cached=0 thinking=False effort=none tokens=21 sha=ad11ca37c7fc finish=stop rounds=6 accepted=14/18
 [tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
-info: backend verify: 36 calls, 20220 us each
-info: backend keep: 12 calls, 7 us each
-info: backend draft: 42 calls, 2737 us each
+info: backend verify: 36 calls, 21162 us each
+info: backend keep: 12 calls, 11 us each
+info: backend draft: 42 calls, 2812 us each
 info: head graphs: 2 captured, 42 of 44 batches replayed
 info: graphs: 8 captured (2 ms each), 196 of 204 rounds replayed
