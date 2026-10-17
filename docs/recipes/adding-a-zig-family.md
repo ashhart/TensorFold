@@ -194,6 +194,12 @@ On M5 tensor units. Chips before M5 need their own path.
     250-500 ms, on its own queue, inside the engine process. Without it macOS unwires the set after 1-2 s idle, and
     the next request pays a full re-wire: 2.7 s on K3.
 
+Native CUDA families may export `healthy(ctx: *anyopaque) bool`. The native host forwards this callback to
+lane health and admission. It must read thread-safe host state without binding a GPU context, waiting on device
+work or taking the inference thread's lock. Families without it retain the lane host's normal closing/stale checks.
+Unavailable or busy admission returns HTTP 503 before a streaming response opens. Context-window refusals retain
+their existing streamed error policy; failures after admission remain stream errors.
+
 ## Across several Macs
 
 From Kimi K3 on four Macs:

@@ -11,6 +11,9 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    var status: api.Status = .{};
+    srv.engine.status(&status, &.{});
+    if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
 }
