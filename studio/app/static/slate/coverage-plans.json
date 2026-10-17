@@ -1,0 +1,693 @@
+{
+  "version": 1,
+  "plans": [
+    {
+      "id": "full-coverage",
+      "label": "Full Coverage",
+      "group": "Shot Coverage",
+      "description": "Classic scene coverage pattern combining a master, an over-the-shoulder pair, a favored single, an insert, and a reaction shot for standard editorial flexibility.",
+      "shots": [
+        {
+          "slot": "Master",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Establish blocking, spatial relationships, and full performance for the scene as a safety and editorial spine.",
+          "promptGuidance": "Frame every performer in the scene with headroom and blocking space; keep the camera locked off so this shot can carry any dialogue beat in the edit."
+        },
+        {
+          "slot": "OTS A",
+          "size": "MCU",
+          "angle": "over-shoulder",
+          "movement": "locked",
+          "intent": "Give the editor a matched shoulder shot favoring character A that motivates cutting on their dialogue and reactions.",
+          "promptGuidance": "Foreground character B's shoulder and ear soft in frame; keep character A's eyeline consistent with the master for clean matched cutting."
+        },
+        {
+          "slot": "OTS B",
+          "size": "MCU",
+          "angle": "over-shoulder",
+          "movement": "locked",
+          "intent": "Mirror OTS A from the reverse side so the scene can cut cleanly between both speaking characters.",
+          "promptGuidance": "Match focal length, height, and eyeline of OTS A exactly, just reversed, so the pair cuts together without a jump."
+        },
+        {
+          "slot": "Single",
+          "size": "MCU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Isolate the scene's focal character in a clean, uncluttered frame for their key line or beat.",
+          "promptGuidance": "Choose whichever character carries the scene's emotional weight; keep the background simple so nothing competes with their performance."
+        },
+        {
+          "slot": "Insert",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Highlight a specific object or detail the dialogue or blocking references, giving the editor a cutaway.",
+          "promptGuidance": "Fill the frame with the object referenced in the scene, such as a prop, document, or hands at work, shot tight enough to read instantly."
+        },
+        {
+          "slot": "Reaction",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture a silent reaction that can be cut in to punctuate another character's line.",
+          "promptGuidance": "Hold on the listening character's face with no dialogue of their own; let the expression carry the beat."
+        }
+      ]
+    },
+    {
+      "id": "dialogue-coverage",
+      "label": "Dialogue Coverage",
+      "group": "Shot Coverage",
+      "description": "Two-person conversation pattern built for seamless back-and-forth cutting: a wide master, a matched OTS pair, a matched CU pair, and a listening reaction.",
+      "shots": [
+        {
+          "slot": "Master",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Establish the geography of the conversation and give the editor a wide safety to return to.",
+          "promptGuidance": "Keep both characters fully in frame with clear negative space between them so the eyeline reads even in the wide."
+        },
+        {
+          "slot": "OTS A",
+          "size": "MCU",
+          "angle": "over-shoulder",
+          "movement": "locked",
+          "intent": "Favor character A while keeping character B present as a foreground anchor.",
+          "promptGuidance": "Match lens height and distance to OTS B; character B's shoulder should occupy the same frame proportion in both shots."
+        },
+        {
+          "slot": "OTS B",
+          "size": "MCU",
+          "angle": "over-shoulder",
+          "movement": "locked",
+          "intent": "Favor character B as the reverse of OTS A for standard shot and reverse-shot cutting.",
+          "promptGuidance": "Mirror OTS A's framing exactly in reverse; keep both characters' eyelines crossing believably toward each other."
+        },
+        {
+          "slot": "CU A",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Move into character A's face for their most important lines, isolating performance detail.",
+          "promptGuidance": "Frame tight from collarbone up; keep focus critically sharp on the eyes for this character's key dialogue moment."
+        },
+        {
+          "slot": "CU B",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Mirror CU A for character B so both speakers get equal close-up weight in the edit.",
+          "promptGuidance": "Match CU A's framing and eyeline height in reverse; keep lighting and lens consistent across the pair."
+        },
+        {
+          "slot": "Reaction",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture a nonverbal response that can land on the other character's dialogue.",
+          "promptGuidance": "Hold on whichever character is listening at the scene's turning point; let silence and micro-expression do the work."
+        }
+      ]
+    },
+    {
+      "id": "motion-coverage",
+      "label": "Motion Coverage",
+      "group": "Shot Coverage",
+      "description": "Coverage pattern for a moving subject, combining tracking, following, lateral, POV, aerial, and detail shots to sell speed and momentum.",
+      "shots": [
+        {
+          "slot": "Lead Tracking",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "track",
+          "intent": "Travel ahead of the subject to show their forward drive and the space they're moving into.",
+          "promptGuidance": "Camera moves backward at the subject's pace, keeping them centered; let the environment stream past on both sides."
+        },
+        {
+          "slot": "Follow",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "handheld",
+          "intent": "Stay directly behind the subject to build urgency and put the viewer in pursuit.",
+          "promptGuidance": "Shoulder-height handheld directly behind the subject's back, matching their exact speed with natural sway."
+        },
+        {
+          "slot": "Side Travel",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "track",
+          "intent": "Reveal the subject's speed and the scale of the environment they're crossing.",
+          "promptGuidance": "Camera moves parallel to the subject's path on a lateral track, keeping them at a consistent screen position as background scrolls past."
+        },
+        {
+          "slot": "POV",
+          "size": "MS",
+          "angle": "POV",
+          "movement": "handheld",
+          "intent": "Put the viewer directly in the subject's perspective as they move.",
+          "promptGuidance": "Simulate the subject's own eyeline and head-bob; hands or forward motion may enter frame at the edges."
+        },
+        {
+          "slot": "Drone Context",
+          "size": "EWS",
+          "angle": "high",
+          "movement": "drone",
+          "intent": "Pull back to show the subject's path within the full scale of the environment.",
+          "promptGuidance": "Rise and track from above to reveal the subject as one moving element within a much larger landscape or cityscape."
+        },
+        {
+          "slot": "Detail Insert",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Isolate a physical detail of the motion itself, such as feet, wheels, or hands, for texture and rhythm.",
+          "promptGuidance": "Tight, fast-shutter-feeling frame on the point of contact driving the motion, such as footfall, tires, or gripping hands."
+        }
+      ]
+    },
+    {
+      "id": "extreme-action",
+      "label": "Extreme Action",
+      "group": "Shot Coverage",
+      "description": "High-impact action beat coverage: the hit, the chaos, the damage, and the aftermath, built for a fast, disorienting cut.",
+      "shots": [
+        {
+          "slot": "Impact Frame",
+          "size": "MCU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture the precise moment of collision or impact as the scene's punctuation point.",
+          "promptGuidance": "Frame tight on the point of contact at the instant of impact; the composition should read as a single decisive beat."
+        },
+        {
+          "slot": "Whip Handheld",
+          "size": "MS",
+          "angle": "dutch",
+          "movement": "handheld",
+          "intent": "Convey chaos and disorientation as the action escalates.",
+          "promptGuidance": "Aggressive handheld with a canted horizon and rough camera energy; let framing feel barely in control."
+        },
+        {
+          "slot": "Crash Zoom",
+          "size": "MCU",
+          "angle": "eye level",
+          "movement": "push-in",
+          "intent": "Snap sudden attention onto a critical action detail or reaction.",
+          "promptGuidance": "Rapid push-in that lands hard on the subject; the speed of the move itself should feel like part of the impact."
+        },
+        {
+          "slot": "Debris Insert",
+          "size": "Insert",
+          "angle": "low",
+          "movement": "locked",
+          "intent": "Sell physical consequence through flying or scattered debris and damage detail.",
+          "promptGuidance": "Tight low frame on debris, dust, or damage settling in the immediate aftermath of the impact."
+        },
+        {
+          "slot": "Low Hero",
+          "size": "MS",
+          "angle": "low",
+          "movement": "locked",
+          "intent": "Give the surviving or dominant figure a powerful, victorious silhouette after the action peak.",
+          "promptGuidance": "Shoot up at the subject from near ground level so they read as commanding and larger than the chaos around them."
+        },
+        {
+          "slot": "Aftermath Wide",
+          "size": "WS",
+          "angle": "high",
+          "movement": "crane",
+          "intent": "Reveal the full scale of consequence once the action has settled.",
+          "promptGuidance": "Crane up and back to show the entire aftermath, including damage, debris, and figures, in one settled, wide frame."
+        }
+      ]
+    },
+    {
+      "id": "establishing-sequence",
+      "label": "Establishing Sequence",
+      "group": "Shot Coverage",
+      "description": "Opening location sequence that moves from aerial approach down to street level and into an interior, orienting the audience in stages.",
+      "shots": [
+        {
+          "slot": "Aerial Approach",
+          "size": "EWS",
+          "angle": "high",
+          "movement": "drone",
+          "intent": "Introduce the location's geography from above before narrowing focus.",
+          "promptGuidance": "Sweeping high drone shot approaching the location, giving a sense of scale and surrounding context before descending."
+        },
+        {
+          "slot": "Landmark WS",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Present the specific building or landmark that anchors the scene.",
+          "promptGuidance": "Frame the landmark centered and fully visible, with enough surrounding context to confirm location and time of day."
+        },
+        {
+          "slot": "Street Level",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "handheld",
+          "intent": "Bring the audience down into human scale and everyday activity at the location.",
+          "promptGuidance": "Handheld at pedestrian eye height, capturing foot traffic or street life that grounds the location in lived-in reality."
+        },
+        {
+          "slot": "Environment Texture",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "pan",
+          "intent": "Build atmosphere through incidental detail, such as signage, weather, or activity, that isn't plot-critical.",
+          "promptGuidance": "Slow pan across a texture-rich element of the environment; this shot should feel observational, not narratively urgent."
+        },
+        {
+          "slot": "Sign/Detail Insert",
+          "size": "Insert",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Pinpoint a specific sign, address, or object that confirms exact location for the audience.",
+          "promptGuidance": "Tight, legible frame on the specific detail, such as a street sign, door number, or plaque, that answers where we are."
+        },
+        {
+          "slot": "Interior Arrival",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "push-in",
+          "intent": "Transition the audience from exterior to interior, completing the sequence's arrival.",
+          "promptGuidance": "Push in through a doorway or threshold as the subject enters, carrying momentum from exterior into interior space."
+        }
+      ]
+    },
+    {
+      "id": "surveillance-coverage",
+      "label": "Surveillance Coverage",
+      "group": "Shot Coverage",
+      "description": "Voyeuristic, monitored coverage pattern that keeps the audience at a technological remove of cameras, lenses, and screens rather than direct presence.",
+      "shots": [
+        {
+          "slot": "Security-Cam Angle",
+          "size": "WS",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Establish the clinical, watched feeling of a fixed overhead security perspective.",
+          "promptGuidance": "Mount the camera high in a corner position with slight wide-angle distortion, as if bolted to a wall; keep it perfectly locked off."
+        },
+        {
+          "slot": "Long-Lens Compressed",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Observe the subject from a concealed distance with compressed, voyeuristic framing.",
+          "promptGuidance": "Use heavy compression and shallow depth of field consistent with a long telephoto lens shooting from far away, unnoticed."
+        },
+        {
+          "slot": "Through-Obstruction",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Reinforce the sense of covert observation by shooting through a partial foreground obstruction.",
+          "promptGuidance": "Frame the subject partially blocked by foreground elements like blinds, foliage, or a doorframe, as if glimpsed rather than shown."
+        },
+        {
+          "slot": "Monitor Screen-in-Screen",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Show the surveillance footage as viewed by a watching character, doubling the sense of observation.",
+          "promptGuidance": "Frame a monitor or screen displaying the surveillance feed, with scan lines, timestamp, or screen glow visible in the shot."
+        },
+        {
+          "slot": "Tail Follow",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "handheld",
+          "intent": "Track the subject from a discreet trailing distance as if being followed.",
+          "promptGuidance": "Stay well behind the subject with obstructions and crowd cover between camera and target, holding a cautious following distance."
+        },
+        {
+          "slot": "Still-Frame Grab",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Deliver a freeze-frame-like still that feels pulled directly from recorded footage for evidence or reveal.",
+          "promptGuidance": "Compose like a paused video frame, with slight motion blur or grain, timestamp-ready, as if captured mid-action from the feed."
+        }
+      ]
+    },
+    {
+      "id": "entrance-coverage",
+      "label": "Entrance Coverage",
+      "group": "Shot Coverage",
+      "description": "Character entrance pattern that builds anticipation through a doorway reveal, a hero approach, onlooker reactions, and a powerful final angle.",
+      "shots": [
+        {
+          "slot": "Door Reveal",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Build anticipation as the door opens and the character is first glimpsed.",
+          "promptGuidance": "Frame the doorway centered with the character emerging from shadow or backlight into visibility; hold the reveal a beat before movement."
+        },
+        {
+          "slot": "Walk-Toward Hero",
+          "size": "MWS",
+          "angle": "low",
+          "movement": "locked",
+          "intent": "Give the entering character a commanding, hero-scaled approach toward camera.",
+          "promptGuidance": "Shoot from a slightly low angle as the character walks directly toward the lens, filling the frame progressively with confidence."
+        },
+        {
+          "slot": "Reaction Single",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture how the room or a key onlooker responds to the entrance.",
+          "promptGuidance": "Hold on the onlooker's face at the moment of recognition or surprise; the entering character may be off-screen or soft in the background."
+        },
+        {
+          "slot": "Environment Reframe",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "pan",
+          "intent": "Reorient the audience to how the entrance changes the space and the people already in it.",
+          "promptGuidance": "Pan or reframe from the entrance point across the room to show how attention shifts and bodies reposition."
+        },
+        {
+          "slot": "Detail of Hand/Object",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Highlight an object or gesture the entering character carries that signals intent or status.",
+          "promptGuidance": "Tight insert on the hand, prop, or object central to the character's entrance, such as a weapon, gift, badge, or key detail."
+        },
+        {
+          "slot": "Power Low-Angle",
+          "size": "MCU",
+          "angle": "low",
+          "movement": "locked",
+          "intent": "Cement the character's authority or dominance once fully arrived in the space.",
+          "promptGuidance": "Shoot up from below eye level with the character filling the frame, expression settled and in control of the room."
+        }
+      ]
+    },
+    {
+      "id": "parallel-action",
+      "label": "Parallel Action",
+      "group": "Shot Coverage",
+      "description": "Intercut two-location pattern that builds tension by crosscutting parallel masters, tension close-ups, and synced details before converging.",
+      "shots": [
+        {
+          "slot": "A-Master",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Establish the geography and stakes of location A before crosscutting begins.",
+          "promptGuidance": "Wide, stable frame of location A that clearly reads the space, characters, and what's at stake there."
+        },
+        {
+          "slot": "B-Master",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Establish location B as the parallel counterpart to A, ready to be intercut against it.",
+          "promptGuidance": "Match the visual grammar of A-Master in framing and stability so the two locations feel like they exist in the same story clock."
+        },
+        {
+          "slot": "A-Tension CU",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Raise stakes at location A through a tight, urgent close-up as events escalate.",
+          "promptGuidance": "Tight, slightly tense framing on the key character in A; expression and breathing should signal rising pressure."
+        },
+        {
+          "slot": "B-Tension CU",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Mirror the escalation at location B so both threads climb in tension together.",
+          "promptGuidance": "Match the intensity and framing of A-Tension CU so crosscutting between the two feels rhythmically equal."
+        },
+        {
+          "slot": "A-Detail Insert",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Show a specific action or object at location A that the audience must track for the payoff.",
+          "promptGuidance": "Tight insert on the critical action in A, such as a countdown, a lock, or hands working, timed to feel urgent."
+        },
+        {
+          "slot": "B-Detail Insert",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Mirror A's detail insert at location B, setting up the synchronized payoff between both threads.",
+          "promptGuidance": "Match the framing and urgency of A-Detail Insert so the two inserts read as simultaneous when intercut."
+        },
+        {
+          "slot": "Sync Cutaway",
+          "size": "MCU",
+          "angle": "eye level",
+          "movement": "handheld",
+          "intent": "Provide a connective beat, such as a clock, phone, or signal, that ties both locations to the same moment in time.",
+          "promptGuidance": "Frame a shared reference point, such as a countdown display or communication device, that could belong to either thread."
+        },
+        {
+          "slot": "Convergence Wide",
+          "size": "WS",
+          "angle": "high",
+          "movement": "crane",
+          "intent": "Bring both storylines together in a single frame as the parallel action resolves.",
+          "promptGuidance": "Crane to a wide vantage that finally unites both locations or characters in one composition, paying off the crosscut."
+        }
+      ]
+    },
+    {
+      "id": "dance-sequence",
+      "label": "Dance Sequence",
+      "group": "Shot Coverage",
+      "description": "Performance coverage pattern for a dance or choreographed movement piece, built around a full-body master, moving camera work, a rhythmic close-up, and a finale wide.",
+      "shots": [
+        {
+          "slot": "Full-Body Master",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture the complete choreography and body language in one uninterrupted frame.",
+          "promptGuidance": "Frame the dancer fully from head to feet with room to move in every direction; keep the camera locked so the full performance reads clearly."
+        },
+        {
+          "slot": "Moving-With Dancer",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "track",
+          "intent": "Match the dancer's movement to make the camera feel like a dance partner.",
+          "promptGuidance": "Track laterally or circularly at the dancer's own tempo, keeping them centered as the camera moves in rhythm with the choreography."
+        },
+        {
+          "slot": "Rhythm CU (Feet/Hands)",
+          "size": "CU",
+          "angle": "low",
+          "movement": "locked",
+          "intent": "Isolate the percussive detail of footwork or hand gesture that drives the piece's rhythm.",
+          "promptGuidance": "Tight frame on feet striking the floor or hands articulating a gesture, timed to the beat for rhythmic editorial cutting."
+        },
+        {
+          "slot": "Overhead Pattern",
+          "size": "WS",
+          "angle": "overhead",
+          "movement": "locked",
+          "intent": "Reveal the geometric shape and spacing of the choreography from directly above.",
+          "promptGuidance": "Shoot straight down to show the dancer's floor pattern and symmetry, emphasizing the shapes the movement traces."
+        },
+        {
+          "slot": "Slow-Mo Feature",
+          "size": "MCU",
+          "angle": "eye level",
+          "movement": "orbit",
+          "intent": "Showcase a single standout movement or expression in extended, elevated detail.",
+          "promptGuidance": "Slow, graceful orbit around the dancer at their movement's peak moment, built to be slowed in post for maximum visual impact."
+        },
+        {
+          "slot": "Finale Wide",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "pull-back",
+          "intent": "Close the sequence by pulling back to the full stage or space as the performance ends.",
+          "promptGuidance": "Pull back from the dancer's final pose to reveal the complete performance space, landing on a settled closing frame."
+        }
+      ]
+    },
+    {
+      "id": "angle-coverage",
+      "label": "Angle Coverage",
+      "group": "Angle Coverage",
+      "description": "Systematic rotation around a static subject through six standard angles, giving the editor full flexibility to choose the most flattering or dramatic perspective.",
+      "shots": [
+        {
+          "slot": "Front",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Present the subject's most direct, neutral read for baseline coverage.",
+          "promptGuidance": "Camera square-on to the subject's face at eye level; keep expression and framing neutral and evenly lit."
+        },
+        {
+          "slot": "3/4 Front",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Offer a more dimensional, flattering angle than the flat front for editorial variety.",
+          "promptGuidance": "Rotate roughly 45 degrees from center so both the face and a sense of depth toward the far shoulder are visible."
+        },
+        {
+          "slot": "Profile",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Capture the subject's pure side silhouette for a distinct graphic option.",
+          "promptGuidance": "Camera at exactly 90 degrees to the subject's facing direction, showing only the profile line of the face and body."
+        },
+        {
+          "slot": "3/4 Back",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Show the subject from behind and around, useful for reveals or following context.",
+          "promptGuidance": "Position roughly 45 degrees behind the subject so the back and a hint of the far cheek are visible."
+        },
+        {
+          "slot": "Back",
+          "size": "MWS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Provide a full rear view, useful for anonymity, mystery, or POV setups.",
+          "promptGuidance": "Camera directly behind the subject; frame should read the back of the head and body with no facial features visible."
+        },
+        {
+          "slot": "High Angle",
+          "size": "MS",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Offer a diminishing or observational perspective distinct from the eye-level set.",
+          "promptGuidance": "Elevate the camera above the subject's eyeline looking down, keeping the same subject distance as the other angles for a clean set."
+        }
+      ]
+    },
+    {
+      "id": "orbit",
+      "label": "Orbit",
+      "group": "Angle Coverage",
+      "description": "Six-position orbital pass around the subject at varied heights, generating a full circular coverage set from low to overhead.",
+      "shots": [
+        {
+          "slot": "Low Front Orbit",
+          "size": "MS",
+          "angle": "low",
+          "movement": "orbit",
+          "intent": "Begin the orbit with a grounded, slightly heroic read of the subject's front.",
+          "promptGuidance": "Camera below eye level arcing across the subject's front, giving an empowered, monumental feel to open the sequence."
+        },
+        {
+          "slot": "Eye-Level Side Orbit",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "orbit",
+          "intent": "Pass across the subject's side at a neutral height for a balanced, natural read.",
+          "promptGuidance": "Arc smoothly past the subject's profile at their own eye height, maintaining consistent radius and speed."
+        },
+        {
+          "slot": "High 3/4 Orbit",
+          "size": "MS",
+          "angle": "high",
+          "movement": "orbit",
+          "intent": "Shift upward to reveal more of the subject's surroundings while still circling.",
+          "promptGuidance": "Raise the camera above eye level while continuing the arc, angling down slightly to bring more environment into frame."
+        },
+        {
+          "slot": "Overhead Orbit",
+          "size": "WS",
+          "angle": "overhead",
+          "movement": "orbit",
+          "intent": "Complete the vertical range of the orbit with a top-down circling pass.",
+          "promptGuidance": "Position the camera near-directly above the subject, circling slowly to reveal the top-down shape and surrounding layout."
+        },
+        {
+          "slot": "Low Back Orbit",
+          "size": "MS",
+          "angle": "low",
+          "movement": "orbit",
+          "intent": "Continue the circle to a low rear angle for a mysterious or vulnerable read.",
+          "promptGuidance": "Camera below eye level arcing behind the subject, catching the back and shoulders from a grounded, slightly concealed vantage."
+        },
+        {
+          "slot": "Eye-Level Front Orbit",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "orbit",
+          "intent": "Return to the front at neutral height to close the orbit and complete the circle.",
+          "promptGuidance": "Finish the arc back at the subject's front at eye level, matching the opening shot's height to close the loop cleanly."
+        }
+      ]
+    },
+    {
+      "id": "story-beats",
+      "label": "Story Beats",
+      "group": "Story",
+      "description": "Six-beat narrative arc pattern that moves a scene from setup through inciting detail, confrontation, escalation, climax, and resolution.",
+      "shots": [
+        {
+          "slot": "Setup",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Establish the scene's normal world and status quo before disruption.",
+          "promptGuidance": "Wide, calm framing showing characters and setting in their ordinary state, with visual room for something to change."
+        },
+        {
+          "slot": "Inciting Detail",
+          "size": "Insert",
+          "angle": "high",
+          "movement": "locked",
+          "intent": "Introduce the specific object, message, or event that disrupts the status quo.",
+          "promptGuidance": "Tight insert on the precise trigger, such as a note, a sound source, or an arriving object, that the rest of the scene will react to."
+        },
+        {
+          "slot": "Confrontation",
+          "size": "MS",
+          "angle": "eye level",
+          "movement": "locked",
+          "intent": "Bring characters into direct conflict or dialogue as the disruption is addressed.",
+          "promptGuidance": "Frame the opposing characters or character-and-obstacle together in the same shot to establish direct confrontation."
+        },
+        {
+          "slot": "Escalation",
+          "size": "CU",
+          "angle": "eye level",
+          "movement": "handheld",
+          "intent": "Intensify the emotional or physical stakes as the conflict builds toward its peak.",
+          "promptGuidance": "Move tighter and add handheld energy as tension rises; framing should feel less controlled than the confrontation shot."
+        },
+        {
+          "slot": "Climax",
+          "size": "ECU",
+          "angle": "eye level",
+          "movement": "push-in",
+          "intent": "Hit the scene's highest point of tension or revelation in its most intense frame.",
+          "promptGuidance": "Push into an extreme close-up on the pivotal expression or action at the exact peak moment of the scene."
+        },
+        {
+          "slot": "Resolution",
+          "size": "WS",
+          "angle": "eye level",
+          "movement": "pull-back",
+          "intent": "Release tension by pulling back to show the aftermath and new status quo.",
+          "promptGuidance": "Pull the camera back out to a wide, settled frame that shows where characters land once the scene's conflict resolves."
+        }
+      ]
+    }
+  ]
+}
