@@ -445,21 +445,27 @@ fn keyed(r: *Rig) !void {
     try r.same("keyed share", f32, probd, prob);
 }
 
-/// The latent router's top-k, both forms (512 experts, 22 picks, 2 shares) against its host twin, ties and -infs too.
+/// The latent router's top-k, both forms, against its host twin: Super's 512 experts and 22 picks, then the bounds.
 fn latentTopk(r: *Rig, fns: nemotron.latent.Fns) !void {
-    const le = 512;
-    const picks = 22;
     const shares = 2;
     const sk = 8;
-    const Case = struct { rows: usize, ties: bool = false, numbers: usize = le, norm: bool = true };
-    for ([_]Case{ .{ .rows = 1 }, .{ .rows = 16, .ties = true }, .{ .rows = 300, .norm = false }, .{ .rows = 4, .numbers = 10 } }) |c| {
+    const Case = struct { rows: usize, experts: usize = 512, picks: usize = 22, ties: bool = false, numbers: ?usize = null, norm: bool = true };
+    const cases = [_]Case{
+        .{ .rows = 1 },                                             .{ .rows = 16, .ties = true },
+        .{ .rows = 300, .norm = false },                            .{ .rows = 4, .numbers = 10 },
+        .{ .rows = 1, .experts = 1024, .picks = 32 },               .{ .rows = 16, .experts = 1024, .picks = 32, .ties = true },
+        .{ .rows = 4, .experts = 1024, .picks = 32, .numbers = 0 }, .{ .rows = 3, .experts = 1000, .picks = 32, .numbers = 31 },
+    };
+    for (cases) |c| {
+        const le = c.experts;
+        const picks = c.picks;
         const part = try r.f32s(sk * c.rows * le, -1, 1);
         if (c.ties) for (part) |*v| {
             v.* = @round(v.* * 4) / 4; // quarters: many equal logits, so equal scores
         };
         const bias = try r.f32s(le, -0.05, 0.05);
         if (c.ties) @memset(bias, 0);
-        @memset(bias[c.numbers..], -std.math.inf(f32));
+        if (c.numbers) |n| @memset(bias[n..], -std.math.inf(f32));
         const idx = try r.a.alloc(i32, c.rows * picks * shares);
         const wt = try r.a.alloc(f32, c.rows * picks);
         ref.superTopk(part, bias, idx, wt, c.rows, 2.5, le, sk, picks, shares, c.norm);
