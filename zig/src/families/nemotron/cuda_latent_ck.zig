@@ -10,7 +10,7 @@ const Precision = @import("config.zig").Precision;
 
 /// Whether the checkpoint's math runs: as asked, else by default for a latent ModelOpt checkpoint on Blackwell.
 pub fn wanted(ctx: *const cuda.Context, c: Config, asked: ?Precision) !bool {
-    const built = c.format == .modelopt and c.latent > 0;
+    const built = c.format == .modelopt and c.latent > 0 and !c.bolt;
     const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
     const p = asked orelse return built and major >= kern.ck_major;
     if (p == .full) return false;

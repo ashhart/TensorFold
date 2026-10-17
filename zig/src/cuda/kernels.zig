@@ -125,3 +125,4 @@ pub const qwen36_mtp: []const u8 = if (available) &Blob("fatbin_qwen36_mtp").byt
 
 pub const experts3: []const u8 = if (available) &Blob("fatbin_experts3").bytes else &.{};
 pub const experts3_prefill: []const u8 = if (available) &Blob("fatbin_experts3_prefill").bytes else &.{};
+pub const ggml: []const u8 = if (available) &Blob("fatbin_ggml").bytes else &.{};

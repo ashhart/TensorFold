@@ -39,7 +39,7 @@ pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, h
         if (head) |h| try h.reset();
     } else if (e.pos != from) return error.BadReuse;
     const waited = e.heat_gate.waited_s;
-    if (from == 0 and keep == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
+    if (from == 0 and keep == null and e.vision == null and e.segments > 1 and dump == null and e.prompt_rows == null and e.taps == null and prompt.len > state.prefill_rows and e.decide == lesson_route.none and !Cancel.background(cancel)) {
         try segs.prefill(e, try e.segmentSet(), prompt, head, e.segments, cancel);
     } else try e.serialChunks(prompt, from, dump, head, cancel, keep);
     if (e.heat_gate.waited_s > waited) heat.note(e.heat_gate.waited_s - waited);

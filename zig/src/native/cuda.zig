@@ -74,7 +74,8 @@ const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque,
 /// The context a lane thread needs current: the lane host steps rounds on its own thread, CUDA binds per thread.
 threadlocal var bound: ?*const cuda.Context = null;
 
-const Gpu = struct { driver: cuda.Driver, ctx: cuda.Context };
+const failed_load = @import("cuda_load_gpu.zig");
+const Gpu = failed_load.Gpu;
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 const Host = struct {
@@ -117,7 +118,7 @@ const Host = struct {
         h.core.deinit();
         h.cfg.deinit(h.gpa);
         if (h.recording) |r| r.free(h.gpa);
-        if (h.gpu) |g| g.ctx.makeCurrent() catch {};
+        failed_load.closeEntry(if (h.gpu) |g| &g.ctx else null) catch {};
         if (h.store) |s| {
             const rows = s.disk;
             s.deinit();
@@ -272,7 +273,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = "--slide runs a prompt one chunk at a time, its change's scratch shared by every layer: serve it without --segments or TF_CUDA_SEGMENTS";
         return null;
     }
+    if (failed_load.recover() != 0) {
+        problem.* = "a CUDA loader is retained until its context recovers; retry after recovery";
+        return null;
+    }
     const g = try gpa.create(Gpu);
+    g.gpa = gpa;
+    g.next = null;
     var opened = false;
     defer if (!opened) gpa.destroy(g);
     g.driver = cuda.Driver.open() catch |e| {
@@ -306,7 +313,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
-    const whole = budget.weightBytes(io, o.dir);
+    const whole = if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
+        return null;
+    } else budget.weightBytes(io, o.dir);
     const text_weights = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     const weights = text_weights + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
     const held0 = cuda.usage(false).device;
@@ -338,6 +348,12 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         };
         switch (@as(anyerror, e)) { // every family's open: GLM's error set has no ModeloptNeedsSm90
+            error.LoadRetained => {
+                opened = true;
+                failed_load.keep(g);
+                problem.* = "CUDA loading failed without completion; its destinations and GPU owner are retained";
+                return null;
+            },
             error.ModeloptNeedsSm90 => {
                 problem.* = try std.fmt.allocPrint(
                     a,

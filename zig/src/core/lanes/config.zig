@@ -12,6 +12,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
+    copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
     gpu_tokens: bool = false, // one-token rounds may run a step ahead (pipelined)
@@ -84,7 +85,7 @@ pub const Config = struct {
     pub fn init(gpa: Allocator, m: Model, max_rows: u32, max_draft: u32) !Config {
         if (max_rows < 1) return error.BadMaxRows;
         const width: u32 = @max(1, @min(@max(m.exact_width, 1), max_rows));
-        const max_copy = width - 1;
+        const max_copy = if (m.copy_drafts) width - 1 else 0;
         const first_rows: i64 = if (m.first_copy_rows != 0) m.first_copy_rows else width;
         const first_copy: u32 = @intCast(@max(1, @min(@as(i64, max_copy), first_rows - 1)));
         const prior = if (m.draft_prior.len > 0) m.draft_prior else &default_prior;

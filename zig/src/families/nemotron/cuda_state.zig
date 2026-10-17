@@ -5,6 +5,7 @@ const lesson_route = @import("living").lesson_route;
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");
+const glue = @import("cuda_glue.zig");
 const sampler = @import("cuda_sampler.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const latent = @import("cuda_latent.zig");
@@ -96,7 +97,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const xd: usize = c.inner();
     const pairs = R * ns;
     // a latent MoE plans pairs (row, pick, share held) over its share tables; its experts write fp32 to the exchange
-    const lat = c.latent > 0;
+    const lat = c.latent > 0 and !c.bolt;
     const own: usize = if (lat) c.ownShares() else 1;
     const plan_experts = if (lat) c.experts * own else c.experts + 2;
     const items = kern.maxItems(@intCast(pairs * own), plan_experts, 16);
@@ -104,23 +105,24 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const job = if (lat and c.world > 1) worker.jobBytes(c) else 0;
     const sw = if (lat) c.shared_width / c.shares else 0;
     // the checkpoint's math: e4m3 rows of the widest FP8 projection input, and a latent MoE's NVFP4 rows
+    const router_slices: usize = if (lat) latent.routerSlices(D) else if (c.bolt) glue.max_router_slices else 6;
     const ck8 = if (c.ck) R * @max(D, @max(xd, qd)) else 0;
     const ck4 = if (c.ck and lat) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0;
     return .{
-        W * c.vocab * 2,                                              16,                                             R * 4,
-        R * D * 2,                                                    c.vocab * 2,                                    16,
-        R * D * 2,                                                    R * D * 2,                                      R * D * 2,
-        R * D * 2,                                                    R * D / 64 * 4,                                 R * D * 2,
-        R * c.projDim() * 2,                                          R * cd * 2,                                     R * xd * 2,
-        R * xd * 2,                                                   R * xd / 64 * 4,                                R * c.qkvDim() * 2,
-        R * qd * 2,                                                   R * qd * 2,                                     R * qd / 64 * 4,
-        W * nch * qd * 4,                                             W * nch * c.heads * 4,                          W * nch * c.heads * 4,
-        (if (lat) latent.routerSlices(D) else 6) * R * c.experts * 4, pairs * own * 4,                                R * ns * 4,
-        pairs * own * 4,                                              items * 12,                                     8,
-        pairs * own * 4,                                              (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
-        ymoe,                                                         shared_words * 4,                               R * kern.pocket_width * 4,
-        R * c.latent * 2,                                             R * c.latent * 2,                               R * own * sw * 2,
-        R * own * 4,                                                  job,                                            ck8,
+        W * c.vocab * 2,                   16,                                             R * 4,
+        R * D * 2,                         c.vocab * 2,                                    16,
+        R * D * 2,                         R * D * 2,                                      R * D * 2,
+        R * D * 2,                         R * D / 64 * 4,                                 R * D * 2,
+        R * c.projDim() * 2,               R * cd * 2,                                     R * xd * 2,
+        R * xd * 2,                        R * xd / 64 * 4,                                R * c.qkvDim() * 2,
+        R * qd * 2,                        R * qd * 2,                                     R * qd / 64 * 4,
+        W * nch * qd * 4,                  W * nch * c.heads * 4,                          W * nch * c.heads * 4,
+        router_slices * R * c.experts * 4, pairs * own * 4,                                R * ns * 4,
+        pairs * own * 4,                   items * 12,                                     8,
+        pairs * own * 4,                   (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
+        ymoe,                              shared_words * 4,                               R * kern.pocket_width * 4,
+        R * c.latent * 2,                  R * c.latent * 2,                               R * own * sw * 2,
+        R * own * 4,                       job,                                            ck8,
         ck4,
     };
 }
@@ -297,7 +299,7 @@ pub const Buffers = struct {
 
     /// Writes every row count's shared plan (pairs in row order, one item a half since rows <= 16).
     pub fn initShared(b: *const Buffers, ops: kern.Ops, c: Config) !void {
-        if (c.latent > 0) {
+        if (c.latent > 0 and !c.bolt) {
             try latent.initShareIds(ops.k.latent.?, ops.s, b.sids, pass_rows, c.ownShares());
             return ops.s.synchronize();
         }
@@ -312,6 +314,10 @@ pub const Buffers = struct {
             w[at..][0..8].* = .{ @intCast(c.experts), 0, n, @intCast(c.experts + 1), max_rows, n, 2, 2 };
         }
         try ops.upload(b.shared, std.mem.sliceAsBytes(&w));
+        if (c.latent > 0) {
+            const z: [pass_rows]u32 = @splat(0);
+            try ops.upload(b.sids, std.mem.sliceAsBytes(&z));
+        }
         try ops.s.synchronize();
     }
 

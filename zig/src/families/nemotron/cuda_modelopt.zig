@@ -13,9 +13,24 @@ const Loader = W.Loader;
 const Tensor = core.checkpoint.Tensor;
 const Nvfp4Experts = cuda.experts.Nvfp4Experts;
 
-pub const Kind = enum { nvfp4, fp8, bf16 };
+pub const Kind = enum { nvfp4, fp8, bf16, q8_0, iq2xxs };
+
+/// Bytes and weights of one ggml block: Q8_0 34 per 32, IQ2_XXS 66 per 256.
+fn ggmlBlock(k: Kind) [2]usize {
+    return switch (k) {
+        .q8_0 => .{ 34, 32 },
+        .iq2xxs => .{ 66, 256 },
+        else => unreachable,
+    };
+}
 
 fn kindOf(t: Tensor) !Kind {
+    // ggml blocks (Bolt): [rows, blocks, block bytes]; NVFP4 packs pairs as [rows, k / 2]
+    if (t.dtype == .u8 and t.rank == 3) return switch (t.dim(2)) {
+        34 => .q8_0,
+        66 => .iq2xxs,
+        else => error.UnsupportedQuantization,
+    };
     return switch (t.dtype) {
         .u8 => .nvfp4,
         .f8_e4m3 => .fp8,
@@ -42,7 +57,7 @@ fn scalar(ck: *core.Checkpoint, n: []const u8) !f32 {
 pub fn part(ck: *core.Checkpoint, pre: []const u8) !Part {
     var buf: [192]u8 = undefined;
     const w = try ck.get(try name(&buf, "{s}.weight", .{pre}));
-    if (w.rank != 2) return error.UnexpectedTensor;
+    if (w.rank != 2 and w.rank != 3) return error.UnexpectedTensor;
     // the KV cache stays bf16; the input scale is read for the checkpoint's math (--precision checkpoint)
     var act: f32 = 0;
     for ([_][]const u8{ "input_scale", "k_scale", "v_scale" }) |extra| {
@@ -51,9 +66,15 @@ pub fn part(ck: *core.Checkpoint, pre: []const u8) !Part {
         if (extra[0] == 'i') act = try scalar(ck, n) else _ = try ck.get(n);
     }
     const kind = try kindOf(w);
-    var p: Part = .{ .w = w, .act = act, .kind = kind, .n = w.dim(0), .k = if (kind == .nvfp4) w.dim(1) * 2 else w.dim(1) };
+    if ((w.rank == 3) != (kind == .q8_0 or kind == .iq2xxs)) return error.UnexpectedTensor;
+    const k = switch (kind) {
+        .nvfp4 => w.dim(1) * 2,
+        .q8_0, .iq2xxs => w.dim(1) * ggmlBlock(kind)[1],
+        else => w.dim(1),
+    };
+    var p: Part = .{ .w = w, .act = act, .kind = kind, .n = w.dim(0), .k = k };
     switch (kind) {
-        .bf16 => {},
+        .bf16, .q8_0, .iq2xxs => {},
         .fp8 => p.scale = try scalar(ck, try name(&buf, "{s}.weight_scale", .{pre})),
         .nvfp4 => {
             p.blocks = try ck.expect(try name(&buf, "{s}.weight_scale", .{pre}), .f8_e4m3, &.{ p.n, p.k / 16 });
@@ -87,6 +108,7 @@ pub fn dense(L: *Loader, ck: *core.Checkpoint, label: []const u8, prefixes: []co
     var buf: [128]u8 = undefined;
     const s = L.ops.s;
     switch (first.kind) {
+        .q8_0, .iq2xxs => return ggmlDense(L, label, parts[0..prefixes.len], n, k),
         .bf16, .fp8 => {
             const size: usize = if (first.kind == .bf16) 2 else 1;
             const base = try L.tmp(n * k * size);
@@ -123,9 +145,96 @@ pub fn dense(L: *Loader, ck: *core.Checkpoint, label: []const u8, prefixes: []co
     }
 }
 
+/// Row-stacked ggml parts (q, k, v: rows after rows) uploaded as stored, then tiled on the GPU (a byte permutation).
+fn ggmlDense(L: *Loader, label: []const u8, parts: []const Part, n: usize, k: usize) !kern.QLinear {
+    const g = try ggmlKernels(L);
+    const kind = parts[0].kind;
+    const base = try L.tmp(n * k / ggmlBlock(kind)[1] * ggmlBlock(kind)[0]);
+    var at: usize = 0;
+    for (parts) |p| {
+        try L.src.upload(base + at, p.w.bytes);
+        at += p.w.bytes.len;
+    }
+    var buf: [128]u8 = undefined;
+    const gk: cuda.ggml.Kind = if (kind == .q8_0) .q8_0 else .iq2xxs;
+    const out = try L.alloc(try name(&buf, "{s}.weight", .{label}), cuda.ggml.bytes(gk, n, k));
+    try L.src.flush();
+    try g.pack(L.ops.s, gk, base, out, n, k, 1);
+    return if (kind == .q8_0) .{ .q8_0 = cuda.ggml.q8Weight(out, n, k) } else .{ .iq2xxs = cuda.ggml.iq2Weight(out, n, k) };
+}
+
+fn ggmlKernels(L: *Loader) !*const cuda.ggml.Kernels {
+    return if (L.ops.k.ggml) |*g| g else error.GgmlNotLoaded;
+}
+
+/// IQ2_XXS grouped experts from `count` tensors named by `names`, [n, k] each, uploaded back to back and tiled.
+fn iq2Experts(L: *Loader, ck: *core.Checkpoint, label: []const u8, count: usize, n: usize, k: usize, names: anytype) !u64 {
+    const g = try ggmlKernels(L);
+    const one = n * k / 256 * 66;
+    const base = try L.tmp(count * one);
+    var b: [192]u8 = undefined;
+    for (0..count) |i| {
+        const p = try part(ck, try names.at(&b, i));
+        if (p.kind != .iq2xxs or p.n != n or p.k != k) {
+            std.log.err("{s}: {t} [{d}, {d}], expected IQ2_XXS [{d}, {d}]", .{ try names.at(&b, i), p.kind, p.n, p.k, n, k });
+            return error.UnexpectedTensor;
+        }
+        try L.src.upload(base + i * one, p.w.bytes);
+    }
+    const out = try L.alloc(label, cuda.ggml.bytes(.iq2xxs, n, k) * count);
+    try L.src.flush();
+    try g.pack(L.ops.s, .iq2xxs, base, out, n, k, count);
+    return out;
+}
+
+/// A LatentMoE layer (Bolt): router and bias, fc1/fc2_latent_proj, latent IQ2_XXS experts, full-width shared expert.
+pub fn latent(L: *Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, c: Config, layer: usize) !W.MoE {
+    const lm = c.layerMoe(layer);
+    const E = lm.experts;
+    const Lw = c.latent;
+    var a: [128]u8 = undefined;
+    var b: [192]u8 = undefined;
+    const r = try routerOf(L, try name(&a, "{s}.router", .{label}), try ck.get(try name(&b, "{s}gate.weight", .{pre})), E, c.hidden);
+    const bias = try ck.expect(try name(&b, "{s}gate.e_score_correction_bias", .{pre}), .f32, &.{E});
+    var m: W.MoE = .{ .router = r, .bias = try L.raw(try name(&a, "{s}.bias", .{label}), bias), .experts = undefined };
+    var ex: kern.Experts = .{ .format = .iq2xxs, .up = 0, .down = 0, .width = lm.width, .dims = Lw, .experts = E, .relu2 = true };
+    const Names = struct {
+        pre: []const u8,
+        leaf: []const u8,
+        fn at(x: @This(), buf: []u8, i: usize) ![]const u8 {
+            return std.fmt.bufPrint(buf, "{s}experts.{d}.{s}", .{ x.pre, i, x.leaf });
+        }
+    };
+    ex.up = try iq2Experts(L, ck, try name(&a, "{s}.experts.up", .{label}), E, lm.width, Lw, Names{ .pre = pre, .leaf = "up_proj" });
+    ex.down = try iq2Experts(L, ck, try name(&a, "{s}.experts.down", .{label}), E, Lw, lm.width, Names{ .pre = pre, .leaf = "down_proj" });
+    m.experts = ex;
+    const Shared = struct {
+        pre: []const u8,
+        leaf: []const u8,
+        fn at(x: @This(), buf: []u8, _: usize) ![]const u8 {
+            return std.fmt.bufPrint(buf, "{s}shared_experts.{s}", .{ x.pre, x.leaf });
+        }
+    };
+    var sh: kern.Experts = .{ .format = .iq2xxs, .up = 0, .down = 0, .width = c.shared_width, .dims = c.hidden, .experts = 1, .relu2 = true };
+    sh.up = try iq2Experts(L, ck, try name(&a, "{s}.shared.up", .{label}), 1, c.shared_width, c.hidden, Shared{ .pre = pre, .leaf = "up_proj" });
+    sh.down = try iq2Experts(L, ck, try name(&a, "{s}.shared.down", .{label}), 1, c.hidden, c.shared_width, Shared{ .pre = pre, .leaf = "down_proj" });
+    var p1: [192]u8 = undefined;
+    var p2: [192]u8 = undefined;
+    m.bolt = .{
+        .fc1 = try dense(L, ck, try name(&a, "{s}.fc1_latent", .{label}), &.{try name(&p1, "{s}fc1_latent_proj", .{pre})}),
+        .fc2 = try dense(L, ck, try name(&b, "{s}.fc2_latent", .{label}), &.{try name(&p2, "{s}fc2_latent_proj", .{pre})}),
+        .shared = sh,
+    };
+    return m;
+}
+
 /// The router as the kernels read it: bf16 [E, D]; an fp32 router is taken only when every value is a bf16.
 pub fn router(L: *Loader, label: []const u8, t: Tensor, c: Config) !u64 {
-    if (t.rank != 2 or t.dim(0) != c.experts or t.dim(1) != c.hidden) return error.UnexpectedTensor;
+    return routerOf(L, label, t, c.experts, c.hidden);
+}
+
+fn routerOf(L: *Loader, label: []const u8, t: Tensor, experts_: usize, hidden: usize) !u64 {
+    if (t.rank != 2 or t.dim(0) != experts_ or t.dim(1) != hidden) return error.UnexpectedTensor;
     if (t.dtype == .bf16) return L.raw(label, t);
     if (t.dtype != .f32) return error.UnexpectedTensor;
     const raw = try L.gpa.alloc(u8, t.bytes.len);

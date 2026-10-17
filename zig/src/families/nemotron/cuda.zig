@@ -19,6 +19,8 @@ pub const Head = @import("cuda_mtp.zig").Head;
 pub const Lanes = @import("cuda_lanes.zig").Cuda;
 pub const native = @import("cuda_native.zig");
 pub const train = @import("cuda_train.zig");
+/// Bolt's image tower (C-RADIO) and projector: one image's patches to the rows its `<image>` placeholders take.
+pub const vision = @import("cuda_vision.zig");
 pub const sites = @import("cuda_sites.zig");
 pub const train_ops = @import("cuda_train_ops.zig");
 pub const glue = @import("cuda_glue.zig");
@@ -31,6 +33,9 @@ pub const omni = @import("cuda_native_omni.zig");
 pub const identity = @import("cuda_identity.zig");
 
 test {
+    _ = @import("cuda_bolt_lanes_test.zig");
+    _ = @import("cuda_lanes.zig");
+    _ = vision;
     _ = @import("config.zig");
     _ = @import("draft_ids.zig");
     _ = kernels;

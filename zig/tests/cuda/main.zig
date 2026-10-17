@@ -72,6 +72,7 @@ const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
 const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
 const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
+const ggml_tests = @import("ggml_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -141,6 +142,8 @@ const usage =
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  moe                       softmax routing and SwiGLU experts against host references
     \\  experts3                  affine-3 packing and outputs against affine-4 and fp64
+    \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
+    \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
     \\  exlr8                     EXLR8 projections: every codebook state, FP64, row windows, the Metal frozen digests
     \\  exlr8-bench DIR [MANIFEST] [LAYER] [SETS]   a real EXLR8 layer: FP64, row windows, then GB/s by stage
@@ -251,6 +254,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);

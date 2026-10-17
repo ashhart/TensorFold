@@ -218,7 +218,7 @@ pub const Forward = struct {
                     delta = .dense;
                 } else {
                     try f.experts(blk.moe, rows, false);
-                    delta = .moe;
+                    delta = if (blk.moe.bolt != null) .dense else .moe;
                 },
             }
         }
@@ -251,8 +251,9 @@ pub const Forward = struct {
         const o = f.ops;
         const ex = m.experts;
         const pairs = rows * c.slots();
+        if (m.bolt) |lt| return f.latentExperts(m, lt, rows, prompt);
         if (!prompt) if (f.side) |sd| return f.forked(m, rows, sd);
-        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
         try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
@@ -271,6 +272,52 @@ pub const Forward = struct {
             try f.mark(.experts_down);
         }
         try f.sharedRest(o, m, rows, !prompt);
+    }
+
+    /// LatentMoE (Bolt), into b.delta: fc2_latent(sum of the routed experts on fc1_latent(y)) + the shared expert on y.
+    fn latentExperts(f: *const Forward, m: weights.MoE, lt: weights.BoltLatent, rows: usize, prompt: bool) !void {
+        const c = f.c;
+        const b = f.b;
+        const o = f.ops;
+        const ex = m.experts;
+        const K = c.top_k;
+        const pairs = rows * K;
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, ex.experts, K, K, c.routed_scaling, c.norm_topk);
+        try f.mark(.route);
+        if (prompt) try o.prefillDense(b.y, lt.fc1, b.lat, rows) else try o.dense(b.y, b.xs, lt.fc1, b.lat, rows);
+        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
+        const g = o.grouped();
+        try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
+        try f.mark(.plan);
+        var items = kern.maxItems(pairs, ex.experts, tile);
+        const up_in: cuda.experts.Rows = .{ .x = b.lat, .stride = c.latent, .slots = K };
+        const down_in: cuda.experts.Rows = .{ .x = b.act, .stride = ex.width };
+        if (prompt) {
+            try g.prompt(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
+            try g.prompt(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+        } else {
+            try g.decode(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
+            try f.mark(.experts_up);
+            try g.decode(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+            try f.mark(.experts_down);
+        }
+        try o.latentSum(b.ymoe, b.wts, b.comb, rows, K, c.latent);
+        if (prompt) try o.prefillDense(b.comb, lt.fc2, b.delta, rows) else try o.dense(b.comb, 0, lt.fc2, b.delta, rows);
+        // the shared expert: every row's pair with expert 0 of a one-expert layer, relu^2 between as the routed ones
+        const sh = lt.shared;
+        try o.plan(b.sids, rows, 1, tile, b.plan);
+        items = kern.maxItems(rows, 1, tile);
+        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
+        const sh_down: cuda.experts.Rows = .{ .x = b.act, .stride = sh.width };
+        if (prompt) {
+            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
+            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+        } else {
+            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
+            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+        }
+        try o.addBf16(b.delta, b.delta, b.ymoe, true, rows * c.hidden);
+        try f.mark(.shared_wait);
     }
 
     /// The pocket over the rows of sequences that read what was learned: every row, or the runs between untaught ones'.
@@ -318,7 +365,7 @@ pub const Forward = struct {
         try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
-        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
         try f.mark(.plan);
@@ -437,7 +484,7 @@ pub const Forward = struct {
                 w.delta = .dense;
             } else {
                 try f.experts(blk.moe, w.rows, true);
-                w.delta = .moe;
+                w.delta = if (blk.moe.bolt != null) .dense else .moe;
             },
         }
     }

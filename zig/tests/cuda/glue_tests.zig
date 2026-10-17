@@ -188,27 +188,32 @@ fn norms(r: *Rig) !void {
 }
 
 fn route(r: *Rig) !void {
-    const sk = glue.routerShape(D).sk;
+    try routeShape(r, D, E, top_k, NS);
+    try routeShape(r, 4096, 496, 9, 9);
+}
+
+fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
+    const sk = glue.routerShape(d).sk;
     // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router)
-    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0);
-    try routeRows(r, sk, 4, 2); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0, d, e, k, ns);
+    try routeRows(r, sk, 4, 2, d, e, k, ns); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
 }
 
 /// `rows` rows that start `skew` bf16 values into their buffer, routed and ranked against the host references.
-fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize) !void {
-    const x = try r.bfs(skew + rows * D, 1.0);
-    const w = try r.bfs(E * D, 0.05);
-    const bias = try r.f32s(E, -0.05, 0.05);
-    const part = try r.a.alloc(f32, sk * rows * E);
-    const idx = try r.a.alloc(i32, rows * NS);
-    const wt = try r.a.alloc(f32, rows * NS);
-    ref.router(x[skew..], w, part, rows, D, E, sk);
-    ref.topk(part, bias, idx, wt, rows, 2.5, E, sk, top_k, NS, true);
-    const partd = try r.zeros(f32, sk * rows * E);
-    const idxd = try r.zeros(i32, rows * NS);
-    const wtd = try r.zeros(f32, rows * NS);
+fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k: usize, ns: usize) !void {
+    const x = try r.bfs(skew + rows * d, 1.0);
+    const w = try r.bfs(e * d, 0.05);
+    const bias = try r.f32s(e, -0.05, 0.05);
+    const part = try r.a.alloc(f32, sk * rows * e);
+    const idx = try r.a.alloc(i32, rows * ns);
+    const wt = try r.a.alloc(f32, rows * ns);
+    ref.router(x[skew..], w, part, rows, d, e, sk);
+    ref.topk(part, bias, idx, wt, rows, 2.5, e, sk, k, ns, true);
+    const partd = try r.zeros(f32, sk * rows * e);
+    const idxd = try r.zeros(i32, rows * ns);
+    const wtd = try r.zeros(f32, rows * ns);
     const xd = try r.dev(u16, x) + @as(u64, 2 * skew);
-    try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, D, E, top_k, 2.5, true);
+    try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, d, e, k, ns, 2.5, true);
     try r.same("router partials", f32, partd, part);
     try r.same("top-k ids", i32, idxd, idx);
     try r.same("top-k weights", f32, wtd, wt);

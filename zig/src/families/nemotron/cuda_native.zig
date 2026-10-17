@@ -23,7 +23,9 @@ pub const slide = @import("cuda_slide.zig");
 
 pub const model_type = "nemotron_h";
 pub const explains_open = true; // explain() words open refusals too (--vision on a checkpoint without a tower)
-pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4" };
+/// Nemotron 3.5 Bolt's config: the language model under llm_config, beside its vision tower's.
+pub const also_model_types: []const []const u8 = &.{"nemotron_h_omni"};
+pub const formats: []const []const u8 = &.{ "mlx-q4g64", "modelopt-nvfp4", "modelopt-ggml" };
 pub const default_context: i64 = engine.default_context;
 pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
@@ -57,6 +59,7 @@ pub const Loaded = struct {
     learn_bytes: usize = 0, // --slide: what its trainer allocates at the first lesson, kept out of the streams' room
     vision: ?*vision.Vision = null, // --vision: the tower the server's image requests reach
     taps: []const u32 = &.{}, // the rows a recorder may ask `backend` for (empty: none)
+    host_snaps: bool = false, // kept prompt states in pinned host memory (a discrete card): the cache's budget is the host's
 };
 
 /// The first shard, index or config.json in `dir` that a write in place would reach through a link, or null.
@@ -85,19 +88,23 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (carve) |c| closeCarveout(gpa, c);
     const e = try engine.Engine.init(gpa, io, ctx, dir, kernels, .{ .context = o.context, .mtp = o.drafts, .graphs = true, .sampling = null, .segments = o.segments, .carveout = carve, .slide = o.slide, .vision = o.vision, .precision = o.precision });
     errdefer e.deinit();
-    const head: ?*Head = if (o.drafts) try Head.init(e) else null;
+    // Bolt has no MTP weights; copy drafts use the lane core and the target's ordinary verify windows.
+    const head_enabled = o.drafts and !e.c.bolt;
+    const head: ?*Head = if (head_enabled) try Head.init(e) else null;
     errdefer if (head) |h| h.deinit();
     if (head) |h| try h.capture();
-    if (!o.drafts) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
+    if (!head_enabled) try e.captureWindows(); // the one-row window: Engine.init captures windows only when drafting
     // the sampled mode's sets: a placeholder rule now, each stream's own uploaded at its prefill
     try e.setSampling(.{ .seed = 0, .temperature = 1.0 });
     try e.captureWindows();
     if (head) |h| try h.capture();
     try e.setSampling(null);
+    e.snap_host = e.k.discrete; // a card with its own memory keeps prompt states in the host's (GB10 shares one)
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
+    own.lanes.copy_drafts = o.drafts;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
@@ -105,7 +112,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     return .{
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
-        .rows = if (head != null) state.max_rows else 1,
+        .rows = own.lanes.facts().exact_width,
         .stream_bytes = e.seqBytes(),
         .ctx = own,
         .deinit = release,
@@ -115,6 +122,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learn_bytes = if (o.slide) @import("cuda_train.zig").Trainer.memory(e.c) else 0,
         .vision = e.vision,
         .taps = &own.taps,
+        .host_snaps = e.snap_host,
     };
 }
 
@@ -136,6 +144,7 @@ pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.OutOfDeviceMemory => "the GPU had no memory left for this request's caches: retry once another request ends",
         error.VisionRefused => "--vision: this checkpoint has no image tower the CUDA engine reads (Nemotron Omni's RADIO); serve it without --vision",
         error.NoVision => "this server reads no images: start it with --vision",
+        error.NemotronServedWithoutVision => "image inputs need the server started with --vision",
         error.PrecisionNotBuilt => "--precision checkpoint: NVIDIA's FP4 and FP8 math is built for Nemotron 3.5 Super VL's NVFP4 checkpoint so far; serve this one with --precision full",
         error.CheckpointMathNeedsBlackwell => "--precision checkpoint: NVIDIA's FP4 math runs on Blackwell (compute capability 12.x); serve with --precision full",
         else => null,
@@ -173,4 +182,9 @@ fn closeCarveout(gpa: std.mem.Allocator, c: *cuda.Carveout) void {
 
 fn env(name: [:0]const u8) ?[]const u8 {
     return std.mem.span(platform.c.getenv(name) orelse return null);
+}
+
+/// The tensors this family loads; the early check uses the same vision switch as open().
+pub fn tensorWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8, vision_on: bool) !u64 {
+    return @import("core").checkpoint_weights.count(a, io, dir, vision_on);
 }

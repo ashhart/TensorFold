@@ -9,6 +9,7 @@ const qmmf = @import("qmmf.zig");
 const nvfp4 = @import("nvfp4.zig");
 const ck = @import("ck.zig");
 const exl3 = @import("exl3.zig");
+const ggml = @import("ggml.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -66,12 +67,15 @@ pub const Weight = union(enum) {
     nvfp4: qmmf.Weight,
     fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
     bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
+    q8_0: ggml.Weight, // ggml Q8_0 packed by ggml.Kernels.pack
+    iq2xxs: ggml.Weight, // ggml IQ2_XXS packed by ggml.Kernels.pack
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .exl3 => |q| q.n,
             .affine4 => |q| q.n,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.n,
+            .q8_0, .iq2xxs => |q| q.n,
         };
     }
 
@@ -80,6 +84,7 @@ pub const Weight = union(enum) {
             .exl3 => |q| q.k,
             .affine4 => |q| q.k,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.k,
+            .q8_0, .iq2xxs => |q| q.k,
         };
     }
 };
@@ -96,6 +101,7 @@ pub const Linear = struct {
     ck_rows: u64 = 0, // its e4m3 rows (at least rows * k bytes), and slice partials where no cluster meets them
     ck_part: u64 = 0,
     exl3: ?*exl3.Dense = null, // the EXL3 kernels and the scratch the dense calls share
+    ggml: ?*const ggml.Kernels = null, // q8_0 and iq2xxs rows of both kinds
 
     /// e4m3 rows of x times an fp8 weight under its input scale, bf16 out: decode and prompt rows alike (row-exact).
     fn checkpoint(l: Linear, s: Stream, c: *const ck.Ck, q: qmmf.Weight, in: Rows, out: u64, rows: usize) !void {
@@ -122,6 +128,7 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onLane(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .q8_0, .iq2xxs => |q| return (l.ggml orelse return error.FormatNotLoaded).decode(s, q, in.x, in.ldx, rows, out, .bf16),
         }
     }
 
@@ -143,6 +150,8 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            // prompt rows always take the prompt GEMM: a row's bits must not depend on where a prompt's chunks are cut
+            .q8_0, .iq2xxs => |q| return (l.ggml orelse return error.FormatNotLoaded).promptRows(s, q, in.x, in.ldx, rows, out, .bf16),
         }
     }
 

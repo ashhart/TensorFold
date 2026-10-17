@@ -1,6 +1,7 @@
 //! Nemotron CUDA streams own their sequences and share window rounds.
 
 const std = @import("std");
+const vision = @import("cuda_vision.zig");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const core = @import("core");
@@ -57,6 +58,7 @@ pub const Cuda = struct {
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
+    copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -137,7 +139,8 @@ pub const Cuda = struct {
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
         return .{
-            .exact_width = if (drafting) state.max_rows else 1,
+            .exact_width = state.max_rows,
+            .copy_drafts = self.copy_drafts,
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
@@ -147,9 +150,9 @@ pub const Cuda = struct {
             .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
-            .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
+            .hidden_rows = true, // several streams' windows share a forward (Engine.verifyShared)
             .batch_rows = state.max_rows,
-            .max_streams = if (drafting) engine.max_streams else 1,
+            .max_streams = engine.max_streams,
         };
     }
 
@@ -266,8 +269,10 @@ pub const Cuda = struct {
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
-        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len); // prompt rows need every row
+        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len);
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
+        defer if (e.vision) |v| v.end();
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
@@ -524,3 +529,19 @@ pub const Cuda = struct {
         if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
     }
 };
+
+test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
+    var e: Engine = undefined;
+    e.c.latent = 128;
+    var c: Cuda = undefined;
+    c.e = &e;
+    c.head = null;
+    c.copy_drafts = true;
+    c.cost_count = 0;
+    c.mtp_ms = 0;
+    const f = c.facts();
+    try std.testing.expectEqual(@as(u32, state.max_rows), f.exact_width);
+    try std.testing.expect(f.hidden_rows);
+    try std.testing.expect(f.max_streams > 1);
+    try std.testing.expect(!f.mtp);
+}

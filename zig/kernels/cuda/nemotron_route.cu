@@ -97,7 +97,7 @@ tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __
 
 namespace {
 
-constexpr int MAXC = 8;   // experts a lane holds: up to 256 experts
+constexpr int MAXC = 16;   // experts a lane holds: up to 512 experts
 constexpr int MAXSK = 8;  // router slices topk sums (routerShape takes at most 6)
 
 // The larger of two (value, index) picks: a higher value, or the lower index on a tie (values are never NaN).

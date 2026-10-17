@@ -26,6 +26,7 @@ const kernels = [_]Kernel{
     .{ .name = "experts3_prefill", .flags = &.{"-O3"} },
     .{ .name = "moe", .flags = &.{"-O3"} }, // cuda/moe.py: softmax top-k routing with a sigmoid-gated shared expert
     .{ .name = "qwen36_mtp", .flags = &.{"-O3"} }, // ours: the Qwen3.6 MTP drafter's attention at the target's head width
+    .{ .name = "ggml", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "gdn", .flags = &.{ "-O3", "--fmad=false" } }, // cuda/kernels/gdn.py, tensorfold_gdn_v2
     .{ .name = "probe", .flags = &.{"-O3"} },
     .{ .name = "qmm_group", .flags = &.{"-O3"} }, // cuda/kernels/qmm.py, tensorfold_qmm_v5
@@ -203,6 +204,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision);
+    b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     _ = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
@@ -385,8 +387,36 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         step.dependOn(&projection.step);
         projection_step.dependOn(&projection.step);
     }
+    const bolt = b.step("test-bolt-host", "Nemotron Bolt and shared lane host contracts");
+    const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
+    const check_cuda = runtime(b, cuda_target, .debug, &.{});
+    const check_mods = family(b, cuda_target, .debug, check_cuda, draft_ids);
+    const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/bolt_compile.zig"),
+        .target = cuda_target,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "nemotron", .module = check_mods.nemotron } },
+    }) });
+    bolt.dependOn(&compile_bolt.step);
+    step.dependOn(&compile_bolt.step);
+    for ([_]*std.Build.Module{ mods.nemotron, mods.lanes, mods.radio }) |m|
+        bolt.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
+    const load_check = b.step("test-bolt-load-host", "Bolt load destination and native-parent retention without a GPU");
+    const load_filter = b.option([]const u8, "bolt-load-filter", "Select one load regression");
+    const load_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_load_gpu.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nemotron", .module = mods.nemotron } } });
+    for ([_]*std.Build.Module{ load_module, mods.radio }) |m| {
+        const check = b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = if (load_filter) |f| &.{f} else &.{} }));
+        check.has_side_effects = true;
+        load_check.dependOn(&check.step);
+    }
+
+    const compile_modules = engines(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision);
+    const startup = b.addObject(.{ .name = "bolt-load-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/bolt_load_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "native", .module = compile_modules.engines }} }) });
+    _ = startup.getEmittedBin();
+    b.step("compile-bolt-load-host", "Compile actual native CUDA startup without GPU images").dependOn(&startup.step);
+
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{

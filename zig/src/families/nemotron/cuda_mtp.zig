@@ -74,7 +74,7 @@ pub const Head = struct {
     levels: usize = 0,
 
     pub fn init(e: *Engine) !*Head {
-        if (e.w.mtp == null) return error.NoMtpHead;
+        if (e.c.bolt or e.w.mtp == null) return error.NoMtpHead;
         const c = e.c;
         const D: usize = c.hidden;
         const R: usize = state.pass_rows;

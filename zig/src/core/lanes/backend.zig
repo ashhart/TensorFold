@@ -1,4 +1,4 @@
-//! What the round loop asks a backend (Metal, CUDA or the fake) to compute; drawn tokens stay on the GPU behind handles.
+//! Backend operations for shared rounds; drawn tokens remain on the GPU behind handles.
 const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Shape = @import("shape.zig").Shape;
@@ -164,7 +164,7 @@ pub const Backend = struct {
         b.vtable.release(b.ptr, s);
     }
 
-    /// A driver of its own starts a stream: the prompt pass and its first token, committed; a cancel or failure releases it.
+    /// Start a stream and commit its first token; cancellation or failure releases it.
     pub fn opening(b: Backend, gpa: std.mem.Allocator, s: *Stream) !u32 {
         errdefer b.release(s);
         try b.prefill(s);

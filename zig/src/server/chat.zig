@@ -269,7 +269,7 @@ const Generation = struct {
         return !g.ignore_eos and std.mem.indexOfScalar(u32, g.srv.eos, t) != null;
     }
 
-    /// What closes a call the model's end token left open (``tool_parse.closeCall``); nothing when a stop string, the length or ``ignore_eos`` ended the reply instead.
+    /// Close a tool call left open at the model end token, except when another stop condition ended the reply.
     fn closeCall(g: *const Generation, text: []const u8) Allocator.Error![]const u8 {
         const t = g.collected.items;
         if (g.tools.len == 0 or t.len == 0 or !g.eos(t[t.len - 1])) return "";
@@ -349,7 +349,7 @@ const Generation = struct {
         };
     }
 
-    /// Ends the request and waits for the engine; one it ended unfinished counts as a disconnect, as the Mac scheduler counts it.
+    /// End the request and wait for the engine; unfinished requests count as disconnects.
     fn cancel(g: *Generation) void {
         if (!g.engine_done) g.srv.engine.cancel(g.id);
         g.drain();

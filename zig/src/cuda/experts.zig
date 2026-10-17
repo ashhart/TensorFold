@@ -6,6 +6,7 @@ const stream_ = @import("stream.zig");
 const kernels = @import("kernels.zig");
 const grouped = @import("grouped.zig");
 const driver = @import("driver.zig");
+const ggml = @import("ggml.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -14,21 +15,21 @@ const Stream = stream_.Stream;
 const Plan = grouped.Plan;
 const Affine3Experts = @import("experts3.zig").Affine3Experts;
 
-pub const Format = enum { affine4, affine3, fp8g, nvfp4, exl3 };
+pub const Format = enum { affine4, affine3, fp8g, nvfp4, exl3, iq2xxs };
 
 /// One layer's experts on the device as each format's make() lays them out; a family stacks its shared ones last.
 pub const Layer = struct {
     format: Format,
     exl3: ?@import("exl3_experts.zig").Layer = null,
-    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]
-    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]
+    up: u64, // affine4 [E][NI/32][D/64][288] int32; fp8g [E][NI/32][D/32][2][32][2][4]; nvfp4 [E][NI/32][D/32][2][144]; iq2xxs [E][NI/16][D/256][1056] bytes (ggml.zig)
+    down: u64, // affine4 [E][D/32][NI/64][288]; fp8g [E][D/32][NI/32][1][32][2][4]; nvfp4 [E][D/32][NI/32][1][144]; iq2xxs [E][D/16][NI/256][1056]
     up_scale: u64 = 0, // fp8g [E][2][NI/128][D/128] fp32; nvfp4 [E][2] global scales; affine4's are in the blocks
     down_scale: u64 = 0, // fp8g [E][1][D/128][NI/128]; nvfp4 [E][1]
     width: usize, // NI
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
-    relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
+    relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up; iq2xxs: always
     swiglu: bool = false, // affine4: up is gate and up interleaved per group ([E][NI/32][D/64][2][288]) under SwiGLU
     shared: i32 = -1, // affine3: the expert whose tables are 4-bit (a SwiGLU pair at shared_up, down at shared_down)
     shared_up: u64 = 0,
@@ -48,6 +49,7 @@ pub const Grouped = struct {
     affine3: ?*const Affine3Experts = null,
     fp8g: ?*const Fp8Experts = null,
     nvfp4: ?*const Nvfp4Experts = null,
+    iq2xxs: ?*const Iq2xxsExperts = null,
 
     /// Decode rows: `items` bounds the plan's items (grouped.maxItems at tile 16); `skip` an expert left out, or -1.
     pub fn decode(g: Grouped, s: Stream, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
@@ -70,6 +72,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, false, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).run(s, epi, in, l, p, out, items, skip),
+            .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, false, epi, in, l, p, out, items, skip),
         }
     }
 
@@ -94,6 +97,7 @@ pub const Grouped = struct {
             },
             .fp8g => return (g.fp8g orelse return error.FormatNotLoaded).run(s, epi, in, l, p, true, out, items, skip),
             .nvfp4 => return (g.nvfp4 orelse return error.FormatNotLoaded).runPrompt(s, epi, in, l, p, out, items, skip),
+            .iq2xxs => return iq2Run(g.iq2xxs orelse return error.FormatNotLoaded, s, true, epi, in, l, p, out, items, skip),
         }
     }
 };
@@ -101,8 +105,24 @@ pub const Grouped = struct {
 /// Pairs a prompt item holds, per format (the Python engines' prompt tiles).
 pub fn promptTile(f: Format) usize {
     return switch (f) {
-        .affine4, .affine3, .fp8g, .nvfp4, .exl3 => 64,
+        .affine4, .affine3, .fp8g, .nvfp4, .exl3, .iq2xxs => 64,
     };
+}
+
+/// IQ2_XXS experts (ggml.cu): relu^2 up, down to fp32 or bf16; packed by Iq2xxsExperts.pack from the raw blocks.
+pub const Iq2xxsExperts = ggml.Kernels;
+
+fn iq2Run(k: *const Iq2xxsExperts, s: Stream, prompt: bool, epi: Epi, in: Rows, l: Layer, p: Plan, out: u64, items: usize, skip: i32) !void {
+    if (l.limit != 0) return error.OptionNotBuilt;
+    const up = epi == .up;
+    const o: ggml.Out = switch (epi) {
+        .up => .relu2,
+        .down_f32 => .f32,
+        .down_bf16 => .bf16,
+    };
+    const n = if (up) l.width else l.dims;
+    const kk = if (up) l.dims else l.width;
+    return k.experts(s, prompt, .iq2xxs, o, in.x, in.stride, if (up) in.slots else 0, if (up) l.up else l.down, n, kk, p, out, items, skip);
 }
 
 fn int(x: usize) c_int {

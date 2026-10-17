@@ -77,7 +77,7 @@ pub const CancelCheck = struct {
     check: *const fn (ptr: *anyopaque) bool,
 };
 
-/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and where it keeps new ones.
+/// A kept prompt state to restore before prefill, and destinations for new states.
 pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,

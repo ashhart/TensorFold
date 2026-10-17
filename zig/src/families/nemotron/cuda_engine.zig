@@ -87,6 +87,8 @@ const masked_ids = 4000;
 /// One stream's part of a shared window: its sequence, the ids its first rows take from the host, and its rows.
 pub const Shared = struct { seq: *state.Seq, ids: []const u32, rows: usize, mask: Mask = .{} };
 
+pub const load_owner = @import("cuda_load_owner.zig");
+
 pub const Engine = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
@@ -134,12 +136,17 @@ pub const Engine = struct {
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
+    snap_host: bool = false, // kept prompt states in pinned host memory (cuda_reuse.zig), set when the host opens the engine
+    load_pending: ?*weights.PendingLoad = null,
+    load_has_weights: bool = false,
+    load_next: ?*Engine = null,
 
     /// Loads the checkpoint into the Python engine's layouts and sizes the caches; `triton_dir` null: our own glue.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, model_dir: []const u8, triton_dir: ?[]const u8, opts: Options) !*Engine {
+        var keep_owner = false;
         const t0 = std.Io.Clock.awake.now(io);
         const e = try gpa.create(Engine);
-        errdefer gpa.destroy(e);
+        errdefer if (!keep_owner) gpa.destroy(e);
         e.* = .{ .gpa = gpa, .io = io, .ctx = ctx, .stream = undefined, .k = undefined, .w = undefined, .b = undefined, .c = undefined, .max_len = 0, .pinned = undefined, .history = undefined };
         e.trace = platform.c.getenv("TF_SLIDE_TRACE") != null;
         e.c = try Config.read(gpa, io, model_dir);
@@ -153,15 +160,15 @@ pub const Engine = struct {
         const slots = (opts.context orelse default_context) + state.max_rows;
         e.max_len = (slots + state.chunk_keys - 1) / state.chunk_keys * state.chunk_keys;
         e.stream = try cuda.Stream.init(ctx.d, true);
-        errdefer e.stream.deinit();
+        errdefer if (!keep_owner) e.stream.deinit();
         e.side = .{ .s = try cuda.Stream.init(ctx.d, true), .fork = try cuda.Event.init(ctx.d, false), .join = try cuda.Event.init(ctx.d, false) };
-        errdefer {
+        errdefer if (!keep_owner) {
             e.side.s.deinit();
             e.side.fork.deinit();
             e.side.join.deinit();
-        }
+        };
         e.k = try kern.Kernels.load(gpa, io, ctx, triton_dir);
-        errdefer e.k.deinit();
+        errdefer if (!keep_owner) e.k.deinit();
         if (e.c.format == .modelopt) {
             if (opts.slide) return error.SlideNeedsMlx; // the learner reads MLX 4-bit projections
             try e.k.loadModelopt(ctx);
@@ -171,37 +178,55 @@ pub const Engine = struct {
         // the ranks' lines first: a rank that never comes, refuses, fails or dies is named, not waited on
         if (e.c.world > 1) try cuda.tp_watch.start(io, e.c.rank, e.c.world); // the caller tells the others a failure
         if (e.c.world > 1) e.tp = try cuda.tp_group.Group.open(e.c.rank, e.c.world);
-        errdefer if (e.tp) |*g| g.close();
+        errdefer if (!keep_owner) if (e.tp) |*g| g.close();
         if (e.tp) |*g| try latent.agree(gpa, io, e.c, g, ctx.d, e.stream, model_dir);
         // every byte this rank holds, hashed while the weights load; the ranks compare the digests at ready
         var content: ?*identity.Content = if (e.tp != null) try identity.Content.start(gpa, io, model_dir, e.c.held != null) else null;
         errdefer if (content) |x| x.abandon();
+        // Bolt (LatentMoE, ggml blocks): no MTP head in the checkpoint; our own glue (captured sets are Lightning's)
+        const mtp = opts.mtp and !e.c.bolt;
+        if (e.c.bolt) {
+            if (e.k.triton != null) return error.CapturedGlueIsLightnings;
+            try e.k.loadGgml(ctx);
+        }
         const chunks = e.max_len / state.chunk_keys;
         e.nch = if (e.k.triton) |*t| @intCast(t.smallestConst("_chunk", "NCH", @intCast(chunks)) orelse {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
             return error.ContextUnsupported;
         }) else chunks;
-        e.w = try weights.load(gpa, io, e.ops(), model_dir, e.c, opts.mtp);
-        errdefer e.w.deinit();
-        if (opts.vision) |lim| {
+        e.w = weights.load(gpa, io, e.ops(), model_dir, e.c, mtp, &e.load_pending) catch |err| {
+            if (e.load_pending != null) {
+                keep_owner = true;
+                e.carve = null;
+                load_owner.keep(e);
+            }
+            return err;
+        };
+        e.load_has_weights = true;
+        errdefer if (!keep_owner) e.w.deinit();
+        if (opts.vision) |limits| {
             var problem: []const u8 = "";
-            e.vision = (try @import("cuda_vision.zig").Vision.init(gpa, io, ctx.d, model_dir, lim, &problem)) orelse {
-                std.log.err("--vision: {s}", .{problem});
-                return error.VisionRefused;
-            };
+            e.vision = (@import("cuda_vision.zig").Vision.init(gpa, io, ctx.d, model_dir, limits, &problem) catch |err| {
+                if (err == error.LoadRetained) {
+                    keep_owner = true;
+                    e.carve = null;
+                    load_owner.keep(e);
+                }
+                return err;
+            }) orelse return error.VisionRefused;
         }
-        errdefer if (e.vision) |v| v.deinit();
+        errdefer if (!keep_owner) if (e.vision) |v| v.deinit();
         e.b = try state.Buffers.init(ctx.d, e.c, e.max_len, e.nch, e.carve);
-        errdefer e.b.deinit();
+        errdefer if (!keep_owner) e.b.deinit();
         try e.b.initShared(e.ops(), e.c);
         if (e.segments > 1) e.seg = try segs.Segments.init(e, e.segments);
-        errdefer if (e.seg) |*s| s.deinit();
+        errdefer if (!keep_owner) if (e.seg) |*s| s.deinit();
         e.own = state.Seq.view(&e.b);
         e.bound = &e.own;
         e.pinned = try cuda.HostBuffer.alloc(ctx.d, (pin_shared + max_streams * 64) * 4);
-        errdefer e.pinned.free();
+        errdefer if (!keep_owner) e.pinned.free();
         e.history = try cuda.HostBuffer.allocMapped(ctx.d, (@as(usize, e.max_len) + state.max_rows) * 4);
-        errdefer e.history.free();
+        errdefer if (!keep_owner) e.history.free();
         e.history_dev = try e.history.device();
         for (&e.done) |*ev| ev.* = try cuda.Event.init(ctx.d, false);
         e.copied = try cuda.Event.init(ctx.d, false);
@@ -212,7 +237,7 @@ pub const Engine = struct {
             content = null;
             try cuda.tp_watch.ready(io, try x.finish());
         }
-        if (opts.graphs) try e.capture(opts.mtp);
+        if (opts.graphs) try e.capture(mtp);
         e.heat_gate = heat.Gate.fromEnv() catch |err| {
             std.log.err("TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high", .{});
             return err;
@@ -297,6 +322,7 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
+        load_owner.closeEntry(e.ctx) catch {};
         e.stream.synchronize() catch {};
         e.spares.deinit();
         if (e.serial) |*g| g.deinit();

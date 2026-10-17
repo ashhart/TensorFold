@@ -159,8 +159,8 @@ pub fn router(x: []const u16, w: []const u16, part: []f32, rows: usize, d: usize
 
 /// Sum slices in order, rank sigmoid scores plus bias (lowest id on ties), then add shared slots.
 pub fn topk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: usize, scaling: f32, e: usize, sk: usize, top_k: usize, ns: usize, norm: bool) void {
-    var score: [256]f32 = undefined;
-    var sel: [256]f32 = undefined;
+    var score: [512]f32 = undefined; // the top-k kernel's MAXC: up to 512 experts
+    var sel: [512]f32 = undefined;
     for (0..rows) |r| {
         for (0..e) |ex| {
             var logit: f32 = 0;
@@ -170,8 +170,8 @@ pub fn topk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: u
             sel[ex] = if (std.math.isNan(v)) -std.math.inf(f32) else v;
         }
         var total: f32 = 0;
-        var probs: [8]f32 = undefined;
-        var ids: [8]i32 = undefined;
+        var probs: [16]f32 = undefined;
+        var ids: [16]i32 = undefined;
         for (0..top_k) |k| {
             var bi: usize = 0;
             for (1..e) |ex| if (sel[ex] > sel[bi]) {

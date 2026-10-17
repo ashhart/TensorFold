@@ -26,60 +26,12 @@ comptime {
         @compileError("TensorFold's Zig engine requires Zig " ++ required);
 }
 
-/// Our Metal sources, compiled into one metallib that executables embed.
-const kernels = [_][]const u8{
-    "zig/kernels/metal/runtime_tests.metal",
-    "zig/kernels/metal/nemotron_expert_up.metal",
-    "zig/kernels/metal/nemotron_expert_down.metal",
-};
-
-/// Kernels generated from our Python sources (tools/zig/gen_nemotron_metal.py), also built under fast math as a control.
-const generated = kernels[1..];
-
-/// Kimi K3's kernels: one metallib, sharing kimi_common.h.
-const kimi_dir = "zig/kernels/metal/kimi";
-const kimi_kernels = [_][]const u8{ "dense.metal", "dense_mma.metal", "norms.metal", "experts.metal", "kda.metal", "mla.metal", "synth.metal" };
-
-/// Nemotron's packed kernels (generated, they use uint4b_format): one metallib built ahead of time for the
-/// runtime compilers that refuse the type (macOS 26.3, #451). Keep in step with tools/zig/gen_nemotron_kernels.py.
-const nemotron_packed = [_][]const u8{
-    "zig/kernels/metal/nemotron/coop_down_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_down_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_down_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_draft_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_draft_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_draft_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_eh_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_eh_1_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_eh_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_eh_2_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_eh_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_eh_2_1_sk.metal",
-    "zig/kernels/metal/nemotron/coop_head_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_head_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_head_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_in_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_in_1_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_in_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_in_2_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_in_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_in_2_1_sk.metal",
-    "zig/kernels/metal/nemotron/coop_out_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_out_1_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_out_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_out_2_0_sk.metal",
-    "zig/kernels/metal/nemotron/coop_out_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_out_2_1_sk.metal",
-    "zig/kernels/metal/nemotron/coop_qkv_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_qkv_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_qkv_2_1.metal",
-    "zig/kernels/metal/nemotron/coop_up_1_0.metal",
-    "zig/kernels/metal/nemotron/coop_up_2_0.metal",
-    "zig/kernels/metal/nemotron/coop_up_2_1.metal",
-    "zig/kernels/metal/nemotron/up_relu2_1_0.metal",
-    "zig/kernels/metal/nemotron/up_relu2_2_0.metal",
-    "zig/kernels/metal/nemotron/up_relu2_2_1.metal",
-};
+const metal_lists = @import("zig/build/metal_source_lists.zig");
+const kernels = metal_lists.kernels;
+const generated = metal_lists.generated;
+const kimi_dir = metal_lists.kimi_dir;
+const kimi_kernels = metal_lists.kimi_kernels;
+const nemotron_packed = metal_lists.nemotron_packed;
 
 /// MLX's language version for mx.fast.metal_kernel on this macOS: 4.1 from 27, 4.0 on 26, 3.2 on 15, else 3.1.
 fn mlxMetalStd(b: *std.Build) []const u8 {

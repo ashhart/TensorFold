@@ -90,9 +90,17 @@ const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [ma
 
 /// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
 pub fn routerShape(d: usize) struct { sk: usize, shared: u32 } {
-    const sk = triton.divisor(d / 64, 6);
-    return .{ .sk = sk, .shared = @intCast(2 * 16 * (d / sk / 2 + 1) * 4) };
+    var sk = triton.divisor(d / 64, 6);
+    while (staged(d, sk) > 48 << 10 and (d / 64) % (sk * 2) == 0) sk *= 2; // wide rows (Bolt's): within 48 KiB, no opt-in
+    return .{ .sk = sk, .shared = @intCast(staged(d, sk)) };
 }
+
+fn staged(d: usize, sk: usize) usize {
+    return 2 * 16 * (d / sk / 2 + 1) * 4;
+}
+
+/// The most K slices routerShape takes for a row of `d`: the router's scratch is that many [rows, E] fp32 sums.
+pub const max_router_slices = 8;
 
 /// Every launch of a window or prompt chunk's glue, on one stream.
 pub const Glue = struct {
@@ -153,10 +161,10 @@ pub const Glue = struct {
         try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
-    /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots.
-    pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, scaling: f32, norm: bool) !void {
+    /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots (`slots` past top-k).
+    pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, slots: usize, scaling: f32, norm: bool) !void {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
-        if (e > 256 or top_k + 2 > 8) return error.RouterTooWide;
+        if (e > 512 or top_k > 16 or slots < top_k or slots > top_k + 2) return error.RouterTooWide; // the top-k kernel's MAXC
         const shape = routerShape(d);
         if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
         var a: cuda.Args = .{};
@@ -164,8 +172,8 @@ pub const Glue = struct {
         ints(&a, &.{ rows, d, e, shape.sk });
         // decode: a block a (16 experts, slice) stages the rows and its experts, same bits
         if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) {
-            const staged: u32 = @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16);
-            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, staged, &a);
+            const row_shared: u32 = @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16);
+            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, row_shared, &a);
         } else {
             try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
         }
@@ -173,7 +181,7 @@ pub const Glue = struct {
         ptrs(&b, &.{ part, bias, ids, wts });
         b.add(int(rows));
         b.add(scaling);
-        ints(&b, &.{ e, shape.sk, top_k, top_k + 2 });
+        ints(&b, &.{ e, shape.sk, top_k, slots });
         b.add(@as(c_int, @intFromBool(norm)));
         try g.go(g.f.topk, .{ rows, 1, 1 }, 32, 0, &b);
     }
@@ -362,4 +370,8 @@ test "the router stages one slice of 16 rows and 16 experts" {
     const s = routerShape(2688);
     try std.testing.expectEqual(@as(usize, 6), s.sk);
     try std.testing.expectEqual(@as(u32, 2 * 16 * 225 * 4), s.shared);
+    // Bolt's 4096-wide rows: four slices would stage 66 KiB, eight stay under 48
+    const b = routerShape(4096);
+    try std.testing.expectEqual(@as(usize, 8), b.sk);
+    try std.testing.expect(b.shared <= 48 << 10 and b.sk <= max_router_slices);
 }
