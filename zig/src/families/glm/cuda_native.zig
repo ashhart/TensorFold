@@ -36,6 +36,7 @@ pub const Options = struct {
     room: ?Room = null,
     vision: ?images_mod.Limits = null, // --vision: rank 0's tower, every rank's image rows
     drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
+    drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
 };
 /// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
 pub const takes_drafter = true;
@@ -160,7 +161,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer if (own.e.images) |v| v.deinit();
     if (o.drafter) |dd| { // before the rooms: its weights and scratch count against every rank's
         if (!o.drafts) return error.DrafterNeedsDrafts;
-        own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world);
+        own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);
     }
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();

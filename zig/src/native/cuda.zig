@@ -319,7 +319,10 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
-    if (comptime @hasField(F.Options, "drafter")) opts.drafter = o.drafter; // cuda_refusal let it through: the family takes one
+    if (comptime @hasField(F.Options, "drafter")) { // cuda_refusal let it through: the family takes one
+        opts.drafter = o.drafter;
+        opts.drafter_bits = o.drafter_bits;
+    }
     if (o.vision) |vo| {
         if (!@hasField(F.Options, "vision")) {
             problem.* = "--vision: this CUDA family reads no images; serve it without --vision";

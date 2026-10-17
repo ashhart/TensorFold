@@ -339,3 +339,14 @@ extern "C" __global__ void __launch_bounds__(256) df_top16_merge(const float* __
         out[r * 2 * TOP + TOP + threadIdx.x] = __float_as_int(ov[threadIdx.x]);
     }
 }
+
+// A row's sums over each 64-column group (qmm's xs for a 4-bit linear's input), fp32 [rows][k / 64].
+extern "C" __global__ void df_gsum(const __nv_bfloat16* __restrict__ x, int ldx, int k, float* __restrict__ xs) {
+    const int r = blockIdx.x, groups = k / 64;
+    const __nv_bfloat16* xr = x + (long long)r * ldx;
+    for (int g = threadIdx.x; g < groups; g += blockDim.x) {
+        float s = 0.f;
+        for (int i = 0; i < 64; ++i) s += bf(xr[g * 64 + i]);
+        xs[(long long)r * groups + g] = s;
+    }
+}

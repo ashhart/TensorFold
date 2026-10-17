@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const mm = @import("cuda_mm.zig");
+const q4 = @import("cuda_q4.zig");
 const taps_mod = @import("cuda_taps.zig");
 const select = @import("dflash_select.zig");
 const block = @import("dflash_block.zig");
@@ -45,6 +46,7 @@ pub const Kernels = struct {
     sum2: cuda.Function,
     top16_part: cuda.Function,
     top16_merge: cuda.Function,
+    gsum: cuda.Function,
 
     pub fn load(m: cuda.Module) !Kernels {
         var k: Kernels = undefined;
@@ -53,7 +55,11 @@ pub const Kernels = struct {
     }
 };
 
-pub const LayerW = struct { in_norm: u64, post_norm: u64, qn: u64, kn: u64, a_base: u64, m_base: u64, qkv: mm.Tiled, kv: mm.Tiled, o: mm.Tiled, gu: mm.Tiled, down: mm.Tiled, a_proj: mm.Tiled, m_proj: mm.Tiled };
+/// A drafter linear: 4 bits (--drafter-bits 4, the default; they only propose) or bf16 tiled for glm_mm.
+pub const Lin = union(enum) { q4: q4.Q4, bf16: mm.Tiled };
+
+/// down and the selector's projection stay bf16 (their fp32 outputs are gathered or read on the host).
+pub const LayerW = struct { in_norm: u64, post_norm: u64, qn: u64, kn: u64, a_base: u64, m_base: u64, qkv: Lin, kv: Lin, o: Lin, gu: Lin, down: mm.Tiled, a_proj: Lin, m_proj: Lin };
 
 /// A stream's drafter state by slot: its ring, where its context starts, and its last verify's tap rows.
 pub const Slot = struct {
@@ -79,7 +85,7 @@ pub const Drafter = struct {
     k: Kernels,
     weights: cuda.DeviceBuffer,
     layers: [LAYERS]LayerW = undefined,
-    fc: mm.Tiled = undefined,
+    fc: Lin = undefined,
     hproj: mm.Tiled = undefined,
     hnorm: u64 = 0,
     norm: u64 = 0,
@@ -116,6 +122,7 @@ pub const Drafter = struct {
     g: u64 = 0,
     logits: u64 = 0,
     part: u64 = 0, // the linears' K-slice partials
+    gs: u64 = 0, // a 4-bit linear's input group sums [MAX_CTX][5 * D / 64]
     sums: u64 = 0, // the split down's gathered fp32 partials [2][MAX_M][D]
     cin: u64 = 0,
     c1: u64 = 0,

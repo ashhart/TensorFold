@@ -17,9 +17,29 @@ fn set(e: anytype) glue.Set {
     return .{ .glue = &e.m.glue, .mm = &e.m.mm };
 }
 
-/// out[m, n] = x[m, k] . w^T (bf16 out) on glm_mm.
-fn lin(dr: *const Drafter, e: anytype, x: u64, w: mm.Tiled, out: u64, m: usize, wide: bool) !void {
-    try mm.matmul(&e.m.mm, e.stream, x, w.k, w, out, dr.part, m, wide);
+/// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm only): 4 bits 16 rows a launch, or glm_mm.
+fn lin(dr: *const Drafter, e: anytype, x: u64, w: df.Lin, out: u64, m: usize, wide: bool) !void {
+    switch (w) {
+        .bf16 => |t| try mm.matmul(&e.m.mm, e.stream, x, t.k, t, out, dr.part, m, wide),
+        .q4 => |q| {
+            if (wide) return error.WideFromFourBits;
+            var a: cuda.Args = .{};
+            a.add(x);
+            a.add(@as(i32, @intCast(q.k)));
+            a.add(@as(i32, @intCast(q.k)));
+            a.add(dr.gs);
+            try go(dr.k.gsum, .{ .x = @intCast(m) }, 128, e, &a);
+            var r0: usize = 0;
+            while (r0 < m) : (r0 += 16) {
+                const rows = @min(16, m - r0);
+                try q4.matmul(&e.m.q4, e.stream, x + r0 * q.k * 2, q.k, dr.gs + r0 * (q.k / 64) * 4, q, out + r0 * q.n * 2, rows);
+            }
+        },
+    }
+}
+
+fn linB(dr: *const Drafter, e: anytype, x: u64, w: mm.Tiled, out: u64, m: usize, wide: bool) !void {
+    try lin(dr, e, x, .{ .bf16 = w }, out, m, wide);
 }
 
 pub fn copy(e: anytype, dst: u64, src: u64, bytes: usize) !void {
@@ -126,14 +146,14 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
         }
         if (dr.split) { // each rank's half of down's K as fp32 partials, gathered and summed
             const bytes = M * D * 4;
-            try lin(dr, e, dr.act, l.down, dr.sums + e.share.rank * bytes, M, true);
+            try linB(dr, e, dr.act, l.down, dr.sums + e.share.rank * bytes, M, true);
             try gather(e, dr.sums, bytes);
             var a: cuda.Args = .{};
             a.add(dr.sums);
             a.add(dr.a);
             a.add(@as(i32, @intCast(M)));
             try go(dr.k.sum2, .{ .x = @intCast(M), .y = D / 1024 }, 256, e, &a);
-        } else try lin(dr, e, dr.act, l.down, dr.a, M, false);
+        } else try linB(dr, e, dr.act, l.down, dr.a, M, false);
         try conv(dr, e, dr.a, 1, l.m_base + 2 * D * 2, dr.x, true, M);
     }
     // every row through the drafts' 4-bit head (this rank's vocabulary), its 16 best, gathered; rank 0's projections
@@ -162,5 +182,5 @@ pub fn pass(dr: *Drafter, e: anytype, S: usize, rank0: bool) !void {
         try go(dr.k.top16_merge, .{ .x = @intCast(M) }, 256, e, &b);
     }
     try gather(e, dr.gtk, nw * 4);
-    if (rank0) try lin(dr, e, dr.hn, dr.hproj, dr.g, M, true);
+    if (rank0) try linB(dr, e, dr.hn, dr.hproj, dr.g, M, true);
 }
