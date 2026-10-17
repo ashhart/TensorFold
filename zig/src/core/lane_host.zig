@@ -59,6 +59,7 @@ pub const LaneHost = struct {
     recall: ?*lanes.recall_store.Store = null, // Recall's record: drafts from earlier requests (lane_host_recall.zig)
     decoded_rows: bool = false, // the backend prefills Request.decode_spans with decoded rows' arithmetic, cache or not
     health: ?api.HealthSource = null,
+    frame_key: ?*const fn (images: []const api.Image) u32 = null, // a family's image frame (0: text's), in the cache key
     memory: ?api.MemorySource = null, // the backend's memory counts; null: Engine.memory reports none
     explain: ?api.Explain = null, // the backend's words for a request it refuses; null: the error's name
     learner: ?api.Learner = null, // the family's Sliding Weights learner; null: learn requests are refused
@@ -79,50 +80,7 @@ pub const LaneHost = struct {
 
     const Lesson = struct { request: *const api.LearnRequest, sink: api.LearnSink };
 
-    pub const Job = struct {
-        host: *LaneHost,
-        id: Id,
-        request: *const Request,
-        sink: Sink,
-        stream: lanes.Stream = undefined,
-        proposer: lanes.SuffixLookup = undefined,
-        recall: recalls.Slot = .{}, // its reads of Recall's record (lane_host_recall.zig)
-        /// the family's proposer (LaneHost.proposers), in place of `proposer`
-        custom: ?lanes.proposer.Proposer = null,
-        delivered: usize = 0,
-        started: bool = false,
-        prefill_sent: bool = false, // a lone driver's prefilled event went out
-        fill_began: bool = false, // its first prompt chunk ran
-        submitted: i96 = 0,
-        fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
-        began: i96 = 0,
-        /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
-        fill_on: std.atomic.Value(bool) = .init(false),
-        prefilled: ?i96 = null,
-        entry: ?*pc.Entry = null, // the kept state the backend restores, until its prompt pass reports
-        marks: []const u32 = &.{}, // where the pass keeps states (gpa-owned)
-        kept0: u64 = 0, // the store's kept count when the job looked it up
-        seq: u64 = 0, // its admission's number
-        waits_since: ?u64 = null, // the admissions count when it first waited at the head for pool room
-
-        /// The backend's prompt pass stands at a mark: the cache keeps the stream's state there.
-        pub fn kept(ptr: *anyopaque, s: *lanes.Stream, at: u32) void {
-            const job: *Job = @ptrCast(@alignCast(ptr));
-            job.reported(); // before a keep can evict the entry the pass restored
-            if (job.host.cache) |store| _ = store.keepBorn(job.request.cacheKey(), job.request.bornLen(), at, s, job.request.chunks, job.host.spans(job.request));
-        }
-
-        /// Report a restored prefix or its failed copy; an untouched prefix remains kept.
-        fn reported(job: *Job) void {
-            const e = job.entry orelse return;
-            job.entry = null;
-            const store = job.host.cache orelse return;
-            if (!job.started) return store.release(e);
-            job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
-            const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
-            if (job.stream.reuse_failed or ok) store.resumedWithReason(e, job.request.cacheKey(), if (ok) null else job.stream.reuse_error orelse error.RestoreRejected) else store.release(e);
-        }
-    };
+    pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
         var enforced = info_;
@@ -284,6 +242,7 @@ pub const LaneHost = struct {
         if (h.rounds) |rd| rd.vtable.left(rd.ctx, @intFromPtr(job));
         job.reported();
         h.gpa.free(job.marks);
+        h.gpa.free(job.key);
         const s = &job.stream;
         const stats: Stats = if (job.started) .{ .rounds = s.rounds, .drafted = s.drafted, .accepted = s.accepted, .min_rows = s.min_rows, .loop_period = s.loop_period, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null } else .{};
         const told = if (job.started) recalls.finished(h, job, reason, stats) else stats;
@@ -445,13 +404,14 @@ pub const LaneHost = struct {
     /// A prompt-only pass on a `warm_turns` engine: the backend prefills, the cache keeps its end (a mark, if keyed on)
     fn warmPass(h: *LaneHost, job: *Job, began: i96) bool {
         const be = h.core.backend;
+        if (h.cache) |store| if (job.marks.len == 0 and (job.request.untaught or store.rules.lookahead > 0)) return h.cancel(job); // it would keep nothing
         be.prefill(&job.stream) catch |e| { // a yield ends it like a cancel: what it prefilled is kept
             if (e != error.Cancelled and e != error.Yielded) return h.drop(job, h.words(e));
             be.release(&job.stream);
             return h.cancel(job);
         };
         h.prefilled(job, began);
-        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.request.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
+        if (h.cache) |store| _ = if (!job.request.untaught and store.rules.lookahead == 0) store.keepBorn(job.cacheKey(), job.request.bornLen(), @intCast(job.request.prompt.len), &job.stream, job.request.chunks, h.spans(job.request)) else false;
         be.release(&job.stream);
         h.remove(job);
         h.finish(job, .length, "");
@@ -499,6 +459,8 @@ pub const LaneHost = struct {
         job.entry = null; // looked up again at its next admission
         h.gpa.free(job.marks);
         job.marks = &.{};
+        h.gpa.free(job.key);
+        job.key = &.{};
         h.memory_lanes = others;
         return false;
     }

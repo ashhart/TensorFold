@@ -35,6 +35,7 @@ pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
 pub const flashnext_sample = @import("families/flashnext/host_sample.zig");
 pub const flashnext_batch_sample = @import("families/flashnext/batch_sample.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
+pub const flashnext_config = @import("families/flashnext/config.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
 pub const flashnext_session = @import("families/flashnext/session.zig");
 pub const flashnext_batch_forward = @import("families/flashnext/batch_forward.zig");

@@ -560,12 +560,13 @@ test "a vision_config's tower is taken; other patches, depths, head widths and M
         .{ "\"num_position_embeddings\":2304", "\"num_position_embeddings\":1024" },
         .{ "[11,11,10]", "[16,24,24]" },
         .{ "\"mrope_interleaved\":true", "\"mrope_interleaved\":false" },
-        .{ "\"video_token_id\":248057", "\"video_token_id\":-1" },
     };
     for (refused) |r| {
         const text = try std.mem.replaceOwned(u8, a, good, r[0], r[1]);
         try std.testing.expectError(error.UnsupportedQwenVision, parse(a, text));
     }
+    const negative = try std.mem.replaceOwned(u8, a, good, "\"video_token_id\":248057", "\"video_token_id\":-1");
+    try std.testing.expectError(error.VisionConfig, parse(a, negative)); // the shared parser reads the video token
     // the 2B's tower: 24 blocks of 1024, heads of 64
     const big = "\"depth\":27,\"hidden_size\":1152,\"num_heads\":16,\"intermediate_size\":4304";
     const two = "\"depth\":24,\"hidden_size\":1024,\"num_heads\":16,\"intermediate_size\":4096";

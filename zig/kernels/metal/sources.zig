@@ -72,6 +72,8 @@ pub const flashnext_prompt = @embedFile("prefill/fn_prompt.metal");
 pub const flashnext_select = @embedFile("prefill/fn_select.metal");
 /// Flash Next prompt rows' block scores and sparse attention on the tensor units.
 pub const flashnext_attn = @embedFile("prefill/fn_attn.metal");
+/// Flash Next's attention prep at three positions a row, for prompt rows up to an image prompt's last image.
+pub const flashnext_mrope = @embedFile("prefill/fn_mrope.metal");
 
 /// A source file of MLX-exact kernels: compiled as one library, its kernels found by name.
 pub const File = struct { name: []const u8, text: []const u8 };

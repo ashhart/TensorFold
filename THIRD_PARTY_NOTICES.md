@@ -26,6 +26,12 @@ Copyright 2026 The Qwen Team and The HuggingFace Inc. team, Apache License 2.0.
 See [the license text](LICENSES/Apache-2.0.txt). The same helpers appear in mlx-vlm's
 `models/qwen4_exp/language.py`, MIT License, Copyright © 2025 Prince Canuma.
 
+The native engine's image and video input for Flash Next follows transformers' `get_rope_index` positions in
+`models/qwen4_exp/modeling_qwen4_exp.py` (`zig/src/families/flashnext/vis_prompt.zig`) and its Qwen3-VL video
+processor and processor in `models/qwen3_vl/` (frame sampling, `smart_resize`, pair times and the prompt layout;
+`zig/src/core/qwen_vl/video.zig`, `zig/src/server/images.zig`). Copyright 2025 and 2026 The Qwen Team and The
+HuggingFace Inc. team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
 ## GLM-5.3-Flash on Apple Silicon
 
 The native GLM-5.3-Flash engine (`zig/src/families/glm/`) runs the Python `glm5_next` family's decode kernels.
@@ -258,8 +264,7 @@ SOFTWARE.
 
 This notice covers the Flash Next image input on CUDA that @shantanugoel added to the Python engine in
 [#146](https://github.com/ashhart/TensorFold/pull/146), under `src/tensorfold/vision/` and
-`src/tensorfold/families/qwen4_exp/cuda/`; that engine is frozen at 0.6.6. The native engine reads no vision tower
-and ships none of this code.
+`src/tensorfold/families/qwen4_exp/cuda/`; that engine is frozen at 0.6.6. The native engine ships none of this code.
 The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
