@@ -312,9 +312,10 @@ pub const Tower = struct {
         return t.arena.ptr + at;
     }
 
-    fn put(t: *Tower, bytes: []const u8) !u64 {
+    /// `bytes` into the arena; a failed wait drains before load's frees of the host rows or the mapped checkpoint.
+    pub fn put(t: *Tower, bytes: []const u8) !u64 {
         const p = try t.take(bytes.len);
-        try t.arena.upload(p - t.arena.ptr, bytes);
+        try @import("qwen_completion.zig").upload(t.arena, p - t.arena.ptr, bytes);
         return p;
     }
 
@@ -576,6 +577,8 @@ test "a vision_config's tower is taken; other patches, depths, head widths and M
 
 /// A Qwen-VL prompt's image rows on the device, shared by every CUDA family that runs this tower.
 pub const media = @import("qwen_cuda_media.zig");
+/// The completion policy the tower's owners follow: drain the stream, then the context, or end the process.
+pub const completion = @import("qwen_completion.zig");
 
 test {
     _ = media;

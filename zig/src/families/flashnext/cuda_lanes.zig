@@ -499,7 +499,8 @@ pub fn Namespace(comptime Tri: type) type {
             const self = of(ptr);
             if (self.lanes.fetchRemove(s)) |kv| {
                 var l = kv.value;
-                self.stream.synchronize() catch {};
+                // its rounds drain first, or the process ends: a failed wait never frees what the GPU may still use
+                @import("qwen_vision").completion.drain(self.engine.driver, self.stream);
                 dropLane(self, &l);
             }
         }

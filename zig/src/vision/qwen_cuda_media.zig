@@ -156,10 +156,9 @@ pub const Media = struct {
         errdefer src.free();
         var rope = try cuda.DeviceBuffer.alloc(enc.driver, p.pos.len * 4);
         errdefer rope.free();
-        // the uploads wait on the default stream: one that fails its wait drains it before the frees above run
-        errdefer @import("qwen_completion.zig").drain(enc.driver, .{ .d = enc.driver, .handle = null });
-        try src.upload(0, std.mem.sliceAsBytes(p.src));
-        try rope.upload(0, std.mem.sliceAsBytes(p.pos));
+        // each upload waits on the default stream; one whose wait fails drains it before the frees above run
+        try @import("qwen_completion.zig").upload(src, 0, std.mem.sliceAsBytes(p.src));
+        try @import("qwen_completion.zig").upload(rope, 0, std.mem.sliceAsBytes(p.pos));
         return .{ .plan = p, .features = f, .src = src, .rope = rope, .width = enc.config.out_hidden, .splice = enc.splice };
     }
     pub fn init(a: std.mem.Allocator, enc: Encoder, ids: []const u32, images: []const lanes.stream.Image, l: Limits) !Media {

@@ -15,6 +15,8 @@ pub fn send(s: *Session, q: *prompt.Seq) !void {
     }
     const bytes = raw[0 .. runs.len * 12];
     const h = try s.command(.{ .kind = .media, .object = q.rank_id, .arg = m.image.plan.src.len, .bytes = @intCast(bytes.len) }, bytes);
+    // after the poison: a broadcast that may be enqueued drains before the caller can free the features
+    errdefer shared.completion.drain(s.engine.driver, s.engine.stream.*);
     errdefer s.poison();
     try s.collective.broadcast(s.engine.stream.*, m.image.features.ptr, m.image.features.len);
     try s.collective.finish(s.engine.stream.*);
@@ -27,6 +29,8 @@ pub fn receive(s: *Session, q: *prompt.Seq, h: wire.Header, payload: []const u8)
     const n = try decode(payload, &runs);
     q.media = try v.receive(@intCast(h.arg), runs[0..n]);
     const m = &q.media.?;
+    // q keeps the features; a failed transfer drains the stream before any teardown can free them
+    errdefer shared.completion.drain(s.engine.driver, s.engine.stream.*);
     try s.collective.broadcast(s.engine.stream.*, m.image.features.ptr, m.image.features.len);
     try s.collective.finish(s.engine.stream.*);
 }
@@ -51,4 +55,8 @@ test "rank media frames are bounded and rebuild the same image plan" {
     try std.testing.expectEqual(@as(i32, 6), p.src[10]);
     try std.testing.expectError(error.BadRankFrame, decode(raw[0..23], &runs));
     try std.testing.expectError(error.BadRankFrame, decode(&raw, runs[0..1]));
+}
+
+test {
+    _ = @import("cuda_rank_media_test.zig");
 }

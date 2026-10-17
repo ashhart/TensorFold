@@ -171,6 +171,18 @@ test "an image plan whose upload fails its wait drains before the plan and buffe
 test "a rank's received plan whose upload fails its wait drains before anything is freed" {
     try uploadWait(true);
 }
+test "a tower load upload that fails its wait drains before load can free its rows or the checkpoint" {
+    var d: cuda.Driver = undefined;
+    var t: v.Tower = undefined;
+    M.setup(&d, &t);
+    t.arena = .{ .d = &d, .ptr = 0x200000, .len = 4096 };
+    t.at = 0;
+    M.htod_pends = true;
+    M.fail_waits = 2;
+    const rows: [64]u8 = @splat(1);
+    try std.testing.expectError(error.NotReady, t.put(&rows));
+    try std.testing.expect(!M.pending);
+}
 const Child = struct {
     extern "c" fn fork() c_int;
     extern "c" fn kill(c_int, c_int) c_int;

@@ -102,6 +102,62 @@ fn run(comptime Cuda: type, comptime open: anytype, comptime drop: anytype, draf
         try std.testing.expectEqual(view.image.features, l.draft.?.media.?.image.features);
     }
 }
+// A lane release whose stream wait fails once while its rounds are still pending; frees during that window count.
+const Wait = struct {
+    var pending: bool = false;
+    var fail_waits: usize = 0;
+    var bad_free: usize = 0;
+    fn free(_: u64) callconv(.c) c_int {
+        if (pending) bad_free += 1;
+        return 0;
+    }
+    fn sync(_: cuda.abi.Stream) callconv(.c) c_int {
+        if (pending and fail_waits > 0) {
+            fail_waits -= 1;
+            return cuda.abi.error_not_ready;
+        }
+        pending = false;
+        return 0;
+    }
+    fn context() callconv(.c) c_int {
+        pending = false;
+        return 0;
+    }
+};
+fn release(comptime Cuda: type, comptime open: anytype) !void {
+    const a = std.testing.allocator;
+    var driver = fixtures.fakeDriver();
+    driver.api.cuMemFree_v2 = Wait.free;
+    driver.api.cuStreamSynchronize = Wait.sync;
+    driver.api.cuCtxSynchronize = Wait.context;
+    var stream: cuda.Stream = .{ .d = &driver, .handle = null };
+    var engine: prompt.Engine = undefined;
+    engine.gpa = a;
+    engine.driver = &driver;
+    engine.stream = &stream;
+    engine.chunk = 16;
+    engine.eos = 7;
+    engine.round_graph = .{};
+    var self: Cuda = undefined;
+    self.gpa = a;
+    self.context = 64;
+    self.engine = &engine;
+    self.stream = stream;
+    self.ranks = null;
+    self.head = null;
+    self.vision = null;
+    self.lanes = .empty;
+    defer self.lanes.deinit(a);
+    var s = try lanes.Stream.init(a, .{ .id = "release", .prompt = &.{ 1, 2, 3 }, .max_new = 1 });
+    defer s.deinit(a);
+    _ = try open(&self, &s);
+    Wait.pending = true;
+    Wait.fail_waits = 1;
+    Wait.bad_free = 0;
+    self.backend().vtable.release(&self, &s);
+    try std.testing.expect(!Wait.pending);
+    try std.testing.expectEqual(@as(usize, 0), Wait.bad_free);
+}
 pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype) type {
     return struct {
         test "an image lane restores kept prefixes that end before, inside and after its image, with and without MTP" {
@@ -112,6 +168,9 @@ pub fn Cases(comptime Cuda: type, comptime open: anytype, comptime drop: anytype
         }
         test "image rows and their M-RoPE positions reach a drafted family lane" {
             try run(Cuda, open, drop, true, null);
+        }
+        test "a lane release whose stream wait fails drains before the sequence is freed" {
+            try release(Cuda, open);
         }
     };
 }
