@@ -88,8 +88,9 @@ def specs() -> list[Spec]:
     out: list[Spec] = []
 
     def plain(key: str, base: str, body: str, header: str, inputs: list[Arg], outputs: list[Arg], template: list,
-              extra: list | None = None) -> None:
-        out.append(Spec(key, f"{base}_{_digest(header + body)}", body, inputs, outputs, header, template, extra or []))
+              extra: list | None = None, threads: int = 0) -> None:
+        out.append(Spec(key, f"{base}_{_digest(header + body)}", body, inputs, outputs,
+                        header, template, extra or [], threads=threads))
 
     qmv_in = [Arg("X", bf, big, 2), Arg("W", u32, big, 2), Arg("S", bf, big, 2), Arg("B", bf, big, 2)]
     for k, n in PROJECTIONS:
@@ -113,7 +114,7 @@ def specs() -> list[Spec]:
                 Arg("EPS", f32, one)]
     plain("hc_expand_10", "tf_glm5_fused_hc_expand", H._HC_EXPAND, F._HEADER, hc_ex_in,
           [Arg("XNEW", bf, big, 3), Arg("INV", f32, big), Arg("Z", f32, big, 2)],
-          [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)])
+          [("D", HIDDEN), ("EXPAND", 1), ("SPLIT", 0), ("ZOUT", 0), ("SQ_FMA", F.SQ_FMA)], threads=1024)
 
     for key, heads in (("kda_rows", KDA_HEADS), ("kda_rows_tp", KDA_HEADS // 2)):  # all heads, or one Mac's in TP2
         plain(key, "tf_glm5_kda_rows", KD._SOURCE, KD._HEADER,
@@ -122,13 +123,13 @@ def specs() -> list[Spec]:
                Arg("GBB", bf, big, 2), Arg("A", f32, big), Arg("DTB", f32, big), Arg("ST", f32, big, 4),
                Arg("ONW", f32, big), Arg("LB", f32, one), Arg("EPS", f32, one)],
               [Arg("Y", bf, big, 2), Arg("ST_OUT", f32, big, 4), Arg("CS_OUT", bf, big, 2)],
-              [("H", heads), ("D", KDA_DIM), ("TAPS", TAPS), ("TY", KD.TY), ("FB", 4), ("GB", 4)])
+              [("H", heads), ("D", KDA_DIM), ("TAPS", TAPS), ("TY", KD.TY), ("FB", 4), ("GB", 4)], threads=1024)
 
     def router(rr: int) -> list:
         return [("K", HIDDEN), ("NE", EXPERTS), ("RR", rr), ("C", 8 if rr <= 4 else 4), ("NT", M.ROUTER_TG)]
 
     plain("router", "tf_glm5_fused_router_tg", M._ROUTER_TG, F._HEADER, [Arg("X", f32, big, 2), Arg("RP", bf, big, 5)],
-          [Arg("OUT", f32, big, 2)], router(1), [router(rr) for rr in range(2, MAX_ROWS + 1)])
+          [Arg("OUT", f32, big, 2)], router(1), [router(rr) for rr in range(2, MAX_ROWS + 1)], threads=M.ROUTER_TG)
     plain("moe_route", "tf_glm5_fused_moe_route", M._MOE_ROUTE, F._HEADER,
           [Arg("LOGITS", f32, big, 2), Arg("BIAS", f32, big), Arg("SCALE", f32, one)],
           [Arg("PICK", i32, big, 2), Arg("WTS", f32, big, 2), Arg("UIDS", i32, big), Arg("UMEM", i32, big, 2),

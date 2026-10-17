@@ -37,9 +37,16 @@ pub const Sink = struct {
         try s.placed.append(s.gpa, .{ .range = r, .view_offset = view_offset, .buffer = buffer });
     }
 
-    /// Make every buffer resident before the first round (the wired bytes are what the plan budgeted).
+    /// Make every buffer resident before the first round, inside the 70% limit every residency set keeps; else none.
     pub fn commit(s: *Sink) void {
         const set = s.set orelse return;
+        var bytes: u64 = 0;
+        for (s.placed.items) |p| bytes += p.buffer.length();
+        if (!mtl.ResidencySet.within("cluster", 0, bytes)) {
+            set.deinit(); // its uncommitted adds go with it: the buffers serve unwired
+            s.set = null;
+            return;
+        }
         set.commit();
         set.requestResidency();
     }

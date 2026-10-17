@@ -9,12 +9,16 @@ pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
 pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
+pub const snapshot = @import("snapshot.zig");
 pub const pool = @import("pool.zig");
 pub const backend = @import("backend.zig");
 pub const mirror = @import("mirror.zig");
 pub const timing = @import("timing.zig");
 pub const affine = @import("affine.zig");
 pub const wide = @import("wide.zig");
+pub const vision = @import("vision.zig");
+pub const image = @import("image.zig");
+pub const video = @import("video.zig");
 
 test {
     _ = config;
@@ -27,10 +31,12 @@ test {
     _ = @import("../../core/paced_read.zig");
     _ = @import("../../core/copy_index.zig");
     _ = @import("attn_check.zig");
+    _ = @import("launch_check.zig");
     _ = @import("load_plan.zig");
     _ = @import("page_cache.zig");
     _ = pool;
     _ = @import("kept.zig");
+    _ = @import("draw_test.zig");
     _ = mirror;
     _ = timing;
     _ = @import("quant.zig");
@@ -38,4 +44,7 @@ test {
     _ = @import("names.zig");
     _ = @import("weights_test.zig");
     _ = @import("wide.zig");
+    _ = vision;
+    _ = image;
+    _ = video;
 }
