@@ -146,7 +146,7 @@ pub fn build(b: *std.Build) void {
     const ids_files = b.addWriteFiles();
     _ = ids_files.addCopyFile(b.path("zig/src/families/nemotron/draft_ids.txt"), "draft_ids.txt");
     const draft_ids = b.createModule(.{ .root_source_file = ids_files.add("draft_ids.zig", "pub const text = @embedFile(\"draft_ids.txt\");\n") });
-    const test_step = b.step("test", "Host-side unit tests (no GPU work)");
+    const test_step = b.step("test", "Unit tests (macOS includes available Metal device checks)");
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
     names_run.setCwd(b.path("."));
@@ -545,7 +545,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster })).step);
     cluster_tests.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cluster_metal })).step);
 
-    // Host-only unit tests: no GPU work.
+    // These module tests include Metal device checks when the macOS host has a GPU.
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = metal })).step);
     const helpers = b.createModule(.{
         .root_source_file = b.path("zig/tests/common.zig"),
