@@ -413,6 +413,7 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
     if (o.get("norm_topk_prob")) |v| c.norm_topk = v.bool;
     c.omni = wrapped;
     if (o.get("moe_latent_size")) |v| if (v == .integer) {
+        if (v.integer < 0) return error.BadConfig; // a width: refused before the cast, as the latent checks below would
         c.latent = @intCast(v.integer);
     };
     if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try puzzle(&c, v.array.items, why);

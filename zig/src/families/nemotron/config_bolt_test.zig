@@ -7,19 +7,19 @@ const Kind = cfg.Kind;
 const Moe = cfg.Moe;
 const Config = cfg.Config;
 const Format = cfg.Format;
+const bolt =
+    \\{"model_type": "nemotron_h_omni", "eos_token_id": 11, "llm_config": {"model_type": "nemotron_h_puzzle",
+    \\ "hidden_size": 4096, "vocab_size": 131072, "mamba_num_heads": 128, "mamba_head_dim": 64, "n_groups": 8,
+    \\ "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32, "num_key_value_heads": 2, "head_dim": 128,
+    \\ "num_experts": 512, "moe_latent_size": 1024, "moe_shared_expert_intermediate_size": 5376,
+    \\ "routed_scaling_factor": 5.0, "eos_token_id": 2, "time_step_limit": [0.0, {"__float__": "Infinity"}],
+    \\ "block_configs": [{"block_type": "mamba"},
+    \\  {"block_type": "moe", "moe_intermediate_size": 2048, "n_routed_experts": 240, "num_experts_per_tok": 9},
+    \\  {"block_type": "attention"},
+    \\  {"block_type": "moe", "moe_intermediate_size": 2560, "n_routed_experts": 496, "num_experts_per_tok": 9}]},
+    \\ "quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION"}}
+;
 test "a Bolt config: omni wrapper, puzzle blocks with their own experts and widths, LatentMoE" {
-    const bolt =
-        \\{"model_type": "nemotron_h_omni", "eos_token_id": 11, "llm_config": {"model_type": "nemotron_h_puzzle",
-        \\ "hidden_size": 4096, "vocab_size": 131072, "mamba_num_heads": 128, "mamba_head_dim": 64, "n_groups": 8,
-        \\ "ssm_state_size": 128, "conv_kernel": 4, "num_attention_heads": 32, "num_key_value_heads": 2, "head_dim": 128,
-        \\ "num_experts": 512, "moe_latent_size": 1024, "moe_shared_expert_intermediate_size": 5376,
-        \\ "routed_scaling_factor": 5.0, "eos_token_id": 2, "time_step_limit": [0.0, {"__float__": "Infinity"}],
-        \\ "block_configs": [{"block_type": "mamba"},
-        \\  {"block_type": "moe", "moe_intermediate_size": 2048, "n_routed_experts": 240, "num_experts_per_tok": 9},
-        \\  {"block_type": "attention"},
-        \\  {"block_type": "moe", "moe_intermediate_size": 2560, "n_routed_experts": 496, "num_experts_per_tok": 9}]},
-        \\ "quantization_config": {"quant_method": "modelopt", "quant_algo": "MIXED_PRECISION"}}
-    ;
     var why: Why = .{};
     const c = try parse(std.testing.allocator, bolt, &why);
     try std.testing.expectEqual(@as(usize, 4), c.layers);
@@ -36,6 +36,15 @@ test "a Bolt config: omni wrapper, puzzle blocks with their own experts and widt
     try std.testing.expectEqual(std.math.inf(f32), c.dt_max);
     try std.testing.expectEqual(Format.modelopt, c.format);
     try std.testing.expect(c.omni and c.bolt and c.shares == 1);
+}
+
+test "a negative moe_latent_size is refused before it is cast to a width" {
+    const a = std.testing.allocator;
+    const text = try std.mem.replaceOwned(u8, a, bolt, "\"moe_latent_size\": 1024", "\"moe_latent_size\": -1024");
+    defer a.free(text);
+    try std.testing.expect(!std.mem.eql(u8, text, bolt));
+    var why: Why = .{};
+    try std.testing.expectError(error.BadConfig, parse(a, text, &why));
 }
 
 test "the Bolt checkpoint's own config.json, when it is on this machine" {
