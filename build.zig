@@ -133,6 +133,7 @@ fn embedded(b: *std.Build, lib: std.Build.LazyPath, file: []const u8) *std.Build
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
+    @import("zig/build/copy_source.zig").steps(b);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
     if (release_version) |v| if (!dist_build.validVersion(v)) @panic("-Dversion must be exactly MAJOR.MINOR.PATCH");
     const build_options = b.addOptions();

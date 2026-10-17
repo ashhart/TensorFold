@@ -216,7 +216,7 @@ pub const Source = struct {
     /// Page-locked slots record their copy event; pageable slots wait for the driver to stage their bytes.
     fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
-        try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(s.ops.k.d, p.dst, got, s.ops.s);
         if (s.copied[k]) |e| return e.record(s.ops.s);
         try s.ops.s.synchronize();
     }

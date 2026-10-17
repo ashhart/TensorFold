@@ -391,7 +391,7 @@ pub const Ops = struct {
 
     pub fn upload(o: Ops, dst: u64, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        try o.k.d.check(o.k.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, o.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(o.k.d, dst, bytes, o.s);
     }
 
     pub fn download(o: Ops, dst: []u8, src: u64) !void {

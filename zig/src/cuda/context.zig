@@ -17,6 +17,7 @@ pub const Context = struct {
         try d.check(d.api.cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
         errdefer _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
         try d.check(d.api.cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
+        @import("copy_source.zig").setCurrent(ctx);
         return .{ .d = d, .device = dev, .handle = ctx };
     }
 
@@ -38,7 +39,7 @@ pub const Context = struct {
 
     /// Waits for all work, then drops this retain; resources made in it must be released first.
     pub fn deinit(self: *Context) void {
-        _ = self.d.api.cuCtxSynchronize();
+        self.d.synchronize() catch {};
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
         self.* = undefined;
     }
@@ -46,10 +47,11 @@ pub const Context = struct {
     /// Makes the context current on another thread before it calls the driver.
     pub fn makeCurrent(self: *const Context) Error!void {
         try self.d.check(self.d.api.cuCtxSetCurrent(self.handle), "cuCtxSetCurrent");
+        @import("copy_source.zig").setCurrent(self.handle);
     }
 
     pub fn synchronize(self: *const Context) Error!void {
-        try self.d.check(self.d.api.cuCtxSynchronize(), "cuCtxSynchronize");
+        try self.d.synchronize();
     }
 
     pub fn attribute(self: *const Context, a: abi.DeviceAttribute) Error!c_int {

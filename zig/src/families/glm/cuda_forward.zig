@@ -435,7 +435,7 @@ pub const Forward = struct {
                 r.st.pending = R;
                 r.st.prompt = r.b.prefill;
             } else try shared.begin(r, R);
-            try f.d.check(f.d.api.cuMemcpyHtoDAsync_v2(r.b.ids, ids.ptr, R * 4, f.stream.handle), "cuMemcpyHtoDAsync");
+            try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
         }
         const c = &f.ranks[0].w.config;
         for (f.ranks) |r| try glue.embedB16(f.set(), f.stream, r.b.ids, r.w.embed, r.b.x, R, c.hidden, c.hc);
@@ -495,7 +495,7 @@ pub const Forward = struct {
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
             if (r.st.mtp_len + n > r.st.capacity) return error.PastCapacity;
-            try f.d.check(f.d.api.cuMemcpyHtoDAsync_v2(r.b.ids, ids.ptr, n * 4, f.stream.handle), "cuMemcpyHtoDAsync");
+            try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
             if (h != r.b.hin) try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(r.b.hin, h, n * D * 2, f.stream.handle), "cuMemcpyDtoDAsync");
             const m = r.w.mtp.?;
             const b = r.b;

@@ -112,8 +112,7 @@ pub const DeviceBuffer = struct {
     pub fn upload(self: DeviceBuffer, offset: usize, bytes: []const u8) Error!void {
         const dst = try self.span(offset, bytes.len);
         if (bytes.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyHtoD_v2(dst, bytes.ptr, bytes.len), "cuMemcpyHtoD");
-        try self.d.check(self.d.api.cuStreamSynchronize(null), "cuStreamSynchronize");
+        try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
@@ -122,11 +121,11 @@ pub const DeviceBuffer = struct {
         try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
     }
 
-    /// Asynchronous only when `bytes` is pinned (HostBuffer); pageable memory makes the driver stage it.
+    /// Owns a pinned source copy until completion. Captured uploads must use copy_source.Stage or Buffer.
     pub fn uploadAsync(self: DeviceBuffer, offset: usize, bytes: []const u8, stream: abi.Stream) Error!void {
         const dst = try self.span(offset, bytes.len);
         if (bytes.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, stream), "cuMemcpyHtoDAsync");
+        try @import("copy_source.zig").enqueue(self.d, dst, bytes, .{ .d = self.d, .handle = stream });
     }
 
     pub fn downloadAsync(self: DeviceBuffer, offset: usize, out: []u8, stream: abi.Stream) Error!void {
@@ -339,4 +338,8 @@ test "taking an interval preserves transient peaks before resetting them" {
     try std.testing.expectEqual(before.device + 96, interval.peak);
     try std.testing.expectEqual(before.host, usage(false).host_peak);
     try std.testing.expectEqual(before.device, usage(false).peak);
+}
+
+pub fn releaseRetainedHost(bytes: usize) void {
+    freed(&host_bytes, bytes);
 }
