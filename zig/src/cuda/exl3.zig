@@ -204,8 +204,9 @@ pub const Dense = struct {
     /// A scratch buffer's address, grown when a layer needs more than it holds.
     fn scratch(de: *Dense, slot: *?memory.DeviceBuffer, bytes: usize) !u64 {
         if (slot.* != null and slot.*.?.len >= bytes) return slot.*.?.ptr;
+        const replacement = try memory.DeviceBuffer.alloc(de.d, bytes);
         if (slot.* != null) slot.*.?.free();
-        slot.* = try memory.DeviceBuffer.alloc(de.d, bytes);
+        slot.* = replacement;
         return slot.*.?.ptr;
     }
 
@@ -271,4 +272,19 @@ test "matmul refuses shapes the loader would refuse, before any launch" {
     nbad.n = 100;
     try std.testing.expectError(error.Exl3Shape, l.matmul(s, nbad, 0, .bf16, 8, 0, .bf16, 0, 0, 0));
     try std.testing.expectError(error.Exl3Scratch, l.matmul(s, w, 0, .bf16, 8, 0, .bf16, 0, 0, 0)); // plan(4096, 1024) splits K
+}
+
+test "a failed scratch allocation keeps the old scratch owned" {
+    const mock = @import("exl3_mock.zig");
+    var d = mock.init();
+    var de: Dense = .{ .d = &d, .lin = undefined };
+    var slot: ?memory.DeviceBuffer = try memory.DeviceBuffer.alloc(&d, 16);
+    defer {
+        if (mock.frees == 0) slot.?.free();
+        slot = null;
+    }
+    mock.fail = true;
+    try std.testing.expectError(error.NotReady, de.scratch(&slot, 32));
+    try std.testing.expectEqual(@as(usize, 0), mock.frees);
+    try std.testing.expectEqual(@as(usize, 16), slot.?.len);
 }

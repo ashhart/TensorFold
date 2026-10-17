@@ -52,7 +52,7 @@ fn layerChecks(r: *Rig, scan: *exl3_load.Scan, idx: *std.StringHashMapUnmanaged(
     for (layers) |item| {
         const o = item.object;
         const id = o.get("id").?.string;
-        var up: exl3_upload.Uploader = .{ .d = r.gpu.d, .gpa = r.gpu.gpa };
+        var up: exl3_upload.Uploader = .{ .d = r.gpu.d, .gpa = r.gpu.gpa, .max_buffers = scan.groups.len * 4 + 12 };
         defer up.deinit();
         for (o.get("groups").?.array.items) |gitem| try denseGroup(r, scan, idx, dense, dir, &up, gitem.object);
         try expertLayer(r, scan, idx, exp, dir, &up, o.get("experts").?.object);
@@ -111,7 +111,7 @@ fn expertLayer(r: *Rig, scan: *exl3_load.Scan, idx: *std.StringHashMapUnmanaged(
             const g = scan.groups[gi];
             try check.expect(g.halves == bitsOf(k2map.items[e]), "exl3.layer.python {s}: expert {d} is {d} halves, the fixture says {d}", .{ prefix, e, g.halves, bitsOf(k2map.items[e]) });
             const parts = try scan.parts(r.a, gi);
-            list.*[e] = .{ .trellis = parts.trellis.bytes, .suh = parts.suh.bytes, .svh = parts.svh.bytes, .k2 = g.halves };
+            list.*[e] = .{ .trellis = parts.trellis.bytes, .suh = parts.suh.bytes, .svh = parts.svh.bytes, .k2 = g.halves, .signs = parts.suh_packed };
         }
     }
     const l = try exl3_upload.layer(up, r.a, dims, width, .mul1, @floatCast(o.get("limit").?.float), @intCast(o.get("act_mode").?.integer), gate, upj, down);

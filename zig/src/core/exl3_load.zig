@@ -88,7 +88,8 @@ pub const Scan = struct {
         const svh = try s.ck.get(try std.mem.concat(a, u8, &.{ g.prefix, ".", sv_name }));
         const in_shape: []const usize = if (g.suh) &.{g.k} else &.{g.k / 16};
         const out_shape: []const usize = if (g.suh) &.{g.n} else &.{g.n / 16};
-        if (!suh.is(.f16, in_shape) or !svh.is(.f16, out_shape)) return error.BadScales;
+        const dtype: st.DType = if (g.suh) .f16 else .i16;
+        if (!suh.is(dtype, in_shape) or !svh.is(dtype, out_shape)) return error.BadScales;
         var bias: ?st.Tensor = null;
         if (g.bias) {
             bias = try s.ck.get(try std.mem.concat(a, u8, &.{ g.prefix, ".bias" }));
@@ -103,7 +104,10 @@ pub fn scan(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Scan {
     var ck = try checkpoint.Checkpoint.openModel(gpa, io, dir);
     errdefer ck.close();
     var groups: std.ArrayList(Group) = .empty;
-    errdefer groups.deinit(gpa);
+    errdefer {
+        for (groups.items) |g| gpa.free(g.prefix);
+        groups.deinit(gpa);
+    }
     var summary: Summary = .{};
     var bad: usize = 0;
     var arena_state = std.heap.ArenaAllocator.init(gpa);
@@ -113,9 +117,13 @@ pub fn scan(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !Scan {
         if (!std.mem.endsWith(u8, name, ".trellis")) continue;
         const prefix = name[0 .. name.len - ".trellis".len];
         if (admit(a, &ck, prefix, e)) |g| {
-            try groups.append(gpa, .{ .prefix = try gpa.dupe(u8, g.prefix), .halves = g.halves, .codebook = g.codebook, .k = g.k, .n = g.n, .suh = g.suh, .bias = g.bias });
+            try groups.ensureUnusedCapacity(gpa, 1);
+            const owned = try gpa.dupe(u8, g.prefix);
+            errdefer gpa.free(owned);
+            groups.appendAssumeCapacity(.{ .prefix = owned, .halves = g.halves, .codebook = g.codebook, .k = g.k, .n = g.n, .suh = g.suh, .bias = g.bias });
             summary.bump(g);
-        } else |_| {
+        } else |err| {
+            if (err == error.OutOfMemory) return err;
             bad += 1;
         }
     };
@@ -224,4 +232,89 @@ test "a hand-built safetensors file admits its one group and refuses the scalele
     try std.testing.expectEqual(@as(usize, 128), p.trellis.dim(0) * 16);
     try std.testing.expect(!p.suh_packed);
     try std.testing.expectEqual(@as(usize, 128), p.svh.numel());
+}
+
+test "packed sign planes the scan admits load as the parts" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // one full group (trellis [8, 8, 32] i16, fp16 scales, the mul1 marker) and one without scales
+    const trellis: [4096]u8 = @splat(0);
+    const scales: [16]u8 = @splat(0);
+    const marker = [_]u8{ 0x2D, 0xD1, 0xDC, 0x83 }; // 0x83DCD12D little-endian
+    const Entry = st.Entry;
+    const entries = [_]Entry{
+        .{ .dtype = .i16, .rank = 3, .shape = .{ 8, 8, 32, 1, 1 }, .begin = 0, .end = 4096 },
+        .{ .dtype = .i16, .rank = 1, .shape = .{ 8, 1, 1, 1, 1 }, .begin = 4096, .end = 4112 },
+        .{ .dtype = .i16, .rank = 1, .shape = .{ 8, 1, 1, 1, 1 }, .begin = 4112, .end = 4128 },
+        .{ .dtype = .i32, .rank = 1, .shape = .{ 1, 1, 1, 1, 1 }, .begin = 4128, .end = 4132 },
+        .{ .dtype = .i16, .rank = 3, .shape = .{ 8, 8, 32, 1, 1 }, .begin = 4132, .end = 4132 + 4096 },
+    };
+    const names = [_][]const u8{ "a.trellis", "a.su", "a.sv", "a.mul1", "b.trellis" };
+    const dts = [_][]const u8{ "I16", "I16", "I16", "I32", "I16" };
+    const data = try std.mem.concat(gpa, u8, &.{ &trellis, &scales, &scales, &marker, &trellis });
+    defer gpa.free(data);
+    var header: std.ArrayListUnmanaged(u8) = .empty;
+    defer header.deinit(gpa);
+    try header.appendSlice(gpa, "{");
+    for (names, entries, dts, 0..) |name, e, dt, i| {
+        if (i != 0) try header.appendSlice(gpa, ",");
+        try header.print(gpa, "\"{s}\":{{\"dtype\":\"{s}\",\"shape\":[", .{ name, dt });
+        for (e.shape[0..e.rank], 0..) |d, j| {
+            if (j != 0) try header.appendSlice(gpa, ",");
+            try header.print(gpa, "{d}", .{d});
+        }
+        try header.print(gpa, "],\"data_offsets\":[{d},{d}]}}", .{ e.begin, e.end });
+    }
+    try header.appendSlice(gpa, "}");
+    var file: std.ArrayListUnmanaged(u8) = .empty;
+    defer file.deinit(gpa);
+    try file.appendNTimes(gpa, 0, 8);
+    std.mem.writeInt(u64, file.items[0..8], header.items.len, .little);
+    try file.appendSlice(gpa, header.items);
+    try file.appendSlice(gpa, data);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = file.items });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", gpa);
+    defer gpa.free(dir);
+
+    var s = try scan(gpa, io, dir);
+    defer s.deinit();
+    try std.testing.expectEqual(@as(usize, 1), s.bad);
+    try std.testing.expectEqual(@as(usize, 1), s.summary.mul1);
+    try std.testing.expectEqual(@as(usize, 1), s.summary.su_sv);
+    try std.testing.expectEqual(@as(usize, 1), s.summary.bits[4]); // a 32-word trellis is 4 halves
+    const gi = s.find("a") orelse return error.TestUnexpectedResult;
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const p = try s.parts(arena.allocator(), gi);
+    try std.testing.expectEqual(@as(usize, 128), p.trellis.dim(0) * 16);
+    try std.testing.expect(p.suh_packed);
+    try std.testing.expectEqual(@as(usize, 8), p.svh.numel());
+}
+
+fn scanFault(a: std.mem.Allocator, io: std.Io, dir: []const u8) !void {
+    var s = try scan(a, io, dir);
+    defer s.deinit();
+}
+
+test "a scan that fails an allocation frees every group prefix it held" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header = "{\"a.trellis\":{\"dtype\":\"I16\",\"shape\":[8,8,32],\"data_offsets\":[0,4096]},\"a.su\":{\"dtype\":\"I16\",\"shape\":[8],\"data_offsets\":[4096,4112]},\"a.sv\":{\"dtype\":\"I16\",\"shape\":[8],\"data_offsets\":[4112,4128]},\"b.trellis\":{\"dtype\":\"I16\",\"shape\":[8,8,32],\"data_offsets\":[4128,8224]},\"b.su\":{\"dtype\":\"I16\",\"shape\":[8],\"data_offsets\":[8224,8240]},\"b.sv\":{\"dtype\":\"I16\",\"shape\":[8],\"data_offsets\":[8240,8256]}}";
+    var bytes: std.ArrayList(u8) = .empty;
+    defer bytes.deinit(a);
+    try bytes.appendNTimes(a, 0, 8);
+    std.mem.writeInt(u64, bytes.items[0..8], header.len, .little);
+    try bytes.appendSlice(a, header);
+    try bytes.appendNTimes(a, 0, 8256);
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes.items });
+    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(dir);
+    var admitted = try scan(a, io, dir);
+    defer admitted.deinit();
+    try std.testing.expectEqual(@as(usize, 2), admitted.groups.len);
+    try std.testing.checkAllAllocationFailures(a, scanFault, .{ io, dir });
 }
