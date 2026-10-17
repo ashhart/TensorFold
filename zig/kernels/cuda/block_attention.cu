@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "attn_odd.cuh"
 #include "qmm_frag.cuh"
 
 namespace tf_block {
@@ -166,30 +167,53 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
     }
     Fold f;
     const int lo = max(0, s - window); // the earliest context key any row sees (row 0: s - k <= window)
-    for (int k0 = lo / KT * KT; k0 < s; k0 += KT) {
+    const auto vis = [&](int r, int key) { return r < L && key < s && s + r - key <= window; };
+    // the context's edge tiles, where some row cannot see some key: e0..e1
+    const int e0 = lo / KT * KT, e1 = min(s, e0 + (max(0, s + L - 1 - window - e0) + KT - 1) / KT * KT);
+    auto context = [&](bool odd) { // odd: the edge tiles' NaN and infinite values leave the mma (added back below)
+        for (int k0 = e0; k0 < s; k0 += KT) {
+            for (int i = threadIdx.x; i < KT * C; i += blockDim.x) {
+                const int key = k0 + i / C;
+                const bool in = key < s;
+                cp16z(ks + sw(i / C, i % C), kc + (int64_t)(in ? key : 0) * D + (i % C) * 8, in);
+                cp16z(vs + sw(i / C, i % C), vc + (int64_t)(in ? key : 0) * D + (i % C) * 8, in);
+            }
+            commit();
+            wait_all();
+            if (odd && k0 < e1) attn_odd::clean<D>(vs, blockDim.x);
+            __syncthreads();
+            f.tile(qa, ks, vs, scale, lane, k0, vis);
+            __syncthreads();
+        }
+    };
+    auto block_keys = [&] { // the block's own keys
         for (int i = threadIdx.x; i < KT * C; i += blockDim.x) {
-            const int key = k0 + i / C;
-            const bool in = key < s;
-            cp16z(ks + sw(i / C, i % C), kc + (int64_t)(in ? key : 0) * D + (i % C) * 8, in);
-            cp16z(vs + sw(i / C, i % C), vc + (int64_t)(in ? key : 0) * D + (i % C) * 8, in);
+            const int c = i / C;
+            const bool in = c < L;
+            const int64_t at = ((int64_t)g * rows + j * L + (in ? c : 0)) * D + (i % C) * 8;
+            cp16z(ks + sw(c, i % C), kb + at, in);
+            cp16z(vs + sw(c, i % C), vb + at, in);
         }
         commit();
         wait_all();
-        __syncthreads();
-        f.tile(qa, ks, vs, scale, lane, k0, [&](int r, int key) { return r < L && key < s && s + r - key <= window; });
-        __syncthreads();
-    }
-    for (int i = threadIdx.x; i < KT * C; i += blockDim.x) { // the block's own keys
-        const int c = i / C;
-        const bool in = c < L;
-        const int64_t at = ((int64_t)g * rows + j * L + (in ? c : 0)) * D + (i % C) * 8;
-        cp16z(ks + sw(c, i % C), kb + at, in);
-        cp16z(vs + sw(c, i % C), vb + at, in);
-    }
-    commit();
-    wait_all();
+    };
+    const auto own = [&](int r, int c) { return r < L && c < L && (!causal || c <= r); };
+    context(false);
+    block_keys();
     __syncthreads();
-    f.tile(qa, ks, vs, scale, lane, 0, [&](int r, int c) { return r < L && c < L && (!causal || c <= r); });
+    f.tile(qa, ks, vs, scale, lane, 0, own);
+    // a NaN or infinite output: again, values some row cannot see out of the mma, added back (finite values: same bits)
+    if (__syncthreads_or(attn_odd::nonfinite_out<NB>(f.o, g8 < L, g8 + 8 < L))) {
+        f = Fold();
+        context(true);
+        attn_odd::add_back<D>(f.o, [&](int k) { return vc + (int64_t)k * D; }, e0, e1, lane, vis, f.l0, f.l1);
+        block_keys();
+        if (causal) attn_odd::clean<D>(vs, blockDim.x); // row r cannot see keys past r
+        __syncthreads();
+        f.tile(qa, ks, vs, scale, lane, 0, own);
+        const auto row = [&](int c) { return vb + ((int64_t)g * rows + j * L + c) * D; };
+        if (causal) attn_odd::add_back<D>(f.o, row, 0, L, lane, own, f.l0, f.l1);
+    }
     if (g8 < L)
 #pragma unroll
         for (int i = 0; i < NB; ++i)

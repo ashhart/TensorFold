@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "attn_odd.cuh"
 #include "qmm_frag.cuh"
 
 namespace tf_window {
@@ -51,8 +52,8 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloa
         const int key = t * BN + i / d;
         const bool in = key >= lo && key <= p;
         const int64_t at = ((base + (in ? key : lo) % ring) * hk + kh) * d + i % d;
-        kt[(i % d) * KT + i / d] = kc[at];
-        vs[i] = vc[at];
+        kt[(i % d) * KT + i / d] = in ? kc[at] : __float2bfloat16_rn(0.0f); // outside the window: zeros
+        vs[i] = in ? vc[at] : __float2bfloat16_rn(0.0f);
     }
     __syncthreads();
     for (int i = threadIdx.x; i < g * BN; i += NT) { // score (head i / BN, key i % BN)
@@ -164,16 +165,16 @@ __device__ __forceinline__ float rowsum(const float (&c)[8]) {
                      __fadd_rn(__fadd_rn(w[1], w[5]), __fadd_rn(w[3], w[7])));
 }
 
-template <int D, int WARPS, int HPC, int NS>
-__global__ void __launch_bounds__(32 * WARPS, 1)
-wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
-             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
-             int G, float scale, int win, int ring) {
+// ODD: the edge tiles' NaN and infinite values leave the mma, and the rows that see them add them back.
+template <int D, int WARPS, int HPC, int NS, bool ODD>
+__device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+                                           const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out,
+                                           int p0, int W, int H, int HK, int G, float scale, int win, int ring) {
     constexpr int C = D / 8, K16 = D / 16, NB = D / 8, RB = WARPS / HPC, THREADS = 32 * WARPS;
     constexpr bool QREG = D <= 128;               // the queries' fragments stay in registers, else in shared memory
-    extern __shared__ uint4 smem[];
-    uint4* slots = smem;
-    uint4* qs = smem + NS * HALF * C;
+    extern __shared__ uint4 wsmem[];
+    uint4* slots = wsmem;
+    uint4* qs = wsmem + NS * HALF * C;
     const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, g = lane / 4, qd = lane % 4, mt = lane / 8;
     const int groups = G / HPC, hk = blockIdx.y / groups, hg = blockIdx.y % groups;
     const int row0 = blockIdx.x * 16 * RB, last = min(row0 + 16 * RB, W) - 1;
@@ -224,8 +225,9 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
     uint32_t pa[4][4];
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.0f, l1 = 0.0f;
     const int pos0 = p0 + wrow + g, pos1 = pos0 + 8;
-    auto take = [&](int it) -> const uint4* {           // item it's slot, once every thread's copy has landed
+    auto take = [&](int it, bool odd) -> const uint4* { // item it's slot, once every thread's copy has landed
         wait_group<NS - 1>();
+        if (odd) attn_odd::clean<D>(slots + (it % NS) * HALF * C, THREADS); // NaN and infinities out of the mma
         __syncthreads();
         return slots + (it % NS) * HALF * C;
     };
@@ -273,11 +275,14 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
             mma(o[i + 1], pa1, b[2], b[3]);
         }
     };
+    const auto edge = [&](int t) { // tile t, where some row of the block cannot see some key
+        return (t0 + t) * BN < (win > 0 ? p0 + last - win + 1 : 0) || (t0 + t) * BN + BN - 1 > p0 + row0;
+    };
     for (int t = 0; t < tiles; ++t) {
         const int it = 4 * t;
-        scores(*reinterpret_cast<float(*)[4][4]>(&sc[0]), take(it));
+        scores(*reinterpret_cast<float(*)[4][4]>(&sc[0]), take(it, false));
         done(it);
-        scores(*reinterpret_cast<float(*)[4][4]>(&sc[4]), take(it + 1));
+        scores(*reinterpret_cast<float(*)[4][4]>(&sc[4]), take(it + 1, false));
         done(it + 1);
         {                                                // _tile's fold of the tile's 64 scores
             const int kb = (t0 + t) * BN + 2 * qd;
@@ -331,13 +336,21 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
                 pa[j][3] = pack(sc[2 * j + 1][2], sc[2 * j + 1][3]);
             }
         }
-        values(pa[0], pa[1], take(it + 2));
+        values(pa[0], pa[1], take(it + 2, ODD && edge(t)));
         done(it + 2);
-        values(pa[2], pa[3], take(it + 3));
+        values(pa[2], pa[3], take(it + 3, ODD && edge(t)));
         done(it + 3);
     }
     wait_group<0>();
-    const int r0 = wrow + g, r1 = r0 + 8;
+    const int r0 = wrow + g, r1 = r0 + 8, pw = p0 + wrow;
+    if constexpr (!ODD) { // a NaN or infinite output: the block runs again as ODD (finite values: the same bits)
+        if (__syncthreads_or(attn_odd::nonfinite_out<NB>(o, r0 < W, r1 < W))) return true;
+    } else {
+        const auto row = [&](int k) { return vc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D; };
+        const auto vis = [&](int r, int k) { return k >= (win > 0 ? pw + r - win + 1 : 0) && k <= pw + r; };
+        for (int t = 0; t < tiles; ++t)
+            if (edge(t)) attn_odd::add_back<D>(o, row, (t0 + t) * BN, min((t0 + t + 1) * BN, limit), lane, vis, l0, l1);
+    }
 #pragma unroll
     for (int i = 0; i < NB; ++i) {
         const int d = 8 * i + 2 * qd;
@@ -348,8 +361,25 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
             *reinterpret_cast<uint32_t*>(out + ((int64_t)r1 * H + head) * D + d) =
                 pack(tdiv(o[i][2], l1), tdiv(o[i][3], l1));
     }
+    return false;
 }
 
+// A block with a NaN or infinite output, run again with ODD on (out of the common path).
+template <int D, int WARPS, int HPC, int NS>
+__device__ __noinline__ void wattn_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
+                                       __nv_bfloat16* out, int p0, int W, int H, int HK, int G, float scale, int win,
+                                       int ring) {
+    wattn_rows<D, WARPS, HPC, NS, true>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring);
+}
+
+template <int D, int WARPS, int HPC, int NS>
+__global__ void __launch_bounds__(32 * WARPS, 1)
+wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
+             const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out, int p0, int W, int H, int HK,
+             int G, float scale, int win, int ring) {
+    if (wattn_rows<D, WARPS, HPC, NS, false>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring))
+        wattn_odd<D, WARPS, HPC, NS>(q, kc, vc, out, p0, W, H, HK, G, scale, win, ring);
+}
 
 // Decode on tensor cores (d 128): a row's heads one mma tile; warps take every 4th 32-key tile, fold in warp order.
 extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
@@ -439,10 +469,10 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
             tm0 = fmaxf(tm0, __shfl_xor_sync(0xffffffffu, tm0, x));
             tm1 = fmaxf(tm1, __shfl_xor_sync(0xffffffffu, tm1, x));
         }
-        const bool act = tm0 != -INFINITY; // the keys' mask is the same for every head
-        const float n0 = act ? fmaxf(m0, tm0) : m0, n1 = act ? fmaxf(m1, tm1) : m1;
-        const float a0 = act ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-        const float a1 = act ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+        const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY; // each head's own: a NaN head moves only its row
+        const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
+        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
+        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
         float c0 = 0.0f, c1 = 0.0f;
 #pragma unroll
         for (int n = 0; n < 4; ++n) {
