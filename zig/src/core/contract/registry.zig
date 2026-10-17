@@ -312,6 +312,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "exl3_candidate tf_exl3_tc_1", .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 127, .static = 8196, .bound = 256 }, .{ .regs = 127, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
         .{ .name = "exl3_candidate tf_exl3_prompt_1", .usage = .{ .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 80, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 }, .{ .regs = 77, .static = 32768, .bound = 256 } } },
         .{ .name = "exl3_candidate tf_exl3_rotate_f", .usage = .{ .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 28, .static = 0, .bound = 32 }, .{ .regs = 20, .static = 0, .bound = 32 }, .{ .regs = 20, .static = 0, .bound = 32 } } },
+        .{ .name = "router tf_nemo_topk_wide", .usage = .{ .{ .regs = 168, .static = 0, .bound = 32 }, .{ .regs = 168, .static = 0, .bound = 32 }, .{ .regs = 168, .static = 0, .bound = 32 }, .{ .regs = 160, .static = 0, .bound = 32 }, .{ .regs = 160, .static = 0, .bound = 32 } } },
     } },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
