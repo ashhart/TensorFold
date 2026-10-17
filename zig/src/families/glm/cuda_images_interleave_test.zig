@@ -27,6 +27,40 @@ const Fake = struct {
     fn sync(_: cuda.abi.Stream) callconv(.c) c_int {
         return 0;
     }
+    fn hostAlloc(out: *?*anyopaque, n: usize, _: c_uint) callconv(.c) c_int {
+        const bytes = std.testing.allocator.alignedAlloc(u8, .@"16", n + 16) catch return cuda.abi.error_not_ready;
+        std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], n + 16, .little);
+        out.* = bytes.ptr + 16;
+        return 0;
+    }
+    fn hostFree(ptr: ?*anyopaque) callconv(.c) c_int {
+        const base: [*]align(16) u8 = @alignCast(@as([*]u8, @ptrCast(ptr.?)) - 16);
+        const n = std.mem.readInt(usize, base[0..@sizeOf(usize)], .little);
+        std.testing.allocator.free(base[0..n]);
+        return 0;
+    }
+    fn eventCreate(out: *cuda.abi.Event, _: c_uint) callconv(.c) c_int {
+        out.* = @ptrFromInt(1);
+        return 0;
+    }
+    fn eventRecord(_: cuda.abi.Event, _: cuda.abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn eventDone(_: cuda.abi.Event) callconv(.c) c_int {
+        return cuda.abi.error_not_ready;
+    }
+    fn eventDestroy(_: cuda.abi.Event) callconv(.c) c_int {
+        return 0;
+    }
+    // the copy-source owner's pinned sources and events, on a driver whose launches and copies only count
+    fn owned(d: *cuda.Driver) void {
+        d.api.cuMemHostAlloc = hostAlloc;
+        d.api.cuMemFreeHost = hostFree;
+        d.api.cuEventCreate = eventCreate;
+        d.api.cuEventRecord = eventRecord;
+        d.api.cuEventQuery = eventDone;
+        d.api.cuEventDestroy_v2 = eventDestroy;
+    }
     fn launch(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
         launches += 1;
         feature = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
@@ -42,6 +76,7 @@ fn run(other_media: bool) !void {
     d.api.cuMemcpyHtoDAsync_v2 = Fake.uploadAsync;
     d.api.cuStreamSynchronize = Fake.sync;
     d.api.cuLaunchKernel = Fake.launch;
+    Fake.owned(&d);
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x55) };
     var map: [2049]i32 = undefined;
     var v: Images = undefined;
@@ -58,6 +93,7 @@ fn run(other_media: bool) !void {
     v.run.stream = stream;
     v.run.f.inject = .{ .d = &d, .handle = null };
     defer {
+        stream.synchronize() catch unreachable; // the owner's pinned sources are released by a completed wait
         var it = v.saved.valueIterator();
         while (it.next()) |state| {
             state.rows.free();
@@ -111,6 +147,7 @@ test "slot 0's stream released while another slot is bound leaves that slot's ow
     d.api.cuMemcpyHtoDAsync_v2 = Fake.uploadAsync;
     d.api.cuStreamSynchronize = Fake.sync;
     d.api.cuLaunchKernel = Fake.launch;
+    Fake.owned(&d);
     const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x55) };
     var map: [2049]i32 = undefined;
     var v: Images = undefined;
@@ -127,6 +164,7 @@ test "slot 0's stream released while another slot is bound leaves that slot's ow
     v.run.stream = stream;
     v.run.f.inject = .{ .d = &d, .handle = null };
     defer {
+        stream.synchronize() catch unreachable; // the owner's pinned sources are released by a completed wait
         var it = v.saved.valueIterator();
         while (it.next()) |state| {
             state.rows.free();

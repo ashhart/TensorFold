@@ -43,8 +43,5 @@ test "loaded weights are freed after a tiling failure at allocation, enqueue or 
 const cuda = @import("cuda");
 
 pub fn drain(s: cuda.Stream, d: *const cuda.Driver) void {
-    if (d.api.cuStreamSynchronize(s.handle) == 0) return;
-    if (d.api.cuCtxSynchronize() == 0) return;
-    cuda.tp_watch.fail("GLM tiling context did not drain");
-    std.c._exit(1);
+    cuda.completion.drain(d, s, "a GLM stream and its context did not drain");
 }

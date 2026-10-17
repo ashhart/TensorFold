@@ -106,7 +106,7 @@ pub const Tower = struct {
                 bytes = std.mem.sliceAsBytes(perm);
             }
             const ptr = t.mem.ptr + at;
-            try d.check(d.api.cuMemcpyHtoD_v2(ptr, bytes.ptr, bytes.len), "vision weights");
+            try cuda.copy_source.synchronousCopy(d, ptr, bytes, std.heap.page_allocator);
             try names.put(name, ptr);
             at += std.mem.alignForward(u64, bytes.len, 256);
         };
@@ -296,8 +296,8 @@ pub const Tower = struct {
         const oh = take(&at, q_rows * HD * 4);
         const sums = take(&at, q_rows * 4);
         const dpos = take(&at, N * 8);
-        try d.check(d.api.cuMemcpyHtoDAsync_v2(dpos, pos.ptr, pos.len * 4, ru.stream.handle), "vision positions");
-        try d.check(d.api.cuMemcpyHtoDAsync_v2(p32, patches.ptr, patches.len * 4, ru.stream.handle), "vision patches");
+        try cuda.copy_source.enqueue(d, dpos, std.mem.sliceAsBytes(pos), ru.stream);
+        try cuda.copy_source.enqueue(d, p32, std.mem.sliceAsBytes(patches), ru.stream);
         { // the patch embedding: the patches as bf16, then the conv as a linear (with its bias) into the fp32 stream
             var a: cuda.Args = .{};
             a.add(p32);
