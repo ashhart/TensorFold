@@ -23,7 +23,7 @@ const prompt_rows = @import("cuda_prompt_rows.zig");
 const prompt_pass = @import("cuda_prompt.zig");
 const marks = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
-const identity = @import("cuda_identity.zig");
+const identity = @import("core").checkpoint_identity;
 pub const PromptRows = prompt_rows.PromptRows;
 
 /// nemotron_h.cuda.CONTEXT: prompt plus reply tokens when --context is not given, as `tensorfold serve` sizes it.

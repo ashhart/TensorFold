@@ -31,7 +31,7 @@ pub const pages = @import("cuda_pages.zig");
 pub const slide = @import("cuda_slide.zig");
 pub const worker = @import("cuda_worker.zig");
 pub const omni = @import("cuda_native_omni.zig");
-pub const identity = @import("cuda_identity.zig");
+pub const identity = @import("core").checkpoint_identity;
 
 test {
     _ = @import("cuda_bolt_lanes_test.zig");
@@ -55,7 +55,6 @@ test {
     _ = @import("cuda_train_back.zig");
     _ = @import("cuda_latent.zig");
     _ = @import("cuda_latent_ck.zig");
-    _ = @import("cuda_identity.zig");
     _ = worker;
 }
 
