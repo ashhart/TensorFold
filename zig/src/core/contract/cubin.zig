@@ -133,6 +133,19 @@ pub fn release(a: std.mem.Allocator, elf: []const u8) !?limits.Nvcc {
     return null;
 }
 
+/// The release that built `bytes`' image for `sm`, else the one every image names (MixedCompilers when they differ).
+pub fn releaseFor(a: std.mem.Allocator, bytes: []const u8, sm: u32) !?limits.Nvcc {
+    const imgs = try images(a, bytes);
+    defer a.free(imgs);
+    for (imgs) |im| if (im.sm == sm) return release(a, im.elf);
+    var seen: ?limits.Nvcc = null;
+    for (imgs) |im| if (try release(a, im.elf)) |rel| {
+        if (seen) |s| if (!std.meta.eql(s, rel)) return error.MixedCompilers;
+        seen = rel;
+    };
+    return seen;
+}
+
 /// The value a global .nv.info record of `attr` keeps for symbol `sym` (EIATTR_REGCOUNT's symbol, count).
 fn record(info: []const u8, attr: u8, sym: u32) !?u32 {
     var at: usize = 0;
@@ -293,4 +306,46 @@ test "a section or launch bound past what the image holds is refused" {
     try std.testing.expectError(error.BadElf, kernels(a, elf, 121));
     std.mem.writeInt(u64, elf[0x28..0x30], std.math.maxInt(u64) - 8, .little);
     try std.testing.expectError(error.BadElf, kernels(a, elf, 121));
+}
+
+/// A fatbin of one uncompressed entry an image, as `images` reads it.
+fn fatbinOf(a: std.mem.Allocator, imgs: []const Image) ![]u8 {
+    var size: usize = 16;
+    for (imgs) |im| size += 64 + im.elf.len;
+    const out = try a.alloc(u8, size);
+    @memset(out, 0);
+    std.mem.writeInt(u32, out[0..4], fatbin_magic, .little);
+    std.mem.writeInt(u16, out[6..8], 16, .little);
+    std.mem.writeInt(u64, out[8..16], size - 16, .little);
+    var at: usize = 16;
+    for (imgs) |im| {
+        std.mem.writeInt(u16, out[at..][0..2], elf_kind, .little);
+        std.mem.writeInt(u32, out[at + 4 ..][0..4], 64, .little);
+        std.mem.writeInt(u64, out[at + 8 ..][0..8], im.elf.len, .little);
+        std.mem.writeInt(u32, out[at + 28 ..][0..4], im.sm, .little);
+        @memcpy(out[at + 64 ..][0..im.elf.len], im.elf);
+        at += 64 + im.elf.len;
+    }
+    return out;
+}
+
+test "an image's compiler is its own SM image's, else the one every image names; images that differ are refused" {
+    const a = std.testing.allocator;
+    const r132 = try noted(a, "Cuda compilation tools, release 13.2, V13.2.78");
+    defer a.free(r132);
+    const r130 = try noted(a, "Cuda compilation tools, release 13.0, V13.0.88");
+    defer a.free(r130);
+    const bare = try synthetic(a, 143, 1060, 256, true);
+    defer a.free(bare);
+    const mixed = try fatbinOf(a, &.{ .{ .sm = 120, .elf = r132 }, .{ .sm = 89, .elf = r130 } });
+    defer a.free(mixed);
+    try std.testing.expectEqual(@as(?limits.Nvcc, .{ .major = 13, .minor = 2 }), try releaseFor(a, mixed, 120));
+    try std.testing.expectEqual(@as(?limits.Nvcc, .{ .major = 13, .minor = 0 }), try releaseFor(a, mixed, 89));
+    try std.testing.expectError(error.MixedCompilers, releaseFor(a, mixed, 121)); // no sm_121 image, two compilers
+    const same = try fatbinOf(a, &.{ .{ .sm = 120, .elf = r132 }, .{ .sm = 89, .elf = bare }, .{ .sm = 86, .elf = r132 } });
+    defer a.free(same);
+    try std.testing.expectEqual(@as(?limits.Nvcc, .{ .major = 13, .minor = 2 }), try releaseFor(a, same, 121));
+    const none = try fatbinOf(a, &.{.{ .sm = 89, .elf = bare }});
+    defer a.free(none);
+    try std.testing.expectEqual(@as(?limits.Nvcc, null), try releaseFor(a, none, 121));
 }

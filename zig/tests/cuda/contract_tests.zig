@@ -170,13 +170,9 @@ fn live(gpu: check.Gpu) !usize {
     return n;
 }
 
-/// The nvcc release that built a fatbin's image for `sm`, else any of its images (null: none names one).
+/// The nvcc release that built a fatbin's image for `sm`, else the one its images agree on (null: none names one).
 fn built(a: std.mem.Allocator, bytes: []const u8, sm: u32) !?limits.Nvcc {
-    const imgs = try contract.cubin.images(a, bytes);
-    defer a.free(imgs);
-    for (imgs) |im| if (im.sm == sm) return contract.cubin.release(a, im.elf);
-    for (imgs) |im| if (try contract.cubin.release(a, im.elf)) |rel| return rel;
-    return null;
+    return contract.cubin.releaseFor(a, bytes, sm);
 }
 
 /// Says which compiler's records an audit compares against, and why.
