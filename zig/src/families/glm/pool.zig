@@ -117,18 +117,28 @@ fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
     return true;
 }
 
-/// The oldest kept state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
+/// The oldest held state, `spare` last, goes stale; a state an outstanding lookup restores goes last (issue #966).
 fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap) bool {
-    var pick: ?*snapshot.Snap = null;
-    var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.held != null and (pick == null or first(snap.*, pick.?, spare))) {
-        pick = snap.*;
-    };
-    const snap = pick orelse return false;
+    const snap = oldest(sl, spare, false) orelse oldest(sl, spare, true) orelse return false;
     snap.held = null;
     snap.stale = true;
     kept_mod.wentStale(sl, snap);
     return true;
+}
+
+/// The oldest held snap; `any` includes a state an outstanding lookup still restores, which goes last.
+fn oldest(sl: *Slots, spare: ?*const snapshot.Snap, any: bool) ?*snapshot.Snap {
+    var best: ?*snapshot.Snap = null;
+    var it = sl.snaps.valueIterator();
+    while (it.next()) |snap| if (snap.*.held != null and (any or !borrowed(sl, snap.*))) if (best == null or first(snap.*, best.?, spare)) {
+        best = snap.*;
+    };
+    return best;
+}
+
+fn borrowed(sl: *Slots, snap: *snapshot.Snap) bool {
+    const q = sl.borrowed orelse return false;
+    return q.f(q.ctx, @ptrCast(snap));
 }
 
 /// Eviction order: every held prefix before `spare`, then the older id first.
@@ -181,6 +191,13 @@ test "a region of n blocks holds n blocks less the pooled entry, and tokens take
     }
 }
 
+/// The tests' borrow query: a state whose id the test names is still restoring.
+fn ofBorrowed(ctx: *anyopaque, saved: *anyopaque) bool {
+    const sl: *Slots = @ptrCast(@alignCast(ctx));
+    const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
+    return sl.snaps.get(snap.id) == snap and snap.id == 1;
+}
+
 /// Slots over a pool of `blocks` blocks with no GPU behind them, for tests that read only regions and kept states.
 fn testSlots(slots: []Slot, blocks: u32) Slots {
     return .{ .gpa = std.testing.allocator, .e = undefined, .slots = slots, .rows = undefined, .ids = undefined, .lasts = undefined, .picks = undefined, .ring = undefined, .pool = .{ .base = undefined, .blocks = blocks, .kpool = 4 } };
@@ -227,4 +244,36 @@ test "with no prefix to restore, held prefixes give their blocks up oldest first
     try sl.snaps.put(gpa, newer.id, &newer);
     try std.testing.expectEqual(@as(u32, 4), try place(&sl, 10, null));
     try std.testing.expect(older.stale and !newer.stale);
+}
+
+test "a held state an outstanding lookup still restores gives its blocks up last" {
+    const gpa = std.testing.allocator;
+    var slots: [2]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    var borrowed_snap: snapshot.Snap = .{ .id = 1, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 0, 4 } };
+    var other: snapshot.Snap = .{ .id = 2, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 8, 4 } };
+    try sl.snaps.put(gpa, borrowed_snap.id, &borrowed_snap);
+    try sl.snaps.put(gpa, other.id, &other);
+    sl.borrowed = .{ .ctx = &sl, .f = ofBorrowed };
+    defer sl.borrowed = null;
+    try std.testing.expectEqual(@as(u32, 4), try place(&sl, 10, null)); // [4, 14): the other prefix went first
+    try std.testing.expect(other.stale and !borrowed_snap.stale);
+    try std.testing.expectEqual(@as(u32, 4), try place(&sl, 4, null)); // a run that fits past the borrowed prefix leaves it alone
+    try std.testing.expect(!borrowed_snap.stale);
+}
+
+test "a borrowed state's blocks still free when nothing else can serve the pass" {
+    const gpa = std.testing.allocator;
+    var slots: [1]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    var borrowed_snap: snapshot.Snap = .{ .id = 1, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 0, 12 } };
+    try sl.snaps.put(gpa, borrowed_snap.id, &borrowed_snap);
+    sl.borrowed = .{ .ctx = &sl, .f = ofBorrowed };
+    defer sl.borrowed = null;
+    try std.testing.expectEqual(@as(u32, 0), try place(&sl, 12, null)); // liveness: the borrowed state went last, not never
+    try std.testing.expect(borrowed_snap.stale);
 }

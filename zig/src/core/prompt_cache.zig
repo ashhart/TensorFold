@@ -179,6 +179,12 @@ pub const Store = struct {
         return false;
     }
 
+    /// Whether an outstanding lookup still borrows `saved`'s state: the family spares it while restoring.
+    pub fn borrowed(s: *Store, saved: Saved) bool {
+        for (s.entries.items) |e| if (e.saved == saved and !e.expired and e.borrowers > 0) return true;
+        return false;
+    }
+
     pub const expired = lifetime.expired;
     pub const collectExpired = lifetime.collect;
     pub const release = lifetime.release;
