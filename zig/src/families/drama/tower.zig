@@ -21,6 +21,10 @@ const workspace_bytes = 8 << 20;
 const sample_shared_bytes = 65536;
 /// drama_tower.cu's attention_split: the CTAs of drama_attention_decode's cluster for one query head.
 const attention_split = 4;
+/// Clusters are sm_90+: below it the image holds no drama_attention_decode, and the decode row runs drama_attention.
+fn clusters(capability: u32) bool {
+    return capability >= 90;
+}
 pub const projections = [_][2]usize{
     .{ hidden, 2 * hidden },       .{ qkv_width, hidden },    .{ hidden, query_width },
     .{ 2 * intermediate, hidden }, .{ hidden, intermediate }, .{ 4096, hidden },
@@ -107,17 +111,17 @@ const Kernels = struct {
     norm: cuda.Function,
     rope: cuda.Function,
     attention: cuda.Function,
-    attention_decode: cuda.Function,
+    attention_decode: ?cuda.Function,
     silu: cuda.Function,
     sample: cuda.Function,
-    fn resolve(m: cuda.Module) !Kernels {
+    fn resolve(m: cuda.Module, capability: u32) !Kernels {
         return .{
             .embeddings = try m.function("drama_frame_embeddings"),
             .mix = try m.function("drama_mix"),
             .norm = try m.function("drama_norm"),
             .rope = try m.function("drama_rope_cache"),
             .attention = try m.function("drama_attention"),
-            .attention_decode = try m.function("drama_attention_decode"),
+            .attention_decode = if (clusters(capability)) try m.function("drama_attention_decode") else null,
             .silu = try m.function("drama_silu_mul"),
             .sample = try m.function("drama_sample"),
         };
@@ -315,7 +319,8 @@ pub const Impl = struct {
         a.add(@as(i32, 16));
         a.add(@as(i32, 2));
         a.add(@as(i32, 256));
-        if (rows == 1) try launch(p.kernels.attention_decode, stream, 16 * attention_split, 256, 0, &a) else try launch(p.kernels.attention, stream, rows * 16, 256, 0, &a);
+        const decode = if (rows == 1) p.kernels.attention_decode else null;
+        if (decode) |f| try launch(f, stream, 16 * attention_split, 256, 0, &a) else try launch(p.kernels.attention, stream, rows * 16, 256, 0, &a);
         try p.stage(trace, stream, i, rows, .attended);
         try p.project(stream, rows, 2, p.attended, w.out, p.branch);
         try p.stage(trace, stream, i, rows, .attention_output);
@@ -422,7 +427,7 @@ pub const Model = struct {
         p.* = .{ .gpa = gpa, .driver = ctx.d, .options = options, .semantic_start = parsed.value.semantic_start_token_id, .semantic_end = parsed.value.semantic_end_token_id, .eos = parsed.value.eos_token_id, .eps = c.norm_eps, .rope_base = c.rope_base };
         errdefer p.release();
         p.module = try loadModule(gpa, io, ctx.d, kernel_dir, "drama_tower.fatbin", cuda.kernels.drama_tower);
-        p.kernels = try Kernels.resolve(p.module.?);
+        p.kernels = try Kernels.resolve(p.module.?, try ctx.capability());
         try p.kernels.sample.allowDynamicShared(sample_shared_bytes);
         p.library = try cuda.cublaslt.Library.open();
         p.library_open = true;
@@ -563,3 +568,8 @@ pub const Model = struct {
         return result[0..11].*;
     }
 };
+
+test "sm_89, which the backbone admits, runs the decode row without a cluster" {
+    try std.testing.expect(!clusters(89));
+    try std.testing.expect(clusters(90) and clusters(120) and clusters(121));
+}
