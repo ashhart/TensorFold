@@ -3,6 +3,7 @@ const std = @import("std");
 const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
+const tool_closers = @import("tool_closers.zig");
 const tool_params = @import("tool_params.zig");
 const tool_specs = @import("tool_specs.zig");
 const tool_streaming = @import("tool_streaming.zig");
@@ -64,17 +65,18 @@ fn envelopes(a: Allocator, text: []const u8) Allocator.Error![]Envelope {
         pos = e + 12;
     }
     pos = 0;
+    var closers: tool_closers.Closers = .{ .text = text };
     while (std.mem.indexOfScalarPos(u8, text, pos, '<')) |s| {
         pos = s + 1;
         var j = s + 1;
         if (j >= text.len or !(std.ascii.isAlphabetic(text[j]) or text[j] == '_')) continue;
         j += 1;
-        while (j < text.len and (word(text[j]) or text[j] == '.' or text[j] == '-')) j += 1;
+        while (j < text.len and tool_closers.nameByte(text[j])) j += 1;
         if (!std.ascii.startsWithIgnoreCase(text[j..], ":tool_call>")) continue;
-        const closer = try std.mem.concat(a, u8, &.{ "</", text[s + 1 .. j], ":tool_call>" });
-        const e = findCI(text, closer, j + 11) orelse continue;
-        try found.append(a, .{ .start = s, .end = e + closer.len, .payload = strip(text[j + 11 .. e]) });
-        pos = e + closer.len;
+        const e = (try closers.next(a, text[s + 1 .. j], j + 11)) orelse continue;
+        const end = e + j - s + 12; // ``</NAME:tool_call>``
+        try found.append(a, .{ .start = s, .end = end, .payload = strip(text[j + 11 .. e]) });
+        pos = end;
     }
     pos = 0;
     while (find(text, "<|tool_call>", pos)) |s| {
