@@ -57,22 +57,24 @@ fn linears(w: *Weights, list: *std.ArrayList(Lin)) !void {
     try add(list, w.gpa, &w.head, w.share.vocab.len(), w.config.hidden);
 }
 
-/// A packed linear's bytes moved out of its bf16 buffer into one its own size; the bf16 one freed (`field` repointed).
-fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, bytes: usize) !void {
+/// A packed linear moved into a buffer its own size, its bf16 one freed; the bytes freed (0: it shares a buffer).
+fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, bytes: usize) !usize {
     const old = field.*;
+    const at = for (w.buffers.items, 0..) |b, i| {
+        if (b.ptr == old) break i;
+    } else return 0;
+    const was = w.buffers.items[at].len;
     const nb = try cuda.DeviceBuffer.alloc(d, bytes);
     try d.check(d.api.cuMemcpyDtoDAsync_v2(nb.ptr, old, bytes, s.handle), "cuMemcpyDtoDAsync");
     try s.synchronize();
-    for (w.buffers.items, 0..) |*b, i| if (b.ptr == old) {
-        b.free();
-        w.buffers.items[i] = nb;
-        break;
-    } else return error.LinearBufferNotFound;
+    w.buffers.items[at].free();
+    w.buffers.items[at] = nb;
     for (w.named.items) |*n| if (n.ptr == old) {
         n.ptr = nb.ptr;
         n.len = nb.len;
     };
     field.* = nb.ptr;
+    return was -| nb.len;
 }
 
 /// Every linear retiled in place: dense at `dense_bits`, the head at `head_bits` (16: bf16); the packed ones' table.
@@ -94,6 +96,7 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
     errdefer packed_ptrs.deinit(gpa);
     var packed_bits: std.ArrayList(u8) = .empty;
     errdefer packed_bits.deinit(gpa);
+    var freed: usize = 0;
     for (list.items, 0..) |e, i| {
         const n = e.n;
         const k = e.k;
@@ -115,11 +118,12 @@ pub fn tileLinears(gpa: std.mem.Allocator, w: *Weights, mk: *const mm_mod.Kernel
         try tmp.upload(sizes[0], std.mem.sliceAsBytes(scales.items));
         try mm_mod.tilePacked(mk, s, bits, tmp.ptr, tmp.ptr + sizes[0], ptr, ptr + sizes[0], n, k);
         try s.synchronize(); // tmp is the next linear's
-        try compact(w, d, s, e.field, sizes[0] + sizes[1]); // its bf16 bytes back to the device
+        freed += try compact(w, d, s, e.field, sizes[0] + sizes[1]); // its bf16 bytes back to the device
         try packed_ptrs.append(gpa, e.field.*);
         try packed_bits.append(gpa, bits);
     }
     try s.synchronize();
+    if (packed_ptrs.items.len > 0) std.log.info("glm: {d} linears packed ({d}/{d} bits), {d:.2} GiB freed", .{ packed_ptrs.items.len, dense_bits, head_bits, @as(f64, @floatFromInt(freed)) / (1 << 30) });
     // sorted by pointer, the bits beside them (Packed.tiled searches)
     const ptrs = try packed_ptrs.toOwnedSlice(gpa);
     const bits_out = try packed_bits.toOwnedSlice(gpa);
