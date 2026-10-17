@@ -122,13 +122,19 @@ pub fn Index(comptime Extra: type) type {
             return x.by_key.get(key);
         }
 
+        /// Reserves first, so a failure changes nothing; free_nodes keeps room for every slot (prune never allocates).
         fn newNode(x: *Self, digest: Digest, parent: u32, depth: u32) !u32 {
-            const id: u32 = if (x.free_nodes.pop()) |i| i else blk: {
-                try x.nodes.append(x.gpa, undefined);
+            try x.by_digest.ensureUnusedCapacity(x.gpa, 1);
+            if (x.free_nodes.items.len == 0) {
+                try x.nodes.ensureUnusedCapacity(x.gpa, 1);
+                try x.free_nodes.ensureTotalCapacity(x.gpa, x.nodes.items.len + 1);
+            }
+            const id: u32 = x.free_nodes.pop() orelse blk: {
+                x.nodes.appendAssumeCapacity(undefined);
                 break :blk @intCast(x.nodes.items.len - 1);
             };
             x.nodes.items[id] = .{ .digest = digest, .parent = parent, .depth = depth };
-            try x.by_digest.put(x.gpa, digest, id);
+            x.by_digest.putAssumeCapacityNoClobber(digest, id);
             if (parent != none) {
                 const p = &x.nodes.items[parent];
                 x.nodes.items[id].next_sib = p.first_child;
@@ -143,18 +149,22 @@ pub fn Index(comptime Extra: type) type {
             return x.gpa.alloc(i32, x.page);
         }
 
-        /// Adds an entry for ids (chain: its full pages' digests), or returns the one with the same key.
+        /// Adds an entry for ids (chain: its full pages' digests) or returns the one with its key; an error adds none.
         pub fn insert(x: *Self, tag: u32, ids: []const i32, digests: []const Digest, ram: bool, extra: Extra) !Placed {
             const full: u32 = @intCast(ids.len / x.page);
             std.debug.assert(digests.len >= full);
             const r = root(tag);
             var n = x.by_digest.get(r) orelse try x.newNode(r, none, 0);
+            errdefer x.prune(n); // the path's new nodes, which no entry holds yet
             for (0..full) |j| {
                 const d = digests[j];
                 n = x.by_digest.get(d) orelse try x.newNode(d, n, @intCast(j + 1));
             }
             const r2 = try x.place(tag, n, ids.len, ids[full * x.page ..], extra);
-            if (r2.new and ram) try x.setRam(r2.id, true, ids);
+            if (r2.new and ram) x.setRam(r2.id, true, ids) catch |err| {
+                _ = x.drop(r2.id); // the errdefer above prunes its path
+                return err;
+            };
             return r2;
         }
 
@@ -164,6 +174,7 @@ pub fn Index(comptime Extra: type) type {
                 const r = root(tag);
                 break :blk x.by_digest.get(r) orelse try x.newNode(r, none, 0);
             };
+            errdefer x.prune(n); // the path's new nodes, which no entry holds yet
             const d0 = x.nodes.items[n].depth;
             const full: u32 = @intCast(suffix.len / x.page);
             for (0..full) |j| {
@@ -183,13 +194,17 @@ pub fn Index(comptime Extra: type) type {
         fn place(x: *Self, tag: u32, n: u32, pos: u64, tail_ids: []const i32, extra: Extra) !Placed {
             const key = entryKey(x.nodes.items[n].digest, pos, tail_ids);
             if (x.by_key.get(key)) |e| return .{ .id = e, .new = false };
-            const tail = try x.gpa.dupe(i32, tail_ids);
-            errdefer x.gpa.free(tail);
-            const id: u32 = if (x.free_entries.pop()) |i| i else blk: {
-                try x.entries.append(x.gpa, undefined);
+            try x.by_key.ensureUnusedCapacity(x.gpa, 1);
+            if (x.free_entries.items.len == 0) {
+                try x.entries.ensureUnusedCapacity(x.gpa, 1);
+                try x.free_entries.ensureTotalCapacity(x.gpa, x.entries.items.len + 1);
+            }
+            const tail = try x.gpa.dupe(i32, tail_ids); // the last step that can fail
+            const id: u32 = x.free_entries.pop() orelse blk: {
+                x.entries.appendAssumeCapacity(undefined);
                 break :blk @intCast(x.entries.items.len - 1);
             };
-            try x.by_key.put(x.gpa, key, id);
+            x.by_key.putAssumeCapacityNoClobber(key, id);
             const nd = &x.nodes.items[n];
             x.entries.items[id] = .{ .key = key, .tag = tag, .pos = pos, .node = n, .tail = tail, .ram = false, .next_at = nd.first_entry, .extra = extra };
             if (nd.first_entry != none) x.entries.items[nd.first_entry].prev_at = id;
@@ -214,6 +229,7 @@ pub fn Index(comptime Extra: type) type {
             if (e.ram == ram) return;
             if (ram) {
                 const all = ids orelse return error.IdsNeeded;
+                errdefer x.dropTokens(e.node); // the blocks this call took: tokens stay only where sub_ram > 0
                 var n = e.node;
                 while (n != none and x.nodes.items[n].depth > 0) : (n = x.nodes.items[n].parent) {
                     const nd = &x.nodes.items[n];
@@ -243,6 +259,11 @@ pub fn Index(comptime Extra: type) type {
 
         /// Removes an entry and the nodes no entry needs any more.
         pub fn remove(x: *Self, id: u32) void {
+            x.prune(x.drop(id));
+        }
+
+        /// Unlinks an entry and frees its slot; returns its node, whose path may now hold no entry.
+        fn drop(x: *Self, id: u32) u32 {
             x.setRam(id, false, null) catch unreachable;
             const e = &x.entries.items[id];
             const n = e.node;
@@ -251,8 +272,13 @@ pub fn Index(comptime Extra: type) type {
             _ = x.by_key.remove(e.key);
             x.gpa.free(e.tail);
             e.live = false;
-            x.free_entries.append(x.gpa, id) catch {};
+            x.free_entries.appendAssumeCapacity(id); // place keeps room for every slot
             x.addPath(n, -1, 0);
+            return n;
+        }
+
+        /// Frees the nodes from n up that no entry holds (sub_all 0).
+        fn prune(x: *Self, n: u32) void {
             var m = n;
             while (m != none and x.nodes.items[m].sub_all == 0) {
                 const nd = x.nodes.items[m];
@@ -261,7 +287,7 @@ pub fn Index(comptime Extra: type) type {
                     if (nd.next_sib != none) x.nodes.items[nd.next_sib].prev_sib = nd.prev_sib;
                 }
                 if (x.by_digest.remove(nd.digest)) x.dropped();
-                x.free_nodes.append(x.gpa, m) catch {};
+                x.free_nodes.appendAssumeCapacity(m); // newNode keeps room for every slot
                 m = nd.parent;
             }
         }
