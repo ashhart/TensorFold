@@ -7,7 +7,8 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
-    split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows) or gather
+    split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
+    ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
@@ -17,8 +18,11 @@ pub const Settings = struct {
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
         if (get("TF_GLM_PREFILL_REDUCE")) |v| {
-            if (std.mem.eql(u8, v, "split")) s.split = true else if (std.mem.eql(u8, v, "gather")) s.split = false else {
-                problem.* = "TF_GLM_PREFILL_REDUCE: split or gather";
+            if (std.mem.eql(u8, v, "split")) s.split = true else if (std.mem.eql(u8, v, "ring")) {
+                s.split = true;
+                s.ring = true;
+            } else if (std.mem.eql(u8, v, "gather")) s.split = false else {
+                problem.* = "TF_GLM_PREFILL_REDUCE: split, ring or gather";
                 return error.BadSetting;
             }
         }
@@ -63,7 +67,7 @@ pub const Fingerprint = extern struct {
     layout: u32 = 5, // this struct's version
     world: u32,
     rank: u32,
-    split: u32,
+    split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
     pieces: u32,
     layers: u32, // TF_GLM_LAYERS (0: all)
@@ -105,7 +109,7 @@ pub const Fingerprint = extern struct {
         var f: Fingerprint = .{
             .world = @intCast(world),
             .rank = @intCast(rank),
-            .split = @intFromBool(s.split),
+            .split = if (!s.split) 0 else if (s.ring) 2 else 1,
             .kda_wide = @intFromBool(s.kda_wide),
             .pieces = s.pieces,
             .layers = s.layers,
@@ -230,6 +234,11 @@ fn fake(name: [:0]const u8) ?[]const u8 {
     return null;
 }
 
+fn ringed(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_PREFILL_REDUCE")) return "ring";
+    return null;
+}
+
 fn bad(name: [:0]const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "TF_GLM_PREFILL_REDUCE")) return "sum";
     return null;
@@ -240,7 +249,10 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     const s = try Settings.read(&fake, &problem);
     try std.testing.expect(!s.split and s.kda_wide and s.pieces == 2 and s.heat.?.high_c == 92 and s.heat.?.low_c == 88);
     try std.testing.expectError(error.BadSetting, Settings.read(&bad, &problem));
-    try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split or gather", problem);
+    try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split, ring or gather", problem);
+    const r = try Settings.read(&ringed, &problem);
+    try std.testing.expect(r.split and r.ring);
+    try std.testing.expectEqual(@as(u32, 2), Fingerprint.of(2, 0, r, 8192, true, @splat(0), @splat(0), "/c").split);
 }
 
 test "fingerprints: agreeing ranks pass; the first differing field and rank are named" {

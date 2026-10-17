@@ -13,6 +13,7 @@ pub const mlp = @import("cuda_mlp.zig");
 pub const shard = @import("cuda_shard.zig");
 pub const weights = @import("cuda_weights.zig");
 pub const forward = @import("cuda_forward.zig");
+pub const relay = @import("cuda_relay.zig");
 pub const config = @import("config.zig");
 pub const quant = @import("cuda_quant.zig");
 pub const q4 = @import("cuda_q4.zig");
@@ -37,6 +38,7 @@ test {
     _ = shard;
     _ = weights;
     _ = forward;
+    _ = relay;
     _ = quant;
     _ = q4;
     _ = ranks;
