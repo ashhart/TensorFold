@@ -2,7 +2,7 @@
 const std = @import("std");
 const family = @import("tensorfold").gemma4.contracts;
 const contract = @import("contract");
-test "T59 normal runner requires every Gemma geometry, fused kind and tap setting" {
+test "normal runner requires every Gemma geometry, fused kind and tap setting" {
     try family.requireComplete(family.entries);
     try std.testing.expectError(error.IncompleteGemmaContract, family.requireComplete(&.{}));
     for (family.entries) |v| {
@@ -13,7 +13,7 @@ test "T59 normal runner requires every Gemma geometry, fused kind and tap settin
     }
 }
 
-test "T59 literal 31B and 12B launch settings and private staged math" {
+test "literal 31B and 12B launch settings and private staged math" {
     const ns = [12]usize{ 5376, 16384, 18432, 16384, 43008, 5376, 3840, 8192, 8704, 8192, 30720, 3840 };
     const sks = [12]usize{ 0, 2, 2, 2, 8, 4, 0, 4, 4, 4, 8, 4 };
     const bytes = [12]usize{ 9216, 19456, 19456, 19456, 25600, 7680, 9216, 20480, 20480, 20480, 22528, 7424 };
@@ -40,7 +40,7 @@ test "T59 literal 31B and 12B launch settings and private staged math" {
     _ = @import("tests/contract/gemma4_math.zig");
 }
 
-test "T59 fused prologues preserve exact stress inputs and bound random norm stages" {
+test "fused prologues preserve exact stress inputs and bound random norm stages" {
     const math = @import("tests/contract/gemma4_math.zig");
     const c = contract.spec;
     const a = std.testing.allocator;
@@ -73,7 +73,7 @@ test "T59 fused prologues preserve exact stress inputs and bound random norm sta
     };
 }
 
-test "T59 production numerical hooks reject corrupt main, hidden, tap and inner guards" {
+test "production numerical hooks reject corrupt main, hidden, tap and inner guards" {
     const mtl = @import("metal");
     const Probe = @import("tests/contract/metal_gemma4.zig").Probe;
     const a = std.testing.allocator;
@@ -118,7 +118,7 @@ test "T59 production numerical hooks reject corrupt main, hidden, tap and inner 
     }
 }
 
-test "T59 registered stress simulators prove their stated accumulator margins" {
+test "registered stress simulators prove their stated accumulator margins" {
     const mtl = @import("metal");
     const Probe = @import("tests/contract/metal_gemma4.zig").Probe;
     const a = std.testing.allocator;

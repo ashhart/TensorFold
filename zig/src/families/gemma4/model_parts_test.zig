@@ -51,20 +51,20 @@ fn boundary(fail: usize) !void {
     try std.testing.expectEqual(@as(usize, 0), leaks);
     for (Fake.freed[0..Fake.made]) |n| try std.testing.expectEqual(@as(usize, 1), n);
 }
-test "T59 private pipeline failure has no published handle" {
+test "private pipeline failure has no published handle" {
     try boundary(1);
 }
-test "T59 sliding inverse allocation releases the private pipeline" {
+test "sliding inverse allocation releases the private pipeline" {
     try boundary(2);
 }
-test "T59 global inverse allocation releases the first table and private pipeline" {
+test "global inverse allocation releases the first table and private pipeline" {
     try boundary(3);
 }
-test "T59 inverse operations unwind both tables and private pipeline" {
+test "inverse operations unwind both tables and private pipeline" {
     try boundary(4);
     try boundary(5);
 }
-test "T59 successful late load transfers all three owners" {
+test "successful late load transfers all three owners" {
     Fake.step = 0;
     Fake.fail = 0;
     Fake.made = 0;

@@ -24,14 +24,14 @@ fn val(p: mtl.Pass, comptime T: type, i: usize) !T {
 fn bound(p: mtl.Pass, slot: usize, id: usize) !void {
     try std.testing.expectEqual(mtl.Bound{ .id = id, .off = id * 256 }, p.buffers[slot]);
 }
-test "T52 shared affine release ABI and entry ordering" {
+test "shared affine release ABI and entry ordering" {
     const expected = [_][]const u8{ "tf_affine_row_sums", "tf_affine_mm", "tf_affine_gather_32", "tf_affine_gather_64", "tf_affine_gather_scatter_32", "tf_affine_gather_scatter_64", "tf_affine_gather_glu_32", "tf_affine_gather_glu_64" };
     try std.testing.expectEqual(@as(usize, 8), am.names.len);
     for (am.names, 0..) |name, i| try std.testing.expectEqualStrings(expected[i], name);
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(am.Args));
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(am.Strides));
 }
-test "T52 shared affine row sums dense pitches batches and bindings match release" {
+test "shared affine row sums dense pitches batches and bindings match release" {
     try std.testing.expectEqual(@as(usize, 8), am.names.len);
     if (comptime am.names.len == 8) {
         var r: mtl.Record = .{};
@@ -66,7 +66,7 @@ test "T52 shared affine row sums dense pitches batches and bindings match releas
         try bound(r.passes[0], 4, 5);
     }
 }
-test "T52 shared affine expert scatter and GLU thresholds match release" {
+test "shared affine expert scatter and GLU thresholds match release" {
     try std.testing.expectEqual(@as(usize, 8), am.names.len);
     if (comptime am.names.len == 8) {
         for ([_]u32{ 63, 64, 199, 200 }) |average| {
@@ -99,7 +99,7 @@ test "T52 shared affine expert scatter and GLU thresholds match release" {
         }
     }
 }
-test "T52 released Metal source bytes are pinned without shader compilation" {
+test "released Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
@@ -111,7 +111,7 @@ test "T52 released Metal source bytes are pinned without shader compilation" {
         try std.testing.expectEqualStrings("d96f3c86926177d9fe6df6c82beea7e4f379b16654aa835200d50afe182f3c99", &std.fmt.bytesToHex(hash, .lower));
     }
 }
-test "T52 released lane parameters and conservative scratch size" {
+test "released lane parameters and conservative scratch size" {
     const l = lane.Layout{ .n = 128, .k = 256, .format = .{ .bits = 4, .group = 64 }, .sk = 4, .reg = true, .precompute_sums = true };
     try std.testing.expectEqual(@as(usize, 14336), l.threadgroupBytes());
     const text = try lane.source(std.testing.allocator, l);
@@ -119,7 +119,7 @@ test "T52 released lane parameters and conservative scratch size" {
     try std.testing.expect(std.mem.endsWith(u8, text, ks.core_lane_projection));
     try std.testing.expect(std.mem.indexOf(u8, text, "TF_FUSED") == null);
 }
-test "T52 shared lane encode and supplied sums dispatch match released parameters" {
+test "shared lane encode and supplied sums dispatch match released parameters" {
     var r: mtl.Record = .{};
     const e = mtl.ComputeEncoder{ .r = &r };
     const p = lane.Projection{ .pipe = 211, .n = 128, .k = 256, .group_count = 4, .weight_bytes = 16384, .metadata_bytes = 2048, .output_bytes = 2, .y_stride = 192, .tile_count = 4, .sk = 4, .sums_pipe = 210, .sums_buffer = .{ .id = 9 }, .reg = true };
@@ -143,7 +143,7 @@ test "T52 shared lane encode and supplied sums dispatch match released parameter
     try std.testing.expectEqual([2]i32{ 70, 96 }, try val(r.passes[0], [2]i32, 3));
     try std.testing.expectEqual(mtl.Bound{ .id = 10, .off = 256 }, r.passes[0].buffers[5]);
 }
-test "T52 shared source format output GLU and fragment prefixes remain released" {
+test "shared source format output GLU and fragment prefixes remain released" {
     const a = std.testing.allocator;
     for ([_]u8{ 2, 3, 4, 5, 6, 8 }) |bits| for ([_]u16{ 32, 64 }) |group| for ([_]bool{ false, true }) |out| for ([_]bool{ false, true }) |plain| for ([_]bool{ false, true }) |tensor| {
         const text = try am.source(.{ .tensor = tensor }, a, .{ .bits = bits, .group = group, .out_f32 = out, .glu = if (plain) .plain else .clipped });
@@ -154,7 +154,7 @@ test "T52 shared source format output GLU and fragment prefixes remain released"
         try std.testing.expect(std.mem.indexOf(u8, text, "tf_affine_row_sums") != null);
     };
 }
-test "T52 Gemma rounded dense and fused source are separate from shared libraries" {
+test "Gemma rounded dense and fused source are separate from shared libraries" {
     const own = @import("src/families/gemma4/affine_mm.zig");
     const fused = @import("src/families/gemma4/fused_lane.zig");
     try std.testing.expectEqual(@as(usize, 1), own.names.len);

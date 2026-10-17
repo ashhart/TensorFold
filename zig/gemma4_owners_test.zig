@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const weights = @import("src/families/gemma4/weights.zig");
 const cfg = @import("src/families/gemma4/config.zig");
-test "T59 packed pair second publication failure releases every buffer once" {
+test "packed pair second publication failure releases every buffer once" {
     mtl.reset();
     var w: weights.Weights = undefined;
     w.owned = try .initCapacity(std.testing.allocator, 1);

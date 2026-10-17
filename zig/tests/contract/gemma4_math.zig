@@ -88,7 +88,7 @@ pub fn roundedWeight(s: f64, q: u8, b: f64) f64 {
     const weight = @mulAdd(f32, @as(f32, @floatCast(s)), @as(f32, @floatFromInt(q)), @as(f32, @floatCast(b)));
     return c.fromBf16(c.toBf16(weight));
 }
-test "T59 private dense rounds each weight, and GeGLU retains staged bf16 boundaries" {
+test "private dense rounds each weight, and GeGLU retains staged bf16 boundaries" {
     const s: f64 = c.fromBf16(c.toBf16(0.013));
     const b: f64 = c.fromBf16(c.toBf16(-0.03));
     try std.testing.expect(roundedWeight(s, 7, b) != s * 7 + b);
