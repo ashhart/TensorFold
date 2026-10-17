@@ -52,6 +52,49 @@ drafted request answers with `"draft": false` and the same tokens. The resident 
 reads no weights from disk during execution; a run that does fails the receipt's
 residency gate.
 
+## 256 GB: the Engram tables from disk
+
+The two Engram tables are about 203 GB of the release, and a token touches only 48 of
+their rows (24 per table, 256 bytes each). `--engram-stream` leaves them in their
+shards: the load checks both table headers as a resident load does but stages neither,
+and it stages only the tensors the backbone binds (no `mtp.*`, `vision.*`, `aligner.*`
+or image markers). Each chunk then hashes its row IDs in a command buffer of its own,
+reads each table's distinct rows with uncached `pread`s on a few threads, and runs the
+rest of the forward with the same gather kernel over the staged rows, so a streamed
+reply is the resident reply bit for bit (the gather check stages a synthetic shard and
+compares the two gathers byte for byte). The scale columns, 8 bytes a row, are read
+once at open and held in host memory (about 6.1 GB); they count against the load
+limit, not Metal admission.
+
+```sh
+tensorfold-native serve <pack> \
+  --engram-table-dir <orig> --engram-stream --chat-template <template> \
+  --context 65536 --parallel 1 --no-drafts --prompt-cache-gib 0 \
+  --host 127.0.0.1 --port 8099 --name DeepSeek-V4.1-Flash --keep-warm 0
+```
+
+- Set `--context` explicitly: `--context 0` means the config's 1,048,576 positions.
+- The pack must fit the load limit without the tables: on a 256 GB Mac that is a
+  backbone of roughly 2.0 to 2.25 bpw. Such a pack is a local recipe; its whole-model
+  error is larger than the qualified 2.8 and 2.9bpw packs' and must be measured.
+- Every row read costs a random read: put the tables on the internal SSD.
+- Releases without `chat_template.jinja` (DeepSeek-V4.1-Flash-1017 ships only
+  `encoding/`): use V4.1's template after checking it against the release's goldens,
+  ```sh
+  zig build tf-dsv41-template-check && ./zig-out/bin/tf-dsv41-template-check \
+    <template> <orig>/encoding/tests
+  ```
+  which renders each `test_input_N.json` with the engine's Jinja and compares it with
+  `test_output_N.txt`. Replies' `<｜DSML｜ calls>` blocks (V4.1's spelling, a space
+  after the bar) parse into `tool_calls` like V4's `<｜DSML｜tool_calls>`.
+- The token map depends only on the tokenizer and config; a release with V4.1's
+  tokenizer and config has V4.1's map, but its tables are its own.
+
+The residency receipt changes with it, and this is a gate change: `tf-dsv41-run` with
+`DSV41_ENGRAM_STREAM=1` passes when the execution's disk reads stay within the row
+bytes the reader counted itself and no page-ins occur; the resident gate (no disk
+reads at all) is unchanged.
+
 ## The numbers
 
 The per-operator reference tests run every stage against an FP64 ideal at three sides —
