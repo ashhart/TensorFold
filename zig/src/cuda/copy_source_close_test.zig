@@ -13,6 +13,7 @@ const Fake = struct {
         in_query: bool = false,
         go: bool = false,
         close_started: bool = false,
+        close_waiting: bool = false, // keepDriver reached its wait while the reaper held the stage
         close_returned: bool = false,
         freed: bool = false,
         destroyed: bool = false,
@@ -68,6 +69,9 @@ const Fake = struct {
         reap(d);
         return null;
     }
+    fn waiting() void {
+        set(&s.close_waiting);
+    }
     fn close(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
         const d: *Driver = @ptrCast(@alignCast(arg.?));
         set(&s.close_started);
@@ -95,29 +99,28 @@ pub fn run(reap: *const fn (*const Driver) void) !void {
     defer source.dropSpares(&d, @ptrFromInt(41)); // a spare close left behind, so the next test starts empty
     try source.enqueue(&d, 256, &@as([16]u8, @splat(7)), .{ .d = &d, .handle = null });
     try t.expectEqual(@as(usize, 1), source.retained());
-    var worker: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&worker, null, Fake.reaper, &d));
+    source.on_close_wait = Fake.waiting;
+    defer source.on_close_wait = null;
+    var worker: ?std.c.pthread_t = null;
+    var closer: ?std.c.pthread_t = null;
+    defer { // a failed check still lets the query return and both threads finish before the test does
+        Fake.set(&Fake.s.go);
+        if (closer) |c| _ = std.c.pthread_join(c, null);
+        if (worker) |w| _ = std.c.pthread_join(w, null);
+    }
+    var w: std.c.pthread_t = undefined;
+    try t.expectEqual(.SUCCESS, std.c.pthread_create(&w, null, Fake.reaper, &d));
+    worker = w;
     Fake.until(&Fake.s.in_query);
-    var closer: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&closer, null, Fake.close, &d));
-    Fake.until(&Fake.s.close_started);
+    var c: std.c.pthread_t = undefined;
+    try t.expectEqual(.SUCCESS, std.c.pthread_create(&c, null, Fake.close, &d));
+    closer = c;
+    Fake.until(&Fake.s.close_waiting);
     _ = std.c.pthread_mutex_lock(&Fake.mutex);
-    var deadline: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &deadline);
-    deadline.nsec += 300 * std.time.ns_per_ms; // close gets well into its wait on the busy stage
-    if (deadline.nsec >= std.time.ns_per_s) {
-        deadline.sec += 1;
-        deadline.nsec -= std.time.ns_per_s;
-    }
-    while (!Fake.s.close_returned) {
-        if (std.c.pthread_cond_timedwait(&Fake.cond, &Fake.mutex, &deadline) == .TIMEDOUT) break;
-    }
     const early = Fake.s.close_returned;
-    Fake.s.go = true;
-    _ = std.c.pthread_cond_broadcast(&Fake.cond);
     _ = std.c.pthread_mutex_unlock(&Fake.mutex);
-    try t.expectEqual(.SUCCESS, std.c.pthread_join(worker, null));
-    try t.expectEqual(.SUCCESS, std.c.pthread_join(closer, null));
+    Fake.set(&Fake.s.go);
+    Fake.until(&Fake.s.close_returned);
     try t.expect(!early);
     try t.expectEqual(@as(usize, 0), source.spareCount());
     try t.expect(Fake.s.freed and Fake.s.destroyed);

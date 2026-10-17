@@ -13,6 +13,8 @@ var mutex: std.c.pthread_mutex_t = .{};
 var changed: std.c.pthread_cond_t = .{};
 var head: ?*Node = null;
 var next_ticket: u64 = 1;
+/// Tests only: called under the lock each time keepDriver is about to wait on a busy owner.
+pub var on_close_wait: ?*const fn () void = null;
 /// Completed temporary stages kept for the next upload in their driver and context (none in tests unless one sets it).
 pub const SpareLimits = struct { count: usize = 64, bytes: usize = 64 << 20 };
 var spare_limits: SpareLimits = if (builtin.is_test) .{ .count = 0, .bytes = 0 } else .{};
@@ -245,6 +247,7 @@ pub fn keepDriver(d: *const Driver) bool {
             at = n.next;
         }
         if (!busy) return kept;
+        if (comptime builtin.is_test) if (on_close_wait) |hook| hook(); // the close fixture's signal: close is waiting
         _ = std.c.pthread_cond_wait(&changed, &mutex);
     }
 }
