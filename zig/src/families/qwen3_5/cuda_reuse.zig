@@ -30,6 +30,7 @@ pub const Copy = struct {
     delta: i32,
     format: Format,
     images: []Seen,
+    reading: bool = false, // a restore's queued copies may still read `host`: a drop keeps it until they are done
 };
 
 /// The engine, the streams' caches a save copies, and their prompts' images (cuda_native.zig's Lanes owns the maps).
@@ -164,8 +165,11 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
     if (copy.format != formatOf(e)) return error.KeptCacheFormat;
     if (!restorable(e, cache, copy, seen)) return error.BadReuse;
     const l: Layout = .{ .g = e.g, .format = copy.format, .cap = cache.cap, .at = copy.at };
-    // a failed copy may leave earlier ones reading the kept state: the stream drains before the caller can drop it
-    errdefer e.stream.synchronize() catch {};
+    // the copies read the kept state until the stream drains: a restore that fails before then leaves it marked
+    copy.reading = true;
+    errdefer if (e.stream.synchronize()) |_| {
+        copy.reading = false;
+    } else |_| std.log.warn("qwen3_5: a failed restore's stream did not drain: its kept state's host copy stays", .{});
     var off: usize = 0;
     for (0..l.count()) |i| {
         const p = l.piece(i);
@@ -174,6 +178,7 @@ pub fn restoreCache(e: *Engine, cache: *Cache, saved: *anyopaque, seen: []const 
         off += p.len;
     }
     try e.stream.synchronize(); // the host copy may be dropped once this returns
+    copy.reading = false;
     cache.len = copy.at;
     cache.written = copy.at;
     cache.last = null;
@@ -193,8 +198,9 @@ pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     dropCopy(t.e, @ptrCast(@alignCast(saved)));
 }
 
+/// Frees a kept state's host copy, unless a failed restore's copies may still read it: then it stays, as a save's.
 pub fn dropCopy(e: *Engine, copy: *Copy) void {
-    copy.host.free();
+    if (copy.reading) std.log.warn("qwen3_5: a kept state's host copy stays: a restore's copies from it did not drain", .{}) else copy.host.free();
     e.gpa.free(copy.images);
     e.gpa.destroy(copy);
 }
@@ -265,11 +271,13 @@ test "fp8 pieces follow qwen35_kv8.cu: a layer's key then value rows, then their
 test "a state resumes only a request with the same images before its position" {
     const d = [_]u64{ 1, 2, 3 };
     const kept = [_]Seen{.{ .at = 5, .id = d[0] }};
-    try std.testing.expect(sameImages(&kept, &.{ .{ .at = 5, .id = d[0] }, .{ .at = 40, .id = d[2] } }, 20)); // a later image is the pass's
+    // a later image is the pass's
+    try std.testing.expect(sameImages(&kept, &.{ .{ .at = 5, .id = d[0] }, .{ .at = 40, .id = d[2] } }, 20));
     try std.testing.expect(!sameImages(&kept, &.{.{ .at = 5, .id = d[1] }}, 20)); // another image under the same ids
     try std.testing.expect(!sameImages(&kept, &.{.{ .at = 6, .id = d[0] }}, 20));
     try std.testing.expect(!sameImages(&kept, &.{}, 20)); // a text prompt never resumes an image's state
-    try std.testing.expect(!sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 20)); // nor an image prompt a text state past its image
+    // nor an image prompt a text state past its image
+    try std.testing.expect(!sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 20));
     try std.testing.expect(sameImages(&.{}, &.{.{ .at = 5, .id = d[0] }}, 5)); // a text prefix before it
 }
 
@@ -296,4 +304,62 @@ test "a restore refuses another cache format, another length, a position past th
     copy.len += 1;
     cache.cap = 10;
     try std.testing.expect(!restorable(&e, &cache, &copy, &same));
+}
+
+/// A driver whose later copies and stuck waits fail with CUDA_ERROR_NOT_READY (check logs nothing), counting frees.
+const RestoreFake = struct {
+    var copies: usize = 0;
+    var fail_at: usize = 1;
+    var stuck = true;
+    var freed: usize = 0;
+
+    fn htod(_: cuda.abi.DevicePtr, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        copies += 1;
+        return if (copies - 1 >= fail_at) cuda.abi.error_not_ready else cuda.abi.success;
+    }
+    fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return if (stuck) cuda.abi.error_not_ready else cuda.abi.success;
+    }
+    fn hostAlloc(p: *?*anyopaque, len: usize, _: c_uint) callconv(.c) cuda.abi.Result {
+        p.* = (std.testing.allocator.alignedAlloc(u8, .@"16", len) catch return 2).ptr;
+        return cuda.abi.success;
+    }
+    fn freeHost(_: ?*anyopaque) callconv(.c) cuda.abi.Result {
+        freed += 1;
+        return cuda.abi.success;
+    }
+};
+
+test "a restore whose later copy fails keeps its host copy through a drop while the stream will not drain" {
+    var api: cuda.abi.Api = undefined;
+    api.cuMemcpyHtoDAsync_v2 = RestoreFake.htod;
+    api.cuStreamSynchronize = RestoreFake.sync;
+    api.cuMemHostAlloc = RestoreFake.hostAlloc;
+    api.cuMemFreeHost = RestoreFake.freeHost;
+    const d: cuda.Driver = .{ .lib = undefined, .api = api };
+    var e: Engine = undefined;
+    e.gpa = std.testing.allocator;
+    e.d = &d;
+    e.g = testGeometry(8, 4, 4);
+    e.stream = .{ .d = &d, .handle = null };
+    if (comptime @hasField(Engine, "kv8")) e.kv8 = false;
+    var cache: Cache = undefined;
+    cache.cap = 64;
+    cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
+    cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
+    const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
+    for ([_]bool{ true, false }) |stuck| {
+        RestoreFake.copies = 0;
+        RestoreFake.freed = 0;
+        RestoreFake.stuck = stuck;
+        const copy = try std.testing.allocator.create(Copy);
+        copy.* = .{ .host = try cuda.HostBuffer.alloc(&d, @intCast(l.total())), .len = l.total(), .at = 10, .delta = 0, .format = .bf16, .images = try std.testing.allocator.alloc(Seen, 0) };
+        const pinned = copy.host.bytes; // the fake's free keeps them: the test gives them back
+        defer std.testing.allocator.free(pinned);
+        try std.testing.expectError(error.NotReady, restoreCache(&e, &cache, copy, &.{}));
+        try std.testing.expectEqual(@as(usize, 2), RestoreFake.copies); // the state queued, the first head's rows refused
+        dropCopy(&e, copy);
+        // a stream that will not drain may still read the copy: the drop leaves it; once drained, the drop frees it
+        try std.testing.expectEqual(@as(usize, @intFromBool(!stuck)), RestoreFake.freed);
+    }
 }
