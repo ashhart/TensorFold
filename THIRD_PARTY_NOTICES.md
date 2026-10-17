@@ -209,12 +209,16 @@ The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision 
 
 ## Pictures in the native engine
 
-`zig/src/core/picture/` reads PNG and JPEG pictures to the RGB pixels TensorFold 0.6.6's Python engine loaded with
-Pillow 12.3, and the families' processors resize them. No libjpeg-turbo, Pillow or PyTorch code is included.
+`zig/src/core/picture/` reads PNG, JPEG and WebP pictures to the RGB pixels Pillow loads them as (Pillow 12.3 for
+TensorFold 0.6.6's PNG and JPEG, Pillow 13.0.0 for WebP), and the families' processors resize them. No libjpeg-turbo,
+libwebp, Pillow or PyTorch code is included.
 
 - JPEG pictures decode in libjpeg-turbo 3.1.4.1's TurboJPEG library (`libturbojpeg`), the release Pillow 12.3
   bundles, loaded at run time and called with Pillow's decoder settings. TensorFold neither includes nor ships it;
   libjpeg-turbo is under the IJG, BSD-3-Clause and zlib licenses.
+- WebP pictures decode in libwebp 1.6.0's decoder library (`libwebpdecoder`), the release Pillow 13.0.0 bundles,
+  loaded at run time. TensorFold neither includes nor ships it; libwebp is under the BSD-3-Clause license, Copyright
+  (c) 2010, Google Inc.
 - PNG pictures decode from the PNG specification on Zig's zlib inflater, and each layout becomes 8-bit samples as
   Pillow's PNG modes hold it. The bicubic resizes repeat, bit for bit, the fixed-point arithmetic of Pillow's
   `Image.resize` (MIT-CMU License, Copyright © 1997-2011 by Secret Labs AB, Copyright © 1995-2011 by Fredrik Lundh

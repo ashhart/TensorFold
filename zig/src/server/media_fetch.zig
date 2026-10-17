@@ -14,7 +14,7 @@ pub const max_redirects = 3;
 pub const timeout_s = 10;
 pub const total_s = 30;
 
-/// images_http.MEDIA_TYPES: the declared types an image URL may answer with (WebP is refused after, by its bytes).
+/// images_http.MEDIA_TYPES: the declared types an image URL may answer with.
 pub const image_media = [_][]const u8{ "image/jpeg", "image/png", "image/webp" };
 /// videos.py VIDEO_MEDIA_TYPES.
 pub const video_media = [_][]const u8{ "video/mp4", "video/webm", "video/quicktime", "video/x-matroska" };

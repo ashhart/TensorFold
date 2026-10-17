@@ -165,7 +165,14 @@ and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at start
   server loads it at the first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
   folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
   libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
-  release; PNG images still serve. WebP is refused by name until a decoder exists; other formats are refused.
+  release; PNG images still serve.
+- WebP is decoded by libwebp 1.6.0's decoder library (`libwebpdecoder`, the release Pillow 13.0.0 bundles), to the
+  RGB bytes Pillow 13.0.0 gives the same file (lossy and lossless, with and without alpha, EXIF-oriented:
+  `zig/tests/fixtures/picture/webp.json`, from `tools/zig/picture_webp_fixtures.py`). TensorFold does not ship it
+  either; the server loads it at the first WebP from the file `TENSORFOLD_LIBWEBP` names, else `lib/` beside the
+  server's folder, beside the server, Homebrew's `webp` on macOS, then the system's library path, and refuses WebP
+  images by name when it is missing or another release (`WebPGetDecoderVersion`). Animated WebP is refused as
+  animated pictures are. Other formats are refused.
 - The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the GLM5-Next
   processor's sizing and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
   `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
