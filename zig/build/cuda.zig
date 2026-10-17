@@ -452,6 +452,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
     b.step("test-issue-934", "Benchmark config admission and receipt regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 934:"} })).step);
+    b.step("test-issue-969", "First-EOS classification and incomplete benchmark messages without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 969"} })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
     const server_step = b.step(

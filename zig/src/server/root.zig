@@ -108,6 +108,7 @@ test {
         _ = @import("benchmark_args.zig");
         _ = @import("benchmark_cli_test.zig");
         _ = @import("benchmark_run_test.zig");
+        _ = @import("benchmark_early_test.zig");
     }
 }
 

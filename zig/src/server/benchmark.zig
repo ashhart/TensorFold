@@ -397,6 +397,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
         const code = try publish(ctx, args, v);
         if (code != 0) return code;
     }
-    for (samples) |s| if (s.status != .ok) return 2;
+    for (samples) |s| if (s.status != .ok) {
+        try say(ctx, "Incomplete attempts remain in the saved receipt (exit 2). " ++
+            "A cell has aggregates only when every repetition succeeds; early EOS is excluded from full-length comparisons.", .{});
+        return 2;
+    };
     return 0;
 }
