@@ -20,6 +20,30 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         },
     }) });
     const run = b.addRunArtifact(tests);
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
+    const gathers = b.addTest(.{ .filters = &.{"GLM gathers"}, .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/glm_gather_tests.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    b.step("test-glm-gathers", "CPU GLM gather formats, mixed projections and encoder parameters").dependOn(&b.addRunArtifact(gathers).step);
+    const cases = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_gather_cases.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+    }) });
+    b.step("test-glm-gather-cases", "CPU coverage of the GPU gather gate's routing distributions").dependOn(&b.addRunArtifact(cases).step);
+    const api = b.createModule(.{ .root_source_file = b.path("zig/src/glm_gather_api.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
+    const gpu_check = b.addObject(.{ .name = "glm-gather-gpu-compile", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/glm_gather_compile.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "tensorfold", .module = api } },
+    }) });
+    b.step("check-glm-gather-gpu-host", "Compile the GPU gather equality gate without compiling or running shaders").dependOn(&gpu_check.step);
     const compile = b.addObject(.{ .name = "glm-restore-host", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_restore_compile.zig"),
         .target = b.graph.host,

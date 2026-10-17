@@ -291,6 +291,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
             D,
             n,
         );
+    } else if (s & Class.routed == 0 and path == .gather) {
+        const g = wide.gather;
+        g.encode(e, p.mm.wide.?.gather[0], w.gate, w.up, .{ .x = x_in, .offsets = p.offsets, .order = p.order, .out = p.act }, n, E, c.topk, c.moe_inter, c.swiglu_limit);
+        g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
         gateUp(p, mm, x, e, w, x_in, M, n);

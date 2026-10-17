@@ -578,3 +578,20 @@ test {
     _ = learning;
     _ = paging;
 }
+/// Gather launches and shared row-source recompiles need measured limits before gate 5 can pass again.
+pub const gather_metal = blk: {
+    var rows = metal;
+    for (&rows) |*r| if (std.mem.startsWith(u8, r.name, "row projection ")) {
+        r.m1 = 0;
+        r.m2 = 0;
+    };
+    break :blk rows ++ [_]M{
+        .{ .name = "glm gather glm_gather_glu", .threads = 64, .tg_memory = 0 },
+        .{ .name = "glm gather glm_gather_down", .threads = 64, .tg_memory = 0 },
+    };
+};
+test "GLM gathers: unmeasured launch limits keep the resource gate red" {
+    for (gather_metal) |r| if (std.mem.startsWith(u8, r.name, "glm gather ") or std.mem.startsWith(u8, r.name, "row projection ")) {
+        try std.testing.expect(try checkMetal(std.testing.allocator, &.{r}, true) > 0);
+    };
+}

@@ -474,6 +474,7 @@ pub fn main() !void {
     defer g.core.deinit();
     defer g.swiglu.deinit();
     std.debug.print("GPU {s}, tensor units: {}\n", .{ device.name(), device.tensorUnits() });
+    try @import("glm_gather_check.zig").check(&g);
     var all = Tally{};
     const shapes = [_][2]usize{ .{ 132, 384 }, .{ 64, 2688 }, .{ 40, 1536 } };
     for (affine.row_bits) |bits| for ([_]usize{ 32, 64, 128 }) |group| {

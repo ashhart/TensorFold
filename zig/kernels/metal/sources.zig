@@ -104,6 +104,7 @@ pub const glm = @import("glm/kernels.zig");
 pub const glm_glue = @embedFile("glm_glue.metal");
 /// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
 pub const glm_rows = @embedFile("glm_rows.metal");
+pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
