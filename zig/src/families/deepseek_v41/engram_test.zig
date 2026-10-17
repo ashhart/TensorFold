@@ -245,3 +245,70 @@ test "Metal gathers only selected FP8 rows with rowwise scales and gates each mH
     }
     try std.testing.expectEqualSlices(u16, hidden.slice(u16, 8), masked_output.slice(u16, 8));
 }
+
+test "G1: gathers over staged rows from the shard equal gathers over the resident table bit for bit" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    const rows_mod = @import("engram_rows.zig");
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const table_rows: usize = 997;
+    const pad: usize = 5003;
+    const fx = try rows_mod.writeFixture(io, tmp.dir, "table.safetensors", table_rows, pad);
+    const path = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}/table.safetensors", .{tmp.sub_path}, 0);
+    defer a.free(path);
+    const file_bytes = try tmp.dir.readFileAlloc(io, "table.safetensors", a, .unlimited);
+    defer a.free(file_bytes);
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try engram.Pipelines.load(device);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    // The resident table: exactly the shard's two tensors, as load.Plan would stage them.
+    const weight = try device.buffer(table_rows * 256, 0);
+    defer weight.deinit();
+    @memcpy(weight.slice(u8, table_rows * 256), file_bytes[fx.data_start + pad ..][0 .. table_rows * 256]);
+    const scale = try device.buffer(table_rows * 8, 0);
+    defer scale.deinit();
+    @memcpy(scale.slice(u8, table_rows * 8), file_bytes[fx.data_start + pad + table_rows * 256 ..][0 .. table_rows * 8]);
+    const max_tokens = 64;
+    const n_max = max_tokens * hash.columns;
+    for ([_]bool{ true, false }) |in_ram| {
+        var src = try rows_mod.Source.open(a, .{ .path = path, .file_bytes = fx.file_bytes, .data_start = fx.data_start, .weight_begin = pad, .scale_begin = pad + table_rows * 256, .rows = table_rows }, .{ .max_ids = n_max, .cache_rows = 50, .scales_in_ram = in_ram, .threads = 4 });
+        defer src.deinit();
+        const ids = try device.buffer(n_max * 4, 0);
+        defer ids.deinit();
+        const local = try device.buffer(n_max * 4, 0);
+        defer local.deinit();
+        const stage_w = try device.buffer(n_max * 256, 0);
+        defer stage_w.deinit();
+        const stage_s = try device.buffer(n_max * 8, 0);
+        defer stage_s.deinit();
+        const out_resident = try device.buffer(max_tokens * engram.gather_dim * 2, 0);
+        defer out_resident.deinit();
+        const out_staged = try device.buffer(max_tokens * engram.gather_dim * 2, 0);
+        defer out_staged.deinit();
+        var state: u64 = 0x9e3779b97f4a7c15;
+        // Prefill-sized, decode-sized and a repeat that hits the row cache; narrow ID ranges force duplicates.
+        for ([_]struct { tokens: u32, span: u32 }{ .{ .tokens = 64, .span = 997 }, .{ .tokens = 1, .span = 997 }, .{ .tokens = 37, .span = 40 }, .{ .tokens = 37, .span = 40 } }) |case| {
+            const n = @as(usize, case.tokens) * hash.columns;
+            for (ids.slice(u32, n)) |*id| {
+                state = state *% 6364136223846793005 +% 1442695040888963407;
+                id.* = @intCast((state >> 33) % case.span);
+            }
+            const staged = try src.stage(ids.slice(u32, n), stage_w.slice(u8, n * 256), stage_s.slice(u8, n * 8), local.slice(u32, n));
+            const cb = queue.commandBuffer();
+            const e = cb.compute(.serial);
+            try engram.encodeGather(e, &p, .{ .weight = view(weight), .scale = view(scale), .rows = @intCast(table_rows) }, view(ids), view(out_resident), case.tokens, engram.gather_dim);
+            try engram.encodeGather(e, &p, .{ .weight = view(stage_w), .scale = view(stage_s), .rows = staged }, view(local), view(out_staged), case.tokens, engram.gather_dim);
+            e.end();
+            try completed(cb);
+            const bytes = @as(usize, case.tokens) * engram.gather_dim;
+            try std.testing.expectEqualSlices(u16, out_resident.slice(u16, bytes), out_staged.slice(u16, bytes));
+        }
+        try std.testing.expect(src.stats.hits > 0);
+    }
+}

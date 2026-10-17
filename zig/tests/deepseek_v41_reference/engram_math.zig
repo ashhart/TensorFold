@@ -61,6 +61,9 @@ pub const State = struct {
     }
     pub fn apply(self: *State, e: Engram, layer: usize, id: u32, h: []u16, c: Config, scratch: *projection.Scratch) !void {
         @setFloatMode(.strict);
+        // The oracle reads the tables in place; a streamed load has none.
+        const table = e.table orelse return error.OracleNeedsResidentEngram;
+        const scales = e.scales orelse return error.OracleNeedsResidentEngram;
         const tokens = [4]u32{ id, self.history[0], self.history[1], self.history[2] };
         var rolling = @as(u64, tokens[0]) * multipliers[layer][0];
         var offset: usize = 0;
@@ -70,7 +73,7 @@ pub const State = struct {
                 const column = (lookback - 1) * 8 + head;
                 const row = offset + @as(usize, @intCast(rolling % primes[layer][column]));
                 for (0..256) |d| self.gathered[column * 256 + d] =
-                    m.b(m.value(e.table, row * 256 + d) * m.value(e.scales, row * 8 + d / 32));
+                    m.b(m.value(table, row * 256 + d) * m.value(scales, row * 8 + d / 32));
                 offset += primes[layer][column];
             }
         }

@@ -1,5 +1,6 @@
 //! V4.1's lane slots behind the native server: greedy draws, drafts off, one Mac.
 //! The load stays under 70% of RAM unless GLM_LOAD_LIMIT_GB opts past it, as GLM's does.
+//! --engram-stream leaves the two Engram tables (about 203 GB) in their shards and stages only the bound backbone.
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
@@ -28,7 +29,7 @@ fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
         error.GreedyOnly => "the native DeepSeek V4.1 engine decodes greedily only: send temperature 0",
         error.ContextFull => "the prompt and max_tokens do not fit this server's --context",
         error.NoFreeSlot => "every lane slot is busy",
-        error.LoadLimitExceeded => "the resident payload does not fit the load limit: raise GLM_LOAD_LIMIT_GB or free memory",
+        error.LoadLimitExceeded => "the resident payload does not fit the load limit: raise GLM_LOAD_LIMIT_GB, free memory, or pass --engram-stream to read the Engram tables from disk",
         error.MissingEngramTables => "the checkpoint has no Engram tables: pass --engram-table-dir with the original release's shards",
         error.InvalidTokenMap => "engram-token-map.bin is missing or stale beside the checkpoint",
         else => null,
@@ -106,6 +107,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .context = if (o.context) |c| if (c > 0) @intCast(@min(c, std.math.maxInt(u32))) else 0 else 0,
         .lanes = @max(1, @min(o.lanes, 256)),
         .ram_limit_bytes = limit,
+        .engram = if (o.engram_stream) .streamed else .resident,
+        .bound_only = o.engram_stream,
     }) catch |err| {
         a.destroy(model);
         if (err == error.InvalidTokenMap) {

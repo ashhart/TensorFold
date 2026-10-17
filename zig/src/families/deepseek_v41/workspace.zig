@@ -38,12 +38,20 @@ pub const Field = enum {
     logits,
     projection,
     grouping,
+    /// Streamed Engram staging, one set per table layer (empty in resident mode): compact rows, scales, local IDs.
+    engram_stage_w_0,
+    engram_stage_w_1,
+    engram_stage_s_0,
+    engram_stage_s_1,
+    engram_local_0,
+    engram_local_1,
 };
 const count = std.enums.values(Field).len;
 
 pub const Plan = struct {
     rows: u32,
     lanes: u32,
+    streamed: bool = false,
     offsets: [count]usize,
     bytes: usize,
 
@@ -52,9 +60,15 @@ pub const Plan = struct {
     }
 
     pub fn initLanes(rows: u32, lanes: u32) !Plan {
+        return initStreamed(rows, lanes, false);
+    }
+
+    /// `streamed` adds the Engram staging fields; resident offsets are unchanged either way.
+    pub fn initStreamed(rows: u32, lanes: u32, streamed: bool) !Plan {
         if (rows == 0 or rows > 4096) return error.InvalidPrefillChunk;
         if (lanes == 0 or lanes > 256) return error.InvalidLaneCount;
         const t: usize = rows;
+        const stage: usize = if (streamed) t * hash.columns else 0;
         const grouped = if (rows > 1) try groups.Plan.init(t * 6, 384) else null;
         const projection_bytes = @max(try exl3.scratchBytes(5120, 129280, t), if (grouped) |g| @max(try exl3.scratchBytes(5120, 2304, g.padded), try exl3.scratchBytes(2304, 5120, g.padded)) else try exl3.scratchBytes(2304, 5120, t * 6));
         const sizes = [_]usize{
@@ -62,9 +76,10 @@ pub const Plan = struct {
             t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,    t * 24 * 4,   t * 4,        t * 24 * 4,
             t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
             t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 6 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
-            t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0,
+            t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, stage * 256,   stage * 256,  stage * 8,    stage * 8,
+            stage * 4,        stage * 4,
         };
-        var out = Plan{ .rows = rows, .lanes = lanes, .offsets = undefined, .bytes = 0 };
+        var out = Plan{ .rows = rows, .lanes = lanes, .streamed = streamed, .offsets = undefined, .bytes = 0 };
         for (sizes, 0..) |size, i| {
             out.offsets[i] = std.mem.alignForward(usize, out.bytes, 16);
             out.bytes = try std.math.add(usize, out.offsets[i], size);
@@ -106,6 +121,14 @@ pub const Workspace = struct {
         if (rows < 2 or rows > w.plan.rows) return error.InvalidPrefillChunk;
         const v = w.view(.grouping);
         return .{ .buffer = v.buffer, .offset = v.offset, .plan = try groups.Plan.init(@as(usize, rows) * 6, 384) };
+    }
+    pub fn bytes(w: *const Workspace, field: Field, len: usize) []u8 {
+        const v = w.view(field);
+        return (v.buffer.contents() + v.offset)[0..len];
+    }
+    pub fn words(w: *const Workspace, field: Field, len: usize) []u32 {
+        const v = w.view(field);
+        return @as([*]u32, @ptrCast(@alignCast(v.buffer.contents() + v.offset)))[0..len];
     }
     pub fn tokenIds(w: *const Workspace, rows: usize) []u32 {
         const v = w.view(.ids);

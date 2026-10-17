@@ -4,6 +4,7 @@ const mtl = @import("metal");
 const st = @import("../../core/safetensors.zig");
 const cp = @import("../../core/checkpoint_metal.zig");
 const paced = @import("../../core/paced_read.zig");
+const rows = @import("engram_rows.zig");
 
 pub const Reference = struct { shard: usize, entry: st.Entry };
 pub const Shard = struct {
@@ -15,14 +16,36 @@ pub const Shard = struct {
     names: st.Header,
 };
 
+/// Where the two Engram tables live: wired beside the backbone, or left in their shards and read per chunk.
+pub const Engram = enum { resident, streamed };
+pub const Options = struct {
+    engram: Engram = .resident,
+    /// Stage only tensors the backbone binds (embed, norm, head, layers.*): MTP, vision and image markers stay on disk.
+    bound_only: bool = false,
+};
+
+pub const tables = [_]struct { layer: u32, file: []const u8, rows: usize }{
+    .{ .layer = 1, .file = "model-00047-of-00048.safetensors", .rows = 384006168 },
+    .{ .layer = 14, .file = "model-00048-of-00048.safetensors", .rows = 384016682 },
+};
+
 pub const Plan = struct {
     arena: std.heap.ArenaAllocator,
     shards: std.ArrayList(Shard) = .empty,
     tensors: std.StringHashMapUnmanaged(Reference) = .empty,
     bytes: usize = 0,
+    /// Set in streamed mode: each table's shard and offsets, checked like a resident table but never staged.
+    engram_files: ?[2]rows.File = null,
+    bound_only: bool = false,
+    /// Indexed tensors left out by `bound_only`.
+    skipped: usize = 0,
 
     pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, table_dir: []const u8) !Plan {
-        var self = Plan{ .arena = std.heap.ArenaAllocator.init(gpa) };
+        return openWith(gpa, io, dir, table_dir, .{});
+    }
+
+    pub fn openWith(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, table_dir: []const u8, options: Options) !Plan {
+        var self = Plan{ .arena = std.heap.ArenaAllocator.init(gpa), .bound_only = options.bound_only };
         errdefer self.deinit();
         const a = self.arena.allocator();
         const index_path = try std.fs.path.join(a, &.{ dir, "model.safetensors.index.json" });
@@ -48,17 +71,21 @@ pub const Plan = struct {
         entries.reset();
         while (entries.next()) |item| try owned.put(a, item.key_ptr.*, item.value_ptr.string);
         for (ordered) |file| try self.add(try std.fs.path.join(a, &.{ dir, file }), null, &owned);
-        if (self.tensors.count() != index.weight_map.object.count()) return error.CheckpointIndexMismatch;
+        if (self.tensors.count() + self.skipped != index.weight_map.object.count()) return error.CheckpointIndexMismatch;
         entries = index.weight_map.object.iterator();
         while (entries.next()) |item| {
+            if (self.bound_only and !bound(item.key_ptr.*)) continue;
             const ref = self.tensors.get(item.key_ptr.*) orelse return error.CheckpointIndexMismatch;
             if (!std.mem.eql(u8, std.fs.path.basename(self.shards.items[ref.shard].path), item.value_ptr.string))
                 return error.CheckpointIndexMismatch;
         }
-        for ([_]struct { layer: u32, file: []const u8, rows: usize }{
-            .{ .layer = 1, .file = "model-00047-of-00048.safetensors", .rows = 384006168 },
-            .{ .layer = 14, .file = "model-00048-of-00048.safetensors", .rows = 384016682 },
-        }) |table| {
+        if (options.engram == .streamed) {
+            var streamed: [2]rows.File = undefined;
+            for (tables, &streamed) |table, *file| file.* = try self.tableFile(try std.fs.path.join(a, &.{ table_dir, table.file }), table.layer, table.rows);
+            self.engram_files = streamed;
+            return self;
+        }
+        for (tables) |table| {
             const prefix = try std.fmt.allocPrint(a, "layers.{d}.engram.embed.", .{table.layer});
             try self.add(try std.fs.path.join(a, &.{ table_dir, table.file }), prefix, null);
             const weight = try std.fmt.allocPrint(a, "{s}weight", .{prefix});
@@ -91,7 +118,9 @@ pub const Plan = struct {
         }
     }
 
-    fn add(self: *Plan, path: []const u8, prefix: ?[]const u8, owned: ?*const std.StringHashMapUnmanaged([]const u8)) !void {
+    const Header = struct { path: [:0]const u8, file_bytes: usize, data_start: usize, names: st.Header };
+
+    fn header(self: *Plan, path: []const u8, prefix: ?[]const u8) !Header {
         const a = self.arena.allocator();
         const own_path = try a.dupeSentinel(u8, path, 0);
         const fd = std.c.open(own_path, .{ .ACCMODE = .RDONLY });
@@ -109,13 +138,44 @@ pub const Plan = struct {
         const data_start: usize = 8 + @as(usize, @intCast(header_bytes));
         const names = try st.parseHeaderPrefix(a, json, file_bytes - data_start, prefix);
         if (names.count() == 0) return error.MissingTensor;
-        var begin: usize = if (prefix == null) 0 else file_bytes - data_start;
-        var end: usize = if (prefix == null) file_bytes - data_start else 0;
+        return .{ .path = own_path, .file_bytes = file_bytes, .data_start = data_start, .names = names };
+    }
+
+    /// A streamed table: the same dtype, shape and two-tensor checks as a resident one, nothing staged or counted.
+    fn tableFile(self: *Plan, path: []const u8, layer: u32, row_count: usize) !rows.File {
+        var buf: [64]u8 = undefined;
+        const prefix = try std.fmt.bufPrint(&buf, "layers.{d}.engram.embed.", .{layer});
+        const h = try self.header(path, prefix);
+        if (h.names.count() != 2) return error.UnexpectedEngramTensor;
+        var wbuf: [80]u8 = undefined;
+        var sbuf: [80]u8 = undefined;
+        const w = h.names.get(try std.fmt.bufPrint(&wbuf, "{s}weight", .{prefix})) orelse return error.MissingTensor;
+        const s = h.names.get(try std.fmt.bufPrint(&sbuf, "{s}scale", .{prefix})) orelse return error.MissingTensor;
+        if (w.dtype != .f8_e4m3 or w.rank != 2 or w.shape[0] != row_count or w.shape[1] != 256 or w.end - w.begin != row_count * 256 or
+            s.dtype != .f8_e8m0 or s.rank != 2 or s.shape[0] != row_count or s.shape[1] != 8 or s.end - s.begin != row_count * 8)
+            return error.UnsupportedTensor;
+        return .{ .path = h.path, .file_bytes = h.file_bytes, .data_start = h.data_start, .weight_begin = w.begin, .scale_begin = s.begin, .rows = row_count };
+    }
+
+    fn add(self: *Plan, path: []const u8, prefix: ?[]const u8, owned: ?*const std.StringHashMapUnmanaged([]const u8)) !void {
+        const a = self.arena.allocator();
+        const h = try self.header(path, prefix);
+        const own_path = h.path;
+        const file_bytes = h.file_bytes;
+        const data_start = h.data_start;
+        const names = h.names;
+        const selective = prefix == null and self.bound_only;
+        var begin: usize = if (prefix == null and !selective) 0 else file_bytes - data_start;
+        var end: usize = if (prefix == null and !selective) file_bytes - data_start else 0;
         for (names.keys(), names.values()) |name, entry| {
             // A rank-split pack duplicates whole-load tensors beside the shards; the index decides the owner file.
             if (owned) |map| {
                 const owner = map.get(name) orelse continue;
                 if (!std.mem.eql(u8, owner, std.fs.path.basename(path))) continue;
+            }
+            if (selective and !bound(name)) {
+                self.skipped += 1;
+                continue;
             }
             begin = @min(begin, entry.begin);
             end = @max(end, entry.end);
@@ -130,6 +190,8 @@ pub const Plan = struct {
             for (names.values()) |entry| selected_bytes = try std.math.add(usize, selected_bytes, entry.end - entry.begin);
             if (selected_bytes != end - begin) return error.NoncontiguousEngramTables;
         }
+        // A shard holding only unbound tensors is not staged at all.
+        if (selective and end <= begin) return;
         self.bytes = try std.math.add(usize, self.bytes, end - begin);
         try self.shards.append(a, .{ .path = own_path, .file_bytes = file_bytes, .data_start = data_start, .begin = begin, .end = end, .names = names });
     }
@@ -187,6 +249,12 @@ fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
+}
+
+/// The tensors weights.bind reads; everything else in a release (mtp.*, vision.*, aligner.*, image markers) is unbound.
+pub fn bound(name: []const u8) bool {
+    return std.mem.startsWith(u8, name, "layers.") or std.mem.startsWith(u8, name, "head.") or
+        std.mem.eql(u8, name, "embed.weight") or std.mem.eql(u8, name, "norm.weight");
 }
 
 fn safeBasename(s: []const u8) bool {
@@ -250,4 +318,72 @@ test "selected table payload must be contiguous and indexed files cannot escape 
     try std.testing.expectError(error.NoncontiguousEngramTables, plan.add(path, "engram.embed.", null));
     for ([_][]const u8{ "../x.safetensors", "/x.safetensors", "a\\x.safetensors", ".", "..", "x.safetensors\x00", "x.json", "" }) |name| try std.testing.expect(!safeBasename(name));
     try std.testing.expect(safeBasename("model-00001-of-00039.safetensors"));
+}
+
+test "a streamed table is checked like a resident one but stays out of the staged bytes" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header =
+        \\{"layers.1.engram.embed.weight":{"dtype":"F8_E4M3","shape":[3,256],"data_offsets":[0,768]},
+        \\ "layers.1.engram.embed.scale":{"dtype":"F8_E8M0","shape":[3,8],"data_offsets":[768,792]}}
+    ;
+    var data: [8 + header.len + 792]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    @memset(data[8 + header.len ..], 0);
+    try tmp.dir.writeFile(io, .{ .sub_path = "t.safetensors", .data = &data });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/t.safetensors", .{tmp.sub_path});
+    defer a.free(path);
+    var plan = Plan{ .arena = std.heap.ArenaAllocator.init(a) };
+    defer plan.deinit();
+    const f = try plan.tableFile(path, 1, 3);
+    try std.testing.expectEqual(@as(usize, 8 + header.len), f.data_start);
+    try std.testing.expectEqual(@as(usize, 768), f.scale_begin);
+    try std.testing.expectEqual(@as(usize, 0), plan.bytes);
+    try std.testing.expectEqual(@as(usize, 0), plan.shards.items.len);
+    try std.testing.expectError(error.UnsupportedTensor, plan.tableFile(path, 1, 4));
+    try std.testing.expectError(error.MissingTensor, plan.tableFile(path, 14, 3));
+}
+
+test "bound-only staging leaves MTP, vision and image markers on disk" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const header =
+        \\{"mtp.0.x":{"dtype":"U8","shape":[4],"data_offsets":[0,4]},
+        \\ "layers.0.a":{"dtype":"U8","shape":[2],"data_offsets":[4,6]},
+        \\ "embed.weight":{"dtype":"U8","shape":[2],"data_offsets":[6,8]},
+        \\ "vision.y":{"dtype":"U8","shape":[3],"data_offsets":[8,11]}}
+    ;
+    var data: [8 + header.len + 11]u8 = undefined;
+    std.mem.writeInt(u64, data[0..8], header.len, .little);
+    @memcpy(data[8..][0..header.len], header);
+    @memset(data[8 + header.len ..], 0);
+    try tmp.dir.writeFile(io, .{ .sub_path = "s.safetensors", .data = &data });
+    const only_mtp =
+        \\{"mtp.1.x":{"dtype":"U8","shape":[4],"data_offsets":[0,4]}}
+    ;
+    var data2: [8 + only_mtp.len + 4]u8 = undefined;
+    std.mem.writeInt(u64, data2[0..8], only_mtp.len, .little);
+    @memcpy(data2[8..][0..only_mtp.len], only_mtp);
+    @memset(data2[8 + only_mtp.len ..], 0);
+    try tmp.dir.writeFile(io, .{ .sub_path = "m.safetensors", .data = &data2 });
+    const path = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/s.safetensors", .{tmp.sub_path});
+    defer a.free(path);
+    const path2 = try std.fmt.allocPrint(a, ".zig-cache/tmp/{s}/m.safetensors", .{tmp.sub_path});
+    defer a.free(path2);
+    var plan = Plan{ .arena = std.heap.ArenaAllocator.init(a), .bound_only = true };
+    defer plan.deinit();
+    try plan.add(path, null, null);
+    try plan.add(path2, null, null);
+    try std.testing.expectEqual(@as(usize, 4), plan.bytes);
+    try std.testing.expectEqual(@as(usize, 1), plan.shards.items.len);
+    try std.testing.expectEqual(@as(usize, 4), plan.shards.items[0].begin);
+    try std.testing.expectEqual(@as(usize, 3), plan.skipped);
+    try std.testing.expect(!plan.has("mtp.0.x") and !plan.has("vision.y") and plan.has("layers.0.a"));
+    for ([_][]const u8{ "aligner.w", "image_start", "mtp.0.e", "vision.blocks.0" }) |n| try std.testing.expect(!bound(n));
+    for ([_][]const u8{ "head.trellis", "embed.weight", "norm.weight", "layers.39.ffn.gate.weight" }) |n| try std.testing.expect(bound(n));
 }

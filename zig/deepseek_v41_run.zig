@@ -34,8 +34,14 @@ fn usage(code: u8) noreturn {
         "IDS_JSON: nonempty JSON array of token IDs below 129280.\n" ++
         "Limits: oracle/trace 16 IDs; profile 256 IDs; teacher/seams 4096 IDs.\n" ++
         "History: TOKEN below 4096; retained normalized prefix at most 256 MiB.\n" ++
-        "Local diagnostics do not qualify the model. Oracle retains the independent 1% NRMS gate.\n", .{});
+        "Local diagnostics do not qualify the model. Oracle retains the independent 1% NRMS gate.\n" ++
+        "DSV41_ENGRAM_STREAM=1 reads the Engram tables from their shards (not with oracle or trace);\n" ++
+        "the receipt then admits disk reads up to the counted Engram row bytes and no page-ins.\n", .{});
     std.process.exit(code);
+}
+fn streamEngram() bool {
+    const v = std.c.getenv("DSV41_ENGRAM_STREAM") orelse return false;
+    return std.mem.eql(u8, std.mem.span(v), "1");
 }
 fn number(s: []const u8) !u32 {
     return std.fmt.parseInt(u32, s, 10);
@@ -170,7 +176,7 @@ pub fn main(init: std.process.Init) !void {
     defer pool.pop();
     if (std.mem.eql(u8, mode, "plan")) {
         const cfg = try config.Config.load(arena, io, args[2]);
-        var plan = try load.Plan.open(a, io, args[2], args[3]);
+        var plan = try load.Plan.openWith(a, io, args[2], args[3], if (streamEngram()) .{ .engram = .streamed, .bound_only = true } else .{});
         defer plan.deinit();
         try weights.validate(&plan);
         const device = try mtl.Device.init();
@@ -209,10 +215,13 @@ pub fn main(init: std.process.Init) !void {
         .lanes = if (is_lanes) 2 else 1,
         // Two full-capacity caches sit at the machine's wired edge; the receipt needs only the prompt's window.
         .context = if (is_lanes and args.len > 7) try number(args[7]) else 0,
+        .engram = if (streamEngram()) .streamed else .resident,
+        .bound_only = streamEngram(),
     });
     defer model.deinit();
     const ready = mtl.clock.seconds();
     const before = try counters();
+    const engram_before = model.engramStats();
     var execution_after: ?Counters = null;
     var execution_error: ?anyerror = null;
     execute(a, io, model, args, ids, map_blob, dir, before, &execution_after) catch |err| {
@@ -220,7 +229,15 @@ pub fn main(init: std.process.Init) !void {
     };
     const after = execution_after orelse try counters();
     if (after.disk_read < before.disk_read or after.pageins < before.pageins) return error.NonmonotonicCounters;
-    const resident_gate_passed = after.disk_read == before.disk_read;
+    const engram_after = model.engramStats();
+    const engram_read_bytes = engram_after.read_bytes - engram_before.read_bytes;
+    const streamed = model.engram_sources != null;
+    // Gate change for streamed Engram: execution may read from disk, but no more than the row bytes engram_rows
+    // counted itself (F_NOCACHE preads, so the count is exact), and nothing through page faults.
+    const resident_gate_passed = if (streamed)
+        after.disk_read - before.disk_read <= engram_read_bytes and after.pageins == before.pageins
+    else
+        after.disk_read == before.disk_read;
     const receipt = try std.json.Stringify.valueAlloc(a, .{
         .mode = mode,
         .evidence_origin = "current_invocation_not_historical_qualification",
@@ -234,6 +251,13 @@ pub fn main(init: std.process.Init) !void {
         .measurement_scope = if (execution_after != null) "model_execution" else "execution_and_diagnostic_io",
         .execution_disk_read_bytes = after.disk_read - before.disk_read,
         .execution_pageins = after.pageins - before.pageins,
+        .engram = if (streamed) "streamed" else "resident",
+        .engram_read_bytes = engram_read_bytes,
+        .engram_rows_requested = engram_after.requested - engram_before.requested,
+        .engram_rows_unique = engram_after.unique - engram_before.unique,
+        .engram_cache_hits = engram_after.hits - engram_before.hits,
+        .engram_reads = engram_after.reads - engram_before.reads,
+        .engram_wait_seconds = @as(f64, @floatFromInt(engram_after.wait_ns - engram_before.wait_ns)) / 1e9,
         .resident_gate_passed = resident_gate_passed,
         .execution_error = if (execution_error) |err| @as(?[]const u8, @errorName(err)) else null,
     }, .{});

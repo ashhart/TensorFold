@@ -16,6 +16,7 @@ pub const csa2_index = @import("csa2_index.zig");
 pub const rope = @import("rope.zig");
 const route = @import("route.zig");
 const engram = @import("engram.zig");
+pub const engram_rows = @import("engram_rows.zig");
 const View = @import("view.zig").View;
 const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("../../core/expert_groups.zig");
@@ -32,6 +33,14 @@ pub const Options = struct {
     lanes: u32 = 1,
     /// Refuse the load past this many bytes; null admits to Metal's working set minus the margin.
     ram_limit_bytes: ?u64 = null,
+    /// `.streamed` leaves the two Engram tables in their shards and reads each chunk's rows (engram_rows).
+    engram: load.Engram = .resident,
+    /// Host row cache per table in streamed mode; 0 turns it off.
+    engram_cache_rows: u32 = 0,
+    engram_scales_in_ram: bool = true,
+    engram_threads: u32 = 16,
+    /// Stage only the tensors the backbone binds (no MTP, vision or image markers).
+    bound_only: bool = false,
 };
 
 const Pipelines = struct {
@@ -90,6 +99,8 @@ pub const Model = struct {
     workspace: work.Workspace,
     attention_workspace: attention.Workspace,
     pipelines: Pipelines,
+    /// Streamed mode's per-table row readers (layer 1, layer 14); null when the tables are resident.
+    engram_sources: ?*[2]engram_rows.Source = null,
     admitted_bytes: usize,
     load_seconds: f64 = 0,
     last_gpu_seconds: f64 = 0,
@@ -109,21 +120,29 @@ pub const Model = struct {
         const c = try config.Config.load(arena.allocator(), io, o.dir);
         const capacity = try c.context(o.context);
         const table_dir = o.table_dir orelse c.engram_table_dir orelse return error.MissingEngramTables;
-        var plan = try load.Plan.open(gpa, io, o.dir, table_dir);
+        const streamed = o.engram == .streamed;
+        var plan = try load.Plan.openWith(gpa, io, o.dir, table_dir, .{ .engram = o.engram, .bound_only = o.bound_only });
         defer plan.deinit();
         try weights.validate(&plan);
         const map_blob = try std.Io.Dir.cwd().readFileAlloc(io, o.token_map, arena.allocator(), .limited(2 << 20));
         const map = try engram.hash.TokenMap.parse(map_blob);
         const lanes = o.lanes;
-        const wp = try work.Plan.initLanes(o.chunk_rows, lanes);
+        const wp = try work.Plan.initStreamed(o.chunk_rows, lanes, streamed);
+        const source_options = engram_rows.Options{ .max_ids = @as(usize, o.chunk_rows) * engram.hash.columns, .cache_rows = o.engram_cache_rows, .scales_in_ram = o.engram_scales_in_ram, .threads = o.engram_threads };
+        var host_bytes: usize = 0;
+        if (plan.engram_files) |files| for (files) |f| {
+            host_bytes += engram_rows.Source.hostBytes(source_options, f.rows);
+        };
         const kp = kv.cache.Plan{ .capacity = capacity, .layers = 40 };
         const workspace_bytes = try std.math.add(usize, wp.bytes, attention.Workspace.bytes(o.chunk_rows));
         const cache_bytes = try std.math.add(usize, kp.residentBytes(), weights.sizeofDescriptors());
         const execution_bytes = try std.math.add(usize, workspace_bytes, try std.math.mul(usize, cache_bytes, lanes));
         const rotary_bytes = attention.Pipelines.residentBytes(capacity, c.text_config);
         const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
-        if (o.ram_limit_bytes) |limit| if (needed > limit) {
-            std.log.err("the resident payload needs {d} bytes; the load limit is {d}", .{ needed, limit });
+        // Streamed tables cost host memory (scale columns, row cache), not Metal buffers: the load limit counts it, Metal admission does not.
+        const limited = try std.math.add(usize, needed, host_bytes);
+        if (o.ram_limit_bytes) |limit| if (limited > limit) {
+            std.log.err("the resident payload needs {d} bytes (host {d}); the load limit is {d}", .{ limited, host_bytes, limit });
             return error.LoadLimitExceeded;
         };
         const load_started = std.Io.Timestamp.now(io, .awake);
@@ -146,8 +165,22 @@ pub const Model = struct {
         errdefer residency.deinit();
         var cp = try plan.materialize(gpa, device, residency, queue);
         errdefer cp.deinit();
-        var bound = try weights.bind(device, &cp);
+        var bound = try weights.bind(device, &cp, o.engram);
         errdefer bound.deinit();
+        var sources: ?*[2]engram_rows.Source = null;
+        if (plan.engram_files) |files| {
+            const pair = try gpa.create([2]engram_rows.Source);
+            errdefer gpa.destroy(pair);
+            pair[0] = try engram_rows.Source.open(gpa, files[0], source_options);
+            errdefer pair[0].deinit();
+            pair[1] = try engram_rows.Source.open(gpa, files[1], source_options);
+            sources = pair;
+            std.log.info("streamed Engram tables: {d} + {d} rows, host bytes {d}, cache rows {d}", .{ files[0].rows, files[1].rows, host_bytes, o.engram_cache_rows });
+        }
+        errdefer if (sources) |pair| {
+            for (pair) |*src| src.deinit();
+            gpa.destroy(pair);
+        };
         const caches = try gpa.alloc(kv.cache.State, lanes);
         errdefer gpa.free(caches);
         const engram_stash = try gpa.alloc(u8, lanes * 16);
@@ -169,10 +202,14 @@ pub const Model = struct {
         residency.commit();
         residency.requestResidency();
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .admitted_bytes = needed, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
+        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .engram_sources = sources, .admitted_bytes = limited, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
     }
 
     pub fn deinit(m: *Model) void {
+        if (m.engram_sources) |pair| {
+            for (pair) |*src| src.deinit();
+            m.gpa.destroy(pair);
+        }
         m.queue.removeResidencySet(m.residency);
         m.residency.deinit();
         m.attention_workspace.deinit();
@@ -259,6 +296,31 @@ pub const Model = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const rows: u32 = @intCast(ids.len);
+        // Streamed tables: hash and commit in their own command buffer, read the row IDs back, stage the rows, then run the rest.
+        var staged: [2]u32 = .{ 0, 0 };
+        if (m.engram_sources) |sources| {
+            m.valid = false;
+            const ws = &m.workspace;
+            const h = m.queue.commandBufferUnretained();
+            const he = h.compute(.serial);
+            for (engram.hash.layers, 0..) |meta, index| {
+                engram.encodeHash(he, &m.pipelines.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows) catch |err| {
+                    he.end();
+                    return err;
+                };
+            }
+            engram.encodeCommit(he, &m.pipelines.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows) catch |err| {
+                he.end();
+                return err;
+            };
+            he.end();
+            h.commit();
+            h.wait();
+            try completed(h);
+            const n = @as(usize, rows) * engram.hash.columns;
+            staged[0] = try sources[0].stage(ws.words(.engram_ids_0, n), ws.bytes(.engram_stage_w_0, n * engram_rows.weight_bytes), ws.bytes(.engram_stage_s_0, n * engram_rows.scale_bytes), ws.words(.engram_local_0, n));
+            staged[1] = try sources[1].stage(ws.words(.engram_ids_1, n), ws.bytes(.engram_stage_w_1, n * engram_rows.weight_bytes), ws.bytes(.engram_stage_s_1, n * engram_rows.scale_bytes), ws.words(.engram_local_1, n));
+        }
         const e = m.queue.commandBufferUnretained();
         var enc = e.compute(.serial);
         for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
@@ -278,10 +340,12 @@ pub const Model = struct {
         try m.profileSpan(&enc, .other);
         const p = &m.pipelines;
         const ws = &m.workspace;
-        for (engram.hash.layers, 0..) |meta, index| {
-            try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
+        if (m.engram_sources == null) {
+            for (engram.hash.layers, 0..) |meta, index| {
+                try engram.encodeHash(enc, &p.engram, meta, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), ws.view(if (index == 0) .engram_ids_0 else .engram_ids_1), rows);
+            }
+            try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows);
         }
-        try engram.encodeCommit(enc, &p.engram, ws.view(.ids), ws.view(.token_map), null, try ws.historyView(slot), rows);
         ops.encodeEmbedding(enc, &p.ops, ws.view(.ids), tensor(m.weights.embed), ws.view(.collapsed), .{ .rows = rows, .width = 5120, .table_stride = 5120, .y_stride = 5120, .copies = 1 });
         enc.barrier();
         mhc.encodeExpand(enc, &p.mhc, ws.view(.collapsed), ws.view(.stream), ws.view(.previous_pre), .{ .rows = rows, .width = 5120, .x_stride = 5120, .stream_stride = 20480 });
@@ -289,7 +353,16 @@ pub const Model = struct {
         for (&m.weights.layers, 0..) |*layer, index| {
             if (layer.engram) |g| {
                 try m.profileSpan(&enc, .engram);
-                try engram.encodeGather(enc, &p.engram, .{ .weight = tensor(g.table), .scale = tensor(g.scales), .rows = @intCast(g.table.shape[0]) }, ws.view(if (index == 1) .engram_ids_0 else .engram_ids_1), ws.view(.engram_gather), rows, 6144);
+                const first = index == 1;
+                // Staged rows are the shard's bytes in ascending row order and local IDs point into them: same kernel, same bits.
+                const table: engram.Table, const gather_ids = if (g.table) |t| .{
+                    .{ .weight = tensor(t), .scale = tensor(g.scales.?), .rows = @intCast(t.shape[0]) },
+                    ws.view(if (first) .engram_ids_0 else .engram_ids_1),
+                } else .{
+                    .{ .weight = ws.view(if (first) .engram_stage_w_0 else .engram_stage_w_1), .scale = ws.view(if (first) .engram_stage_s_0 else .engram_stage_s_1), .rows = staged[if (first) 0 else 1] },
+                    ws.view(if (first) .engram_local_0 else .engram_local_1),
+                };
+                try engram.encodeGather(enc, &p.engram, table, gather_ids, ws.view(.engram_gather), rows, 6144);
                 try m.project(enc, g.wkv, ws.view(.engram_gather), ws.view(.engram_kv), rows, 6144, 25600, .bf16);
                 try engram.encodeGate(enc, &p.engram, .{ .q_weight = tensor(g.q_weight), .k_weight = tensor(g.k_weight), .dim = 5120, .copies = 4, .weight_dtype = switch (g.q_weight.dtype) {
                     .bf16 => .bf16,
@@ -341,6 +414,13 @@ pub const Model = struct {
         m.valid = true;
         m.logits_rows = if (logits == .all) rows else if (logits == .last) 1 else 0;
         return ws.logits(m.logits_rows);
+    }
+
+    /// Streamed mode's read counters summed over both tables; zero when the tables are resident.
+    pub fn engramStats(m: *const Model) engram_rows.Stats {
+        var out: engram_rows.Stats = .{};
+        if (m.engram_sources) |pair| for (pair) |*src| out.add(src.stats);
+        return out;
     }
 
     fn profileSpan(m: *Model, encoder: *mtl.ComputeEncoder, stage: gpu_counters.Stage) !void {
