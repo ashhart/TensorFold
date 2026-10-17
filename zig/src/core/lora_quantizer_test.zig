@@ -114,3 +114,41 @@ test "an allocation that fails at any step is unwound without a leak or a close 
     }
     try std.testing.expect(at > 5 and at < 1000); // it did fail at some steps, and ran clean once none failed
 }
+
+const dense_name = "model.language_model.layers.0.linear_attn.in_proj_a";
+const shipped_name = "language_model.model.layers.0.linear_attn.in_proj_a";
+
+fn checkNames(s: *fx.Scratch, modules: []const []const u8, msg: []u8) !struct { res: anyerror!bool, out: []const u8 } {
+    var w = Io.Writer.fixed(msg);
+    const res = dir.gate.quantizerCheck(std.testing.allocator, s.arena.allocator(), io, &w, try s.path(&.{"dense"}), try s.path(&.{"base"}), modules);
+    return .{ .res = res, .out = w.buffered() };
+}
+
+test "a module named in the dense or in the shipped namespace resolves, and the output names both forms" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    _ = try fx.makeNamed(&s, &.{.{ .dense = dense_name, .shipped = shipped_name }});
+    var buf: [4096]u8 = undefined;
+    for ([_][]const u8{ dense_name, shipped_name }) |given| {
+        const r = try checkNames(&s, &.{given}, &buf);
+        try std.testing.expect(try r.res);
+        try std.testing.expect(contains(r.out, dense_name ++ " (shipped as " ++ shipped_name ++ ")") and contains(r.out, "identical"));
+    }
+}
+
+test "a name that matches two distinct pairs, or none, is refused listing every candidate tried" {
+    var s = try fx.Scratch.init();
+    defer s.deinit();
+    // the dense source holds both spellings, so the shipped spelling pairs with itself and with the dense one
+    _ = try fx.makeNamed(&s, &.{
+        .{ .dense = shipped_name, .shipped = shipped_name },
+        .{ .dense = dense_name, .shipped = dense_name },
+    });
+    var buf: [4096]u8 = undefined;
+    var r = try checkNames(&s, &.{shipped_name}, &buf);
+    try std.testing.expectError(error.Refused, r.res);
+    try std.testing.expect(contains(r.out, "ambiguous") and contains(r.out, dense_name ++ ".weight") and contains(r.out, shipped_name ++ ".weight"));
+    r = try checkNames(&s, &.{"model.layers.9.unknown"}, &buf);
+    try std.testing.expectError(error.Refused, r.res);
+    try std.testing.expect(contains(r.out, "model.layers.9.unknown.weight") and contains(r.out, "dense base"));
+}

@@ -63,6 +63,26 @@ When the dense source and the conversion scheme match how a checkpoint was made,
 `zig build tf-merge-check` builds a check of that: `tf-merge-check --quantizer DENSE SHIPPED MODULE...` quantizes each named dense tensor and compares it with the shipped one, reporting the share of equal scales, biases, codes and whole groups.
 A dense tensor of another shape, size or dtype than the shipped projection, and any non-finite value or stored scale, is refused naming the tensor.
 
+## Merging a LoRA
+
+`tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED` folds a PEFT LoRA into a quantized checkpoint without a Python toolchain or a GPU.
+`DENSE` is the checkpoint's bf16 source, `ADAPTER` a PEFT folder and `SHIPPED` the MLX affine 4-bit checkpoint to match; `OUT` must not exist or must be empty.
+For each tensor the adapter names, `(alpha / r) * (B * A)` is added to the dense weights and the result is quantized fresh at the shipped tensor's bits and group as above.
+The product is accumulated in FP64 in order and scaled once, so a zero sum gives an exactly zero delta; a sum that is not exact in FP64 is not made exact.
+Folding the adapter into the already-quantized weights instead keeps only a small part of its effect, which is why the dense base is required.
+Every other tensor, shard, index and `config.json` is copied byte for byte from `SHIPPED`; with a zero adapter that is the whole checkpoint.
+The merge is staged in a sibling folder and renamed to `OUT` only when everything has succeeded, so a failure before publication leaves no `OUT`; the rename replaces an empty `OUT` atomically and never a non-empty one.
+A module is merged when `SHIPPED` holds its `.weight`, `.scales` and `.biases` as rank-2 tensors in the 4-bit affine layout and `DENSE` holds a rank-2 `.weight` of the same shape, so attention, MLP and linear-attention projections all qualify; the checkpoint decides, not a list of names.
+A module may be named in either checkpoint's namespace: the exact name is tried first, then one table of prefix rewrites (`model.language_model.` and `language_model.model.`) in both directions; a module that resolves to no pair of names present in both folders, or to more than one, is refused naming each pair tried.
+It refuses, naming the tensor and the reason, anything else: modules not quantized in `SHIPPED` (norms, embeddings), stacked or rank-3 expert tensors, fused projections, other bit widths, DoRA and rsLoRA, shard names that leave the folder, subdirectories, dangling symlinks and special files among its inputs, shards whose tensor ranges overlap, non-finite weights, factors or stored scales, duplicate PEFT keys, and shape mismatches.
+`tf-merge-check DENSE ADAPTER OUT SHIPPED` holds a merged folder to these gates:
+- the exact file set and lengths of `SHIPPED`, and every byte outside the touched tensors, identical;
+- every written group equal, byte for byte, to a recomputation from `DENSE` and `ADAPTER`, with the number of groups compared reported;
+- aggregate RMS error against an FP64 reference at most twice the shipped quantization's: a sanity net for a gross fault such as a wrong scale or a sign error, not a quality gate, since a delta that widens the groups' ranges legitimately coarsens the grid by a few percent (the ratios, including the worst-column one, are printed);
+- for an adapter with no effect (alpha 0, or an all-zero factor, negative zero included), byte identity and ratios of exactly 1.
+
+The recomputation shares the merge's arithmetic, so it checks that what was written is what the code computed; the independent evidence is the pinned vectors and the byte identity of the quantizer with shipped tensors.
+
 ## Scope and qualification
 
 In the Python 0.6.6 engine, these additions cover MLX affine safetensors checkpoints for the dense Qwen family. The
