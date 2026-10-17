@@ -76,7 +76,7 @@ pub fn mixer(f: *const fwd.Forward, w: *const fwd.Walk, i: usize, spans: []const
 
 fn mshape(f: *const fwd.Forward) @import("cuda_glue.zig").Shape {
     const c = f.c;
-    return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.max_rows };
+    return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.windowRows(c) };
 }
 
 /// The MoE block (cuda_forward.zig's experts and sharedRest), the pocket's open neurons scaled row by row.

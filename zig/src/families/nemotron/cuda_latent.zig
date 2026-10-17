@@ -31,6 +31,7 @@ pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck
 pub const Fns = struct {
     mod: cuda.Module,
     topk: cuda.Function,
+    topk_few: cuda.Function,
     combine: cuda.Function,
     moe_out: cuda.Function,
     share_ids: cuda.Function,
@@ -41,6 +42,7 @@ pub const Fns = struct {
         return .{
             .mod = mod,
             .topk = try mod.function("tf_super_topk"),
+            .topk_few = try mod.function("tf_super_topk_few"),
             .combine = try mod.function("tf_super_combine"),
             .moe_out = try mod.function("tf_super_moe_out"),
             .share_ids = try mod.function("tf_super_share_ids"),
@@ -49,6 +51,18 @@ pub const Fns = struct {
 
     pub fn unload(x: *Fns) void {
         x.mod.unload();
+    }
+
+    /// Each row's top-k of `sk` slices (ids by pick and share, weights by pick): `few` an expert a thread, else a warp.
+    pub fn picks(x: Fns, s: cuda.Stream, few: bool, part: u64, bias: u64, ids: u64, wts: u64, rows: usize, scaling: f32, experts: usize, sk: usize, top_k: usize, shares: usize, norm_topk: bool) !void {
+        var t: cuda.Args = .{};
+        for ([_]u64{ part, bias, ids, wts }) |p| t.add(p);
+        t.add(int(rows));
+        t.add(scaling);
+        for ([_]usize{ experts, sk, top_k, shares }) |v| t.add(int(v));
+        t.add(@as(c_int, @intFromBool(norm_topk)));
+        if (few) return go(x.topk_few, s, .{ rows, 1, 1 }, @intCast((experts + 31) / 32 * 32), 0, &t);
+        try go(x.topk, s, .{ rows, 1, 1 }, 32, 0, &t);
     }
 };
 
@@ -173,7 +187,7 @@ fn norm(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, 
     return L.raw(label, try ck.expect(try std.fmt.bufPrint(&b, "{s}{s}", .{ pre, leaf }), .bf16, &.{c.hidden}));
 }
 
-/// The MTP head as stored (bf16 attention and input projection, a latent MoE); it drafts over the whole head.
+/// The MTP head as stored (bf16 attention and input projection, a latent MoE).
 pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
     var buf: [6][192]u8 = undefined;
     var p: [128]u8 = undefined;
@@ -194,12 +208,7 @@ pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
         .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c, mtp_id),
         .final_norm = try norm(L, ck, "mtp.final_norm", pre, "1.final_layernorm.weight", c),
     };
-    // the draft head is the target's: every id a candidate, so no vocabulary table is needed for this tokenizer
-    L.w.draft_head = L.w.head;
-    const ids = try L.gpa.alloc(u32, c.vocab);
-    defer L.gpa.free(ids);
-    for (ids, 0..) |*x, i| x.* = @intCast(i);
-    try W.draftIds(L, ids);
+    try modelopt.fp8DraftHead(L, ck, c);
 }
 
 /// Expert `e`'s projection name: `pre` then `mid` (with its index when `mid` takes one) then the leaf.
@@ -319,14 +328,7 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     } else {
         try go(g.f.router, g.s, .{ (rows + 15) / 16, (c.experts + 15) / 16, sk }, 256, @intCast(2 * 16 * (per / 2 + 1) * 4), &a);
     }
-    const fns = f.ops.k.latent.?;
-    var t: cuda.Args = .{};
-    for ([_]u64{ b.part, m.bias, b.pick, b.wts }) |p| t.add(p);
-    t.add(int(rows));
-    t.add(c.routed_scaling);
-    for ([_]usize{ c.experts, sk, c.top_k, c.ownShares() }) |v| t.add(int(v));
-    t.add(@as(c_int, @intFromBool(c.norm_topk)));
-    try go(fns.topk, g.s, .{ rows, 1, 1 }, 32, 0, &t);
+    try f.ops.k.latent.?.picks(g.s, rows <= state.max_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
