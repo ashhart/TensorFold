@@ -362,6 +362,13 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     return u;
 }
 
+/// Unmeasured launches stay outside the measured set; live and fatbin audits must collect their missing records.
+pub const cuda_pending = [_]CudaRecord{
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_rotate", .symbol = "tf_exl3_prompt_rotate", .image = "exl3_experts", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu", .symbol = "tf_exl3_prompt_gu", .image = "exl3_experts", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = none },
+};
+
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
     .{ .launch = .{ .name = "control: past its bounds", .symbol = "tf_ctl_bounded", .image = "contract_controls", .threads = 512 }, .usage = .{ .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 }, .{ .regs = 10, .static = 0, .bound = 256 } } },
@@ -569,9 +576,18 @@ const learning = @import("registry_learning.zig");
 const paging = @import("paging_pending.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-/// What the live audit checks: the serving records, then the learning and paging launches.
-pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
+/// What the live audit checks: the serving records, then the learning, paging and still unmeasured launches.
+pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra ++ cuda_pending;
 test {
     _ = learning;
     _ = paging;
+}
+
+test "pending CUDA launches have no invented usage and cannot pass the measured gate" {
+    for (cuda_pending) |r| {
+        try std.testing.expect(r.launch.threads > 0);
+        try std.testing.expectEqual(none, r.usage);
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
+        for (cuda) |measured| try std.testing.expect(!std.mem.eql(u8, r.launch.symbol, measured.launch.symbol));
+    }
 }

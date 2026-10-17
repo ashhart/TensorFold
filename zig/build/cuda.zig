@@ -414,6 +414,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // the GLM-5.3-Flash CUDA family's host side
     const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
+    const prompt_host = b.createModule(.{ .root_source_file = b.path("zig/exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
+    const prompt_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_host, .filters = &.{"exl3 prompt:"} }));
+    prompt_run.has_side_effects = true;
+    b.step("test-exl3-prompt-host", "Actual common prompt dispatch and scratch with recording CUDA calls").dependOn(&prompt_run.step);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);

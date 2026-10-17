@@ -13,6 +13,7 @@ const Stream = stream_.Stream;
 
 pub const DType = exl3.DType;
 pub const Codebook = exl3.Codebook;
+pub const prompt = @import("exl3_prompt.zig");
 
 /// One layer's routed experts (experts.py's Exl3RoutedExperts): per-expert trellis pointers, stacked scales, the clamp.
 pub const Layer = struct {
@@ -32,6 +33,8 @@ pub const Layer = struct {
     dims: usize, // D (model width)
     width: usize, // I (expert width)
     codebook: Codebook,
+    uniform_k2: u32 = 0, // nonzero only when the loader verified this half-bit width for every projection
+    shared_input: bool = false, // the loader verified identical gate/up input scales across every expert
     gu_stride: usize = 0, // gate/up trellis row stride in tiles (0: contiguous per projection)
     limit: f32 = 0, // the SwiGLU clamp (0: none)
     act_mode: i32 = 0, // 0: GLM's bf16 roundings (the route RED-SNOW runs), 1: fp32
@@ -108,6 +111,7 @@ pub const Experts = struct {
     grouped: [3]Function, // one per codebook
     gateup: Function,
     down_combine: Function,
+    prompt: prompt.Kernels = undefined,
     plan_rotate: Function = undefined,
     plan_finish: Function = undefined,
 
@@ -122,6 +126,7 @@ pub const Experts = struct {
             .down_combine = undefined,
         };
         errdefer e.mod.unload();
+        e.prompt = try prompt.Kernels.resolve(e.mod);
         e.plan_rotate = try e.mod.function("tf_exl3_plan_rotate");
         e.plan_finish = try e.mod.function("tf_exl3_plan_finish");
         e.group = try e.mod.function("tf_exl3_group");
