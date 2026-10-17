@@ -1,6 +1,7 @@
 //! A round's windows (Python `_plan_window`, `_copy_proposal`, `_allocate`): forced, copied or drafted rows.
 const std = @import("std");
 const accept = @import("accept.zig");
+const cut = @import("window_cut.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
@@ -232,25 +233,7 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     for (plans, counts) |*p, c| {
         if (p.kind == .head) p.stream.granted = c;
         if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
-        if (c == 0) {
-            p.kind = .none;
-            p.held = 0;
-            p.tokens = &.{};
-            p.parents = null;
-        } else if (p.parents) |parents| {
-            // the held drafts lead the window (placeholders here), so the first kept rows stay held
-            const drafts = try a.alloc(u32, p.count());
-            @memset(drafts[0..p.held], 0);
-            @memcpy(drafts[p.held..], p.tokens);
-            const tree = try accept.sanitizeTree(a, drafts, parents, c);
-            const held = @min(p.held, c);
-            p.held = held;
-            p.tokens = tree.tokens[held..];
-            p.parents = tree.parents;
-            if (c < p.branch_from) p.branch_from = 0; // the grafts follow the trunk's drafts: this count keeps none
-        } else if (p.held > 0) {
-            p.held = c;
-        } else p.tokens = p.tokens[0..c];
+        try cut.prefix(a, p, c);
     }
     const rows = try a.alloc(Value, plans.len);
     for (rows, plans) |*r, p| {
@@ -275,20 +258,10 @@ fn trimmed(e: *Engine, plans: []Plan, t: trim.Trim) !void {
         if (c.nodes) |nodes| {
             if (p.parents == null or p.held > 0) return error.TrimNodesNeedTree;
             const sub = try trim.select(a, p.tokens, p.parents.?, nodes);
+            try cut.selected(a, p, nodes);
             p.tokens = sub.tokens;
             p.parents = if (accept.isChain(try accept.rowParents(a, 1 + sub.tokens.len, sub.parents))) null else sub.parents;
-        } else if (c.count == 0) {
-            p.kind = .none;
-            p.held = 0;
-            p.tokens = &.{};
-            p.parents = null;
-        } else if (c.count < p.count()) {
-            if (p.parents) |parents| {
-                const tree = try accept.sanitizeTree(a, p.tokens, parents, c.count);
-                p.tokens = tree.tokens;
-                p.parents = tree.parents;
-            } else if (p.held > 0) p.held = c.count else p.tokens = p.tokens[0..c.count];
-        }
+        } else try cut.prefix(a, p, c.count);
         if (p.count() == 0) p.kind = .none;
     }
 }

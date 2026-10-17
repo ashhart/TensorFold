@@ -28,6 +28,12 @@ const Run = struct {
 };
 
 fn run(trunk: Trunk, drafts: bool, n: usize, prompt: []const u32) !Run {
+    return runMode(trunk, drafts, n, prompt, false);
+}
+fn runMode(trunk: Trunk, drafts: bool, n: usize, prompt: []const u32, resumed: bool) !Run {
+    var saved: std.ArrayList(u32) = .empty;
+    defer saved.deinit(gpa);
+    try saved.appendSlice(gpa, prompt[0..5]);
     // the cost of each row, not the 32-row cap, is what makes the allocator cut the held set's windows
     var costs: [16]Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
@@ -50,7 +56,7 @@ fn run(trunk: Trunk, drafts: bool, n: usize, prompt: []const u32) !Run {
     for (streams, proposers) |*s, *p| {
         p.* = try SuffixLookup.init(gpa, .{ .min_match = 4 });
         const proposer = if (trunk == .copied) p.proposer() else null;
-        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = prompt, .max_new = 120, .eos = &.{96}, .drafts = drafts, .proposer = proposer });
+        s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = prompt, .max_new = 120, .eos = &.{96}, .drafts = drafts, .proposer = proposer, .reuse = if (resumed) .{ .saved = &saved, .at = 5 } else .{} });
     }
     defer for (streams, proposers) |*s, *p| {
         s.deinit(gpa);
@@ -62,6 +68,7 @@ fn run(trunk: Trunk, drafts: bool, n: usize, prompt: []const u32) !Run {
     for (out.replies, out.reasons, streams) |*r, *why, *s| {
         r.* = try gpa.dupe(u32, s.emitted());
         why.* = s.reason;
+        if (resumed) try std.testing.expectEqual(@as(u32, 5), s.cached);
         out.drafted += s.drafted;
         out.branch_rows += s.branch_rows;
         out.branch_kept += s.branch_accepted;
@@ -95,7 +102,7 @@ test "allocate keeps a grafted window's first drafts at every count, the trunk's
         // three copied drafts, then grafts past their end: one after the last, its child and that child's sibling
         .{ .kind = .copy, .held = 0, .tokens = &.{ 4, 1, 5, 7, 8, 9 }, .parents = &.{ -1, 0, 1, 2, 3, 3 } },
     };
-    for (windows) |t| for (1..1 + t.parents.len) |c| {
+    for (windows) |t| for (0..1 + t.parents.len) |c| {
         var cfg = try Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = @intCast(c + 1), .max_streams = 8, .draft_streams = true }, 16, 15);
         defer cfg.deinit(gpa);
         var target: fake.Fake = .{ .gpa = gpa };
@@ -111,7 +118,23 @@ test "allocate keeps a grafted window's first drafts at every count, the trunk's
         try std.testing.expectEqual(c, p.count());
         try std.testing.expectEqual(@min(t.held, c), p.held);
         try std.testing.expectEqualSlices(u32, t.tokens[0 .. c - @min(t.held, c)], p.tokens);
-        try std.testing.expectEqualSlices(i32, t.parents[0..c], p.parents.?);
+        if (c == 0) try std.testing.expect(p.parents == null) else try std.testing.expectEqualSlices(i32, t.parents[0..c], p.parents.?);
         try std.testing.expectEqual(@as(u32, if (c > 3) 4 else 0), p.branch_from);
     };
+}
+
+test "grafted replies: resumed and fresh solo and neighbors equal plain" {
+    const prompt = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
+    for ([_]Trunk{ .held, .copied }) |trunk| {
+        const plain = try run(trunk, false, 1, &prompt);
+        defer plain.deinit();
+        for ([_]bool{ false, true }) |resumed| for ([_]usize{ 1, 2, 4 }) |neighbors| {
+            const got = try runMode(trunk, true, neighbors, &prompt, resumed);
+            defer got.deinit();
+            for (got.replies, got.reasons) |reply, reason| {
+                try std.testing.expectEqualSlices(u32, plain.replies[0], reply);
+                try std.testing.expectEqual(plain.reasons[0], reason);
+            }
+        };
+    }
 }
