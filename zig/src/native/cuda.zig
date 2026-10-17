@@ -330,13 +330,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         opts.master = if (o.master.len > 0) o.master else null;
         opts.master_port = o.master_port;
     }
-    if (o.vision) |vo| {
-        if (!@hasField(F.Options, "vision")) {
-            problem.* = "--vision: this CUDA family reads no images; serve it without --vision";
-            return null;
+    if (comptime @hasField(F.Options, "vision")) {
+        if (o.vision) |vo| {
+            const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
+            opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
         }
-        const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
-        opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
     }
     if (o.precision) |p| {
         if (!@hasField(F.Options, "precision")) {
@@ -606,4 +604,8 @@ test "family readiness reaches production lane admission without binding CUDA" {
 
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
+}
+
+test "Flash Next refuses --vision before files or CUDA" {
+    try @import("cuda_flashnext_refusal_test.zig").vision(openWith);
 }

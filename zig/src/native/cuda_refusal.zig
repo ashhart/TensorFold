@@ -21,6 +21,8 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
+    if (o.vision != null and !(@hasDecl(F, "Options") and @hasField(F.Options, "vision")))
+        return "--vision: this CUDA family reads no images; serve it without --vision";
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
     if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
     if (@hasDecl(F, "tp_draft_snapshots")) {

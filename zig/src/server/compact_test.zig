@@ -16,6 +16,23 @@ const Allocator = std.mem.Allocator;
 const gpa = std.testing.allocator;
 const io = std.testing.io;
 
+test "a text-only Flash Next server refuses image parts before prompt rendering" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]
+    )).ok;
+    const normalize = @import("messages.zig").normalizeWith;
+    try std.testing.expectError(error.Refused, normalize(&cx, messages, "system", false, .{}));
+    try std.testing.expectEqual(errors.Kind.request, cx.kind);
+    try std.testing.expectEqual(@as(u16, 400), cx.status());
+    try std.testing.expectEqualStrings(
+        "this server accepts text parts only; image, audio and video inputs are unsupported",
+        cx.message,
+    );
+}
+
 test "rewind boundary follows the latest actual user and stops before content" {
     var eng: Eng = .{ .window = 256, .cache = true };
     var text: Text = .{};
