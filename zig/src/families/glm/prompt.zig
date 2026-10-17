@@ -1,5 +1,6 @@
 //! Prompt chunks: matmuls on the M5 tensor units at the row kernels' arithmetic (core/affine_mm.zig), the rest on the row kernels.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -83,7 +84,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
 
 /// The prompt's sparse MLA on the tensor units (GLM_SPARSE_NAX=0: the row kernel, its output beside its queries).
 fn sparseNax() bool {
-    return if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
+    return if (platform.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
 }
 
 /// The bytes `init` takes from the arena for `rows`-row chunks.

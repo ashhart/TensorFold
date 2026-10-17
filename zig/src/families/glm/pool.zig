@@ -1,5 +1,6 @@
 //! One Mac's streams share the engine's MLA cache, a contiguous region each; kept prefixes hold blocks until needed.
 const std = @import("std");
+const platform = @import("sys");
 const st = @import("state.zig");
 const snapshot = @import("snapshot.zig");
 const Engine = @import("engine.zig").Engine;
@@ -42,7 +43,7 @@ pub const Pool = struct {
 /// Whether the slots share one pool: on one Mac (a pair's ranks mirror slot commands), unless GLM_POOL=0.
 pub fn on(e: *const Engine) bool {
     if (e.ep != null or e.followsPeer()) return false;
-    const v = std.c.getenv("GLM_POOL") orelse return true;
+    const v = platform.c.getenv("GLM_POOL") orelse return true;
     return !std.mem.eql(u8, std.mem.span(v), "0");
 }
 
