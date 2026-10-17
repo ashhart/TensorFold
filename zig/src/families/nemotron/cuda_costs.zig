@@ -5,7 +5,9 @@ const cuda = @import("cuda");
 const core = @import("core");
 const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
-const Head = @import("cuda_mtp.zig").Head;
+const mtp = @import("cuda_mtp.zig");
+const Head = mtp.Head;
+const Vocab = mtp.Vocab;
 const state = @import("cuda_state.zig");
 const rule = lanes.cost_rule;
 const profile_window = @import("cuda_profile_window.zig");
@@ -30,11 +32,11 @@ const Timer = struct {
     }
 };
 
-/// Cache identity: GPU and driver, model shape, window and glue kernels, alongside the build.
-fn keyParts(e: *Engine, name: []u8, shape: []u8) ![3][]const u8 {
+/// Cache identity: GPU and driver, model shape, window and glue kernels and the draft head, alongside the build.
+fn keyParts(e: *Engine, h: *Head, v: Vocab, name: []u8, shape: []u8) ![3][]const u8 {
     const c = e.c;
     const gpu = e.ctx.name(name) catch "gpu";
-    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} {d}/{d}/{d}/{d}/{d} draft{d} {s}{s}", .{ try e.ctx.capability(), try e.ctx.d.version(), c.layers, c.hidden, c.vocab, c.experts, e.max_len, e.w.draft_count, if (e.k.triton != null) "captured" else "own", if (c.format == .modelopt) " modelopt" else "" });
+    const at = try std.fmt.bufPrint(shape, "sm{d} cuda{d} {d}/{d}/{d}/{d}/{d} draft{d} {s}{s}", .{ try e.ctx.capability(), try e.ctx.d.version(), c.layers, c.hidden, c.vocab, c.experts, e.max_len, h.width(v), if (e.k.triton != null) "captured" else "own", if (c.format == .modelopt) " modelopt" else "" });
     return .{ "nemotron-cuda", gpu, at };
 }
 
@@ -45,32 +47,55 @@ fn drifted(c: core.draft_depth.Costs, ref: core.draft_depth.Costs) bool {
     return false;
 }
 
-/// Fastest-of-seven costs by width and head level, cached per build, GPU and model shape.
-pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8) !core.draft_depth.Costs {
-    var name: [256]u8 = undefined;
-    var shape: [192]u8 = undefined;
-    const parts = try keyParts(e, &name, &shape);
-    const k = lanes.cost_cache.key(gpa, io, &parts) catch null;
-    if (k) |key| if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key)) |kept| return kept;
-    const rk = lanes.cost_cache.cudaReferenceKey(&parts);
+/// Each head's costs: the draft head's, and the whole head's where the checkpoint drafts with both.
+pub const Measured = struct { subset: core.draft_depth.Costs, full: ?core.draft_depth.Costs };
+
+/// Fastest-of-seven costs by width and each head's level, cached per head; one pass times the windows for every head.
+pub fn measure(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8) !Measured {
+    const all = [_]Vocab{ .subset, .full };
+    const heads = all[0..if (e.w.draft_coverage != null) 2 else 1];
+    var name: [2][256]u8 = undefined;
+    var shape: [2][192]u8 = undefined;
+    var parts: [2][3][]const u8 = undefined;
+    var keys: [2]?[32]u8 = undefined;
+    var kept: [2]?core.draft_depth.Costs = @splat(null);
+    for (heads, 0..) |v, i| {
+        parts[i] = try keyParts(e, h, v, &name[i], &shape[i]);
+        keys[i] = lanes.cost_cache.key(gpa, io, &parts[i]) catch null;
+        if (keys[i]) |key| kept[i] = lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, key);
+    }
+    for (kept[0..heads.len]) |k| {
+        if (k == null) break;
+    } else return .{ .subset = kept[0].?, .full = kept[1] };
     var raw: Raw = undefined;
-    try timeAll(gpa, io, e, h, model_dir, &raw, false);
-    const widths = state.windowRows(e.c) + 1;
-    var costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level, regime);
-    if (lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, rk)) |ref| if (drifted(costs, ref)) {
-        try timeAll(gpa, io, e, h, model_dir, &raw, true);
-        costs = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level, regime);
-    };
-    if (k) |key| lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, key, costs);
-    lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, rk, costs);
-    return costs;
+    try timeAll(gpa, io, e, h, model_dir, heads, &raw, false);
+    var costs: [2]core.draft_depth.Costs = undefined;
+    tables(e, raw, heads, &costs);
+    for (0..heads.len) |i| {
+        const ref = lanes.cost_cache.load(core.draft_depth.Costs, gpa, io, lanes.cost_cache.cudaReferenceKey(&parts[i])) orelse continue;
+        if (!drifted(costs[i], ref)) continue;
+        try timeAll(gpa, io, e, h, model_dir, heads, &raw, true);
+        tables(e, raw, heads, &costs);
+        break;
+    }
+    for (0..heads.len) |i| {
+        if (keys[i]) |key| lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, key, costs[i]);
+        lanes.cost_cache.save(core.draft_depth.Costs, gpa, io, lanes.cost_cache.cudaReferenceKey(&parts[i]), costs[i]);
+    }
+    return .{ .subset = costs[0], .full = if (heads.len > 1) costs[1] else null };
 }
 
-/// Fastest-run window ms by width (index 0 unused; widths to the engine's window) and a head level's ms.
-const Raw = struct { verify: [state.max_rows + 1]f64, level: f64 };
+/// Each head's table: the windows' widths with its level.
+fn tables(e: *Engine, raw: Raw, heads: []const Vocab, out: []core.draft_depth.Costs) void {
+    const widths = state.windowRows(e.c) + 1;
+    for (heads, out[0..heads.len]) |v, *c| c.* = core.draft_depth.Costs.measured(raw.verify[0..widths], raw.level[@backingInt(v)], regime);
+}
 
-/// Time widths with interleaved levels, retime dips, and retain faster values on a retry.
-fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8, raw: *Raw, again: bool) !void {
+/// Fastest-run window ms by width (index 0 unused; widths to the engine's window) and a level's ms by head.
+const Raw = struct { verify: [state.max_rows + 1]f64, level: [2]f64 };
+
+/// Time widths with each head's levels interleaved, retime dips, and retain faster values on a retry.
+fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: []const u8, heads: []const Vocab, raw: *Raw, again: bool) !void {
     const path = try std.fs.path.join(gpa, &.{ model_dir, "tokenizer.json" });
     defer gpa.free(path);
     var tok = try core.tokenizer.loadTokenizer(io, gpa, path);
@@ -121,7 +146,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
         }
         pub fn draft(w: *@This(), n: usize) !void {
             try w.h.begin(1);
-            for (1..n + 1) |j| try w.h.launch(@intCast(j));
+            for (1..n + 1) |j| try w.h.launch(@intCast(j), .subset);
         }
         pub fn follow(w: *@This(), n: usize) !void {
             try w.e.ops().copy(w.e.b.ids + 4, w.continuation, n * 4);
@@ -151,6 +176,7 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
         pos: usize,
         last: u64,
         pending: u32,
+        vocab: Vocab,
 
         pub fn time(l: @This(), levels: usize) !f64 {
             try l.h.restore(l.saved, l.pos);
@@ -159,17 +185,29 @@ fn timeAll(gpa: std.mem.Allocator, io: std.Io, e: *Engine, h: *Head, model_dir: 
             try l.e.stream.synchronize();
             try l.t.a.record(l.e.stream);
             try l.h.begin(1);
-            for (1..levels + 1) |j| try l.h.launch(@intCast(j));
+            for (1..levels + 1) |j| try l.h.launch(@intCast(j), l.vocab);
             return l.t.ms(l.e);
         }
     };
+    // each head samples its chains between the same widths, as one head alone would
+    const Heads = struct {
+        chains: []rule.ChainLevel(L),
+
+        pub fn afterWidth(x: *@This(), i: usize) !void {
+            for (x.chains) |*c| try c.afterWidth(i);
+        }
+    };
     const windows: W = .{ .e = e, .h = h, .t = t, .saved = saved, .head_saved = head_saved, .head_pos = head_pos, .last = last_saved.ptr, .pending = pending, .continuation = next.ptr };
-    var chains: rule.ChainLevel(L) = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending } };
-    try rule.measureWidths(windows, &chains, raw.verify[1 .. rows + 1], again);
+    var chains: [2]rule.ChainLevel(L) = undefined;
+    for (heads, chains[0..heads.len]) |v, *c| c.* = .{ .timer = .{ .e = e, .h = h, .t = t, .saved = head_saved, .pos = head_pos, .last = last_hidden, .pending = pending, .vocab = v } };
+    var observer: Heads = .{ .chains = chains[0..heads.len] };
+    try rule.measureWidths(windows, &observer, raw.verify[1 .. rows + 1], again);
     if (!again) raw.verify[0] = 0;
     try rule.smooth(windows, raw.verify[1 .. rows + 1]);
-    const level = chains.level();
-    raw.level = if (again) @min(raw.level, level) else level;
+    for (heads, chains[0..heads.len]) |v, c| {
+        const level = &raw.level[@backingInt(v)];
+        level.* = if (again) @min(level.*, c.level()) else c.level();
+    }
     try e.reset();
     try h.reset();
 }

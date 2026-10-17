@@ -25,6 +25,11 @@ The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower an
 16,384-token window the server admits 8 streams at 0.35 GiB each and keeps a prompt cache of about 8 to 10 GiB, and
 about 24 GB of the GB10's memory stays available. Leave the other ranks' variables below unset.
 
+The MTP draft head can use the embedded draft vocabulary's FP8 output rows or the already-resident full output head.
+A stream drafts on the subset while the last 16 tokens of its context, its prompt's tail at first, are all draft ids,
+and on the full head otherwise; other streams do not change its choice. Each head has its own captured graphs and
+its own measured level cost beside the window costs both share, and shared rounds are priced at the full head's.
+The target still verifies proposals with its unchanged full-vocabulary head.
 For CUDA MTP streams, `--mtp-drafts` caps MTP depth (at most 31 for Super) and `--mtp-confidence` sets a
 cumulative-confidence threshold from 0 to 1 instead of the cost-based cutoff. A zero draft cap disables
 drafting. The same controls apply in lone and shared rounds, including resumes and handoff.
@@ -100,8 +105,7 @@ equal their solo runs, and three-turn chats with regenerate, edit and delete equ
 | Two GB10s | `checkpoint` (default) | 46.8 tok/s (35.9 to 63.6) | 20.2 tok/s | |
 | Two GB10s | `full` | 48.1 tok/s (36.4 to 65.6) | 21.4 tok/s | |
 
-Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time. The MTP layer drafts
-with the target's own output head over the whole vocabulary.
+Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time.
 
 ## Images
 

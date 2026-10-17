@@ -408,12 +408,8 @@ fn draftHead(L: *Loader, ck: *core.Checkpoint, c: Config) !void {
     if (p.kind != .nvfp4 or p.n != c.vocab) return error.UnexpectedTensor;
     const rows = [2]usize{ p.k / 2, p.k / 16 };
     const host = try L.staging(ids.len * (rows[0] + rows[1]));
-    for ([2]Tensor{ p.w, p.blocks.? }, rows, [2]usize{ 0, ids.len * rows[0] }) |t, row, at| {
-        const whole = try L.gpa.alloc(u8, t.bytes.len);
-        defer L.gpa.free(whole);
-        try L.src.read(whole, t.bytes);
-        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], whole[id * row ..][0..row]);
-    }
+    try W.gatherRows(L, p.w, ids, host);
+    try W.gatherRows(L, p.blocks.?, ids, host[ids.len * rows[0] ..]);
     const base = try L.tmp(host.len);
     try L.ops.upload(base, host);
     const n = ids.len;
@@ -422,4 +418,27 @@ fn draftHead(L: *Loader, ck: *core.Checkpoint, c: Config) !void {
     try m.pack.fp4Lane(L.ops.s, base, base + n * rows[0], words, tiles, n, p.k);
     L.w.draft_head = .{ .nvfp4 = cuda.nvfp4.weight(words, tiles, p.scale, n, p.k) };
     try W.draftIds(L, ids);
+}
+
+/// Super's head_rows: lm_head's FP8 rows for the draft ids, packed as a head of their own (the head's scales).
+pub fn fp8DraftHead(L: *Loader, ck: *core.Checkpoint, c: Config) !void {
+    const m = try kernels(L);
+    const ids = try draft_ids.load(L.gpa, c.vocab);
+    defer L.gpa.free(ids);
+    var buf: [192]u8 = undefined;
+    const p = try part(ck, try name(&buf, "{s}lm_head", .{c.prefix()}));
+    if (p.kind != .fp8 or p.n != c.vocab or p.k != c.hidden) return error.UnexpectedTensor;
+    const act: f32 = if (L.ops.k.ck != null) p.act else 0;
+    if (L.ops.k.ck != null and act == 0) return error.NoInputScale;
+    const host = try L.staging(ids.len * p.k);
+    try W.gatherRows(L, p.w, ids, host);
+    const base = try L.tmp(host.len);
+    try L.ops.upload(base, host);
+    const out = try L.alloc("draft_head.weight", cuda.modelopt.padded(ids.len) * p.k);
+    try m.pack.fp8Lane(L.ops.s, base, out, ids.len, p.k);
+    var w = cuda.modelopt.fp8Weight(out, p.scale, ids.len, p.k);
+    w.act = act;
+    L.w.draft_head = .{ .fp8 = w };
+    try W.draftIds(L, ids);
+    L.w.draft_coverage = try .init(L.gpa, c.vocab, ids); // the whole head stays resident: streams draft on either
 }

@@ -6,8 +6,10 @@ const lanes = @import("lanes");
 const Engine = @import("cuda_engine.zig").Engine;
 const mtp = @import("cuda_mtp.zig");
 const Head = mtp.Head;
+const Vocab = mtp.Vocab;
 const state = @import("cuda_state.zig");
 const Mask = @import("cuda_engine.zig").Mask;
+const Measured = @import("cuda_costs.zig").Measured;
 const DepthRule = core.draft_depth.DepthRule;
 
 pub const Stats = struct { rounds: usize = 0, drafted: usize = 0, accepted: usize = 0 };
@@ -20,19 +22,19 @@ fn copyRoom(rows: usize, window: usize) usize {
     return std.math.clamp(2 * (rows - 1), copy_chain, window - 1);
 }
 
-/// Start a round's head work: an absorb for a copied chain, else level 1 (the rule reads the later levels).
-fn queue(h: *Head, keep: usize, copied: bool) !void {
+/// Start a round's head work: an absorb for a copied chain, else level 1 of head `v` (the rule reads the later levels).
+fn queue(h: *Head, keep: usize, copied: bool, v: Vocab) !void {
     try h.begin(keep);
-    try h.launch(if (copied) 0 else 1);
+    try h.launch(if (copied) 0 else 1, v);
 }
 
 /// The drafts this round verifies: the rule reads each level's confidence before drafting the next.
-fn depth(h: *Head, rule: *const DepthRule) !usize {
+fn depth(h: *Head, rule: *const DepthRule, v: Vocab) !usize {
     var run: f64 = 1.0;
     var n: usize = 0;
     var j: usize = 1;
     while (j <= rule.most) : (j += 1) {
-        if (j > 1) try h.launch(j);
+        if (j > 1) try h.launch(j, v);
         run *= try h.confidence(j);
         if (!rule.keep(j, run)) break;
         n = j;
@@ -49,11 +51,36 @@ pub const Gate = struct {
 
 pub const Gated = struct { rows: usize, mask: Mask };
 
+/// A lone stream's depth rules, one a head: each prices its rounds by its own head's levels.
+pub const Rules = struct {
+    subset: DepthRule,
+    full: ?DepthRule,
+
+    /// Each head's depthRule, capped at `most` drafts and cut at confidence `floor` when given.
+    pub fn init(m: Measured, most: ?u32, floor: ?f64) Rules {
+        return .{ .subset = limited(m.subset, most, floor), .full = if (m.full) |c| limited(c, most, floor) else null };
+    }
+
+    fn limited(c: core.draft_depth.Costs, most: ?u32, floor: ?f64) DepthRule {
+        var r = depthRule(c);
+        (@import("lanes").mtp_policy.Controls{ .cap = most, .floor = floor }).configure(&r);
+        return r;
+    }
+
+    fn of(r: *Rules, v: Vocab) *DepthRule {
+        return switch (v) {
+            .subset => &r.subset,
+            .full => &r.full.?,
+        };
+    }
+};
+
 /// A drafted decode's rounds over a token context: each verifies a copied chain or the head's chain in one window.
 pub const Rounds = struct {
     e: *Engine,
     h: *Head,
-    rule: *DepthRule,
+    rules: *Rules,
+    vocab: Vocab, // the head the next round drafts with, by the context's tail (Head.vocab)
     index: core.CopyIndex,
     cbuf: [mtp.max_chain]u32 = undefined,
     ids: [mtp.max_chain + 1]u32 = undefined,
@@ -70,20 +97,21 @@ pub const Rounds = struct {
         gpa: std.mem.Allocator,
         e: *Engine,
         h: *Head,
-        rule: *DepthRule,
+        rules: *Rules,
         prompt: []const u32,
         out: []const u32,
         last_hidden: ?u64,
         recall: ?*lanes.recall.Reader,
     ) !Rounds {
         const index = try core.CopyIndex.init(gpa, prompt);
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
+        var r: Rounds = .{ .e = e, .h = h, .rules = rules, .vocab = .subset, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
+        r.vocab = h.vocab(r.index.ctx.items);
         if (last_hidden) |x| try e.ops().copy(e.b.hidden, x, e.c.hidden * 2);
         try e.ops().fill32(e.b.sampled, out[out.len - 1], 1);
         r.copied = r.copies();
-        try queue(h, 1, r.copied.len > 0);
+        try queue(h, 1, r.copied.len > 0, r.vocab);
         return r;
     }
 
@@ -92,19 +120,20 @@ pub const Rounds = struct {
         gpa: std.mem.Allocator,
         e: *Engine,
         h: *Head,
-        rule: *DepthRule,
+        rules: *Rules,
         prompt: []const u32,
         out: []const u32,
         kept: usize,
         recall: ?*lanes.recall.Reader,
     ) !Rounds {
         const index = try core.CopyIndex.init(gpa, prompt);
-        var r: Rounds = .{ .e = e, .h = h, .rule = rule, .index = index, .recall = recall };
+        var r: Rounds = .{ .e = e, .h = h, .rules = rules, .vocab = .subset, .index = index, .recall = recall };
         errdefer r.index.deinit();
         try r.index.extend(out);
+        r.vocab = h.vocab(r.index.ctx.items);
         r.copied = r.copies();
         try h.again(kept);
-        try h.launch(if (r.copied.len > 0) 0 else 1);
+        try h.launch(if (r.copied.len > 0) 0 else 1, r.vocab);
         return r;
     }
 
@@ -131,7 +160,7 @@ pub const Rounds = struct {
         const e = r.e;
         r.copy_round = r.copied.len > 0;
         if (gate) |g| { // the planned chain as host tokens, cut and grown by the grammar, its rows masked
-            const planned = if (r.copy_round) r.copied else r.h.drafts()[0..try depth(r.h, r.rule)];
+            const planned = if (r.copy_round) r.copied else r.h.drafts()[0..try depth(r.h, r.rules.of(r.vocab), r.vocab)];
             r.ids[0] = last;
             @memcpy(r.ids[1..][0..planned.len], planned);
             const w = try g.window(g.ptr, r.ids[0..state.windowRows(e.c)], 1 + planned.len);
@@ -143,7 +172,7 @@ pub const Rounds = struct {
             try e.verify(r.ids[0 .. 1 + r.copied.len], 1 + r.copied.len, null);
             r.proposal = r.copied;
         } else {
-            const n = try depth(r.h, r.rule);
+            const n = try depth(r.h, r.rules.of(r.vocab), r.vocab);
             try e.verify(&.{last}, 1 + n, null);
             r.proposal = r.h.drafts()[0..n];
         }
@@ -156,7 +185,7 @@ pub const Rounds = struct {
     /// Keep leading rows and their sampled tokens, then queue head work when more tokens are needed.
     pub fn keep(r: *Rounds, sampled: []const u32, n: usize, more: bool) !void {
         try r.e.commit(n);
-        r.rule.done(n, 1 + r.proposal.len, if (r.copy_round) 0 else r.h.levels);
+        r.rules.of(r.vocab).done(n, 1 + r.proposal.len, if (r.copy_round) 0 else r.h.levels);
         if (r.recall) |x| { // Recall's copy is judged apart; the head's rounds set the bar its copies must beat
             if (!r.copy_round) x.noteHead(n);
             if (r.copy_round and r.recalled) x.observe(@intCast(r.proposal.len), @intCast(n -| 1), r.st.rounds);
@@ -167,14 +196,15 @@ pub const Rounds = struct {
         r.st.accepted += n - 1;
         if (r.copy_round) r.copy_room = copyRoom(n, state.windowRows(r.e.c));
         if (!more) return;
+        r.vocab = r.h.vocab(r.index.ctx.items);
         r.copied = r.copies();
-        try queue(r.h, n, r.copied.len > 0);
+        try queue(r.h, n, r.copied.len > 0, r.vocab);
     }
 };
 
 /// `count` tokens in `out` (its first the prompt's pending token), drafting from the prompt's last hidden row.
-pub fn decode(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, prompt: []const u32, out: *std.ArrayList(u32), count: usize, stop_eos: bool, last_hidden: u64) !Stats {
-    var r = try Rounds.init(gpa, e, h, rule, prompt, out.items, last_hidden, null);
+pub fn decode(gpa: std.mem.Allocator, e: *Engine, h: *Head, rules: *Rules, prompt: []const u32, out: *std.ArrayList(u32), count: usize, stop_eos: bool, last_hidden: u64) !Stats {
+    var r = try Rounds.init(gpa, e, h, rules, prompt, out.items, last_hidden, null);
     defer r.deinit();
     while (out.items.len < count and !(stop_eos and e.c.isEos(out.items[out.items.len - 1]))) {
         const v = try r.verify(out.items[out.items.len - 1], null);
@@ -190,25 +220,25 @@ pub fn decode(gpa: std.mem.Allocator, e: *Engine, h: *Head, rule: *DepthRule, pr
     return r.st;
 }
 
-/// The MTP head and the measured-cost depth rule (app._rules: greedy calibration power 2, every draft depth).
+/// The MTP head and its measured-cost depth rules (app._rules: greedy calibration power 2, every draft depth).
 pub const Drafter = struct {
     head: *Head,
-    rule: DepthRule,
+    rules: Rules,
 
-    /// `costs`: window ms at each width the engine takes, then a level's, as another run measured; null: measure here.
+    /// `costs`: window ms at each width, then the draft head's level, as another run measured; null: measure here.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *Engine, model_dir: []const u8, graphs: bool, costs: ?[]const f64) !Drafter {
         const h = try Head.init(e);
         errdefer h.deinit();
         if (graphs) try h.capture();
-        var c: core.draft_depth.Costs = .{};
+        var m: Measured = undefined;
         if (costs) |given| {
             const rows = state.windowRows(e.c);
             if (given.len != rows + 1) return error.CostsNeedEveryWidth;
-            c.rows = rows;
+            var c: core.draft_depth.Costs = .{ .rows = rows, .level = given[rows] };
             @memcpy(c.verify[1 .. rows + 1], given[0..rows]);
-            c.level = given[rows];
-        } else c = try @import("cuda_costs.zig").measure(gpa, io, e, h, model_dir);
-        return .{ .head = h, .rule = depthRule(c) };
+            m = .{ .subset = c, .full = if (e.w.draft_coverage != null) (try @import("cuda_costs.zig").measure(gpa, io, e, h, model_dir)).full else null };
+        } else m = try @import("cuda_costs.zig").measure(gpa, io, e, h, model_dir);
+        return .{ .head = h, .rules = .init(m, null, null) };
     }
 
     pub fn deinit(d: *Drafter) void {

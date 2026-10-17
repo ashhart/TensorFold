@@ -245,7 +245,7 @@ pub const Engine = struct {
     /// What a graph runs: a verify window (with the serial feed or the sampled download), or one MTP head level.
     pub const Body = union(enum) {
         window: struct { rows: usize, feed: bool, mask: Mask = .{} },
-        head: struct { h: *Head, rows: usize, j: usize },
+        head: struct { h: *Head, rows: usize, j: usize, vocab: @import("cuda_mtp.zig").Vocab },
     };
 
     /// One graph of `body` on the bound sequence's buffers, instantiated and uploaded.
@@ -277,7 +277,7 @@ pub const Engine = struct {
                 if (w.feed) return e.ops().serialFeed(e.b.sampled, e.b.ids, e.b.meta, e.history_dev);
                 try e.ops().download(std.mem.sliceAsBytes(e.pinned.slice(u32)[pin_sampled..][0..w.rows]), e.b.sampled);
             },
-            .head => |x| try x.h.level(x.rows, x.j),
+            .head => |x| try x.h.level(x.rows, x.j, x.vocab),
         }
     }
 

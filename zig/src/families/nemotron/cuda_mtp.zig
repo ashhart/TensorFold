@@ -18,7 +18,10 @@ const host_probs = host_drafts + max_chain;
 const host_tokens = host_probs + max_chain;
 const host_metas = host_tokens + state.pass_rows; // a meta row a stream for `chains`
 
-/// One stream of a batched draft (`chains`): its head and target buffers, kept rows and depth.
+/// The output rows a draft level reads: the draft vocabulary's (the draft head), or the target's whole head.
+pub const Vocab = enum { subset, full };
+
+/// One stream of a batched draft (`chains`): its head and target buffers, kept rows, depth and head.
 pub const Part = struct {
     k_cache: u64,
     v_cache: u64,
@@ -31,10 +34,11 @@ pub const Part = struct {
     pos: usize,
     keep: usize,
     depth: usize,
+    vocab: Vocab = .subset,
 };
 
-/// A stream's rows in a head forward: where they start, how many, its meta row and its head caches.
-const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64, table: u64 = 0 };
+/// A stream's rows in a head forward: where they start, how many, its meta row, its head caches and its head.
+const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64, vocab: Vocab, table: u64 = 0 };
 
 pub const Head = struct {
     e: *Engine,
@@ -43,8 +47,8 @@ pub const Head = struct {
     copied: cuda.Event,
     ready: [max_chain]cuda.Event,
     absorb_graphs: [state.max_rows + 1]?cuda.graph.Exec = @splat(null),
-    first_graphs: [2][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // [greedy, sampled] draws
-    chain_graphs: [2][max_chain + 1]?cuda.graph.Exec = @splat(@splat(null)),
+    first_graphs: [4][state.max_rows + 1]?cuda.graph.Exec = @splat(@splat(null)), // by graphSet: draw mode, then head
+    chain_graphs: [4][max_chain + 1]?cuda.graph.Exec = @splat(@splat(null)),
     k_cache: u64,
     v_cache: u64,
     meta: u64,
@@ -75,13 +79,39 @@ pub const Head = struct {
     keep: usize = 0,
     levels: usize = 0,
 
+    /// The head a stream drafts its next round with: the subset while the draft ids cover its context's tail.
+    pub fn vocab(h: *const Head, context: []const u32) Vocab {
+        const c = if (h.e.w.draft_coverage) |*c| c else return .subset;
+        return if (c.covers(context)) .subset else .full;
+    }
+
+    /// Logits a row of head `v` holds.
+    pub fn width(h: *const Head, v: Vocab) usize {
+        return switch (v) {
+            .subset => h.e.w.draft_count,
+            .full => h.e.c.vocab,
+        };
+    }
+
+    fn output(h: *const Head, v: Vocab) weights.QLinear {
+        return switch (v) {
+            .subset => h.e.w.draft_head.?,
+            .full => h.e.w.head,
+        };
+    }
+
+    /// first_graphs' and chain_graphs' set: the bound draw mode (greedy, sampled), then head `v` (subset, full).
+    fn graphSet(h: *const Head, v: Vocab) usize {
+        return 2 * @as(usize, @intFromBool(h.e.sampling != null)) + @backingInt(v);
+    }
+
     pub fn init(e: *Engine) !*Head {
         if (e.c.bolt or e.w.mtp == null) return error.NoMtpHead;
         const c = e.c;
         const D: usize = c.hidden;
         const R: usize = state.pass_rows;
         const kv: usize = @as(usize, e.max_len) * c.kv_heads * c.head_dim * 2;
-        const n = e.w.draft_count;
+        const n = if (e.w.draft_coverage != null) c.vocab else e.w.draft_count;
         const S: usize = streams;
         const sizes = [_]usize{ kv, kv, meta_words * 4, state.max_rows * D * 2, state.max_rows * 4, max_chain * 4, D * 2, R * D * 2, R * 2 * D * 2, R * 2 * D / 64 * 4, R * D * 2, S * D * 2, S * D * 2, S * D * 2, S * D / 64 * 4, S * n * 2, n * 4, sampler.max_candidates * 4, sampler.max_candidates * 8, sampler.max_candidates * 8, 32, S * D * 2, S * meta_words * 4, R * 4, torch_ops.topkScratchBytes(1, n), 4 };
         var total: usize = 0;
@@ -109,7 +139,9 @@ pub const Head = struct {
     pub fn deinit(h: *Head) void {
         h.e.stream.synchronize() catch {};
         h.e.head = null;
-        for ([_][]?cuda.graph.Exec{ &h.absorb_graphs, &h.first_graphs[0], &h.first_graphs[1], &h.chain_graphs[0], &h.chain_graphs[1] }) |set| for (set) |*g| if (g.*) |*x| x.deinit();
+        for (&h.absorb_graphs) |*g| if (g.*) |*x| x.deinit();
+        for (&h.first_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
+        for (&h.chain_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         for (&h.ready) |*r| r.deinit();
         h.copied.deinit();
         h.pinned.free();
@@ -159,13 +191,13 @@ pub const Head = struct {
         h.pos = 0;
     }
 
-    /// MTPHead._forward: rows at the head's positions; with `tail`, the last row's output and draft-head logits.
-    fn forward(h: *Head, rows: usize, tail: bool, meta: u64) !void {
-        return h.forwardSpans(&.{.{ .row0 = 0, .rows = rows, .meta = meta, .k_cache = h.k_cache, .v_cache = h.v_cache, .table = h.e.b.table }}, tail);
+    /// MTPHead._forward: rows at the head's positions; with `tail`, the last row's output and head `v`'s logits.
+    fn forward(h: *Head, rows: usize, tail: bool, meta: u64, v: Vocab) !void {
+        _ = try h.forwardSpans(&.{.{ .row0 = 0, .rows = rows, .meta = meta, .k_cache = h.k_cache, .v_cache = h.v_cache, .vocab = v, .table = h.e.b.table }}, tail);
     }
 
-    /// Each span's rows at its stream's head positions; with `tail`, each span's last row out as row k of the logits.
-    fn forwardSpans(h: *Head, spans: []const Span, tail: bool) !void {
+    /// Each span's rows at its head positions; with `tail`, logits row k is span k's by its own head (stride returned).
+    fn forwardSpans(h: *Head, spans: []const Span, tail: bool) !usize {
         const e = h.e;
         const c = e.c;
         const m = e.w.mtp.?;
@@ -191,7 +223,7 @@ pub const Head = struct {
             try t.attention(qkv, s.k_cache, s.v_cache, s.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
         }
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
-        if (!tail) return;
+        if (!tail) return 0;
         if (spans.len == 1) {
             const last = spans[0].row0 + spans[0].rows - 1;
             try t.addRmsnorm(h.x + last * D * 2, b.delta + last * D * 2, m.moe_norm, h.h1, b.y, b.xs, 1, c.hidden, c.eps);
@@ -212,11 +244,19 @@ pub const Head = struct {
             try f.experts(m.moe, spans.len, false);
             try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
         }
-        try o.dense(h.row, h.rxs, e.w.draft_head.?, h.logits, spans.len);
+        const v = spans[0].vocab;
+        for (spans[1..]) |s| {
+            if (s.vocab != v) break;
+        } else {
+            try o.dense(h.row, h.rxs, h.output(v), h.logits, spans.len);
+            return h.width(v);
+        }
+        for (spans, 0..) |s, k| try o.dense(h.row + k * D * 2, h.rxs + k * D / 64 * 4, h.output(s.vocab), h.logits + k * c.vocab * 2, 1);
+        return c.vocab;
     }
 
-    /// MTPHead._level: 0 absorbs the window's kept rows, 1 absorbs them and drafts after them, j > 1 extends the chain.
-    pub fn level(h: *Head, rows: usize, j: usize) !void {
+    /// MTPHead._level: 0 absorbs the window's kept rows, 1 absorbs and drafts after them, j > 1 extends; `v` drafts.
+    pub fn level(h: *Head, rows: usize, j: usize, v: Vocab) !void {
         const e = h.e;
         const o = e.ops();
         const D: u64 = e.c.hidden;
@@ -227,42 +267,46 @@ pub const Head = struct {
             try o.copy(h.hin, h.out, D * 2);
             try o.copy(h.tok, e.b.ids + (j - 1) * 4, 4);
         }
-        if (j == 0) return h.forward(rows, false, h.meta);
-        try h.forward(rows, true, if (j == 1) h.meta else h.meta + (j - 1) * 4);
+        if (j == 0) return h.forward(rows, false, h.meta, v);
+        try h.forward(rows, true, if (j == 1) h.meta else h.meta + (j - 1) * 4, v);
         try o.copy(h.out, h.row, D * 2);
-        try h.sample(h.logits, if (e.sampling != null) e.b.rule else null, h.meta + 4, e.b.ids + j * 4, h.probs + (j - 1) * 4, j);
+        try h.sample(h.logits, if (e.sampling != null) e.b.rule else null, h.meta + 4, e.b.ids + j * 4, h.probs + (j - 1) * 4, j, v);
         try o.download(std.mem.sliceAsBytes(h.pinned.slice(u32)[host_drafts + j - 1 ..][0..1]), e.b.ids + j * 4);
         try o.download(std.mem.sliceAsBytes(h.pinned.slice(u32)[host_probs + j - 1 ..][0..1]), h.probs + (j - 1) * 4);
     }
 
-    /// Level j's draft from a row of logits: by the stream's rule (sample.cu), else the greedy _keyed over the top 28.
-    fn sample(h: *Head, logits: u64, rule: ?u64, meta: u64, out: u64, prob: u64, j: usize) !void {
+    /// Level j's draft from head `v`'s logits: by the stream's rule (sample.cu), else greedy _keyed over the top 28.
+    fn sample(h: *Head, logits: u64, rule: ?u64, meta: u64, out: u64, prob: u64, j: usize, v: Vocab) !void {
         const e = h.e;
-        const n = e.w.draft_count;
-        if (rule) |r| return e.ops().draw(logits, n, r, meta, j - 1, out, 1, e.w.draft_ids, prob);
+        const n = h.width(v);
+        const ids: ?u64 = if (v == .subset) e.w.draft_ids else null; // the whole head's columns are the ids
+        if (rule) |r| return e.ops().draw(logits, n, r, meta, j - 1, out, 1, ids, prob);
         const k = sampler.greedy_draft;
         const count = sampler.count(k.k, n);
         const t = e.ops().torch();
         try t.toF32(logits, h.flog, n);
         try t.topk(h.flog, n, 1, count, h.vals, h.cols, h.topk);
-        try t.lookup(e.w.draft_ids, n, h.cols, h.cand, count, h.invalid);
+        if (ids) |x| try t.lookup(x, n, h.cols, h.cand, count, h.invalid);
         // GREEDY loads SEED and FP but reads neither: the head's zeroed fp serves as both
-        try e.forward(null).glue.keyed(h.vals, h.cand, meta, out, h.fp, h.fp, prob, j - 1, 1, count, k);
+        try e.forward(null).glue.keyed(h.vals, if (ids != null) h.cand else h.cols, meta, out, h.fp, h.fp, prob, j - 1, 1, count, k);
     }
 
-    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the bound draw mode.
+    /// MTPHead.capture: levels 0 and 1 at every kept-row count, later levels at one row, in the draw mode, per head.
     pub fn capture(h: *Head) !void {
-        const m = @intFromBool(h.e.sampling != null);
         const rows = state.windowRows(h.e.c);
-        for (1..rows + 1) |k| {
-            if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try h.record(k, 0);
-            h.first_graphs[m][k] = try h.record(k, 1);
+        for ([_]Vocab{ .subset, .full }) |v| {
+            if (v == .full and h.e.w.draft_coverage == null) continue;
+            const m = h.graphSet(v);
+            for (1..rows + 1) |k| {
+                if (h.absorb_graphs[k] == null) h.absorb_graphs[k] = try h.record(k, 0, v);
+                h.first_graphs[m][k] = try h.record(k, 1, v);
+            }
+            for (2..rows) |j| h.chain_graphs[m][j] = try h.record(1, j, v);
         }
-        for (2..rows) |j| h.chain_graphs[m][j] = try h.record(1, j);
     }
 
-    fn record(h: *Head, rows: usize, j: usize) !cuda.graph.Exec {
-        return h.e.record(.{ .head = .{ .h = h, .rows = rows, .j = j } });
+    fn record(h: *Head, rows: usize, j: usize, v: Vocab) !cuda.graph.Exec {
+        return h.e.record(.{ .head = .{ .h = h, .rows = rows, .j = j, .vocab = v } });
     }
 
     /// MTPHead.begin: the head absorbs the last window's first `keep` rows, then drafts the positions after them.
@@ -285,14 +329,14 @@ pub const Head = struct {
         try h.begin(keep);
     }
 
-    /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j].
-    pub fn launch(h: *Head, j: usize) !void {
-        const m: usize = @intFromBool(h.e.sampling != null);
+    /// MTPHead.level: queue level j of this round (0: absorb only) into the engine's ids[j], drafted by head `v`.
+    pub fn launch(h: *Head, j: usize, v: Vocab) !void {
+        const m = h.graphSet(v);
         const rows = if (j <= 1) h.keep else 1;
         const g = if (j == 0) h.absorb_graphs[h.keep] else if (j == 1) h.first_graphs[m][h.keep] else h.chain_graphs[m][j];
         const w = state.max_rows + 1;
         const id = if (j == 0) 1000 + h.keep else if (j == 1) 2000 + m * w + h.keep else 3000 + m * (max_chain + 1) + j;
-        if (g) |x| try h.e.launchGraph(x, @intCast(id), .{ .head = .{ .h = h, .rows = rows, .j = j } }) else try h.level(rows, j);
+        if (g) |x| try h.e.launchGraph(x, @intCast(id), .{ .head = .{ .h = h, .rows = rows, .j = j, .vocab = v } }) else try h.level(rows, j, v);
         if (j > 0) {
             try h.ready[j - 1].record(h.e.stream);
             h.levels = j;
@@ -300,12 +344,12 @@ pub const Head = struct {
     }
 
     /// The lane core's draft request: absorb `follow.len` kept rows (follow: the token after each), then `depth` levels.
-    pub fn chain(h: *Head, follow: []const u32, depth: usize) !void {
+    pub fn chain(h: *Head, follow: []const u32, depth: usize, v: Vocab) !void {
         if (follow.len < 1 or follow.len > state.windowRows(h.e.c) or depth >= state.windowRows(h.e.c)) return error.BadDraftRequest;
         try h.e.ops().upload(h.e.b.sampled, std.mem.sliceAsBytes(follow));
         try h.begin(follow.len);
-        if (depth == 0) return h.launch(0);
-        for (1..depth + 1) |j| try h.launch(j);
+        if (depth == 0) return h.launch(0, v);
+        for (1..depth + 1) |j| try h.launch(j, v);
     }
 
     /// Several streams' draft requests level by level, a row a stream: drafts to their `ids`, confidences to `probs`.
@@ -313,7 +357,6 @@ pub const Head = struct {
         const e = h.e;
         const o = e.ops();
         const D: u64 = e.c.hidden;
-        const n: u64 = e.w.draft_count;
         if (parts.len < 1 or parts.len > streams) return error.BadDraftRequest;
         var total: usize = 0;
         for (parts) |p| {
@@ -341,7 +384,7 @@ pub const Head = struct {
         for (parts, spans[0..parts.len]) |p, *s| {
             try o.copy(h.hin + row0 * D * 2, p.hidden, p.keep * D * 2);
             try o.copy(h.tok + row0 * 4, p.sampled, p.keep * 4);
-            s.* = .{ .row0 = row0, .rows = p.keep, .meta = 0, .k_cache = p.k_cache, .v_cache = p.v_cache, .table = p.table };
+            s.* = .{ .row0 = row0, .rows = p.keep, .meta = 0, .k_cache = p.k_cache, .v_cache = p.v_cache, .table = p.table, .vocab = p.vocab };
             row0 += p.keep;
         }
         var live = parts.len;
@@ -355,11 +398,11 @@ pub const Head = struct {
                 s.row0 = k;
                 s.rows = 1;
             }
-            try h.forwardSpans(spans[0..live], true);
+            const n = try h.forwardSpans(spans[0..live], true);
             try o.copy(h.outs, h.row, live * D * 2);
             for (parts[0..live], 0..) |p, k| {
                 const meta = h.metas + k * meta_words * 4;
-                try h.sample(h.logits + k * n * 2, p.rule, meta + 4, p.ids + j * 4, p.probs + (j - 1) * 4, j);
+                try h.sample(h.logits + k * n * 2, p.rule, meta + 4, p.ids + j * 4, p.probs + (j - 1) * 4, j, p.vocab);
             }
         }
     }
@@ -381,7 +424,7 @@ pub const Head = struct {
         const e = h.e;
         try e.ops().upload(h.logits, logits);
         const j = offset + 1;
-        try h.sample(h.logits, if (e.sampling != null) e.b.rule else null, h.meta + 4, e.b.ids + j * 4, h.probs + (j - 1) * 4, j);
+        try h.sample(h.logits, if (e.sampling != null) e.b.rule else null, h.meta + 4, e.b.ids + j * 4, h.probs + (j - 1) * 4, j, .subset);
         var tok: [1]u32 = undefined;
         var prob: [1]f32 = undefined;
         try e.ops().download(std.mem.sliceAsBytes(&tok), e.b.ids + j * 4);

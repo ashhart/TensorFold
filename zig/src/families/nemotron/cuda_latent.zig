@@ -187,7 +187,7 @@ fn norm(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, 
     return L.raw(label, try ck.expect(try std.fmt.bufPrint(&b, "{s}{s}", .{ pre, leaf }), .bf16, &.{c.hidden}));
 }
 
-/// The MTP head as stored (bf16 attention and input projection, a latent MoE); it drafts over the whole head.
+/// The MTP head as stored (bf16 attention and input projection, a latent MoE).
 pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
     var buf: [6][192]u8 = undefined;
     var p: [128]u8 = undefined;
@@ -208,12 +208,7 @@ pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
         .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c, mtp_id),
         .final_norm = try norm(L, ck, "mtp.final_norm", pre, "1.final_layernorm.weight", c),
     };
-    // the draft head is the target's: every id a candidate, so no vocabulary table is needed for this tokenizer
-    L.w.draft_head = L.w.head;
-    const ids = try L.gpa.alloc(u32, c.vocab);
-    defer L.gpa.free(ids);
-    for (ids, 0..) |*x, i| x.* = @intCast(i);
-    try W.draftIds(L, ids);
+    try modelopt.fp8DraftHead(L, ck, c);
 }
 
 /// Expert `e`'s projection name: `pre` then `mid` (with its index when `mid` takes one) then the leaf.
