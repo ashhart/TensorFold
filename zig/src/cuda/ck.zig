@@ -53,9 +53,9 @@ pub const Ck = struct {
     quant4_fn: Function,
     pack4_fn: Function,
     pack4_scales_fn: Function,
-    up_fn: Function,
-    down_fn: Function,
-    resident: [2]usize, // blocks the up and down kernels fill: per SM times SMs
+    up_fns: [2]Function, // prompt chunks, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
+    down_fns: [2]Function,
+    resident: [2][2]usize, // blocks the up and down kernels fill, by up_fns' order: per SM times SMs
     clusters: bool,
 
     pub fn load(d: *const Driver, capability_major: u32, sms: usize) !Ck {
@@ -73,9 +73,11 @@ pub const Ck = struct {
         c.quant4_fn = try experts_mod.function("tf_ck_quant4");
         c.pack4_fn = try experts_mod.function("tf_ck_pack4");
         c.pack4_scales_fn = try experts_mod.function("tf_ck_pack4_scales");
-        c.up_fn = try experts_mod.function("tf_ck4_up_relu2");
-        c.down_fn = try experts_mod.function("tf_ck4_down_f32");
-        c.resident = .{ @max(1, try c.up_fn.occupancy(128, 0)) * sms, @max(1, try c.down_fn.occupancy(128, 0)) * sms };
+        for ([_][2][:0]const u8{ .{ "tf_ck4_up_relu2", "tf_ck4_down_f32" }, .{ "tf_ck4_up_relu2_few", "tf_ck4_down_f32_few" } }, 0..) |names, i| {
+            c.up_fns[i] = try experts_mod.function(names[0]);
+            c.down_fns[i] = try experts_mod.function(names[1]);
+            c.resident[i] = .{ @max(1, try c.up_fns[i].occupancy(128, 0)) * sms, @max(1, try c.down_fns[i].occupancy(128, 0)) * sms };
+        }
         c.clusters = capability_major >= 9;
         return c;
     }
@@ -175,19 +177,24 @@ pub const Ck = struct {
         return .{ count * n * k / 2, count * n * (k / 16) };
     }
 
+    /// Columns of `n` a warp of the up and down kernels takes, by up_fns' order.
+    pub const warp_columns = [2]usize{ 64, 32 };
+
     /// relu^2 up over a plan: NVFP4 rows (quant4's, at `rows`, `k` wide; row = pair / slots) to bf16 [pairs][width].
     pub fn up(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, out: u64, items: usize) !void {
-        return c.run(s, c.up_fn, c.resident[0], rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out, items);
+        const few = @intFromBool(nrows <= launch_.few_rows);
+        return run(s, c.up_fns[few], c.resident[few][0], warp_columns[few], rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out, items);
     }
 
-    /// down over a plan: NVFP4 pair rows (quant4's, at `rows`) to fp32 [pairs][dims].
-    pub fn down(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize) !void {
-        return c.run(s, c.down_fn, c.resident[1], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
+    /// down over a plan: NVFP4 pair rows (quant4's, at `rows`) of `tokens` token rows to fp32 [pairs][dims].
+    pub fn down(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, tokens: usize, p: Plan, out: u64, items: usize) !void {
+        const few = @intFromBool(tokens <= launch_.few_rows);
+        return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 
-    fn run(c: *const Ck, s: Stream, f: Function, resident: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
-        _ = c;
-        const nb = n / 64;
+    /// One grouped launch of `f` over a plan: NVFP4 rows at `rows` (`nrows` of `k`), `n` columns of `columns` a warp.
+    pub fn run(s: Stream, f: Function, resident: usize, columns: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
+        const nb = n / columns;
         const grid = @min((items * nb + 3) / 4, resident);
         if (grid < 1) return;
         var a: launch_.Args = .{};

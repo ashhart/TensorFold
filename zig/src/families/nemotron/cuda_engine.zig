@@ -383,7 +383,7 @@ pub const Engine = struct {
         f.untaught = e.bound.untaught;
         f.tp = if (e.tp) |*g| g else null;
         f.vision = e.vision;
-        if (dump == null and e.c.experts <= 128 and e.c.slots() <= 8) f.side = e.side; // tf_plan_routed's bounds
+        if (dump == null and (e.c.latent > 0 or (e.c.experts <= 128 and e.c.slots() <= 8))) f.side = e.side; // tf_plan_routed's bounds; a latent MoE plans without it
         return f;
     }
 
