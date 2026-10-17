@@ -12,6 +12,8 @@ pub const server = @import("server.zig");
 pub const serve = @import("serve.zig");
 pub const hub = @import("hub.zig");
 pub const tool_specs = @import("tool_specs.zig");
+pub const family = @import("family.zig");
+pub const deepseek = @import("deepseek.zig");
 pub const Server = server.Server;
 pub const Config = server.Config;
 
@@ -48,7 +50,12 @@ test {
     _ = @import("videos.zig");
     _ = @import("stream_preflight_test.zig");
     _ = @import("stream_dsml_test.zig");
+    _ = @import("deepseek.zig");
+    _ = @import("deepseek_test.zig");
+    _ = @import("deepseek_wire_test.zig");
     _ = @import("logprobs_test.zig");
+    _ = @import("drain_test.zig");
+    _ = @import("keepalive_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
     _ = @import("completion_prompt_test.zig");
