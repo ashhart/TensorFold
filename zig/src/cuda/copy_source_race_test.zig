@@ -1,3 +1,4 @@
+const custody_sync = @import("copy_source_sync.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const t = std.testing;
@@ -6,22 +7,23 @@ const budget = @import("copy_source_budget.zig");
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Fake = struct {
-    var mutex: std.c.pthread_mutex_t = .{};
-    var cond: std.c.pthread_cond_t = .{};
+    var mutex: custody_sync.Mutex = .{};
+    var cond: custody_sync.Condition = .{};
     var phase: u8 = 0;
     var allowed: u8 = 0;
     var close_started = false;
     var close_returned = false;
+    var close_waiting = false;
     var premature = false;
     var bytes: []align(16) u8 = undefined;
     var reaper: *const fn (*const Driver) void = undefined;
     var completing = false;
     fn pause(at: u8) void {
-        _ = std.c.pthread_mutex_lock(&mutex);
-        defer _ = std.c.pthread_mutex_unlock(&mutex);
+        mutex.lock();
+        defer mutex.unlock();
         phase = at;
-        _ = std.c.pthread_cond_broadcast(&cond);
-        while (allowed < at) _ = std.c.pthread_cond_wait(&cond, &mutex);
+        cond.broadcast();
+        while (allowed < at) cond.wait(&mutex);
         premature = premature or close_returned or budget.usage().nodes == 0;
         if (budget.acquire(0, 1)) |_| {
             budget.release(0, 1);
@@ -59,24 +61,26 @@ const Fake = struct {
     fn sync() callconv(.c) abi.Result {
         return 0;
     }
-    fn run(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-        const d: *Driver = @ptrCast(@alignCast(arg.?));
+    fn run(d: *Driver) void {
         source.setCurrent(@ptrFromInt(41));
         if (completing) source.synchronizeContext(d) catch unreachable else reaper(d);
-        return null;
     }
-    fn close(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-        const d: *Driver = @ptrCast(@alignCast(arg.?));
-        _ = std.c.pthread_mutex_lock(&mutex);
+    fn waiting() void {
+        mutex.lock();
+        close_waiting = true;
+        cond.broadcast();
+        mutex.unlock();
+    }
+    fn close(d: *Driver) void {
+        mutex.lock();
         close_started = true;
-        _ = std.c.pthread_cond_broadcast(&cond);
-        _ = std.c.pthread_mutex_unlock(&mutex);
+        cond.broadcast();
+        mutex.unlock();
         d.close();
-        _ = std.c.pthread_mutex_lock(&mutex);
+        mutex.lock();
         close_returned = true;
-        _ = std.c.pthread_cond_broadcast(&cond);
-        _ = std.c.pthread_mutex_unlock(&mutex);
-        return null;
+        cond.broadcast();
+        mutex.unlock();
     }
 };
 pub fn run(reaper: *const fn (*const Driver) void, completing: bool) !void {
@@ -86,11 +90,14 @@ pub fn run(reaper: *const fn (*const Driver) void, completing: bool) !void {
     Fake.allowed = 0;
     Fake.close_started = false;
     Fake.close_returned = false;
+    Fake.close_waiting = false;
+    source.on_close_wait = Fake.waiting;
+    defer source.on_close_wait = null;
     Fake.premature = false;
     Fake.reaper = reaper;
     Fake.completing = completing;
     var d: Driver = undefined;
-    d.lib = try std.DynLib.open(if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
+    d.lib = try std.DynLib.open(if (builtin.os.tag == .windows) "kernel32.dll" else if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     d.api.cuMemHostAlloc = Fake.alloc;
     d.api.cuMemFreeHost = Fake.free;
     d.api.cuMemcpyHtoDAsync_v2 = Fake.copy;
@@ -104,35 +111,28 @@ pub fn run(reaper: *const fn (*const Driver) void, completing: bool) !void {
     @memset(try s.take(&d, 16), 7);
     try s.copyTo(.{ .d = &d, .ptr = 256, .len = 16 }, 0, .{ .d = &d, .handle = null });
     s.abandon();
-    var worker: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&worker, null, Fake.run, &d));
-    _ = std.c.pthread_mutex_lock(&Fake.mutex);
+    const worker = try std.Thread.spawn(.{}, Fake.run, .{&d});
+    Fake.mutex.lock();
     const first: u8 = if (completing) 2 else 1;
-    while (Fake.phase < first) _ = std.c.pthread_cond_wait(&Fake.cond, &Fake.mutex);
-    _ = std.c.pthread_mutex_unlock(&Fake.mutex);
-    var closer: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&closer, null, Fake.close, &d));
-    _ = std.c.pthread_mutex_lock(&Fake.mutex);
-    while (!Fake.close_started) _ = std.c.pthread_cond_wait(&Fake.cond, &Fake.mutex);
-    var deadline: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.REALTIME, &deadline);
-    deadline.sec += 1;
-    while (!Fake.close_returned) {
-        if (std.c.pthread_cond_timedwait(&Fake.cond, &Fake.mutex, &deadline) == .TIMEDOUT) break;
-    }
+    while (Fake.phase < first) Fake.cond.wait(&Fake.mutex);
+    Fake.mutex.unlock();
+    const closer = try std.Thread.spawn(.{}, Fake.close, .{&d});
+    Fake.mutex.lock();
+    while (!Fake.close_started) Fake.cond.wait(&Fake.mutex);
+    while (!Fake.close_waiting and !Fake.close_returned) Fake.cond.wait(&Fake.mutex);
     var counted = true;
     for (first..4) |phase| {
-        while (Fake.phase < phase) _ = std.c.pthread_cond_wait(&Fake.cond, &Fake.mutex);
+        while (Fake.phase < phase) Fake.cond.wait(&Fake.mutex);
         Fake.premature = Fake.premature or Fake.close_returned;
-        _ = std.c.pthread_mutex_unlock(&Fake.mutex);
+        Fake.mutex.unlock();
         counted = counted and source.retained() == 1;
-        _ = std.c.pthread_mutex_lock(&Fake.mutex);
+        Fake.mutex.lock();
         Fake.allowed = @intCast(phase);
-        _ = std.c.pthread_cond_broadcast(&Fake.cond);
+        Fake.cond.broadcast();
     }
-    _ = std.c.pthread_mutex_unlock(&Fake.mutex);
-    try t.expectEqual(.SUCCESS, std.c.pthread_join(worker, null));
-    try t.expectEqual(.SUCCESS, std.c.pthread_join(closer, null));
+    Fake.mutex.unlock();
+    worker.join();
+    closer.join();
     try t.expect(!Fake.premature);
     try t.expect(counted);
     try t.expect(Fake.close_returned);

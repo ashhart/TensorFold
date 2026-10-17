@@ -1,14 +1,14 @@
 //! Track wrapper captures by driver, context and stream across submitting threads.
+const custody_sync = @import("copy_source_sync.zig");
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Stream = @import("stream.zig").Stream;
-const std = @import("std");
 const Scope = struct { driver: *const Driver, context: abi.Context, stream: abi.Stream, mode: abi.CaptureMode };
 var scopes: [64]?Scope = @splat(null);
-var mutex: std.c.pthread_mutex_t = .{};
+var mutex: custody_sync.Mutex = .{};
 pub fn begin(stream: Stream, context: abi.Context, mode: abi.CaptureMode) error{ CopySourceLimit, UnownedCaptureSource }!void {
-    _ = std.c.pthread_mutex_lock(&mutex);
-    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    mutex.lock();
+    defer mutex.unlock();
     for (scopes) |scope| if (scope) |s| {
         if (s.driver == stream.d and s.context == context and s.stream == stream.handle) return error.UnownedCaptureSource;
     };
@@ -19,8 +19,8 @@ pub fn begin(stream: Stream, context: abi.Context, mode: abi.CaptureMode) error{
     return error.CopySourceLimit;
 }
 pub fn end(stream: Stream, context: abi.Context) void {
-    _ = std.c.pthread_mutex_lock(&mutex);
-    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    mutex.lock();
+    defer mutex.unlock();
     for (&scopes) |*scope| if (scope.*) |s| {
         if (s.driver == stream.d and s.context == context and s.stream == stream.handle) {
             scope.* = null;
@@ -29,8 +29,8 @@ pub fn end(stream: Stream, context: abi.Context) void {
     };
 }
 pub fn active(d: *const Driver, context: abi.Context) bool {
-    _ = std.c.pthread_mutex_lock(&mutex);
-    defer _ = std.c.pthread_mutex_unlock(&mutex);
+    mutex.lock();
+    defer mutex.unlock();
     for (scopes) |scope| if (scope) |s| {
         if (s.driver == d and (s.context == context or s.mode == .global)) return true;
     };

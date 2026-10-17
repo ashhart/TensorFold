@@ -1,4 +1,5 @@
 //! Own copy sources through completion. Failed disposal moves them to context/stream quarantine.
+const custody_sync = @import("copy_source_sync.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const abi = @import("abi.zig");
@@ -9,8 +10,8 @@ const budget = @import("copy_source_budget.zig");
 const durable = std.heap.page_allocator;
 const capture_scope = @import("copy_source_capture.zig");
 threadlocal var current_context: abi.Context = null;
-var mutex: std.c.pthread_mutex_t = .{};
-var changed: std.c.pthread_cond_t = .{};
+var mutex: custody_sync.Mutex = .{};
+var changed: custody_sync.Condition = .{};
 var head: ?*Node = null;
 var next_ticket: u64 = 1;
 /// Tests only: called under the lock each time keepDriver is about to wait on a busy owner.
@@ -73,10 +74,10 @@ fn newNode() !*Node {
     return n;
 }
 fn lock() void {
-    _ = std.c.pthread_mutex_lock(&mutex);
+    mutex.lock();
 }
 fn unlock() void {
-    _ = std.c.pthread_mutex_unlock(&mutex);
+    mutex.unlock();
 }
 pub fn setCurrent(context: abi.Context) void {
     current_context = context;
@@ -105,7 +106,7 @@ fn releaseTracked(n: *Node) void {
     var at = &head;
     while (at.* != n) at = &at.*.?.next;
     at.* = n.next;
-    _ = std.c.pthread_cond_broadcast(&changed);
+    changed.broadcast();
     unlock();
     n.destroy();
 }
@@ -124,7 +125,7 @@ fn keepSpare(n: *Node) bool {
     spares = n;
     spare_count += 1;
     spare_bytes += len;
-    _ = std.c.pthread_cond_broadcast(&changed);
+    changed.broadcast();
     return true;
 }
 /// The smallest spare of `d` in this thread's context that holds `need` bytes, out of the spares.
@@ -248,7 +249,7 @@ pub fn keepDriver(d: *const Driver) bool {
         }
         if (!busy) return kept;
         if (comptime builtin.is_test) if (on_close_wait) |hook| hook(); // the close fixture's signal: close is waiting
-        _ = std.c.pthread_cond_wait(&changed, &mutex);
+        changed.wait(&mutex);
     }
 }
 /// A pinned buffer no wait proved free: quarantine counts it and frees it after a later wait on its stream succeeds.
@@ -568,7 +569,7 @@ fn reap(d: *const Driver) void {
             lock();
             if (result != abi.error_not_ready) n.failed = true;
             n.busy = false;
-            _ = std.c.pthread_cond_broadcast(&changed);
+            changed.broadcast();
             unlock();
         }
     }

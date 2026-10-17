@@ -1,3 +1,4 @@
+const custody_sync = @import("copy_source_sync.zig");
 const std = @import("std");
 const builtin = @import("builtin");
 const t = std.testing;
@@ -7,8 +8,8 @@ const Driver = @import("driver.zig").Driver;
 
 /// A reaper held inside its event query while the driver closes; the stage it then parks must go before the library.
 const Fake = struct {
-    var mutex: std.c.pthread_mutex_t = .{};
-    var cond: std.c.pthread_cond_t = .{};
+    var mutex: custody_sync.Mutex = .{};
+    var cond: custody_sync.Condition = .{};
     const State = struct {
         in_query: bool = false,
         go: bool = false,
@@ -23,16 +24,16 @@ const Fake = struct {
     var bytes: []align(16) u8 = undefined;
     var reap: *const fn (*const Driver) void = undefined;
     fn set(flag: *bool) void {
-        _ = std.c.pthread_mutex_lock(&mutex);
-        defer _ = std.c.pthread_mutex_unlock(&mutex);
+        mutex.lock();
+        defer mutex.unlock();
         flag.* = true;
         s.late = s.late or ((flag == &s.freed or flag == &s.destroyed) and s.close_returned);
-        _ = std.c.pthread_cond_broadcast(&cond);
+        cond.broadcast();
     }
     fn until(flag: *const bool) void {
-        _ = std.c.pthread_mutex_lock(&mutex);
-        defer _ = std.c.pthread_mutex_unlock(&mutex);
-        while (!flag.*) _ = std.c.pthread_cond_wait(&cond, &mutex);
+        mutex.lock();
+        defer mutex.unlock();
+        while (!flag.*) cond.wait(&mutex);
     }
     fn alloc(out: *?*anyopaque, len: usize, _: c_uint) callconv(.c) abi.Result {
         bytes = std.heap.page_allocator.alignedAlloc(u8, .@"16", len) catch return abi.error_not_ready;
@@ -63,21 +64,17 @@ const Fake = struct {
         set(&s.destroyed);
         return 0;
     }
-    fn reaper(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-        const d: *Driver = @ptrCast(@alignCast(arg.?));
+    fn reaper(d: *Driver) void {
         source.setCurrent(@ptrFromInt(41));
         reap(d);
-        return null;
     }
     fn waiting() void {
         set(&s.close_waiting);
     }
-    fn close(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-        const d: *Driver = @ptrCast(@alignCast(arg.?));
+    fn close(d: *Driver) void {
         set(&s.close_started);
         d.close();
         set(&s.close_returned);
-        return null;
     }
 };
 
@@ -87,7 +84,7 @@ pub fn run(reap: *const fn (*const Driver) void) !void {
     Fake.s = .{};
     Fake.reap = reap;
     var d: Driver = undefined;
-    d.lib = try std.DynLib.open(if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
+    d.lib = try std.DynLib.open(if (builtin.os.tag == .windows) "kernel32.dll" else if (builtin.os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     d.api.cuMemHostAlloc = Fake.alloc;
     d.api.cuMemFreeHost = Fake.free;
     d.api.cuMemcpyHtoDAsync_v2 = Fake.copy;
@@ -101,24 +98,20 @@ pub fn run(reap: *const fn (*const Driver) void) !void {
     try t.expectEqual(@as(usize, 1), source.retained());
     source.on_close_wait = Fake.waiting;
     defer source.on_close_wait = null;
-    var worker: ?std.c.pthread_t = null;
-    var closer: ?std.c.pthread_t = null;
+    var worker: ?std.Thread = null;
+    var closer: ?std.Thread = null;
     defer { // a failed check still lets the query return and both threads finish before the test does
         Fake.set(&Fake.s.go);
-        if (closer) |c| _ = std.c.pthread_join(c, null);
-        if (worker) |w| _ = std.c.pthread_join(w, null);
+        if (closer) |c| c.join();
+        if (worker) |w| w.join();
     }
-    var w: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&w, null, Fake.reaper, &d));
-    worker = w;
+    worker = try std.Thread.spawn(.{}, Fake.reaper, .{&d});
     Fake.until(&Fake.s.in_query);
-    var c: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&c, null, Fake.close, &d));
-    closer = c;
+    closer = try std.Thread.spawn(.{}, Fake.close, .{&d});
     Fake.until(&Fake.s.close_waiting);
-    _ = std.c.pthread_mutex_lock(&Fake.mutex);
+    Fake.mutex.lock();
     const early = Fake.s.close_returned;
-    _ = std.c.pthread_mutex_unlock(&Fake.mutex);
+    Fake.mutex.unlock();
     Fake.set(&Fake.s.go);
     Fake.until(&Fake.s.close_returned);
     try t.expect(!early);

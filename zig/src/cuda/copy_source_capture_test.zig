@@ -92,11 +92,9 @@ test "capture start rollback and failed end preserve the temporary-source guard"
 const OtherThread = struct {
     const Driver = @import("driver.zig").Driver;
     var result: ?anyerror = null;
-    fn run(arg: ?*anyopaque) callconv(.c) ?*anyopaque {
-        const d: *Driver = @ptrCast(@alignCast(arg.?));
+    fn run(d: *Driver) void {
         source.setCurrent(@ptrFromInt(55));
         result = if (source.synchronousCopy(d, 256, &.{1}, t.allocator)) |_| null else |e| e;
-        return null;
     }
 };
 test "a registered capture guards temporary uploads on another submitting thread" {
@@ -104,9 +102,8 @@ test "a registered capture guards temporary uploads on another submitting thread
     source.setCurrent(@ptrFromInt(55));
     const s: Stream = .{ .d = &d, .handle = @ptrFromInt(5) };
     try graph.beginCapture(s, .thread_local);
-    var worker: std.c.pthread_t = undefined;
-    try t.expectEqual(.SUCCESS, std.c.pthread_create(&worker, null, OtherThread.run, &d));
-    try t.expectEqual(.SUCCESS, std.c.pthread_join(worker, null));
+    const worker = try std.Thread.spawn(.{}, OtherThread.run, .{&d});
+    worker.join();
     var g = try graph.endCapture(s);
     g.deinit();
     try t.expectEqual(@as(?anyerror, error.UnownedCaptureSource), OtherThread.result);
