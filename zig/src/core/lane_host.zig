@@ -535,5 +535,6 @@ test {
     _ = @import("lane_host_test.zig");
     _ = @import("lane_rounds_test.zig");
     _ = @import("lane_halt_test.zig");
+    _ = @import("lane_host_end_test.zig");
     _ = @import("lane_review_test.zig");
 }
