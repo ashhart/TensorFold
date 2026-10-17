@@ -132,13 +132,14 @@ pub fn summarize(cpu: ?[]const u8, memory: ?u64, gpus: []const Gpu, mlx: bool) H
     return .{ .cpu_model = cpu, .system_memory_bytes = memory, .memory_type = memory_type, .gpus = gpus, .source = if (complete) "detected" else if (evidence) "partial" else "unavailable" };
 }
 
-/// A processor or GPU description from the allowlist, whitespace collapsed and a clock suffix dropped; else null.
+/// A processor or GPU description from the allowlist, whitespace collapsed, "w/" written "with" and a clock suffix dropped; else null.
 pub fn modelName(a: Allocator, text: []const u8) ?[]const u8 {
     var words: std.ArrayList(u8) = .empty;
     var it = std.mem.tokenizeAny(u8, text, " \t\n\r\x0b\x0c");
     while (it.next()) |w| {
         if (words.items.len > 0) words.append(a, ' ') catch return null;
-        words.appendSlice(a, w) catch return null;
+        // AMD's "w/" (Ryzen AI MAX+ 395 w/ Radeon 8060S) is written "with", as its other names spell it, inside the board's pattern
+        words.appendSlice(a, if (std.mem.eql(u8, w, "w/")) "with" else w) catch return null;
     }
     const name = dropClock(words.items);
     if (name.len > 120 or std.mem.eql(u8, name, "NVIDIA NPU")) return null;

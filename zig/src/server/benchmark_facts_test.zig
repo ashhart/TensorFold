@@ -123,7 +123,7 @@ test "hardware names pass only the allowlist; Mac and NVIDIA probes keep only na
     try std.testing.expectEqualStrings("Intel(R) Xeon(R) CPU E5-2680 v4", host.modelName(a, "  Intel(R)  Xeon(R) CPU E5-2680 v4 @ 2.40GHz\n").?);
     try std.testing.expectEqualStrings("Apple M5 Max", host.modelName(a, "Apple M5 Max").?);
     const long = try std.mem.concat(a, u8, &.{ "NVIDIA ", try a.dupe(u8, &(@as([121]u8, @splat('a')))) });
-    for ([_][]const u8{ "private-machine", "/home/example/private", "NVIDIA /home/example/private", "NVIDIA NPU", long, "Apple M5 Max Extra", "Apple M", "Intel user@example.test" }) |bad| try std.testing.expect(host.modelName(a, bad) == null);
+    for ([_][]const u8{ "private-machine", "/home/example/private", "NVIDIA /home/example/private", "NVIDIA NPU", "AMD w/home/example", "AMD Ryzen w/ /home", long, "Apple M5 Max Extra", "Apple M", "Intel user@example.test" }) |bad| try std.testing.expect(host.modelName(a, bad) == null);
     const gib128: u64 = 128 << 30;
     const profiler = "{\"SPDisplaysDataType\": [{\"sppci_model\": \"Apple M5 Max\", \"sppci_cores\": \"40\", \"serial_number\": \"private-device-value\", \"_name\": \"private-computer\", \"sppci_device_id\": \"private-id\"}]}";
     const mac = host.summarize("Apple M5 Max", gib128, host.macGpus(a, profiler, gib128), true);
@@ -225,17 +225,17 @@ test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no d
     defer arena.deinit();
     const a = arena.allocator();
     try std.testing.expect(std.mem.eql(u8, host.gpuQuery("rocm").?[0], "rocminfo") and std.mem.eql(u8, host.gpuQuery("cuda").?[0], "nvidia-smi"));
-    // Strix Halo's /proc/cpuinfo name has a "/", outside the board's name pattern, so the CPU stays unknown.
     const cpu = host.cpuinfo(a, "model name\t: AMD RYZEN AI MAX+ 395 w/ Radeon 8060S\n");
-    try std.testing.expect(cpu == null);
+    try std.testing.expectEqualStrings("AMD RYZEN AI MAX+ 395 with Radeon 8060S", cpu.?);
+    try std.testing.expect(check.name(cpu.?));
     const probe = host.rocm(a, cpu, 128 << 30, rocminfo_strix, null);
     try std.testing.expect(probe.driver == null and probe.hardware.gpus.len == 1);
     const g = probe.hardware.gpus[0];
     try std.testing.expectEqualStrings("AMD Radeon 8060S Graphics", g.name);
     try std.testing.expectEqual(@as(?u64, 125829120 * 1024), g.memory_bytes);
     try std.testing.expectEqual(@as(?u64, 40), g.cores);
-    try std.testing.expect(std.mem.eql(u8, probe.hardware.source, "partial") and std.mem.eql(u8, probe.hardware.memory_type, "unified"));
-    try std.testing.expectEqualStrings("detected", host.rocm(a, "AMD EPYC 9004", 128 << 30, rocminfo_strix, null).hardware.source);
+    try std.testing.expect(std.mem.eql(u8, probe.hardware.source, "detected") and std.mem.eql(u8, probe.hardware.memory_type, "unified"));
+    try std.testing.expectEqualStrings("partial", host.rocm(a, null, 128 << 30, rocminfo_strix, null).hardware.source);
     const runtime: receipt.Runtime = .{ .tensorfold_version = "0.0.0-test", .backend = "rocm", .python_version = "none", .platform = "linux", .driver = probe.driver };
     const sample: suite.Sample = .{ .fixture_id = "code", .temperature = 0, .repeat = -1, .seed = 1, .status = .@"error", .error_code = .server_error };
     const v = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .repo_id = "example-org/test-model", .local = false }, runtime, probe.hardware, .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true }, &.{sample});
