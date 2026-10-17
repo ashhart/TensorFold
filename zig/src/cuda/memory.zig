@@ -84,8 +84,11 @@ pub const DeviceBuffer = struct {
     /// Allocates and fills from host bytes in one call.
     pub fn fromHost(d: *const Driver, bytes: []const u8) Error!DeviceBuffer {
         var b = try alloc(d, bytes.len);
-        errdefer b.free();
-        try b.upload(0, bytes);
+        b.upload(0, bytes) catch |e| { // the copy may still write `b`: it is freed once completion is proved
+            @import("completion.zig").drain(d, .{ .d = d, .handle = null }, "an upload's default stream and context did not drain");
+            b.free();
+            return e;
+        };
         return b;
     }
 

@@ -158,8 +158,7 @@ pub const Uploads = struct {
     event: cuda.Event,
 
     pub fn copy(u: Uploads, dst: u64, bytes: []const u8) !void {
-        const d = u.stream.d;
-        try d.check(d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, u.stream.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(u.stream.d, dst, bytes, u.stream);
     }
     pub fn record(u: Uploads) !void {
         try u.event.record(u.stream);

@@ -327,7 +327,7 @@ pub const Tower = struct {
 
     fn upload(t: *Tower, dst: u64, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        try t.d.check(t.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, t.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(t.d, dst, bytes, t.s);
     }
 
     /// Images' patches (fp32, merge order) to merged bf16 [sum(h * w) / 4, out_hidden] at `out`, each image on its own.

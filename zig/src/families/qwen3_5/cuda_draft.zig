@@ -285,7 +285,7 @@ pub const Draft = struct {
 
     fn picksZero(d: *Draft) !void {
         const zero: [64]u8 = @splat(0);
-        try d.e.d.check(d.e.d.api.cuMemcpyHtoD_v2(d.picks, &zero, 64), "cuMemcpyHtoD");
+        try cuda.copy_source.synchronousCopy(d.e.d, d.picks, &zero, std.heap.page_allocator);
     }
 
     fn drop(d: *Draft, ctx: *Ctx) void {
@@ -387,7 +387,7 @@ pub const Draft = struct {
         const ids = std.mem.bytesAsSlice(u32, d.staged.bytes[0 .. B * 4]);
         ids[0] = pending;
         @memset(ids[1..B], c.mask);
-        try e.d.check(e.d.api.cuMemcpyHtoDAsync_v2(d.ids, ids.ptr, B * 4, e.stream.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(e.d, d.ids, std.mem.sliceAsBytes(ids[0..B]), e.stream);
         try e.embed(d.ids, d.h, B, 0);
         for (d.w.layers, 0..) |l, i| {
             try d.norm(d.h, l.input_norm, d.x, B);

@@ -70,6 +70,33 @@ const M = struct {
         if (htod_pends) pending = true;
         return 0;
     }
+    // the copy-source owner's pinned sources and events
+    fn hostAlloc(out: *?*anyopaque, n: usize, _: c_uint) callconv(.c) c_int {
+        const bytes = std.testing.allocator.alignedAlloc(u8, .@"16", n + 16) catch return cuda.abi.error_not_ready;
+        std.mem.writeInt(usize, bytes[0..@sizeOf(usize)], n + 16, .little);
+        out.* = bytes.ptr + 16;
+        return 0;
+    }
+    fn hostFree(ptr: ?*anyopaque) callconv(.c) c_int {
+        if (pending) bad_free += 1;
+        const base: [*]align(16) u8 = @alignCast(@as([*]u8, @ptrCast(ptr.?)) - 16);
+        const n = std.mem.readInt(usize, base[0..@sizeOf(usize)], .little);
+        std.testing.allocator.free(base[0..n]);
+        return 0;
+    }
+    fn eventCreate(out: *cuda.abi.Event, _: c_uint) callconv(.c) c_int {
+        out.* = @ptrFromInt(1);
+        return 0;
+    }
+    fn eventRecord(_: cuda.abi.Event, _: cuda.abi.Stream) callconv(.c) c_int {
+        return 0;
+    }
+    fn eventQuery(_: cuda.abi.Event) callconv(.c) c_int {
+        return cuda.abi.error_not_ready;
+    }
+    fn eventDestroy(_: cuda.abi.Event) callconv(.c) c_int {
+        return 0;
+    }
     fn setup(d: *cuda.Driver, t: *v.Tower) void {
         pending = false;
         bad_free = 0;
@@ -88,6 +115,12 @@ const M = struct {
         d.api.cuMemAlloc_v2 = dalloc;
         d.api.cuMemFree_v2 = dfree;
         d.api.cuMemcpyHtoD_v2 = upload;
+        d.api.cuMemHostAlloc = hostAlloc;
+        d.api.cuMemFreeHost = hostFree;
+        d.api.cuEventCreate = eventCreate;
+        d.api.cuEventRecord = eventRecord;
+        d.api.cuEventQuery = eventQuery;
+        d.api.cuEventDestroy_v2 = eventDestroy;
         t.* = undefined;
         t.gpa = .{ .ptr = t, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         t.d = d;

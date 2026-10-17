@@ -228,3 +228,7 @@ test "expert upload retains independent projection widths and expands packed sca
     try std.testing.expectEqual(@as(usize, 18), u.bufs.items.len);
     try std.testing.expectEqual(@as(u16, 0xbc00), std.mem.readInt(u16, mock.copied[0..2], .little));
 }
+
+test {
+    _ = @import("exl3_upload_wait_test.zig");
+}
