@@ -34,7 +34,7 @@ kernel void dsv41_rms(const device ushort* x [[buffer(0)]], const device uchar* 
     y[ulong(row)*d.y_stride+i] = rb((bf(x[ulong(row)*d.x_stride+i])*sums[0])*rd(w,i,d.weight_f32));
 }
 #pragma clang fp contract(on)
-// Each SIMD group emits four columns; compensated dots do not depend on token count.
+// Compensated dots do not depend on token count.
 
 // Precision: 0=BF16, 1=FP32, 2=FP16; FP16 weights never round through BF16.
 inline void dense_add(thread float& high, thread float& low, float value) {
@@ -47,32 +47,44 @@ struct Dense { uint rows, k, n, groups, x_stride, w_stride, y_stride, x_dtype, w
 kernel void dsv41_dense(const device uchar* x [[buffer(0)]], const device uchar* w [[buffer(1)]],
                         device uchar* y [[buffer(2)]], constant Dense& d [[buffer(3)]],
                         uint3 g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
-                        uint sg [[simdgroup_index_in_threadgroup]]) {
-  uint col = g.x*16 + sg*4;
-  float a[4] = {0,0,0,0}, residual[4] = {0,0,0,0};
-  for (uint k = lane; k < d.k; k += 32) {
-    float v = rd(x,ulong(g.y)*d.x_stride+ulong(g.z)*d.k+k,d.x_dtype);
-    for (uint j=0;j<4;j++) if (col+j<d.n) {
-      float weight = rd(w,(ulong(g.z)*d.n+col+j)*d.w_stride+k,d.w_dtype);
+                        uint sg [[simdgroup_index_in_threadgroup]], uint groups [[simdgroups_per_threadgroup]]) {
+  // One column per SIMD group: a one-row dot is latency bound, so more groups keep more loads in
+  // flight. Each column's lane order of products and compensated adds is unchanged.
+  const uint col = g.x*groups + sg;
+  if (col >= d.n) return;
+  float a = 0, residual = 0;
+  const uint xs = d.x_dtype == 1 ? 4 : 2, wsz = d.w_dtype == 1 ? 4 : 2;
+  const device uchar* xrow = x + (ulong(g.y)*d.x_stride+ulong(g.z)*d.k)*xs;
+  const device uchar* wrow = w + (ulong(g.z)*d.n+col)*d.w_stride*wsz;
+  // Sixteen strides of loads are issued before their adds; the add order is unchanged.
+  for (uint k0 = lane; k0 < d.k; k0 += 32*16) {
+    float vs[16], ws[16];
+    for (uint u=0;u<16;u++) {
+      const uint k = min(k0 + 32*u, d.k - 1);
+      vs[u] = rd(xrow,k,d.x_dtype);
+      ws[u] = rd(wrow,k,d.w_dtype);
+    }
+    for (uint u=0;u<16;u++) {
+      if (k0 + 32*u >= d.k) break;
+      float v = vs[u];
+      float weight = ws[u];
       float product = v * weight;
-      dense_add(a[j], residual[j], product);
-      if (d.x_dtype == 1 || d.w_dtype == 1) residual[j] += fma(v, weight, -product);
+      dense_add(a, residual, product);
+      if (d.x_dtype == 1 || d.w_dtype == 1) residual += fma(v, weight, -product);
     }
   }
-  for (uint j=0;j<4;j++) {
-    for (uint offset = 16; offset != 0; offset >>= 1) {
-      float other = simd_shuffle_xor(a[j], offset);
-      float other_residual = simd_shuffle_xor(residual[j], offset);
-      dense_add(a[j], residual[j], other);
-      residual[j] += other_residual;
-    }
-    float v = a[j] + residual[j];
-    if (lane==0 && col+j<d.n) {
-      ulong i = ulong(g.y)*d.y_stride+ulong(g.z)*d.n+col+j;
-      if (d.y_dtype==1) ((device float*)y)[i]=v;
-      else if (d.y_dtype==2) ((device half*)y)[i]=half(v);
-      else ((device ushort*)y)[i]=rb(v);
-    }
+  for (uint offset = 16; offset != 0; offset >>= 1) {
+    float other = simd_shuffle_xor(a, offset);
+    float other_residual = simd_shuffle_xor(residual, offset);
+    dense_add(a, residual, other);
+    residual += other_residual;
+  }
+  float v = a + residual;
+  if (lane==0) {
+    ulong i = ulong(g.y)*d.y_stride+ulong(g.z)*d.n+col;
+    if (d.y_dtype==1) ((device float*)y)[i]=v;
+    else if (d.y_dtype==2) ((device half*)y)[i]=half(v);
+    else ((device ushort*)y)[i]=rb(v);
   }
 }
 struct Embedding { uint rows,width,table_stride,y_stride,copies; };

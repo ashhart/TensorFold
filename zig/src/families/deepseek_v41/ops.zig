@@ -66,7 +66,7 @@ pub fn encodeDense(e: mtl.ComputeEncoder, p: *const Pipelines, x: View, w: View,
     e.setPipeline(p.dense);
     bind(e, .{ x, w, y });
     e.setValue([10]u32{ d.rows, d.k, d.n, d.groups, d.x_stride, d.w_stride, d.y_stride, @backingInt(d.x_dtype), @backingInt(d.w_dtype), @backingInt(d.y_dtype) }, 3);
-    e.dispatchGroups(mtl.Size.of((d.n + 15) / 16, d.rows, d.groups), mtl.Size.of(128, 1, 1));
+    e.dispatchGroups(mtl.Size.of(d.n, d.rows, d.groups), mtl.Size.of(32, 1, 1));
 }
 pub const Embedding = extern struct { rows: u32, width: u32, table_stride: u32, y_stride: u32, copies: u32 = 4 };
 /// ids[rows] u32 must be in vocabulary; table[vocab,width] BF16 -> y[rows,copies,width] BF16.
