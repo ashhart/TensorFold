@@ -1,14 +1,14 @@
-//! Flash Next behind the native server: one reply at a time on the replay engine (prompt chunks, then GPU-side
-//! rounds), greedy only; the engine's thread owns the GPU, requests wait in arrival order (foreground first).
+//! Flash Next behind the native server: one reply at a time, sampled on the GPU on request (speed-up mode greedy only).
 const std = @import("std");
 const mtl = @import("metal");
 const api = @import("engine_api");
 const tf = @import("tensorfold");
 const fx = tf.flashnext_engine;
-const snap = tf.flashnext_snapshot;
-const learned = tf.flashnext_learned;
 const pc = api.prompt_cache;
 const cache_fit = @import("cache_fit.zig");
+const disk = @import("flashnext_disk.zig");
+const Snaps = @import("flashnext_snaps.zig").Snaps;
+const Resident = @import("resident.zig").Resident;
 const Allocator = std.mem.Allocator;
 
 const Job = struct {
@@ -25,11 +25,13 @@ const Job = struct {
     keep_ns: i96 = 0, // the cache's saves at the pass's marks
 };
 
+/// The engine's thread owns the GPU; requests wait their turn, foreground first, each in arrival order.
 pub const Host = struct {
     gpa: Allocator,
     io: std.Io,
     eng: *fx.Engine,
     warm: mtl.keepalive.Target = undefined, // the engine's queue, for the server's idle ticker
+    resident: ?Resident = null, // the engine's buffers, kept wired between requests
     info_: api.Info,
     mutex: std.Io.Mutex = .init,
     wake: std.Io.Condition = .init,
@@ -44,10 +46,13 @@ pub const Host = struct {
     prefill_at: i96 = 0,
     live_prompt: u64 = 0, // the running reply's prompt tokens, for status (which never reads the job: finish frees it)
     live_generated: u64 = 0,
+    prefilling: bool = false, // the engine thread's prompt pass is running (status reads it under this lock)
     cache: ?pc.Store = null, // kept prompt states (engine thread only); null: no reuse (rank 1, a zero budget)
     prompt: []const u32 = &.{}, // the request in the engine (speed-up mode names kept states by its tokens)
     saved: std.ArrayList(u32) = .empty, // this request's marks the cache kept (speed-up: rank 1 drops the others)
     learned: ?api.prompt_imprint.Imprint = null, // --learn: shared states on disk, read back by later servers
+    disk: api.ImprintDisk = .{}, // the Mac app's questions about kept states, and the disk writer's quiet
+    served: u64 = 0, // requests taken from the queue: a new one restarts the writer's quiet
 
     const Mark = struct { at: i96, tokens: u64 };
     const window_ns: i96 = 2 * std.time.ns_per_s;
@@ -58,19 +63,29 @@ pub const Host = struct {
 
     /// Stops admitting, cancels what waits, lets the running reply end at its next round and joins the thread.
     pub fn stop(h: *Host) void {
+        drainFn(h);
+        h.disk.close(h.gpa);
+        h.queued.deinit(h.gpa);
+        h.cancels.deinit(h.gpa);
+        h.decoded.deinit(h.gpa);
+    }
+
+    /// A container constant: a literal with a call in a field lives on the stack, so engine() handed it out dangling.
+    const vtable: api.Engine.VTable = .{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn, .imprint = disk.ask(Host), .drain = drainFn };
+
+    pub fn engine(h: *Host) api.Engine {
+        return .{ .ctx = h, .vtable = &vtable };
+    }
+
+    /// Engine.drain, and stop's first half: closing, what waits cancelled, writes finished, the thread joined.
+    fn drainFn(ctx: *anyopaque) void {
+        const h = self(ctx);
         h.lock();
         h.closing = true;
         h.wake.broadcast(h.io);
         h.unlock();
         if (h.thread) |t| t.join();
         h.thread = null;
-        h.queued.deinit(h.gpa);
-        h.cancels.deinit(h.gpa);
-        h.decoded.deinit(h.gpa);
-    }
-
-    pub fn engine(h: *Host) api.Engine {
-        return .{ .ctx = h, .vtable = &.{ .info = infoFn, .submit = submitFn, .cancel = cancelFn, .status = statusFn, .memory = memoryFn, .keepalive = keepaliveFn } };
     }
 
     /// The engine's queue as a keepalive target: the ticker commits a tiny buffer on it while idle.
@@ -83,15 +98,15 @@ pub const Host = struct {
         return @ptrCast(@alignCast(ctx));
     }
 
-    fn lock(h: *Host) void {
+    pub fn lock(h: *Host) void {
         h.mutex.lockUncancelable(h.io);
     }
 
-    fn unlock(h: *Host) void {
+    pub fn unlock(h: *Host) void {
         h.mutex.unlock(h.io);
     }
 
-    fn now(h: *Host) i96 {
+    pub fn now(h: *Host) i96 {
         return std.Io.Clock.awake.now(h.io).toNanoseconds();
     }
 
@@ -110,9 +125,7 @@ pub const Host = struct {
             return error.Closed;
         }
         var at = h.queued.items.len; // foreground before background, each in arrival order
-        if (!request.background) {
-            while (at > 0 and h.queued.items[at - 1].request.background) at -= 1;
-        }
+        while (!request.background and at > 0 and h.queued.items[at - 1].request.background) at -= 1;
         h.queued.insert(h.gpa, at, job) catch {
             h.gpa.destroy(job);
             return error.Busy;
@@ -158,11 +171,12 @@ pub const Host = struct {
             .preemptions = 0,
             .streams = n,
             .generation_tokens = generation_tokens,
+            .fill_unknown = h.prefilling, // this backend reports no fill counters: the page says so, not idle
         };
     }
 
-    fn memoryFn(_: *anyopaque, _: bool) ?api.Memory {
-        return null;
+    fn memoryFn(_: *anyopaque, reset_peak: bool) ?api.Memory {
+        return cache_fit.hostMemory(0, reset_peak); // the process footprint; no configured load limit
     }
 
     fn emit(job: *Job, event: api.Event) void {
@@ -195,8 +209,12 @@ pub const Host = struct {
     fn run(h: *Host) void {
         while (true) {
             h.lock();
-            while (h.queued.items.len == 0 and !h.closing) {
-                h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(100), .clock = .awake } }) catch {};
+            if (h.queued.items.len == 0 and !h.closing) {
+                const ms_: i64 = if (disk.idleWork(h)) 10 else 100; // writes waiting for the quiet look again soon
+                if (ms_ == 100 or !h.disk.quiet(h.served, h.now())) h.wake.waitTimeout(h.io, &h.mutex, .{ .duration = .{ .raw = .fromMilliseconds(ms_), .clock = .awake } }) catch {};
+                h.unlock();
+                _ = disk.idleStep(h);
+                continue;
             }
             if (h.closing) {
                 const left = h.gpa.dupe(*Job, h.queued.items) catch &.{};
@@ -204,17 +222,29 @@ pub const Host = struct {
                 h.unlock();
                 for (left) |job| h.finish(job, .cancelled, .{}, "");
                 h.gpa.free(left);
+                // --learn's half-made cut settled, then what waits for disk written under the stop's deadline
+                if (h.cache) |*store| if (store.imprint) |im| api.prompt_learn.settle(store, im);
+                if (h.cache) |*store| if (store.disk) |r| {
+                    _ = api.prompt_cache.rows.write.drain(r, api.prompt_cache.rows.write.nowNs() + 20 * std.time.ns_per_s);
+                };
                 return;
             }
+            if (h.queued.items.len == 0) {
+                h.unlock();
+                continue;
+            }
             const job = h.queued.orderedRemove(0);
+            h.served += 1;
             h.running = job;
             h.live_prompt = job.request.prompt.len;
             h.live_generated = 0;
+            h.prefilling = true; // its prompt pass starts: status shows an unknown-progress fill until it reports
             h.cancels.clearRetainingCapacity(); // a cancel for an id no longer queued or running
             h.unlock();
             h.serve(job);
             h.lock();
             h.running = null;
+            h.prefilling = false;
             h.live_generated = 0;
             const idle = h.queued.items.len == 0;
             h.unlock();
@@ -245,8 +275,10 @@ pub const Host = struct {
             h.lock();
             if (done > c.job.began) h.prefill_rate = @as(f64, @floatFromInt(c.job.request.prompt.len - c.job.cached)) / (@as(f64, @floatFromInt(done - c.job.began)) / 1e9);
             h.prefill_at = done;
+            h.prefilling = false; // the pass reported: status stops showing an unknown-progress fill
             c.job.prefilled = done;
             h.unlock();
+            if (h.cache) |*store| if (store.disk) |r| r.prefilled(c.job.request.prompt.len - c.job.cached, done - c.job.began);
             c.job.prefill_sent = true;
             emit(c.job, .{ .prefilled = c.job.cached });
         }
@@ -285,6 +317,8 @@ pub const Host = struct {
             h.lock();
             defer h.unlock();
             if (h.closing) return true;
+            // a reply's background pass yields to a waiting request
+            if (c.job.request.background and h.queued.items.len > 0 and !h.queued.items[0].request.background) return true;
             return std.mem.indexOfScalar(api.Id, h.cancels.items, c.job.id) != null;
         }
     };
@@ -297,18 +331,21 @@ pub const Host = struct {
         defer h.finish(job, fin.reason, fin.stats, fin.message); // after every defer below: they read the job and its request
         const r = job.request;
         job.began = h.now();
-        if (r.sampling) |s| if (s.temperature > 0) {
-            emit(job, .{ .prefilled = 0 });
-            fin.message = "the native Flash Next engine decodes greedily only: send temperature 0";
-            return;
-        };
         if (h.eng.followsPeer()) {
             emit(job, .{ .prefilled = 0 });
             fin.message = "speed-up mode: this Mac runs rank 0's requests; send requests to rank 0";
             return;
         }
         var c: Ctx = .{ .h = h, .job = job };
-        const out: fx.Out = .{ .ctx = &c, .prefilled = Ctx.prefilled, .tokens = Ctx.tokens, .cancelled = Ctx.cancelled, .marked = Ctx.marked };
+        const sampled: ?api.Sampling = if (r.sampling) |s| (if (s.temperature > 0) s else null) else null;
+        const out: fx.Out = .{
+            .ctx = &c,
+            .prefilled = Ctx.prefilled,
+            .tokens = Ctx.tokens,
+            .cancelled = Ctx.cancelled,
+            .marked = Ctx.marked,
+            .sampling = sampled,
+        };
         const depth: ?usize = if (r.drafts) null else 0;
         const budget: fx.Think = if (r.think_budget > 0) .{ .budget = r.think_budget, .close = r.think_close, .end = r.think_end } else .{};
         var arena: std.heap.ArenaAllocator = .init(h.gpa);
@@ -357,73 +394,6 @@ fn ms(ns: i96) f64 {
     return @as(f64, @floatFromInt(ns)) / 1e6;
 }
 
-/// The prompt cache's copies of the engine's state (snapshot.zig), on the engine's thread.
-const Snaps = struct {
-    fn bytes(ptr: *anyopaque, at: u32) u64 {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        return h.eng.snap_pool.size(snap.bytes(at)); // a new buffer's size; a free one in the pool may take the state instead
-    }
-    fn charged(_: *anyopaque, saved: pc.Saved) u64 {
-        const k: *Kept = @ptrCast(@alignCast(saved));
-        return k.st.cap;
-    }
-    fn spare(ptr: *anyopaque) u64 {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        return h.eng.snap_pool.spare();
-    }
-    fn trim(ptr: *anyopaque, room: u64) void {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        h.eng.snap_pool.trim(room);
-    }
-    fn reuses(ptr: *anyopaque, at: u32) bool {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        return h.eng.snap_pool.fits(snap.bytes(at));
-    }
-    /// A kept state and its name on both Macs (speed-up mode's rank 1 keeps its own under the same name).
-    const Kept = struct { st: *snap.State, key: u64 };
-    fn save(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        const k = try h.gpa.create(Kept);
-        errdefer h.gpa.destroy(k);
-        k.* = .{ .st = try snap.save(h.eng, h.gpa, at), .key = fx.keyOf(h.prompt[0 .. at + 1]) };
-        if (std.mem.indexOfScalar(u64, h.eng.peer_drops.items, k.key)) |i| _ = h.eng.peer_drops.swapRemove(i); // rank 1's copy is this new one
-        return k;
-    }
-    fn restore(ptr: *anyopaque, _: ?*anyopaque, saved: pc.Saved) anyerror!void {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        const k: *Kept = @ptrCast(@alignCast(saved));
-        try snap.restore(h.eng, k.st);
-    }
-    fn drop(ptr: *anyopaque, saved: pc.Saved) void {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        const k: *Kept = @ptrCast(@alignCast(saved));
-        if (h.eng.r.tp != null) h.eng.peer_drops.append(h.gpa, k.key) catch {};
-        snap.drop(h.gpa, k.st);
-        h.gpa.destroy(k);
-    }
-    /// --learn: a kept state to its file under `dir`.
-    fn write(_: *anyopaque, saved: pc.Saved, dir: [:0]const u8, key: u64) anyerror!void {
-        const k: *Kept = @ptrCast(@alignCast(saved));
-        var buf: [1100]u8 = undefined;
-        try learned.writeFile(k.st, try learned.path(&buf, dir, key));
-    }
-    /// --learn: learned state `key` read back into a pool buffer, named by the request's tokens as a saved one is.
-    fn read(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!pc.Saved {
-        const h: *Host = @ptrCast(@alignCast(ptr));
-        if (at >= h.prompt.len) return error.SnapshotRead;
-        var buf: [1100]u8 = undefined;
-        const k = try h.gpa.create(Kept);
-        errdefer h.gpa.destroy(k);
-        k.* = .{ .st = try learned.readFile(h.eng, h.gpa, at, try learned.path(&buf, dir, key)), .key = fx.keyOf(h.prompt[0 .. at + 1]) };
-        return k;
-    }
-    /// --learn: learned state `key`'s file removed.
-    fn forget(_: *anyopaque, dir: [:0]const u8, key: u64) void {
-        var buf: [1100]u8 = undefined;
-        _ = std.c.unlink(learned.path(&buf, dir, key) catch return);
-    }
-};
-
 /// The prompt cache's plan (cache_fit.zig); without an OS reading, `gib` or the Metal working set's spare.
 fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]const u8) !api.PromptCachePlan {
     const rank = if (eng.followsPeer()) " (rank 1 keeps its halves of rank 0's)" else if (eng.r.tp != null) " (rank 1 mirrors them)" else "";
@@ -431,22 +401,20 @@ fn cacheBudget(eng: *fx.Engine, gib: ?f64, over: bool, a: Allocator, why: *[]con
     return cache_fit.budget(gib, over, dev.maxWorkingSet() -| dev.allocated() -| (8 << 30), a, why, rank);
 }
 
+/// --learn's settings: the root, cap, free-disk floor and daily writes, and whether conversations go to disk too.
+pub const Learn = struct { root: []const u8, cap: u64, floor: u64 = 4 << 30, daily: u64 = 32 << 30, conversations: bool = false };
+
+const rows_image: api.prompt_cache.rows.Image = disk.image(Host);
+
 /// Learned states under `root` by checkpoint, kernel sources and modes, probe bits, OS build and chip.
-fn learnedStates(gpa: Allocator, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
-    var h = std.hash.Wyhash.init(0x6678);
-    const probe = try learned.probe(eng, gpa);
-    const modes = [_]u64{ @intFromBool(eng.r.xnew), @intFromBool(eng.r.hc_up), @intFromBool(eng.r.device.tensorUnits()) };
-    for ([_]u64{ eng.identity_hash, learned.sourceHash(), modes[0], modes[1], modes[2], probe }) |x| h.update(std.mem.asBytes(&x));
-    var os: [64]u8 = undefined;
-    h.update(api.prompt_imprint.osBuild(&os));
-    h.update(std.mem.span(eng.r.device.name()));
-    const m = try api.prompt_imprint.Imprint.open(gpa, root, h.final(), cap);
+fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, cap: u64) !api.prompt_imprint.Imprint {
+    const m = try api.prompt_imprint.Imprint.open(gpa, root, (try disk.identity(gpa, io, eng)).id, cap);
     std.log.info("flash next: learned prompt states in {s} ({d} known, {d} of {d} MiB)", .{ m.dir, m.metas.items.len, m.total() >> 20, cap >> 20 });
     return m;
 }
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
-pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?[]const u8, learn_cap: u64, a: Allocator, why: *[]const u8) !*Host {
+pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, a: Allocator, why: *[]const u8) !*Host {
     const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
     errdefer eng.deinit();
     if (learn != null and eng.r.tp != null) {
@@ -465,18 +433,45 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, wind
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
     const limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
-    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = true, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
+    h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, limit) else limit) } };
     h.warm = .{ .queue = eng.r.queue };
+    // macOS unwires idle GPU memory within seconds: the engine's buffers join one set the idle keepalive's ticks use
+    if (std.c.getenv("FLASHNEXT_NO_RESIDENCY") == null) holdResident(h) catch |err| std.log.warn("flash next: no residency set ({s}): the first request after an idle second waits for the model's memory", .{@errorName(err)});
+    errdefer dropResident(h);
     // chunk 1: a prompt call keeps at marks inside it (engine.mark_taps), so a short prompt's history mark adds no call
-    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget } }, .{ .lookahead = 1, .chunk = 1 }, budget);
+    if (!eng.followsPeer() and budget > 0) h.cache = pc.Store.init(gpa, .{ .ptr = h, .vtable = &.{ .bytes = Snaps.bytes, .save = Snaps.save, .restore = Snaps.restore, .drop = Snaps.drop, .charged = Snaps.charged, .spare = Snaps.spare, .trim = Snaps.trim, .reuses = Snaps.reuses, .write = Snaps.write, .read = Snaps.read, .forget = Snaps.forget, .rows = &rows_image } }, .{ .lookahead = 1, .chunk = 1, .warm = .on }, budget);
     h.info_.prompt_cache = h.cache != null;
-    if (learn) |root| {
-        h.learned = try learnedStates(gpa, eng, root, learn_cap);
+    // a reply's background pass keeps its end: a client that drops the reasoning resumes past the reply
+    h.info_.warm_turns = h.cache != null;
+    if (learn) |l| if (l.conversations) {
+        if (h.cache) |*store| _ = try disk.attach(gpa, store, try disk.identity(gpa, io, eng), l.root, l.cap, l.floor, l.daily);
+    } else {
+        h.learned = try learnedStates(gpa, io, eng, l.root, l.cap);
         if (h.cache) |*store| store.imprint = &h.learned.?;
-    }
+    };
     errdefer if (h.learned) |*m| m.deinit();
+    errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     try h.start();
     return h;
+}
+
+/// The engine's buffers in one residency set the idle keepalive's ticks use; buffers made later join it or stay out.
+fn holdResident(h: *Host) !void {
+    h.resident = try Resident.hold(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, h.eng.r.held.items, "flash next") orelse return;
+    const r = &h.resident.?;
+    h.warm = r.target();
+    h.eng.r.follow = r.follow();
+    h.eng.snap_pool.follow = r.follow(); // kept states' buffers join it, and leave it before they are freed
+}
+
+/// The set released; the engine's allocators stop reporting to it first.
+fn dropResident(h: *Host) void {
+    const r = if (h.resident) |*x| x else return;
+    h.eng.r.follow = null;
+    h.eng.snap_pool.follow = null;
+    r.deinit();
+    h.resident = null;
+    h.warm = .{ .queue = h.eng.r.queue };
 }
 
 fn follow(eng: *fx.Engine) void {
@@ -490,8 +485,11 @@ pub fn close(ctx: *anyopaque) void {
         h.eng.stopFollowing();
         th.join();
     }
+    const rows = if (h.cache) |*store| store.disk else null;
     if (h.cache) |*store| store.deinit();
+    if (rows) |r| r.deinit(); // after the store: its entries leave the write queue as they go
     if (h.learned) |*m| m.deinit();
+    dropResident(h);
     h.saved.deinit(h.gpa);
     h.eng.deinit();
     h.gpa.destroy(h);

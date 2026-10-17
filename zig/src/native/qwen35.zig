@@ -5,6 +5,12 @@ const api = @import("engine_api");
 const tf = @import("tensorfold");
 const q = tf.qwen35;
 const lanes = tf.lanes;
+const cache_fit = @import("cache_fit.zig");
+
+/// The host's memory counts: `cache_fit.hostMemory` from the process footprint (no configured load limit).
+fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    return cache_fit.hostMemory(0, reset_peak);
+}
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -54,6 +60,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     h.core = lanes.Engine.init(gpa, &h.config, h.metal.backend(), h.clock.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.warm = .{ .queue = h.metal.model.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();

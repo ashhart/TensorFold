@@ -206,30 +206,10 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     if (m.adapter) |ad| adapt(f, e, ad, s.sh_act, s.sh, rows);
     inline for (.{ "expert_up", "expert_down" }, 0..) |key, j| {
         if (j == 0) e.alongside();
-        const fc = if (j == 0) m.fc1 else m.fc2;
-        const many = rows > 1 and f.members > 0;
-        const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
-        e.pipe(if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
-        e.buf(if (j == 0) s.x else s.act, 0, 0);
-        if (rows == 1) {
-            e.buf(s.idx, 0, 1);
-            e.bytes(ints8(&.{ 0, 1, 2, 3, 4, 5 }), 2);
-            e.bytes(ints8(&.{ 1, 1, 1, 1, 1, 1 }), 3);
-            e.bytes(ints8(&.{ 0, 1, 2, 3, 4, 5 }), 4);
-            e.bytes(@as(i32, @intCast(pairs)), 5);
-        } else {
-            e.buf(s.uids, 0, 1);
-            e.buf(s.start, 0, 2);
-            e.buf(s.count, 0, 3);
-            e.buf(s.members, 0, 4);
-            e.buf(s.ucount, 0, 5);
-        }
-        e.buf(fc[0].buffer, fc[0].offset, 6);
-        e.buf(fc[1].buffer, fc[1].offset, 7);
-        e.buf(fc[2].buffer, fc[2].offset, 8);
-        e.buf(if (j == 0) s.act else s.ey, 0, 9);
-        const n = if (j == 0) c.expert_width else c.hidden;
-        e.run(.{ 32 * geo[1], n / (geo[0] * geo[1]), groups }, .{ 32 * geo[1], 1, 1 });
+        if (m.routed) |r| {
+            // by pair: fc1 reads each token's row once a pick, fc2 its pair's activations
+            if (j == 0) f.indexed(e, r[0], c.top_k, pairs, true, s.x, s.idx, s.act) else f.indexed(e, r[1], 1, pairs, false, s.act, s.idx, s.ey);
+        } else experts4(f, e, m, key, j, rows, pairs, groups);
     }
     // the pocket's output beside the routed experts' down: its products and the shared expert's sum were done before it
     if (m.pocket) |p| if (p.used > 0) runs(f, e, p, s.x, s.sh, rows, pocketOut);
@@ -379,6 +359,36 @@ pub fn latch(k: *const kern.Kernels, e: *Enc, need: Buffer, latches: Buffer, sco
     e.run(.{ 1, 1, 1 }, .{ 1, 1, 1 });
 }
 
+/// The routed experts' 4-bit kernels (j 0: up into act, 1: down into ey): one row's pairs, else each expert's members.
+fn experts4(f: Forward, e: *Enc, m: wts.Moe, comptime key: []const u8, comptime j: usize, rows: usize, pairs: usize, groups: usize) void {
+    const c = f.c;
+    const s = f.s;
+    const fc = if (j == 0) m.fc1 else m.fc2;
+    const many = rows > 1 and f.members > 0;
+    const geo: [2]usize = if (f.geometry > 0 and !many) kern.geometries[f.geometry - 1] else if (many and f.members == 3) .{ 4, 4 } else .{ 4, 2 };
+    e.pipe(if (many) expertRows(f, j, f.members) else if (f.geometry > 0) expertGeo(f, j, f.geometry - 1) else f.k.get(key));
+    e.buf(if (j == 0) s.x else s.act, 0, 0);
+    if (rows == 1) {
+        e.buf(s.idx, 0, 1);
+        e.bytes(ints8(&.{ 0, 1, 2, 3, 4, 5 }), 2);
+        e.bytes(ints8(&.{ 1, 1, 1, 1, 1, 1 }), 3);
+        e.bytes(ints8(&.{ 0, 1, 2, 3, 4, 5 }), 4);
+        e.bytes(@as(i32, @intCast(pairs)), 5);
+    } else {
+        e.buf(s.uids, 0, 1);
+        e.buf(s.start, 0, 2);
+        e.buf(s.count, 0, 3);
+        e.buf(s.members, 0, 4);
+        e.buf(s.ucount, 0, 5);
+    }
+    e.buf(fc[0].buffer, fc[0].offset, 6);
+    e.buf(fc[1].buffer, fc[1].offset, 7);
+    e.buf(fc[2].buffer, fc[2].offset, 8);
+    e.buf(if (j == 0) s.act else s.ey, 0, 9);
+    const n = if (j == 0) c.expert_width else c.hidden;
+    e.run(.{ 32 * geo[1], n / (geo[0] * geo[1]), groups }, .{ 32 * geo[1], 1, 1 });
+}
+
 /// The routed-expert kernel (j 0: up, 1: down) taking `mb` member rows a pass (3: tf_experts_w, four simdgroups).
 fn expertRows(f: Forward, j: usize, mb: usize) mtl.Pipeline {
     if (mb == 3) return if (j == 0) f.k.get("tf_xup_w3") else f.k.get("tf_xdown_w3");
@@ -406,8 +416,8 @@ fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
     e.pipe(if (tmr == 1) f.k.get("up_relu2_1_0") else if (!edge) f.k.get("up_relu2_2_0") else f.k.get("up_relu2_2_1"));
     e.buf(s.x, 0, 0);
     e.buf(s.xs, 0, 1);
-    e.buf(lin.w, 0, 2);
-    e.buf(lin.sbt, 0, 3);
+    e.buf(lin.tiles.?.w, 0, 2);
+    e.buf(lin.tiles.?.sbt, 0, 3);
     e.bytes(Forward.mdims(rows), 4);
     e.buf(s.sh_act, 0, 5);
     e.buf(s.sh_xs, 0, 6);
