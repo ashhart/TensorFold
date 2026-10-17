@@ -104,7 +104,7 @@ __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return
 
 }  // namespace
 
-// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots. MAXC: experts a lane holds.
+// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots. MAXC: a lane's experts.
 template <int MAXC>
 __device__ __forceinline__ void nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS, int* __restrict__ IDX,
                                           float* __restrict__ WT, int R, float scaling, int E, int SK, int TOPK, int NS, int norm) {
