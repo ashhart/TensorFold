@@ -1,5 +1,6 @@
 //! Nemotron's checkpoint prompt tiles, router tiles and share-sum glue launches' CUDA records, in registry.cuda.
 const CudaRecord = @import("registry.zig").CudaRecord;
+const Override = @import("registry.zig").Override;
 
 pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "router tf_nemo_router_tiles", .symbol = "tf_nemo_router_tiles", .image = "nemotron_route", .threads = 256, .dynamic = 40960 }, .usage = .{ .{ .regs = 181, .static = 0, .bound = 256 }, .{ .regs = 184, .static = 0, .bound = 256 }, .{ .regs = 184, .static = 0, .bound = 256 }, .{ .regs = 177, .static = 0, .bound = 256 }, .{ .regs = 177, .static = 0, .bound = 256 } } },
@@ -10,4 +11,10 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "ck tf_ck4_down_sum_prompt", .symbol = "tf_ck4_down_sum_prompt", .image = "ck_experts", .threads = 256, .min_sm = 120 }, .usage = .{ .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 222, .static = 36864, .bound = 256 }, .{ .regs = 222, .static = 36864, .bound = 256 } } },
     .{ .launch = .{ .name = "ck tf_ck8_128", .symbol = "tf_ck8_128", .image = "ck_lane", .threads = 256, .dynamic = 49152, .opt_in = true, .min_sm = 89 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 122, .static = 0, .bound = 256 }, .{ .regs = 76, .static = 0, .bound = 256 }, .{ .regs = 76, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "ck tf_ck8_128c cluster of 8", .symbol = "tf_ck8_128c", .image = "ck_lane", .threads = 256, .dynamic = 65536, .cluster = 8, .opt_in = true, .min_sm = 90 }, .usage = .{ .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 64, .static = 0, .bound = 256 }, .{ .regs = 58, .static = 0, .bound = 256 }, .{ .regs = 104, .static = 0, .bound = 256 }, .{ .regs = 104, .static = 0, .bound = 256 } } },
+};
+
+/// nvcc 13.2's usage where it differs from 13.0's.
+pub const cuda_132 = [_]Override{
+    .{ .name = "ck tf_ck4_down_f32_prompt", .usage = .{ .{ .regs = 80, .static = 36864, .bound = 256 }, .{ .regs = 90, .static = 36864, .bound = 256 }, .{ .regs = 90, .static = 36864, .bound = 256 }, .{ .regs = 126, .static = 36864, .bound = 256 }, .{ .regs = 126, .static = 36864, .bound = 256 } } },
+    .{ .name = "ck tf_ck4_down_sum_prompt", .usage = .{ .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 164, .static = 36864, .bound = 256 }, .{ .regs = 224, .static = 36864, .bound = 256 }, .{ .regs = 224, .static = 36864, .bound = 256 } } },
 };

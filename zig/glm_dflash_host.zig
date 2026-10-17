@@ -72,14 +72,14 @@ test "glm dflash: either book read failure releases its allocated storage" {
     try attempt(99, 1);
 }
 
-test "glm dflash: every loaded symbol has a pending launch record" {
+test "glm dflash: every loaded symbol has a measured launch record" {
     inline for (@typeInfo(glm.dflash.Kernels).@"struct".field_names) |name| {
         const symbol = "df_" ++ name;
         var found = false;
         for (registry.all_cuda) |r| if (std.mem.eql(u8, symbol, r.launch.symbol)) {
             found = true;
             try t.expectEqualStrings("glm_dflash", r.launch.image);
-            for (r.usage) |u| try t.expectEqual(@as(u32, 0), u.regs);
+            for (r.usage) |u| try t.expect(u.regs > 0);
         };
         try t.expect(found);
     }

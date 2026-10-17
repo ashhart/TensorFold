@@ -17,14 +17,14 @@ fn record(symbol: []const u8) !registry.CudaRecord {
     return error.MissingGlmLaunch;
 }
 
-test "glm packed: every loaded matmul bucket and tiler has an unmeasured resource record" {
+test "glm packed: every loaded matmul bucket and tiler has a measured resource record" {
     inline for (.{ 16, 4, 6, 8 }) |bits| {
         inline for (.{ 16, 32, 64, 128 }) |bm| {
             const r = try record(std.fmt.comptimePrint("glm_mm{d}_{d}", .{ bits, bm }));
             try t.expectEqualStrings("glm_mm", r.launch.image);
             try t.expectEqual(@as(u32, if (bm <= 32) 128 else 256), r.launch.threads);
             try t.expectEqual(glm.mm.sharedBytes(bits, bm), r.launch.dynamic);
-            for (r.usage) |u| try t.expectEqual(@as(u32, 0), u.regs);
+            for (r.usage) |u| try t.expect(u.regs > 0);
         }
         _ = try record(std.fmt.comptimePrint("glm_mm_tile{d}", .{bits}));
     }
