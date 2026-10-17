@@ -116,7 +116,6 @@ fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
     try s.synchronize();
 }
 
-/// The largest shard a rank sends by RoCE writes: a decode window's partials (8 rows of fp32) fit.
 /// TF_ROCE_MAX_KB: a RoCE gather's largest shard (default 4096 KiB; 512 cost glm_cuda 24-43% at 8 streams).
 fn roceCap() usize {
     const v = std.c.getenv("TF_ROCE_MAX_KB") orelse return 4096 << 10;
