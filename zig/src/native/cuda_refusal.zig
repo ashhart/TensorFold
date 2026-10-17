@@ -23,6 +23,10 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     const ranked = @hasDecl(F, "Options") and @hasField(F.Options, "rank");
     if (o.tp != 1 and !ranked) return "this CUDA family has no tensor-parallel ranks: serve without --tp";
+    if (@hasDecl(F, "tp_draft_snapshots")) {
+        if (!F.tp_draft_snapshots and o.tp > 1 and o.drafts and (o.prompt_cache_gib orelse 1) > 0)
+            return "Flash Next tensor-rank MTP snapshots are unavailable: use --prompt-cache-gib 0 with --tp and drafting";
+    }
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
     if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
     if (o.kv8 and !(@hasDecl(F, "Options") and @hasField(F.Options, "kv8"))) return "--kv-cache fp8: this CUDA family keeps bf16 caches; serve without it";

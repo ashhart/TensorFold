@@ -24,6 +24,7 @@ pub const captured_head_entries = [_][]const u8{ "_rmsnorm", "_add_streams" };
 pub fn Namespace(comptime Tri: type) type {
     return struct {
         pub const model_type = "qwen4_exp";
+        pub const tp_draft_snapshots = false;
         pub const formats: []const []const u8 = &.{ "mlx-q4g32", "modelopt-mixed" };
         // the model's window: past 2,048 keys the block indexer picks each row's 512 best blocks of 4 (cuda_batch.zig)
         pub const default_context: i64 = @intCast(prompt.max_tokens);

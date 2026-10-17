@@ -603,3 +603,7 @@ test "a cancel during a long prompt stops it, and the next request's reply is un
 test "family readiness reaches production lane admission without binding CUDA" {
     try @import("cuda_health_test.zig").check(Host, Host.readiness, Host.serve);
 }
+
+test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
+    try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
+}
