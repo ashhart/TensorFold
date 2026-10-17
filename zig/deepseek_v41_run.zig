@@ -52,7 +52,7 @@ fn validArguments(args: []const [:0]const u8) bool {
     for ([_][]const u8{ "plan", "operators" }, [_]usize{ 4, 5 }) |name, count|
         if (std.mem.eql(u8, mode, name)) return args.len == count;
     if (std.mem.eql(u8, mode, "attention-history-sameinput")) return args.len == 8;
-    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins", "lanes" }) |name|
+    for ([_][]const u8{ "teacher", "generate", "attention-sameinput", "hc-sameinput", "moe-sameinput", "margins" }) |name|
         if (std.mem.eql(u8, mode, name)) return args.len == 6 or args.len == 7;
     if (std.mem.eql(u8, mode, "lanes")) return args.len == 6 or args.len == 7 or args.len == 8;
     for ([_][]const u8{ "seams", "oracle", "profile", "trace" }) |name|
