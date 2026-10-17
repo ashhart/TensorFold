@@ -4,6 +4,9 @@ const api = @import("engine_api");
 
 /// Sets what `o` asks of `F` in `opts`; false with `problem` set when F cannot take a flag given (--precision).
 pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8) bool {
+    if (@hasField(F.Options, "mtp_drafts")) opts.mtp_drafts = o.mtp_drafts;
+    if (@hasField(F.Options, "mtp_confidence")) opts.mtp_confidence = o.mtp_confidence;
+    if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);

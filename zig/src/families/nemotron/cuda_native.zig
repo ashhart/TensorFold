@@ -34,7 +34,7 @@ pub const max_segments: u32 = @import("cuda_segments.zig").MAX;
 pub const prompt_rows: u32 = state.pass_rows;
 pub const window_rows: u32 = state.max_rows; // a request's last verify window: its pages hold that many rows past it
 
-pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null };
+pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, precision: ?@import("config.zig").Precision = null, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
 pub const vision = @import("cuda_vision.zig");
 
 /// Thinking budgets the lone driver takes (cuda_lone.zig): above it, the stream goes to the lane core before its cut.
@@ -127,6 +127,8 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     own.* = .{ .gpa = gpa, .e = e, .head = head, .lanes = try Lanes.init(gpa, e, head), .target = .{ .e = e, .head = head }, .carve = carve };
     errdefer own.lanes.deinit();
     own.lanes.copy_drafts = o.drafts;
+    own.lanes.mtp_drafts = o.mtp_drafts;
+    own.lanes.mtp_confidence = o.mtp_confidence;
     own.living = try slide.loadLiving(gpa, io, e, dir); // before the lanes' costs are measured: they decode through it
     errdefer if (own.living) |*s| s.deinit();
     try own.lanes.measure(io, dir);
