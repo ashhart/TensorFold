@@ -352,11 +352,12 @@ pub const State = struct {
         if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
     }
 
-    /// The rings restart at the current pool's first row: its rows so far (under 4) copied to their start.
+    /// Rebase at the earliest pool a rollback may revisit; MTP retains a whole verify window before its cursor.
     fn rebase(st: *State, stream: cuda.Stream, mtp: bool) !void {
         const at = if (mtp) st.mtp_len else st.pos;
         const old = if (mtp) st.mtp_base else st.base;
-        const nb = at / sparse.pool * sparse.pool;
+        const floor = if (mtp) at -| window_rows else at;
+        const nb = floor / sparse.pool * sparse.pool;
         const keep = (at - nb) * st.ring_row;
         const d = st.arena.buf.d;
         const first: usize = if (mtp) st.caches.len else 0;
