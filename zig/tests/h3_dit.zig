@@ -117,6 +117,7 @@ pub fn main(init: std.process.Init) !void {
     const av = try gpa.alloc(f32, na);
     // a knock-out or a probe only wants the profile
     const quick = args.len == 6 and (std.mem.indexOf(u8, args[5], "H3_KO") != null or std.mem.indexOf(u8, args[5], "H3_PROBE") != null);
+    try h3.geometry.stepRange(from, steps);
     for (from..if (quick) from else if (once) from + 1 else steps) |step| {
         const took = try model.forward(video, audio, step, vv, av);
         if (step == from) {

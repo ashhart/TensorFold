@@ -17,7 +17,7 @@ const audio_shift: f32 = 3.0;
 /// Re-voicing: the picture held, the audio rows down the released model's grid of n + 1 points.
 pub fn revoice(init: std.process.Init, model: *h3.Model, case: *const h3.Tensors, n: usize) !Made {
     const a = init.arena.allocator();
-    const audio = try h3.schedule.Schedule.fromPoints(a, n + 1, audio_shift);
+    const audio = try h3.schedule.Schedule.fromPoints(a, try h3.schedule.pointsForSteps(n), audio_shift);
     const steps = try h3.modulation.reschedule(model, a, audio, audio, true);
     std.debug.print("re-voice schedule made here: {d} audio steps, {d} timesteps\n", .{ audio.timesteps.len, model.lines / h3.schedule.modalities });
     compare(model, case);
@@ -32,8 +32,8 @@ pub fn reschedule(init: std.process.Init, model: *h3.Model, case: *const h3.Tens
     const a = init.arena.allocator();
     // the released weights (FL2VA, Ref2VA) sample their own grid of n + 1 points
     if (model.base) {
-        const video = try h3.schedule.Schedule.fromPoints(a, n + 1, video_shift);
-        const audio = try h3.schedule.Schedule.fromPoints(a, n + 1, audio_shift);
+        const video = try h3.schedule.Schedule.fromPoints(a, try h3.schedule.pointsForSteps(n), video_shift);
+        const audio = try h3.schedule.Schedule.fromPoints(a, try h3.schedule.pointsForSteps(n), audio_shift);
         const steps = try h3.modulation.reschedule(model, a, video, audio, false);
         std.debug.print("released-model schedule made here: {d} steps, {d} timesteps\n", .{ n, model.lines / h3.schedule.modalities });
         compare(model, case);

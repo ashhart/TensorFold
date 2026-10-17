@@ -3,6 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const h3 = @import("h3.zig");
 const schedule = @import("schedule.zig");
+const shape = @import("modulation_shape.zig");
 
 const Model = h3.Model;
 
@@ -20,7 +21,7 @@ fn names(m: *const Model) Names {
 /// y (rows, n) = x (rows, k) w^T + b on the host, summed in float64 and rounded once to float32.
 fn linear(a: std.mem.Allocator, x: []const f32, w: []const f32, b: []const f32, rows: usize, k: usize) ![]f32 {
     const n = b.len;
-    const y = try a.alloc(f32, rows * n);
+    const y = try a.alloc(f32, try shape.linear(x.len, w.len, n, rows, k));
     for (0..rows) |r| for (0..n) |o| {
         var s: f64 = 0;
         for (x[r * k ..][0..k], w[o * k ..][0..k]) |p, q| s += @as(f64, p) * q;
@@ -37,11 +38,11 @@ fn silu(v: f32) f32 {
 fn embed(m: *Model, a: std.mem.Allocator, table: []const f32) ![]u16 {
     const ck = &m.checkpoint;
     const n = names(m);
+    const dim = try shape.embedding(ck.entry(n.in_w) orelse return error.MissingTensor, ck.entry(n.in_b) orelse return error.MissingTensor, ck.entry(n.out_w) orelse return error.MissingTensor, ck.entry(n.out_b) orelse return error.MissingTensor, table.len);
     const w_in = try ck.floats(a, n.in_w);
     const b_in = try ck.floats(a, n.in_b);
     const w_out = try ck.floats(a, n.out_w);
     const b_out = try ck.floats(a, n.out_b);
-    const dim = w_in.len / b_in.len;
     const half = dim / 2;
     // cosine half first, angles and frequencies in float32 as MLX computes them
     const sinusoid = try a.alloc(f32, table.len * dim);
@@ -67,7 +68,7 @@ fn bf16(v: f32) u16 {
 /// One projection's tables into `out`: rows of `groups` x `parts` x `width`, laid out (part, timestep x group, width).
 fn project(m: *const Model, enc: mtl.ComputeEncoder, x: mtl.Buffer, prefix: []const u8, t: usize, k: usize, groups: usize, parts: usize, width: usize, out: mtl.Buffer) !void {
     var name: [128]u8 = undefined;
-    const n = groups * parts * width;
+    const n = try shape.projection(t, k, groups, parts, width);
     const w = try m.checkpoint.ref(try std.fmt.bufPrint(&name, "{s}weight", .{prefix}), n * k);
     const b = try m.checkpoint.ref(try std.fmt.bufPrint(&name, "{s}bias", .{prefix}), n);
     enc.setPipeline(m.pipeline("h3_modulation"));
@@ -81,6 +82,9 @@ fn project(m: *const Model, enc: mtl.ComputeEncoder, x: mtl.Buffer, prefix: []co
 
 /// The case's schedule replaced (plan, lines, tables); `hold` keeps all but the generated audio at the keyframe level.
 pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, audio: schedule.Schedule, hold: bool) !Steps {
+    try schedule.validate(video);
+    try schedule.validate(audio);
+    if (video.timesteps.len != audio.timesteps.len) return error.H3BadSchedule;
     const rows = m.rows;
     // a row's modality is the case's, fixed by the packing: its first step's line modulo the modalities
     const tags = try a.alloc(i32, rows);
@@ -88,12 +92,12 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
     const p = try schedule.plan(a, .{ .text = m.text, .condition = m.condition, .audio = m.audio, .held_audio = m.held_audio, .video = m.video, .hold = hold }, video.timesteps, audio.timesteps);
     const adaln = try a.alloc(i32, p.index.len);
     for (adaln, p.index, 0..) |*o, i, at| o.* = i * schedule.modalities + tags[at % rows];
-    m.adaln = adaln;
-    m.times = p.index;
     const t = p.table.len;
-    m.lines = t * schedule.modalities;
+    const lines = try shape.tables(t, m.hidden);
     const x = try embed(m, a, p.table);
     const k = x.len / t;
+    _ = try shape.projection(t, k, schedule.modalities, 6, m.hidden);
+    _ = try shape.projection(t, k, 1, 1, 2 * m.hidden);
     const shared = mtl.ResourceOptions.shared;
     const input = try m.device.buffer(x.len * 2, shared);
     @memcpy(input.slice(u16, x.len), x);
@@ -103,7 +107,7 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
     const enc = cb.compute(.concurrent);
     var name: [128]u8 = undefined;
     for (m.blocks, 0..) |*b, i| {
-        b.tables = .{ .buffer = try m.device.buffer(6 * m.lines * m.hidden * 2, shared) };
+        b.tables = .{ .buffer = try m.device.buffer(6 * lines * m.hidden * 2, shared) };
         try project(m, enc, input, try std.fmt.bufPrint(&name, "{s}{d}.adaln_proj.linear.", .{ names(m).block, i }), t, k, schedule.modalities, 6, m.hidden, b.tables.buffer);
     }
     m.final_table = .{ .buffer = try m.device.buffer(t * 2 * m.hidden * 2, shared) };
@@ -115,6 +119,9 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
         std.debug.print("modulation failed: {s}\n", .{why});
         return error.GpuFailed;
     }
+    m.adaln = adaln;
+    m.times = p.index;
+    m.lines = lines;
     const steps = Steps{ .video = try a.alloc([2]f32, video.timesteps.len), .audio = try a.alloc([2]f32, audio.timesteps.len) };
     for (steps.video, 0..) |*s, i| s.* = if (hold) .{ 0.0, 1.0 } else video.euler(i);
     for (steps.audio, 0..) |*s, i| s.* = audio.euler(i);

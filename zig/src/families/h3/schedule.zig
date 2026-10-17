@@ -1,5 +1,6 @@
 //! FastH3's sampling schedule: the checkpoint's rungs or N spread from its first, the sigma shifts and the step plan.
 const std = @import("std");
+const geometry = @import("geometry.zig");
 
 /// Keyframe rows are held at this timestep for every step.
 pub const keyframe_noise: f32 = 0.999;
@@ -20,9 +21,15 @@ fn number(v: std.json.Value) !f64 {
 /// fastvideo_inference.json; a preview checkpoint leaves a shift to its scheduler folder, given as that JSON.
 pub fn contract(a: std.mem.Allocator, json: []const u8, video_folder: ?[]const u8, audio_folder: ?[]const u8) !Contract {
     const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, json, .{});
-    const steps = (doc.object.get("dmd_denoising_steps") orelse return error.BadContract).array.items;
+    if (doc != .object) return error.BadContract;
+    const field = doc.object.get("dmd_denoising_steps") orelse return error.BadContract;
+    if (field != .array) return error.BadContract;
+    if (field.array.items.len == 0) return error.H3BadSchedule;
+    const steps = field.array.items;
+    _ = try geometry.product(&.{ steps.len, @sizeOf(f64) });
     const nodes = try a.alloc(f64, steps.len);
     for (nodes, steps) |*n, s| n.* = try number(s) / 1000.0;
+    try validNodes(nodes);
     return .{ .nodes = nodes, .video_shift = try shift(a, doc, "video_scheduler_shift", video_folder), .audio_shift = try shift(a, doc, "audio_scheduler_shift", audio_folder) };
 }
 
@@ -30,11 +37,15 @@ fn shift(a: std.mem.Allocator, doc: std.json.Value, key: []const u8, folder: ?[]
     if (doc.object.get(key)) |v| return number(v);
     const text = folder orelse return error.NoShift;
     const config = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+    if (config != .object) return error.BadContract;
     return number(config.object.get("shift") orelse return error.NoShift);
 }
 
 /// `n` rungs spread evenly from the first of `nodes` towards 0, as the exporter's --steps does.
 pub fn spread(a: std.mem.Allocator, nodes: []const f64, n: usize) ![]f64 {
+    try validNodes(nodes);
+    try geometry.dimension(n);
+    _ = try geometry.product(&.{ n, @sizeOf(f64) });
     if (n == nodes.len) return a.dupe(f64, nodes);
     const out = try a.alloc(f64, n);
     for (out, 0..) |*o, i| o.* = nodes[0] * (1.0 - @as(f64, @floatFromInt(i)) / @as(f64, @floatFromInt(n)));
@@ -48,7 +59,11 @@ pub const Schedule = struct {
 
     /// A distilled model's rungs: shifted in float64 and cast once, as FastVideo does.
     pub fn fromNodes(a: std.mem.Allocator, nodes: []const f64, s: f64) !Schedule {
-        const sigmas = try a.alloc(f32, nodes.len + 1);
+        try validNodes(nodes);
+        try validShift(s);
+        const points = try geometry.sum(&.{ nodes.len, 1 });
+        _ = try geometry.product(&.{ points, 4 });
+        const sigmas = try a.alloc(f32, points);
         for (sigmas, 0..) |*o, i| {
             const raw = if (i < nodes.len) nodes[i] else 0.0;
             o.* = @floatCast(s * raw / (1.0 + (s - 1.0) * raw));
@@ -60,6 +75,10 @@ pub const Schedule = struct {
 
     /// The released model's grid: torch's float32 linspace(1, 0, points), shifted in float32, repeats dropped.
     pub fn fromPoints(a: std.mem.Allocator, points: usize, s: f32) !Schedule {
+        if (points < 2) return error.H3BadSchedule;
+        try geometry.dimension(points);
+        try validShift(s);
+        _ = try geometry.product(&.{ points, 4 });
         const step: f32 = -1.0 / @as(f32, @floatFromInt(points - 1));
         const half = points / 2;
         var values: std.ArrayList(f32) = .empty;
@@ -102,9 +121,17 @@ fn rowTime(r: Rows, row: usize, video_t: f32, audio_t: f32) f32 {
 }
 
 pub fn plan(a: std.mem.Allocator, r: Rows, video: []const f32, audio: []const f32) !Plan {
-    const rows = r.text + r.condition + r.audio + r.video;
+    if (r.held_audio > r.audio) return error.H3HeldAudioExceedsTotal;
+    const rows = try geometry.sum(&.{ r.text, r.condition, r.audio, r.video });
+    try geometry.dimension(rows);
+    if (video.len == 0 or video.len != audio.len) return error.H3BadSchedule;
+    const lines = try geometry.product(&.{ video.len, 4, modalities });
+    try geometry.dimension(lines);
+    _ = try geometry.product(&.{ video.len, rows, 4 });
+    for (video, audio) |vt, at| if (!std.math.isFinite(vt) or !std.math.isFinite(at) or
+        vt < 0 or vt > 1 or at < 0 or at > 1) return error.H3BadSchedule;
     var seen: std.ArrayList(f32) = .empty;
-    for (video, audio) |vt, at| for ([_]f32{ vt, @max(vt, keyframe_noise), at, audio_condition }, 0..) |t, k| {
+    for (video, audio) |vt, at| for ([_]f32{ vt, if (r.hold) keyframe_noise else @max(vt, keyframe_noise), at, audio_condition }, 0..) |t, k| {
         // only the kinds of row this run has
         if ((k == 1 and r.condition == 0 and !r.hold) or (k == 3 and r.held_audio == 0) or (k == 0 and r.hold)) continue;
         if (std.mem.indexOfScalar(f32, seen.items, t) == null) try seen.append(a, t);
@@ -181,4 +208,28 @@ test "the plan: keyframe rows held at 0.999, held audio at 1, one sorted table o
     // step 0: text 0.5, keyframe 0.999, held audio 1, audio 0.25, video 0.5
     try std.testing.expectEqualSlices(i32, &.{ 1, 3, 4, 0, 1 }, p.index[0..5]);
     try std.testing.expectEqualSlices(i32, &.{ 2, 3, 4, 1, 2 }, p.index[5..10]);
+}
+
+fn validNodes(nodes: []const f64) !void {
+    if (nodes.len == 0) return error.H3BadSchedule;
+    try geometry.dimension(nodes.len);
+    for (nodes) |n| if (!std.math.isFinite(n) or n <= 0 or n > 1) return error.H3BadSchedule;
+}
+
+fn validShift(s: f64) !void {
+    if (!std.math.isFinite(s) or s <= 0) return error.H3BadSchedule;
+}
+
+pub fn validate(s: Schedule) !void {
+    if (s.timesteps.len == 0 or s.sigmas.len == 0 or s.sigmas.len - 1 != s.timesteps.len)
+        return error.H3BadSchedule;
+    for (s.timesteps, 0..) |t, i| {
+        if (!std.math.isFinite(t) or t < 0 or t >= 1 or !std.math.isFinite(s.sigmas[i]) or s.sigmas[i] <= 0 or
+            !std.math.isFinite(s.sigmas[i + 1]) or s.sigmas[i + 1] < 0) return error.H3BadSchedule;
+    }
+}
+
+pub fn pointsForSteps(n: usize) !usize {
+    try geometry.dimension(n);
+    return geometry.sum(&.{ n, 1 });
 }

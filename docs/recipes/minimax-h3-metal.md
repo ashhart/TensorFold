@@ -122,3 +122,19 @@ never stepped. `steps=N` on the released weights makes their own grid of N + 1 p
 - No exporter in the tree, so the tool cannot be exercised from this repository alone.
 - One machine (M5 Ultra). Chips without tensor units are refused.
 - No `tensorfold generate`, no text encoder, decoders or sampler: the forward only.
+
+## Host geometry admission
+
+`zig build test-h3-geometry` tests the case reader and schedule without a GPU or the Metal compiler.
+On macOS, `zig build compile-h3-host` compiles the actual tool with embedded shader source but does not compile or run
+shaders. Device and reference-output checks still need a Mac with the Metal toolchain.
+
+The reader accepts six, seven or eight nonnegative geometry counts. The seventh is held picture/video rows; the eighth
+is held audio, from zero through the total audio count. Text and held picture rows may be empty. Both audio and generated
+video must have rows for this tool's unconditional buffers and dispatches. Tiles hold one through 64 rows each; their
+unique slots must match the prefix/video partition. Keep may be zero through the generated-video tile count.
+
+Malformed counts, tensor shapes, tile maps, table indices, schedule sizes and overflowing byte products return named
+`H3` errors before shader compilation or scratch allocation. Integer shader dimensions must fit `i32`; GEMM widths must
+be multiples of 256; rotary width must be even and between 2 and 128. The top-k tile map is capped at 32768 tiles for the
+32 KiB threadgroup array. These arithmetic limits do not promise that an admitted request fits the available memory.

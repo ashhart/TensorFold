@@ -107,6 +107,7 @@ pub fn build(b: *std.Build) void {
         step5_mods.sources.addImport("nemotron_packed_metallib", embedded(b, empty, "nemotron_packed.metallib"));
         @import("zig/build/step5_host.zig").steps(b, step5_mods.metal, step5_mods.engine, step5_mods.lanes);
     }
+    @import("zig/build/h3_host.zig").tests(b, target, test_step);
     // every tracked path checks out on Windows too
     const names_run = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/portable_names.zig"), .target = target }) }));
     names_run.setCwd(b.path("."));
@@ -115,8 +116,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/xpu_admit.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/safetensors.zig"), .target = target }) })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/xpu/limits.zig"), .target = target }) })).step);
-    // MiniMax H3's sampling schedule: contracts, rungs and the step plan, on every host
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/schedule.zig"), .target = target }) })).step);
     const cost_cases = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/cost_rule_cases.zig"),
         .target = target,

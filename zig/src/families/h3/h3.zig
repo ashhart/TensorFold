@@ -8,6 +8,7 @@ const kernels = @import("h3_kernels");
 const block = @import("block.zig");
 pub const modulation = @import("modulation.zig");
 pub const schedule = @import("schedule.zig");
+pub const geometry = @import("geometry.zig");
 
 pub const Tensors = tensors.Tensors;
 pub const Ref = tensors.Ref;
@@ -147,37 +148,20 @@ pub const Model = struct {
         const prefix = if (self.base) "blocks" else "transformer_blocks";
         const to_q = ck.entry(if (self.base) "blocks.0.attn.qkv_proj.weight" else "transformer_blocks.0.attn.to_q.weight") orelse return error.MissingTensor;
         const fc2 = ck.entry(if (self.base) "blocks.0.mlp.fc2.weight" else "transformer_blocks.0.ff.net.2.weight") orelse return error.MissingTensor;
-        self.inner = to_q.shape[0] / @as(usize, if (self.base) 3 else 1);
-        self.hidden = to_q.shape[1];
-        self.heads = self.inner / head_dim;
-        self.mlp = fc2.shape[1];
         var layers: usize = 0;
         var name: [128]u8 = undefined;
         while (ck.entry(try std.fmt.bufPrint(&name, "{s}.{d}.norm1.weight", .{ prefix, layers })) != null) layers += 1;
-
-        // a case made for a first frame has a seventh count, the keyframe's rows
-        const counts = (case.names.get("geometry") orelse return error.MissingTensor).shape[0];
-        const geometry = try case.copy(i32, gpa, try case.at("geometry", .i32, counts), counts);
-        defer gpa.free(geometry);
-        self.prefix_tiles = @intCast(geometry[0]);
-        self.tiles = @intCast(geometry[0] + geometry[1]);
-        self.keep = @intCast(geometry[2]);
-        self.text = @intCast(geometry[3]);
-        self.audio = @intCast(geometry[4]);
-        self.video = @intCast(geometry[5]);
-        self.condition = if (counts > 6) @intCast(geometry[6]) else 0;
-        // a Ref2VA case has an eighth: the reference audio rows at the front of the audio
-        self.held_audio = if (counts > 7) @intCast(geometry[7]) else 0;
-        self.rows = self.text + self.condition + self.audio + self.video;
+        const admitted = try geometry.read(gpa, .{ .names = case.names, .data = case.map.bytes[case.data..case.map.size] }, to_q, fc2, layers, self.base);
+        _ = try geometry.product(&.{ layers, @sizeOf(Block) });
+        inline for (.{ "hidden", "inner", "heads", "mlp", "video_in", "audio_in", "lines", "rot" }) |f|
+            @field(self, f) = @field(admitted, f);
+        inline for (.{ "prefix_tiles", "tiles", "keep", "text", "audio", "video", "condition", "held_audio", "rows" }) |f|
+            @field(self, f) = @field(admitted.layout, f);
         const rows = self.rows;
         const hidden = self.hidden;
         const inner = self.inner;
         const heads = self.heads;
-        self.video_in = (case.names.get("video_in.weight") orelse return error.MissingTensor).shape[1];
-        self.audio_in = (case.names.get("audio_in.weight") orelse return error.MissingTensor).shape[1];
-        self.lines = (case.names.get("tables.0") orelse return error.MissingTensor).shape[1];
-        self.rot = (case.names.get("cos") orelse return error.MissingTensor).shape[1];
-        const times = (case.names.get("final") orelse return error.MissingTensor).shape[0];
+        const times = admitted.times;
 
         // the kernels take the model's sizes as compile-time values
         const source = try std.fmt.allocPrint(gpa, "#define H3_HEADS {d}\n#define H3_SLOTS {d}\n#define H3_TILES {d}\n{s}\n{s}", .{ heads, self.slots(), self.tiles, options.defines, kernels.source });
@@ -207,7 +191,7 @@ pub const Model = struct {
         self.slot = try self.held("tile_slot", .i32, rows);
         self.sizes = try self.held("tile_sizes", .i32, self.tiles);
 
-        const steps = (case.names.get("adaln") orelse return error.MissingTensor).shape[0];
+        const steps = admitted.steps;
         self.adaln = try case.copy(i32, gpa, try case.at("adaln", .i32, steps * rows), steps * rows);
         self.times = try case.copy(i32, gpa, try case.at("times", .i32, steps * rows), steps * rows);
         const total = self.slots();
@@ -345,6 +329,7 @@ pub const Model = struct {
 
     /// The video and audio velocities for the latent rows at denoising step `step` of the case's schedule.
     pub fn forward(self: *Model, video: []const f32, audio: []const f32, step: usize, video_velocity: []f32, audio_velocity: []f32) !Timing {
+        try geometry.forward(self.rows, self.video * self.video_in, self.audio * self.audio_in, self.adaln.len, self.times.len, step, video.len, audio.len, video_velocity.len, audio_velocity.len);
         const started = mtl.clock.seconds();
         const rows = self.rows;
         const hidden = self.hidden;
