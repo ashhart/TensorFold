@@ -218,3 +218,16 @@ tokens a reply, greedy, two alternated rounds, `tools/bench_concurrent.py --alon
 Every concurrent reply equaled its solo run and every solo run equaled `"draft": false` (832 replies checked a
 binary). One stream decodes the same as before: 505 and 347 tok/s on the two decode prompts. A 64-row cap alone,
 measured on the way, gave most of the 32-session gain and a quarter of the 64-session one.
+
+## Stream memory on CUDA
+
+The native CUDA engine keeps one sequence of its own at the full `--context` window, as before; its captured graphs
+and the lone stream's fast path read it. Every other stream takes its key and value rows from one pool of 512-row
+pages (`zig/src/core/kv_pool.zig`), which the engine fills from the room its own sequence and the weights leave:
+each further stream's fixed part (Mamba states, window scratch, its page table: 64 MiB), the prompt cache's snapshot
+slots (48 MiB each, made at load) and its copied rows come first, then pages, never more than every stream could hold
+at once. A request reserves `ceil((prompt + max_tokens + 16) / 512)` pages when it is admitted: a 2,048-token prompt
+with 4,096 reply tokens takes 13 pages (45.5 MiB) instead of a whole window. A request whose pages do not fit waits
+until a stream ends. The attention kernels read the pages through a table at a fixed device address, so the graphs
+keep their addresses. The startup line shows the pool. `TF_KV_PAGES=0` gives every stream a window again;
+`TF_KV_PAGES=all` puts every stream on pages (for checks).

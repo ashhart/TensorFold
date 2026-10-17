@@ -23,7 +23,11 @@ pub const snap_bytes = native.snap_bytes;
 pub const snap_save = native.snap_save;
 pub const snap_restore = native.snap_restore;
 pub const snap_drop = native.snap_drop;
-pub const snap_ready = native.snap_ready;
+pub const snap_slots = native.snap_slots;
+pub const snap_place = native.snap_place;
+pub const window_rows = native.window_rows;
+pub const attach = native.attach;
+pub const fits = native.fits;
 
 /// NVFP4 bytes a parameter takes: a 4-bit code and an e4m3 scale a 16.
 const nvfp4_bytes: f64 = 0.5625;

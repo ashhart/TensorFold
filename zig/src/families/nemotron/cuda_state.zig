@@ -143,6 +143,9 @@ pub const Seq = struct {
     arena: ?Arena, // null: the engine's own buffers
     carved: ?Carved = null,
     ptr: [seq_fields.len]u64,
+    table: u64 = 0, // its page table on the device (0: contiguous KV planes of max_len rows)
+    pages: []const u32 = &.{}, // the pages the table names, as the host holds them (cuda_pages.zig)
+    cap: usize = 0, // rows its caches hold (0: the engine's max_len)
     head: [3]u64 = @splat(0), // the MTP head's seq_fields (cuda_mtp.zig)
     graphs: seq_graphs.Graphs = .{}, // what this sequence captured for itself (the own one: masked windows alone)
     epoch: u32 = 0, // the engine's graph epoch its graphs were captured in
@@ -177,6 +180,32 @@ pub const Seq = struct {
         var s: Seq = .{ .arena = null, .ptr = undefined, .carved = carved };
         for (&s.ptr, sizes, 0..) |*p, n, i| p.* = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (s.head[0..head.len], head) |*p, n| p.* = a.take(n);
+        s.arena = a;
+        return s;
+    }
+
+    /// Fixed bytes of a paged sequence: every plane but the KV planes, its head's `head` buffers, a table of `pages`.
+    pub fn pagedBytes(c: Config, head: []const usize, pages: usize) usize {
+        return bytes(c, 0, head) + pages * 4 + 256;
+    }
+
+    /// A sequence whose KV planes are pages at `kv` (layer l's K, then V, `chunk_keys` rows each) through its table.
+    pub fn initPaged(d: *const cuda.Driver, c: Config, head: []const usize, stream: cuda.Stream, kv: u64, pages: usize) !Seq {
+        const sizes = seqSizes(c, 0);
+        var a: Arena = .{ .buf = try cuda.DeviceBuffer.alloc(d, pagedBytes(c, head, pages)) };
+        errdefer {
+            cuda.completion.drain(d, stream, "a paged sequence clear did not drain; its arena stays alive");
+            a.buf.free();
+        }
+        try a.buf.fill8(0, stream.handle);
+        var s: Seq = .{ .arena = null, .ptr = undefined };
+        for (&s.ptr, sizes) |*p, n| p.* = a.take(n);
+        for (s.head[0..head.len], head) |*p, n| p.* = a.take(n);
+        const plane: u64 = chunk_keys * kvRowBytes(c);
+        s.ptr[0] = kv;
+        s.ptr[1] = kv + plane;
+        if (head.len > 0) s.head[0..2].* = .{ kv + c.count(.attention) * 2 * plane, kv + (c.count(.attention) * 2 + 1) * plane };
+        s.table = a.take(pages * 4);
         s.arena = a;
         return s;
     }
@@ -244,6 +273,7 @@ pub const Buffers = struct {
     act: u64,
     ymoe: u64,
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
+    table: u64, // the bound sequence's page table (0: contiguous KV planes)
     shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
     pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
     lane_part: u64, // the lane matmul's fp32 slice partials on a card without clusters (rows short of fusing)
@@ -267,6 +297,7 @@ pub const Buffers = struct {
         errdefer a.buf.free();
         var b: Buffers = undefined;
         b.carved = carved;
+        b.table = 0;
         b.state_bytes = own[0..7].*;
         inline for (seq_fields, own, 0..) |name, n, i| @field(b, name) = if (carved != null and i < 2) carved.?.kv[i].ptr else a.take(n);
         for (b.scratchPtrs(), scratch) |f, n| f.* = a.take(n);
@@ -289,6 +320,7 @@ pub const Buffers = struct {
     /// A sibling takes `b`'s sequence buffers (they move when the engine binds another sequence).
     pub fn follow(s: *Buffers, b: *const Buffers) void {
         inline for (seq_fields) |name| @field(s, name) = @field(b, name);
+        s.table = b.table;
         s.state_bytes = b.state_bytes;
     }
 
@@ -371,9 +403,9 @@ pub const Buffers = struct {
         }
     }
 
-    /// Engine.reset: every cache and state buffer zeroed, as a fresh request starts.
+    /// Engine.reset: every cache and state buffer zeroed, as a fresh request starts (pages: written before any read).
     pub fn reset(b: *const Buffers, ops: kern.Ops) !void {
-        for (b.planes(), b.state_bytes) |p, n| try ops.fill32(p, 0, n / 4);
+        for (b.planes(), b.state_bytes, 0..) |p, n, i| if (i >= 2 or b.table == 0) try ops.fill32(p, 0, n / 4);
     }
 
     /// Bytes of the own sequence's planes in the display carveout.

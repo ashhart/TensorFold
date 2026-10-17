@@ -125,6 +125,7 @@ pub const Store = struct {
     family: Snapshots,
     rules: Rules,
     budget: u64,
+    most: usize = std.math.maxInt(usize), // states kept at most: a family's snapshot slots, one a state
     held: u64 = 0,
     clock: u64 = 0,
     entries: std.ArrayList(*Entry) = .empty,
@@ -292,14 +293,16 @@ pub const Store = struct {
     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
     fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
+        var new: usize = 0; // states it keeps that the store lacks: a slot each
         for (marks_) |at| {
             const n = @as(usize, at) + s.rules.lookahead;
             const exists = for (s.entries.items) |e| {
                 if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) break true;
             } else false;
             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
+            new += @intFromBool(!exists);
         }
-        while (s.held + need > s.budget) {
+        while (s.held + need > s.budget or s.entries.items.len + @min(new, s.most) > s.most) {
             const i = s.victimBut(from, prompt, born) orelse return;
             s.remove(i);
             s.counts.evicted += 1;
@@ -452,15 +455,15 @@ pub const Store = struct {
         var owns_decoded = true;
         defer if (owns_decoded) s.gpa.free(decoded);
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
-        if (bytes > s.budget) {
+        if (bytes > s.budget or s.most == 0) {
             s.counts.refused += 1;
             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
             return false;
         }
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
-            if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) break;
+            if (s.family.vtable.reuses) |f| if (s.entries.items.len < s.most and f(s.family.ptr, at)) break;
             const free_ = s.spare();
-            if (s.held + free_ + bytes <= s.budget) break;
+            if (s.held + free_ + bytes <= s.budget and s.entries.items.len < s.most) break;
             if (free_ > 0) {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
@@ -507,7 +510,7 @@ pub const Store = struct {
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
-        while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
+        while (bytes <= s.budget and (s.held + s.spare() + bytes > s.budget or s.entries.items.len >= s.most)) {
             s.remove(s.victimBut(have, prompt, born) orelse return have);
             s.counts.evicted += 1;
         }

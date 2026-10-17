@@ -13,7 +13,6 @@ pub const refreshed_cuda = blk: {
     }
     break :blk records;
 };
-pub const all_cuda = refreshed_cuda ++ gradient_pending ++ qwen_learning_pending;
 
 test "train launch records: every new gradient launch stays unqualified without compiler receipts" {
     try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);

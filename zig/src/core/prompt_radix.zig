@@ -18,6 +18,28 @@ pub const Rules = pc.Rules;
 /// What the tree may hold: pages, and snapshots.
 pub const Limits = struct { pages: usize = 0, snaps: usize = 0 };
 
+/// An owner's pages as the store holds them: `T` has retain, release, holders and available (kv_pool.Pool).
+pub fn pagesOf(comptime T: type, owner: *T, bytes: u64) Pages {
+    const V = struct {
+        fn of(p: *anyopaque) *T {
+            return @ptrCast(@alignCast(p));
+        }
+        fn retain(p: *anyopaque, id: u32) void {
+            of(p).retain(id);
+        }
+        fn release(p: *anyopaque, id: u32) void {
+            of(p).release(id);
+        }
+        fn holders(p: *anyopaque, id: u32) u32 {
+            return of(p).holders(id);
+        }
+        fn available(p: *anyopaque) usize {
+            return of(p).available();
+        }
+    };
+    return .{ .ptr = owner, .bytes = bytes, .vtable = &.{ .retain = V.retain, .release = V.release, .holders = V.holders, .available = V.available } };
+}
+
 pub const Plan = pc.Plan;
 /// A paged store's `keep`: whether the mark holds a state, and how many leading pages the stream swaps for the store's.
 pub const Kept = struct { held: bool, shared: usize };

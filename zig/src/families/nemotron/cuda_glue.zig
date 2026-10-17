@@ -86,9 +86,9 @@ const ConvSegs = extern struct { p: [max_segs]u64, base: [max_segs]u64, raw: [ma
 const ScanSegs = extern struct { p: [max_segs]u64, xc: [max_segs]u64, dt: [max_segs]u64, s: [max_segs]u64, meta: [max_segs]u64, y: [max_segs]u64, r: [max_segs]c_int };
 
 /// A stream's attention in a shared window, at one layer: its caches, meta row and first row of the shared rows.
-pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usize };
+pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usize, pt: u64 = 0 };
 
-const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, row0: [max_segs]c_int, n: c_int };
+const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, pt: [max_segs]u64, ps: i64, row0: [max_segs]c_int, n: c_int };
 
 /// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
 pub fn routerShape(d: usize) struct { sk: usize, shared: u32 } {
@@ -123,6 +123,12 @@ pub const Glue = struct {
 
     fn ptrs(a: *cuda.Args, xs: []const u64) void {
         for (xs) |x| a.add(x);
+    }
+
+    /// The kernels' last two arguments: the stream's page table (0: contiguous rows) and the elements between pages.
+    fn paged(a: *cuda.Args, at: Attn) void {
+        a.add(at.pt);
+        a.add(@as(i64, @intCast(at.ps)));
     }
 
     fn ints(a: *cuda.Args, xs: []const usize) void {
@@ -282,6 +288,7 @@ pub const Glue = struct {
         var a: cuda.Args = .{};
         ptrs(&a, &.{ qkv, kc, vc, meta });
         ints(&a, &.{ at.nqkv, at.heads * at.dim, at.kv_heads * at.dim });
+        paged(&a, at);
         try g.go(g.f.kv_write, .{ rows, 1, 1 }, 256, 0, &a);
     }
 
@@ -295,6 +302,7 @@ pub const Glue = struct {
         ptrs(&a, &.{ qkv, kc, vc, meta, po, pm, pl });
         ints(&a, &.{ at.nqkv, at.heads, at.kv_heads, grp, chunk_keys, at.nch });
         a.add(scale);
+        paged(&a, at);
         // several rows: each block loads its next key tile while it computes this one (one row gains nothing)
         try g.go(if (rows > 1) g.f.attn_chunk_pf else g.f.attn_chunk, .{ rows, at.kv_heads, @min(at.nch, chunk_blocks) }, 256, 0, &a);
         var b: cuda.Args = .{};
@@ -312,8 +320,10 @@ pub const Glue = struct {
             for (segs) |s| {
                 const r0: u64 = s.row0;
                 const q = qkv + r0 * at.nqkv * 2;
-                try g.kvWrite(q, s.kc, s.vc, s.meta, s.rows, at);
-                try g.attention(q, s.kc, s.vc, s.meta, po + r0 * at.nch * qd * 4, pm + r0 * at.nch * at.heads * 4, pl + r0 * at.nch * at.heads * 4, out + r0 * qd * 2, xs + r0 * (qd / 64) * 4, s.rows, at);
+                var own = at;
+                own.pt = s.pt;
+                try g.kvWrite(q, s.kc, s.vc, s.meta, s.rows, own);
+                try g.attention(q, s.kc, s.vc, s.meta, po + r0 * at.nch * qd * 4, pm + r0 * at.nch * at.heads * 4, pl + r0 * at.nch * at.heads * 4, out + r0 * qd * 2, xs + r0 * (qd / 64) * 4, s.rows, own);
             }
             return;
         }
@@ -324,8 +334,10 @@ pub const Glue = struct {
             t.kc[k] = s.kc;
             t.vc[k] = s.vc;
             t.meta[k] = s.meta;
+            t.pt[k] = s.pt;
             t.row0[k] = int(s.row0);
         }
+        t.ps = @intCast(at.ps);
         t.n = int(segs.len);
         var w: cuda.Args = .{};
         w.add(t);

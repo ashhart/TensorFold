@@ -349,6 +349,9 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     var u = r.usage;
+    if (for (u) |v| {
+        if (v.regs > 0) break false;
+    } else true) return u;
     const rel = release orelse return u;
     for (cuda_sets) |s| {
         if (newer(s.release, rel)) break;
@@ -560,9 +563,18 @@ test {
     _ = @import("registry_sets_test.zig");
 }
 
-pub const gradient_pending = @import("registry_learning.zig").gradient_pending;
-pub const qwen_learning_pending = @import("registry_learning.zig").qwen_learning_pending;
-pub const all_cuda = @import("registry_learning.zig").all_cuda;
+const learning = @import("registry_learning.zig");
+const paging = @import("paging_pending.zig");
+pub const gradient_pending = learning.gradient_pending;
+pub const qwen_learning_pending = learning.qwen_learning_pending;
+/// What the live audit checks: the serving records less those learning and paging changed, then the new launches.
+pub const all_cuda = blk: {
+    @setEvalBranchQuota(100000);
+    var rows = learning.refreshed_cuda;
+    paging.clear(&rows);
+    break :blk rows ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
+};
 test {
-    _ = @import("registry_learning.zig");
+    _ = learning;
+    _ = paging;
 }

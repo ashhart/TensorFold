@@ -76,6 +76,46 @@ test "a conversation's states outlive the server: a restart resumes from disk, e
     try std.testing.expectEqual(@as(u64, 1), r.counts.reads);
 }
 
+test "a disk read takes a snapshot slot: with every slot held it frees one first, with none it reads nothing" {
+    const gpa = std.testing.allocator;
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var buf: [128]u8 = undefined;
+    const dir = root(&buf, "slots");
+    defer rmTree(dir);
+    const turn1 = try prompt(a, 0, 1, 1500);
+    {
+        var f: Fake = .{ .gpa = gpa };
+        const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
+        defer r.deinit();
+        var s = pc.Store.init(gpa, f.snapshots(), rules, 1 << 30);
+        defer s.deinit();
+        s.disk = r;
+        _ = try request(a, &s, &f, turn1, 1400);
+        drain(r);
+    }
+    const turn2 = try std.mem.concat(a, u32, &.{ turn1[0..1401], &[_]u32{ 9, 8, 7, 6 } });
+    for ([_]usize{ 0, 1 }) |most| {
+        var f: Fake = .{ .gpa = gpa, .slots = most };
+        const r = try rows.Rows.open(gpa, f.snapshots(), options(dir));
+        defer r.deinit();
+        var s = pc.Store.init(gpa, f.snapshots(), rules, 1 << 30);
+        defer s.deinit();
+        s.disk = r;
+        s.most = most;
+        if (most == 1) { // another conversation holds the one slot
+            _ = try request(a, &s, &f, try prompt(a, 0, 2, 1200), 1100);
+            try std.testing.expectEqual(@as(usize, 1), s.entries.items.len);
+        }
+        const got = try request(a, &s, &f, turn2, 1404);
+        try std.testing.expectEqual(@as(u32, if (most == 0) 0 else 1400), got.from);
+        try std.testing.expectEqual(fresh(turn2), got.sum);
+        try std.testing.expectEqual(@as(u64, most), r.counts.reads);
+        try std.testing.expect(s.entries.items.len <= most);
+    }
+}
+
 test "ten conversations with one head store its blocks once" {
     const gpa = std.testing.allocator;
     var arena: std.heap.ArenaAllocator = .init(gpa);

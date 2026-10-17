@@ -63,6 +63,7 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
+    page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{
@@ -100,11 +101,13 @@ pub const Forward = struct {
     }
 
     pub fn ashape(f: *const Forward) glue.Attn {
-        return .{ .nqkv = f.c.qkvDim(), .heads = f.c.heads, .kv_heads = f.c.kv_heads, .dim = f.c.head_dim, .nch = f.nch };
+        return .{ .nqkv = f.c.qkvDim(), .heads = f.c.heads, .kv_heads = f.c.kv_heads, .dim = f.c.head_dim, .nch = f.nch, .pt = f.b.table, .ps = f.page_elems };
     }
 
-    fn cache(f: *const Forward, base: u64, layer: usize) u64 {
-        return base + layer * f.max_len * f.c.kv_heads * f.c.head_dim * 2;
+    /// Attention layer `layer`'s plane in `b`'s cache at `base`: max_len rows a layer, or a page's K and V a layer.
+    fn cache(f: *const Forward, b: *const state.Buffers, base: u64, layer: usize) u64 {
+        const row: u64 = state.kvRowBytes(f.c);
+        return base + layer * (if (b.table != 0) 2 * state.chunk_keys else f.max_len) * row;
     }
 
     /// Engine.norm: h = x + delta (dense, or the experts' slot-order sum), then the block's RMSNorm into y and xs.
@@ -202,7 +205,7 @@ pub const Forward = struct {
                     while (k0 < segs.len) : (k0 += glue.max_segs) {
                         const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
                         var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
-                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b.k_cache, aj), .vc = f.cache(s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows };
+                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
                         try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     }
                     try f.mark(.attention);
@@ -433,13 +436,13 @@ pub const Forward = struct {
                 try o.scanRows(b.proj, b.p_xc, b.ssm + w.mj * layer, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, snaps);
             },
             .attention => {
-                const kc = f.cache(b.k_cache, w.aj);
-                const vc = f.cache(b.v_cache, w.aj);
+                const kc = f.cache(b, b.k_cache, w.aj);
+                const vc = f.cache(b, b.v_cache, w.aj);
                 const qd = c.heads * c.head_dim;
                 try f.glue.kvWrite(b.qkv, kc, vc, b.p_meta, w.rows, f.ashape());
                 try o.torch().copyRows(b.qkv, c.qkvDim() * 2, b.q, qd * 2, qd * 2, w.rows);
                 const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(c.head_dim), -0.5));
-                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale);
+                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale, b.table, f.page_elems);
             },
             .moe => {},
         }

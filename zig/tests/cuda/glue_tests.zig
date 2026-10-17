@@ -15,17 +15,17 @@ const top_k = 6;
 const NS = 8;
 const eps: f32 = 1e-5;
 const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 16 };
-const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
+pub const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
 
 fn mshape() glue.Shape {
     return .{ .proj = ms.proj, .xd = ms.xd, .cd = ms.cd, .heads = ms.heads, .dh = ms.dh, .groups = ms.groups, .state = 128, .rmax = ms.rmax };
 }
 
-fn ashape() glue.Attn {
+pub fn ashape() glue.Attn {
     return .{ .nqkv = at.nqkv, .heads = at.heads, .kv_heads = at.kv_heads, .dim = at.dim, .nch = at.nch };
 }
 
-const Rig = struct {
+pub const Rig = struct {
     gpu: Gpu,
     a: std.mem.Allocator, // host data, freed together at the end
     s: cuda.Stream,
@@ -38,25 +38,25 @@ const Rig = struct {
     cases: usize = 0,
     sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
 
-    fn g(r: *Rig) glue.Glue {
+    pub fn g(r: *Rig) glue.Glue {
         return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
     }
 
     /// A device copy of host values, landed before any kernel on the rig's stream reads it.
-    fn dev(r: *Rig, comptime T: type, host: []const T) !u64 {
+    pub fn dev(r: *Rig, comptime T: type, host: []const T) !u64 {
         const b = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
         try r.bufs.append(r.gpu.gpa, b);
         try r.gpu.ctx.synchronize();
         return b.ptr;
     }
 
-    fn zeros(r: *Rig, comptime T: type, n: usize) !u64 {
+    pub fn zeros(r: *Rig, comptime T: type, n: usize) !u64 {
         const host = try r.a.alloc(T, n);
         @memset(std.mem.sliceAsBytes(host), 0);
         return r.dev(T, host);
     }
 
-    fn bfs(r: *Rig, n: usize, scale: f32) ![]u16 {
+    pub fn bfs(r: *Rig, n: usize, scale: f32) ![]u16 {
         const out = try r.a.alloc(u16, n);
         for (out) |*v| v.* = gm.f32ToBf16((r.rng.float(f32) * 2 - 1) * scale);
         return out;
@@ -72,14 +72,14 @@ const Rig = struct {
         return out;
     }
 
-    fn f32s(r: *Rig, n: usize, lo: f32, hi: f32) ![]f32 {
+    pub fn f32s(r: *Rig, n: usize, lo: f32, hi: f32) ![]f32 {
         const out = try r.a.alloc(f32, n);
         for (out) |*v| v.* = lo + r.rng.float(f32) * (hi - lo);
         return out;
     }
 
     /// The device bytes at `ptr` against `want`, element for element; a difference names its first element.
-    fn same(r: *Rig, what: []const u8, comptime T: type, ptr: u64, want: []const T) !void {
+    pub fn same(r: *Rig, what: []const u8, comptime T: type, ptr: u64, want: []const T) !void {
         try r.s.synchronize();
         const got = try r.a.alloc(T, want.len);
         try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(got.ptr, ptr, want.len * @sizeOf(T)), "cuMemcpyDtoH");
@@ -99,7 +99,7 @@ const Rig = struct {
     }
 
     /// n elements of the device bytes at `ptr`, once the rig's stream is done.
-    fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
+    pub fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
         try r.s.synchronize();
         const out = try r.a.alloc(T, n);
         try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n * @sizeOf(T)), "cuMemcpyDtoH");
@@ -571,8 +571,9 @@ pub fn run(gpu: Gpu) !void {
     for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 }, .{ 0, 1 }, .{ 40000, 1 } }) |c| try attention(&r, c[0], c[1]);
     try attentionSegs(&r);
     try attentionPaths(&r);
+    try @import("glue_paged_tests.zig").attentionPaged(&r);
     try keyed(&r);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references or the one-stream kernels", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, paged attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }

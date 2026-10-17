@@ -12,6 +12,7 @@ const marks = @import("cuda_marks.zig");
 /// A host state keeps both in `host` (key and value rows first); `mamba` is then an armed row's staging until `finish`.
 pub const Copy = struct {
     mamba: cuda.DeviceBuffer,
+    slot: ?u32 = null, // a borrowed snapshot slot; null means an owned buffer or host-state staging
     kv: cuda.DeviceBuffer,
     host: ?cuda.HostBuffer = null, // pinned: rows, then Mamba states; `mamba` is then an armed row's staging until `finish`
     head: bool,
@@ -27,7 +28,7 @@ pub const Target = struct {
     head: ?*Head,
     ctx: ?*const cuda.Context = null, // made current before a disk copy, which may run before any backend call
 
-    /// Kept states in pinned host memory (Engine.snap_host, a discrete card): the budget is the host's.
+    /// Kept states in pinned host memory (Engine.snap_host, as `place` set it): the budget is the host's.
     fn host(t: *const Target) bool {
         return t.e.snap_host;
     }
@@ -86,7 +87,7 @@ pub fn setWords(saved: *anyopaque, w: [2]u64) void {
 const Part = struct { live: u64, len: usize, mamba: bool = false };
 
 /// Where the bound sequence keeps what a state copies: KV planes, SSM and conv planes, the head's KV planes.
-const Planes = struct { k: u64, v: u64, ssm: u64, conv: u64, head: ?[2]u64 = null };
+const Planes = struct { k: u64, v: u64, ssm: u64, conv: u64, head: ?[2]u64 = null, stride: usize = 0 };
 
 const max_parts = 2 * config.max_layers + 4;
 
@@ -108,7 +109,7 @@ fn kvBytes(c: Config, at: usize, head: bool) usize {
 }
 
 /// A state's Mamba buffer, the same for every state: a spare one takes any.
-fn mambaBytes(c: Config) usize {
+pub fn mambaBytes(c: Config) usize {
     const m = state.mambaPlanes(c);
     return allocBytes(m[0] + m[1]);
 }
@@ -119,7 +120,7 @@ fn parts(c: Config, max_len: usize, p: Planes, at: usize, out: *[max_parts]Part)
     const m = state.mambaPlanes(c);
     var n: usize = 0;
     for ([2]u64{ p.k, p.v }) |plane| for (0..c.count(.attention)) |l| {
-        out[n] = .{ .live = plane + l * max_len * row, .len = at * row };
+        out[n] = .{ .live = plane + l * (if (p.stride > 0) p.stride else max_len * row), .len = at * row };
         n += 1;
     };
     out[n] = .{ .live = p.ssm, .len = m[0], .mamba = true };
@@ -134,7 +135,7 @@ fn parts(c: Config, max_len: usize, p: Planes, at: usize, out: *[max_parts]Part)
 
 fn planes(t: *const Target) Planes {
     const b = &t.e.b;
-    return .{ .k = b.k_cache, .v = b.v_cache, .ssm = b.ssm, .conv = b.conv_base, .head = if (t.head) |h| .{ h.k_cache, h.v_cache } else null };
+    return .{ .k = b.k_cache, .v = b.v_cache, .ssm = b.ssm, .conv = b.conv_base, .head = if (t.head) |h| .{ h.k_cache, h.v_cache } else null, .stride = if (b.table != 0) 2 * state.chunk_keys * state.kvRowBytes(t.e.c) else 0 };
 }
 
 /// Copies between the bound sequence and `copy` on the engine's stream (`into`: live to copy); the bytes moved.
@@ -143,8 +144,10 @@ fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool)
     var store: [max_parts]Part = undefined;
     var off = [2]usize{ 0, 0 }; // into the key and value buffer, into the Mamba buffer
     for (parts(t.e.c, t.e.max_len, planes(t), at, &store)) |p| {
-        const buf = if (p.mamba) copy.mamba.ptr + off[1] else copy.kv.ptr + off[0];
-        if (mamba or !p.mamba) if (into) try o.copy(buf, p.live, p.len) else try o.copy(p.live, buf, p.len);
+        if (p.mamba) {
+            const buf = copy.mamba.ptr + off[1];
+            if (mamba) if (into) try o.copy(buf, p.live, p.len) else try o.copy(p.live, buf, p.len);
+        } else try deviceRows(t, p, copy.kv.ptr + off[0], into);
         off[@intFromBool(p.mamba)] += p.len;
     }
     return off[0] + off[1];
@@ -152,6 +155,7 @@ fn move(t: *const Target, at: usize, copy: *const Copy, into: bool, mamba: bool)
 
 /// Bound sequence <-> host copy (`into`: to host), rows first; Mamba states too if `mamba`, else from `staging`.
 fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, staging: ?u64) !void {
+    errdefer drain(t);
     const o = t.e.ops();
     var store: [max_parts]Part = undefined;
     var off = [2]usize{ 0, kvBytes(t.e.c, at, t.head != null) };
@@ -159,7 +163,13 @@ fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, st
         const at_host = off[@intFromBool(p.mamba)];
         const buf = host[at_host..][0..p.len];
         if (!p.mamba) {
-            if (into) try o.download(buf, p.live) else try o.upload(p.live, buf);
+            var done: usize = 0;
+            while (done < p.len) {
+                const span = try rowSpan(t, p, done);
+                const fragment = buf[done..][0..span.len];
+                if (into) try o.download(fragment, span.live) else try o.upload(span.live, fragment);
+                done += span.len;
+            }
         } else if (mamba) {
             if (into) try o.download(buf, p.live) else try o.upload(p.live, buf);
         } else if (staging) |st| try o.download(buf, st + (at_host - kvBytes(t.e.c, at, t.head != null))); // SSM, then conv
@@ -171,7 +181,7 @@ fn hostMove(t: *const Target, at: usize, host: []u8, into: bool, mamba: bool, st
 pub fn bytes(ptr: *anyopaque, at: u32) u64 {
     const t: *Target = @ptrCast(@alignCast(ptr));
     if (t.host()) return stateBytes(t.e.c, at, t.head != null);
-    return mambaBytes(t.e.c) + allocBytes(kvBytes(t.e.c, at, t.head != null));
+    return (if (t.e.snaps.count > 0 or t.e.snaps_configured) @as(usize, 0) else mambaBytes(t.e.c)) + allocBytes(kvBytes(t.e.c, at, t.head != null));
 }
 
 /// Sets spare Mamba buffers aside in a cache of `budget` bytes, a quarter of it at most; the bytes they take.
@@ -197,6 +207,7 @@ pub fn save(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {
     if (t.host()) {
         const copy = try hostBlank(t, at);
         errdefer {
+            drain(t);
             copy.host.?.free();
             e.gpa.destroy(copy);
         }
@@ -214,10 +225,17 @@ fn alloc(t: *const Target, at: usize, kv: bool) !*Copy {
     const e = t.e;
     const copy = try e.gpa.create(Copy);
     errdefer e.gpa.destroy(copy);
-    var m = e.spares.take() orelse try cuda.DeviceBuffer.alloc(e.ctx.d, mambaBytes(e.c));
-    errdefer if (!e.spares.give(m)) m.free();
+    var slot: ?u32 = null;
+    var m: cuda.DeviceBuffer = undefined;
+    if (!t.host() and (e.snaps.count > 0 or e.snaps_configured)) {
+        slot = e.snaps.take() orelse return error.NoSnapshotSlot;
+        m = .{ .ptr = e.snaps.at(slot.?), .len = e.snaps.bytes, .d = e.ctx.d };
+    } else if (t.host()) {
+        m = e.spares.take() orelse return error.NoSnapshotSlot;
+    } else m = e.spares.take() orelse try cuda.DeviceBuffer.alloc(e.ctx.d, mambaBytes(e.c));
+    errdefer if (slot) |id| e.snaps.give(id) else if (!e.spares.give(m)) m.free();
     const rows = try cuda.DeviceBuffer.alloc(e.ctx.d, if (kv and !t.host()) allocBytes(kvBytes(e.c, at, t.head != null)) else 0);
-    copy.* = .{ .mamba = m, .kv = rows, .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
+    copy.* = .{ .mamba = m, .slot = slot, .kv = rows, .head = t.head != null, .pos = at, .parity = e.parity, .rows = e.rows };
     return copy;
 }
 
@@ -241,6 +259,7 @@ pub fn finish(t: Target) !void {
             // the chunk wrote this row's Mamba states to staging: rows and states to the host, then staging back
             var h = cuda.HostBuffer.alloc(e.ctx.d, stateBytes(e.c, m.at, copy.head)) catch continue; // stays not whole
             hostMove(&t, m.at, h.bytes, true, false, copy.mamba.ptr) catch {
+                drain(&t);
                 h.free();
                 continue;
             };
@@ -254,7 +273,7 @@ pub fn finish(t: Target) !void {
         _ = try move(&t, m.at, copy, true, false);
         copy.whole = true;
     }
-    e.spares.fill(e.ctx.d, mambaBytes(e.c));
+    if (!t.host()) e.spares.fill(e.ctx.d, mambaBytes(e.c));
 }
 
 /// What a kept state holds on the device, both buffers.
@@ -283,6 +302,7 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
     const t: *Target = @ptrCast(@alignCast(ptr));
     const copy: *Copy = @ptrCast(@alignCast(saved));
     const e = t.e;
+    errdefer drain(t);
     if (copy.head != (t.head != null)) return error.NoHead; // checked before any copy: nothing half restored
     if (!copy.whole) return error.Incomplete; // its chunk failed before `finish`
     if (copy.host) |h| {
@@ -300,13 +320,14 @@ pub fn restore(ptr: *anyopaque, owner: ?*anyopaque, saved: *anyopaque) anyerror!
 pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     const t: *Target = @ptrCast(@alignCast(ptr));
     const copy: *Copy = @ptrCast(@alignCast(saved));
+    drain(t);
     t.e.armed.forget(saved); // a copy evicted before its chunk ran: the chunk must not write it
     if (copy.host) |*h| {
         // queued copies may still read or write it: they finish before the host memory goes
         t.e.stream.synchronize() catch {};
         h.free();
     }
-    if (copy.mamba.len > 0 and !t.e.spares.give(copy.mamba)) copy.mamba.free();
+    if (copy.slot) |id| t.e.snaps.give(id) else if (copy.mamba.len > 0 and !t.e.spares.give(copy.mamba)) copy.mamba.free();
     if (copy.kv.len > 0) copy.kv.free();
     t.e.gpa.destroy(copy);
 }
@@ -405,4 +426,45 @@ test "disk adapter preserves pinned snapshot layout and metadata" {
     setWords(&copy, .{ 1, 19 });
     try std.testing.expectEqual([2]u64{ 1, 19 }, words(&copy));
     try std.testing.expectEqual(@as(usize, 2048), shape(&t, 1).kv);
+}
+
+/// Where kept states go, as the native host placed them before it makes the slots: pinned host memory, or the device.
+pub fn place(t: *Target, host_mode: bool) void {
+    t.e.snap_host = host_mode;
+}
+
+pub fn slots(t: *Target, n: usize) !u64 {
+    if (t.host()) {
+        t.e.spares.want = 1;
+        t.e.spares.fill(t.e.ctx.d, mambaBytes(t.e.c));
+        if (t.e.spares.n != 1) return error.OutOfMemory;
+        return mambaBytes(t.e.c);
+    }
+    try t.e.snaps.init(t.e.ctx.d, n, mambaBytes(t.e.c));
+    t.e.snaps_configured = true;
+    return n * mambaBytes(t.e.c);
+}
+
+test {
+    _ = @import("cuda_reuse_merge_test.zig").Cases(Engine, Target, testConfig, hostMove, blank, drop, save, finish);
+}
+
+fn drain(t: *const Target) void {
+    cuda.completion.drain(t.e.ctx.d, t.e.stream, "a snapshot stream and context did not drain; its owners stay alive");
+}
+const Span = struct { live: u64, len: usize };
+fn rowSpan(t: *const Target, p: Part, done: usize) !Span {
+    if (t.e.b.table == 0) return .{ .live = p.live + done, .len = p.len - done };
+    const page_bytes = state.chunk_keys * state.kvRowBytes(t.e.c);
+    const at = done / page_bytes;
+    if (at >= t.e.bound.pages.len) return error.PastPages;
+    return .{ .live = p.live + t.e.bound.pages[at] * t.e.pageBytes(), .len = @min(page_bytes, p.len - done) };
+}
+fn deviceRows(t: *const Target, p: Part, buf: u64, into: bool) !void {
+    var done: usize = 0;
+    while (done < p.len) {
+        const span = try rowSpan(t, p, done);
+        if (into) try t.e.ops().copy(buf + done, span.live, span.len) else try t.e.ops().copy(span.live, buf + done, span.len);
+        done += span.len;
+    }
 }

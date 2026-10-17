@@ -44,6 +44,7 @@ pub const moe_ref = @import("moe_ref.zig");
 pub const dense_ref = @import("dense_ref.zig");
 
 pub const checkpoint_weights = @import("checkpoint_weights.zig");
+pub const kv_pool = @import("kv_pool.zig");
 
 test {
     _ = checkpoint_weights;
@@ -86,6 +87,7 @@ test {
     _ = qwen_vl;
     _ = @import("nvfp4_fixture_test.zig");
     _ = @import("drafter_release_test.zig");
+    _ = kv_pool;
 }
 
 pub const frame_rounds = @import("frame_rounds.zig");
