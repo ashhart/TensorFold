@@ -103,15 +103,18 @@ pub fn hideToolCalls(a: Allocator, text: []const u8, finished: bool) Allocator.E
 pub fn hideInto(a: Allocator, out: *std.ArrayList(u8), text: []const u8, finished: bool) Allocator.Error![]const u8 {
     out.clearRetainingCapacity();
     var pos: usize = 0;
+    var next: [calls.len]?usize = undefined; // each opener at or after `pos`, searched again only once `pos` passes it
+    for (calls, &next) |c, *n| n.* = findTag(text, 0, c[0]);
     while (true) {
         var start: ?usize = null;
         var which: usize = 0;
-        for (calls, 0..) |c, i| if (findTag(text, pos, c[0])) |at| {
-            if (start == null or at < start.?) {
+        for (calls, &next, 0..) |c, *n, i| {
+            if (n.* != null and n.*.? < pos) n.* = findTag(text, pos, c[0]);
+            if (n.*) |at| if (start == null or at < start.?) {
                 start = at;
                 which = i;
-            }
-        };
+            };
+        }
         if (start == null) {
             const tail = text[pos..];
             var held: usize = 0;
@@ -289,6 +292,35 @@ pub const Stops = struct {
         var longest: usize = 0;
         for (s.strings) |stop| longest = @max(longest, charCount(stop));
         return longest + 8;
+    }
+};
+
+/// The text a stream has sent: Python's ``streamed = visible``, grown by its delta while it only grows.
+pub const Shown = struct {
+    text: std.ArrayList(u8) = .empty,
+    chars: usize = 0,
+    at: ?[*]const u8 = null, // where the last shown text lay; the decode buffer only grows, so that prefix holds
+    extends: bool = false,
+
+    /// Python's ``now[len(shown):]``; ``stable``: ``now`` lies in the append-only decode buffer.
+    pub fn after(s: *Shown, now: []const u8, stable: bool) []const u8 {
+        const sent = s.text.items;
+        s.extends = (stable and s.at == now.ptr and now.len >= sent.len) or std.mem.startsWith(u8, now, sent);
+        if (!s.extends) return afterChars(now, s.chars);
+        if (stable) s.at = now.ptr; // the buffer moved but kept its bytes: the next check is free again
+        return now[sent.len..];
+    }
+
+    pub fn set(s: *Shown, a: Allocator, now: []const u8, delta: []const u8) Allocator.Error!void {
+        if (s.extends) {
+            try s.text.appendSlice(a, delta);
+            s.chars += charCount(delta);
+        } else {
+            s.text = .empty;
+            try s.text.appendSlice(a, now);
+            s.chars = charCount(now);
+        }
+        s.at = now.ptr;
     }
 };
 
