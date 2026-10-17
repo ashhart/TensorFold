@@ -131,6 +131,29 @@ candidates are close: 32 greedy tokens equal it on four of `zig/tests/cuda/flash
 token 15 on the 3,001-token one. Over 4,096 tokens of this repository's documentation, the next-token perplexity is
 6.168 on the captured set and 6.178 on ours.
 
+### The ModelOpt checkpoint on one GB10
+
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` (revision `b9ce18a6`) on a GB10 (128 GB, driver 580.178, CUDA 13.3), greedy,
+`--prompt-cache-gib 0`, the tools above, three runs of the defaults at a 32,768-token window alternated with other
+settings in one session:
+
+| | defaults |
+| --- | --- |
+| One stream, drafted, code / chat | 64.1-64.6 / 40.7-41.1 |
+| drafted, 1 / 4 / 8 streams, greedy code | 64.1-64.4 / 44.9-45.2 / 66.2-66.8 |
+| drafted, 1 / 4 / 8 streams, greedy chat | 40.6-41.1 / 35.0-35.2 / 52.4-52.8 |
+| Cold first token at 2,048 / 8,192 / 32,768 / 65,536 / 131,072 tokens (s) | 1.83 / 7.11 / 29.2 / 60.1 / 131.7 |
+
+Every concurrent reply equalled its solo run and every drafted one its `"draft": false` run. A reply cancelled
+mid-stream, or sent again after a restart, equalled a fresh one, and a second conversation turn resumed from the prompt
+cache (`--no-drafts`) equalled the same turn computed without it. Prompt rows equal one-token rows bit for bit at seven
+fixed histories of 20 to 6,496 tokens. Three streams draft at a time; the rest share plain rounds.
+
+The engine holds 73.2 GiB and keeps a 12.2 GiB reserve. A 32,768-token window then admits 7 or 8 streams of 1.21 GiB
+and a 131,136-token window (the cold prompts above) 2 of 4.03 GiB; a 262,144-token stream takes 7.79 GiB, which fitted
+in one start of four on this machine. After the 131,072-token prompt the process had peaked at 6.5 GB of host and
+83.0 GB of device memory. Absolute speeds on this machine moved by about a tenth between sessions.
+
 ## Not yet
 
 - The dense projections run a copy of the Python engine's group-32 lane matmul (`qmm.cu`); the core's `qmm_group` and
