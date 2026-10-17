@@ -201,3 +201,59 @@ test "mtp policy: the inherited policy works through 31 drafts and a resumed sha
         try std.testing.expectEqualSlices(u32, plain, got);
     };
 }
+
+test "mtp policy: shared latent windows avoid per-layer side events while lone graphs retain overlap" {
+    var f: nemo.Forward = undefined;
+    f.c.latent = 512;
+    f.side = .{ .s = undefined, .fork = undefined, .join = undefined };
+    f.tp = null;
+    f.route = .{};
+    var buffers: nemo.state.Buffers = undefined;
+    const Seg = @typeInfo(@TypeOf(f.segs)).pointer.child;
+    var parts: [4]Seg = undefined;
+    for (&parts, 0..) |*p, i| p.* = .{ .b = &buffers, .row0 = i * 8, .rows = 8, .sampled = false, .slot = @intCast(i), .untaught = i == 2 };
+    const shared = f.routedWindow(&parts);
+    try std.testing.expect(shared.side == null);
+    try std.testing.expect(shared.untaught);
+    try std.testing.expectEqual(@as(usize, 4), shared.segs.len);
+    try std.testing.expectEqual(@as(u32, 4), shared.route.count);
+    try std.testing.expect(f.routedWindow(parts[0..1]).side != null);
+    f.tp = @ptrFromInt(4096);
+    try std.testing.expect(f.routedWindow(parts[0..1]).side == null);
+    f.tp = null;
+    f.c.latent = 0;
+    try std.testing.expect(f.routedWindow(&parts).side != null);
+}
+
+test "mtp policy: rank-local cached plans survive sibling follow after a resumed sequence is bound" {
+    var c: nemo.Config = undefined;
+    c.latent = 1024;
+    c.bolt = false;
+    c.shares = 2;
+    var owner: nemo.state.Buffers = undefined;
+    owner.shared = 0x100000;
+    owner.sids = 0x200000;
+    owner.plan = .{ .members = 0, .items = 0, .counts = 0, .rank = 0x300000, .hist = 0x400000 };
+    owner.table = 0x500000;
+    owner.state_bytes = @splat(64);
+    inline for (nemo.state.seq_fields, 0..) |name, i| @field(owner, name) = 0x600000 + i * 4096;
+    for ([_]usize{ 1, 2 }) |world| {
+        c.world = world;
+        var sibling = owner;
+        sibling.plan.rank = 0x700000;
+        sibling.plan.hist = 0x800000;
+        for ([_]usize{ 1, 16, 32 }) |rows| {
+            const before = sibling.latentPlan(c, rows);
+            sibling.follow(&owner);
+            const after = sibling.latentPlan(c, rows);
+            try std.testing.expectEqual(before, after);
+            try std.testing.expectEqual(owner.sids, sibling.sids);
+            try std.testing.expectEqual(owner.shared, sibling.shared);
+            try std.testing.expectEqual(owner.table, sibling.table);
+            try std.testing.expectEqual(@as(u64, 0x700000), after.rank);
+            try std.testing.expect(after.items >= after.members + rows * c.ownShares() * 4);
+            const items = nemo.kernels.maxItems(rows * c.ownShares(), c.ownShares(), 16);
+            try std.testing.expect(after.counts >= after.items + 3 * items * 4);
+        }
+    }
+}

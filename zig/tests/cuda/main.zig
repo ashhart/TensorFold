@@ -150,6 +150,7 @@ const usage =
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  prompt-segments MODEL IDS_FILE   a prompt run as 2 to 4 staggered segments a call equals one uncut pass, byte for byte
+    \\  cached-plans-tp2 MODEL IDS_FILE   rank-zero cached plans and prompt resumes with the existing expert rank
     \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back) against one stream, byte for byte
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  paged MODEL IDS_FILE      a paged sequence against the own one: prompt pass, decode, resumes across page edges
@@ -208,6 +209,7 @@ pub fn main(init: std.process.Init) !u8 {
     const rest = args[2..];
 
     run(gpu, cmd, rest) catch |e| {
+        if (std.mem.eql(u8, cmd, "cached-plans-tp2")) cuda.tp_watch.fatal(@errorName(e));
         std.debug.print("FAIL {s}: {t}\n", .{ cmd, e });
         return 1;
     };
@@ -325,6 +327,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "prompt-segments")) return prompt_cuts.segments(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "cached-plans-tp2")) return @import("shared_plans.zig").tp2(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "shared-fork")) return shared_fork.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "paged")) return paged_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));

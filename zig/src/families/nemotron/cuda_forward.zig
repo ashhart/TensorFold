@@ -132,13 +132,20 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
+        const routed = f.routedWindow(segs);
+        try routed.windowRows(segs);
+    }
+
+    /// Selects the window schedule while retaining each segment's lesson latch and state.
+    pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
+        if (f.c.latent > 0 and (segs.len > 1 or f.tp != null)) routed.side = null;
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
         if (routed.route.count == 0) for (segs[0..@min(segs.len, lesson_route.max_segments)]) |s| routed.route.later(s.row0, s.rows, s.slot);
-        try routed.windowRows(segs);
+        return routed;
     }
 
     fn windowRows(f: *const Forward, segs: []const Seg) !void {

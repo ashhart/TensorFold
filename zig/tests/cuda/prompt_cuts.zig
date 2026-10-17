@@ -45,6 +45,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     try check.expect(n > R + 64, "prompt-cuts: the prompt needs more than {d} tokens, has {d}", .{ R + 64, n });
     const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = true, .sampling = null, .segments = 1 });
     defer e.deinit();
+    try @import("shared_plans.zig").compare(e);
     const h = try nemotron.Head.init(e);
     defer h.deinit();
     try h.capture();
@@ -103,6 +104,7 @@ pub fn segments(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     try check.expect(n > (cuda.segments.MAX - 1) * R, "prompt-segments: {d} segments need more than {d} tokens, has {d}", .{ cuda.segments.MAX, (cuda.segments.MAX - 1) * R, n });
     const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = true, .sampling = null, .segments = 1 });
     defer e.deinit();
+    try @import("shared_plans.zig").compare(e);
     const h = try nemotron.Head.init(e);
     defer h.deinit();
     try h.capture();
