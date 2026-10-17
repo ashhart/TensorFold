@@ -48,7 +48,6 @@ const subjectRow = slide_subject.subjectRow;
 const kindsOf = slide_subject.kindsOf;
 const kindsList = slide_subject.kindsList;
 const slide_teacher = @import("slide_teacher.zig");
-const supplied_questions = @import("slide_supplied.zig");
 pub const Teacher = slide_teacher.Teacher;
 const local = slide_teacher.local;
 const keepExamples = slide_teacher.keepExamples;
@@ -104,14 +103,14 @@ pub fn routed(srv: *Server, cx: *Cx, c: Check) !struct { prompt: api.Example, ke
 }
 
 /// One lesson for the facts `told` (kept[f]: fact f had enough clean answers), or null; `siblings`: all facts told.
-pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, document: bool, siblings: []const []const u8, supplied: []const []const u8, gone: anytype) !?Plan {
+pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8, kept: []bool, document: bool, siblings: []const []const u8, gone: anytype) !?Plan {
     const a = cx.a;
     const end = try turnEnd(srv, cx, teacher);
     var parts: Parts = .{ .thinks = try thinks(srv, cx, teacher), .document = document, .siblings = siblings };
     var count: u32 = 0;
     const language = try languageOf(srv, cx, told[0], gone);
     for (told, kept, 0..) |fact, *k, f| {
-        k.* = try factLesson(srv, cx, &parts, fact, f, end, language, supplied, gone);
+        k.* = try factLesson(srv, cx, &parts, fact, f, end, language, gone);
         count += @intFromBool(k.*);
     }
     if (count == 0) return null;
@@ -203,7 +202,7 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
 }
 
 /// The facts' examples as a lesson gathers them.
-pub const Parts = struct {
+const Parts = struct {
     train: std.ArrayList(api.Example) = .empty,
     held_ex: std.ArrayList(api.Example) = .empty,
     held: std.ArrayList(Held) = .empty,
@@ -313,20 +312,17 @@ fn keepNear(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, nears: []con
 }
 
 /// One fact's part: its questions and answers (two held out), and twins about other things as the model answers them.
-pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, language: ?[]const u8, supplied: []const []const u8, gone: anytype) !bool {
+fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, end: []const u32, language: ?[]const u8, gone: anytype) !bool {
     const a = cx.a;
     const asked = try askBase(srv, cx, null, try questionsFor(a, parts.document, fact, probes, language), 32 * probes, gone);
-    // the caller's own questions go first, judged as the model's are: a lesson's wording need not name the subject
-    const written = try wording.questions(a, asked.content, probes);
-    const qs = try supplied_questions.ahead(a, supplied, written);
-    if (supplied.len > 0) log.line("slide: {d} questions supplied with \"{s}\"", .{ supplied.len, fact });
+    const qs = try wording.questions(a, asked.content, probes);
     var got: Got = .{ .entity = try aboutEntity(srv, cx, fact, gone), .siblings = parts.siblings };
     var phrase: []const u8 = "";
     if (got.entity) {
         const said = try askBase(srv, cx, null, try std.fmt.allocPrint(a, prompts.fact_subject_prompt, .{fact}), 16, gone);
         phrase = std.mem.trim(u8, said.content, " \t\r\n\"'.?*");
-        got.words = try slide_subject.factSubject(a, phrase, fact, written, parts.document);
-        got.named = try slide_subject.named(a, got.words, fact, written);
+        got.words = try slide_subject.factSubject(a, phrase, fact, qs, parts.document);
+        got.named = try slide_subject.named(a, got.words, fact, qs);
         log.line("slide: its subject is \"{s}\": {s} (a question names it by {s})", .{ phrase, try std.mem.join(a, " ", got.words), try std.mem.join(a, " or ", if (got.named.len > 0) got.named else got.words) });
         if (got.words.len == 0) got.entity = false;
     }

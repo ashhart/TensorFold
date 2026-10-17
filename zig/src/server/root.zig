@@ -82,8 +82,6 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
-    _ = @import("slide_supplied.zig");
-    _ = @import("slide_questions_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_span.zig");
@@ -126,8 +124,4 @@ test {
 
 test {
     _ = @import("slide_save_failure_test.zig");
-}
-
-test {
-    _ = @import("slide_subject_guard_test.zig");
 }

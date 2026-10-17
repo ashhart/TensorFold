@@ -101,7 +101,7 @@ each route and its events.
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/slide/learn` | `{"text": "...", "questions": ["..."]}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events; `questions` is optional (see Living Weights) |
+| `POST /v1/slide/learn` | `{"text": "..."}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events |
 | `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
