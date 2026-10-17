@@ -156,6 +156,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("glm_cuda", glm_cuda);
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
+    // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
+    b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;

@@ -38,6 +38,7 @@ pub const vit = @import("vit.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
+pub const relay_plan = @import("relay_plan.zig");
 pub const tp_group = @import("tp_group.zig");
 pub const tp_watch = @import("tp_watch.zig");
 pub const ck = @import("ck.zig");
@@ -53,6 +54,7 @@ test {
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = @import("rank_scatter.zig");
+    _ = @import("relay_plan.zig");
     _ = launch;
     _ = abi;
     _ = aot;

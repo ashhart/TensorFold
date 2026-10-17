@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const abi = @import("abi.zig");
+const tp_watch = @import("tp_watch.zig");
 
 pub const Result = c_int;
 pub const Comm = ?*opaque {};
@@ -62,6 +63,7 @@ pub const Library = struct {
         if (@import("builtin").is_test) return error.NcclFailed; // a test's injected failure: the runner fails error logs
         const s = self.api.ncclGetErrorString(r);
         std.log.err("{s}: {s} ({d})", .{ what, if (s) |p| std.mem.span(p) else "?", r });
+        tp_watch.fatal(what); // with the ranks' lines open, every rank stops with it; with none, the caller hears it
         return error.NcclFailed;
     }
 

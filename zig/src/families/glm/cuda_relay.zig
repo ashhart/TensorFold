@@ -1,52 +1,10 @@
-//! TF_GLM_PREFILL_REDUCE=ring: split's exchanges passed along the ring, for fabrics where ranks reach only neighbours.
+//! GLM's split exchanges over NCCL: straight to every rank, or passed along the ring (TF_GLM_PREFILL_REDUCE=ring).
 
 const std = @import("std");
 const cuda = @import("cuda");
-const fw = @import("cuda_forward.zig");
 
-/// One piece's relay: each owner gets every rank's block in split's slot, so it sums split's bytes in split's order.
-pub const Relay = struct {
-    world: usize,
-    rank: usize,
-    n: usize, // the piece's rows
-
-    pub fn next(x: Relay) usize {
-        return (x.rank + 1) % x.world;
-    }
-    pub fn prev(x: Relay) usize {
-        return (x.rank + x.world - 1) % x.world;
-    }
-    /// Whose blocks this rank sends at step s (its own at step 1).
-    pub fn sentFrom(x: Relay, s: usize) usize {
-        return (x.rank + x.world + 1 - s) % x.world;
-    }
-    /// Whose blocks this rank takes at step s.
-    pub fn takenFrom(x: Relay, s: usize) usize {
-        return (x.rank + x.world - s) % x.world;
-    }
-    /// The i-th owner after this rank: step s sends owners 0 .. world - s, and keeps 0 .. world - s - 1 to send on.
-    pub fn owner(x: Relay, i: usize) usize {
-        return (x.rank + 1 + i) % x.world;
-    }
-    /// Owner p's rows of the piece (split's shares).
-    pub fn rows(x: Relay, p: usize) [2]usize {
-        return fw.Forward.share(x.n, x.world, p);
-    }
-    /// Rows into a transit where owner(i)'s block begins.
-    pub fn at(x: Relay, i: usize) usize {
-        var o: usize = 0;
-        for (0..i) |k| {
-            const r = x.rows(x.owner(k));
-            o += r[1] - r[0];
-        }
-        return o;
-    }
-    /// Rows into a piece's room where transit t (by step parity) begins: past every slot split fills.
-    pub fn transit(x: Relay, t: usize) usize {
-        const most = (x.n + x.world - 1) / x.world;
-        return x.world * most + t * (x.world - 2) * most;
-    }
-};
+/// The ring's plan, shared with every family's row-split exchange (cuda/relay_plan.zig).
+pub const Relay = cuda.relay_plan.Relay;
 
 /// A piece's partials (`part`: this rank's fp32 rows) into `room`'s slots on `side`; NCCL keeps a pair's posting order.
 pub fn partials(lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, side: cuda.Stream, x: Relay, room: u64, part: u64, lo: usize, dims: usize) !void {
@@ -101,62 +59,49 @@ const Step = struct {
     }
 };
 
-test "Relay: each owner's slot q holds rank q's block of its rows, as split's direct sends leave it; the transits fit" {
-    const gpa = std.testing.allocator;
-    for (2..7) |w| for ([_]usize{ 0, 1, w - 1, 2 * w + 1, 683 }) |extra| {
-        const n = w + extra; // a split piece has a row for every rank
-        // rank q's partial of piece row j is q << 16 | j (one value a row); every rank's room is the piece's [w * n]
-        const part = try gpa.alloc(u32, w * n);
-        defer gpa.free(part);
-        const rooms = try gpa.alloc(u32, w * w * n);
-        defer gpa.free(rooms);
-        @memset(rooms, std.math.maxInt(u32));
-        for (0..w) |q| for (0..n) |j| {
-            part[q * n + j] = @intCast(q << 16 | j);
-        };
-        var wire: std.ArrayList(u32) = .empty; // what each rank sent its next one this step, rank after rank
-        defer wire.deinit(gpa);
-        var cut: [8]usize = undefined;
-        for (1..w) |s| {
-            wire.clearRetainingCapacity();
-            for (0..w) |r| { // every rank's sends first: a step's receives write nothing its sends read
-                const x: Relay = .{ .world = w, .rank = r, .n = n };
-                const room = rooms[r * w * n ..][0 .. w * n];
-                cut[r] = wire.items.len;
-                for (0..w - s) |i| {
-                    const p = x.rows(x.owner(i));
-                    const len = p[1] - p[0];
-                    try wire.appendSlice(gpa, if (s == 1) part[r * n + p[0] ..][0..len] else room[x.transit((s - 1) % 2) + x.at(i) ..][0..len]);
-                }
-            }
-            for (0..w) |r| {
-                const x: Relay = .{ .world = w, .rank = r, .n = n };
-                const room = rooms[r * w * n ..][0 .. w * n];
-                var got = wire.items[cut[x.prev()]..if (x.prev() + 1 < w) cut[x.prev() + 1] else wire.items.len];
-                const mine = x.rows(r);
-                const own = mine[1] - mine[0];
-                @memcpy(room[x.takenFrom(s) * own ..][0..own], got[0..own]);
-                got = got[own..];
-                for (0..w - s - 1) |i| {
-                    const p = x.rows(x.owner(i));
-                    const len = p[1] - p[0];
-                    @memcpy(room[x.transit(s % 2) + x.at(i) ..][0..len], got[0..len]);
-                    got = got[len..];
-                }
-                try std.testing.expectEqual(@as(usize, 0), got.len);
-            }
-        }
-        for (0..w) |p| {
-            const x: Relay = .{ .world = w, .rank = p, .n = n };
-            const mine = x.rows(p);
-            const own = mine[1] - mine[0];
-            const room = rooms[p * w * n ..][0 .. w * n];
-            @memcpy(room[p * own ..][0..own], part[p * n + mine[0] ..][0..own]); // the own block, as split copies it
-            for (0..w) |q| for (0..own) |k| try std.testing.expectEqual(@as(u32, @intCast(q << 16 | (mine[0] + k))), room[q * own + k]);
-            try std.testing.expect(x.transit(1) + (w - 2) * ((n + w - 1) / w) <= w * n);
-        }
-    };
+/// Split's direct exchange of a piece's partials: each rank's block of every owner's rows straight to that owner.
+pub fn splitPartials(lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, side: cuda.Stream, x: Relay, room: u64, part: u64, lo: usize, dims: usize) !void {
+    try lib.group(Direct{ .lib = lib, .comm = comm, .side = side, .x = x, .base = room, .part = part, .lo = lo, .dims = dims }, Direct.partials);
 }
+
+/// Split's direct exchange of a piece's glued rows (`rows_of`, bf16): each rank's own rows straight to every rank.
+pub fn splitGlued(lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, side: cuda.Stream, x: Relay, rows_of: u64, lo: usize, dims: usize) !void {
+    try lib.group(Direct{ .lib = lib, .comm = comm, .side = side, .x = x, .base = rows_of, .lo = lo, .dims = dims }, Direct.glued);
+}
+
+/// A direct exchange's postings, every peer's send and receive, which `Library.group` puts in one group.
+const Direct = struct {
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    side: cuda.Stream,
+    x: Relay,
+    base: u64, // the piece's room (partials) or the glued rows
+    part: u64 = 0, // this rank's partial (partials)
+    lo: usize,
+    dims: usize,
+
+    fn post(t: Direct, peer: usize, src: u64, out: usize, dst: u64, in: usize, ty: cuda.nccl.DataType) !void {
+        try t.lib.check(t.lib.api.ncclSend(src, out, ty, @intCast(peer), t.comm, t.side.handle), "ncclSend");
+        try t.lib.check(t.lib.api.ncclRecv(dst, in, ty, @intCast(peer), t.comm, t.side.handle), "ncclRecv");
+    }
+    fn partials(t: Direct) anyerror!void {
+        const x = t.x;
+        const mine = x.rows(x.rank);
+        const own = mine[1] - mine[0];
+        for (0..x.world) |peer| if (peer != x.rank) {
+            const theirs = x.rows(peer);
+            try t.post(peer, t.part + (t.lo + theirs[0]) * t.dims * 4, (theirs[1] - theirs[0]) * t.dims, t.base + peer * own * t.dims * 4, own * t.dims, .f32);
+        };
+    }
+    fn glued(t: Direct) anyerror!void {
+        const x = t.x;
+        const mine = x.rows(x.rank);
+        for (0..x.world) |peer| if (peer != x.rank) {
+            const theirs = x.rows(peer);
+            try t.post(peer, t.base + (t.lo + mine[0]) * t.dims * 2, (mine[1] - mine[0]) * t.dims, t.base + (t.lo + theirs[0]) * t.dims * 2, (theirs[1] - theirs[0]) * t.dims, .bf16);
+        };
+    }
+};
 
 /// NCCL for the relay's postings: each call in order, and the call numbered `fail` returns an error.
 const Fake = struct {
@@ -191,32 +136,44 @@ const Fake = struct {
         api.ncclRecv = &recv;
         return .{ .lib = undefined, .api = api };
     }
-    /// One exchange's whole schedule on `lib`: a piece's partials, or with `glue` its glued rows.
-    fn run(lib: *const cuda.nccl.Library, x: Relay, glue: bool) !void {
+    const Mode = enum { ring_partials, ring_glued, split_partials, split_glued };
+    /// One exchange's whole schedule on `lib`: a piece's partials or glued rows, along the ring or direct.
+    fn run(lib: *const cuda.nccl.Library, x: Relay, mode: Mode) !void {
         const side: cuda.Stream = .{ .d = undefined, .handle = null };
-        if (glue) try glued(lib, null, side, x, 0, 0, 8) else try partials(lib, null, side, x, 0, 0, 0, 8);
+        switch (mode) {
+            .ring_partials => try partials(lib, null, side, x, 0, 0, 0, 8),
+            .ring_glued => try glued(lib, null, side, x, 0, 0, 8),
+            .split_partials => try splitPartials(lib, null, side, x, 0, 0, 0, 8),
+            .split_glued => try splitGlued(lib, null, side, x, 0, 0, 8),
+        }
     }
 };
 
-test "Relay: a posting that fails, at each posting in turn, ends its group and posts nothing after it" {
+test "a posting that fails, at each posting in turn, ends its group and posts nothing after it, ring or direct" {
     const lib = Fake.library();
-    for (2..7) |w| for (0..w) |r| for ([_]bool{ false, true }) |glue| {
+    for (2..7) |w| for (0..w) |r| for ([_]Fake.Mode{ .ring_partials, .ring_glued, .split_partials, .split_glued }) |mode| {
         const x: Relay = .{ .world = w, .rank = r, .n = 2 * w + 1 };
+        const ring = mode == .ring_partials or mode == .ring_glued;
         Fake.n = 0;
         Fake.fail = null;
-        try Fake.run(&lib, x, glue);
+        try Fake.run(&lib, x, mode);
         const total = Fake.n;
         const clean = Fake.calls; // each failing run below writes over the calls
+        var peers: usize = 0; // a direct exchange sends to and takes from every other rank once
         for (clean[0..total]) |c| switch (c.kind) {
-            .send => try std.testing.expectEqual(@as(c_int, @intCast(x.next())), c.peer),
-            .recv => try std.testing.expectEqual(@as(c_int, @intCast(x.prev())), c.peer),
+            .send => if (ring) try std.testing.expectEqual(@as(c_int, @intCast(x.next())), c.peer) else {
+                try std.testing.expect(c.peer >= 0 and c.peer < w and c.peer != r);
+                peers += 1;
+            },
+            .recv => if (ring) try std.testing.expectEqual(@as(c_int, @intCast(x.prev())), c.peer),
             else => {},
         };
+        if (!ring) try std.testing.expectEqual(w - 1, peers);
         for (0..total) |k| {
             const failed = clean[k].kind;
             Fake.n = 0;
             Fake.fail = k;
-            try std.testing.expectError(error.NcclFailed, Fake.run(&lib, x, glue));
+            try std.testing.expectError(error.NcclFailed, Fake.run(&lib, x, mode));
             var opened: usize = 0; // a failed GroupStart opens nothing
             var ended: usize = 0;
             for (Fake.calls[0..Fake.n], 0..) |c, i| switch (c.kind) {
@@ -227,32 +184,5 @@ test "Relay: a posting that fails, at each posting in turn, ends its group and p
             try std.testing.expectEqual(opened, ended);
             try std.testing.expectEqual(if (failed == .send or failed == .recv) k + 2 else k + 1, Fake.n);
         }
-    };
-}
-
-test "Relay: a piece's glued rows reach every rank, each step sending what the last one brought in" {
-    for (2..7) |w| for ([_]usize{ 0, 1, w - 1, 2 * w + 1 }) |extra| {
-        const n = w + extra;
-        var rows: [6][64]u32 = undefined; // rank r's copy of the piece's rows: its own glued, the rest unknown
-        for (0..w) |r| {
-            const mine = (Relay{ .world = w, .rank = r, .n = n }).rows(r);
-            for (0..n) |j| rows[r][j] = if (j >= mine[0] and j < mine[1]) @intCast(j) else std.math.maxInt(u32);
-        }
-        for (1..w) |s| {
-            var sent: [6][64]u32 = undefined; // every rank's send of step s, before any receive lands
-            for (0..w) |r| {
-                const x: Relay = .{ .world = w, .rank = r, .n = n };
-                const out = x.rows(x.sentFrom(s));
-                @memcpy(sent[r][out[0]..out[1]], rows[r][out[0]..out[1]]);
-            }
-            for (0..w) |r| {
-                const x: Relay = .{ .world = w, .rank = r, .n = n };
-                const y: Relay = .{ .world = w, .rank = x.prev(), .n = n };
-                const got = x.rows(x.takenFrom(s));
-                try std.testing.expectEqual(y.rows(y.sentFrom(s)), got); // rank - 1 sends the block this rank takes
-                @memcpy(rows[r][got[0]..got[1]], sent[x.prev()][got[0]..got[1]]);
-            }
-        }
-        for (0..w) |r| for (0..n) |j| try std.testing.expectEqual(@as(u32, @intCast(j)), rows[r][j]);
     };
 }

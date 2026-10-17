@@ -72,14 +72,7 @@ pub const Sampler = struct {
         }
         switch (exchange) {
             .local => {},
-            .nccl => |x| { // each rank's columns of each row from that rank (spans may differ in width: TP=3)
-                try x.lib.check(x.lib.api.ncclGroupStart(), "ncclGroupStart");
-                for (0..rows) |row| for (spans, 0..) |span, q| {
-                    const at = s.full.ptr + (row * V + span.lo) * 2;
-                    try x.lib.check(x.lib.api.ncclBroadcast(at, at, span.len(), .bf16, @intCast(q), x.comm, stream.handle), "ncclBroadcast");
-                };
-                try x.lib.check(x.lib.api.ncclGroupEnd(), "ncclGroupEnd");
-            },
+            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = s.full.ptr, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
         }
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
@@ -116,3 +109,21 @@ test "rules as nemotron/cuda_sampler fills them; temperature 0 is greedy" {
     try std.testing.expectEqual(@as(usize, 32), @sizeOf(Rule));
     try std.testing.expectEqual(@as(?Sampling, null), check(.{ .seed = 0, .temperature = 0 }));
 }
+
+/// Each rank's columns of each row from that rank (spans may differ in width: TP=3), in one group.
+const Spread = struct {
+    lib: *const cuda.nccl.Library,
+    comm: cuda.nccl.Comm,
+    stream: cuda.Stream,
+    full: u64,
+    vocab: usize,
+    spans: []const Span,
+    rows: usize,
+
+    fn post(t: Spread) anyerror!void {
+        for (0..t.rows) |row| for (t.spans, 0..) |span, q| {
+            const at = t.full + (row * t.vocab + span.lo) * 2;
+            try t.lib.check(t.lib.api.ncclBroadcast(at, at, span.len(), .bf16, @intCast(q), t.comm, t.stream.handle), "ncclBroadcast");
+        };
+    }
+};
