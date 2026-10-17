@@ -26,8 +26,20 @@ pub const mm: [22]R = blk: {
 
 test "GLM pending records cannot pass the measured resource gate" {
     const registry = @import("registry.zig");
-    for (mm) |r| {
+    for (mm ++ drafter) |r| {
         try std.testing.expectEqual(none, r.usage);
         try std.testing.expectEqual(limits.sms.len, try registry.checkCuda(std.testing.allocator, &.{r}, true));
     }
 }
+
+/// The DFlash loader resolves exactly these symbols; resource measurements are still pending.
+pub const drafter: [11]R = blk: {
+    const names = .{ "tap", "block_qkv", "ctx_kv", "conv", "swiglu", "attn_part", "attn_merge", "sum2", "top16_part", "top16_merge", "gsum" };
+    const threads = [_]u32{ 256, 64, 64, 256, 256, 256, 128, 256, 256, 256, 128 };
+    var out: [11]R = undefined;
+    for (names, threads, 0..) |n, nt, i| {
+        const symbol = "df_" ++ n;
+        out[i] = .{ .launch = .{ .name = symbol, .symbol = symbol, .image = "glm_dflash", .threads = nt, .min_sm = 80 }, .usage = none };
+    }
+    break :blk out;
+};

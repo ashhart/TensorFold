@@ -152,7 +152,7 @@ pub const Drafter = struct {
     h_froms: [MAX_S]i64 = undefined,
     h_cpos: []i64 = &.{},
     h_crings: []u64 = &.{},
-    cand: []i32 = &.{}, // both ranks' gathered candidates, [2][MAX_M][CW]
+    cand: []i32 = &.{}, // all ranks' gathered candidates, [world][MAX_M][CW]
     gh: []f32 = &.{}, // the selector's hidden projections [MAX_M][RANK]
 
     pub fn deinit(dr: *Drafter) void {
@@ -277,7 +277,7 @@ pub const Drafter = struct {
         try block.pass(dr, e, S, rank0);
         tm = try dr.mark(e, .{ tm, 2 });
         if (rank0) {
-            try block.download(dr, e, std.mem.sliceAsBytes(dr.cand[0 .. 2 * M * CW]), dr.gtk);
+            try block.download(dr, e, std.mem.sliceAsBytes(dr.cand[0..@import("dflash_candidates.zig").Layout.init(dr.world, M, CW).read]), dr.gtk);
             try block.download(dr, e, std.mem.sliceAsBytes(dr.gh[0 .. M * RANK]), dr.g);
             for (reqs, 0..) |q, i| select.select(dr, i, M, q);
             if (dr.log > dr.calls) for (reqs) |q| std.log.info("dflash2 round {d}: slot {d} pos {d} kept {d} anchor {d} drafts {any}", .{ dr.calls, q.slot, q.pos, q.n, q.anchor, q.out.?[0 .. BLOCK - 1] });

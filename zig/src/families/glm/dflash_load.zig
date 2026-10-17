@@ -162,6 +162,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     const dr = try gpa.create(Drafter);
     errdefer gpa.destroy(dr);
     dr.* = .{ .gpa = gpa, .d = d, .module = module, .k = try df.Kernels.load(module), .weights = wbuf, .split = split, .ff = ff, .rank = rank, .world = world };
+    defer @import("cuda_load_owner.zig").drain(e.stream, d);
     var nb: [4][96]u8 = undefined;
     for (&dr.layers, 0..) |*lw, i| {
         lw.in_norm = try l.raw(try layerName(&nb[0], i, "input_layernorm.weight"), D * 2);
@@ -194,20 +195,32 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     dr.hnorm = try l.raw("hidden_norm.weight", D * 2);
     dr.norm = try l.raw("norm.weight", D * 2);
     if (l.at > total) return error.DrafterLayout;
-    dr.pred = try gpa.alloc(u16, df.VOCAB * df.RANK);
-    @memcpy(std.mem.sliceAsBytes(dr.pred), try l.read("candidate_selector.predecessor_codebook", df.VOCAB * df.RANK * 2));
-    dr.succ = try gpa.alloc(u16, df.VOCAB * df.RANK);
-    @memcpy(std.mem.sliceAsBytes(dr.succ), try l.read("candidate_selector.successor_codebook", df.VOCAB * df.RANK * 2));
-    try carve(dr, d, head.n);
+    var tail: Tail = .{ .loader = &l, .head_n = head.n };
+    const candidates = @import("dflash_candidates.zig").Layout.init(world, df.MAX_M, df.CW);
+    try @import("dflash_load_owner.zig").acquire(gpa, dr, &tail, Tail, .{ .book = df.VOCAB * df.RANK, .ctx = df.MAX_CTX, .cand = candidates.host, .hidden = df.MAX_M * df.RANK });
     if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
     if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
-    dr.h_cpos = try gpa.alloc(i64, df.MAX_CTX);
-    dr.h_crings = try gpa.alloc(u64, df.MAX_CTX);
-    dr.cand = try gpa.alloc(i32, world * df.MAX_M * df.CW);
-    dr.gh = try gpa.alloc(f32, df.MAX_M * df.RANK);
     std.log.info("dflash2: drafter from {s} (CC BY-NC-ND 4.0: non-commercial use only), linears at {d} bits, {d:.2} GiB on the device", .{ dir, if (bits == 0) 16 else bits, @as(f64, @floatFromInt(l.at)) / (1 << 30) });
     return dr;
 }
+
+const Tail = struct {
+    loader: *Loader,
+    head_n: usize,
+
+    pub fn readBook(t: *Tail, i: usize, dst: []u16) !void {
+        const name = if (i == 0) "candidate_selector.predecessor_codebook" else "candidate_selector.successor_codebook";
+        @memcpy(std.mem.sliceAsBytes(dst), try t.loader.read(name, dst.len * 2));
+    }
+
+    pub fn scratch(t: *Tail, dr: *Drafter) !void {
+        try carve(dr, t.loader.w.d, t.head_n);
+    }
+
+    pub fn freeScratch(_: *Tail, dr: *Drafter) void {
+        dr.scratch.free();
+    }
+};
 
 /// The drafter's scratch, every field one carved piece of one buffer.
 fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
@@ -224,16 +237,16 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
     if (dr.fc == .bf16) part = @max(part, mm.partBytes(64, dr.fc.bf16));
     part = @max(part, mm.partBytes(64, dr.hproj));
     const fields = .{
-        .{ "x", M * D * 2 },                 .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                .{ "dyn", M * KVW * 2 },
-        .{ "qkv", M * df.QKV * 2 },          .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
-        .{ "att", M * D * 2 },               .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
-        .{ "hn", M * D * 2 },                .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
-        .{ "part", part },                   .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
-        .{ "c1", C * D * 2 },                .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
-        .{ "taps_prefill", C * df.TAP_ROW }, .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
-        .{ "starts", df.MAX_S * 8 },         .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
-        .{ "gtk", 2 * M * df.CW * 4 },       .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
-        .{ "pl", M * df.QH * df.CH * 4 },    .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
+        .{ "x", M * D * 2 },                                                                     .{ "y", M * D * 2 },                        .{ "y2", M * D * 2 },                .{ "dyn", M * KVW * 2 },
+        .{ "qkv", M * df.QKV * 2 },                                                              .{ "q", M * D * 2 },                        .{ "kb", M * KVW * 2 },              .{ "vb", M * KVW * 2 },
+        .{ "att", M * D * 2 },                                                                   .{ "a", M * D * 2 },                        .{ "gu", M * 2 * FF * 2 },           .{ "act", M * FF * 2 },
+        .{ "hn", M * D * 2 },                                                                    .{ "xs", M * (D / 64) * 4 },                .{ "g", M * df.RANK * 4 },           .{ "logits", M * head_n * 2 },
+        .{ "part", part },                                                                       .{ "gs", C * 5 * (D / 64) * 4 },            .{ "sums", 2 * M * D * 4 },          .{ "cin", C * df.TAP_ROW },
+        .{ "c1", C * D * 2 },                                                                    .{ "ctx", C * D * 2 },                      .{ "ckv", C * 2 * KVW * 2 },         .{ "taps_step", df.STEP_ROWS * df.TAP_ROW },
+        .{ "taps_prefill", C * df.TAP_ROW },                                                     .{ "ids", M * 4 },                          .{ "bpos", M * 4 },                  .{ "rings", df.MAX_S * 8 },
+        .{ "starts", df.MAX_S * 8 },                                                             .{ "froms", df.MAX_S * 8 },                 .{ "cpos", C * 8 },                  .{ "crings", C * 8 },
+        .{ "gtk", @import("dflash_candidates.zig").Layout.init(dr.world, M, df.CW).device * 4 }, .{ "pv", M * chunks * df.TOPK * 4 },        .{ "pi", M * chunks * df.TOPK * 4 }, .{ "pm", M * df.QH * df.CH * 4 },
+        .{ "pl", M * df.QH * df.CH * 4 },                                                        .{ "pacc", M * df.QH * df.CH * df.HD * 4 },
     };
     var at: u64 = 0;
     inline for (fields) |f| {
@@ -241,6 +254,7 @@ fn carve(dr: *Drafter, d: *const cuda.Driver, head_n: usize) !void {
         at += std.mem.alignForward(u64, f[1], 256);
     }
     dr.scratch = try cuda.DeviceBuffer.alloc(d, at);
+    errdefer dr.scratch.free();
     inline for (fields) |f| @field(dr, f[0]) += dr.scratch.ptr;
     try d.check(d.api.cuMemsetD8_v2(dr.scratch.ptr, 0, at), "cuMemsetD8");
 }

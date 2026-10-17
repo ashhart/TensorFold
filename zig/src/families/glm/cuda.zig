@@ -64,3 +64,7 @@ test {
     _ = @import("cuda_tile.zig");
     _ = @import("heat"); // upstream's heat bands, run where the GLM ranks use them
 }
+
+pub const dflash = @import("dflash.zig");
+pub const dflash_candidates = @import("dflash_candidates.zig");
+pub const dflash_load_owner = @import("dflash_load_owner.zig");

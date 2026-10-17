@@ -177,7 +177,6 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
             return error.NoVisionTower;
         };
     }
-    errdefer if (own.e.images) |v| v.deinit();
     if (o.drafter) |dd| { // before the rooms: its weights and scratch count against every rank's
         if (!o.drafts) return error.DrafterNeedsDrafts;
         own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);

@@ -581,7 +581,7 @@ const glm = @import("glm_pending.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
 /// What the live audit checks: the serving records, then the learning, paging and still unmeasured launches.
-pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra ++ glm.mm;
+pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra ++ glm.mm ++ glm.drafter;
 test {
     _ = learning;
     _ = paging;
