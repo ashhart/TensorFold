@@ -5,4 +5,5 @@ test {
     _ = @import("src/families/deepseek_v41/engram_hash.zig");
     _ = @import("src/families/deepseek_v41/load.zig");
     _ = @import("src/families/deepseek_v41/weights.zig");
+    _ = @import("src/families/deepseek_v41/engram_rows.zig");
 }
