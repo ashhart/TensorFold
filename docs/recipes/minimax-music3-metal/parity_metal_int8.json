@@ -1,0 +1,100 @@
+{
+ "ref": "ref30",
+ "mine": "par_int8",
+ "label": "metal int8",
+ "prompt_ids_equal": true,
+ "frame_states": {
+  "frames": [
+   750,
+   750
+  ],
+  "cos": {
+   "mean": 0.999838,
+   "min": 0.997195,
+   "p01": 0.99947
+  },
+  "cos_by_part": [
+   0.999807,
+   0.999822,
+   0.999844,
+   0.99986,
+   0.999873,
+   0.999878,
+   0.99988,
+   0.999882
+  ]
+ },
+ "c0_logits": {
+  "frames": 751,
+  "cos_cond": {
+   "mean": 0.999906,
+   "min": 0.99749,
+   "p01": 0.99954
+  },
+  "cos_uncond": {
+   "mean": 0.99991,
+   "min": 0.998108,
+   "p01": 0.999598
+  },
+  "greedy_agree_cond": 0.968,
+  "greedy_agree_guided": 0.9694,
+  "top50_overlap": 0.9821,
+  "ref_drawn_code_rank_mine_median": 1
+ },
+ "depth_logits": {
+  "cos_cond_by_codebook": [
+   0.999859,
+   0.999857,
+   0.999852,
+   0.999822,
+   0.99982,
+   0.999807,
+   0.999808
+  ],
+  "greedy_agree_by_codebook": [
+   0.9561,
+   0.9774,
+   0.9614,
+   0.9521,
+   0.9334,
+   0.9654,
+   0.9494
+  ]
+ },
+ "dit_probe": {
+  "1.0": {
+   "cos_cond": 0.999995,
+   "cos_uncond": 0.999996,
+   "rel_err_cond": 0.00315,
+   "cos_guided_1.7": 0.999992
+  },
+  "0.5": {
+   "cos_cond": 0.999982,
+   "cos_uncond": 0.99998,
+   "rel_err_cond": 0.00615,
+   "cos_guided_1.7": 0.999951
+  },
+  "0.1": {
+   "cos_cond": 0.999993,
+   "cos_uncond": 0.999994,
+   "rel_err_cond": 0.00372,
+   "cos_guided_1.7": 0.999979
+  }
+ },
+ "dit_final_latent": {
+  "cos": 0.999939,
+  "snr_db": 38.97
+ },
+ "dav_probe": {
+  "cos": 1.0,
+  "snr_db": 103.92
+ },
+ "dav_waveform": {
+  "samples": [
+   1322496,
+   1322496
+  ],
+  "cos": 1.0,
+  "snr_db": 103.89
+ }
+}

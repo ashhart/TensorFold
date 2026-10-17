@@ -137,3 +137,16 @@ pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
+
+/// MiniMax Music 3's kernels (music3.metallib is built ahead of time); the kernel contract compiles this text.
+pub const music3 = struct {
+    pub const common = @embedFile("music3/m3_common.h");
+    pub const gemm_nax = @embedFile("prefill/gemm_nax.metal");
+    pub const ar = @embedFile("music3/ar.metal");
+    pub const attn = @embedFile("music3/attn.metal");
+    pub const sample = @embedFile("music3/sample.metal");
+    pub const gemm = @embedFile("music3/gemm.metal");
+    pub const dit = @embedFile("music3/dit.metal");
+    pub const dit_attn = @embedFile("music3/dit_attn.metal");
+    pub const dav = @embedFile("music3/dav.metal");
+};

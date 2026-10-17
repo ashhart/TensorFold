@@ -17,6 +17,8 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+| MiniMax Music 3 (MiniMax-Music3) | [Lyrics and a caption to a song on one CUDA GPU (GB10)](minimax-music3-cuda.md) |
+| MiniMax Music 3 (MiniMax-Music3) | [Lyrics and a caption to a song on Metal (Apple M5)](minimax-music3-metal.md) |
 
 ## Capability floor
 

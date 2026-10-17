@@ -8,6 +8,7 @@ const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
 const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
+const music3_k = @import("metal_music3.zig");
 
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro]";
@@ -94,6 +95,12 @@ pub fn main(init: std.process.Init) !u8 {
         r.* = try rows_k.Row.init(a, device, queue, w);
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
+    }
+    var m3norm: ?music3_k.Norm = null;
+    defer if (m3norm) |*n| n.deinit();
+    if (wanted(o, music3_k.spec().name)) {
+        m3norm = try music3_k.Norm.init(a, device, queue);
+        try kernels.append(a, m3norm.?.kernel());
     }
     var topk: ?topk_k.TopK = null;
     defer if (topk) |*t| t.deinit();
