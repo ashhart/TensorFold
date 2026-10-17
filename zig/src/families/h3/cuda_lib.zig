@@ -3,6 +3,7 @@ const std = @import("std");
 const h3 = @import("cuda.zig");
 const weights = @import("cuda_weights.zig");
 const tp = h3.tp;
+const bounds = @import("cuda_bounds.zig");
 
 const gpa = std.heap.c_allocator;
 
@@ -58,7 +59,11 @@ export fn tf_h3_spent(model: *const h3.Model, out: [*]f64, names: [*][*:0]const 
 
 /// Joins a sequence-parallel world (tp.init): `device` is one RDMA device, or two (rails) by a comma; 0 when it worked.
 export fn tf_h3_tp_init(model: *h3.Model, device: [*:0]const u8, gid_index: c_int, world: c_int, rank: c_int, region_bytes: u64) c_int {
-    tp.init(model, device, gid_index, @intCast(world), @intCast(rank), region_bytes) catch |e| {
+    const w = bounds.world(world, rank) catch |e| {
+        std.debug.print("tf_h3_tp_init: {t} (world {d}, rank {d})\n", .{ e, world, rank });
+        return -1;
+    };
+    tp.init(model, device, gid_index, w.world, w.rank, region_bytes) catch |e| {
         std.debug.print("tf_h3_tp_init: {t}\n", .{e});
         return -1;
     };
@@ -71,13 +76,19 @@ export fn tf_h3_tp_close(model: *h3.Model) void {
 
 /// This rank's connection record for `peer` (72 bytes), to be handed to that rank's tf_h3_tp_connect.
 export fn tf_h3_tp_info(model: *h3.Model, peer: c_int, out: *tp.XchgInfo) c_int {
-    tp.info(model, @intCast(peer), out) catch return -1;
+    tp.info(model, peerOf(model, peer) catch return -1, out) catch return -1;
     return 0;
 }
 
 export fn tf_h3_tp_connect(model: *h3.Model, peer: c_int, in: *const tp.XchgInfo) c_int {
-    tp.connect(model, @intCast(peer), in) catch return -1;
+    tp.connect(model, peerOf(model, peer) catch return -1, in) catch return -1;
     return 0;
+}
+
+/// `peer` checked against the world this model is in before it is cast.
+fn peerOf(model: *const h3.Model, peer: c_int) error{BadWorld}!u32 {
+    const t = model.tp orelse return error.BadWorld;
+    return bounds.peer(peer, .{ .world = t.world, .rank = t.rank });
 }
 
 /// The last forward's exchanges: seconds in them, how many, and the seconds of those spent packing this rank's tiles.

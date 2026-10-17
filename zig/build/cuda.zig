@@ -273,6 +273,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const native = native_modules.engines;
     const h3_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"), .target = host, .optimize = .debug, .link_libc = true });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_checkpoint })).step);
+    const h3_bounds = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_bounds.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_bounds })).step);
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{
