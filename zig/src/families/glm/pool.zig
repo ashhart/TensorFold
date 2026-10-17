@@ -62,6 +62,10 @@ pub fn capacity(sl: *const Slots) u32 {
 
 /// The first free run of `n` blocks, or null; `held`: blocks kept prompt states hold count as taken.
 fn findRun(sl: *const Slots, n: u32, held: bool) ?u32 {
+    return findExcept(sl, n, held, null);
+}
+
+fn findExcept(sl: *const Slots, n: u32, held: bool, own: ?*const snapshot.Snap) ?u32 {
     const p = sl.pool.?;
     var at: u32 = 0;
     while (at + n <= p.blocks) {
@@ -71,7 +75,7 @@ fn findRun(sl: *const Slots, n: u32, held: bool) ?u32 {
         };
         if (held) {
             var it = sl.snaps.valueIterator();
-            while (it.next()) |snap| if (snap.*.held) |h| if (h[0] < at + n and at < h[0] + h[1]) {
+            while (it.next()) |snap| if (snap.* != own) if (snap.*.held) |h| if (h[0] < at + n and at < h[0] + h[1]) {
                 next = @max(next orelse 0, h[0] + h[1]);
             };
         }
@@ -89,11 +93,16 @@ pub fn fits(sl: *const Slots, tokens: u32) bool {
 
 /// Slot `i`'s region for `tokens` of caches before its stream begins (`from`: a held prefix it restores).
 pub fn reserve(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap) !void {
+    return reserveWith(sl, i, tokens, from, Mover{});
+}
+
+/// The real allocator with only the drained shared-memory copy supplied by the caller for host tests.
+pub fn reserveWith(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap, mover: anytype) !void {
     const p = sl.pool orelse return;
     if (i >= sl.slots.len or sl.slots[i].used or sl.slots[i].region != null) return error.SlotOutOfStep;
     if (tokens > capacity(sl)) return error.ContextFull;
     const n = p.need(tokens);
-    const start = try place(sl, n, from);
+    const start = try placeWith(sl, n, from, mover);
     const slot = &sl.slots[i];
     slot.region = .{ .start = start, .blocks = n };
     p.caches(&sl.e.c, slot.region.?, slot.s.mla[0..mlaCount(sl.e)]);
@@ -101,13 +110,35 @@ pub fn reserve(sl: *Slots, i: u32, tokens: u32, from: ?*const snapshot.Snap) !vo
 }
 
 /// Where `n` blocks go: on `from`'s held prefix (restored in place) if nothing else is there, else the first free run.
-fn place(sl: *Slots, n: u32, from: ?*const snapshot.Snap) error{PoolFull}!u32 {
+fn placeWith(sl: *Slots, n: u32, from: ?*const snapshot.Snap, mover: anytype) !u32 {
     while (true) {
         if (from) |f| if (f.held) |h| if (clearAt(sl, h[0], n, f)) return h[0];
         if (findRun(sl, n, true)) |at| return at;
-        if (!evictHeld(sl, from)) return error.PoolFull;
+        if (evictHeld(sl, from, false)) continue;
+        if (from) |f| if (!f.stale and f.held != null) if (findExcept(sl, n, true, f)) |at| {
+            mover.move(sl, f, at) catch |err| {
+                std.log.warn("glm: restoring {d} tokens failed ({s}); pool relocation aborted", .{ f.at, @errorName(err) });
+                return err;
+            };
+            @constCast(f).held.?[0] = at;
+            return at;
+        };
+        if (!evictHeld(sl, from, true)) return error.PoolFull;
     }
 }
+
+const Mover = struct {
+    pub fn move(_: Mover, sl: *Slots, snap: *const snapshot.Snap, start: u32) !void {
+        try sl.flush();
+        for (sl.ring_cb) |pending| if (pending) |cb| {
+            cb.wait();
+            if (cb.failure() != null) return error.PoolMoveNotDrained;
+        };
+        const e = sl.e;
+        if (e.event.value() < e.ev and !e.event.wait(e.ev, 120_000)) return error.PoolMoveNotDrained;
+        @import("pool_move.zig").prefix(&e.c, sl.pool.?.base[0..mlaCount(e)], snap.held.?[0], start, snap.at);
+    }
+};
 
 /// Whether blocks [at, at + n) lie in the pool clear of every stream's region and of every held prefix but `own`.
 fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
@@ -119,10 +150,10 @@ fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
 }
 
 /// The oldest kept state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
-fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap) bool {
+fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap, allow_spare: bool) bool {
     var pick: ?*snapshot.Snap = null;
     var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.held != null and (pick == null or first(snap.*, pick.?, spare))) {
+    while (it.next()) |snap| if ((allow_spare or snap.* != spare) and snap.*.held != null and (pick == null or first(snap.*, pick.?, spare))) {
         pick = snap.*;
     };
     const snap = pick orelse return false;
@@ -172,7 +203,7 @@ fn mlaCount(e: *const Engine) usize {
     return e.c.countKind(.mla) + @as(u32, if (e.c.mtp > 0) 1 else 0);
 }
 
-test "a region of n blocks holds n blocks less the pooled entry, and tokens take the blocks that hold them" {
+test "GLM expiry: a region of n blocks holds n blocks less the pooled entry" {
     const p: Pool = .{ .base = undefined, .blocks = 4096, .kpool = 4 };
     try std.testing.expectEqual(@as(u32, 1_048_572), p.tokens(p.blocks));
     for ([_]u32{ 1, 252, 253, 508, 509, 6376, 1_048_572 }) |t| {
@@ -187,7 +218,11 @@ fn testSlots(slots: []Slot, blocks: u32) Slots {
     return .{ .gpa = std.testing.allocator, .e = undefined, .slots = slots, .rows = undefined, .ids = undefined, .lasts = undefined, .picks = undefined, .ring = undefined, .pool = .{ .base = undefined, .blocks = blocks, .kpool = 4 } };
 }
 
-test "a stream that restores a held prefix takes its region on that prefix's blocks; other held prefixes go first" {
+const MetadataMover = struct {
+    pub fn move(_: MetadataMover, _: *Slots, _: *const snapshot.Snap, _: u32) !void {}
+};
+
+test "GLM expiry: a held prefix extends in place after other prefixes go first" {
     const gpa = std.testing.allocator;
     var slots: [2]Slot = undefined;
     for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
@@ -197,12 +232,12 @@ test "a stream that restores a held prefix takes its region on that prefix's blo
     var own: snapshot.Snap = .{ .id = 2, .at = 1500, .buf = undefined, .bytes = 0, .held = .{ 2, 6 } };
     try sl.snaps.put(gpa, older.id, &older);
     try sl.snaps.put(gpa, own.id, &own);
-    try std.testing.expectEqual(@as(u32, 2), try place(&sl, 9, &own)); // [2, 11): the older prefix's [9, 12) went
+    try std.testing.expectEqual(@as(u32, 2), try placeWith(&sl, 9, &own, MetadataMover{}));
     try std.testing.expect(older.stale and older.held == null);
     try std.testing.expect(!own.stale and own.held != null); // its prefix rows stay where they are: still valid
 }
 
-test "the prefix a stream restores gives its blocks up last, only when nothing else frees a run" {
+test "GLM expiry: a prefix relocates beside a running stream without overwriting it" {
     const gpa = std.testing.allocator;
     var slots: [2]Slot = undefined;
     for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
@@ -211,12 +246,13 @@ test "the prefix a stream restores gives its blocks up last, only when nothing e
     slots[1].region = .{ .start = 12, .blocks = 4 }; // a running stream
     var own: snapshot.Snap = .{ .id = 2, .at = 1500, .buf = undefined, .bytes = 0, .held = .{ 2, 6 } };
     try sl.snaps.put(gpa, own.id, &own);
-    try std.testing.expectEqual(@as(u32, 0), try place(&sl, 12, &own)); // [2, 14) meets the running stream
-    try std.testing.expect(own.stale and own.held == null);
-    try std.testing.expectError(error.PoolFull, place(&sl, 13, null));
+    try std.testing.expectEqual(@as(u32, 0), try placeWith(&sl, 12, &own, MetadataMover{}));
+    try std.testing.expect(!own.stale and own.held.?[0] == 0);
+    try std.testing.expectEqual(@as(u32, 12), slots[1].region.?.start);
+    try std.testing.expectError(error.PoolFull, placeWith(&sl, 13, null, MetadataMover{}));
 }
 
-test "with no prefix to restore, held prefixes give their blocks up oldest first" {
+test "GLM expiry: with no restore, held prefixes give their blocks up oldest first" {
     const gpa = std.testing.allocator;
     var slots: [2]Slot = undefined;
     for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
@@ -226,6 +262,6 @@ test "with no prefix to restore, held prefixes give their blocks up oldest first
     var newer: snapshot.Snap = .{ .id = 2, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 0, 4 } };
     try sl.snaps.put(gpa, older.id, &older);
     try sl.snaps.put(gpa, newer.id, &newer);
-    try std.testing.expectEqual(@as(u32, 4), try place(&sl, 10, null));
+    try std.testing.expectEqual(@as(u32, 4), try placeWith(&sl, 10, null, MetadataMover{}));
     try std.testing.expect(older.stale and !newer.stale);
 }

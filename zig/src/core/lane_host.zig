@@ -119,7 +119,7 @@ pub const LaneHost = struct {
             if (!job.started) return store.release(e);
             job.stream.reuse.saved = null; // the backend restores before its first chunk; a later keep may free it
             const ok = !job.stream.reuse_failed and job.stream.cached == e.at;
-            if (job.stream.reuse_failed or ok) store.resumed(e, job.request.cacheKey(), ok) else store.release(e);
+            if (job.stream.reuse_failed or ok) store.resumedWithReason(e, job.request.cacheKey(), if (ok) null else job.stream.reuse_error orelse error.RestoreRejected) else store.release(e);
         }
     };
 

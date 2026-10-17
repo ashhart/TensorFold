@@ -112,12 +112,17 @@ pub const Backend = struct {
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
             if (snap.at < prompt.len and b.sl.usable(snap)) {
-                if (snap.home != i) try b.copyOut(i, 0); // the restore writes every one of this slot's rows
-                try mirror.send(e, .restore, &.{ i, snap.id });
-                try b.sl.restore(i, snap.id);
+                b.restore(i, snap) catch |err| {
+                    s.reuse_failed = true;
+                    s.reuse_error = err;
+                    return err;
+                };
                 at = snap.at;
                 s.cached = at;
-            } else s.reuse_failed = true;
+            } else {
+                s.reuse_failed = true;
+                s.reuse_error = if (snap.at >= prompt.len) error.SnapshotNotPrefix else if (snap.stale) error.SnapshotStale else error.SnapshotMissing;
+            }
         }
         var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
         s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored
@@ -138,6 +143,12 @@ pub const Backend = struct {
             s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
             if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
         }
+    }
+
+    fn restore(b: *Backend, i: u32, snap: *const snapshot.Snap) !void {
+        if (snap.home != i) try b.copyOut(i, 0);
+        try mirror.send(b.sl.e, .restore, &.{ i, snap.id });
+        try b.sl.restore(i, snap.id);
     }
 
     /// Slot `i`'s resident states past `at` made whole where the budget has room before it writes; a pair's rank 1 copies the same ids.

@@ -114,6 +114,8 @@ pub const Entry = struct {
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
 
+pub const RestoreLog = struct { ctx: *anyopaque, write: *const fn (*anyopaque, u32, anyerror) void };
+
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
@@ -121,6 +123,7 @@ pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
 
 pub const Store = struct {
+    restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
     rules: Rules,
@@ -247,12 +250,9 @@ pub const Store = struct {
     pub fn beginRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
         const l = try s.lookupRewind(a, prompt, @intCast(prompt.len), history_len, rewind_len, shared, starts, spans);
         const e = l.entry orelse return .{ .marks = l.marks };
-        const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
-            note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
-            break :blk false;
-        };
-        const from = if (ok) e.at else 0;
-        s.resumed(e, prompt, ok);
+        const failure: ?anyerror = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| null else |err| err;
+        const from = if (failure == null) e.at else 0;
+        s.resumedWithReason(e, prompt, failure);
         s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
         return .{ .from = from, .marks = l.marks };
     }
@@ -378,9 +378,14 @@ pub const Store = struct {
 
     /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
     pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
+        return s.resumedWithReason(e, prompt, if (ok) null else error.RestoreRejected);
+    }
+
+    pub fn resumedWithReason(s: *Store, e: *Entry, prompt: []const u32, failure: ?anyerror) void {
         if (std.mem.indexOfScalar(*Entry, s.entries.items, e) == null) return;
         defer s.release(e);
-        if (!ok) {
+        if (failure) |err| {
+            if (s.restore_log) |log| log.write(log.ctx, e.at, err) else note("restoring {d} tokens failed ({s}); discarding cached state", .{ e.at, @errorName(err) });
             s.counts.failed += 1;
             e.expired = true;
             return;
