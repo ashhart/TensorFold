@@ -2,9 +2,10 @@
 const std = @import("std");
 const api = @import("engine_api");
 
-/// Any row, the head one token on (Nemotron's); `snap_grid`'s chunk starts and `warm_quiet`'s warm turns if declared.
+/// Any row, the head one token on (Nemotron's) unless `snap_lookahead` says; `snap_grid` and `warm_quiet` if declared.
 pub fn cacheRules(comptime F: type) api.prompt_cache.Rules {
     var rules: api.prompt_cache.Rules = .{ .lookahead = 1, .min_prompt = 0 };
+    if (@hasDecl(F, "snap_lookahead")) rules.lookahead = F.snap_lookahead; // a family with no head reads no token on
     if (@hasDecl(F, "warm_quiet")) rules.warm = .waits;
     if (@hasDecl(F, "snap_grid")) {
         rules.planned = true;
@@ -39,6 +40,10 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     const Warm = struct {
         pub const warm_quiet: u64 = 1;
     };
+    const Headless = struct {
+        pub const snap_lookahead: u32 = 0;
+    };
+    try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);

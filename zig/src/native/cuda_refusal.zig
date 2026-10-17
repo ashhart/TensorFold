@@ -21,7 +21,10 @@ const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its ow
 
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
-    if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
+    if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) {
+        if (@hasDecl(F, "drafter_refusal")) return F.drafter_refusal; // a family without an MTP head says so itself
+        return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
+    }
     if (o.learn_conversations and F != nemotron.native) return "--learn-conversations keeps conversation states on disk for Nemotron only on CUDA: serve this model without it";
     return null;
 }
@@ -61,6 +64,14 @@ test "a family that explicitly declines a drafter refuses it" {
         pub const takes_drafter = false;
     };
     try std.testing.expectStringStartsWith(family(Declined, .{ .dir = "d", .model_type = "m", .drafter = "draft" }) orelse "", "--drafter loads a separate drafter");
+}
+
+test "a family with no head of its own words its --drafter refusal" {
+    const Headless = struct {
+        pub const takes_drafter = false;
+        pub const drafter_refusal = "--drafter: none yet";
+    };
+    try std.testing.expectEqualStrings("--drafter: none yet", family(Headless, .{ .dir = "d", .model_type = "m", .drafter = "x" }) orelse "");
 }
 
 test "--learn-conversations opens Nemotron only, the one CUDA family whose states have a disk image" {

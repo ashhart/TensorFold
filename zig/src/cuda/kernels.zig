@@ -35,6 +35,11 @@ pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else 
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
+pub const tree_attention: []const u8 = if (available) &Blob("fatbin_tree_attention").bytes else &.{};
+pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_attention").bytes else &.{};
+pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};
+pub const moe_glue: []const u8 = if (available) &Blob("fatbin_moe_glue").bytes else &.{};
+pub const dense_rows: []const u8 = if (available) &Blob("fatbin_dense_rows").bytes else &.{};
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};
 pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes else &.{};
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
@@ -56,6 +61,9 @@ pub const ck_lane: []const u8 = if (available) &Blob("fatbin_ck_lane").bytes els
 pub const ck_experts: []const u8 = if (available) &Blob("fatbin_ck_experts").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
+pub const act_rows: []const u8 = if (available) &Blob("fatbin_act_rows").bytes else &.{};
+pub const gdn_prep: []const u8 = if (available) &Blob("fatbin_gdn_prep").bytes else &.{};
+pub const qk_rows: []const u8 = if (available) &Blob("fatbin_qk_rows").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {

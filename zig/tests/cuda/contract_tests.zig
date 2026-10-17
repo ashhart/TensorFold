@@ -8,6 +8,13 @@ const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
+const act_k = @import("contract_act.zig");
+const gdn_k = @import("contract_gdn.zig");
+const qk_k = @import("contract_qk.zig");
+const tree_k = @import("contract_tree_attn.zig");
+const block_k = @import("contract_block_attn.zig");
+const window_k = @import("contract_window.zig");
+const moe_k = @import("contract_moe.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -21,7 +28,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "act_rows", "gdn_prep", "qk_rows", "tree_attention", "block_attention", "window_attention", "moe_glue", "dense_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -89,6 +96,67 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var act_rows = try cuda.act_rows.ActRows.load(gpu.d);
+    defer act_rows.unload();
+    var acts: [std.enums.values(act_k.Which).len]act_k.Act = undefined;
+    for (std.enums.values(act_k.Which), &acts) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &act_rows, .arena = .init(a) };
+    defer for (&acts) |*x| x.deinit();
+    for (&acts) |*x| try kernels.append(a, x.kernel());
+    var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
+    defer gdn_prep.unload();
+    var gdns: [9]gdn_k.Gdn = undefined;
+    for (&gdns, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .dk = @as(usize, 64) << @intCast(i / 3), .part = @fromBackingInt(@intCast(i % 3)), .k = &gdn_prep, .arena = .init(a) };
+    defer for (&gdns) |*x| x.deinit();
+    for (&gdns) |*x| try kernels.append(a, x.kernel());
+    var qk_rows = try cuda.qk_rows.QkRows.load(gpu.d);
+    defer qk_rows.unload();
+    var qks: [qk_k.forms.len]qk_k.Qk = undefined;
+    for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
+    defer for (&qks) |*x| x.deinit();
+    for (&qks) |*x| try kernels.append(a, x.kernel());
+    var tree_paths = try cuda.tree_attention.TreeAttention.load(gpu.d);
+    defer tree_paths.unload();
+    var paths = tree_k.Paths{ .rig = .{ .gpu = gpu, .s = s }, .ta = &tree_paths };
+    defer paths.deinit();
+    try kernels.append(a, paths.kernel());
+    var trees: [tree_k.variants.len]tree_k.Tree = undefined;
+    var ntrees: usize = 0;
+    defer for (trees[0..ntrees]) |*x| {
+        x.ta.unload();
+        x.deinit();
+    };
+    for (tree_k.variants) |v| {
+        trees[ntrees] = .{ .rig = .{ .gpu = gpu, .s = s }, .v = v, .ta = try cuda.tree_attention.TreeAttention.load(gpu.d) };
+        ntrees += 1;
+    }
+    for (&trees) |*x| try kernels.append(a, x.kernel());
+    var block_attn = try cuda.block_attention.BlockAttention.load(gpu.d);
+    defer block_attn.unload();
+    var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
+    defer for (&blocks) |*x| x.deinit();
+    for (&blocks) |*x| try kernels.append(a, x.kernel());
+    var window_fns = try cuda.window_attention.WindowAttention.load(gpu.d);
+    defer window_fns.unload();
+    var windows: [window_k.cfgs.len]window_k.Window = undefined;
+    for (window_k.cfgs, &windows) |f, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns };
+    defer for (&windows) |*x| x.deinit();
+    for (&windows) |*x| try kernels.append(a, x.kernel());
+    var moe_fns = try cuda.moe_glue.MoeGlue.load(gpu.d);
+    defer moe_fns.unload();
+    var topks: [moe_k.routes.len]moe_k.TopK = undefined;
+    for (moe_k.routes, &topks) |r, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .route = r, .g = &moe_fns };
+    defer for (&topks) |*x| x.deinit();
+    for (&topks) |*x| try kernels.append(a, x.kernel());
+    var combines: [moe_k.combos.len]moe_k.Combine = undefined;
+    for (moe_k.combos, &combines) |m, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .x = m, .g = &moe_fns };
+    defer for (&combines) |*x| x.deinit();
+    for (&combines) |*x| try kernels.append(a, x.kernel());
+    var dense_fns = try cuda.dense_rows.DenseRows.load(gpu.d);
+    defer dense_fns.unload();
+    var denses: [moe_k.dense_tiles.len]moe_k.DenseRows = undefined;
+    for (&denses, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .tile = i, .g = &dense_fns };
+    defer for (&denses) |*x| x.deinit();
+    for (&denses) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
