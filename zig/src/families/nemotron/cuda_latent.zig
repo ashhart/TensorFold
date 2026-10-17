@@ -338,18 +338,30 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
 pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
-    if (t.ck) |x| return four.partials(o, x, s.plan, s.shared_plan, s.act, s.sact, s.sids, s.ck4, picks, lat, hidden, rows, own, c, out);
+    try routed(o, t, s, picks, lat, rows, own, c, out);
+    try sharedRows(o, t, s, hidden, rows, own, c, out + @as(u64, rows * c.top_k * own) * c.latent * 4);
+}
+
+/// `picks`' pairs through the routed experts into `out` (partials' first region).
+fn routed(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    if (t.ck) |x| return four.routed(o, x.routed, s.plan, s.act, s.ck4, picks, lat, rows, own, c, out);
     const pairs = rows * c.top_k * own;
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
     const items = kern.maxItems(pairs, t.routed.experts, 16);
     try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
     try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
+}
+
+/// The shared expert's (row, share) pairs into `out` (partials' second region), on `s`'s fixed plan where it has one.
+fn sharedRows(o: kern.Ops, t: Tables, s: Scratch, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    if (t.ck) |x| return four.shared(o, x.shared, s.plan, s.shared_plan, s.sact, s.sids, s.ck4, hidden, rows, own, c, out);
+    const g = o.grouped();
     const sp = s.shared_plan orelse s.plan;
     if (s.shared_plan == null) try o.plan(s.sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
     try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out + @as(u64, pairs) * c.latent * 4, sh_items, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, -1);
 }
 
 /// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.
@@ -363,11 +375,22 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     const pairs = rows * c.top_k * own;
     const D: u64 = c.hidden;
     const Lw: u64 = c.latent;
+    const window = rows <= state.max_rows; // the shared expert's fixed plans; on one GPU, the side stream
+    const scratch: Scratch = .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4, .shared_plan = if (window) b.latentPlan(c, rows) else null };
+    const side = if (window and f.tp == null) f.side else null;
+    if (side) |sd| {
+        try sd.fork.record(o.s);
+        try sd.s.wait(sd.fork);
+        const so: kern.Ops = .{ .k = o.k, .s = sd.s };
+        try sharedRows(so, lt.t, scratch, b.y, rows, own, c, b.ymoe + @as(u64, pairs) * Lw * 4);
+        try sd.join.record(sd.s);
+    }
     try route(f, m, b.y, rows);
     try f.mark(.route);
     try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
     if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
-    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4, .shared_plan = if (rows <= state.max_rows) b.latentPlan(c, rows) else null }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
+    try routed(o, lt.t, scratch, b.pick, b.lat, rows, own, c, b.ymoe);
+    if (side == null) try sharedRows(o, lt.t, scratch, b.y, rows, own, c, b.ymoe + @as(u64, pairs) * Lw * 4);
     try f.mark(.experts_down);
     // one GPU: shares interleaved by pair; ranks: each rank's rows in its own region of ymoe, in rank order
     var share_stride: u64 = Lw;
@@ -394,6 +417,10 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     a.add(int(c.latent));
     try go(fns.combine, o.s, .{ rows, (c.latent + 255) / 256, 1 }, 256, 0, &a);
     try o.linear().decode(o.s, lt.out, .{ .x = b.comb }, b.delta, rows);
+    if (side) |sd| {
+        try o.s.wait(sd.join);
+        try f.mark(.shared_wait);
+    }
     var z: cuda.Args = .{};
     z.add(b.delta);
     z.add(b.ymoe + @as(u64, pairs) * Lw * 4);

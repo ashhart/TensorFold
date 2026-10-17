@@ -61,6 +61,8 @@ so one grouped launch serves every share a rank holds.
 
 Passes of up to a verify window's rows read shared-expert plans built when the buffers load, one per row count;
 longer prompt passes and the other rank's jobs plan the shared expert at their own row count.
+On one GPU those passes run the shared expert on the side stream while the router and routed experts run on the main
+stream: its activations, quantized rows and plan are its own, and events order its input and the final sum.
 
 ## Precision
 
