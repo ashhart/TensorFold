@@ -81,6 +81,14 @@ fn list(o: std.json.ObjectMap, key: []const u8, n: u32) ![]const std.json.Value 
     return v.array.items;
 }
 
+/// The router, indexed experts and shared scratch must all admit the same shape.
+pub fn validateExperts(c: *const Config) error{UnsupportedStep5Experts}!void {
+    if (c.hidden == 0 or c.hidden % 64 != 0 or c.experts == 0 or c.experts > 512 or c.experts % 4 != 0 or
+        c.topk == 0 or c.topk > c.experts or c.topk > 16 or c.intermediate == 0 or c.intermediate % 16 != 0 or
+        c.moe_intermediate == 0 or c.moe_intermediate % 16 != 0 or c.shared_intermediate == 0 or
+        c.shared_intermediate % 16 != 0 or c.shared_intermediate > c.intermediate) return error.UnsupportedStep5Experts;
+}
+
 pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     var doc = try std.json.parseFromSlice(std.json.Value, gpa, bytes, .{});
     defer doc.deinit();
@@ -108,6 +116,7 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Config {
     c.routed_scale = @floatCast(try number(try field(t, "moe_router_scaling_factor")));
     c.window = try int(t, "sliding_window");
     c.context = try int(t, "max_position_embeddings");
+    try validateExperts(&c);
     if (c.layers + c.mtp > max_layers or c.heads % c.kv_heads != 0 or c.head_dim % 32 != 0 or c.head_dim > 256) return error.BadStep5Config;
     const norm = try field(t, "norm_expert_weight");
     if (norm != .bool or !norm.bool) return error.UnsupportedStep5Router;
@@ -179,5 +188,44 @@ test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
         const sliced = try std.mem.replaceOwned(u8, std.testing.allocator, text, "0.3333333333333333", bad);
         defer std.testing.allocator.free(sliced);
         try std.testing.expectError(error.BadStep5Config, parse(std.testing.allocator, sliced));
+    }
+}
+
+test "T50 expert geometry is refused by the serialized config before loading" {
+    const fixture = @embedFile("config_fixture.json");
+    const Case = struct { from: []const u8, to: []const u8 };
+    const cases = [_]Case{
+        .{ .from = "\"moe_top_k\": 8", .to = "\"moe_top_k\": 17" },
+        .{ .from = "\"moe_top_k\": 8", .to = "\"moe_top_k\": 353" },
+        .{ .from = "\"moe_num_experts\": 352", .to = "\"moe_num_experts\": 4" },
+        .{ .from = "\"moe_num_experts\": 352", .to = "\"moe_num_experts\": 350" },
+        .{ .from = "\"moe_num_experts\": 352", .to = "\"moe_num_experts\": 516" },
+        .{ .from = "\"share_expert_dim\": 1536", .to = "\"share_expert_dim\": 13840" },
+    };
+    for (cases) |c| {
+        const bytes = try std.mem.replaceOwned(u8, std.testing.allocator, fixture, c.from, c.to);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectError(error.UnsupportedStep5Experts, parse(std.testing.allocator, bytes));
+    }
+}
+
+test "T50 expert endpoints and released rotary refusals stay admitted or refused" {
+    var c = Config{};
+    try validateExperts(&c);
+    for ([_]u32{ 4, 512 }) |experts| for ([_]u32{ 1, @min(experts, 16) }) |topk| {
+        c.experts = experts;
+        c.topk = topk;
+        try validateExperts(&c);
+    };
+    const fields = [_][]const u8{ "hidden", "intermediate", "moe_intermediate", "shared_intermediate" };
+    inline for (fields) |field_name| {
+        c = .{};
+        @field(c, field_name) += 1;
+        try std.testing.expectError(error.UnsupportedStep5Experts, validateExperts(&c));
+    }
+    for ([_][]const u8{ "1.5", "-0.5" }) |value| {
+        const bytes = try std.mem.replaceOwned(u8, std.testing.allocator, @embedFile("config_fixture.json"), "0.3333333333333333", value);
+        defer std.testing.allocator.free(bytes);
+        try std.testing.expectError(error.BadStep5Config, parse(std.testing.allocator, bytes));
     }
 }

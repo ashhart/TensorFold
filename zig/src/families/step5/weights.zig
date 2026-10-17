@@ -5,6 +5,7 @@ const ck = @import("../../core/checkpoint_metal.zig");
 const rows = @import("../../core/row_projection.zig");
 const route = @import("../../core/moe_route.zig");
 const cfg = @import("config.zig");
+const shape = @import("tensor_shape.zig");
 
 pub const Tensor = ck.Tensor;
 pub const Linear = rows.Weights;
@@ -55,15 +56,23 @@ fn affine(c: *const ck.Checkpoint, prefix: []const u8, suffix: []const u8, stack
     const w = try c.get(try name(&b2, base, ".weight"));
     const s = try c.get(try name(&b2, base, ".scales"));
     const z = try c.get(try name(&b2, base, ".biases"));
-    const words = w.shape[w.rank - 1];
-    const groups = s.shape[s.rank - 1];
-    if (w.dtype != .u32 or s.dtype != .bf16 or z.dtype != .bf16 or w.count() != stack * n * words or s.count() != stack * n * groups or
-        z.count() != s.count() or groups == 0 or k % groups != 0 or words * 32 % k != 0)
-    {
-        std.log.err("step5: {s} is not an affine [{d}, {d}, {d}] matrix in MLX's layout", .{ base, stack, n, k });
-        return error.UnexpectedStep5Tensor;
-    }
-    const out = Linear{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = k / groups, .bits = @intCast(words * 32 / k) };
+    return checkedAffine(w, s, z, stack, n, k);
+}
+
+pub fn checkedAffine(w: Tensor, s: Tensor, z: Tensor, stack: usize, n: usize, k: usize) !Linear {
+    if (stack == 0 or n == 0 or k == 0 or n > std.math.maxInt(i32) or k > std.math.maxInt(i32)) return error.UnexpectedStep5Tensor;
+    const rank: usize = if (stack == 1) 2 else 3;
+    if (w.rank != rank or s.rank != rank or z.rank != rank) return error.UnexpectedStep5Tensor;
+    const words = w.shape[rank - 1];
+    const groups = s.shape[rank - 1];
+    const wd = [3]usize{ stack, n, words };
+    const sd = [3]usize{ stack, n, groups };
+    try shape.require(w, .u32, wd[3 - rank ..]);
+    try shape.require(s, .bf16, sd[3 - rank ..]);
+    try shape.require(z, .bf16, sd[3 - rank ..]);
+    const packed_bits = std.math.mul(usize, words, 32) catch return error.UnexpectedStep5Tensor;
+    if (groups == 0 or k % groups != 0 or packed_bits % k != 0 or packed_bits / k > std.math.maxInt(u8)) return error.UnexpectedStep5Tensor;
+    const out = Linear{ .w = w.buffer, .w_off = w.offset, .scales = s.buffer, .s_off = s.offset, .biases = z.buffer, .b_off = z.offset, .n = n, .k = k, .group = k / groups, .bits = @intCast(packed_bits / k) };
     try out.validate();
     return out;
 }
@@ -74,13 +83,14 @@ fn mlp(c: *const ck.Checkpoint, p: []const u8, hidden: usize, inter: usize) !Mlp
 
 /// The bf16 router [experts, hidden] repacked into a new shared buffer in moe_route's block order.
 fn router(device: mtl.Device, t: Tensor, experts: usize, hidden: usize) !mtl.Buffer {
-    if (t.dtype != .bf16 or t.count() != experts * hidden) return error.UnexpectedStep5Tensor;
+    try shape.require(t, .bf16, &.{ experts, hidden });
     const buf = try device.buffer(experts * hidden * 2, mtl.ResourceOptions.shared);
     route.pack(t.host(u16), buf.slice(u16, experts * hidden), experts, hidden);
     return buf;
 }
 
 pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, f: *const cfg.Config) !Weights {
+    try cfg.validateExperts(f);
     const h: usize = f.hidden;
     var w = Weights{
         .embed = try affine(c, "model.", "embed_tokens", 1, f.vocab, h),
@@ -165,4 +175,8 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint,
         };
     }
     return w;
+}
+
+test {
+    _ = @import("weights_test.zig");
 }
