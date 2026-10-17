@@ -46,6 +46,10 @@ pub const Link = struct {
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, max_ids: usize) !Link {
         const buf = try cuda.DeviceBuffer.alloc(d, 64 + max_ids * 4);
+        errdefer {
+            var owned = buf;
+            owned.free();
+        }
         const wait = if (std.c.getenv("TF_GLM_LINK_WAIT")) |v| std.mem.eql(u8, std.mem.span(v), "1") else false;
         return .{ .d = d, .lib = lib, .comm = comm, .stream = stream, .buf = buf, .ids = try gpa.alloc(u32, max_ids), .gpa = gpa, .wait = wait };
     }
@@ -164,10 +168,9 @@ pub const Leader = struct {
     /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
     pub fn images(x: Leader, v: *const images_mod.Images) !void {
         try x.flush();
-        var words: [3 * 64]u32 = undefined;
-        if (v.spans.items.len * 3 > words.len) return error.TooManyImages;
-        for (v.spans.items, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
-        try x.send(.{ .kind = @backingInt(Kind.image) }, words[0 .. 3 * v.spans.items.len]);
+        const words = try spanWords(v.gpa, v.spans.items, x.link.ids.len);
+        defer v.gpa.free(words);
+        try x.send(.{ .kind = @backingInt(Kind.image) }, words);
         try x.link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
     }
 
@@ -299,4 +302,62 @@ test "a step's header is 64 bytes and keeps its fields" {
     @memcpy(std.mem.asBytes(&back), bytes);
     try std.testing.expectEqual(h, back);
     try std.testing.expectEqual(Kind.draft, @as(Kind, @fromBackingInt(@intCast(back.kind))));
+}
+
+// The production image-step serializer, isolated so the host can test the offered video limits.
+pub fn spanWords(a: std.mem.Allocator, spans: []const images_mod.Span, max_words: usize) ![]u32 {
+    const n = std.math.mul(usize, spans.len, 3) catch return error.TooManyIds;
+    if (n > max_words) return error.TooManyIds;
+    const words = try a.alloc(u32, n);
+    for (spans, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
+    return words;
+}
+test "128 video pairs cross the span serializer and a follower's receiver; one word short is refused" {
+    const a = std.testing.allocator;
+    var spans: [128]images_mod.Span = undefined;
+    for (&spans, 0..) |*sp, i| sp.* = .{ .at = @intCast(i * 2), .n = 1, .row = @intCast(i) };
+    const words = try spanWords(a, &spans, 3 * spans.len);
+    defer a.free(words);
+    var v: images_mod.Images = undefined;
+    v.gpa = a;
+    v.spans = .empty;
+    v.slot = 9;
+    defer v.spans.deinit(a);
+    v.limits = .{ .image_tokens = 64, .max_images = 8, .video_tokens = 128, .max_frames = 256 };
+    v.video_ids = .{ 1, 2, 3 };
+    try v.take(9, words);
+    try std.testing.expectEqualSlices(images_mod.Span, &spans, v.spans.items);
+    try std.testing.expectEqual(@as(u32, 9), v.slot);
+    try std.testing.expectEqual(@as(usize, 128), v.rowCount());
+    try std.testing.expectError(error.TooManyIds, spanWords(a, &spans, 3 * spans.len - 1));
+}
+
+test "a link whose host allocation fails frees its device buffer" {
+    const Mock = struct {
+        var frees: usize = 0;
+        fn alloc(ptr: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
+            ptr.* = 4096;
+            return 0;
+        }
+        fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+            frees += 1;
+            return 0;
+        }
+    };
+    Mock.frees = 0;
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = Mock.alloc;
+    d.api.cuMemFree_v2 = Mock.free;
+    var lib: cuda.nccl.Library = undefined;
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const before = cuda.usage(false).device;
+    defer {
+        if (Mock.frees == 0) {
+            var leaked: cuda.DeviceBuffer = .{ .d = &d, .ptr = 4096, .len = 64 + 128 * 4 };
+            leaked.free();
+        }
+    }
+    try std.testing.expectError(error.OutOfMemory, Link.init(failing.allocator(), &d, &lib, null, .{ .d = &d, .handle = null }, 128));
+    try std.testing.expectEqual(@as(usize, 1), Mock.frees);
+    try std.testing.expectEqual(before, cuda.usage(false).device);
 }

@@ -579,6 +579,7 @@ pub fn tileLinears(w: *const Weights, mk: *const mm_mod.Kernels, s: cuda.Stream,
     for (list.items) |e| most = @max(most, e[1] * e[2] * 2);
     var tmp = try cuda.DeviceBuffer.alloc(d, most);
     defer tmp.free();
+    errdefer @import("cuda_load_owner.zig").drain(s, d);
     for (list.items) |e| {
         try mm_mod.tile(mk, s, e[0], tmp.ptr, e[1], e[2]);
         try d.check(d.api.cuMemcpyDtoDAsync_v2(e[0], tmp.ptr, e[1] * e[2] * 2, s.handle), "cuMemcpyDtoDAsync");

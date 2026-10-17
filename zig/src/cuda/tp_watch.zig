@@ -112,7 +112,7 @@ pub fn ready(io: std.Io, digest: [32]u8) !void {
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
     for (peer_digest[0..line_count], peer_rank[0..line_count]) |d, rank| if (!std.mem.eql(u8, &d, &digest)) {
-        std.log.err("rank {d}'s checkpoint bytes differ from rank {d}'s (every byte hashed): every rank stops", .{ rank, my_rank });
+        std.log.err("rank {d}'s checkpoint identity differs from rank {d}'s: every rank stops", .{ rank, my_rank });
         return error.CheckpointBytesDiffer;
     };
 }

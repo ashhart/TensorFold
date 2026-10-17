@@ -153,7 +153,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
     if (p.world > 1) try warmPeers(ctx.d, &own.group);
     const cap = capacity(o.context);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = if (o.vision) |l| l.image_tokens else 0 });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = o.vision });
     errdefer own.e.deinit();
     if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
         var problem: []const u8 = "";
@@ -166,7 +166,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
     own.e.group = &own.group;
-    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, cap);
+    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
     errdefer own.link.deinit();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
@@ -178,7 +178,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         peer = .{ .bytes = r, .rank = q };
     };
     // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
-    if (p.world > 1) try cuda.tp_watch.ready(io, ranks.hashBytes(std.fs.path.basename(std.mem.trimEnd(u8, dir, "/"))));
+    if (p.world > 1) try cuda.tp_watch.ready(io, own.e.checkpoint_digest);
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
@@ -200,7 +200,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
-        .stream_bytes = own.e.seqBytes(), // each stream past the first makes its own sequence on every rank
+        .stream_bytes = own.e.seqBytes() + if (own.e.images) |v| v.streamBytes() else @as(usize, 0), // each stream past the first makes its own sequence on every rank
         .free_streams = 1, // the first is the sequence the engine made
         .ctx = own,
         .deinit = close,
@@ -283,4 +283,17 @@ test "capacity keeps a verify window past the context and a multiple of 64" {
     try std.testing.expectEqual(@as(usize, 8256), capacity(8192));
     try std.testing.expectEqual(@as(usize, 330560), capacity(330529));
     try std.testing.expect(capacity(330529) % 64 == 0);
+}
+
+// Enough words for every offered frame pair and image, even with a small text context.
+pub fn linkCapacity(cap: usize, media: ?images_mod.Limits) !usize {
+    const lim = media orelse return cap;
+    const frames: usize = (@as(usize, lim.max_frames) + 1) / 2;
+    const pairs = std.math.mul(usize, frames, lim.max_videos) catch return error.TooManyImages;
+    const spans = std.math.add(usize, pairs, lim.max_images) catch return error.TooManyImages;
+    const words = std.math.mul(usize, spans, 3) catch return error.TooManyImages;
+    return @max(cap, words);
+}
+test "a small text context still sizes the link for every offered media span" {
+    try std.testing.expectEqual(@as(usize, 792), try linkCapacity(64, .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 }));
 }

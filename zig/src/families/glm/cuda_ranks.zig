@@ -7,6 +7,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
+    tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE: 1 (decode windows on KDA's three-kernel chain) or 0
@@ -17,6 +18,12 @@ pub const Settings = struct {
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
+        if (get("TF_GLM_MM")) |v| {
+            if (std.mem.eql(u8, v, "0")) s.tiled = false else if (!std.mem.eql(u8, v, "1")) {
+                problem.* = "TF_GLM_MM: 0 or 1";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_PREFILL_REDUCE")) |v| {
             if (std.mem.eql(u8, v, "split")) s.split = true else if (std.mem.eql(u8, v, "ring")) {
                 s.split = true;
@@ -64,32 +71,42 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 6, // this struct's version
+    layout: u32 = 8, // this struct's version
     world: u32,
     rank: u32,
+    tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
     pieces: u32,
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on): every prompt pass adds its collectives
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
+    video_tokens: u32 = 0,
+    max_images: u32 = 0,
+    max_videos: u32 = 0,
+    max_frames: u32 = 0,
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
-    checkpoint: [64]u8, // the checkpoint folder's last name (the snapshot's revision), zero padded
+    checkpoint: [64]u8, // hex SHA-256 of the checkpoint weights and index
 
     pub const Field = enum {
         layout,
         rank,
         world,
+        tiled,
         split,
         kda_wide,
         pieces,
         layers,
         mtp,
         vision,
+        video_tokens,
+        max_images,
+        max_videos,
+        max_frames,
         capacity,
         heat_high,
         heat_low,
@@ -106,11 +123,12 @@ pub const Fingerprint = extern struct {
         mtp: bool,
         config: [32]u8,
         program: [32]u8,
-        checkpoint_dir: []const u8,
+        checkpoint_digest: [32]u8,
     ) Fingerprint {
-        var f: Fingerprint = .{
+        const f: Fingerprint = .{
             .world = @intCast(world),
             .rank = @intCast(rank),
+            .tiled = @intFromBool(s.tiled),
             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
             .kda_wide = @intFromBool(s.kda_wide),
             .pieces = s.pieces,
@@ -121,11 +139,8 @@ pub const Fingerprint = extern struct {
             .heat_low = if (s.heat) |b| b.low_c else 0,
             .config = config,
             .program = program,
-            .checkpoint = @splat(0),
+            .checkpoint = std.fmt.bytesToHex(checkpoint_digest, .lower),
         };
-        const name = std.fs.path.basename(std.mem.trimEnd(u8, checkpoint_dir, "/"));
-        const n = @min(name.len, f.checkpoint.len);
-        @memcpy(f.checkpoint[0..n], name[0..n]);
         return f;
     }
 };
@@ -139,12 +154,17 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         if (f.rank != r) return .{ .field = .rank, .rank = r };
         const fields = .{
             "world",
+            "tiled",
             "split",
             "kda_wide",
             "pieces",
             "layers",
             "mtp",
             "vision",
+            "video_tokens",
+            "max_images",
+            "max_videos",
+            "max_frames",
             "capacity",
             "heat_high",
             "heat_low",
@@ -238,18 +258,23 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .layout => "a different build of this check",
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
+        .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
         .pieces => "TF_GLM_OVERLAP_PIECES",
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
+        .video_tokens => "--vision-video-tokens",
+        .max_images => "the image count limit",
+        .max_videos => "the video count limit",
+        .max_frames => "the frame limit",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",
         .heat_low => "TF_HEAT_LOW",
         .config => "config.json",
         .program => "the executable",
-        .checkpoint => "the checkpoint's snapshot folder",
+        .checkpoint => "the checkpoint weight/index content digest",
     };
 }
 
@@ -279,31 +304,31 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split, ring or gather", problem);
     const r = try Settings.read(&ringed, &problem);
     try std.testing.expect(r.split and r.ring);
-    try std.testing.expectEqual(@as(u32, 2), Fingerprint.of(2, 0, r, 8192, true, @splat(0), @splat(0), "/c").split);
+    try std.testing.expectEqual(@as(u32, 2), Fingerprint.of(2, 0, r, 8192, true, @splat(0), @splat(0), hashBytes("/c")).split);
 }
 
 test "fingerprints: agreeing ranks pass; the first differing field and rank are named" {
     const h0: [32]u8 = @splat(1);
     const h1: [32]u8 = @splat(2);
     var all = [_]Fingerprint{
-        Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37/"),
-        Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37"),
+        Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37")),
+        Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37")),
     };
     try std.testing.expect(mismatch(&all) == null);
     all[1].program = h1;
     try std.testing.expectEqual(Fingerprint.Field.program, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
     try std.testing.expectEqual(Mismatch{ .field = .split, .rank = 1 }, mismatch(&all).?);
-    all[1] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
     try std.testing.expectEqual(Fingerprint.Field.rank, mismatch(&all).?.field);
     const heat_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88 } };
-    all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
     try std.testing.expectEqual(Fingerprint.Field.heat_high, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/other");
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/other"));
     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, "/hub/snapshots/423acf37"); // --no-drafts on rank 1 only
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, hashBytes("/hub/snapshots/423acf37")); // --no-drafts on rank 1 only
     try std.testing.expectEqual(Mismatch{ .field = .mtp, .rank = 1 }, mismatch(&all).?);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, hashBytes("/hub/snapshots/423acf37"));
     all[1].vision = 4096; // --vision on rank 1 only
     try std.testing.expectEqual(Mismatch{ .field = .vision, .rank = 1 }, mismatch(&all).?);
 }
@@ -389,4 +414,72 @@ test "a ring start on four ranks that reach only their neighbours loads without 
     for (0..4) |r| try std.testing.expectEqual(@as(usize, 0), try Fabric.probe(ring, r, 4, false));
     // gather needs no probe either
     for (0..4) |r| try std.testing.expectEqual(@as(usize, 0), try Fabric.probe(.{ .split = false }, r, 4, false));
+}
+
+pub fn mediaFingerprint(f: *Fingerprint, limits: @import("cuda_images.zig").Limits) void {
+    f.vision = limits.image_tokens;
+    f.video_tokens = limits.video_tokens;
+    f.max_images = limits.max_images;
+    f.max_videos = limits.max_videos;
+    f.max_frames = limits.max_frames;
+}
+test "every media limit is part of the ranks' agreement" {
+    const L = @import("cuda_images.zig").Limits;
+    const base: L = .{ .image_tokens = 2048, .max_images = 8, .video_tokens = 4096, .max_videos = 2, .max_frames = 256 };
+    inline for (.{ "video_tokens", "max_images", "max_videos", "max_frames" }) |field| {
+        var all = [_]Fingerprint{
+            Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+            Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same")),
+        };
+        mediaFingerprint(&all[0], base);
+        mediaFingerprint(&all[1], base);
+        try std.testing.expect(mismatch(&all) == null);
+        var changed = base;
+        @field(changed, field) += 1;
+        mediaFingerprint(&all[1], changed);
+        try std.testing.expect(mismatch(&all) != null);
+        try std.testing.expectEqual(@as(usize, 1), mismatch(&all).?.rank);
+    }
+}
+
+test "every scheduling and identity field that differs stops the ranks" {
+    const zero = Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
+    const one = Fingerprint.of(2, 1, .{}, 8192, true, @splat(0), @splat(0), hashBytes("/same"));
+    inline for (.{ "layout", "world", "rank", "split", "kda_wide", "pieces", "layers", "mtp", "vision", "video_tokens", "max_images", "max_videos", "max_frames", "capacity", "heat_high", "heat_low" }) |name| {
+        var all = [_]Fingerprint{ zero, one };
+        @field(all[1], name) += 1;
+        try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
+        std.mem.swap(Fingerprint, &all[0], &all[1]);
+        all[0].rank = 0;
+        all[1].rank = if (std.mem.eql(u8, name, "rank")) 0 else 1;
+        try std.testing.expect(mismatch(&all) != null);
+    }
+    inline for (.{ "config", "program", "checkpoint" }) |name| {
+        var all = [_]Fingerprint{ zero, one };
+        @field(all[1], name)[0] = 1;
+        try std.testing.expectEqual(@field(Fingerprint.Field, name), mismatch(&all).?.field);
+    }
+}
+
+pub const artifact = @import("cuda_artifact.zig").digest;
+
+test "ranks with different TF_GLM_MM choices disagree" {
+    const h: [32]u8 = @splat(0);
+    const all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, h, h, hashBytes("/model")), Fingerprint.of(2, 1, .{ .tiled = false }, 8192, true, h, h, hashBytes("/model")) };
+    try std.testing.expect(mismatch(&all) != null);
+}
+test "checkpoints in folders of the same name agree only on equal bytes" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "a/model");
+    try tmp.dir.createDirPath(io, "b/model");
+    try tmp.dir.writeFile(io, .{ .sub_path = "a/model/model.safetensors", .data = "weights A" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "b/model/model.safetensors", .data = "weights B" });
+    const left = try tmp.dir.realPathFileAlloc(io, "a/model", a);
+    defer a.free(left);
+    const right = try tmp.dir.realPathFileAlloc(io, "b/model", a);
+    defer a.free(right);
+    try std.testing.expect(!std.mem.eql(u8, &try artifact(a, io, left), &try artifact(a, io, right)));
 }

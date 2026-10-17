@@ -22,10 +22,25 @@ pub const Prof = struct {
     every: u64 = 64, // calls a report sums
 
     pub fn init(d: *const cuda.Driver, io: std.Io) !*Prof {
+        return initWith(d, io, cuda.Event.init);
+    }
+
+    pub fn initWith(d: *const cuda.Driver, io: std.Io, comptime create: anytype) !*Prof {
         const p = try std.heap.page_allocator.create(Prof);
+        errdefer std.heap.page_allocator.destroy(p);
         p.* = .{ .d = d, .events = undefined, .io = io };
-        for (&p.events) |*e| e.* = try cuda.Event.init(d, true);
+        var made: usize = 0;
+        errdefer for (p.events[0..made]) |*event| event.deinit();
+        for (&p.events) |*e| {
+            e.* = try create(d, true);
+            made += 1;
+        }
         return p;
+    }
+
+    pub fn deinit(p: *Prof) void {
+        for (&p.events) |*e| e.deinit();
+        std.heap.page_allocator.destroy(p);
     }
 
     /// TF_GLM_PROF=1 asks for it.
@@ -75,3 +90,53 @@ pub const Prof = struct {
         p.calls = 0;
     }
 };
+
+const Counted = struct {
+    var calls: usize = 0;
+    var live: usize = 0;
+    var fail: usize = 0;
+    fn event(d: *const cuda.Driver, timing: bool) !cuda.Event {
+        const call = calls;
+        calls += 1;
+        if (call == fail) return error.OutOfDeviceMemory;
+        return cuda.Event.init(d, timing);
+    }
+    fn create(out: *cuda.abi.Event, _: c_uint) callconv(.c) c_int {
+        live += 1;
+        out.* = @ptrFromInt(live);
+        return 0;
+    }
+    fn name(_: c_int, out: *?[*:0]const u8) callconv(.c) c_int {
+        out.* = "mock";
+        return 0;
+    }
+    fn destroy(_: cuda.abi.Event) callconv(.c) c_int {
+        live -= 1;
+        return 0;
+    }
+};
+test "a profiler whose first, middle or last event fails destroys the events it made" {
+    var d: cuda.Driver = undefined;
+    d.api.cuGetErrorName = Counted.name;
+    d.api.cuGetErrorString = Counted.name;
+    d.api.cuEventCreate = Counted.create;
+    d.api.cuEventDestroy_v2 = Counted.destroy;
+    for ([_]usize{ 0, 256, 512 }) |at| {
+        Counted.calls = 0;
+        Counted.live = 0;
+        Counted.fail = at;
+        try std.testing.expectError(error.OutOfDeviceMemory, Prof.initWith(&d, std.testing.io, Counted.event));
+        try std.testing.expectEqual(@as(usize, 0), Counted.live);
+    }
+}
+
+test "a profiler destroys all 513 of its events" {
+    var d: cuda.Driver = undefined;
+    d.api.cuEventCreate = Counted.create;
+    d.api.cuEventDestroy_v2 = Counted.destroy;
+    Counted.live = 0;
+    const p = try Prof.init(&d, std.testing.io);
+    try std.testing.expectEqual(@as(usize, 513), Counted.live);
+    p.deinit();
+    try std.testing.expectEqual(@as(usize, 0), Counted.live);
+}

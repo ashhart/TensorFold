@@ -105,6 +105,18 @@ pub const Lanes = struct {
         }
     }
 
+    pub fn claim(self: *Lanes, s: *const lanes.Stream) !*Lane {
+        return self.claimUsing(s, freeSlot);
+    }
+
+    pub fn claimUsing(self: *Lanes, s: *const lanes.Stream, comptime choose: anytype) !*Lane {
+        if (self.lanes.getPtr(s)) |existing| return existing;
+        const slot = choose(self);
+        const gop = try self.lanes.getOrPut(self.x.e.gpa, s);
+        gop.value_ptr.* = .{ .slot = slot };
+        return gop.value_ptr;
+    }
+
     /// The stream's sequence bound, its last verify committed (`kept` rows, else all of them).
     fn bind(self: *Lanes, s: *const lanes.Stream, kept: ?usize) !*Lane {
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
@@ -150,12 +162,11 @@ pub const Lanes = struct {
     fn opening(self: *Lanes, s: *lanes.Stream) !?engine.Resume {
         const ids = s.prompt();
         if (ids.len + s.max_new + max_rows >= self.x.e.capacity) return error.PromptTooLong;
-        const gop = try self.lanes.getOrPut(self.x.e.gpa, s);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .slot = self.freeSlot() };
-        gop.value_ptr.pending_rows = null;
-        gop.value_ptr.held_n = 0;
-        gop.value_ptr.fill = null;
-        try self.x.bind(gop.value_ptr.slot);
+        const l = try self.claim(s);
+        l.pending_rows = null;
+        l.held_n = 0;
+        l.fill = null;
+        try self.x.bind(l.slot);
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
         s.cached = 0;
@@ -305,4 +316,41 @@ pub const Lanes = struct {
 
 comptime {
     std.debug.assert(max_rows <= fw.window_rows);
+}
+
+test "a lane's slot is chosen before its map entry exists" {
+    var storage: [8192]u8 = @splat(0);
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var e: engine.Engine = undefined;
+    e.gpa = fixed.allocator();
+    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
+    defer self.lanes.deinit(e.gpa);
+    var streams: [3]lanes.Stream = undefined;
+    const Probe = struct {
+        var bad = false;
+        fn choose(l: *const Lanes) u32 {
+            bad = l.lanes.count() != 0;
+            return 0;
+        }
+    };
+    _ = try self.claimUsing(&streams[0], Probe.choose);
+    try std.testing.expect(!Probe.bad);
+    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[0])).slot);
+    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
+    _ = self.lanes.remove(&streams[0]);
+    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&streams[2])).slot);
+    try std.testing.expectEqual(@as(u32, 1), (try self.claim(&streams[1])).slot);
+}
+
+test "a failed lane insertion leaves no entry, and a retry takes slot zero" {
+    var fail = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    var e: engine.Engine = undefined;
+    e.gpa = fail.allocator();
+    var self: Lanes = .{ .x = .{ .e = &e, .link = undefined } };
+    defer self.lanes.deinit(e.gpa);
+    var stream: lanes.Stream = undefined;
+    try std.testing.expectError(error.OutOfMemory, self.claim(&stream));
+    try std.testing.expectEqual(@as(usize, 0), self.lanes.count());
+    fail.fail_index = std.math.maxInt(usize);
+    try std.testing.expectEqual(@as(u32, 0), (try self.claim(&stream)).slot);
 }

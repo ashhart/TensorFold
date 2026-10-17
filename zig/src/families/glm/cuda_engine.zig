@@ -19,7 +19,7 @@ pub const Options = struct {
     capacity: usize, // tokens a sequence holds
     mtp: bool, // load the MTP head (drafts)
     settings: ranks.Settings,
-    vision: u32 = 0, // --vision's image tokens (0: none): every rank must hold the rows rank 0 sends
+    vision: ?images_mod.Limits = null, // --vision's limits (null: off): every rank must hold the rows rank 0 sends
 };
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -73,6 +73,7 @@ pub const Engine = struct {
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
+    checkpoint_digest: [32]u8,
     settings: ranks.Settings,
     m: fw.Modules,
     stream: cuda.Stream,
@@ -118,6 +119,7 @@ pub const Engine = struct {
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
         const program_hash = try ranks.hashFile(a, io, "/proc/self/exe");
+        const checkpoint_digest = try ranks.artifact(a, io, checkpoint);
         var fp = ranks.Fingerprint.of(
             world,
             rank,
@@ -126,9 +128,9 @@ pub const Engine = struct {
             o.mtp,
             config_hash,
             program_hash,
-            checkpoint,
+            checkpoint_digest,
         );
-        fp.vision = o.vision;
+        if (o.vision) |lim| ranks.mediaFingerprint(&fp, lim);
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));
         try ranks.probeStart(d, lib, comm, stream, o.settings, rank, world);
         const share = try shard.Share.of(&c, rank, world);
@@ -142,13 +144,19 @@ pub const Engine = struct {
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
-        e.w = try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp);
-        if (tiledLinears()) { // our bf16 linears (glm_mm) on their tiled weights; TF_GLM_MM=0 keeps the glue's
-            try weights.tileLinears(&e.w, &e.m.mm, stream, d);
-            e.m.tiled = true;
-        }
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
+        const Tile = struct {
+            mk: *const @import("cuda_mm.zig").Kernels,
+            s: cuda.Stream,
+            d: *const cuda.Driver,
+            enabled: bool,
+            fn apply(t: @This(), w: *weights.Weights) !void {
+                if (t.enabled) try weights.tileLinears(w, t.mk, t.s, t.d);
+            }
+        };
+        e.w = try @import("cuda_load_owner.zig").finish(try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp), Tile{ .mk = &e.m.mm, .s = stream, .d = d, .enabled = o.settings.tiled }, Tile.apply);
         errdefer e.w.deinit();
+        e.m.tiled = o.settings.tiled;
         try e.bind(0);
         errdefer {
             e.free(0);
@@ -168,6 +176,8 @@ pub const Engine = struct {
         errdefer e.pairs.free();
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world), "cuMemsetD8"); // each pair's padding stays zero
         e.smp = try sampler.Sampler.init(d, c.vocab, fw.window_rows);
+        errdefer e.smp.deinit();
+        errdefer e.freeProfs();
         if (prof_mod.Prof.wanted()) for (&e.profs) |*p| {
             p.* = try prof_mod.Prof.init(d, io);
         };
@@ -175,8 +185,9 @@ pub const Engine = struct {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
         };
-        errdefer e.smp.deinit();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
+        errdefer e.shared_buf.free();
+        errdefer @import("cuda_load_owner.zig").drain(stream, d);
         try e.stream.synchronize();
         return e;
     }
@@ -188,6 +199,7 @@ pub const Engine = struct {
         e.snaps.deinit(e.gpa);
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
+        e.freeProfs();
         e.smp.deinit();
         e.pairs.free();
         e.hold.free();
@@ -204,6 +216,17 @@ pub const Engine = struct {
         e.gpa.free(e.spans);
         const gpa = e.gpa;
         gpa.destroy(e);
+    }
+
+    fn freeProfs(e: *Engine) void {
+        for (&e.profs) |*p| {
+            if (p.*) |v| v.deinit();
+            p.* = null;
+        }
+        for (&e.prompt_profs) |*p| {
+            if (p.*) |v| v.deinit();
+            p.* = null;
+        }
     }
 
     fn exchange(e: *const Engine) fw.Exchange {
@@ -227,10 +250,12 @@ pub const Engine = struct {
         }
         e.cur = e.seqs.items[slot].?;
         e.slot = slot;
+        if (e.images) |v| try v.activate(slot);
     }
 
     /// Frees slot `slot`'s sequence (slot 0 stays: the first stream's, made at init) and binds slot 0.
     pub fn release(e: *Engine, slot: u32) void {
+        if (e.images) |v| v.release(slot);
         if (slot != 0) e.free(slot);
         e.cur = e.seqs.items[0].?;
         e.slot = 0;
@@ -547,12 +572,6 @@ pub const Engine = struct {
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
-    }
-
-    /// TF_GLM_MM=0 keeps the bf16 linears on the glue's b16 kernels (the weights stay as the checkpoint stores them).
-    fn tiledLinears() bool {
-        const v = std.c.getenv("TF_GLM_MM") orelse return true;
-        return !std.mem.eql(u8, std.mem.span(v), "0");
     }
 
     fn heatRoot() []const u8 {
