@@ -94,6 +94,16 @@ The performance map plots the visible protocol-complete greedy-chat medians by f
 
 The profile achievement cabinet awards bronze, silver, gold and platinum trophies for published-run milestones at 1, 5, 10 and 100 runs, plus model and hardware exploration. Top contributor honours go to the highest global approved-run count; speed leader honours go to the highest global protocol-complete greedy-chat median. Awards use the unrounded global values, equal leaders share honours and missing speeds earn no speed trophy. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
 
+## Model size and speed
+
+The default **Size × speed** podium ranks each contributor by their best eligible product of the model's published parameter count in billions and its standard greedy-chat stream-delivery median. Select **Total** to compare model capacity with delivery speed, or **Active** to use the parameters active per token in a sparse MoE model. The score has units of billion parameters × tokens per second; it is a sizing comparison, not measured FLOPS, model quality or hardware-independent efficiency.
+
+Total and active counts are shown together, with links to the original model publishers. Counts may be rounded or include multimodal components. Dense models use total parameters as the active-count sizing convention. External drafters and additional prediction-head overhead are not estimated. An unknown model size or an unavailable active count stays unranked for that view; repository-name suffixes are not accepted as verified size metadata.
+
+The parameter-versus-speed plot uses the selected parameter basis on a logarithmic size axis. Its latency view remains available, and both views show only loaded eligible runs; loading more adds older measurements. Size standings use the full approved history and apply the same model, platform and hardware filters. Unknown-size runs remain visible with their original measurements.
+
+**Speed records** still ranks raw tokens per second, **Contributions** still ranks published-run counts, and existing profile speed honours are unchanged. Use the hardware and model filters and inspect quantization and execution settings when comparing results.
+
 ## AMD (ROCm)
 
 A ROCm build runs the same suite and saves its receipt locally, with backend `rocm` on platform `linux`. `--backend auto` picks `rocm` on that build; an attached run names it with `--backend rocm`. A managed ROCm run records the CPU and system memory, while GPU names and the driver version stay unknown. `inspect` shows a ROCm receipt as usual. The board accepts mlx and cuda receipts for now, so `--publish` with ROCm is refused before the run starts and `benchmark publish` refuses a ROCm receipt before any upload; publishing waits for the board to accept rocm.
