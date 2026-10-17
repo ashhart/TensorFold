@@ -139,7 +139,7 @@ fn refusal(cx: *Cx, v: api.Vision, i: usize, err: anyerror) errors.Refused {
         error.Oversized => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} exceeds the limits: 10 MB encoded, 8192 pixels a side, 16 megapixels", .{i + 1})),
         error.Animated => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: animated and multipage images are unsupported; send a single frame", .{i + 1})),
         error.ImageTooSmall => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d}: the visual-token budget is too small for an image", .{i + 1})),
-        else => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} could not be decoded; send PNG or JPEG", .{i + 1})),
+        else => cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} could not be decoded; send PNG, JPEG or WebP", .{i + 1})),
     };
 }
 
@@ -260,10 +260,9 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         ii += 1;
         const bytes = try sourceBytes(cx, fetch, p.url, @min(max_image_bytes, max_request_bytes - bytes_total), deadline);
         bytes_total += bytes.len;
-        switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP), WebP not yet decoded here
-            .png, .jpeg => {},
-            .webp => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is WebP, which this server does not decode yet; send PNG or JPEG", .{i + 1})),
-            .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG or JPEG; send one of those", .{i + 1})),
+        switch (sniff(bytes)) { // the Python frontend's formats (images.py: JPEG, PNG, WebP)
+            .png, .jpeg, .webp => {},
+            .gif, .other => return cx.refuse(try std.fmt.allocPrint(cx.a, "image {d} is not PNG, JPEG or WebP; send one of those", .{i + 1})),
         }
         const cap = if (p.low) @min(budget, low_detail_tokens) else budget;
         prepared[i] = v.prepare(v.ctx, cx.a, bytes, cap) catch |e| return refusal(cx, v, i, e);
@@ -436,7 +435,7 @@ test "a prepare error the engine words is refused in the engine's words, others 
     var plain = worded;
     plain.explain = null;
     try std.testing.expectError(error.Refused, expand(plain, null, MarkText.text(), &cx, msgs, &[_]u32{9}, 0));
-    try std.testing.expectEqualStrings("image 1 could not be decoded; send PNG or JPEG", cx.message);
+    try std.testing.expectEqualStrings("image 1 could not be decoded; send PNG, JPEG or WebP", cx.message);
 }
 
 test "--vision-urls: an https part's bytes come from the fetch, within what the request has left" {
@@ -542,7 +541,7 @@ test "a marker the text spells stays text: only the template's markers are image
     try std.testing.expectEqualSlices(u32, try MarkText.encode(undefined, a, plain_text, false), try encodeShielded(MarkText.text(), a, plain_text, markers));
 }
 
-test "formats from their first bytes: WebP is refused by name" {
+test "formats from their first bytes" {
     try std.testing.expectEqual(Format.png, sniff("\x89PNG\r\n\x1a\nrest"));
     try std.testing.expectEqual(Format.jpeg, sniff("\xff\xd8\xff\xe0"));
     try std.testing.expectEqual(Format.gif, sniff("GIF89a..."));
