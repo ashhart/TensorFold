@@ -11,6 +11,7 @@ const M = struct {
     var fail_waits: usize = 0;
     var mode: usize = 0;
     var live: usize = 0;
+    var htod_pends: bool = false; // a synchronous upload accepted, its completion still owed to a wait
     fn alloc(_: *anyopaque, n: usize, al: std.mem.Alignment, ra: usize) ?[*]u8 {
         return std.testing.allocator.rawAlloc(n, al, ra);
     }
@@ -66,6 +67,7 @@ const M = struct {
         return 0;
     }
     fn upload(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) c_int {
+        if (htod_pends) pending = true;
         return 0;
     }
     fn setup(d: *cuda.Driver, t: *v.Tower) void {
@@ -77,6 +79,7 @@ const M = struct {
         fail_waits = 0;
         mode = 0;
         live = 0;
+        htod_pends = false;
         d.* = undefined;
         d.api.cuMemcpyHtoDAsync_v2 = copy;
         d.api.cuStreamSynchronize = sync;
@@ -140,6 +143,33 @@ test "a failed kernel launch drains the stream before any owner is freed" {
 }
 test "a failed final wait is retried before anything is freed" {
     try failure(0, 0, 1);
+}
+fn uploadWait(follower: bool) !void {
+    var d: cuda.Driver = undefined;
+    var t: v.Tower = undefined;
+    M.setup(&d, &t);
+    M.htod_pends = true;
+    M.fail_waits = 2; // the upload's own wait fails, then the drain's stream wait; the context's completes
+    const enc: v.media.Encoder = .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode };
+    if (follower) {
+        const p = try v.media.Plan.init(t.gpa, 5, &.{.{ .at = 2, .gh = 2, .gw = 2 }}, .{});
+        try std.testing.expectError(error.NotReady, v.media.Media.allocate(p, enc));
+    } else {
+        const px = try std.testing.allocator.alloc(f32, 4 * v.patch_width);
+        defer std.testing.allocator.free(px);
+        const images = [_]@import("lanes").stream.Image{.{ .pixels = px, .gh = 2, .gw = 2, .tokens = 1, .at = 2 }};
+        try std.testing.expectError(error.NotReady, v.media.Media.init(t.gpa, enc, &.{ 7, 52, 50, 53, 9 }, &images, .{}));
+    }
+    const bad = M.bad_free;
+    M.pending = false;
+    try std.testing.expectEqual(@as(usize, 0), bad);
+    try std.testing.expectEqual(@as(usize, 0), M.live);
+}
+test "an image plan whose upload fails its wait drains before the plan and buffers are freed" {
+    try uploadWait(false);
+}
+test "a rank's received plan whose upload fails its wait drains before anything is freed" {
+    try uploadWait(true);
 }
 const Child = struct {
     extern "c" fn fork() c_int;
