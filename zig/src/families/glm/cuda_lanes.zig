@@ -5,6 +5,7 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
 
 const be = lanes.backend;
 
@@ -49,6 +50,7 @@ pub const Lanes = struct {
         .keep = keepFn,
         .draft = draftFn,
         .release = releaseFn,
+        .prompt_rows = true,
     };
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
@@ -121,6 +123,9 @@ pub const Lanes = struct {
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self = of(ptr);
         const from = try self.opening(s);
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
         _ = self.take(try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s)));
     }
 
@@ -133,6 +138,9 @@ pub const Lanes = struct {
         if (going != null) try self.x.bind(l.slot);
         const at = going orelse if (from) |r| r.at else 0;
         errdefer l.fill = null;
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
         if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
             _ = self.take(first);
             l.fill = null;
@@ -154,8 +162,26 @@ pub const Lanes = struct {
         try self.x.bind(gop.value_ptr.slot);
         try self.x.begin(s.sampling);
         s.cached = 0;
-        return self.resumeFrom(s, ids.len);
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
+
+    /// A stream's prompt rows as rank 0 reads them back, in prompt order.
+    const Sink = struct {
+        gpa: std.mem.Allocator,
+        s: *lanes.Stream,
+
+        fn want(p: *Sink) ?prompt_lp.Want {
+            const k = p.s.prompt_logprobs orelse return null;
+            return .{ .k = k, .reader = .{ .ctx = p, .call = read } };
+        }
+
+        fn read(ctx: *anyopaque, words: []const u32, picks: []const u32) anyerror!void {
+            const p: *Sink = @ptrCast(@alignCast(ctx));
+            const w = prompt_lp.row_words;
+            for (picks, 0..) |pick, i| try p.s.prompt_rows.append(p.gpa, lanes.LogprobRow.fromWords(words[i * w ..][0..w], pick, p.s.prompt_logprobs.?));
+        }
+    };
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
         return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
