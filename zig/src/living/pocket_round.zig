@@ -1,4 +1,4 @@
-//! The landed shard encoder plus finite-value and second-round stability checks before judgement.
+//! The landed shard encoder plus finite-value checks: the open fact's layers rounded once, as a save writes them.
 const std = @import("std");
 const math = @import("neuron.zig");
 pub fn layer(comptime F: @import("family.zig").Family, gpa: std.mem.Allocator, d: usize, neurons: usize, gate: []f32, up: []f32, down: []f32) !void {
@@ -9,12 +9,25 @@ pub fn layer(comptime F: @import("family.zig").Family, gpa: std.mem.Allocator, d
     try @import("shards.zig").round(F, gpa, d, if (F.neuron.act == .swiglu) &.{ gate, up } else &.{up}, down);
     for ([_][]f32{ gate, up, down }) |xs| for (xs) |x| if (!std.math.isFinite(x)) return error.NonFinitePocket;
 }
+
+/// The open fact's layers (its neurons, the earlier ones it refitted, the joint ones) rounded once and uploaded.
 pub fn asWritten(p: anytype, t: anytype, host: anytype) !void {
-    for (0..p.used.items.len) |j| {
+    var done: std.ArrayList(usize) = .empty;
+    defer done.deinit(p.gpa);
+    for (p.taken.items) |x| try once(p.gpa, &done, x.slot);
+    for (p.refits.items) |x| try once(p.gpa, &done, x.slot);
+    for (p.joint.items) |x| try once(p.gpa, &done, x.slot);
+    for (done.items) |j| {
         try slot(p, t, host, j);
         try p.upload(t, host, j);
     }
 }
+
+fn once(gpa: std.mem.Allocator, list: *std.ArrayList(usize), j: usize) !void {
+    if (std.mem.indexOfScalar(usize, list.items, j) == null) try list.append(gpa, j);
+}
+
+/// One slot rounded once by the shard encoder, SwiGLU's u through the up rows it is written as.
 pub fn slot(p: anytype, t: anytype, host: anytype, j: usize) !void {
     _ = t;
     _ = host;
@@ -24,19 +37,5 @@ pub fn slot(p: anytype, t: anytype, host: anytype, j: usize) !void {
     const gate: []f32 = if (P.swiglu) p.gate.items[j * n ..][0..n] else &.{};
     if (P.swiglu) math.upRow(P.of.neuron, up, p.scratch.items);
     try layer(P.of, p.gpa, p.hidden, P.neurons, gate, if (P.swiglu) p.scratch.items else up, p.down.items[j * n ..][0..n]);
-    const written_up = if (P.swiglu) p.scratch.items else up;
-    const down = p.down.items[j * n ..][0..n];
-    const copy = try p.gpa.alloc(f32, gate.len + 2 * n);
-    defer p.gpa.free(copy);
-    const cg = copy[0..gate.len];
-    const cu = copy[gate.len..][0..n];
-    const cv = copy[gate.len + n ..];
-    @memcpy(cg, gate);
-    @memcpy(cu, written_up);
-    @memcpy(cv, down);
-    try layer(P.of, p.gpa, p.hidden, P.neurons, cg, cu, cv);
-    if (!std.mem.eql(u8, std.mem.sliceAsBytes(cg), std.mem.sliceAsBytes(gate)) or
-        !std.mem.eql(u8, std.mem.sliceAsBytes(cu), std.mem.sliceAsBytes(written_up)) or
-        !std.mem.eql(u8, std.mem.sliceAsBytes(cv), std.mem.sliceAsBytes(down))) return error.LayerRoundsAgain;
     if (P.swiglu) math.fromUp(P.of.neuron, p.scratch.items, up);
 }
