@@ -11,7 +11,7 @@ const usageFor = registry.usageFor;
 const CudaRecord = registry.CudaRecord;
 
 fn named(name: []const u8) ?CudaRecord {
-    for (registry.cuda) |r| if (std.mem.eql(u8, r.launch.name, name)) return r;
+    for (registry.all_cuda) |r| if (std.mem.eql(u8, r.launch.name, name)) return r;
     return null;
 }
 

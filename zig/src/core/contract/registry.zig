@@ -9,7 +9,7 @@ const U = limits.Usage;
 /// A CUDA launch and what nvcc made of it for sm_80, sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
 pub const CudaRecord = struct { launch: C, usage: [limits.sms.len]U };
 
-pub const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
+const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
 const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
 const gemv_symbol = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
 const prompt_symbol = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
@@ -111,7 +111,7 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "qmmf reduce_kernel<true>", .symbol = "_ZN7tf_qmmf13reduce_kernelILb1EEEvPKfPvxif", .image = "qmmf", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 36, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "rank_sum tf_rank_sum", .symbol = "tf_rank_sum", .image = "rank_sum", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "vit vision_kernel<80, 8> (RADIO)", .symbol = vision80_symbol, .image = "prefill_attention", .threads = 256, .dynamic = 45056 }, .usage = .{ .{ .regs = 143, .static = 0, .bound = 256 }, .{ .regs = 143, .static = 0, .bound = 256 }, .{ .regs = 143, .static = 0, .bound = 256 }, .{ .regs = 122, .static = 0, .bound = 256 }, .{ .regs = 122, .static = 0, .bound = 256 } } },
-    .{ .launch = .{ .name = "vit full_kernel<72> (SigLIP2)", .symbol = full72_symbol, .image = "prefill_attention", .threads = 256, .dynamic = 65536, .opt_in = true }, .usage = .{ .{ .regs = 152, .static = 0, .bound = 256 }, .{ .regs = 152, .static = 0, .bound = 256 }, .{ .regs = 152, .static = 0, .bound = 256 }, .{ .regs = 169, .static = 0, .bound = 256 }, .{ .regs = 169, .static = 0, .bound = 256 } } },
+    .{ .launch = .{ .name = "vit full_kernel<72> (SigLIP2)", .symbol = full72_symbol, .image = "prefill_attention", .threads = 256, .dynamic = 65536, .opt_in = true }, .usage = .{ .{ .regs = 158, .static = 0, .bound = 256 }, .{ .regs = 158, .static = 0, .bound = 256 }, .{ .regs = 158, .static = 0, .bound = 256 }, .{ .regs = 169, .static = 0, .bound = 256 }, .{ .regs = 169, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "vit tf_vit_layer_norm", .symbol = "tf_vit_layer_norm", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 38, .static = 32, .bound = 256 }, .{ .regs = 38, .static = 32, .bound = 256 }, .{ .regs = 38, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 }, .{ .regs = 40, .static = 32, .bound = 256 } } },
     .{ .launch = .{ .name = "vit tf_vit_pointwise", .symbol = "tf_vit_pointwise", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 14, .static = 0, .bound = 256 }, .{ .regs = 14, .static = 0, .bound = 256 }, .{ .regs = 14, .static = 0, .bound = 256 }, .{ .regs = 14, .static = 0, .bound = 256 }, .{ .regs = 14, .static = 0, .bound = 256 } } },
     .{ .launch = .{ .name = "vit tf_vit_bias", .symbol = "tf_vit_bias", .image = "vit", .threads = 256 }, .usage = .{ .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 }, .{ .regs = 12, .static = 0, .bound = 256 } } },
@@ -228,7 +228,7 @@ pub const CudaSet = struct { release: limits.Nvcc, usage: []const Override };
 
 /// The later releases' sets, rising by release; a tree's images are checked against the newest at or below their own.
 pub const cuda_sets = [_]CudaSet{
-    .{ .release = .{ .major = 13, .minor = 2 }, .usage = &.{
+    .{ .release = .{ .major = 13, .minor = 2 }, .usage = &([_]Override{
         .{ .name = "norms tf_rms_rows", .usage = .{ .{ .regs = 32, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 46, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 }, .{ .regs = 43, .static = 132, .bound = 1024 } } },
         .{ .name = "lane_gemv", .usage = .{ .{ .regs = 64, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 58, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 }, .{ .regs = 66, .static = 0, .bound = 128 } } },
         .{ .name = "lane_gemv split-K", .usage = .{ .{ .regs = 62, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 56, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 }, .{ .regs = 72, .static = 128, .bound = 128 } } },
@@ -325,7 +325,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "drama3_codec c_snake", .usage = .{ .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
         .{ .name = "drama3_fp8 decode gate-up", .usage = .{ .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 } } },
         .{ .name = "drama3_fp8 prompt gate-up", .usage = .{ .{ .regs = 213, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 } } },
-    } },
+    } ++ learning.cuda_132) },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
     } },
@@ -569,13 +569,8 @@ const learning = @import("registry_learning.zig");
 const paging = @import("paging_pending.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-/// What the live audit checks: the serving records less those learning and paging changed, then the new launches.
-pub const all_cuda = blk: {
-    @setEvalBranchQuota(100000);
-    var rows = learning.refreshed_cuda;
-    paging.clear(&rows);
-    break :blk rows ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
-};
+/// What the live audit checks: the serving records, then the learning and paging launches.
+pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
 test {
     _ = learning;
     _ = paging;

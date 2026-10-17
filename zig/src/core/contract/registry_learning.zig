@@ -1,22 +1,52 @@
-//! Living Weights' CUDA records: the training launches, still unmeasured, beside the serving set they join.
+//! Living Weights' CUDA records: the training launches measured on nvcc 13.0, and where 13.2 compiles them otherwise.
 const std = @import("std");
 const registry = @import("registry.zig");
 
 pub const gradient_pending = @import("gradient_pending.zig").records;
 pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
-/// The serving records, with the two media launches the dense learning forward dropped left unmeasured.
-pub const refreshed_cuda = blk: {
-    var records = registry.cuda;
-    for (&records) |*record| {
-        if (std.mem.eql(u8, record.launch.symbol, "fn_attn_prep") or
-            std.mem.eql(u8, record.launch.symbol, "fn_qsa_pool")) record.usage = registry.none;
-    }
-    break :blk records;
+/// The learning, paging and changed attention launches nvcc 13.2 compiles differently, from every SM's image.
+pub const cuda_132 = [_]registry.Override{
+    .{ .name = "gdn_train tf_gdn_norm_back threads 128", .usage = .{ .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 } } },
+    .{ .name = "gdn_train tf_gdn_qk_back threads 128", .usage = .{ .{ .regs = 32, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 } } },
+    .{ .name = "gdn_train tf_gdn_conv_back threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 } } },
+    .{ .name = "train_q4 tf_q4_experts_nt threads 64", .usage = .{ .{ .regs = 72, .static = 10816, .bound = 64 }, .{ .regs = 91, .static = 10816, .bound = 64 }, .{ .regs = 91, .static = 10816, .bound = 64 }, .{ .regs = 78, .static = 10816, .bound = 64 }, .{ .regs = 78, .static = 10816, .bound = 64 } } },
+    .{ .name = "train_q4 tf_q4_swiglu_back threads 128", .usage = .{ .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 46, .static = 128, .bound = 128 }, .{ .regs = 46, .static = 128, .bound = 128 } } },
+    .{ .name = "train_q4 tf_q4_experts_nt_packed threads 64", .usage = .{ .{ .regs = 72, .static = 10816, .bound = 64 }, .{ .regs = 83, .static = 10816, .bound = 64 }, .{ .regs = 83, .static = 10816, .bound = 64 }, .{ .regs = 74, .static = 10816, .bound = 64 }, .{ .regs = 74, .static = 10816, .bound = 64 } } },
+    .{ .name = "train_q4 tf_q4_experts_mm_packed threads 64", .usage = .{ .{ .regs = 72, .static = 10304, .bound = 64 }, .{ .regs = 81, .static = 10304, .bound = 64 }, .{ .regs = 81, .static = 10304, .bound = 64 }, .{ .regs = 80, .static = 10304, .bound = 64 }, .{ .regs = 80, .static = 10304, .bound = 64 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 32", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 64", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 96", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 128", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 160", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 192", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 224", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train_attn tf_gattn_prep_back threads 256", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "train tf_train_softmax threads 1024", .usage = .{ .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 41, .static = 128, .bound = 1024 }, .{ .regs = 41, .static = 128, .bound = 1024 } } },
+    .{ .name = "train tf_train_logits threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 40, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 }, .{ .regs = 33, .static = 0, .bound = 256 } } },
+    .{ .name = "train tf_train_sort_pairs threads 256", .usage = .{ .{ .regs = 32, .static = 4096, .bound = 256 }, .{ .regs = 40, .static = 4096, .bound = 256 }, .{ .regs = 40, .static = 4096, .bound = 256 }, .{ .regs = 40, .static = 4096, .bound = 256 }, .{ .regs = 40, .static = 4096, .bound = 256 } } },
+    .{ .name = "train tf_train_pairs_out threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_train tf_fn_hc_mix_back threads 256", .usage = .{ .{ .regs = 29, .static = 0, .bound = 0 }, .{ .regs = 37, .static = 0, .bound = 0 }, .{ .regs = 37, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 }, .{ .regs = 34, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_train tf_fn_hc_act_back threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 30, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 }, .{ .regs = 28, .static = 0, .bound = 256 } } },
+    .{ .name = "flashnext_train tf_fn_hc_norm_back threads 256", .usage = .{ .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 38, .static = 128, .bound = 256 }, .{ .regs = 38, .static = 128, .bound = 256 } } },
+    .{ .name = "flashnext_train tf_fn_pocket_out threads 128", .usage = .{ .{ .regs = 48, .static = 512, .bound = 128 }, .{ .regs = 48, .static = 512, .bound = 128 }, .{ .regs = 48, .static = 512, .bound = 128 }, .{ .regs = 64, .static = 512, .bound = 128 }, .{ .regs = 64, .static = 512, .bound = 128 } } },
+    .{ .name = "flashnext_train tf_fn_pocket_out_rows threads 128", .usage = .{ .{ .regs = 72, .static = 2048, .bound = 128 }, .{ .regs = 72, .static = 2048, .bound = 128 }, .{ .regs = 72, .static = 2048, .bound = 128 }, .{ .regs = 72, .static = 2048, .bound = 128 }, .{ .regs = 72, .static = 2048, .bound = 128 } } },
+    .{ .name = "flashnext_train tf_fn_pocket_grad threads 256", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 } } },
+    .{ .name = "flashnext_batch fn_moe_sum threads 256", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
+    .{ .name = "flashnext_hc fn_hc_upmix_up threads 256", .usage = .{ .{ .regs = 69, .static = 2048, .bound = 256 }, .{ .regs = 64, .static = 2048, .bound = 256 }, .{ .regs = 64, .static = 2048, .bound = 256 }, .{ .regs = 62, .static = 2048, .bound = 256 }, .{ .regs = 62, .static = 2048, .bound = 256 } } },
+    .{ .name = "27B tf_q27_gemm_q4w", .usage = .{ .{ .regs = 128, .static = 37888, .bound = 256 }, .{ .regs = 128, .static = 37888, .bound = 256 }, .{ .regs = 128, .static = 37888, .bound = 256 }, .{ .regs = 126, .static = 37888, .bound = 256 }, .{ .regs = 126, .static = 37888, .bound = 256 } } },
+    .{ .name = "27B tf_q27_zero_rows", .usage = .{ .{ .regs = 14, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 13, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 }, .{ .regs = 12, .static = 0, .bound = 0 } } },
+    .{ .name = "27B tf_train_softmax", .usage = .{ .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 28, .static = 128, .bound = 1024 }, .{ .regs = 41, .static = 128, .bound = 1024 }, .{ .regs = 41, .static = 128, .bound = 1024 } } },
+    .{ .name = "27B tf_train_rms_back", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 39, .static = 128, .bound = 256 }, .{ .regs = 39, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 } } },
+    .{ .name = "27B tf_q27_pocket_grad", .usage = .{ .{ .regs = 32, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 40, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 }, .{ .regs = 37, .static = 128, .bound = 256 } } },
+    .{ .name = "27B tf_attn_prep_back", .usage = .{ .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 31, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 }, .{ .regs = 32, .static = 1152, .bound = 256 } } },
+    .{ .name = "27B tf_gdn_norm_back", .usage = .{ .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 26, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 }, .{ .regs = 24, .static = 644, .bound = 128 } } },
+    .{ .name = "27B tf_gdn_qk_back", .usage = .{ .{ .regs = 32, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 39, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 }, .{ .regs = 40, .static = 128, .bound = 128 } } },
+    .{ .name = "27B tf_gdn_conv_back", .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 38, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 }, .{ .regs = 35, .static = 0, .bound = 0 } } },
+    .{ .name = "paging tf_nemo_attn_chunk_segs", .usage = .{ .{ .regs = 78, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 97, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 }, .{ .regs = 118, .static = 45568, .bound = 256 } } },
 };
 
-test "train launch records: every new gradient launch stays unqualified without compiler receipts" {
-    try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);
-    for (gradient_pending) |record| try std.testing.expect(try registry.checkCuda(std.testing.allocator, &.{record}, true) > 0);
+test "train launch records: every learning launch fits every SM by its measured record" {
+    for (gradient_pending) |record| try std.testing.expectEqual(@as(usize, 0), try registry.checkCuda(std.testing.allocator, &.{record}, true));
 }
 
 test {
