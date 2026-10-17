@@ -31,7 +31,7 @@ pub fn rounds(e: *Engine) !void {
     e.cins = .{ m.ple.cin, .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) } };
     r.ar = .{ .b = try r.buffer(4 * fz.AR_WORDS) };
     e.ring = try r.buffer(fz.RING_WORDS * 4 * engine.RING);
-    e.hist = try r.buffer((fz.CAP + 64) * 4);
+    e.hist = try r.buffer((r.window.capacity + 64) * 4);
     e.wids = .{ .b = try r.buffer(64) };
     e.draw_at = .{ .b = try r.buffer(4 * MAXR) };
     for (1..MAXR + 1) |n| {

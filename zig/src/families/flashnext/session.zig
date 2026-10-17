@@ -24,7 +24,7 @@ pub const Session = struct {
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacity: usize, original: bool) !Session {
         var s: Session = .{ .m = e.m.* };
         errdefer s.deinit(gpa);
-        s.m.cap = if (original) fz.CAP else capacity;
+        s.m.cap = if (original) e.r.window.capacity else capacity;
         s.m.pos = 0;
         s.m.state = 0;
         s.m.state_row = 0;

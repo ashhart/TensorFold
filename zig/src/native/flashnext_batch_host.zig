@@ -54,10 +54,14 @@ fn slotGrow() usize {
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
+    return openConfigured(gpa, io, dir, dump, window, streams, streams_fixed, cache_gib, over, vision, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, std.c.getenv("TF_FLASHNEXT_TP") != null, why));
+}
+
+pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const capacity: usize = @intCast(@min(@as(i64, @intCast(tf.flashnext_replay.CAP)), window + fx.MARGIN));
-    const eng = try fx.Engine.load(gpa, io, dir, dump);
+    const capacity: usize = @intCast(@min(@as(i64, @intCast(settings.capacity)), window + fx.MARGIN));
+    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, null, settings);
     errdefer eng.deinit();
     if (eng.r.tp != null) return error.BatchSpeedUpUnsupported;
     try eng.warm();
@@ -73,7 +77,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
         return err;
     };
     defer if (tiers) |t| gpa.free(t);
-    const overhead = Session.overhead(tf.flashnext_replay.CAP) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
+    const overhead = Session.overhead(eng.r.window.capacity) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
     const available = sizing.sessions;
     if (available < overhead) {
         if (!streams_fixed and tiers == null) return single(gpa, io, eng, window, cache_gib, over, cap, vis, a, why);

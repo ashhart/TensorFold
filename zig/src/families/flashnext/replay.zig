@@ -28,30 +28,12 @@ pub const D = 2560;
 pub const WIDE = 4 * D;
 pub const LAYERS = 48;
 pub const VOCAB = 248320;
-/// The trained window, and the longest an engine opens with: YaRN x4 past it (static, every prompt scaled).
-pub const TRAINED: usize = 262144;
-pub const CAP_MAX: usize = 4 * TRAINED + 64; // a full 1,048,576-token window and the engine's margin past it
-/// Keys an attention layer of the engine's own model holds: TRAINED unless `setCap` asks for more before the load.
-pub var CAP: usize = TRAINED;
-/// The YaRN factor the engine's rotary takes at load (0: the plain rotary); `setCap` sets it past TRAINED.
-pub var yarn_factor: f64 = 0;
-
-/// The engine's window before its load: past the trained 262,144 (up to four times it) through static YaRN x4.
-pub fn setCap(window: usize) !void {
-    const cap = std.mem.alignForward(usize, @max(window, TRAINED), 4);
-    if (cap > CAP_MAX) return error.ContextTooLong;
-    CAP = cap;
-    yarn_factor = if (cap > TRAINED) 4 else 0;
-}
-
-/// A served window past the trained one (`native`): the cap set before the load, or why it is refused.
-pub fn widen(window: i64, native: i64, margin: i64, paired: bool) !?[]const u8 {
-    if (native <= 0 or window <= native) return null;
-    if (paired) return "--context past the trained window is served on one Mac; the --speed-up pair reads up to it";
-    try setCap(@intCast(window + margin));
-    std.log.info("flash next: a {d}-token window, past the trained {d}: static YaRN x4 for every prompt", .{ window, native });
-    return null;
-}
+pub const window_config = @import("window_config.zig");
+pub const WindowSettings = window_config.Settings;
+pub const TRAINED = window_config.trained;
+pub const CAP_MAX = window_config.maximum;
+/// The default capacity for callers that do not request a long window.
+pub const CAP = TRAINED;
 pub const PLE_TAIL = 9;
 pub const GROUPS = 8;
 pub const MAXR = 16; // a decode window's rows at most
@@ -849,6 +831,7 @@ pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
 }
 
 pub const Run = struct {
+    window: WindowSettings = .{},
     arena: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
@@ -1528,7 +1511,7 @@ pub const Select = struct {
             .select = found[2].?,
             .start = try B.of(r, 16),
             .starts = try B.of(r, CATCH * 256),
-            .sc = try B.of(r, @min(rows_max * (CAP / 4), @max(SC_WORDS, MAXR * (CAP / 4))) * 4),
+            .sc = try B.of(r, @min(rows_max * (r.window.capacity / 4), @max(SC_WORDS, MAXR * (r.window.capacity / 4))) * 4),
             .keys = try B.of(r, rows_max * KW * 4),
             .complete = try B.of(r, rows_max * 4),
             .ends = try B.of(r, rows_max * 4),
@@ -1642,7 +1625,7 @@ pub const GSelect = struct {
     pub fn init(r: *Run, pooled: usize) !GSelect {
         var g: GSelect = .{
             .sel = .{ .b = try r.buffer(128 * 4) },
-            .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
+            .sc = .{ .b = try r.buffer(MAXR * (r.window.capacity / 4) * 4) },
             .keys = .{ .b = try r.buffer(MAXR * KW * 4) },
             .pooled_shape = try r.buffer(16),
             .q_shape = undefined,
@@ -1697,7 +1680,7 @@ pub const Layer = struct {
     vals: Buf = undefined,
     raw: Buf = undefined,
     pool: Buf = undefined,
-    pooled: Buf = undefined, // the indexer's pooled block keys [CAP / 4, 128]
+    pooled: Buf = undefined, // the indexer's pooled block keys [capacity / 4, 128]
     pooled_n: usize = 0,
 };
 
@@ -1769,43 +1752,13 @@ pub const Tmp = struct {
 
 /// The rotary's constants every rotary kernel reads: [log2(base), YaRN on, YaRN's cos and sin scale, 32 frequencies].
 pub fn ropeBuf(r: *Run, log2base: f32, factor: f64) !Buf {
-    const b = try r.buffer(35 * 4);
-    const v = b.slice(f32, 35);
-    @memset(v, 0);
-    v[0] = log2base;
-    v[2] = 1;
-    if (factor > 1) {
-        v[1] = 1;
-        const y = yarn(std.math.pow(f64, 2, log2base), factor, TRAINED);
-        v[2] = y.scale;
-        @memcpy(v[3..35], &y.freq);
-    }
+    const rotary = @import("rotary_config.zig");
+    const b = try r.buffer(rotary.words * 4);
+    @memcpy(b.slice(f32, rotary.words), &rotary.table(log2base, factor, TRAINED));
     return .{ .b = b };
 }
 
-/// transformers' _compute_yarn_parameters for the 64 rotary dims (beta 32 and 1, truncated ends), in torch's fp32.
-pub fn yarn(base: f64, factor: f64, trained: usize) struct { freq: [32]f32, scale: f32 } {
-    const dim: f64 = 64;
-    const tp: f64 = @floatFromInt(trained);
-    const dimOf = struct {
-        fn f(rot: f64, b: f64, max_pos: f64) f64 {
-            return 64 * @log(max_pos / (rot * 2 * std.math.pi)) / (2 * @log(b));
-        }
-    }.f;
-    const low = @max(@floor(dimOf(32, base, tp)), 0);
-    var high = @min(@ceil(dimOf(1, base, tp)), dim - 1);
-    if (low == high) high += 0.001;
-    var out: [32]f32 = undefined;
-    for (0..32) |k| {
-        const kf: f64 = @floatFromInt(k);
-        const pos_freq: f32 = @floatCast(std.math.pow(f64, base, @as(f64, @as(f32, @floatCast(2 * kf / dim)))));
-        const extra: f32 = 1.0 / pos_freq;
-        const inter: f32 = 1.0 / (@as(f32, @floatCast(factor)) * pos_freq);
-        const ef: f32 = 1 - @as(f32, @floatCast(std.math.clamp((kf - low) / (high - low), 0, 1)));
-        out[k] = inter * (1 - ef) + extra * ef;
-    }
-    return .{ .freq = out, .scale = @floatCast(0.1 * @log(factor) + 1) };
-}
+pub const yarn = @import("rotary_config.zig").yarn;
 
 pub fn f32Buf(r: *Run, v: f32) !Buf {
     const b = try r.buffer(4);
@@ -1895,7 +1848,7 @@ pub const Model = struct {
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
-    cap: usize = TRAINED, // the engine's own model: CAP, set at load
+    cap: usize = TRAINED, // the model's capacity, set at load
     state: usize = 0, // the DeltaNet buffer pair holding the state
     state_row: usize = 0, // its row
     gpu_seconds: f64 = 0,
@@ -3135,8 +3088,8 @@ pub const Prompt = struct {
             n = 2;
         } else {
             for (0..2) |hd| {
-                ws[n] = .{ .src = bytesOf(L.keys) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + hd * tpm.KV_HEAD };
-                ws[n + 1] = .{ .src = bytesOf(L.vals) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD };
+                ws[n] = .{ .src = bytesOf(L.keys) + (hd * m.cap + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(L.vals) + (hd * m.cap + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD };
                 n += 2;
             }
             ws[n] = .{ .src = bytesOf(L.raw) + pr.pos0 * 256, .len = pr.rows0 * 256, .dst = slot + 4 * tpm.KV_HEAD };
@@ -3161,8 +3114,8 @@ pub const Prompt = struct {
             p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[1 - pr.a], SO_ROW / 4);
         } else {
             for (0..2) |hd| {
-                p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
-                p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
+                p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
+                p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
             }
             p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pr.pos0 * 256 }, pr.rows0 * 64);
         }
@@ -3333,8 +3286,8 @@ pub const Prompt = struct {
                     try ws.append(gpa, .{ .src = bytesOf(L.so[a]), .len = SO_ROW, .dst = slot + CS_ROW });
                 } else {
                     for (0..2) |hd| {
-                        try ws.append(gpa, .{ .src = bytesOf(L.keys) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + hd * tpm.KV_HEAD });
-                        try ws.append(gpa, .{ .src = bytesOf(L.vals) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD });
+                        try ws.append(gpa, .{ .src = bytesOf(L.keys) + (hd * m.cap + pos1) * 512, .len = rows * 512, .dst = slot + hd * tpm.KV_HEAD });
+                        try ws.append(gpa, .{ .src = bytesOf(L.vals) + (hd * m.cap + pos1) * 512, .len = rows * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD });
                     }
                     try ws.append(gpa, .{ .src = bytesOf(L.raw) + pos1 * 256, .len = rows * 256, .dst = slot + 4 * tpm.KV_HEAD });
                 }
@@ -3361,8 +3314,8 @@ pub const Prompt = struct {
                     p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[a], SO_ROW / 4);
                 } else {
                     for (0..2) |hd| {
-                        p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
-                        p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
+                        p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pos1) * 512 }, rows1 * 128);
+                        p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pos1) * 512 }, rows1 * 128);
                     }
                     p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pos1 * 256 }, rows1 * 64);
                 }
@@ -3387,8 +3340,8 @@ pub const Prompt = struct {
         var n: usize = 0;
         if (mine[1] > 0) {
             for (0..2) |hd| {
-                ws[n] = .{ .src = bytesOf(h.keys) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + hd * tpm.KV_HEAD };
-                ws[n + 1] = .{ .src = bytesOf(h.vals) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + (2 + hd) * tpm.KV_HEAD };
+                ws[n] = .{ .src = bytesOf(h.keys) + (hd * m.cap + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(h.vals) + (hd * m.cap + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + (2 + hd) * tpm.KV_HEAD };
                 n += 2;
             }
             ws[n] = .{ .src = bytesOf(h.raw) + mine[0] * 256, .len = mine[1] * 256, .dst = tpm.MTP + 4 * tpm.KV_HEAD };
@@ -3401,8 +3354,8 @@ pub const Prompt = struct {
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         for (0..2) |hd| {
-            p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
-            p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
+            p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
+            p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
         }
         p.copyWords(.{ .b = w, .off = tpm.MTP + 4 * tpm.KV_HEAD }, .{ .b = h.raw.b, .off = h.raw.off + theirs[0] * 256 }, theirs[1] * 64);
         try m.finish(cb);

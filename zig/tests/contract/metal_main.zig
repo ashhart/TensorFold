@@ -12,6 +12,7 @@ const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 
+const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const gemma = @import("metal_gemma4.zig");
 const g = contract.gates;
@@ -120,15 +121,26 @@ pub fn main(init: std.process.Init) !u8 {
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
     }
-    var flash_list: [2]flash.Probe = undefined;
+    var flash_list: [8]flash.Probe = undefined;
     var flash_made: usize = 0;
     defer for (flash_list[0..flash_made]) |*probe| probe.deinit();
-    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| {
-        if (!wanted(o, tf.flashnext_vision_contract.spec(contract.spec, w).name)) continue;
-        flash_list[flash_made] = try flash.Probe.init(a, device, queue, w);
-        flash_made += 1;
-        try kernels.append(a, flash_list[flash_made - 1].kernel());
-    }
+    var pool_list: [4]flash_pool.Probe = undefined;
+    var pool_made: usize = 0;
+    defer for (pool_list[0..pool_made]) |*probe| probe.deinit();
+    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| for ([_]f64{ 0, 4 }) |factor| {
+        if ((w == .mask and factor != 0) or !wanted(o, tf.flashnext_vision_contract.name(w, factor > 1))) continue;
+        if (tf.flashnext_vision_contract.isPool(w)) {
+            pool_list[pool_made] = try flash_pool.Probe.init(a, device, queue, w);
+            pool_list[pool_made].factor = factor;
+            pool_made += 1;
+            try kernels.append(a, pool_list[pool_made - 1].kernel());
+        } else {
+            flash_list[flash_made] = try flash.Probe.init(a, device, queue, w);
+            flash_list[flash_made].factor = factor;
+            flash_made += 1;
+            try kernels.append(a, flash_list[flash_made - 1].kernel());
+        }
+    };
     var d3norm: ?drama3_k.Norm = null;
     defer if (d3norm) |*n| n.deinit();
     if (wanted(o, drama3_k.spec().name)) {

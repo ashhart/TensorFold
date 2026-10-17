@@ -31,8 +31,8 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
-    if (std.mem.startsWith(u8, d.name, "flashnext vision ")) {
-        const w: tf.flashnext_vision_contract.Which = if (std.mem.eql(u8, fun, "fz_mask_rows")) .mask else .mrope;
+    if (std.mem.startsWith(u8, d.name, "flashnext vision ") or std.mem.startsWith(u8, d.name, "flashnext rotary ")) {
+        const w: tf.flashnext_vision_contract.Which = if (std.mem.eql(u8, fun, "fz_mask_rows")) .mask else if (std.mem.eql(u8, fun, "fn_attn_prep_mrope")) .mrope else if (std.mem.indexOf(u8, d.name, " target ") != null) .target else if (std.mem.indexOf(u8, d.name, " mtp ") != null) .mtp else if (std.mem.indexOf(u8, d.name, " absolute ") != null) .absolute else .pooled;
         text = tf.flashnext_vision_contract.source(w);
         return .{ .decl = d, .function = fun, .here = text, .pre_m5 = text };
     }

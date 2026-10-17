@@ -411,7 +411,7 @@ pub const Backend = struct {
             for (w.positions, 0..) |p, j| if (p != s.m.pos + j + 1) return error.PositionMismatch;
             desc[i] = .{ .slot = @intCast(b.by.get(w.stream).?), .pos = @intCast(s.m.pos), .rows = @intCast(w.rows()) };
         }
-        const plan = try meta.Plan.init(desc[0..windows.len], @intCast(fz.CAP));
+        const plan = try meta.forBackend(b, desc[0..windows.len]);
         const t = &b.primary.t;
         for (windows, out, 0..) |w, o, i| {
             const s = try b.session(w.stream);

@@ -363,7 +363,7 @@ pub const Host = struct {
         const t_begin = h.now();
         h.prompt = r.prompt; // a learned state read back in `begin` is named by these tokens
         job.key = if (r.images.len > 0) images.key(arena.allocator(), r) catch r.prompt else r.prompt; // a state fits its frame alone
-        if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= tf.flashnext_replay.CAP) {
+        if (h.cache) |*store| if (r.prompt.len + r.max_tokens + fx.MARGIN <= h.eng.r.window.capacity) {
             plan = store.beginRewind(arena.allocator(), job.key, r.history_len, r.rewind_len, r.shared_prefixes, &.{}, null, &.{}) catch .{};
         };
         var vis: ?*tf.flashnext_replay.vis_prompt.VisPrompt = null;
@@ -444,7 +444,11 @@ fn learnedStates(gpa: Allocator, io: std.Io, eng: *fx.Engine, root: []const u8, 
 
 /// The engine for a Flash Next checkpoint: the replay engine on the kernels and packs in `dump`, warmed, served; `speed_up` names this Mac's speed-up mode settings (tp.zig); `cache_gib` the prompt cache's budget (null: what 70% of RAM leaves, up to 16 GiB; `over_cap` lets a larger one through); on error.CacheOverCap `why` (in `a`) says why.
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8) !*Host {
-    const eng = try fx.Engine.loadWith(gpa, io, dir, dump, speed_up);
+    return openConfigured(gpa, io, dir, dump, window, speed_up, cache_gib, over_cap, learn, vision, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null, why));
+}
+
+pub fn openConfigured(gpa: Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, speed_up: ?[]const u8, cache_gib: ?f64, over_cap: bool, learn: ?Learn, vision: ?api.VisionOpen, a: Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !*Host {
+    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, speed_up, settings);
     errdefer eng.deinit();
     if (learn != null and eng.r.tp != null) {
         why.* = "--learn is not kept across a Flash Next pair yet: leave it out, or serve on one Mac";
@@ -472,7 +476,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    const context_limit: i64 = @as(i64, @intCast(tf.flashnext_replay.CAP)) - fx.MARGIN;
+    const context_limit: i64 = @as(i64, @intCast(eng.r.window.capacity)) - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
