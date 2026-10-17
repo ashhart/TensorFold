@@ -53,7 +53,7 @@ async function main() {
 
     const [serveRecord] = (await h.records()).filter((r) => r.kind === 'serve')
     assert.deepEqual(serveRecord.args.slice(0, 7), ['mlx-community/Qwen3.5-2B-MLX-4bit', '--host', '127.0.0.1', '--port', String(port), '--name', 'mlx-community/Qwen3.5-2B-MLX-4bit'])
-    assert.deepEqual(serveRecord.args.slice(7, 9), ['--prompt-cache-gib', '8'], 'kept prompt states are capped for a desktop app')
+    assert.equal(serveRecord.args.includes('--prompt-cache-gib'), false, 'native sizes kept states from actual memory use')
     assert.equal(serveRecord.args.includes(live.apiKey), false, 'the key travels by environment, never argv')
     assert.equal(serveRecord.hasKey, true)
     assert.equal(serveRecord.noUpdateCheck, '1')
@@ -100,6 +100,19 @@ async function main() {
     const before = (await servePids(h)).length
     await assert.rejects(() => small.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit'), /needs at least 2\.0 GB of memory, more than the 1\.4 GB limit \(70% of this Mac's 2\.0 GB\)/)
     assert.equal((await servePids(h)).length, before)
+
+    // The engine knows its loaded footprint and future streams, beyond info's weight-based floor.
+    // The reported 48 GiB case leaves zero cache room; another load on that Mac can retain states.
+    for (const roomGiB of [0, 3]) {
+      const adaptive = supervisor(h, { totalMemoryBytes: 48 * GIB }, { FAKE_PROMPT_CACHE_ROOM_GIB: String(roomGiB) })
+      try {
+        await adaptive.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit')
+        const launch = (await h.records()).filter((r) => r.kind === 'serve').at(-1)!
+        assert.equal(launch.promptCacheGiB, roomGiB, 'the native planner uses the room beside actual buffers')
+        assert.equal(launch.args.includes('--prompt-cache-gib'), false, 'a positive pre-load guess can refuse a fitting model')
+        assert.equal(launch.args.includes('--prompt-cache-over-cap'), false)
+      } finally { await adaptive.sup.stop() }
+    }
 
     // A load that dies reports the engine's own last line; the next request may retry.
     const broken = supervisor(h, {}, { FAKE_SERVE_FAIL: 'Metal is unavailable' })
