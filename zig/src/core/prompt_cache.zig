@@ -183,6 +183,12 @@ pub const Store = struct {
         return false;
     }
 
+    /// Whether an outstanding lookup still borrows `saved`'s state: the family spares it while restoring.
+    pub fn borrowed(s: *Store, saved: Saved) bool {
+        for (s.entries.items) |e| if (e.saved == saved and !e.expired and e.borrowers > 0) return true;
+        return false;
+    }
+
     pub const expired = lifetime.expired;
     pub const collectExpired = lifetime.collect;
     pub const release = lifetime.release;
@@ -387,6 +393,8 @@ pub const Store = struct {
         if (failure) |err| {
             if (s.restore_log) |log| log.write(log.ctx, e.at, err) else note("restoring {d} tokens failed ({s}); discarding cached state", .{ e.at, @errorName(err) });
             s.counts.failed += 1;
+            const why: []const u8 = if (e.expired) "state already expired" else "backend refused the restore";
+            note("restore of the kept {d}-token state failed for a {d}-token prompt ({s}); prefilling from the start", .{ e.at, prompt.len, why });
             e.expired = true;
             return;
         }

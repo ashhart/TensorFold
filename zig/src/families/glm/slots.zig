@@ -62,6 +62,7 @@ pub const Slots = struct {
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
     expire: ?kept_mod.Expire = null, // invalidates lookup immediately; destruction waits for the host's safe boundary
+    borrowed: ?kept_mod.Borrowed = null, // a lookup still restoring this state: eviction spares it while anything else fits
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
