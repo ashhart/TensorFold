@@ -38,9 +38,11 @@ pub const Part = struct {
 };
 
 /// A stream's rows in a head forward: where they start, how many, its meta row, its head caches and its head.
-const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64, vocab: Vocab, table: u64 = 0 };
+pub const Span = struct { row0: usize, rows: usize, meta: u64, k_cache: u64, v_cache: u64, vocab: Vocab, table: u64 = 0 };
 
 pub const Head = struct {
+    // Host fixtures replace only the network transform; projection, chain scheduling and sample dispatch stay real.
+    pub var test_network: if (@import("builtin").is_test) ?*const fn (*Head, []const Span, bool) anyerror!void else void = if (@import("builtin").is_test) null else {};
     e: *Engine,
     buf: cuda.DeviceBuffer,
     pinned: cuda.HostBuffer,
@@ -222,6 +224,15 @@ pub const Head = struct {
 
     /// Each span's rows at its head positions; with `tail`, logits row k is span k's by its own head (stride returned).
     fn forwardSpans(h: *Head, spans: []const Span, tail: bool) !usize {
+        try h.networkSpans(spans, tail);
+        if (!tail) return 0;
+        const c = h.e.c;
+        var o = h.e.ops();
+        o.ck8 = h.e.b.ck8; // the FP8 rows a checkpoint head quantizes into, as the forward's ops carry them
+        return @import("cuda_mtp_projection.zig").project(o, spans, [2]weights.QLinear{ h.e.w.draft_head.?, h.e.w.head }, .{ h.e.w.draft_count, c.vocab }, h.row, h.rxs, h.logits, c.hidden);
+    }
+    fn networkSpans(h: *Head, spans: []const Span, tail: bool) !void {
+        if (comptime @import("builtin").is_test) if (test_network) |run| return run(h, spans, tail);
         const e = h.e;
         const c = e.c;
         const m = e.w.mtp.?;
@@ -247,7 +258,7 @@ pub const Head = struct {
             try t.attention(qkv, s.k_cache, s.v_cache, s.meta, b.po + r0 * f.nch * qd * 4, b.pm + r0 * f.nch * c.heads * 4, b.pl + r0 * f.nch * c.heads * 4, b.att + r0 * qd * 2, b.axs + r0 * (qd / 64) * 4, s.rows, at);
         }
         try o.dense(b.att, b.axs, m.attn.o, b.delta, rows);
-        if (!tail) return 0;
+        if (!tail) return;
         if (spans.len == 1) {
             const last = spans[0].row0 + spans[0].rows - 1;
             try t.addRmsnorm(h.x + last * D * 2, b.delta + last * D * 2, m.moe_norm, h.h1, b.y, b.xs, 1, c.hidden, c.eps);
@@ -268,7 +279,6 @@ pub const Head = struct {
             try f.experts(m.moe, spans.len, false);
             try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
         }
-        return @import("cuda_mtp_projection.zig").project(o, spans, [2]weights.QLinear{ h.e.w.draft_head.?, h.e.w.head }, .{ h.e.w.draft_count, c.vocab }, h.row, h.rxs, h.logits, D);
     }
 
     /// MTPHead._level: 0 absorbs the window's kept rows, 1 absorbs and drafts after them, j > 1 extends; `v` drafts.

@@ -217,3 +217,7 @@ test "subset head: head choice follows restored context and cannot inherit a nei
     context[0] = 2;
     try std.testing.expectEqual(projection.Vocab.subset, h.vocab(&context));
 }
+
+test {
+    _ = @import("cuda_subset_restore_test.zig");
+}
