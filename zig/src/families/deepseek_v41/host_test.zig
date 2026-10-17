@@ -40,6 +40,23 @@ test "the release config.json: topology, routing and rope" {
     try config.tiny().validate();
 }
 
+test "o_groups: zero is refused before it divides, a divisor of the heads is kept, a non-divisor is refused" {
+    const a = testing.allocator;
+    try testing.expectError(error.BadConfig, Config.parse(a, "{\"o_groups\": 0}"));
+    try testing.expectError(error.BadConfig, Config.parse(a, "{\"text_config\": {\"num_attention_heads\": 64, \"o_groups\": 0}}"));
+    try testing.expectError(error.BadConfig, Config.parse(a, "{\"num_attention_heads\": 0, \"o_groups\": 0}"));
+    try testing.expectEqual(@as(u32, 16), (try Config.parse(a, "{\"o_groups\": 16}")).o_groups);
+    try testing.expectEqual(@as(u32, 8), (try Config.parse(a, "{\"text_config\": {\"num_attention_heads\": 64, \"o_groups\": 8}}")).o_groups);
+    try testing.expectError(error.BadConfig, Config.parse(a, "{\"o_groups\": 7}"));
+    var c = config.tiny();
+    c.o_groups = 0;
+    try testing.expectError(error.BadConfig, c.validate());
+    c.o_groups = 3;
+    try testing.expectError(error.BadConfig, c.validate());
+    c.o_groups = 4;
+    try c.validate();
+}
+
 /// Header JSON of a pack for `c`, named as the release packs are (their index, pattern by pattern), header only.
 fn tinyPack(a: std.mem.Allocator, c: *const Config, extra: []const u8, skip: []const u8) ![]u8 {
     var n: u64 = 0;

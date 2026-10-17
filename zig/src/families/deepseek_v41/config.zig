@@ -167,6 +167,7 @@ pub const Config = struct {
     /// Shapes the kernels and the loader assume; a release that breaks one is refused before any allocation.
     pub fn validate(c: *const Config) !void {
         if (c.hidden % 128 != 0 or c.expert_width % 128 != 0 or c.vocab % 128 != 0) return error.BadConfig;
+        if (c.o_groups == 0) return error.BadConfig; // refused before the modulo below divides by it
         if (c.heads % c.o_groups != 0 or c.rope_dim > c.head_dim or c.topk > c.experts) return error.BadConfig;
         if (c.dspark_topk > c.dspark_experts and c.dspark_experts != 0) return error.BadConfig;
         if (c.compress_ratios.len < c.layers) return error.BadConfig;

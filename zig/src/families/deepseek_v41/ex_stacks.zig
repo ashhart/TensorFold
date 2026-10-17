@@ -42,6 +42,7 @@ pub fn pairs(gpa: std.mem.Allocator, names: []const []const u8, lens: []const us
     defer at.deinit(gpa);
     for (names, 0..) |n, i| try at.put(gpa, n, i);
     var out: std.ArrayList([2]usize) = .empty;
+    errdefer out.deinit(gpa); // a failed append or hand-over keeps nothing (load.zig's upload retries clean)
     var buf: [192]u8 = undefined;
     for (names, 0..) |n, i| {
         const s = sharedOf(&buf, n) orelse continue;
