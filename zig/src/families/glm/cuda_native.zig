@@ -5,11 +5,14 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
+const images_mod = @import("cuda_images.zig");
 const glm_lanes = @import("cuda_lanes.zig");
 const ranks = @import("cuda_ranks.zig");
 const fw = @import("cuda_forward.zig");
 const config = @import("config.zig");
 const shard = @import("cuda_shard.zig");
+const dflash = @import("dflash.zig");
+const dflash_load = @import("dflash_load.zig");
 
 pub const model_type = "glm5_next";
 pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
@@ -31,7 +34,12 @@ pub const Options = struct {
     segments: usize = 1,
     slide: bool = false,
     room: ?Room = null,
+    vision: ?images_mod.Limits = null, // --vision: rank 0's tower, every rank's image rows
+    drafter: ?[]const u8 = null, // --drafter: DFlash2's folder (the same on every rank; needs drafts on)
+    drafter_bits: u8 = 4, // --drafter-bits: 4 (default) or 0 (bf16)
 };
+/// --drafter: DFlash2 (incoai/GLM-5.3-Flash-DFlash2, non-commercial weights) drafts instead of the MTP head.
+pub const takes_drafter = true;
 /// The smallest room among the other ranks and whose it is.
 pub const Peer = struct { bytes: u64, rank: usize };
 
@@ -49,6 +57,7 @@ pub const Loaded = struct {
     lone: ?LoneRun = null,
     target: *engine.Engine, // the prompt cache keeps this engine's states (snap_*)
     peer_room: ?Peer = null, // rank 0: the server admits streams and kept states by this when it is smaller
+    vision: ?*images_mod.Images = null, // rank 0's tower for the server's image offer
 };
 
 /// This rank's place: TF_GLM_RANK of TF_GLM_WORLD (both, or neither for a refusal that names them).
@@ -85,12 +94,36 @@ pub fn capacity(context: usize) usize {
 
 const Owned = struct {
     gpa: std.mem.Allocator,
-    lib: cuda.nccl.Library,
-    comm: cuda.nccl.Comm,
+    group: cuda.tp_group.Group, // the ranks' communicator; two ranks add RoCE writes for the main stream's small gathers
     e: *engine.Engine,
     link: follow.Link,
     lanes: glm_lanes.Lanes,
 };
+
+extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+
+/// Every peer's send/recv connected now, before the weights fill memory (connected on first use, ibv_reg_mr can fail).
+fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
+    const bytes = 4 << 20; // a prompt piece's exchange: every channel a large send/recv takes
+    var buf = try cuda.DeviceBuffer.alloc(d, 2 * bytes * g.world);
+    defer buf.free();
+    var s = try cuda.Stream.init(d, false);
+    defer s.deinit();
+    try g.lib.check(g.lib.api.ncclGroupStart(), "ncclGroupStart");
+    const posted: anyerror!void = post: {
+        for (0..g.world) |peer| if (peer != g.rank) {
+            g.send(s, buf.ptr + peer * bytes, bytes, peer) catch |err| break :post err;
+            g.recv(s, buf.ptr + (g.world + peer) * bytes, bytes, peer) catch |err| break :post err;
+        };
+        break :post {};
+    };
+    try g.lib.check(g.lib.api.ncclGroupEnd(), "ncclGroupEnd"); // the group closes on every path
+    try posted;
+    try s.synchronize();
+}
+
+/// The largest shard a rank sends by RoCE writes: a decode window's partials (8 rows of fp32) fit.
+const roce_cap = 512 << 10;
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
@@ -101,35 +134,58 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("{s}", .{problem});
         return err;
     };
+    if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world); // rank 0's line before NCCL: a failure stops every rank
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
-    own.lib = try cuda.nccl.Library.open();
-    errdefer own.lib.close();
+    // every connection registered at init, while memory is free (lazily, a full GB10's ibv_reg_mr can refuse it)
+    if (std.c.getenv("NCCL_RUNTIME_CONNECT") == null) _ = setenv("NCCL_RUNTIME_CONNECT", "0", 0);
+    var lib = try cuda.nccl.Library.open();
+    errdefer lib.close();
     var id: cuda.nccl.UniqueId = undefined;
-    try own.lib.check(own.lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
-    own.comm = null;
-    try own.lib.check(own.lib.api.ncclCommInitRank(&own.comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
-    errdefer _ = own.lib.api.ncclCommDestroy(own.comm);
+    try lib.check(lib.api.ncclGetUniqueId(&id), "ncclGetUniqueId"); // NCCL_COMM_ID: the same id on every rank
+    var comm: cuda.nccl.Comm = null;
+    try lib.check(lib.api.ncclCommInitRank(&comm, @intCast(p.world), id, @intCast(p.rank)), "ncclCommInitRank");
+    own.group = .{ .lib = lib, .comm = comm, .rank = p.rank, .world = p.world };
+    errdefer _ = own.group.lib.api.ncclCommDestroy(own.group.comm);
+    if (p.world > 1) try warmPeers(ctx.d, &own.group);
     const cap = capacity(o.context);
-    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.lib, own.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set });
+    own.e = try engine.Engine.init(gpa, io, ctx.d, ctx, dir, &own.group.lib, own.group.comm, p.rank, p.world, .{ .capacity = cap, .mtp = o.drafts, .settings = set, .vision = if (o.vision) |l| l.image_tokens else 0, .drafter = o.drafter != null });
     errdefer own.e.deinit();
-    own.link = try follow.Link.init(gpa, ctx.d, &own.lib, own.comm, own.e.stream, cap);
+    if (o.vision) |lim| { // before the rooms: the tower's bytes count against rank 0's
+        own.e.images = (try images_mod.Images.init(gpa, io, ctx.d, own.e.stream, dir, lim, fw.prefill_rows + 1, p.rank == 0, &problem)) orelse {
+            std.log.err("{s}", .{problem});
+            return error.NoVisionTower;
+        };
+    }
+    errdefer if (own.e.images) |v| v.deinit();
+    if (o.drafter) |dd| { // before the rooms: its weights and scratch count against every rank's
+        if (!o.drafts) return error.DrafterNeedsDrafts;
+        own.e.drafter = try dflash_load.load(gpa, io, own.e, dd, p.rank, p.world, o.drafter_bits);
+    }
+    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_cap); // both ranks bring it up or neither does
+    errdefer if (own.group.fast) |f| f.deinit();
+    own.e.group = &own.group;
+    own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, cap);
     errdefer own.link.deinit();
     // Rank 0 admits by the smallest room of the ranks; its sizes are the largest (the first ranks take the remainder).
     const rooms = try gpa.alloc(u64, p.world);
     defer gpa.free(rooms);
     const mine: u64 = if (o.room) |r| r.read(r.ctx) orelse 0 else std.math.maxInt(u64);
-    try ranks.gather(u64, ctx.d, &own.lib, own.comm, own.e.stream, p.rank, mine, rooms);
+    try ranks.gather(u64, ctx.d, &own.group.lib, own.group.comm, own.e.stream, p.rank, mine, rooms);
     var peer: ?Peer = null;
     for (rooms[1..], 1..) |r, q| if (peer == null or r < peer.?.bytes) {
         peer = .{ .bytes = r, .rank = q };
     };
+    // every rank loaded and agreed (cuda_ranks) before the first step; the digest names what they agreed on
+    if (p.world > 1) try cuda.tp_watch.ready(io, ranks.hashBytes(std.fs.path.basename(std.mem.trimEnd(u8, dir, "/"))));
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
-            std.process.exit(1);
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 stops with it instead of waiting on this rank
+            std.c._exit(1); // the stream may hold kernels waiting on a gone rank: a normal exit would join them
         };
+        cuda.tp_watch.ended();
         std.log.info("rank {d}: rank 0 ended; leaving", .{p.rank});
         std.process.exit(0);
     }
@@ -144,12 +200,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .backend = own.lanes.backend(),
         .facts = own.lanes.facts(),
         .rows = glm_lanes.max_rows,
-        .stream_bytes = own.e.seqBytes(), // each stream past the first makes its own sequence on every rank
+        .stream_bytes = own.e.seqBytes() + if (o.drafter != null) dflash.ring_bytes else 0, // and its DFlash2 ring
         .free_streams = 1, // the first is the sequence the engine made
         .ctx = own,
         .deinit = close,
         .target = own.e,
         .peer_room = peer,
+        .vision = own.e.images,
     };
 }
 
@@ -190,12 +247,13 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 fn close(ptr: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(ptr));
+    cuda.tp_watch.ended(); // the other ranks' lines close on purpose from here
     own.lanes.x.end() catch {};
     own.lanes.deinit();
     own.link.deinit();
+    if (own.e.images) |v| v.deinit();
     own.e.deinit();
-    _ = own.lib.api.ncclCommDestroy(own.comm);
-    own.lib.close();
+    own.group.close();
     own.gpa.destroy(own);
 }
 

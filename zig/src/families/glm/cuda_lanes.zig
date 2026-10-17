@@ -5,20 +5,34 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
+const dflash = @import("dflash.zig");
 
 const be = lanes.backend;
 
 /// First tokens a handle names.
 const ring = 1024;
 
-/// The widest verify window: the pending token and a full draft chain (glm-decode-check's, the AOT row variants).
-pub const max_rows = 1 + engine.max_drafts;
+/// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
+pub const max_rows = fw.window_rows;
+const mtp_rows = 1 + engine.max_drafts;
+const max_held = dflash.BLOCK - 1; // a DFlash2 block's drafts (the MTP head's chains stop at max_drafts)
+
+/// With DFlash2: a window's ms by rows on two GB10s (EXL3, TF_GLM_PROF: 86 to 107 ms at 5 to 8), shared as glm_cuda's.
+const gb10_window_costs = costTable(max_rows, 52.0, 6.8);
+const gb10_shared_costs = costTable(engine.shared_rows, 76.0, 4.1);
+
+fn costTable(comptime n: usize, comptime one: f64, comptime row: f64) [n]lanes.config.Cost {
+    var c: [n]lanes.config.Cost = undefined;
+    for (&c, 0..) |*x, i| x.* = .{ .width = i + 1, .ms = one + row * @as(f64, @floatFromInt(i)) };
+    return c;
+}
 
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
     slot: u32,
     pending_rows: ?usize = null,
-    held: [engine.max_drafts]u32 = undefined,
+    held: [max_held]u32 = undefined,
+    chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
     held_n: usize = 0,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
 };
@@ -48,6 +62,7 @@ pub const Lanes = struct {
         .verify = verifyFn,
         .keep = keepFn,
         .draft = draftFn,
+        .probabilities = chancesFn,
         .release = releaseFn,
     };
     const steps_vt: be.Backend.VTable = vt: {
@@ -56,17 +71,24 @@ pub const Lanes = struct {
         break :vt v;
     };
 
-    /// Round loop facts: windows up to max_rows, drafts with the head loaded, shared windows unless TF_GLM_SHARED=0.
+    /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
+        const block = self.x.e.drafter != null;
         const sharing = drafting and !self.alone;
         return .{
             .exact_width = if (drafting) max_rows else 1,
+            .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
-            .drafts = engine.max_drafts,
+            .drafts = if (block) max_held else engine.max_drafts,
+            .draft_streams = block, // one block pass drafts every stream of the round
+            .mtp_step_ms = if (block) 1.6 / @as(f64, max_held) else 0, // a block's 7 drafts in one pass (about 1.6 ms)
+            .draft_probabilities = block, // the selector's chances size each window against the costs below
+            .window_costs = if (block) &gb10_window_costs else &.{},
+            .shared_costs = if (block) &gb10_shared_costs else &.{},
             .hidden_rows = sharing,
             .batch_rows = if (sharing) engine.shared_rows else 0,
             .max_streams = if (sharing) engine.max_shared else 1,
@@ -121,6 +143,7 @@ pub const Lanes = struct {
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self = of(ptr);
         const from = try self.opening(s);
+        try self.images(s, from);
         _ = self.take(try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s)));
     }
 
@@ -129,6 +152,7 @@ pub const Lanes = struct {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
+        if (going == null) try self.images(s, from);
         const l = self.lanes.getPtr(s).?;
         if (going != null) try self.x.bind(l.slot);
         const at = going orelse if (from) |r| r.at else 0;
@@ -152,9 +176,18 @@ pub const Lanes = struct {
         gop.value_ptr.held_n = 0;
         gop.value_ptr.fill = null;
         try self.x.bind(gop.value_ptr.slot);
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
         s.cached = 0;
         return self.resumeFrom(s, ids.len);
+    }
+
+    /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
+    fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
+        if (s.images.len == 0) return;
+        const v = self.x.e.images orelse return error.NoVision;
+        try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
+        try self.x.images(v);
     }
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
@@ -265,6 +298,7 @@ pub const Lanes = struct {
 
     fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const self = of(ptr);
+        if (self.x.e.drafter != null) return self.draftBlock(requests);
         if (!self.x.e.mtp) return error.NoDraftHead;
         for (requests) |r| {
             const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
@@ -280,6 +314,59 @@ pub const Lanes = struct {
             }
             l.held_n = depth;
         }
+    }
+
+    /// DFlash2: every request's kept rows committed, then one block round for them all (cuda_follow's block step).
+    fn draftBlock(self: *Lanes, requests: []const be.DraftRequest) !void {
+        if (requests.len > dflash.MAX_S) return error.TooManyStreams;
+        var reqs: [dflash.MAX_S]dflash.Req = undefined;
+        var held: [dflash.MAX_S]*Lane = undefined;
+        for (requests, 0..) |r, i| {
+            const l = try self.bind(r.stream, if (r.rows) |rows| rows.len else null);
+            if (r.position != self.x.e.pos() + 1) return error.PositionMismatch;
+            if (r.lanes != null) return error.TreesNotBuilt;
+            var n: usize = 0;
+            const anchor = if (r.rows) |rows| a: {
+                for (rows, 0..) |row, j| if (row != j) return error.TreesNotBuilt;
+                n = rows.len;
+                break :a r.follow[rows.len - 1];
+            } else self.value(r.first orelse return error.NoFirstToken);
+            reqs[i] = .{ .slot = l.slot, .pos = 0, .n = n, .anchor = anchor, .out = &l.held, .probs = &l.chances };
+            held[i] = l;
+        }
+        try self.x.block(reqs[0..requests.len]);
+        const cut = confidence();
+        for (requests, held[0..requests.len]) |r, l| {
+            l.held_n = @min(r.depth, max_held);
+            var chain: f64 = 1; // glm_cuda's rule: past the first, a chain stops where its product falls under the cut
+            for (l.chances[0..l.held_n], 0..) |*c, j| {
+                chain *= c.*;
+                if (j > 0 and chain < cut) c.* = 0; // held with chance 0: the window sizing leaves it out
+                if (c.* == 0) chain = 0;
+            }
+        }
+    }
+
+    /// TF_GLM_DRAFT_CONFIDENCE: where a DFlash2 chain's chance product stops it (glm_cuda's 0.7).
+    fn confidence() f64 {
+        const v = std.c.getenv("TF_GLM_DRAFT_CONFIDENCE") orelse return 0.7;
+        return std.fmt.parseFloat(f64, std.mem.span(v)) catch 0.7;
+    }
+
+    /// DFlash2's chance for each held draft (the MTP head gives none: the lane core's per-depth rates stand).
+    fn chancesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
+        const self = of(ptr);
+        if (self.x.e.drafter == null) return false;
+        const l = self.lanes.getPtr(s) orelse return false;
+        if (l.held_n == 0) return false;
+        const n = @min(out.len, l.held_n);
+        var chain: f64 = 1; // a draft lands only if every one before it does: the selector's chances chained
+        for (out[0..n], l.chances[0..n]) |*c, p| {
+            chain *= p;
+            c.* = chain;
+        }
+        for (out[n..]) |*c| c.* = 0;
+        return true;
     }
 
     /// The stream left the rounds: its sequence is freed on every rank (slot 0 stays for the next stream).

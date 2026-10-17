@@ -3,10 +3,13 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
+const images_mod = @import("cuda_images.zig");
+const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
+const dflash = @import("dflash.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -88,6 +91,12 @@ pub const Link = struct {
         }
     }
 
+    /// `bytes` at `ptr` from rank 0 into every rank's `ptr` (image rows: the follower's buffer is the same size).
+    pub fn rows(l: *Link, ptr: u64, bytes: usize) !void {
+        if (bytes == 0) return;
+        try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
+    }
+
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
         try l.bcast(64);
@@ -153,6 +162,16 @@ pub const Leader = struct {
         try x.e.begin(c);
     }
 
+    /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
+    pub fn images(x: Leader, v: *const images_mod.Images) !void {
+        try x.flush();
+        var words: [3 * 64]u32 = undefined;
+        if (v.spans.items.len * 3 > words.len) return error.TooManyImages;
+        for (v.spans.items, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
+        try x.send(.{ .kind = @backingInt(Kind.image) }, words[0 .. 3 * v.spans.items.len]);
+        try x.link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
+    }
+
     /// `cancel` (rank 0's), asked before each chunk, decides for every rank; `from` every rank holds; `marks` rank 0's.
     pub fn prefill(x: Leader, ids: []const u32, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !u32 {
         try x.flush();
@@ -204,6 +223,16 @@ pub const Leader = struct {
         try x.e.draft(from_prompt, follow_ids, depth, out);
     }
 
+    /// DFlash2's round on every rank (Engine.draftBlock): each stream's slot, kept rows and anchor.
+    pub fn block(x: Leader, reqs: []dflash.Req) !void {
+        if (reqs.len == 0 or reqs.len > dflash.MAX_S) return error.TooManyStreams;
+        try x.flush();
+        var buf: [3 * dflash.MAX_S]u32 = undefined;
+        for (reqs, 0..) |q, i| buf[3 * i ..][0..3].* = .{ q.slot, @intCast(q.n), q.anchor };
+        try x.send(.{ .kind = @backingInt(Kind.block), .depth = @intCast(reqs.len) }, buf[0 .. 3 * reqs.len]);
+        try x.e.draftBlock(reqs);
+    }
+
     /// The other ranks leave their loops.
     pub fn end(x: Leader) !void {
         try x.send(.{ .kind = @backingInt(Kind.end) }, &.{});
@@ -218,9 +247,9 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block) try e.bind(h.slot);
         switch (kind) {
-            .begin => try e.begin(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
+            .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
@@ -261,6 +290,18 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
                 try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+            },
+            .block => {
+                const k = h.depth;
+                if (k == 0 or k > dflash.MAX_S or step.ids.len != 3 * k) return error.BadStep;
+                var reqs: [dflash.MAX_S]dflash.Req = undefined;
+                for (reqs[0..k], 0..) |*q, i| q.* = .{ .slot = step.ids[3 * i], .pos = 0, .n = step.ids[3 * i + 1], .anchor = step.ids[3 * i + 2] };
+                try e.draftBlock(reqs[0..k]);
+            },
+            .image => {
+                const v = e.images orelse return error.NoVision; // the ranks agreed on --vision (cuda_ranks)
+                try v.take(h.slot, step.ids);
+                try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
