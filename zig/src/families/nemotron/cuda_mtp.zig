@@ -19,7 +19,7 @@ const host_tokens = host_probs + max_chain;
 const host_metas = host_tokens + state.pass_rows; // a meta row a stream for `chains`
 
 /// The output rows a draft level reads: the draft vocabulary's (the draft head), or the target's whole head.
-pub const Vocab = enum { subset, full };
+pub const Vocab = @import("cuda_mtp_projection.zig").Vocab;
 
 /// One stream of a batched draft (`chains`): its head and target buffers, kept rows, depth and head.
 pub const Part = struct {
@@ -78,6 +78,10 @@ pub const Head = struct {
     pos: usize = 0,
     keep: usize = 0,
     levels: usize = 0,
+    has_buf: bool = false,
+    has_pinned: bool = false,
+    has_copied: bool = false,
+    ready_made: usize = 0,
 
     /// The head a stream drafts its next round with: the subset while the draft ids cover its context's tail.
     pub fn vocab(h: *const Head, context: []const u32) Vocab {
@@ -118,8 +122,10 @@ pub const Head = struct {
         for (sizes) |s| total += std.mem.alignForward(usize, s, 256);
         const h = try e.gpa.create(Head);
         errdefer e.gpa.destroy(h);
-        h.* = .{ .e = e, .buf = try cuda.DeviceBuffer.alloc(e.ctx.d, total), .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0 };
-        errdefer h.buf.free();
+        h.* = .{ .e = e, .buf = undefined, .pinned = undefined, .copied = undefined, .ready = undefined, .k_cache = 0, .v_cache = 0, .meta = 0, .hin = 0, .tok = 0, .probs = 0, .out = 0, .emb = 0, .cat = 0, .cxs = 0, .x = 0, .h1 = 0, .hn = 0, .row = 0, .rxs = 0, .logits = 0, .flog = 0, .vals = 0, .cols = 0, .cand = 0, .fp = 0, .outs = 0, .metas = 0, .atok = 0, .topk = 0, .invalid = 0 };
+        errdefer if (!h.cleanup()) @panic("MTP construction completion failed; keeping all parents until process exit");
+        h.buf = try cuda.DeviceBuffer.alloc(e.ctx.d, total);
+        h.has_buf = true;
         const fields = [_]*u64{ &h.k_cache, &h.v_cache, &h.meta, &h.hin, &h.tok, &h.probs, &h.out, &h.emb, &h.cat, &h.cxs, &h.x, &h.h1, &h.hn, &h.row, &h.rxs, &h.logits, &h.flog, &h.vals, &h.cols, &h.cand, &h.fp, &h.outs, &h.metas, &h.atok, &h.topk, &h.invalid };
         var at: usize = 0;
         for (fields, sizes) |f, s| {
@@ -127,26 +133,44 @@ pub const Head = struct {
             at += std.mem.alignForward(usize, s, 256);
         }
         try h.buf.fill8(0, e.stream.handle); // on the engine's stream: the legacy one would race its first uploads
+        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (host_metas + S * meta_words) * 4);
+        h.has_pinned = true;
+        h.copied = try cuda.Event.init(e.ctx.d, false);
+        h.has_copied = true;
+        try h.copied.record(e.stream);
+        for (&h.ready) |*r| {
+            r.* = try cuda.Event.init(e.ctx.d, false);
+            h.ready_made += 1;
+        }
         e.head = h;
         inline for (seq_fields, &e.own.head) |name, *ptr| ptr.* = @field(h, name);
-        h.pinned = try cuda.HostBuffer.alloc(e.ctx.d, (host_metas + S * meta_words) * 4);
-        h.copied = try cuda.Event.init(e.ctx.d, false);
-        try h.copied.record(e.stream);
-        for (&h.ready) |*r| r.* = try cuda.Event.init(e.ctx.d, false);
         return h;
     }
 
     pub fn deinit(h: *Head) void {
-        h.e.stream.synchronize() catch {};
-        h.e.head = null;
+        if (!h.tryDeinit()) @panic("MTP completion failed; keeping all parents until process exit");
+    }
+    /// False leaves this head and every engine parent alive for the caller to retry.
+    pub fn tryDeinit(h: *Head) bool {
+        if (!h.cleanup()) return false;
+        if (h.e.head == h) h.e.head = null;
+        h.e.gpa.destroy(h);
+        return true;
+    }
+    fn cleanup(h: *Head) bool {
+        if (h.has_buf) h.e.stream.synchronize() catch return false;
         for (&h.absorb_graphs) |*g| if (g.*) |*x| x.deinit();
         for (&h.first_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
         for (&h.chain_graphs) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
-        for (&h.ready) |*r| r.deinit();
-        h.copied.deinit();
-        h.pinned.free();
-        h.buf.free();
-        h.e.gpa.destroy(h);
+        for (h.ready[0..h.ready_made]) |*r| r.deinit();
+        h.ready_made = 0;
+        if (h.has_copied) h.copied.deinit();
+        if (h.has_pinned) h.pinned.free();
+        if (h.has_buf) h.buf.free();
+        h.has_copied = false;
+        h.has_pinned = false;
+        h.has_buf = false;
+        return true;
     }
 
     /// Bytes a snapshot of the head's KV cache takes.
@@ -244,15 +268,7 @@ pub const Head = struct {
             try f.experts(m.moe, spans.len, false);
             try t.addMoeNorm(h.h1, b.ymoe, true, b.wts, m.final_norm, h.hn, h.row, h.rxs, spans.len, c.hidden, c.eps, c.top_k, c.slots());
         }
-        const v = spans[0].vocab;
-        for (spans[1..]) |s| {
-            if (s.vocab != v) break;
-        } else {
-            try o.dense(h.row, h.rxs, h.output(v), h.logits, spans.len);
-            return h.width(v);
-        }
-        for (spans, 0..) |s, k| try o.dense(h.row + k * D * 2, h.rxs + k * D / 64 * 4, h.output(s.vocab), h.logits + k * c.vocab * 2, 1);
-        return c.vocab;
+        return @import("cuda_mtp_projection.zig").project(o, spans, [2]weights.QLinear{ h.e.w.draft_head.?, h.e.w.head }, .{ h.e.w.draft_count, c.vocab }, h.row, h.rxs, h.logits, D);
     }
 
     /// MTPHead._level: 0 absorbs the window's kept rows, 1 absorbs and drafts after them, j > 1 extends; `v` drafts.

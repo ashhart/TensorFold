@@ -67,3 +67,7 @@ test {
 test {
     _ = @import("cuda_pages_safety_test.zig");
 }
+
+test {
+    _ = @import("cuda_subset_host_test.zig");
+}

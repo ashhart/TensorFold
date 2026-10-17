@@ -490,8 +490,12 @@ pub fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Check
 }
 
 /// Rows `ids` of `t` (a row its first dimension's), in `ids`' order, into `host`: the whole tensor read once.
-pub fn gatherRows(L: *Loader, t: Tensor, ids: []const u32, host: []u8) !void {
+pub fn gatherRows(L: anytype, t: Tensor, ids: []const u32, host: []u8) !void {
+    if (t.rank == 0 or t.dim(0) == 0 or t.bytes.len % t.dim(0) != 0) return error.UnexpectedTensor;
     const row = t.bytes.len / t.dim(0);
+    const need = std.math.mul(usize, ids.len, row) catch return error.UnexpectedTensor;
+    if (row == 0 or need > host.len) return error.UnexpectedTensor;
+    for (ids) |id| if (id >= t.dim(0)) return error.DraftIdPastVocabulary;
     const whole = try L.gpa.alloc(u8, t.bytes.len);
     defer L.gpa.free(whole);
     try L.src.read(whole, t.bytes);
