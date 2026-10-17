@@ -8,6 +8,8 @@ const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
+const tree_k = @import("contract_tree_attn.zig");
+const block_k = @import("contract_block_attn.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -21,7 +23,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "tree_attention", "block_attention" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -89,6 +91,27 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var tree_paths = try cuda.tree_attention.TreeAttention.load(gpu.d);
+    defer tree_paths.unload();
+    var paths = tree_k.Paths{ .rig = .{ .gpu = gpu, .s = s }, .ta = &tree_paths };
+    defer paths.deinit();
+    try kernels.append(a, paths.kernel());
+    var trees: [tree_k.variants.len]tree_k.Tree = undefined;
+    var ntrees: usize = 0;
+    defer for (trees[0..ntrees]) |*x| {
+        x.ta.unload();
+        x.deinit();
+    };
+    for (tree_k.variants) |v| {
+        trees[ntrees] = .{ .rig = .{ .gpu = gpu, .s = s }, .v = v, .ta = try cuda.tree_attention.TreeAttention.load(gpu.d) };
+        ntrees += 1;
+    }
+    for (&trees) |*x| try kernels.append(a, x.kernel());
+    var block_attn = try cuda.block_attention.BlockAttention.load(gpu.d);
+    defer block_attn.unload();
+    var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
+    defer for (&blocks) |*x| x.deinit();
+    for (&blocks) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
