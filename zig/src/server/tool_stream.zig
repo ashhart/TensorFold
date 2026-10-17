@@ -1,6 +1,6 @@
 //! Tool calls while they are written: XML calls as argument deltas, and the one-call policy's text filter.
 const std = @import("std");
-const json = @import("json.zig");
+const json = @import("json");
 const ids = @import("ids.zig");
 const reply_text = @import("reply_text.zig");
 const tool_params = @import("tool_params.zig");

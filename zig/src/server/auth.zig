@@ -271,6 +271,13 @@ test "gates and digests" {
     try std.testing.expect(loopback("127.0.0.1") and loopback("::1") and !loopback("0.0.0.0"));
 }
 
+test "the delete route sits behind the server's key, as every /v1 route and the --slide start do" {
+    for ([_][]const u8{ "/v1/slide/fact/2", "/v1/slide/fact/2/", "/v1/slide/fact/2?x=1" }) |path| {
+        try std.testing.expect(gated(path, false));
+        try std.testing.expect(gated(path, true));
+    }
+}
+
 test "auth cleanup after invalid initialization" {
     var problem: []const u8 = "";
     const gpa = std.testing.allocator;

@@ -1,7 +1,7 @@
 //! POST /v1/audio/speech: synthesized whole and sent as WAV or raw PCM; anything but complete audio is an error.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const http_body = @import("http_body.zig");
 const routes = @import("routes.zig");
