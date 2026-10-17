@@ -108,10 +108,10 @@ async function main() {
   assert.equal(installed.verdict, 'installed')
 
   // Unsupported family, and a drafter on its own.
-  const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4' }))
+  const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4_unified' }))
   const unsupported = await preflightRepo('google/gemma-9', null, context(gemma.fetchImpl))
   assert.equal(unsupported.verdict, 'unsupported')
-  assert.match(unsupported.reasons[0], /serves no gemma4 family/)
+  assert.match(unsupported.reasons[0], /serves no gemma4_unified family/)
   const drafterOnly = mockHub(repoRoutes('z-lab/Qwen3.8-27B-DFlash2', { dflash: true }))
   assert.equal((await preflightRepo('z-lab/Qwen3.8-27B-DFlash2', null, context(drafterOnly.fetchImpl))).verdict, 'unsupported')
 

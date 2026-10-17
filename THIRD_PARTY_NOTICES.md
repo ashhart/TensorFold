@@ -69,6 +69,32 @@ In the Python engine, frozen at 0.6.6, the MLX engine of `glm5_next`
   row, so each row keeps MLX's one-row bits. The native `zig/kernels/metal/glm/qmv*.metal`, `gemv*.metal`,
   `moe_*.metal` and `router.metal` are generated from these.
 
+## Gemma 4 on Apple Silicon
+
+The native Gemma 4 engine (`zig/src/families/gemma4/`) ports the Python engine's dense Gemma 4 decode, which @gilby
+wrote in [#360](https://github.com/ashhart/TensorFold/pull/360) on @cshintov's Gemma kernels from
+[#10](https://github.com/ashhart/TensorFold/pull/10) ([credits](https://github.com/ashhart/TensorFold/blob/main/docs/credits.md)).
+Its reference is gilby's `gemma4-dense` branch at `a6ff795e`: `RowDecode` in `src/tensorfold/kernels/gemma/v1/decode.py`
+and the `_EMIT`, `qkv_prep`, `attn_tail` and `dense_tail` kernels and the attention partials and merge in `glue.py` and
+`attention.py`. `zig/kernels/metal/gemma4/glue.metal` repeats that arithmetic, and each kernel names its source.
+
+Where that reference calls MLX or mlx-lm, `glue.metal` repeats their kernels' arithmetic (MLX and mlx-lm, MIT License,
+Copyright © 2023 Apple Inc.; see [the license text](LICENSES/MIT.txt)): `gemma_rms_looped` is MLX's `rms_looped` from
+`mlx/backend/metal/kernels/rms_norm.metal`, the kernel `mx.fast.rms_norm` runs for rows past 4,096, with its thread
+counts, reads and rounding points; `gemma_embed` is MLX's affine dequantize followed by a bf16 multiply;
+`gemma_geglu` and `gemma_softcap` are `geglu` and `logit_softcap` from mlx-lm's `models/gemma4_text.py` as MLX's
+bf16 ops; and `gemma_rope_freqs` is mlx-lm's `ProportionalRoPE` frequencies, computed as MLX's `pow` computes them.
+
+The image tower (`zig/src/families/gemma4/vision.zig`, `zig/kernels/metal/gemma4/vision.metal`) follows
+`Gemma4VisionModel` and `Gemma4MultimodalEmbedder` in transformers' `models/gemma4/modeling_gemma4.py`, and
+`zig/src/families/gemma4/image.zig` follows `Gemma4ImageProcessorPil` in `image_processing_pil_gemma4.py`
+(`get_aspect_ratio_preserving_size`, the patch layout and the rescale). Copyright 2026 the HuggingFace Team, Apache
+License 2.0; see [the license text](LICENSES/Apache-2.0.txt). The engine runs none of their code.
+
+The drafter (`zig/src/families/gemma4/dflash.zig`) implements z-lab's DFlash for Gemma 4 31B from the MLX model listed
+under [vendored code](#vendored-code-and-weights) (z-lab/dflash, MIT License, Copyright © 2026 Z Lab); the native
+engine vendors no copy.
+
 ## CUDA
 
 The Python engine's CUDA backends, frozen at 0.6.6, use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and

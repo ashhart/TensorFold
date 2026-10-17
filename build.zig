@@ -124,6 +124,14 @@ pub fn build(b: *std.Build) void {
         .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options),
         else => {},
     }
+    const gemma4_host_sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig"), .target = b.graph.host });
+    gemma4_host_sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-host-empty.metallib", "") });
+    @import("zig/build/gemma4_host.zig").tests(b, gemma4_host_sources);
+    if (b.graph.host.result.os.tag == .macos) {
+        const gemma4_host_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
+        gemma4_host_mods.sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("gemma4-compile-empty.metallib", "") });
+        @import("zig/build/gemma4_host.zig").compileHost(b, gemma4_host_mods.metal, gemma4_host_mods.engine, gemma4_host_mods.lanes);
+    }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
@@ -399,6 +407,12 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
+        .{ .name = "tf-gemma4-kernels", .path = "zig/tests/gemma4/kernels.zig", .about = "Gemma 4 dense decode kernels against gemma4_dump.py's fixtures, bit for bit by window width" },
+        .{ .name = "tf-gemma4-glue", .path = "zig/tests/gemma4/glue.zig", .about = "Gemma 4 dense glue kernels against gemma4_dump.py's fixtures: embed, norm, q/k/v, attention, tails, softcap" },
+        .{ .name = "tf-gemma4-run", .path = "zig/tests/gemma4/run.zig", .about = "Gemma 4 dense greedy decode, tokens and top-two margins for gemma4_gate.py check" },
+        .{ .name = "tf-gemma4-lanes", .path = "zig/tests/gemma4/lanes.zig", .about = "Gemma 4 dense on the lane core: plain, copy-drafted and shared-round streams against the oracle's tokens" },
+        .{ .name = "tf-gemma4-vision", .path = "zig/tests/gemma4/vision.zig", .about = "Gemma 4's image tower against gemma4_vision_fixtures.py's dumps: patches bit for bit, each stage's error beside torch bf16's" },
+        .{ .name = "tf-gemma4-bench", .path = "zig/tests/gemma4/bench.zig", .about = "Gemma 4 dense step costs: projections alone by rows against whole forwards" },
         .{ .name = "tf-qwen36-row-seam", .path = "zig/tests/qwen36_row_seam.zig", .about = "Model-free fixture: the row projection's bias sums stay fp32 at every width" },
     };
     for (engine_programs) |p| {

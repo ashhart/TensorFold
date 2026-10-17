@@ -26,7 +26,7 @@ pub const Expanded = struct {
 const Part = struct { video: bool = false, url: []const u8, low: bool = false };
 
 /// The image and video parts of normalized `messages`, in the order the template meets them.
-fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
+fn parts(cx: *Cx, messages: Value, image_type: []const u8) errors.Refused![]const Part {
     var out: std.ArrayList(Part) = .empty;
     if (messages != .array) return out.items;
     for (messages.array) |m| {
@@ -35,7 +35,7 @@ fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
         for (content.array) |p| {
             const kind = p.get("type") orelse continue;
             if (kind != .string) continue;
-            if (std.mem.eql(u8, kind.string, "image_url")) {
+            if (std.mem.eql(u8, kind.string, "image_url") or std.mem.eql(u8, kind.string, image_type)) {
                 const iu = p.get("image_url").?;
                 const detail = iu.get("detail");
                 try out.append(cx.a, .{ .url = iu.get("url").?.string, .low = detail != null and std.mem.eql(u8, detail.?.string, "low") });
@@ -227,7 +227,7 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
 /// The prompt with image placeholders expanded to tokens and video ones to frame groups, its images and cache ids.
 pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
-    const ps = try parts(cx, messages);
+    const ps = try parts(cx, messages, v.part_type);
     var n_images: usize = 0;
     for (ps) |p| n_images += @intFromBool(!p.video);
     const n_videos = ps.len - n_images;

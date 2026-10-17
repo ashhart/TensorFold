@@ -44,7 +44,7 @@ pub const Drafted = struct {
     }
 
     pub fn backend(x: *Drafted) be.Backend {
-        return .{ .ptr = x, .first_before_draft = x.target.first_before_draft, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = x, .first_before_draft = x.target.first_before_draft, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .held = held, .release = release } };
     }
 
     /// The target's facts with the drafter's depth, step cost, prior, plain guard and batching; chains drafted late.
@@ -78,6 +78,13 @@ pub const Drafted = struct {
     /// The target's prompt pass, then the drafter absorbs its rows but the last; a later failure releases both.
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const x = self(ptr);
+        if (s.drafts) if (x.target.vtable.prefill_features) |streamed| { // chunk by chunk: no whole prompt's taps held
+            try x.lanes.ensureUnusedCapacity(x.gpa, 1);
+            try x.drafter.open(s);
+            x.lanes.putAssumeCapacity(s, .{});
+            errdefer x.dropStream(s);
+            return streamed(x.target.ptr, s, x.drafter.taps(), .{ .ptr = x, .take = take });
+        };
         try x.target.prefill(s);
         if (!s.drafts) return;
         errdefer x.dropStream(s);
@@ -90,6 +97,17 @@ pub const Drafted = struct {
         const n: u32 = @intCast(ids.len - 1 - from);
         const f = try x.target.features(s, x.drafter.taps(), from, n);
         try x.drafter.absorb(&.{.{ .stream = s, .features = f, .start = from, .follow = ids[from + 1 ..] }});
+    }
+
+    /// A prompt chunk's rows but the prompt's last (absorbed with the first token, as `prefill` leaves it).
+    fn take(ptr: *anyopaque, s: *Stream, f: be.Features, start: u64) anyerror!void {
+        const x = self(ptr);
+        const ids = s.prompt();
+        const last = ids.len - 1;
+        if (start >= last) return;
+        var rows = f;
+        rows.rows = @intCast(@min(f.rows, last - start));
+        try x.drafter.absorb(&.{.{ .stream = s, .features = rows, .start = start, .follow = ids[@intCast(start + 1)..] }});
     }
 
     fn first(ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
@@ -142,6 +160,17 @@ pub const Drafted = struct {
         }
         if (x.streams.items.len > 0) try x.drafter.held(x.streams.items, x.outs.items);
         return x.target.verify(x.windows.items, out);
+    }
+
+    /// One stream's held drafts as host tokens for a grammar to walk (fillers: the pending token, kept for the verify).
+    fn held(ptr: *anyopaque, s: *Stream, out: []u32) anyerror!void {
+        const x = self(ptr);
+        const lane = x.lanes.getPtr(s) orelse return error.NotDrafting;
+        if (lane.filler > 0) {
+            @memset(out, s.pending.?);
+            return;
+        }
+        try x.drafter.held(&.{s}, &.{out});
     }
 
     /// The target keeps from the windows it verified (host tokens): the round loop's, position for position.

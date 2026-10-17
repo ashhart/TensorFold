@@ -73,7 +73,7 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 request, images and videos expanded. `/detokenize` takes `tokens` and returns `prompt`.
 In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
 alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native
-server reads images for GLM-5.3-Flash and Qwen3.8-27B on Metal, with data URLs, and public HTTPS URLs under
+server reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 31B on Metal, with data URLs, and public HTTPS URLs under
 `--vision-urls` ([image input](vision.md#the-native-server)); for GLM-5.3-Flash it also takes `video_url` parts in
 user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
@@ -264,16 +264,18 @@ macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dx
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
 `zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
-structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
-answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
-before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
-and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
+structured request gets HTTP 400. Nemotron (Metal and CUDA), Qwen3.5-2B and Gemma 4 31B (Metal) enforce it; other
+native engines answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come
+back to the host before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key,
+closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies
+are the same.
 
-On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
-is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
-Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments inside the
-tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false` allows exactly
-one call. With thinking on, the grammar starts after the think end.
+On the native server, `tool_choice: "required"` and a named function are a grammar too, on Nemotron and Qwen3.5-2B
+(Gemma 4's template writes `<|tool_call>call:NAME{...}<tool_call|>`, so there they get HTTP 400 asking for `auto`): the
+answer is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as
+Nemotron and Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments
+inside the tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false`
+allows exactly one call. With thinking on, the grammar starts after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),

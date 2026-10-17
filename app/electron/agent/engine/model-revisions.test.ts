@@ -28,7 +28,7 @@ function reviewedFetch(options: { invalidSha?: boolean; missingDrafter?: boolean
     if (route === `/api/models/${REPO}/revision/unsupported`) body = { sha: OTHER }
     if ([`/api/models/${REPO}/tree/${SHA}`, `/api/models/${REPO}/tree/${OTHER}`].includes(route)) body = [{ type: 'file', path: 'model.safetensors', size: 8192 }]
     if (route === `/${REPO}/resolve/${SHA}/config.json`) body = { model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }
-    if (route === `/${REPO}/resolve/${OTHER}/config.json`) body = { model_type: 'gemma4' }
+    if (route === `/${REPO}/resolve/${OTHER}/config.json`) body = { model_type: 'gemma4_unified' }
     return body ? new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }) : new Response('missing', { status: 404 })
   }) as typeof fetch
 }
@@ -45,7 +45,7 @@ async function main() {
     const pull = (await h.records()).find((r) => r.kind === 'pull')
     assert.equal(pull.revision, SHA, 'the actual child must pull the immutable checkpoint whose format and memory were reviewed')
     await service.preflight(REPO) // Re-populate the main-review cache after the completed pull invalidates it.
-    await assert.rejects(() => service.pull(REPO, 'unsupported'), /serves no gemma4/, 'a cached main preflight cannot authorize another revision')
+    await assert.rejects(() => service.pull(REPO, 'unsupported'), /serves no gemma4_unified/, 'a cached main preflight cannot authorize another revision')
 
     const registry = path.join(h.root, 'engine', 'model-revisions.json')
     const persisted = JSON.parse(await fs.readFile(registry, 'utf8'))
@@ -71,7 +71,7 @@ async function main() {
     assert.equal(serve.args[serve.args.indexOf('--name') + 1], REPO, 'logical model identity is preserved for the API')
     await assert.rejects(() => restarted.pull(REPO), /Unload/, 'a pull cannot change a currently serving selection')
     await restarted.unload()
-    await seedModel(h.hub, REPO, { modelType: 'gemma4' })
+    await seedModel(h.hub, REPO, { modelType: 'gemma4_unified' })
     const beforeRef = await fs.readFile(ref, 'utf8')
     restarted = fresh()
     assert.equal((await restarted.installed())[0].modelType, 'qwen3_5')
