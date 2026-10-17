@@ -200,3 +200,13 @@ extern "C" __global__ void __launch_bounds__(256) tf_qv_bias_cast(const float* _
     const long long row = blockIdx.x;
     for (int i = threadIdx.x; i < D; i += blockDim.x) y[row * D + i] = __float2bfloat16_rn(acc[row * D + i] + bf(bias[i]));
 }
+
+// A prompt chunk's image rows from the tower's features, each repeated over `copies` streams; text rows stay.
+extern "C" __global__ void tf_qv_splice(const __nv_bfloat16* features, const int* src,
+                                       __nv_bfloat16* out, int at, int n, int width, int copies) {
+    const int row = blockIdx.x, logical = at + row, col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (logical >= n || col >= width * copies) return;
+    const int from = src[logical];
+    if (from >= 0) out[static_cast<long long>(row) * width * copies + col] =
+        features[static_cast<long long>(from) * width + col % width];
+}
