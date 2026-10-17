@@ -84,19 +84,29 @@ test "budget pressure refuses a keep rather than evicting an outstanding lookup"
     try std.testing.expect(s.keep(&other, 4, null, &.{}, &.{}));
 }
 
-test "a failed restore reports whether the state was already expired on arrival" {
-    const other = [_]u32{ 11, 12, 13, 14, 15, 16 };
-    for ([_][]const u32{ &prompt, &other }, [_]bool{ false, true }) |tokens, expire_first| {
-        var arena: std.heap.ArenaAllocator = .init(a);
-        defer arena.deinit();
-        var f: Fake = .{ .gpa = a };
-        var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
-        defer s.deinit();
-        _ = f.pass(&s, tokens, try s.begin(arena.allocator(), tokens, 4, &.{}, &.{}, null, &.{}));
-        const entry = (try s.lookup(arena.allocator(), tokens, 4, &.{}, &.{}, &.{})).entry.?;
-        if (expire_first) s.expired(entry.saved); // a concurrent admission invalidated it between lookup and restore
-        s.resumed(entry, tokens, false); // the backend refused the restore: the pass prefills from 0
-        try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
-        try std.testing.expect(entry.expired);
-    }
+test "a failed restore on a valid state counts one failure and expires the entry" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    s.resumed(entry, &prompt, false); // the backend refused: the pass prefills from the start
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expect(entry.expired);
+}
+
+test "a failed restore on an already expired state counts its failure too" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    s.expired(entry.saved); // a concurrent admission invalidated it between lookup and restore
+    s.resumed(entry, &prompt, false);
+    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+    try std.testing.expect(entry.expired);
 }
