@@ -5,24 +5,25 @@ const tp = @import("tp");
 const tp_kernel = @import("tp_kernel");
 const checks = @import("gpu_checks.zig");
 const bench = @import("gpu_bench.zig");
+const cli = @import("gpu_cli.zig");
 
 const max_bytes = (4 << 20) + 4096;
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 2) {
-        std.debug.print("usage: tf-tp-test suite | failfast RANK fatal|kill|transport [N [HOLD_S]] | roce-host | hca | kernel\n", .{});
+    const command = cli.parse(args[1..]) catch {
+        std.debug.print("{s}", .{cli.usage});
         return 2;
-    }
+    };
     // `kernel`: whether the build embeds the mailbox kernel (-Dtp-nvcc or -Dtp-fatbin), for scripts to check first
-    if (std.mem.eql(u8, args[1], "kernel")) {
+    if (command == .kernel) {
         std.debug.print("mailbox kernel {d} B\n", .{tp_kernel.mailbox.len});
         return if (tp_kernel.mailbox.len > 0) 0 else 1;
     }
     const cfg = try tp.Config.fromEnv();
-    if (std.mem.eql(u8, args[1], "roce-host")) return @import("roce_host.zig").run(cfg, init.gpa);
-    if (std.mem.eql(u8, args[1], "hca")) return hca(cfg, init.io);
-    if (std.mem.eql(u8, args[1], "failfast") and (!cfg.failfast or args.len > 5) and !hostOnlyAllowed(cfg)) {
+    if (command == .@"roce-host") return @import("roce_host.zig").run(cfg, init.gpa);
+    if (command == .hca) return hca(cfg, init.io);
+    if (command == .failfast and (!cfg.failfast or command.failfast.hold != null) and !hostOnlyAllowed(cfg)) {
         std.debug.print("REFUSED: failfast with TF_TP_FAILFAST=0 or a hold is host-only: TF_TP_ALLOW_HOST_ONLY=1 and no RDMA wire\n", .{});
         return 2;
     }
@@ -40,15 +41,14 @@ pub fn main(init: std.process.Init) !u8 {
     try s.open(&driver, cfg, tp_kernel.mailbox);
     const up_ms = @as(f64, @floatFromInt(tp.sock.nowNs() - t0)) / 1e6;
     std.debug.print("INFO rank {d}/{d} on {s} (sm_{d}), backend {t}, mailbox kernel {d} B, bootstrap + NCCL init {d:.0} ms\n", .{ cfg.rank, cfg.world, try ctx.name(&name_buf), try ctx.capability(), s.comm().kind(), tp_kernel.mailbox.len, up_ms });
-    if (std.mem.eql(u8, args[1], "suite")) return suite(&s, &driver, init.gpa, cfg);
-    if (std.mem.eql(u8, args[1], "failfast") and args.len >= 4 and std.mem.eql(u8, args[3], "transport")) {
-        const n = if (args.len > 4) try std.fmt.parseInt(u32, args[4], 10) else 50;
-        const hold = if (args.len > 5) try std.fmt.parseInt(u32, args[5], 10) else 0;
-        return @import("gpu_transport.zig").run(&s, &driver, init.gpa, cfg, try std.fmt.parseInt(u32, args[2], 10), n, hold);
-    }
-    if (std.mem.eql(u8, args[1], "failfast") and args.len == 4) return failfast(&s, &driver, init.gpa, cfg, try std.fmt.parseInt(u32, args[2], 10), args[3]);
-    std.debug.print("unknown command {s}\n", .{args[1]});
-    return 2;
+    return switch (command) {
+        .suite => suite(&s, &driver, init.gpa, cfg),
+        .failfast => |f| if (f.mode == .transport)
+            @import("gpu_transport.zig").run(&s, &driver, init.gpa, cfg, f.victim, f.n, f.hold orelse 0)
+        else
+            failfast(&s, &driver, init.gpa, cfg, f.victim, @tagName(f.mode)),
+        else => unreachable,
+    };
 }
 
 /// `hca` (host only, no GPU): both ranks' RoCE pick over the bootstrap; this rank's `NCCL_IB_HCA=...` line on stdout.

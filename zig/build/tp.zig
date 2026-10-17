@@ -47,7 +47,9 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     test_step.dependOn(&cli_tests.step);
     if (host.result.os.tag == .linux) {
         const tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, runtime(b, host, .debug)) }));
-        b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)").dependOn(&tests.step);
+        const tp_step = b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)");
+        tp_step.dependOn(&tests.step);
+        tp_step.dependOn(cli_step);
         test_step.dependOn(&tests.step);
     }
     if (target.result.os.tag != .linux) return;
@@ -70,6 +72,15 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             check.expectStdErrEqual(cli.usage);
             cli_step.dependOn(&check.step);
             test_step.dependOn(&check.step);
+        }
+        if (image == null) {
+            const kernel = b.addRunArtifact(exe);
+            kernel.addArg("kernel");
+            kernel.setEnvironmentVariable("TF_TP_WORLD", "invalid");
+            kernel.expectExitCode(1);
+            kernel.expectStdErrEqual("mailbox kernel 0 B\n");
+            cli_step.dependOn(&kernel.step);
+            test_step.dependOn(&kernel.step);
         }
     }
     b.installArtifact(exe);
