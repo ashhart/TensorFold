@@ -36,7 +36,8 @@ const Checker = struct {
         inline for (.{ ".weight", "._lane_sbt" }, 0..) |suffix, j| {
             if (std.mem.endsWith(u8, name, suffix)) {
                 if (w.linears.get(name[0 .. name.len - suffix.len])) |lin| {
-                    const buf = if (j == 0) lin.w else lin.sbt;
+                    const lane = lin.tiles orelse return null; // other widths keep rows, no lane tiles
+                    const buf = if (j == 0) lane.w else lane.sbt;
                     const bytes = if (j == 0) lin.n * lin.k / 2 else lin.k / 64 * lin.n * 4;
                     return .{ .buffer = buf, .offset = 0, .bytes = bytes, .owned = false };
                 }

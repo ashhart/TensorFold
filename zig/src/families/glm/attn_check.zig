@@ -77,7 +77,8 @@ fn sparseCheck(comptime heads: usize) !void {
     enc.setPipeline(nax_pipe);
     for (bufs[0..3], 0..) |b, i| enc.setBuffer(b, 0, i);
     enc.setValue(scale, 3);
-    enc.setValue([4]i32{ WIDTH, CAP, 0, 0 }, 4);
+    // these lists aren't causal: a position past WIDTH has the kernel read every entry
+    enc.setValue([4]i32{ WIDTH, CAP, WIDTH, 0 }, 4);
     enc.setBuffer(bufs[4], 0, 5);
     enc.dispatchGroups(mtl.Size.of(heads / 16, ROWS, 1), mtl.Size.of(128, 1, 1));
     enc.end();
@@ -134,6 +135,28 @@ fn sparseCheck(comptime heads: usize) !void {
     const share = @as(f64, @floatFromInt(same)) / @as(f64, @floatFromInt(ROWS * heads * RANK));
     std.debug.print("sparse attention ({d} heads): {d:.2}% of outputs equal the row kernel's, at most {d:.2} bf16 steps apart\n", .{ heads, share * 100, worst });
     try std.testing.expect(share > 0.99 and worst <= 2);
+
+    // a row at position p reads only its first p + 1 entries: keys listed after them change no bits
+    for ([_]usize{ 30, 2047 }) |pos| {
+        for ([_]bool{ false, true }, bufs[3..5]) |stop, out| {
+            for (0..ROWS) |r| for (lists[r * WIDTH ..][0..WIDTH], 0..) |*k, j| {
+                k.* = if (stop or j <= pos + r) @intCast(j) else -1;
+            };
+            const cb2 = queue.commandBuffer();
+            const enc2 = cb2.compute(.serial);
+            enc2.setPipeline(nax_pipe);
+            for (bufs[0..3], 0..) |b, i| enc2.setBuffer(b, 0, i);
+            enc2.setValue(scale, 3);
+            enc2.setValue([4]i32{ WIDTH, CAP, if (stop) @intCast(pos) else WIDTH, 0 }, 4);
+            enc2.setBuffer(out, 0, 5);
+            enc2.dispatchGroups(mtl.Size.of(heads / 16, ROWS, 1), mtl.Size.of(128, 1, 1));
+            enc2.end();
+            cb2.commit();
+            cb2.wait();
+            try std.testing.expect(cb2.failure() == null);
+        }
+        try std.testing.expectEqualSlices(u16, bufs[3].slice(u16, ROWS * heads * RANK), bufs[4].slice(u16, ROWS * heads * RANK));
+    }
 }
 
 test "sparse attention on the tensor units: the row kernel's values within bf16 rounding" {

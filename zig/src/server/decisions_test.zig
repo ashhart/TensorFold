@@ -1,7 +1,7 @@
 //! Request checks for /v1/decisions, and a fake engine hook that scores one choice.
 const std = @import("std");
 const api = @import("engine_api");
-const json = @import("json.zig");
+const json = @import("json");
 const errors = @import("errors.zig");
 const openai = @import("openai.zig");
 const model_text = @import("model_text.zig");
@@ -82,7 +82,7 @@ const Backend = struct {
         return null;
     }
 
-    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64) error{Failed}!f64 {
+    fn score(ctx: *anyopaque, prompt: []const u32, labels: []const u32, logits: []f64, _: bool) error{Failed}!f64 {
         const b: *@This() = @ptrCast(@alignCast(ctx));
         b.calls += 1;
         b.prompt_len = prompt.len;

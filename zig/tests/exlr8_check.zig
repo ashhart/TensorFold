@@ -88,6 +88,32 @@ fn run(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, d: cases.Da
     return out;
 }
 
+fn checkBlocks(device: mtl.Device, queue: mtl.Queue, p: *const op.Pipelines, book: *const codec.Codebook) !void {
+    var check: ref.Check = .{};
+    var pairs: usize = 0;
+    for ([_]u8{ 2, 3, 4 }) |k| for ([_]usize{ 1, 2, 3, 17, 48 }) |blocks| for ([_]bool{ false, true }) |f32_out| {
+        const c: cases.Case = .{
+            .name = "block reuse",
+            .k = .{ k, 0, 0 },
+            .slots = 1,
+            .blocks = blocks,
+            .outs = 1,
+            .down = false,
+            .y_f32 = f32_out,
+        };
+        const d = try cases.Data.init(c, 0xD08 + @as(u64, k) * 128 + blocks);
+        defer d.deinit();
+        const o = try run(device, queue, p, d, 1);
+        defer o.deinit();
+        pairs += try cases.rowsEqual(o);
+        try cases.fp64(book, d, o, &check);
+    };
+    std.debug.print(
+        "PASS block reuse: 30 cases, {d} row/window pairs, {d} FP64 values; max error {e}, max {d:.4} of bound\n",
+        .{ pairs, check.values, check.max_error, check.max_fraction },
+    );
+}
+
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
     const freeze = argv.len == 2 and std.mem.eql(u8, argv[1], "--freeze");
@@ -108,6 +134,7 @@ pub fn main(init: std.process.Init) !void {
     book.init();
     std.debug.print("EXLR8 Metal projections on {s}; synthetic weights, no model files\n", .{device.name()});
     try checkWeights(device, queue, &p, book);
+    try checkBlocks(device, queue, &p, book);
     var check: ref.Check = .{};
     var pairs: usize = 0;
     for (cases.cases, 0..) |c, i| {

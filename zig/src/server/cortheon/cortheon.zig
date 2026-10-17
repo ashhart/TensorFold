@@ -1,6 +1,6 @@
 //! Cortheon in the server (--cortheon): its reasoning program, web research before building, server-run web tools.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const chat = @import("../chat.zig");
 const grammar = @import("../grammar.zig");
 const prompt_mod = @import("../prompt.zig");
