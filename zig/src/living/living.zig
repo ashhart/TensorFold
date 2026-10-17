@@ -59,6 +59,10 @@ test {
 pub const save_failure_fixture = if (@import("builtin").is_test) @import("host_test.zig") else struct {};
 pub const host_test = @import("host_test.zig");
 pub const pocket_round = @import("pocket_round.zig");
-test { _ = @import("commit_test.zig"); }
+test {
+    _ = @import("commit_test.zig");
+}
 
-test { _ = @import("pocket_quiet_legacy_test.zig"); }
+test {
+    _ = @import("pocket_quiet_legacy_test.zig");
+}

@@ -415,7 +415,10 @@ pub fn run(gpu: Gpu) !void {
 pub fn runShape(gpu: Gpu, hidden: usize, group: usize) !void {
     const old_h = HIDDEN;
     const old_g = GROUP;
-    defer { HIDDEN = old_h; GROUP = old_g; }
+    defer {
+        HIDDEN = old_h;
+        GROUP = old_g;
+    }
     HIDDEN = hidden;
     GROUP = group;
     return runCurrent(gpu);

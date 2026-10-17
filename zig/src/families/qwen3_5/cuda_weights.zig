@@ -378,7 +378,6 @@ test {
     _ = @import("cuda_expert_pack.zig");
 }
 
-
 fn linearWide(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: []const u8, name: []const u8, n: usize, k: usize) !Affine4 {
     const down = std.mem.eql(u8, name, "mlp.down_proj");
     const na = n + if (down) @as(usize, 0) else e.g.pocket;

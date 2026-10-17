@@ -31,7 +31,6 @@ pub const Cache = struct {
     /// The newest verify window of more than one row, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
-
     pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
