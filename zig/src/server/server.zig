@@ -72,6 +72,8 @@ pub const Config = struct {
     timeouts: http_conn.Timeouts = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
+    /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
+    environ: ?*const std.process.Environ.Map = null,
 };
 
 pub const Server = struct {

@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
+const manifest = @import("benchmark_manifest.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -45,6 +46,14 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     }) |field|
         if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
     return .{ .object = o };
+}
+
+/// Facts an attached benchmark may copy. A missing or rejected manifest leaves the run unranked.
+pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
+    const none: std.process.Environ.Map = .init(a);
+    const env = srv.config.environ orelse &none;
+    const backend = if (srv.config.identity.backend.len > 0) srv.config.identity.backend else "cuda";
+    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir));
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {
