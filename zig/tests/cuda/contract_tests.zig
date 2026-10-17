@@ -8,6 +8,7 @@ const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
+const round_k = @import("contract_tree_round.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -21,7 +22,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "tree_round" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -89,6 +90,13 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var round_mod = try cuda.Module.load(gpu.d, kk.tree_round);
+    defer round_mod.unload();
+    const round_fns = try cuda.tree_round.Kernels.resolve(round_mod);
+    var rounds: [std.enums.values(round_k.Which).len]round_k.Round = undefined;
+    for (std.enums.values(round_k.Which), &rounds) |w, *r| r.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &round_fns };
+    defer for (&rounds) |*r| r.deinit();
+    for (&rounds) |*r| try kernels.append(a, r.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

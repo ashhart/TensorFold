@@ -34,6 +34,7 @@ pub const qlinear = @import("qlinear.zig");
 pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
 pub const vit = @import("vit.zig");
+pub const tree_round = @import("tree_round.zig");
 pub const experts = @import("experts.zig");
 pub const sample = @import("sample.zig");
 pub const rank_scatter = @import("rank_scatter.zig");
@@ -49,6 +50,7 @@ test {
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
     _ = @import("vit.zig");
+    _ = @import("tree_round.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = @import("rank_scatter.zig");
