@@ -52,8 +52,34 @@ const window_tests = @import("window_tests.zig");
 const moe_glue_tests = @import("moe_glue_tests.zig");
 const dense_rows_tests = @import("dense_rows_tests.zig");
 
+const experts_rows_tests = @import("experts_rows_tests.zig");
+const route_rows_tests = @import("route_rows_tests.zig");
+const flashnext_model_rank_tests = @import("flashnext_model_rank_tests.zig");
+const flashnext_fidelity_tests = @import("flashnext_fidelity_tests.zig");
+const flashnext_window_tests = @import("flashnext_window_tests.zig");
+const flashnext_rank_tests = @import("flashnext_rank_tests.zig");
+const flashnext_draft_affine_tests = @import("flashnext_draft_affine_tests.zig");
+const flashnext_shared_tests = @import("flashnext_shared_tests.zig");
+const flashnext_nvfp4_tp_tests = @import("flashnext_nvfp4_tp_tests.zig");
+const flashnext_dense_hc_tests = @import("flashnext_dense_hc_tests.zig");
+const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
+const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
+
 const usage =
     \\usage: tf-cuda-test <command>
+    \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
+    \\  route-rows                route_rows.cu's router logits and softmax top-k against float64 (synthetic rows)
+    \\  flashnext-fidelity-single MODEL FIXTURE OUTPUT  single-rank reference isolation
+    \\  flashnext-fidelity-rank MODEL RANK PORT FIXTURE OUTPUT  fixed-history full score rows
+    \\  flashnext-window-rank MODEL RANK PORT IDS_FILE  two-rank serial/window and rollback parity
+    \\  flashnext-model-rank MODEL RANK PORT IDS_FILE  explicit full-model replay experiment (no drafts)
+    \\  flashnext-rank RANK PORT [sum|eof|timeout|missing]  two-process collective and failure probes
+    \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
+    \\  flashnext-shared          separate MXFP8 shared expert and reserved-slot scatter against FP64
+    \\  flashnext-nvfp4-tp        rank-local expert cuts and FP32 partials against FP64 (one GPU)
+    \\  flashnext-dense-hc        dense connection weights and FP32 normalization against FP64
+    \\  flashnext-hc              Flash Next's own hyper-connection and n-gram glue against float64 (synthetic rows)
+    \\  flashnext-attn            Flash Next's own attention glue, pooling and block scores against float64 (synthetic)
     \\  info                      driver, device and library versions
     \\  smoke                     copies, fills, launches, argument packing, module globals
     \\  shared-context            Context.shared and Stream.borrowed as a library inside a host's process sees them
@@ -155,6 +181,20 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
 }
 
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
+    if (std.mem.eql(u8, cmd, "experts-rows")) return experts_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "route-rows")) return route_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-fidelity-single")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), false);
+    if (std.mem.eql(u8, cmd, "flashnext-fidelity-single-serial")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), true);
+    if (std.mem.eql(u8, cmd, "flashnext-fidelity-rank")) return flashnext_fidelity_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "flashnext-window-rank")) return flashnext_window_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "flashnext-model-rank")) return flashnext_model_rank_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "flashnext-rank")) return flashnext_rank_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), try std.fmt.parseInt(u16, try arg(rest, 1), 10), if (rest.len > 2) rest[2] else "sum");
+    if (std.mem.eql(u8, cmd, "flashnext-draft-affine")) return flashnext_draft_affine_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-shared")) return flashnext_shared_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-nvfp4-tp")) return flashnext_nvfp4_tp_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-dense-hc")) return flashnext_dense_hc_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-hc")) return flashnext_hc_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "flashnext-attn")) return flashnext_attn_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
     if (std.mem.eql(u8, cmd, "shared-context")) return runtime_tests.sharedContext(gpu);

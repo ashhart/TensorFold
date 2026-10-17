@@ -37,6 +37,7 @@ pub const grouped = @import("grouped.zig");
 pub const qlinear = @import("qlinear.zig");
 pub const norms = @import("norms.zig");
 pub const embed_rows = @import("embed_rows.zig");
+pub const route_rows = @import("route_rows.zig");
 pub const vit = @import("vit.zig");
 pub const tree_round = @import("tree_round.zig");
 pub const act_rows = @import("act_rows.zig");
@@ -63,6 +64,7 @@ test {
     _ = @import("qlinear.zig");
     _ = @import("norms.zig");
     _ = @import("embed_rows.zig");
+    _ = @import("route_rows.zig");
     _ = @import("vit.zig");
     _ = @import("tree_round.zig");
     _ = @import("act_rows.zig");

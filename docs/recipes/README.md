@@ -11,7 +11,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [CUDA images](flash-next-vision.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |

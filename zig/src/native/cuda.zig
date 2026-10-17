@@ -5,6 +5,9 @@ const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
+const flashnext = @import("flashnext");
+const family_memory = @import("cuda_family_memory.zig");
+pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
 const glm = @import("glm_cuda");
 const qwen35 = @import("qwen35");
@@ -18,7 +21,7 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, flashnext.native };
 
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
@@ -65,11 +68,6 @@ fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8
     return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
 }
 
-fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
-    const u = cuda.usage(reset_peak);
-    return .{ .active = u.device, .cache = 0, .peak = u.peak, .pinned = u.host };
-}
-
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
 const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
 
@@ -97,9 +95,16 @@ const Host = struct {
     slide: ?*anyopaque = null, // that learner's adapter, freed by slide_free before the family
     slide_free: ?*const fn (Allocator, *anyopaque) void = null,
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
+    follow_fn: ?*const fn (*anyopaque) anyerror!void = null,
     health: ?api.HealthSource = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
     served: drafted.Served = undefined, // the family's backend, wrapped with --drafter's draft model when given
+
+    fn followFamily(p: *anyopaque) anyerror!void {
+        const h: *Host = @ptrCast(@alignCast(p));
+        if (h.gpu) |g| try g.ctx.makeCurrent();
+        return h.follow_fn.?(h.family);
+    }
 
     /// A family's readiness reads host state only: no CUDA binding or blocking device work.
     fn readiness(h: *Host, comptime F: type) void {
@@ -152,7 +157,7 @@ const Host = struct {
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();
         h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
-        h.host.memory = if (h.gpu != null) .{ .read = readMemory } else null;
+        h.host.memory = if (h.gpu != null) .{ .read = family_memory.read } else null;
         h.host.explain = explain;
         h.host.health = h.health;
         h.host.cache = h.store;
@@ -302,7 +307,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const whole = budget.weightBytes(io, o.dir);
-    const weights = if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    const weights = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     const held0 = cuda.usage(false).device;
     // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest
     const Probe = struct {
@@ -319,6 +324,12 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
+    if (@hasField(F.Options, "rank")) {
+        opts.tp = @intCast(o.tp);
+        opts.rank = @intCast(o.rank);
+        opts.master = if (o.master.len > 0) o.master else null;
+        opts.master_port = o.master_port;
+    }
     if (o.vision) |vo| {
         if (!@hasField(F.Options, "vision")) {
             problem.* = "--vision: this CUDA family reads no images; serve it without --vision";
@@ -377,7 +388,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
     const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
     const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
-    var room = after.room(model) -| learn_bytes;
+    var room = try family_memory.room(F, loaded.ctx, after.room(model) -| learn_bytes);
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
         room = pr.bytes;
@@ -479,14 +490,17 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
+    if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
+        h.follow_fn = f;
+        return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .follow = Host.followFamily };
+    };
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
 }
 
-fn toGib(bytes: u64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / gib;
-}
+const toGib = family_memory.toGib;
 
 test {
+    _ = windows;
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
     _ = refusals;
     _ = lane_backend;

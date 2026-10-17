@@ -298,6 +298,7 @@ pub const Opened = struct {
     ctx: *anyopaque,
     /// A drain's deadline: rounds end at the next boundary, what is left fails with `reason`; null: `close` alone.
     halt: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null,
+    follow: ?*const fn (*anyopaque) anyerror!void = null,
 };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };

@@ -12,6 +12,31 @@ pub const UniqueId = extern struct { internal: [128]u8 };
 pub const DataType = enum(c_int) { i8 = 0, u8 = 1, i32 = 2, u32 = 3, i64 = 4, u64 = 5, f16 = 6, f32 = 7, f64 = 8, bf16 = 9 };
 pub const RedOp = enum(c_int) { sum = 0, prod = 1, max = 2, min = 3, avg = 4 };
 
+/// NCCL 2.30 public ncclConfig_v23000 ABI. New nonblocking rank owners explicitly require 2.30 or later.
+pub const Config = extern struct {
+    size: usize = @sizeOf(Config),
+    magic: u32 = 0xcafebeef,
+    version: u32 = 23000,
+    blocking: c_int = 0,
+    cga_cluster_size: c_int = std.math.minInt(c_int),
+    min_ctas: c_int = std.math.minInt(c_int),
+    max_ctas: c_int = std.math.minInt(c_int),
+    net_name: ?[*:0]const u8 = null,
+    split_share: c_int = std.math.minInt(c_int),
+    traffic_class: c_int = std.math.minInt(c_int),
+    comm_name: ?[*:0]const u8 = null,
+    collnet_enable: c_int = std.math.minInt(c_int),
+    cta_policy: c_int = std.math.minInt(c_int),
+    shrink_share: c_int = std.math.minInt(c_int),
+    nvls_ctas: c_int = std.math.minInt(c_int),
+    n_channels_per_net_peer: c_int = std.math.minInt(c_int),
+    nvlink_centric_sched: c_int = std.math.minInt(c_int),
+    graph_usage_mode: c_int = std.math.minInt(c_int),
+    num_rma_ctx: c_int = std.math.minInt(c_int),
+    max_p2p_peers: c_int = std.math.minInt(c_int),
+    graph_stream_ordering: c_int = std.math.minInt(c_int),
+};
+
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
 
 const R = Result;
@@ -87,3 +112,11 @@ pub const Library = struct {
         return v;
     }
 };
+
+test "nonblocking communicator config preserves the public ABI defaults" {
+    const c: Config = .{};
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Config));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(Config, "net_name"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(Config, "comm_name"));
+    try std.testing.expect(c.size == 96 and c.blocking == 0 and c.max_ctas == std.math.minInt(c_int));
+}
