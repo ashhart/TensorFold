@@ -471,7 +471,10 @@ pub const Model = struct {
             .bf16 => .bf16,
             else => .f16,
         };
-        if (grouped == null) {
+        // The shared expert's merged row decodes alone, while its plain product shares each tile
+        // across rows: merging pays off for one or two rows only (M5 Max per layer: 1 row
+        // 2.81 -> 2.23 ms, 2 rows 4.20 -> 4.03 ms, 4 rows 7.23 -> 7.29 ms).
+        if (grouped == null and rows <= 2) {
             route.encodeMerged(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), ws.view(.moe_routes), .{ .rows = rows, .bias_dtype = bias_dtype, .merged_stride = 7, .merged_extra = work.shared_expert });
             enc.barrier();
             return m.moeMerged(enc, w, rows);

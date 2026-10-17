@@ -270,10 +270,17 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const grouped = work.view(.grouped);
     const group_input = q_width / c.o_groups;
     const group_output = c.o_groups * c.o_lora_rank;
-    // All eight slices in one indexed product: row 8 t + g is token t's group g, at the same
-    // input and output offsets the per-slice products used, with the same bits.
+    // Up to four rows, all eight slices in one indexed product: row 8 t + g is token t's group g,
+    // at the same offsets the per-slice products use, with the same bits. Indexed rows decode
+    // their tiles alone, so from eight rows on the per-slice products, which share each decoded
+    // tile across eight rows, are faster (M5 Max: 4 rows 1.0 vs 1.5 ms, 8 rows 1.9 vs 1.6 ms,
+    // 256 rows 58 vs 17 ms).
     if (c.o_groups != 8) return error.UnsupportedAttentionGroups;
-    try exl3.encodeIndexed(ep, e, .{ .descriptors = core(.{ .buffer = w.wo_a_descriptors }), .count = 8, .k = group_input, .n = c.o_lora_rank }, core(q), core(grouped), scratch, .{ .count = @as(usize, rows) * 8, .x_stride = group_input, .y_stride = c.o_lora_rank, .output = .bf16, .routes = .{ .ids = core(.{ .buffer = work.slices }), .repeat = 1 } });
+    if (rows <= 4) {
+        try exl3.encodeIndexed(ep, e, .{ .descriptors = core(.{ .buffer = w.wo_a_descriptors }), .count = 8, .k = group_input, .n = c.o_lora_rank }, core(q), core(grouped), scratch, .{ .count = @as(usize, rows) * 8, .x_stride = group_input, .y_stride = c.o_lora_rank, .output = .bf16, .routes = .{ .ids = core(.{ .buffer = work.slices }), .repeat = 1 } });
+    } else for (w.wo_a, 0..) |matrix, group| {
+        try projection(ep, e, .{ .trellis = matrix }, q.shifted(group * group_input * 2), grouped.shifted(group * c.o_lora_rank * 2), scratch, rows, q_width, group_output, .bf16);
+    }
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .grouped, grouped);
     try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden_size, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .wo_b, y);
