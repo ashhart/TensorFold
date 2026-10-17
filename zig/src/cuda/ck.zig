@@ -17,6 +17,12 @@ const Plan = grouped.Plan;
 /// Token rows an expert call takes as decode-sized (the _few kernels): a verify window's, up to 32.
 pub const few_tokens = 32;
 
+/// Token rows from which a pass's expert calls take the prompt kernels, over plans of `prompt_tile` pairs an item.
+pub const prompt_tokens = 128;
+
+/// Pairs a prompt plan item holds: ck_experts.cu's prompt tile rows (decode plans hold 16).
+pub const prompt_tile = 128;
+
 /// One fp32 factor: the checkpoint's runtimes multiply the input scale by the weight's in fp32.
 pub fn alpha(act: f32, scale: f32) f32 {
     return act * scale;
@@ -50,15 +56,17 @@ pub const Layer = struct {
 pub const Ck = struct {
     lane_mod: Module,
     experts_mod: Module,
-    lane: [8]Function, // tiles 16, 32, 64, 64 skipping, each plain then meeting its K slices in a cluster
+    lane: [10]Function, // row tiles 16, 32, 64, 64 skipping, 128 skipping (128 x 128 clustered); plain then clustered
     reduce: Function,
     quant8_fn: Function,
     quant4_fn: Function,
     pack4_fn: Function,
     pack4_scales_fn: Function,
-    up_fns: [2]Function, // prompt chunks, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
+    up_fns: [2]Function, // calls under prompt_tokens, then decode-sized calls (ck_experts.cu's _few: 32 columns a warp)
     down_fns: [2]Function,
     resident: [2][2]usize, // blocks the up and down kernels fill, by up_fns' order: per SM times SMs
+    prompt_fns: [3]Function, // over prompt plans: relu^2 up to NVFP4 rows, fp32 down, share-summed down (256 threads)
+    prompt_resident: [3]usize,
     clusters: bool,
 
     pub fn load(d: *const Driver, capability_major: u32, sms: usize) !Ck {
@@ -70,7 +78,8 @@ pub const Ck = struct {
         var c: Ck = undefined;
         c.lane_mod = lane_mod;
         c.experts_mod = experts_mod;
-        for ([_][:0]const u8{ "tf_ck8_16", "tf_ck8_16c", "tf_ck8_32", "tf_ck8_32c", "tf_ck8_64", "tf_ck8_64c", "tf_ck8_64s", "tf_ck8_64sc" }, &c.lane) |name, *f| f.* = try lane_mod.function(name);
+        for ([_][:0]const u8{ "tf_ck8_16", "tf_ck8_16c", "tf_ck8_32", "tf_ck8_32c", "tf_ck8_64", "tf_ck8_64c", "tf_ck8_64s", "tf_ck8_64sc", "tf_ck8_128", "tf_ck8_128c" }, &c.lane) |name, *f| f.* = try lane_mod.function(name);
+        for (c.lane[8..]) |f| try f.allowDynamicShared(65536);
         c.reduce = try lane_mod.function("tf_ck8_reduce");
         c.quant8_fn = try lane_mod.function("tf_ck_quant8");
         c.quant4_fn = try experts_mod.function("tf_ck_quant4");
@@ -80,6 +89,10 @@ pub const Ck = struct {
             c.up_fns[i] = try experts_mod.function(names[0]);
             c.down_fns[i] = try experts_mod.function(names[1]);
             c.resident[i] = .{ @max(1, try c.up_fns[i].occupancy(128, 0)) * sms, @max(1, try c.down_fns[i].occupancy(128, 0)) * sms };
+        }
+        for ([_][:0]const u8{ "tf_ck4_up_nvfp4_prompt", "tf_ck4_down_f32_prompt", "tf_ck4_down_sum_prompt" }, &c.prompt_fns, &c.prompt_resident) |name, *f, *n| {
+            f.* = try experts_mod.function(name);
+            n.* = @max(1, try f.occupancy(256, 0)) * sms;
         }
         c.clusters = capability_major >= 9;
         return c;
@@ -108,15 +121,22 @@ pub const Ck = struct {
 
     /// e4m3 rows [m, k] at `x8` times the `.fp8` weight `w` under input scale `act`, bf16 at `y` [m, n].
     pub fn lane8(c: *const Ck, s: Stream, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
+        const ti: usize = if (m >= prompt_tokens) 4 else if (m <= 16) 0 else if (m <= 32) 1 else if (m % 64 == 0) 2 else 3;
+        return c.lane8Tile(s, ti, x8, m, w, act, y, part);
+    }
+
+    /// lane8 on row tile `ti` of `lane`'s order: 16, 32, 64 (whole tiles of m), 64 skipping, 128 skipping.
+    pub fn lane8Tile(c: *const Ck, s: Stream, ti: usize, x8: u64, m: usize, w: qmmf.Weight, act: f32, y: u64, part: u64) !void {
         if (w.mode != .fp8) return error.FormatMismatch;
         const sk = qmmf.splitK(w.n, w.k);
         const cluster = sk > 1 and sk <= 8 and c.clusters;
         if (sk > 1 and !cluster and part == 0) return error.NeedsPartials;
-        const bm: usize = if (m <= 16) 16 else if (m <= 32) 32 else 64;
-        const ti: usize = if (bm == 16) 0 else if (bm == 32) 1 else if (m % 64 == 0) 2 else 3;
+        const prompt = ti == 4;
+        const bm: usize = ([_]usize{ 16, 32, 64, 64, 128 })[ti];
+        const bn: usize = if (prompt and cluster) 128 else 64;
         const f = c.lane[ti * 2 + @intFromBool(cluster)];
-        const stage = (bm * 64 + 4096 + 127) / 128 * 128;
-        const smem: u32 = @intCast(@max(4 * stage, if (cluster) bm * 64 * 4 else 0));
+        const stage = (bm * 64 + bn * 64 + 127) / 128 * 128;
+        const smem: u32 = @intCast(@max(4 * stage, if (cluster) bm * bn * 4 else 0));
         const rows_t = (m + bm - 1) / bm;
         const group = @max(1, @min(rows_t, (12 << 20) / (bm * w.k)));
         const al = alpha(act, w.scale);
@@ -128,8 +148,8 @@ pub const Ck = struct {
         a.add(part);
         for ([_]usize{ m, w.n, w.k, sk, group }) |v| a.add(@as(i32, @intCast(v)));
         try launch_.launch(f, .{
-            .grid = .{ .x = @intCast(rows_t * ((w.n + 63) / 64)), .y = 1, .z = sk },
-            .block = .{ .x = 128, .y = 1, .z = 1 },
+            .grid = .{ .x = @intCast(rows_t * ((w.n + bn - 1) / bn)), .y = 1, .z = sk },
+            .block = .{ .x = if (prompt) 256 else 128, .y = 1, .z = 1 },
             .shared = smem,
             .cluster = if (cluster) .{ .x = 1, .y = 1, .z = sk } else null,
         }, s, &a);
@@ -195,11 +215,47 @@ pub const Ck = struct {
         return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 
+    /// `up` over a prompt plan to the NVFP4 rows quant4 makes of its bf16 rows at down's input scale (rowsBytes).
+    pub fn promptUp(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, pairs: usize, out: u64, items: usize) !void {
+        var a = args(rows, nrows, slots, l.up, l.up_s, l.up_alpha, l.dims, l.width, p, out);
+        a.add(out + pairs * l.width / 2);
+        a.add(inverse(l.down_act));
+        try runPrompt(s, c.prompt_fns[0], c.prompt_resident[0], l.width, items, &a);
+    }
+
+    /// `down` over a prompt plan.
+    pub fn promptDown(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize) !void {
+        var a = args(rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out);
+        try runPrompt(s, c.prompt_fns[1], c.prompt_resident[1], l.dims, items, &a);
+    }
+
+    /// `down` over a prompt plan, pair p + s on expert s * experts / shares + e: shares added in order, bf16 a pair p.
+    pub fn promptSum(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, p: Plan, out: u64, items: usize, shares: usize) !void {
+        var a = args(rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out);
+        a.add(@as(i32, @intCast(shares)));
+        a.add(@as(i32, @intCast(l.experts / shares)));
+        // the first share's items alone: pair p + s mirrors pair p, so every share's experts plan the same items
+        try runPrompt(s, c.prompt_fns[2], c.prompt_resident[2], l.dims, items / shares, &a);
+    }
+
     /// One grouped launch of `f` over a plan: NVFP4 rows at `rows` (`nrows` of `k`), `n` columns of `columns` a warp.
     pub fn run(s: Stream, f: Function, resident: usize, columns: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
         const nb = n / columns;
         const grid = @min((items * nb + 3) / 4, resident);
         if (grid < 1) return;
+        var a = args(rows, nrows, slots, w, ws, al, k, n, p, out);
+        try go(f, s, .{ grid, 1, 1 }, 128, 0, &a);
+    }
+
+    /// A prompt kernel's launch: a block a (plan item, 128 columns of `n`).
+    fn runPrompt(s: Stream, f: Function, resident: usize, n: usize, items: usize, a: *launch_.Args) !void {
+        const grid = @min(items * ((n / 64 + 1) / 2), resident);
+        if (grid < 1) return;
+        try go(f, s, .{ grid, 1, 1 }, 256, 0, a);
+    }
+
+    /// The expert kernels' leading arguments: input rows and their scales, the weights, the shape, the plan, `out`.
+    fn args(rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64) launch_.Args {
         var a: launch_.Args = .{};
         a.add(rows);
         a.add(rows + nrows * k / 2);
@@ -210,7 +266,7 @@ pub const Ck = struct {
         a.add(@as(i32, @intCast(k)));
         a.add(@as(i32, @intCast(n)));
         for ([_]u64{ p.items, p.counts, p.members, out }) |v| a.add(v);
-        try go(f, s, .{ grid, 1, 1 }, 128, 0, &a);
+        return a;
     }
 };
 

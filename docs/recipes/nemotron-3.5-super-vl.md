@@ -92,6 +92,18 @@ On one GB10, `checkpoint` teacher-forced on `full`'s greedy 256 tokens after thr
 decodes at about the same speed. The [quantization guide](../quantization.md#nvidias-nvfp4-checkpoints-on-cuda)
 describes both modes. Both ranks of a two-GB10 setup must run the same precision; they check it before loading.
 
+Checkpoint prompt passes of 128 rows or more run the FP8 layers in 128-row tiles (128 columns where K slices meet in
+a cluster) and the NVFP4 experts in blocks of 128 pairs of one expert by 128 columns, their inputs and weights staged
+through shared memory; decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output
+rounding are unchanged. The prompt up kernel quantizes its relu^2 rows to down's NVFP4 input in its epilogue, the same
+bytes the decode path's bf16 rows and separate quantizer give. On one GPU the prompt down kernel runs both expert width
+shares of a pair and adds them in share order before the bf16 rounding the combine applies, so the combine reads one
+bf16 row a pick instead of two fp32 rows. `tf-cuda-test checkpoint` compares the prompt kernels and the combine after
+them with the decode path byte for byte on synthetic inputs.
+
+Router logits of passes over 32 rows run on 128-row by 128-expert register tiles, each logit still one fma chain over
+its slice in input order; `tf-cuda-test glue` compares them with the untiled router and the host reference.
+
 ## Exactness and speed
 
 Served on GB10s at a 16,384-token window, the eight release prompts at 256 tokens each, every cell held in both

@@ -108,13 +108,33 @@ fn norms(r: *Rig) !void {
 fn route(r: *Rig) !void {
     try routeShape(r, D, E, top_k, NS);
     try routeShape(r, 4096, 496, 9, 9);
+    for ([_]usize{ 32, 33, 300, 4100 }) |rows| try superLogits(r, rows); // 32 rows keep tf_nemo_router
 }
 
 fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
     const sk = glue.routerShape(d).sk;
-    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router)
+    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router_tiles)
     for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0, d, e, k, ns);
     try routeRows(r, sk, 4, 2, d, e, k, ns); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
+}
+
+/// Super's router (8 slices of 4,096, 512 experts) past 32 rows on the tiles: against tf_nemo_router and the host.
+fn superLogits(r: *Rig, rows: usize) !void {
+    const d = 4096;
+    const e = 512;
+    const sk = 8;
+    const x = try r.bfs(2 + rows * d, 1.0);
+    const w = try r.bfs(e * d, 0.05);
+    const wd = try r.dev(u16, w);
+    const tiles = try r.zeros(f32, sk * rows * e);
+    const stock = try r.zeros(f32, sk * rows * e);
+    try r.g().logits(try r.dev(u16, x[2..]), wd, tiles, rows, d, e, sk);
+    try r.g().logits(try r.dev(u16, x) + 4, wd, stock, rows, d, e, sk);
+    try r.same("Super router tiles against tf_nemo_router", f32, tiles, try r.get(f32, stock, sk * rows * e));
+    if (rows > 300) return;
+    const part = try r.a.alloc(f32, sk * rows * e);
+    ref.router(x[2..], w, part, rows, d, e, sk);
+    try r.same("Super router tiles", f32, tiles, part);
 }
 
 /// `rows` rows that start `skew` bf16 values into their buffer, routed and ranked against the host references.

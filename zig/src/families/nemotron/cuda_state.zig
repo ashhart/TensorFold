@@ -130,6 +130,8 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const router_slices: usize = if (lat) latent.routerSlices(D) else if (c.bolt) glue.max_router_slices else 6;
     const ck8 = if (c.ck) R * @max(D, @max(xd, qd)) else 0;
     const ck4 = if (c.ck and lat) @import("cuda_latent_ck.zig").rowsBytes(c, R) else 0;
+    // its passes of prompt_tokens rows or more write up's rows to ck4: bf16 activations only for the calls under them
+    const act_rows: usize = if (c.ck and lat) cuda.ck.prompt_tokens - 1 else R;
     return .{
         W * c.vocab * 2,                   16,                                             R * 4,
         R * D * 2,                         c.vocab * 2,                                    16,
@@ -141,9 +143,9 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         W * nch * qd * 4,                  W * nch * c.heads * 4,                          W * nch * c.heads * 4,
         router_slices * R * c.experts * 4, pairs * own * 4,                                R * ns * 4,
         pairs * own * 4,                   items * 12,                                     8,
-        pairs * own * 4,                   (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
+        pairs * own * 4,                   (pairs * own + 1023) / 1024 * plan_experts * 4, act_rows * ns * c.expert_width * 2,
         ymoe,                              sharedBytes(c),                                 R * kern.pocket_width * 4,
-        R * c.latent * 2,                  R * c.latent * 2,                               R * own * sw * 2,
+        R * c.latent * 2,                  R * c.latent * 2,                               act_rows * own * sw * 2,
         R * own * 4,                       job,                                            ck8,
         ck4,                               lanePartBytes(c),
     };
