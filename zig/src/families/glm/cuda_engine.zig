@@ -13,6 +13,8 @@ const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
 const images_mod = @import("cuda_images.zig");
+const tile = @import("cuda_tile.zig");
+const mm_mod = @import("cuda_mm.zig");
 const prof_mod = @import("cuda_prof.zig");
 
 pub const Options = struct {
@@ -71,6 +73,7 @@ pub const Engine = struct {
     comm: cuda.nccl.Comm,
     group: ?*const cuda.tp_group.Group = null, // the main stream's all-gathers (RoCE on two ranks); null: lib and comm
     images: ?*images_mod.Images = null, // --vision: a prompt pass's image rows (rank 0 encodes, the others receive)
+    packs: mm_mod.Packed = .{}, // the linears packed at load and their bits (TF_GLM_DENSE_BITS, _HEAD_BITS)
     profs: [fw.window_rows]?*prof_mod.Prof = @splat(null), // TF_GLM_PROF=1: verify sections' GPU time, by rows
     prompt_profs: [4]?*prof_mod.Prof = @splat(null), // and prompt chunks': to 64, 256, 1024, 2048 rows
     settings: ranks.Settings,
@@ -143,8 +146,11 @@ pub const Engine = struct {
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
         e.w = try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp);
-        if (tiledLinears()) { // our bf16 linears (glm_mm) on their tiled weights; TF_GLM_MM=0 keeps the glue's
-            try weights.tileLinears(&e.w, &e.m.mm, stream, d);
+        const packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
+        if (packs and !tiledLinears()) return error.PackedNeedsGlmMm; // only glm_mm reads packed tiles
+        if (tiledLinears()) { // our linears (glm_mm) on their tiled weights, packed if asked; TF_GLM_MM=0 keeps the glue's
+            e.packs = try tile.tileLinears(gpa, &e.w, &e.m.mm, stream, d, o.settings.dense_bits, o.settings.head_bits);
+            e.m.packs = &e.packs;
             e.m.tiled = true;
         }
         errdefer e.w.deinit();
@@ -182,6 +188,8 @@ pub const Engine = struct {
 
     pub fn deinit(e: *Engine) void {
         e.stream.synchronize() catch {};
+        e.gpa.free(e.packs.ptrs);
+        e.gpa.free(e.packs.bits);
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
         e.snaps.deinit(e.gpa);

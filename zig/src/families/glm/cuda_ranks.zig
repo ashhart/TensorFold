@@ -12,6 +12,8 @@ pub const Settings = struct {
     pieces: u32 = 3, // TF_GLM_OVERLAP_PIECES: a prompt chunk's exchanges in this many row pieces (1: whole).
     heat: ?heat.Bands = null, // TF_HEAT_HIGH and TF_HEAT_LOW (upstream's names): a prompt chunk waits on every rank's hottest zone
     layers: u32 = 0, // TF_GLM_LAYERS: the first this many layers only, a thin model for one-GPU checks (0: all)
+    dense_bits: u8 = 16, // TF_GLM_DENSE_BITS: the dense linears packed at load to 4, 6 or 8 bits (16: bf16)
+    head_bits: u8 = 16, // TF_GLM_HEAD_BITS: the head, likewise
 
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
@@ -42,6 +44,17 @@ pub const Settings = struct {
                 return error.BadSetting;
             }
         }
+        inline for (.{ .{ "TF_GLM_DENSE_BITS", "dense_bits" }, .{ "TF_GLM_HEAD_BITS", "head_bits" } }) |e| if (get(e[0])) |v| {
+            const b = std.fmt.parseInt(u8, v, 10) catch 0;
+            @field(s, e[1]) = switch (b) {
+                4, 6, 8, 16 => b,
+                0 => 16, // the old family's spelling of bf16
+                else => {
+                    problem.* = e[0] ++ ": 4, 6, 8 or 16";
+                    return error.BadSetting;
+                },
+            };
+        };
         s.heat = heat.bandsFrom(get("TF_HEAT_HIGH"), get("TF_HEAT_LOW")) catch {
             problem.* = "TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high";
             return error.BadSetting;
@@ -60,7 +73,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 6, // this struct's version
+    layout: u32 = 7, // this struct's version
     world: u32,
     rank: u32,
     split: u32,
@@ -69,6 +82,7 @@ pub const Fingerprint = extern struct {
     layers: u32, // TF_GLM_LAYERS (0: all)
     mtp: u32, // 1: the MTP head loads and runs (drafts on): every prompt pass adds its collectives
     vision: u32 = 0, // --vision's image tokens (0: off): rank 0 sends image rows every rank must hold
+    bits: u32 = 16 << 8 | 16, // TF_GLM_DENSE_BITS << 8 | TF_GLM_HEAD_BITS: every rank's matmuls read the same codes
     capacity: u64, // tokens a sequence holds
     heat_high: f64, // the heat bands in degrees (0 and 0: off): every rank must wait alike
     heat_low: f64,
@@ -86,6 +100,7 @@ pub const Fingerprint = extern struct {
         layers,
         mtp,
         vision,
+        bits,
         capacity,
         heat_high,
         heat_low,
@@ -112,6 +127,7 @@ pub const Fingerprint = extern struct {
             .pieces = s.pieces,
             .layers = s.layers,
             .mtp = @intFromBool(mtp),
+            .bits = @as(u32, s.dense_bits) << 8 | s.head_bits,
             .capacity = capacity,
             .heat_high = if (s.heat) |b| b.high_c else 0,
             .heat_low = if (s.heat) |b| b.low_c else 0,
@@ -141,6 +157,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             "layers",
             "mtp",
             "vision",
+            "bits",
             "capacity",
             "heat_high",
             "heat_low",
@@ -217,6 +234,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .layers => "TF_GLM_LAYERS",
         .mtp => "--no-drafts given to some ranks and not others",
         .vision => "--vision (or its image tokens) given to some ranks and not others",
+        .bits => "TF_GLM_DENSE_BITS or TF_GLM_HEAD_BITS",
         .capacity => "the sequence capacity (the context)",
         .heat_high => "TF_HEAT_HIGH",
         .heat_low => "TF_HEAT_LOW",
@@ -231,6 +249,8 @@ fn fake(name: [:0]const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "TF_GLM_OVERLAP_PIECES")) return "2";
     if (std.mem.eql(u8, name, "TF_HEAT_HIGH")) return "92";
     if (std.mem.eql(u8, name, "TF_HEAT_LOW")) return "88";
+    if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "4";
+    if (std.mem.eql(u8, name, "TF_GLM_HEAD_BITS")) return "8";
     return null;
 }
 
@@ -243,6 +263,7 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     var problem: []const u8 = "";
     const s = try Settings.read(&fake, &problem);
     try std.testing.expect(!s.split and s.kda_wide and s.pieces == 2 and s.heat.?.high_c == 92 and s.heat.?.low_c == 88);
+    try std.testing.expect(s.dense_bits == 4 and s.head_bits == 8);
     try std.testing.expectError(error.BadSetting, Settings.read(&bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split or gather", problem);
 }
@@ -271,4 +292,6 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
     all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37");
     all[1].vision = 4096; // --vision on rank 1 only
     try std.testing.expectEqual(Mismatch{ .field = .vision, .rank = 1 }, mismatch(&all).?);
+    all[1] = Fingerprint.of(2, 1, .{ .dense_bits = 4 }, 8192, true, h0, h0, "/hub/snapshots/423acf37"); // packed on rank 1 only
+    try std.testing.expectEqual(Mismatch{ .field = .bits, .rank = 1 }, mismatch(&all).?);
 }
