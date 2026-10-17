@@ -34,6 +34,7 @@ pub const Context = struct {
             _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
             return error.Invalid;
         }
+        @import("copy_source.zig").setCurrent(ctx); // the host made it current: copy sources are tagged with it
         return .{ .d = d, .device = dev, .handle = ctx };
     }
 

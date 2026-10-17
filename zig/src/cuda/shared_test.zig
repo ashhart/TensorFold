@@ -4,6 +4,8 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Context = @import("context.zig").Context;
 const Stream = @import("stream.zig").Stream;
+const source = @import("copy_source.zig");
+const stale: abi.Context = @ptrFromInt(0x5555); // the copy-source owner's context before a test
 
 /// The driver as the calls see it: device n's primary context is 0x1000 + n, and ordinal k names device k + 5.
 const Fake = struct {
@@ -91,7 +93,10 @@ const Fake = struct {
 
 test "Context.shared keeps the host's current primary context, on its own device, and makes nothing current" {
     var d = Fake.driver(Fake.primary(3), 3);
+    source.setCurrent(stale);
+    defer source.setCurrent(null);
     var c = try Context.shared(&d);
+    try std.testing.expectEqual(Fake.primary(3), source.current()); // copy sources from here on carry the host's context
     try std.testing.expectEqual(@as(abi.Device, 3), c.device);
     try std.testing.expectEqual(Fake.primary(3), c.handle);
     try std.testing.expectEqual(@as(usize, 1), Fake.retains);
@@ -105,7 +110,10 @@ test "Context.shared keeps the host's current primary context, on its own device
 test "Context.shared refuses a current context that is not a primary one and drops the retain it took" {
     const foreign: abi.Context = @ptrFromInt(0x9000);
     var d = Fake.driver(foreign, 2);
+    source.setCurrent(stale);
+    defer source.setCurrent(null);
     try std.testing.expectError(error.Invalid, Context.shared(&d));
+    try std.testing.expectEqual(stale, source.current());
     try std.testing.expectEqual(@as(usize, 1), Fake.retains);
     try std.testing.expectEqual(@as(usize, 1), Fake.releases);
     try std.testing.expectEqual(@as(abi.Device, 2), Fake.released);
@@ -115,7 +123,10 @@ test "Context.shared refuses a current context that is not a primary one and dro
 
 test "Context.shared with no current context makes device 0's primary current" {
     var d = Fake.driver(null, 0);
+    source.setCurrent(stale);
+    defer source.setCurrent(null);
     var c = try Context.shared(&d);
+    try std.testing.expectEqual(Fake.primary(5), source.current());
     try std.testing.expectEqual(@as(abi.Device, 5), c.device);
     try std.testing.expectEqual(Fake.primary(5), c.handle);
     try std.testing.expectEqual(Fake.primary(5), Fake.current);
@@ -128,7 +139,10 @@ test "Context.shared with no current context makes device 0's primary current" {
 test "Context.shared drops device 0's primary when making it current fails" {
     var d = Fake.driver(null, 0);
     Fake.set_result = abi.error_not_ready; // a failure check() returns without logging: an error log fails a test
+    source.setCurrent(stale);
+    defer source.setCurrent(null);
     try std.testing.expectError(error.NotReady, Context.shared(&d));
+    try std.testing.expectEqual(stale, source.current());
     try std.testing.expectEqual(@as(usize, 1), Fake.retains);
     try std.testing.expectEqual(@as(usize, 1), Fake.releases);
     try std.testing.expectEqual(@as(abi.Device, 5), Fake.released);
