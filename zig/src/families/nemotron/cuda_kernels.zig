@@ -187,14 +187,14 @@ pub const Kernels = struct {
 /// The checkpoint's own math needs this major capability: the block-scaled FP4 mma (sm_120a, sm_121a).
 pub const ck_major: u32 = 12;
 
-/// FP8 and NVFP4 paths stop below this full capability: decode's split-K sums meet in a thread-block cluster.
-pub const modelopt_min: u32 = 90;
+/// FP8 and NVFP4 paths stop below this full capability: they decode to bf16 for mma.sync.
+pub const modelopt_min: u32 = 80;
 
 /// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
 pub fn modeloptRefusal(capability: u32) ?[]const u8 {
     if (capability >= modelopt_min) return null;
-    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: " ++
-        "a ModelOpt checkpoint needs compute capability 9.0 or newer";
+    return "FP8 and NVFP4 weights decode to bf16 for mma.sync: " ++
+        "a ModelOpt checkpoint needs compute capability 8.0 or newer";
 }
 
 /// qmm.split_k (cuda/qlinear.zig).
@@ -215,6 +215,7 @@ fn u(x: usize) u32 {
 pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
+    part: u64 = 0, // the lane matmul's slice partials where it reduces them (no clusters below sm_90)
     ck8: u64 = 0, // the e4m3 rows an FP8 projection reads in the checkpoint's math (its buffers' ck8)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
@@ -296,7 +297,7 @@ pub const Ops = struct {
 
     /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs }, out, rows);
+        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs, .part = o.part }, out, rows);
     }
 
     pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize, sp: Split) !void {
@@ -313,7 +314,7 @@ pub const Ops = struct {
 
     /// Prompt rows of a projection on this stream, by its format's prompt GEMM.
     pub fn prefillDense(o: Ops, x: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().prompt(o.s, q, .{ .x = x }, out, rows);
+        return o.linear().prompt(o.s, q, .{ .x = x, .part = o.part }, out, rows);
     }
 
     /// nemotron_ops' rest: y (bf16, or fp32 when `y_f32`) += r x at rows `i * row_mul + row_add` for i < rows.
@@ -461,7 +462,7 @@ test "items follow the Python shapes" {
     try std.testing.expectEqual(@as(usize, 8), maxItems(8, 130, 16));
 }
 
-test "ModelOpt's floor refuses every card below sm_90, the Ampere ones included, and admits sm_90 up" {
-    for ([_]u32{ 75, 80, 86, 89 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
-    for ([_]u32{ 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
+test "ModelOpt's floor refuses every card below sm_80 and admits Ampere up, the cards without clusters included" {
+    for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 80, 86, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
 }

@@ -194,7 +194,9 @@ pub const Engine = struct {
             std.log.err("no captured attention kernel covers {d} chunks of 512 keys; capture one for this context", .{chunks});
             return error.ContextUnsupported;
         }) else chunks;
-        e.w = weights.load(gpa, io, e.ops(), model_dir, e.c, mtp, &e.load_pending) catch |err| {
+        // ops() reads e.b, made below; the loader uploads and packs and runs no lane matmul
+        const load_ops: kern.Ops = .{ .k = &e.k, .s = e.stream };
+        e.w = weights.load(gpa, io, load_ops, model_dir, e.c, mtp, &e.load_pending) catch |err| {
             if (e.load_pending != null) {
                 keep_owner = true;
                 e.carve = null;
@@ -400,7 +402,7 @@ pub const Engine = struct {
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
-        return .{ .k = &e.k, .s = e.stream };
+        return .{ .k = &e.k, .s = e.stream, .part = e.b.lane_part };
     }
 
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
