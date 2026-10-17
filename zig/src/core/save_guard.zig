@@ -11,7 +11,7 @@ pub fn check(io: std.Io, dir: []const u8) !void {
     return error.CheckpointSaveUncertain;
 }
 pub fn begin(io: std.Io, dir: []const u8) !void {
-    var d = try std.Io.Dir.cwd().openDir(io, dir, .{});
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     var marker = d.createFile(io, name, .{ .exclusive = true }) catch |e| switch (e) {
         error.PathAlreadyExists => return syncDir(d, io),
@@ -23,7 +23,7 @@ pub fn begin(io: std.Io, dir: []const u8) !void {
     try syncDir(d, io);
 }
 pub fn finish(io: std.Io, dir: []const u8) !void {
-    var d = try std.Io.Dir.cwd().openDir(io, dir, .{});
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
     try syncDir(d, io);
     d.deleteFile(io, name) catch |e| switch (e) {
@@ -36,7 +36,7 @@ pub fn finish(io: std.Io, dir: []const u8) !void {
     };
 }
 fn syncDir(dir: std.Io.Dir, io: std.Io) !void {
-    // Windows cannot flush a directory through a regular file handle; the marker file itself is synced.
+    // Windows cannot flush a folder via a file handle (the marker itself is synced); on Linux d must not be O_PATH
     if (@import("builtin").os.tag == .windows) return;
     const handle: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
     try handle.sync(io);
