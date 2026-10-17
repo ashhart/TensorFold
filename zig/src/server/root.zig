@@ -119,9 +119,4 @@ test {
 
 test {
     _ = @import("benchmark_config_test.zig");
-    _ = @import("slide_retention_test.zig");
-}
-
-test {
-    _ = @import("slide_save_failure_test.zig");
 }

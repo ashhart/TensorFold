@@ -2,8 +2,9 @@
 const std = @import("std");
 const platform = @import("sys");
 const examples = @import("lesson_examples.zig");
-const forgetting = @import("pocket_forget.zig");
 const adapters = @import("learn_shape.zig");
+const forgetting = @import("pocket_forget.zig");
+const marks = @import("pocket_mark.zig");
 
 const Example = examples.Example;
 const Lesson = examples.Lesson;
@@ -41,19 +42,8 @@ pub fn Hooks(comptime H: type) type {
             return H.pocket(f.b, layer, up, down, used);
         }
 
-        pub fn pocketRound(f: Self, up: []f32, down: []f32) !void {
-            return H.pocketRound(f.b, f.gpa, up, down);
-        }
-
-        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32) !usize {
+        pub fn pocketRead(f: Self, layer: usize, up: []f32, down: []f32) usize {
             return H.pocketRead(f.b, layer, up, down);
-        }
-
-        pub fn saveBegin(f: Self) !void {
-            if (@hasDecl(H, "pocketSaveBegin")) try H.pocketSaveBegin(f.b, f.gpa, f.io);
-        }
-        pub fn saveFinish(f: Self) !void {
-            if (@hasDecl(H, "pocketSaveFinish")) try H.pocketSaveFinish(f.b, f.gpa, f.io);
         }
 
         pub fn pocketSave(f: Self, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
@@ -70,7 +60,7 @@ pub fn Hooks(comptime H: type) type {
             return H.pocketSwiglu(f.b, layer, gate, up, down, used);
         }
 
-        pub fn pocketReadSwiglu(f: Self, layer: usize, gate: []f32, up: []f32, down: []f32) !usize {
+        pub fn pocketReadSwiglu(f: Self, layer: usize, gate: []f32, up: []f32, down: []f32) usize {
             return H.pocketReadSwiglu(f.b, layer, gate, up, down);
         }
 
@@ -98,7 +88,10 @@ pub fn begin(l: anytype, lesson: Lesson) !void {
             try l.probe.begin(l.trainer.?, l.answers, l.owned.held);
             l.phase = .probe;
         },
-        .pocket => try startPocket(l),
+        .pocket => {
+            try startPocket(l);
+            try marks.mark(&l.pockets); // what taking this lesson out puts back
+        },
         .edit => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try openEmpty(l);
             try startEdit(l);
@@ -154,7 +147,7 @@ pub fn probeOnce(l: anytype) !@import("learner.zig").Step {
 
 /// An answer the checks found moved: the lesson again from its own copy, that answer among what it keeps.
 pub fn reroute(l: anytype) !@import("learner.zig").Step {
-    for (l.lesson.kept) |ex| try l.extra.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide, .subject = ex.subject, .value = ex.value, .context = ex.context });
+    for (l.lesson.kept) |ex| try l.extra.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide });
     l.lesson = l.owned; // the reroute's request holds only the moved answer
     switch (l.method) {
         .pocket => {
@@ -193,24 +186,13 @@ pub fn retire(l: anytype, lesson: Lesson) !?@import("learner.zig").Step {
 
 /// A put-back the device has not taken yet, tried again; it fails until the device takes every layer of it.
 pub fn heal(l: anytype) !void {
-    if (l.method != .pocket) return;
-    if (l.pockets.saved_mismatch) return error.PocketSavedDifferently;
-    if (l.pockets.save_pending) return error.PocketSaveUncertain;
-    try healLive(l);
-}
-
-/// Explicit save retries may reconcile disk uncertainty; device restoration must still complete first.
-pub fn healLive(l: anytype) !void {
-    if (l.method != .pocket) return;
-    if (l.pockets.retire_pending) try l.pockets.unretire(l.trainer.?, hooks(l));
-    if (l.pockets.restore_pending) try l.pockets.undo(l.trainer.?, hooks(l));
-    if (!forgetting.stale(&l.pockets)) return;
+    if (l.method != .pocket or !forgetting.stale(&l.pockets)) return;
     _ = try forgetting.unforget(&l.pockets, l.trainer.?, hooks(l));
 }
 
 /// Whether the device lacks a put-back the pocket holds: replies are refused until `heal` lands it.
 pub fn stale(l: anytype) bool {
-    return l.method == .pocket and (l.pockets.save_pending or l.pockets.saved_mismatch or l.pockets.retire_pending or l.pockets.restore_pending or forgetting.stale(&l.pockets));
+    return l.method == .pocket and forgetting.stale(&l.pockets);
 }
 
 /// The pocket into the shards (an unrecalled lesson out first), held-out answers asked again; false if not a pocket.
@@ -223,7 +205,7 @@ pub fn save(l: anytype) !bool {
     }
     // a pocket a delete emptied still writes: the shards hold the deleted fact until it does
     const forgot = forgetting.pending(&l.pockets);
-    if (l.pockets.empty() and !forgot and !l.pockets.save_pending) return true;
+    if (l.pockets.empty() and !forgot) return true;
     const t0 = H.seconds(l.io);
     const bytes = try l.pockets.save(l.trainer.?, hooks(l));
     forgetting.settle(&l.pockets);

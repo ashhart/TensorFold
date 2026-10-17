@@ -49,7 +49,6 @@ pub const Widths = struct {
 };
 
 pub const Geometry = struct {
-    pocket: usize = 0,
     hidden: usize,
     intermediate: usize,
     layers: usize,
@@ -248,13 +247,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         .context = try integer(t, "max_position_embeddings"),
         .linear = @splat(false),
     };
-    if (t.get("tensorfold_learned_neurons")) |pocket| {
-        if (pocket != .integer or pocket.integer < 0 or pocket.integer > 128 or @mod(pocket.integer, 64) != 0)
-            return error.UnsupportedQwenGeometry;
-        g.pocket = @intCast(pocket.integer);
-        if (g.pocket >= g.intermediate) return error.UnsupportedQwenGeometry;
-        g.intermediate -= g.pocket;
-    }
     if (g.layers > max_layers or g.hidden % 256 != 0 or g.hidden > 8192 or g.intermediate % 64 != 0) return error.UnsupportedQwenGeometry;
     if (moe) {
         g.experts = try integer(t, "num_experts");
@@ -274,12 +266,6 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) !Geometry {
         if (std.mem.eql(u8, kind.string, "linear_attention")) g.linear[i] = true else if (!std.mem.eql(u8, kind.string, "full_attention")) return error.UnsupportedQwenGeometry;
     }
     g.bits = try widths(gpa, root, q, g);
-    if (g.pocket > 0) {
-        if (g.moe()) return error.UnsupportedLearningFormat;
-        for (0..g.layers) |i| for ([_]Slot{ .gate, .up, .down }) |slot| {
-            if (g.bits.of(i, slot) != 4) return error.UnsupportedLearningFormat;
-        };
-    }
     return g;
 }
 

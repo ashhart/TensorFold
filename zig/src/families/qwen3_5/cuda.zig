@@ -25,26 +25,3 @@ test {
     _ = reuse;
     _ = native;
 }
-
-pub const slide = @import("cuda_slide.zig");
-test {
-    _ = slide;
-    _ = @import("cuda_pocket.zig");
-    _ = @import("cuda_vision.zig");
-}
-
-test {
-    _ = @import("cuda_wide.zig");
-}
-
-pub const train_ops = @import("cuda_train_ops.zig");
-pub const train = @import("cuda_train.zig");
-pub const Engine = engine.Engine;
-
-test {
-    _ = @import("cuda_completion.zig");
-}
-
-test {
-    _ = train;
-}

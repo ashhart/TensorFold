@@ -10,12 +10,6 @@ const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };
 const glue = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false", "--prec-div=true", "--prec-sqrt=true" };
 
 pub const kernels = [_]Kernel{
-    .{ .name = "attn_train", .flags = &.{"-O3"} },
-    .{ .name = "qwen27_train", .flags = &.{"-O3"} },
-    .{ .name = "gdn_train", .flags = &.{ "-O3", "--fmad=false" } },
-    .{ .name = "train_q4", .flags = &.{"-O3"} },
-    .{ .name = "train_attn", .flags = &.{"-O3"} },
-    .{ .name = "flashnext_train", .flags = &.{"-O3"} },
     .{ .name = "flashnext_gdn", .flags = &.{ "-O3", "--fmad=false" } }, // qwen4_exp/cuda/gdn.cu chain, one row
     .{ .name = "flashnext_batch", .flags = &.{ "-O3", "--fmad=false" } }, // ours: Flash Next's batched prompt pass glue
     .{ .name = "flashnext_mtp", .flags = &.{"-O3"} }, // ours: Flash Next's MTP drafts, a row's best score and log-sum-exp

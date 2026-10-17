@@ -13,8 +13,8 @@ const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 
 /// Bytes as tokens; a conversation renders as "Q:" and its last user message, then "\nA:".
-pub const ByteText = struct {
-    pub fn text(t: *@This()) model_text.Text {
+const ByteText = struct {
+    fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 

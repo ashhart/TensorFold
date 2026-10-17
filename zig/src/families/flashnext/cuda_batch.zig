@@ -63,12 +63,8 @@ fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
 pub const Logits = parts.Logits;
-pub const HcKeep = parts.HcKeep;
 pub const LayerKeep = parts.LayerKeep;
 pub const Keep = parts.Keep;
-pub const Span = parts.Span;
-pub const MoeAdd = parts.MoeAdd;
-pub const pocket_stride = parts.pocket_stride;
 pub const Hooks = parts.Hooks;
 pub const Kernels = parts.Kernels;
 pub const Scratch = parts.Scratch;
@@ -77,7 +73,6 @@ pub const scoreStride = parts.scoreStride;
 pub const scoreBytes = parts.scoreBytes;
 pub const Lane = parts.Lane;
 pub const Model = parts.Model;
-const Gather = parts.Gather;
 
 /// TF_FLASHNEXT_PROFILE=1: each chunk's wall time (synchronized) and its host n-gram gather on stderr.
 fn profile() bool {
@@ -105,8 +100,6 @@ pub fn Pass(comptime Tri: type) type {
         /// The MoE write-back the next layer (or the head) applies first, and the layer it came from.
         pending: ?usize = null,
         prepared: bool = false,
-        /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
-        pending_f32: bool = false,
 
         // ---- launches ----------------------------------------------------------------------------------------
 
@@ -160,24 +153,6 @@ pub fn Pass(comptime Tri: type) type {
             try cuda.launch.launch(self.k.shift, .{ .grid = .{ .x = @intCast(cdiv(c, 256)) }, .block = .{ .x = 256 } }, self.stream, &a);
         }
 
-        /// rows x width 16-bit columns from src (src_pitch values a row) to dst (dst_pitch); dst 0: none.
-        pub fn copyCols(self: *Self, src: u64, src_pitch: usize, dst: u64, dst_pitch: usize, width: usize, rows: usize) !void {
-            if (dst == 0 or rows == 0) return;
-            var a: cuda.Args = .{};
-            a.add(src);
-            a.add(@as(c_longlong, @intCast(src_pitch)));
-            a.add(dst);
-            a.add(@as(c_longlong, @intCast(dst_pitch)));
-            a.add(cint(width));
-            try cuda.launch.launch(self.k.copy_cols, .{ .grid = .{ .x = @intCast(cdiv(width, 256)), .y = @intCast(rows) }, .block = .{ .x = 256 } }, self.stream, &a);
-        }
-
-        /// The adds to layer `l`'s MoE output: a training pass's, else the model's pockets; null: none there.
-        pub fn addAt(self: *const Self, l: usize) ?MoeAdd {
-            const m = self.hooks.moe_add orelse self.m.pocket orelse return null;
-            return if (m.at(l)) m else null;
-        }
-
         pub fn copy(self: *Self, dst: u64, src: u64, n: usize) !void {
             if (dst == 0 or n == 0) return;
             const d = self.stream.d;
@@ -204,12 +179,6 @@ pub fn Pass(comptime Tri: type) type {
                 return;
             }
             self.pending = null;
-            if (self.pending_f32) {
-                // the fp32 branch rounded once, as MODE 2 rounds its sum (a slice of one)
-                self.pending_f32 = false;
-                try self.tri.hcWriteback(h, h, pss, s.moe_f32 + r0 * dims * 4, "*fp32", inj, dummy, "*bf16", dummy, "*bf16", rs, n, dims, streams, 4, 1, 1, 1);
-                return;
-            }
             const y = s.y + r0 * slots * dims * 4;
             const wts = s.wts + r0 * slots * 4;
             try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
@@ -217,11 +186,6 @@ pub fn Pass(comptime Tri: type) type {
 
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
         pub fn readout(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
-            return self.readoutKeep(hc_w, r0, n, .{});
-        }
-
-        /// readout, keeping what its backward reads (rows r0 = 0 on): the streams, normed rows, v, up rows, gates.
-        pub fn readoutKeep(self: *Self, hc_w: HcW, r0: usize, n: usize, keep: HcKeep) !void {
             const s = self.s;
             const h = s.h + r0 * wide * 2;
             const pss = s.pss + r0 * pss_n * 4;
@@ -239,21 +203,13 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
                 return;
             }
-            try self.copy(keep.h, h, n * wide * 2);
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
-            if (keep.v != 0) try self.sumSlices(s.hc_part, keep.v, false, n * hc_w.n_down, hc_sk);
             const inj_ptr = if (hc_w.has_inj == 1) inj else act;
             try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, hc_sk, n, streams, low, hc_w.n_down, hc_w.has_inj);
-            const mixed = s.mixed + r0 * dims * 2;
-            const xsm = s.xsm + r0 * (dims / 32) * 4;
-            if (keep.up != 0) {
-                try self.tri.hcUpmixUp(act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, norm, mixed, xsm, keep.up, n, wide, low, dims, streams);
-            } else try self.tri.hcUpmix(act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, norm, mixed, xsm, n, wide, low, dims, streams);
-            try self.copy(keep.normed, norm, n * wide * 2);
-            if (hc_w.has_inj == 1) try self.copy(keep.inject, inj, n * streams * 2);
+            try self.tri.hcUpmix(act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, wide, low, dims, streams);
         }
 
-        pub fn pleBlock(self: *Self, lw: *const Layer, ids: []const u32) !void {
+        fn pleBlock(self: *Self, lw: *const Layer, ids: []const u32) !void {
             const s = self.s;
             const n = self.rows;
             // the rows' n-gram embeddings (host gathers from the mapped table) are already uploaded by `stage`
@@ -275,7 +231,7 @@ pub fn Pass(comptime Tri: type) type {
             }
         }
 
-        pub fn gdnBlock(self: *Self, lw: *const Layer, li: usize, keep: LayerKeep) !void {
+        fn gdnBlock(self: *Self, lw: *const Layer, li: usize, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
             try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
@@ -339,20 +295,10 @@ pub fn Pass(comptime Tri: type) type {
         }
 
         pub fn attnBlock(self: *Self, lw: *const Layer, ai: usize) !void {
-            return self.attnBlockKeep(lw, ai, .{});
-        }
-
-        /// attnBlock, keeping its q|gate, k and v projections and o_proj's input.
-        pub fn attnBlockKeep(self: *Self, lw: *const Layer, ai: usize, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
             const pa = s.proj;
             try self.lane(s.mixed, s.xsm, lw.proj, pa, s.dummy, n, 1);
-            const qw2 = q_heads * 2 * head_dim;
-            const kw = kv_heads * head_dim;
-            try self.copyCols(pa, proj_n, keep.pq, qw2, qw2, n);
-            try self.copyCols(pa + qw2 * 2, proj_n, keep.pk, kw, kw, n);
-            try self.copyCols(pa + (qw2 + kw) * 2, proj_n, keep.pv, kw, kw, n);
             if (self.lanes.len > 0) {
                 // a round: each row's rope, cache writes, selection and attention on its own stream's caches
                 const own_seq = self.seq;
@@ -367,9 +313,8 @@ pub fn Pass(comptime Tri: type) type {
                     try self.attnRows(lw, ai, pa + r * proj_n * 2, 1, .{ .pos = s.pos + r * 16, .q = s.q + r * q_heads * head_dim * 2, .iq = s.iq + r * index_heads * index_dim * 2, .ao = s.ao + r * out_k * 2 });
                 }
             } else try self.attnRows(lw, ai, pa, n, .{ .pos = s.pos, .q = s.q, .iq = s.iq, .ao = s.ao });
-            const gated = if (keep.gated != 0) keep.gated else s.gated;
-            try self.tri.attnGate(s.ao, pa, gated, s.gxs_attn, n, proj_n, q_heads, head_dim);
-            try self.lane(gated, s.gxs_attn, lw.out, s.dummy, s.part, n, out_sk);
+            try self.tri.attnGate(s.ao, pa, s.gated, s.gxs_attn, n, proj_n, q_heads, head_dim);
+            try self.lane(s.gated, s.gxs_attn, lw.out, s.dummy, s.part, n, out_sk);
         }
 
         /// Where attnRows reads its rows' positions (16 bytes apart) and writes queries, indexer queries and outputs.
@@ -418,19 +363,11 @@ pub fn Pass(comptime Tri: type) type {
 
         /// Router, each row's ten experts and the shared one, the grouped expert launches: y [rows, 11, dims] fp32.
         pub fn moeBlock(self: *Self, lw: *const Layer) !void {
-            return self.moeBlockKeep(lw, .{});
-        }
-
-        /// moeBlock, keeping its input, experts and weights.
-        pub fn moeBlockKeep(self: *Self, lw: *const Layer, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
             const pairs = n * slots;
-            try self.copy(keep.moe_x, s.mixed, n * dims * 2);
             try self.tri.routerMany(s.mixed, lw.router.ptr, s.router_l, dims, n);
             try self.tri.topkMany(s.router_l, s.picks, s.wts, n);
-            try self.copy(keep.moe_ids, s.picks, pairs * 4);
-            try self.copy(keep.moe_wts, s.wts, pairs * 4);
             const e = experts_n + 1;
             const plan: cuda.grouped.Plan = .{ .members = s.members, .items = s.items, .counts = s.counts, .rank = s.rank, .hist = s.hist };
             if (lw.native_experts) |*native| {
@@ -479,6 +416,37 @@ pub fn Pass(comptime Tri: type) type {
             if (!self.prepared) try s.uploaded();
         }
 
+        /// The rows' n-gram embeddings, gathered on a host thread while the GPU embeds and runs layer 0.
+        const Gather = struct {
+            ngram: *const ple.Ngram,
+            history: []i64,
+            ids: []const u32,
+            emb: []u16,
+            xs: []f32,
+            failed: ?anyerror = null,
+            ns: i96 = 0,
+            io: std.Io,
+            /// A round's rows, each gathered after its own stream's history (empty: every row after `history`).
+            lanes: []const Lane = &.{},
+
+            fn main(g: *Gather) void {
+                const t0 = std.Io.Clock.awake.now(g.io).toNanoseconds();
+                defer g.ns = std.Io.Clock.awake.now(g.io).toNanoseconds() - t0;
+                if (g.lanes.len == 0) {
+                    g.ngram.rows(g.history, g.ids, g.emb, g.xs) catch |err| {
+                        g.failed = err;
+                    };
+                    return;
+                }
+                for (g.lanes, 0..) |l, r| {
+                    g.ngram.rows(l.seq.history[0..], g.ids[r..][0..1], g.emb[r * dims ..][0..dims], g.xs[r * (dims / 32) ..][0 .. dims / 32]) catch |err| {
+                        g.failed = err;
+                        return;
+                    };
+                }
+            }
+        };
+
         /// One chunk of rows at positions pos0.. through every layer and the head.
         pub fn chunk(self: *Self, ids: []const u32, pos0: usize, logits_host: ?[]u8) !void {
             const s = self.s;
@@ -490,14 +458,13 @@ pub fn Pass(comptime Tri: type) type {
             };
             if (n == 0 or n > s.cap) return error.UnexpectedTensor;
             if (self.lanes.len > 0) {
-                // a round reads every row's scores and keeps nothing (a pocket's adds are row by row)
-                if (n != self.lanes.len or self.hooks.logits != .all or self.hooks.keep != null or self.hooks.streams != 0 or self.hooks.moe_add != null) return error.UnexpectedTensor;
+                // a round reads every row's scores and keeps nothing for a rollback
+                if (n != self.lanes.len or self.hooks.logits != .all or self.hooks.keep != null or self.hooks.streams != 0) return error.UnexpectedTensor;
                 for (self.lanes) |l| if (l.pos + 1 > l.seq.cap) return error.UnexpectedTensor;
             } else if (pos0 + n > self.seq.cap) return error.UnexpectedTensor;
             self.rows = n;
             self.pos0 = pos0;
             self.pending = null;
-            self.pending_f32 = false;
             // the gather writes the scratch's pinned rows, so the last pass's uploads must have read them first
             if (!self.prepared) try s.ready();
             const emb = s.hostEmb(n);
@@ -526,29 +493,27 @@ pub fn Pass(comptime Tri: type) type {
                     try self.pleBlock(lw, ids);
                 }
                 try self.writeback(0, n);
-                try self.readoutKeep(lw.attn_hc, 0, n, keep.attn_hc);
+                try self.readout(lw.attn_hc, 0, n);
                 if (lw.linear) {
                     try self.gdnBlock(lw, wt.linearIndex(layer), keep);
                 } else {
-                    try self.attnBlockKeep(lw, wt.attnIndex(layer), keep);
+                    try self.attnBlock(lw, wt.attnIndex(layer));
                 }
-                if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, out_sk);
                 try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, out_sk);
-                try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
-                try self.moeBlockKeep(lw, keep);
-                try self.moeAdds(layer, keep);
+                try self.readout(lw.mlp_hc, 0, n);
+                try self.moeBlock(lw);
                 self.pending = layer;
             }
             try self.head(logits_host);
         }
 
-        pub fn complete(self: *Self) !void {
+        fn complete(self: *Self) !void {
             if (self.m.collective) |c| return c.finish(self.stream);
             try self.stream.synchronize();
         }
 
         /// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
-        pub fn projectHead(self: *Self, out: u64, n: usize) !void {
+        fn projectHead(self: *Self, out: u64, n: usize) !void {
             const s = self.s;
             if (self.m.head.n == vocab) return self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
             if (self.m.head.n != vocab / 2 or n > s.cap) return error.UnexpectedTensor;
@@ -557,26 +522,56 @@ pub fn Pass(comptime Tri: type) type {
             for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
         }
 
-        /// After a layer's experts, when something adds to or keeps its output: the slots' fp32 sum, adds, kept branch.
-        pub fn moeAdds(self: *Self, layer: usize, keep: LayerKeep) !void {
-            const add = self.addAt(layer);
-            if (add == null and keep.moe_branch == 0) return;
+        fn head(self: *Self, logits_host: ?[]u8) !void {
             const s = self.s;
             const n = self.rows;
-            var a: cuda.Args = .{};
-            a.add(s.y);
-            a.add(s.wts);
-            a.add(s.moe_f32);
-            a.add(cint(dims));
-            a.add(cint(slots));
-            try cuda.launch.launch(self.k.moe_sum, .{ .grid = .{ .x = @intCast(n), .y = dims / 256 }, .block = .{ .x = 256 } }, self.stream, &a);
-            if (add) |m| try m.add(m.ctx, layer, s.mixed, s.picks, s.wts, s.moe_f32, n);
-            if (keep.moe_branch != 0) try self.sumSlices(s.moe_f32, keep.moe_branch, true, n * dims, 1);
-            self.pending_f32 = true;
-        }
-
-        pub fn head(self: *Self, logits_host: ?[]u8) !void {
-            return @import("cuda_batch_head.zig").head(self, logits_host);
+            switch (self.hooks.logits) {
+                .none => {
+                    if (self.hooks.streams == 0) return;
+                    try self.writeback(0, n);
+                    try self.copy(self.hooks.streams, s.h, n * wide * 2);
+                    return;
+                },
+                .all => {
+                    try self.writeback(0, n);
+                    try self.copy(self.hooks.streams, s.h, n * wide * 2);
+                    try self.readout(self.m.mixer, 0, n);
+                    const out = if (self.hooks.logits_out != 0) self.hooks.logits_out else return error.UnexpectedTensor;
+                    try self.projectHead(out, n);
+                    if (logits_host) |lh| {
+                        try self.complete();
+                        const d = self.stream.d;
+                        try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, out + (n - 1) * vocab * 2, vocab * 2), "cuMemcpyDtoH");
+                    }
+                },
+                .last => {
+                    // the last row's streams, sums, gates and MoE slots moved to row 0, which keeps 16-byte alignment
+                    const r = n - 1;
+                    if (self.hooks.streams != 0) {
+                        // every row written back and kept, then the last row's streams and sums at row 0
+                        try self.writeback(0, n);
+                        try self.copy(self.hooks.streams, s.h, n * wide * 2);
+                        if (r > 0) {
+                            try self.copy(s.h, s.h + r * wide * 2, wide * 2);
+                            try self.copy(s.pss, s.pss + r * pss_n * 4, pss_n * 4);
+                        }
+                    } else if (r > 0) {
+                        try self.copy(s.h, s.h + r * wide * 2, wide * 2);
+                        try self.copy(s.pss, s.pss + r * pss_n * 4, pss_n * 4);
+                        try self.copy(s.inj, s.inj + r * streams * 2, streams * 2);
+                        try self.copy(s.y, s.y + r * slots * dims * 4, slots * dims * 4);
+                        try self.copy(s.wts, s.wts + r * slots * 4, slots * 4);
+                    }
+                    if (self.hooks.streams == 0) try self.writeback(0, 1);
+                    try self.readout(self.m.mixer, 0, 1);
+                    try self.projectHead(s.logits, 1);
+                    if (logits_host) |lh| {
+                        try self.complete();
+                        const d = self.stream.d;
+                        try d.check(d.api.cuMemcpyDtoH_v2(lh.ptr, s.logits, vocab * 2), "cuMemcpyDtoH");
+                    }
+                },
+            }
         }
     };
 }

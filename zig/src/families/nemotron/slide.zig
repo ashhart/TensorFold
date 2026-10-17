@@ -106,16 +106,8 @@ const Host = struct {
     }
 
     /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
-    pub fn pocketSaveBegin(b: Ctx, _: std.mem.Allocator, io: std.Io) !void {
-        return @import("save_guard").begin(io, b.m.dir);
-    }
-
-    pub fn pocketSaveFinish(b: Ctx, _: std.mem.Allocator, io: std.Io) !void {
-        return @import("save_guard").finish(io, b.m.dir);
-    }
-
     pub fn pocketSave(b: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
-        return PocketShards.writePending(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
+        return PocketShards.write(gpa, io, b.m.dir, b.m.config, moe, neurons, up, down);
     }
 
     /// MoE layer l's shared-expert down projection codes as the checkpoint holds them live, for its row kernels.

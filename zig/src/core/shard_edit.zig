@@ -569,5 +569,3 @@ test "integers set and read inside a nested config object, the top level and eve
 test {
     _ = @import("shard_edit_link_test.zig");
 }
-
-pub const save_guard = @import("save_guard");

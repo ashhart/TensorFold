@@ -101,13 +101,7 @@ pub fn mismatch(text: std.json.ObjectMap, quant: ?std.json.ObjectMap) ?[]const u
 }
 
 fn geometry(text: std.json.ObjectMap) ?[]const u8 {
-    // a folder Living Weights taught widens the shared expert by its pocket (a whole number of groups, 128 at most)
-    const learned = int(text, learned_key) orelse 0;
-    if (learned < 0 or learned > 128 or @mod(learned, 32) != 0) return learned_key;
-    for (shapes) |w| {
-        const want = if (std.mem.eql(u8, w.name, "shared_expert_intermediate_size")) w.value + learned else w.value;
-        if (int(text, w.name) != want) return w.name;
-    }
+    for (shapes) |w| if (int(text, w.name) != w.value) return w.name;
     return semantics(text);
 }
 
@@ -142,9 +136,6 @@ fn modeloptMismatch(text: std.json.ObjectMap, quant: std.json.ObjectMap) ?[]cons
     }
     return null;
 }
-
-/// The neurons a Living Weights pocket adds to each shared expert (living's Keys.pocket).
-const learned_key = "tensorfold_learned_neurons";
 
 /// The first semantic setting the kernels would ignore: eps, RoPE, gates, activations, layer roles, the head's layer.
 pub fn semantics(text: std.json.ObjectMap) ?[]const u8 {
@@ -253,27 +244,6 @@ test "the served shapes pass and a 6-bit checkpoint or another width is named" {
     try text.put(gpa, "hidden_size", .{ .integer = 4096 });
     try std.testing.expectEqualStrings("hidden_size", mismatch(text, quant).?);
     try std.testing.expectEqualStrings("quantization", mismatch(text, null).?);
-}
-
-test "a taught folder's wider shared expert passes with its pocket's count, and not without it" {
-    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
-    defer arena.deinit();
-    const gpa = arena.allocator();
-    var text: std.json.ObjectMap = .empty;
-    var rope_params: std.json.ObjectMap = .empty;
-    var mtp: std.json.ObjectMap = .empty;
-    var kinds: std.json.Array = .init(gpa);
-    var ple: std.json.Array = .init(gpa);
-    try served(gpa, &text, &rope_params, &mtp, &kinds, &ple);
-    var quant: std.json.ObjectMap = .empty;
-    try quant.put(gpa, "bits", .{ .integer = 4 });
-    try quant.put(gpa, "group_size", .{ .integer = 32 });
-    try text.put(gpa, "shared_expert_intermediate_size", .{ .integer = wt.moe_w + 64 });
-    try std.testing.expectEqualStrings("shared_expert_intermediate_size", mismatch(text, quant).?);
-    try text.put(gpa, learned_key, .{ .integer = 64 });
-    try std.testing.expectEqual(@as(?[]const u8, null), mismatch(text, quant));
-    try text.put(gpa, learned_key, .{ .integer = 40 });
-    try std.testing.expectEqualStrings(learned_key, mismatch(text, quant).?);
 }
 
 test "a changed epsilon, RoPE, gate, activation or layer role is refused by name" {

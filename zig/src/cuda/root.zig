@@ -67,9 +67,6 @@ pub const exl3_grouped = @import("exl3_grouped.zig");
 
 test {
     _ = exl3_grouped;
-    _ = gdn_train;
-    _ = train_q4;
-    _ = train_attn;
     _ = @import("memory.zig");
     _ = memory_receipt;
     _ = @import("grouped.zig");
@@ -122,7 +119,3 @@ test {
 }
 
 pub const ggml = @import("ggml.zig");
-
-pub const gdn_train = @import("gdn_train.zig");
-pub const train_q4 = @import("train_q4.zig");
-pub const train_attn = @import("train_attn.zig");

@@ -4,6 +4,7 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 /// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
+
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -487,7 +488,6 @@ pub const keepalive = @import("keepalive.zig");
 
 /// A model folder's original files kept before --slide first teaches it, its hold and its rollback (originals.zig).
 pub const originals = @import("originals.zig");
-pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("lane_host.zig");

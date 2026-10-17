@@ -12,6 +12,7 @@ const probe = @import("probe.zig");
 const pocket = @import("pocket.zig");
 const whole_lessons = @import("whole.zig");
 const examples = @import("lesson_examples.zig");
+
 pub const Example = examples.Example;
 pub const Lesson = examples.Lesson;
 const max_steps = examples.max_steps;
@@ -22,6 +23,7 @@ const pick = examples.pick;
 const own = examples.own;
 const disown = examples.disown;
 const disownLesson = examples.disownLesson;
+
 /// A projection's 4-bit codes as a backend holds them live, on the grid of their scales and biases.
 pub const Codes = struct { words: []u32, scales: []const u16, biases: []const u16 };
 
@@ -101,7 +103,6 @@ pub fn Learner(comptime H: type) type {
         }
 
         pub fn deinit(l: *Self) void {
-            if (l.trainer) |t| if (@hasDecl(H, "drain")) H.drain(t);
             if (has_edits) l.edits.deinit();
             if (has_edits) l.probe.deinit();
             if (has_pocket) l.pockets.deinit();
@@ -145,9 +146,7 @@ pub fn Learner(comptime H: type) type {
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
-            if (has_pocket and l.trainer != null) {
-                if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
-            }
+            if (has_pocket and l.trainer != null) try whole_lessons.heal(l); // a put-back the device lacks goes first
             l.lesson = lesson;
             if (lesson.undo) {
                 l.phase = .undo;
@@ -240,9 +239,12 @@ pub fn Learner(comptime H: type) type {
 
         /// One bounded unit: one example sketched or projected, one step of learning (a check every few), or the undo.
         pub fn step(l: *Self) Step {
-            const operation = l.phase;
-            var s = l.advance() catch |e| @import("learner_failure.zig").failed(l, operation, e, has_sites, has_pocket);
-            s.stale = s.stale or (has_pocket and whole_lessons.stale(l));
+            var s = l.advance() catch |e| failed: {
+                if (has_sites and l.phase == .steps) l.trainer.?.sites.restore();
+                l.phase = .idle;
+                break :failed Step{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
+            };
+            s.stale = has_pocket and whole_lessons.stale(l);
             return s;
         }
 

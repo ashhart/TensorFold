@@ -10,9 +10,6 @@ const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
 const Mtp = @import("cuda_mtp.zig").Mtp;
 const be = lanes.backend;
-pub const vision = @import("cuda_vision.zig");
-pub const slide = @import("cuda_slide.zig");
-pub const linked = slide.linked;
 
 pub const model_type = "qwen3_5";
 pub const formats: []const []const u8 = &.{"mlx-q4g64"};
@@ -33,13 +30,12 @@ pub const snap_grid: u32 = E.max_rows;
 
 /// explain() words open refusals too (--vision on a checkpoint without a tower it reads).
 pub const explains_open = true;
+pub const vision = @import("cuda_vision.zig");
 
 pub const Options = struct { context: usize, drafts: bool, segments: usize = 1, slide: bool = false, vision: ?vision.Limits = null, kv8: bool = false };
 
 /// What the native server drives: the lane backend, the facts its round loop reads, and how to free it.
 pub const Loaded = struct {
-    learns: ?*E.Engine = null,
-    learn_bytes: usize = 0,
     backend: be.Backend,
     facts: lanes.Model,
     rows: u32,
@@ -58,11 +54,9 @@ pub const Loaded = struct {
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     if (kernels != null) return error.QwenHasNoCapturedKernels;
-    if (o.slide and o.kv8) return error.UnsupportedLearningFormat;
     const e = try E.Engine.init(gpa, io, ctx, dir, o.kv8);
     errdefer e.deinit();
     if (e.g.vocab != c.vocab) return error.UnsupportedQwenVocab; // draw.zig's masks are sized by the 2B's vocabulary
-    if (o.slide) _ = try @import("cuda_learn_shape.zig").from(e.g);
     // --vision: the checkpoint's tower, its weights and one call's scratch loaded beside the model's
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
@@ -70,8 +64,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v, .target = undefined };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
-        .learns = if (o.slide) e else null,
-        .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
         .backend = l.backend(),
         .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
         .rows = @intCast(e.window_rows),
@@ -82,11 +74,6 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .vision = v,
         .target = &l.target,
     };
-}
-
-pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
-    const l: *Lanes = @ptrCast(@alignCast(p));
-    return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
 }
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
@@ -336,7 +323,6 @@ const Lanes = struct {
                 }
             } else stream.reuse_failed = true;
         }
-        cache.untaught = stream.untaught;
         while (at < ids.len) {
             const end = nextCut(ids.len, stream.chunks, at);
             try self.e.forward(&.{.{ .cache = cache, .rows = end - at, .images = if (images) |*im| im else null }}, ids[at..end], .last);

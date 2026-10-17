@@ -11,15 +11,14 @@ as Sliding Weights (experimental), and its flag and API use the name `slide`.
 ## What you need
 
 - An Apple-silicon Mac (tested on an M5 Ultra and an M3 Ultra), or an NVIDIA GB10 (DGX Spark) with the CUDA build,
-  with room for the model and a copy of it. On a GB10, `--slide` also keeps GPU memory for its trainer (about 26 GiB
-  for Nemotron, 10.6 GiB for Qwen3.8 Flash Next); on a Mac the trainer works on the model's own weights.
-- The Nemotron 3.5 Lightning MLX 4-bit checkpoint, or, on a GB10 only, the Qwen3.8 Flash Next MLX 4-bit group-32
-  checkpoint with its MTP head. Macs refuse `--slide` for Flash Next.
+  with room for the model and a copy of it. On a GB10, `--slide` also keeps about 26 GiB of GPU memory for its
+  trainer; on a Mac the trainer works on the model's own weights.
+- The Nemotron 3.5 Lightning MLX 4-bit checkpoint, the only model it learns into today.
 - A TensorFold build with the pocket learner described here (the release after 1.0.6). A folder taught by 1.0.3 to
   1.0.6 still serves and answers from what it learned, but `--slide` refuses it: those releases saved lessons into
   the shared experts the pocket widens. Teach a fresh copy instead.
 
-A Nemotron folder that learned on either backend serves on the other.
+A folder that learned on either backend serves on the other.
 
 ## Quick start
 
@@ -327,7 +326,6 @@ the folder's files alone while a server or a rollback has it.
 | `--slide rewrites the model's own files, and … is a link to data another file shares` at startup | The folder holds links into the Hugging Face cache (or hard links); make the copy with `cp -cRL` (Linux: `cp -RL`) as in step 2 |
 | `--slide learns on a GB10 (sm_121) so far` at startup | CUDA learning is qualified on a GB10 only; serve this GPU without `--slide`, or teach on a Mac or a GB10 |
 | `--slide runs a prompt one chunk at a time` at startup | Serve it without `--segments` or `TF_CUDA_SEGMENTS` |
-| `--slide trains on Flash Next's own glue` at startup | Serve Flash Next without `TENSORFOLD_CUDA_KERNELS` |
 | `--slide adds learned neurons beside every shared expert, and … is unquantized` at startup | The folder was taught by TensorFold 1.0.3 to 1.0.6; serve it without `--slide`, or teach a fresh copy |
 | `--slide lets any client that reaches this server rewrite the weights in …` at startup | Add a key: `--api-key-file FILE`, `--api-key KEY` or `TENSORFOLD_API_KEY` (step 3) |
 | `--slide needs a key this server can read, and --api-key-file … gives none: …` at startup | Make the file (one key a line), `chmod 600` it, and check its path; the end of the line gives the reason |
@@ -372,15 +370,6 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
 - **Serving.** Without learned facts the server gives the same replies, token for token, at the same speed as without
   Living Weights. A folder holding many learned facts decodes slower on a Mac (about 16% with 21 facts in the pocket),
   and drafted replies still equal plain ones.
-
-On Qwen3.8 Flash Next (MLX 4-bit group 32 with its MTP head) on a GB10, five facts about the user were taught one
-after another to a fresh copy. Three were kept, in 8.7 to 10.5 minutes each (two and a half to four of them the model writing its
-lesson and three to four its trainer's first round, half a minute each round of checks), and each came back right after
-its lesson; one was refused at once, the model having written too few clean answers to learn from, and one was not
-kept after five rounds in 40 minutes. A later lesson can stop an earlier fact coming back (#870): after the five, two
-of the three kept facts still answered. Unrelated questions kept their answers, plain and `--slide` restarts gave the
-same replies, drafted replies equal `"draft": false` and four streams at once equal each alone. With three facts in
-the pocket, drafted decode was 5% slower (80 against 84 tokens a second on code) and `--no-drafts` 1% slower.
 
 While it learns, near misses and free writing about the fact's subject are trained to stay as they were. Before
 keeping a fact, it checks wordings it never trained on, with thinking off and on, near misses and unrelated prompts.

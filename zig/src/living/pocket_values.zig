@@ -360,7 +360,6 @@ fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     const s = &p.v;
     const d = p.hidden;
     try put(p, t, host, vals, d);
-    try p.asWritten(t, host);
     t.from = @splat(std.math.maxInt(u32));
     std.log.info("slide pocket: {d} answers' first rows run once, {d} rows the steps did not run again", .{ s.prefixes.slots, s.prefixes.skipped });
     try prefix.release(t, &s.prefixes);
@@ -383,6 +382,7 @@ fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
 
 /// The held-out answers judged token for token with the pocket in the forward, side by side; true once judged.
 pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
+    try @import("pocket_mark.zig").asWritten(p, t, host); // judged, and asked after, as a save writes it
     if (p.held.len > 0) try verifyForward(p, t, host, p.held[0]);
     const got = try p.gpa.alloc(Result, p.held.len);
     defer p.gpa.free(got);

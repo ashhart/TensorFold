@@ -97,7 +97,7 @@ fn Host(comptime F: fam.Family) type {
         pub const family = F;
         pub const Ctx = *Seen;
 
-        pub const Seen = struct { fail_save: enum { none, before, partial } = .none, partial: bool = false, dir: []const u8 = &.{}, disk: u64 = 0, uploads: usize = 0, saved: usize = 0, gate_ok: bool = true, up_ok: bool = true, written: []const usize = &.{} };
+        pub const Seen = struct { uploads: usize = 0, saved: usize = 0, gate_ok: bool = true, up_ok: bool = true, written: []const usize = &.{} };
 
         pub fn layout(_: Ctx) fam.Layout {
             var every: fam.Layers = .empty;
@@ -109,13 +109,6 @@ fn Host(comptime F: fam.Family) type {
             const t = try gpa.create(Toy);
             t.* = .{ .gpa = gpa };
             return t;
-        }
-
-        pub fn pocketSaveBegin(s: Ctx, _: std.mem.Allocator, io: std.Io) !void {
-            if (s.dir.len > 0) try @import("save_guard").begin(io, s.dir);
-        }
-        pub fn pocketSaveFinish(s: Ctx, _: std.mem.Allocator, io: std.Io) !void {
-            if (s.dir.len > 0) try @import("save_guard").finish(io, s.dir);
         }
 
         pub fn free(t: *Toy, gpa: std.mem.Allocator) void {
@@ -135,10 +128,9 @@ fn Host(comptime F: fam.Family) type {
             return 0;
         }
 
-        pub fn pocketSave(s: Ctx, _: std.mem.Allocator, _: std.Io, written: []const usize, _: usize, up: []f32, _: []f32) !usize {
+        pub fn pocketSave(s: Ctx, _: std.mem.Allocator, _: std.Io, written: []const usize, _: usize, _: []f32, _: []f32) !usize {
             s.saved += 1;
             s.written = written;
-            try writeImage(s, &.{}, up);
             return 1;
         }
 
@@ -155,32 +147,14 @@ fn Host(comptime F: fam.Family) type {
             return 0;
         }
 
-        fn writeImage(s: Ctx, gate: []const f32, up: []const f32) !void {
-            if (s.fail_save == .before) return error.InjectedSave;
-            var h = std.hash.Wyhash.init(0);
-            h.update(std.mem.sliceAsBytes(gate));
-            h.update(std.mem.sliceAsBytes(up));
-            const image = h.final();
-            s.disk = if (s.fail_save == .partial) image ^ 1 else image;
-            if (s.dir.len > 0) {
-                var dir = try std.Io.Dir.cwd().openDir(std.testing.io, s.dir, .{});
-                defer dir.close(std.testing.io);
-                try dir.writeFile(std.testing.io, .{ .sub_path = "saved.bin", .data = std.mem.asBytes(&s.disk) });
-            }
-            if (s.fail_save == .partial) {
-                s.partial = true;
-                return error.InjectedSave;
-            }
-        }
-
         pub fn pocketSaveSwiglu(s: Ctx, _: std.mem.Allocator, _: std.Io, written: []const usize, _: usize, gate: []f32, up: []f32, _: []f32) !usize {
             s.saved += 1;
             s.written = written;
-            try writeImage(s, gate, up);
             for (gate, up) |g, w| if (@abs(g - F.neuron.sharp * F.neuron.sharp * w) > 1e-5 * @abs(g) + 1e-30) {
                 s.gate_ok = false;
             };
             // handed back as a writer would: rounded, so the learner takes u from the up rows as written
+            for (up) |*w| w.* = std.math.round(w.* * 4096) / 4096;
             return 1;
         }
     };
@@ -223,10 +197,6 @@ fn run(comptime F: fam.Family) !void {
     try std.testing.expect(got.len > 0);
     for (got) |x| try std.testing.expect(x.layer > 0 and x.layer < layers - 1);
     try std.testing.expect(seen.uploads > 0);
-    // A reported verdict already used the exact saved form; rounding again changes no weight bit.
-    const before = state(&l.pockets);
-    try l.pockets.asWritten(l.trainer.?, @import("whole.zig").Hooks(H){ .b = &seen, .gpa = gpa, .io = std.testing.io });
-    try std.testing.expectEqual(before, state(&l.pockets));
     // the save: through the family's own hook, every learning layer handed over
     try l.begin(.{ .save = true });
     while (!l.step().done) {}
@@ -241,86 +211,5 @@ test "a pocket lesson over a stand-in relu^2 host: read, fitted, stepped, judged
 }
 
 test "a pocket lesson over a stand-in gated SwiGLU host: its rows handed over as gate sharp u and up u / sharp, the gate read" {
-    try run(@import("families.zig").qwen4_exp);
-}
-
-fn state(p: anytype) u64 {
-    var h = std.hash.Wyhash.init(0);
-    inline for (.{ "gate", "up", "down", "used" }) |f| h.update(std.mem.sliceAsBytes(@field(p, f).items));
-    return h.final();
-}
-
-fn saveFailure(comptime F: fam.Family, comptime allocate_fails: bool, partial: bool) !void {
-    const Observe = struct {
-        pub fn accepted(_: @This()) void {}
-        pub fn failed(_: @This(), _: bool) !void {}
-    };
-    return observedSaveFailure(F, allocate_fails, partial, Observe{});
-}
-pub fn observedSaveFailure(comptime F: fam.Family, comptime allocate_fails: bool, partial: bool, observer: anytype) !void {
-    const a = std.testing.allocator;
-    const H = Host(F);
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const dir = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
-    defer a.free(dir);
-    var seen: H.Seen = .{ .dir = dir };
-    var l = learner.Learner(H).init(a, std.testing.io, &seen);
-    defer l.deinit();
-    var arena = std.heap.ArenaAllocator.init(a);
-    defer arena.deinit();
-    const al = arena.allocator();
-    var examples: [6]Example = undefined;
-    for (&examples, 0..) |*ex, i| ex.* = try qa(al, 7, @intCast(i));
-    const held = [_]Example{ try qa(al, 7, 10), try qa(al, 7, 11) };
-    try l.begin(.{ .train = &examples, .held = &held });
-    var graph_learned = false;
-    for (0..10000) |_| {
-        const step = l.step();
-        if (step.report) |report| if (report == .learned) {
-            graph_learned = report.learned.recalled;
-            if (graph_learned) observer.accepted();
-        };
-        if (step.done) break;
-    } else return error.NoVerdict;
-    try std.testing.expect(graph_learned and l.kept_rounds > 0 and l.pocketed);
-    const accepted = state(&l.pockets);
-    seen.fail_save = if (partial) .partial else .before;
-    if (allocate_fails) seen.fail_save = .none;
-    try l.begin(.{ .save = true });
-    var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
-    if (allocate_fails) l.pockets.gpa = failing.allocator();
-    const failed = l.step();
-    l.pockets.gpa = a;
-    try observer.failed(failed.stale);
-    try std.testing.expect(failed.done and failed.report != null and failed.report.? == .failed);
-    try std.testing.expectEqual(accepted, state(&l.pockets));
-    try std.testing.expect(graph_learned and failed.stale);
-    try std.testing.expectEqual(!allocate_fails and partial, seen.partial);
-    try std.testing.expectError(error.CheckpointSaveUncertain, @import("save_guard").check(std.testing.io, dir));
-    try std.testing.expectError(error.PocketSaveUncertain, l.begin(.{ .train = &examples, .held = &held }));
-    seen.fail_save = .none;
-    try l.begin(.{ .save = true });
-    const repaired = l.step();
-    try std.testing.expect(repaired.done and repaired.report == null and !repaired.stale);
-    try std.testing.expectEqual(accepted, state(&l.pockets));
-    try @import("save_guard").check(std.testing.io, dir);
-    const disk = try tmp.dir.readFileAlloc(std.testing.io, "saved.bin", a, .limited(32));
-    defer a.free(disk);
-    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&seen.disk), disk);
-    try l.begin(.{ .train = &examples, .held = &held });
-    l.abort();
-}
-test "lesson save: allocation before save preserves an accepted lesson and blocks new work until retry" {
-    inline for (.{ families.qwen4_exp, families.qwen3_5 }) |F| try saveFailure(F, true, false);
-}
-test "lesson save: writer error before write preserves an accepted lesson and blocks new work until retry" {
-    inline for (.{ families.qwen4_exp, families.qwen3_5 }) |F| try saveFailure(F, false, false);
-}
-test "lesson save: partial throwing save preserves the accepted lesson and retry reconciles disk" {
-    inline for (.{ families.qwen4_exp, families.qwen3_5 }) |F| try saveFailure(F, false, true);
-}
-
-test "lesson save: an ungated dense SwiGLU lesson uses the identical judged save gate" {
-    try run(@import("families.zig").qwen3_5);
+    try run(@import("test_families.zig").swiglu);
 }

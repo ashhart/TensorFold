@@ -73,7 +73,6 @@ pub const Checkpoint = struct {
         return openModelPrefix(gpa, io, dir, null);
     }
     pub fn openModelPrefix(gpa: std.mem.Allocator, io: Io, dir: []const u8, prefix: ?[]const u8) !Checkpoint {
-        try @import("save_guard").check(io, dir);
         const paths = try shardFiles(gpa, io, dir);
         defer freeShardFiles(gpa, paths);
         var ck: Checkpoint = .{ .gpa = gpa, .io = io };
@@ -323,22 +322,4 @@ test "release keeps a map that fell back to reads (no mmap): its heap copy is th
     const t = try ck.get("x");
     ck.release();
     try std.testing.expectEqualSlices(u8, image[image.len - n ..], t.bytes);
-}
-
-test "unresolved save: an unresolved partial save refuses actual checkpoint reopening" {
-    const a = std.testing.allocator;
-    const io = std.testing.io;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const image = try testImage(a, "probe", 32);
-    defer a.free(image);
-    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = image });
-    try tmp.dir.writeFile(io, .{ .sub_path = ".tensorfold-save-pending", .data = "unfinished" });
-    const dir = try tmp.dir.realPathFileAlloc(io, ".", a);
-    defer a.free(dir);
-    if (Checkpoint.openModel(a, io, dir)) |opened| {
-        var ck = opened;
-        ck.close();
-        return error.UncertainCheckpointReopened;
-    } else |err| try std.testing.expectEqual(error.CheckpointSaveUncertain, err);
 }

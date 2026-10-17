@@ -13,12 +13,10 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     const round_streams = 32;
 
     if (o.context > prompt.max_tokens) return error.ContextOverWindow;
-    if (o.segments != 1) return error.UnsupportedOption;
+    if (o.segments != 1 or o.slide) return error.UnsupportedOption;
     if ((o.tp != 1 and o.tp != 2) or o.rank >= o.tp) return error.BadRank;
     const mode = try config.mode(gpa, io, dir);
     if (o.tp != 1 and (mode != .modelopt or captured != null)) return error.UnsupportedQuantization;
-    if (o.slide and (mode != .affine or o.tp != 1)) return error.UnsupportedLearningFormat;
-    if (o.slide and captured != null) return error.TrainingOnCapturedGlue;
     const driver: *cuda.Driver = @constCast(ctx.d);
     const own = try gpa.create(Cuda);
     errdefer gpa.destroy(own);
@@ -58,7 +56,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     }
     errdefer if (own.vision) |v| v.deinit();
     // the pass's scratch for a full chunk, once for the engine (every prompt, window, round and head pass)
-    _ = try own.engine.reserve(@max(@min(o.context, own.engine.chunk), if (o.slide) @as(usize, @import("cuda_train.zig").pack_rows) else 0));
+    _ = try own.engine.reserve(@min(o.context, own.engine.chunk));
     // the MTP head unless --no-drafts (TF_FLASHNEXT_DRAFTS and _CONFIDENCE: the chain's rule, 6 and 0.60)
     if (o.drafts and (o.tp == 1 or o.rank == 0)) {
         own.head = try mtp.Head.init(gpa, io, driver, &own.stream, dir);
@@ -73,7 +71,6 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     errdefer own.logits.free();
     own.lanes = .empty;
     own.next = 0;
-    if (o.slide) own.lay = try @import("cuda_slide.zig").layoutOf(gpa, io, dir);
     var stream_bytes = prompt.seqBytes(window);
     if (own.head) |h| {
         stream_bytes += mtp.Draft.bytes(window, h.ids.len, own.engine.chunk);
@@ -88,8 +85,6 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
         .stream_bytes = stream_bytes,
         .ctx = own,
         .deinit = F.release,
-        .learns = if (o.slide) own else null,
-        .learn_bytes = if (o.slide) @import("cuda_train.zig").memory() else 0,
         .target = own,
         .own_glue = own.set == null,
         .follow = if (o.rank != 0) F.follow else null,

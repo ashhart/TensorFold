@@ -164,7 +164,6 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/qwen27_host.zig").tests(b);
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
-    @import("zig/build/gradient_host.zig").add(b);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     xpu_build.hostTests(b, test_step);
     if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
@@ -205,7 +204,6 @@ pub fn build(b: *std.Build) void {
     contract_build.hostTests(b, gemma4_contract_host);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
-    @import("zig/build/save_guard.zig").wire(b);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).

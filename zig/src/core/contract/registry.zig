@@ -337,7 +337,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "latent tf_super_topk_few", .usage = .{ .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 } } },
         .{ .name = "ck tf_ck4_up_relu2_few", .usage = .{ .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 } } },
         .{ .name = "mamba tf_nemo_scan", .usage = .{ .{ .regs = 138, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 } } },
-    } ++ learning.cuda_132 ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132) },
+    } ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132) },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
     } },
@@ -577,14 +577,10 @@ test {
     _ = @import("registry_sets_test.zig");
 }
 
-const learning = @import("registry_learning.zig");
 const paging = @import("paging_pending.zig");
-pub const gradient_pending = learning.gradient_pending;
-pub const qwen_learning_pending = learning.qwen_learning_pending;
-/// What the live audit checks: the serving records, then the learning and paging launches.
-pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
+/// What the live audit checks: the serving records, then the paging launches.
+pub const all_cuda = cuda ++ paging.extra;
 test {
-    _ = learning;
     _ = paging;
 }
 

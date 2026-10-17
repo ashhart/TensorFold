@@ -171,21 +171,16 @@ pub fn keepOriginals(srv: *Server, conn: *Conn, a: Allocator) bool {
 const give_up = 5;
 
 /// What a lesson's rounds left: which facts come back, the steps taken, and why it stopped early (null: it did not).
-pub const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
+const Rounds = struct { recalled: []bool, steps: u32 = 0, why: ?[]const u8 = null };
 
 /// A lesson in checked rounds until its fact comes back, then the facts before it asked again (slide_recheck.zig).
-pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: anytype, id: u32, o: *Out) Rounds {
+fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone: Gone, id: u32, o: *Out) Rounds {
     var out: Rounds = .{ .recalled = a.alloc(bool, plan.facts.len) catch &.{} };
     @memset(out.recalled, false);
     var routed: u32 = 0;
     var repaired: u32 = 0;
     // the facts learned before, as they stood when this lesson began: what its checks find forgotten is against these
-    const before = srv.slide.earlier(a, id) catch |e| {
-        out.why = words(cx, e);
-        return out;
-    };
-    var committed = false;
-    defer if (!committed) takeOut(srv, a, &out, id, out.why orelse "taken out: its full commit gate did not pass");
+    const before = srv.slide.earlier(a, id) catch &.{};
     var asked_after = false; // the facts before it were asked again after its take-out: their verdicts are current
     // a lesson not kept leaves the facts before it as it found them, so their verdicts go back to what they were
     defer if (!asked_after and !std.mem.allEqual(bool, out.recalled, true)) srv.slide.restoreChecks(before);
@@ -259,7 +254,6 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 return out;
             };
             if (lost.len == 0) {
-                committed = true;
                 // a diagnostic: every kept lesson taken out again, to see the facts before it come back as they were
                 if (std.c.getenv("TF_SLIDE_TAKE_OUT_CHECK") != null) {
                     takeOut(srv, a, &out, id, "taken out to check that a take-out puts the facts before it back (TF_SLIDE_TAKE_OUT_CHECK)");
@@ -319,7 +313,7 @@ fn expected(a: Allocator, plan: teach.Plan) []const slide_graph.Answer {
 }
 
 /// The facts learned before fact `id` asked again, each verdict on the stream; those that came back before and not now.
-fn earlierLost(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const slide_graph.Earlier, gone: anytype) ![]const recheck.Result {
+fn earlierLost(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const slide_graph.Earlier, gone: Gone) ![]const recheck.Result {
     const began = now(srv);
     const results = try recheck.check(srv, cx, id, .all, before, gone);
     var back: u32 = 0;
@@ -336,7 +330,7 @@ fn earlierLost(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const s
 }
 
 /// The facts learned before asked again once a lesson is taken out: each that came back before it should come back now.
-fn afterTakeOut(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const slide_graph.Earlier, lost: []const recheck.Result, gone: anytype) void {
+fn afterTakeOut(srv: *Server, cx: *errors.Cx, o: *Out, id: u32, before: []const slide_graph.Earlier, lost: []const recheck.Result, gone: Gone) void {
     const still = earlierLost(srv, cx, o, id, before, gone) catch |e| return log.line("slide: fact {d}: the facts learned before could not be asked again after its take-out: {s}", .{ id, words(cx, e) });
     var back: u32 = 0;
     for (lost) |l| {

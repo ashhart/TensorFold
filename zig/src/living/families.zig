@@ -2,6 +2,7 @@
 const std = @import("std");
 const family = @import("family.zig");
 const Family = family.Family;
+const test_families = @import("test_families.zig");
 
 /// Nemotron 3.5 Lightning (nemotron_h): relu^2 shared experts at the pattern's MoE layers, 4-bit groups of 64.
 pub const nemotron_h: Family = .{
@@ -18,33 +19,7 @@ pub const nemotron_h: Family = .{
     .experts = .pattern,
 };
 
-/// Qwen3.8 Flash Next (qwen4_exp): a SwiGLU shared expert at every layer behind its own gate, 4-bit groups of 32.
-pub const qwen4_exp: Family = .{
-    .model_type = "qwen4_exp",
-    .names = .{
-        .layers = "language_model.model.layers.",
-        .expert = "mlp.shared_expert.",
-        .inputs = &.{ "gate_proj", "up_proj" },
-        .mtp = .{ .base = "language_model.mtp.layers.0.mlp.shared_expert." },
-    },
-    // silu(gate) is not zero below it as relu is: a wider margin keeps sigmoid(-16 * 0.5) = 3e-4 of it there
-    .neuron = .{ .act = .swiglu, .gated = true, .margin = 0.5, .sharp = 16 },
-    .quant = .{ .bits = 4, .group = 32 },
-    .keys = .{ .scope = "text_config", .width = "shared_expert_intermediate_size" },
-    .experts = .every,
-};
-
-/// Dense Qwen3.8-27B: @ZackSample #911, on the owned @BobClawblaw #836 engine.
-pub const qwen3_5: Family = .{
-    .model_type = "qwen3_5",
-    .names = .{ .layers = "language_model.model.layers.", .expert = "mlp.", .inputs = &.{ "gate_proj", "up_proj" } },
-    .neuron = .{ .act = .swiglu, .margin = 0.5, .sharp = 16 },
-    .quant = .{ .bits = 4, .group = 64 },
-    .keys = .{ .scope = "text_config", .width = "intermediate_size" },
-    .experts = .every,
-};
-
-pub const all = [_]Family{ nemotron_h, qwen4_exp, qwen3_5 };
+pub const all = [_]Family{nemotron_h};
 
 /// The family of a checkpoint's top-level model_type, or null.
 pub fn byModelType(model_type: []const u8) ?Family {
@@ -92,7 +67,7 @@ pub fn intField(o: std.json.ObjectMap, key: []const u8) ?usize {
 
 test "each family's model type finds it; a pattern family's letters come from its pattern, an every-layer one's are E" {
     try std.testing.expectEqualStrings("nemotron_h", byModelType("nemotron_h").?.model_type);
-    try std.testing.expectEqualStrings("qwen4_exp", byModelType("qwen4_exp").?.model_type);
+    try std.testing.expect(byModelType("qwen4_exp") == null);
     try std.testing.expect(byModelType("glm") == null);
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -100,5 +75,5 @@ test "each family's model type finds it; a pattern family's letters come from it
     const n = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"layers_block_type\": [\"mamba\", \"moe\", \"attention\"]}", .{});
     try std.testing.expectEqualStrings("ME*", try kinds(a, nemotron_h, n.object));
     const q = try std.json.parseFromSliceLeaky(std.json.Value, a, "{\"text_config\": {\"num_hidden_layers\": 3}}", .{});
-    try std.testing.expectEqualStrings("EEE", try kinds(a, qwen4_exp, scoped(qwen4_exp, q.object).?));
+    try std.testing.expectEqualStrings("EEE", try kinds(a, test_families.swiglu, scoped(test_families.swiglu, q.object).?));
 }
