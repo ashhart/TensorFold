@@ -11,8 +11,9 @@ const be = lanes.backend;
 /// First tokens a handle names.
 const ring = 1024;
 
-/// The widest verify window: the pending token and a full draft chain (glm-decode-check's, the AOT row variants).
-pub const max_rows = 1 + engine.max_drafts;
+/// The widest verify window: the pending token and a copy (the lane core proposes them), as the decode buffers hold.
+pub const max_rows = fw.window_rows;
+const mtp_rows = 1 + engine.max_drafts;
 
 /// A stream's place in the backend: its sequence's slot, the rows its last verify left uncommitted, its held drafts.
 const Lane = struct {
@@ -56,12 +57,13 @@ pub const Lanes = struct {
         break :vt v;
     };
 
-    /// Round loop facts: windows up to max_rows, drafts with the head loaded, shared windows unless TF_GLM_SHARED=0.
+    /// Round loop facts: copies up to max_rows, head chains to mtp_rows, shared windows unless TF_GLM_SHARED=0.
     pub fn facts(self: *const Lanes) lanes.Model {
         const drafting = self.x.e.mtp;
         const sharing = drafting and !self.alone;
         return .{
             .exact_width = if (drafting) max_rows else 1,
+            .first_copy_rows = mtp_rows, // a first copy as wide as a head round; it grows as its tokens land
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
@@ -121,6 +123,7 @@ pub const Lanes = struct {
     fn prefillFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!void {
         const self = of(ptr);
         const from = try self.opening(s);
+        try self.images(s, from);
         _ = self.take(try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s)));
     }
 
@@ -129,6 +132,7 @@ pub const Lanes = struct {
         const self = of(ptr);
         const going: ?usize = if (self.lanes.getPtr(s)) |l| l.fill else null;
         const from = if (going == null) try self.opening(s) else null;
+        if (going == null) try self.images(s, from);
         const l = self.lanes.getPtr(s).?;
         if (going != null) try self.x.bind(l.slot);
         const at = going orelse if (from) |r| r.at else 0;
@@ -152,9 +156,18 @@ pub const Lanes = struct {
         gop.value_ptr.held_n = 0;
         gop.value_ptr.fill = null;
         try self.x.bind(gop.value_ptr.slot);
+        if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
         s.cached = 0;
         return self.resumeFrom(s, ids.len);
+    }
+
+    /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
+    fn images(self: *Lanes, s: *lanes.Stream, from: ?engine.Resume) !void {
+        if (s.images.len == 0) return;
+        const v = self.x.e.images orelse return error.NoVision;
+        try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
+        try self.x.images(v);
     }
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
