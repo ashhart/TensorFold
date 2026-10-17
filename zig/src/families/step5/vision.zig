@@ -58,10 +58,14 @@ pub const Vision = struct {
     att: Ref,
     h: Ref,
 
-    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint) !*Vision {
+    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, hidden: u32) !*Vision {
         const v = try gpa.create(Vision);
         errdefer gpa.destroy(v);
         v.gpa = gpa;
+        const tables = try readTensors(v, c, hidden);
+        const d1 = tables.d1;
+        const d2 = tables.d2;
+        const pos = tables.pos;
         const src = try frags.source(device, gpa, ks.step5_vision);
         defer gpa.free(src);
         v.lib = try mtl.Library.fromSource(device, src, mtl.CompileOptions.mlx());
@@ -80,46 +84,7 @@ pub const Vision = struct {
             v.glue[i] = try mtl.Pipeline.init(device, v.lib, n, false);
             made += 1;
         }
-        const t = struct {
-            fn get(cp: *const ck.Checkpoint, comptime fmt: []const u8, args: anytype, count: usize) !ck.Tensor {
-                var b: [160]u8 = undefined;
-                const name = try std.fmt.bufPrint(&b, fmt, args);
-                const x = try cp.get(name);
-                if (x.dtype != .bf16 or x.count() != count) {
-                    std.log.err("step5 vision: {s} is not bf16[{d}]", .{ name, count });
-                    return error.UnexpectedStep5Tensor;
-                }
-                return x;
-            }
-        };
-        v.conv1 = ref(try t.get(c, "vision_model.conv1.weight", .{}, width * image.patch_width));
-        v.ln_pre_w = ref(try t.get(c, "vision_model.ln_pre.weight", .{}, width));
-        v.ln_pre_b = ref(try t.get(c, "vision_model.ln_pre.bias", .{}, width));
-        for (&v.blocks, 0..) |*b, i| {
-            const p = "vision_model.transformer.resblocks.{d}.";
-            b.* = .{
-                .ln1_w = ref(try t.get(c, p ++ "ln_1.weight", .{i}, width)),
-                .ln1_b = ref(try t.get(c, p ++ "ln_1.bias", .{i}, width)),
-                .ln2_w = ref(try t.get(c, p ++ "ln_2.weight", .{i}, width)),
-                .ln2_b = ref(try t.get(c, p ++ "ln_2.bias", .{i}, width)),
-                .qkv_w = ref(try t.get(c, p ++ "attn.in_proj_weight", .{i}, 3 * width * width)),
-                .qkv_b = ref(try t.get(c, p ++ "attn.in_proj_bias", .{i}, 3 * width)),
-                .out_w = ref(try t.get(c, p ++ "attn.out_proj.weight", .{i}, width * width)),
-                .out_b = ref(try t.get(c, p ++ "attn.out_proj.bias", .{i}, width)),
-                .fc_w = ref(try t.get(c, p ++ "mlp.c_fc.weight", .{i}, mlp_inter * width)),
-                .fc_b = ref(try t.get(c, p ++ "mlp.c_fc.bias", .{i}, mlp_inter)),
-                .proj_w = ref(try t.get(c, p ++ "mlp.c_proj.weight", .{i}, width * mlp_inter)),
-                .proj_b = ref(try t.get(c, p ++ "mlp.c_proj.bias", .{i}, width)),
-                .ls1 = ref(try t.get(c, p ++ "ls_1.gamma", .{i}, width)),
-                .ls2 = ref(try t.get(c, p ++ "ls_2.gamma", .{i}, width)),
-            };
-        }
-        v.down1_b = ref(try t.get(c, "vision_model.vit_downsampler1.bias", .{}, 2 * width));
-        v.down2_b = ref(try t.get(c, "vision_model.vit_downsampler2.bias", .{}, 4 * width));
-        v.proj = ref(try t.get(c, "vit_large_projector.weight", .{}, out_hidden * 4 * width));
-        const d1 = try t.get(c, "vision_model.vit_downsampler1.weight", .{}, 2 * width * width * 9);
-        const d2 = try t.get(c, "vision_model.vit_downsampler2.weight", .{}, 4 * width * 2 * width * 9);
-        const pos = try t.get(c, "vision_model.positional_embedding", .{}, max_patches * width);
+
         // owned: down1, down2 as [out, ky, kx, in]; the 36 x 36 position table; cos and sin for both grids
         const n_d1 = d1.count();
         const n_d2 = d2.count();
@@ -334,4 +299,70 @@ fn rope(cs: []u16, sn: []u16, g: usize) void {
         cs[(r * g + c) * head_dim + d] = bf16(@cos(angle));
         sn[(r * g + c) * head_dim + d] = bf16(@sin(angle));
     };
+}
+
+const Tables = struct { d1: ck.Tensor, d2: ck.Tensor, pos: ck.Tensor };
+
+pub fn checkedTensor(t: ck.Tensor, dims: []const usize) !ck.Tensor {
+    const shape = @import("tensor_shape.zig");
+    if (dims.len == 4 and dims[0] == width and dims[1] == 3 and dims[2] == image.patch and dims[3] == image.patch and t.rank == 2) {
+        try shape.require(t, .bf16, &.{ width, image.patch_width });
+    } else if (std.mem.eql(usize, dims, &.{ max_patches, width }) and t.rank == 3 and t.shape[0] == 1) {
+        try shape.require(t, .bf16, &.{ 1, max_patches, width });
+    } else try shape.require(t, .bf16, dims);
+    return t;
+}
+
+pub fn requireHidden(hidden: u32) error{UnsupportedStep5Tower}!void {
+    if (hidden != out_hidden) return error.UnsupportedStep5Tower;
+}
+
+fn readTensors(v: *Vision, c: *const ck.Checkpoint, hidden: u32) !Tables {
+    try requireHidden(hidden);
+    const t = struct {
+        fn get(cp: *const ck.Checkpoint, comptime fmt: []const u8, args: anytype, dims: []const usize) !ck.Tensor {
+            var b: [160]u8 = undefined;
+            const name = try std.fmt.bufPrint(&b, fmt, args);
+            const x = try cp.get(name);
+            return checkedTensor(x, dims);
+        }
+    };
+    v.conv1 = ref(try t.get(c, "vision_model.conv1.weight", .{}, &.{ width, 3, image.patch, image.patch }));
+    v.ln_pre_w = ref(try t.get(c, "vision_model.ln_pre.weight", .{}, &.{width}));
+    v.ln_pre_b = ref(try t.get(c, "vision_model.ln_pre.bias", .{}, &.{width}));
+    for (&v.blocks, 0..) |*b, i| {
+        const p = "vision_model.transformer.resblocks.{d}.";
+        b.* = .{
+            .ln1_w = ref(try t.get(c, p ++ "ln_1.weight", .{i}, &.{width})),
+            .ln1_b = ref(try t.get(c, p ++ "ln_1.bias", .{i}, &.{width})),
+            .ln2_w = ref(try t.get(c, p ++ "ln_2.weight", .{i}, &.{width})),
+            .ln2_b = ref(try t.get(c, p ++ "ln_2.bias", .{i}, &.{width})),
+            .qkv_w = ref(try t.get(c, p ++ "attn.in_proj_weight", .{i}, &.{ 3 * width, width })),
+            .qkv_b = ref(try t.get(c, p ++ "attn.in_proj_bias", .{i}, &.{3 * width})),
+            .out_w = ref(try t.get(c, p ++ "attn.out_proj.weight", .{i}, &.{ width, width })),
+            .out_b = ref(try t.get(c, p ++ "attn.out_proj.bias", .{i}, &.{width})),
+            .fc_w = ref(try t.get(c, p ++ "mlp.c_fc.weight", .{i}, &.{ mlp_inter, width })),
+            .fc_b = ref(try t.get(c, p ++ "mlp.c_fc.bias", .{i}, &.{mlp_inter})),
+            .proj_w = ref(try t.get(c, p ++ "mlp.c_proj.weight", .{i}, &.{ width, mlp_inter })),
+            .proj_b = ref(try t.get(c, p ++ "mlp.c_proj.bias", .{i}, &.{width})),
+            .ls1 = ref(try t.get(c, p ++ "ls_1.gamma", .{i}, &.{width})),
+            .ls2 = ref(try t.get(c, p ++ "ls_2.gamma", .{i}, &.{width})),
+        };
+    }
+    v.down1_b = ref(try t.get(c, "vision_model.vit_downsampler1.bias", .{}, &.{2 * width}));
+    v.down2_b = ref(try t.get(c, "vision_model.vit_downsampler2.bias", .{}, &.{4 * width}));
+    v.proj = ref(try t.get(c, "vit_large_projector.weight", .{}, &.{ out_hidden, 4 * width }));
+    const d1 = try t.get(c, "vision_model.vit_downsampler1.weight", .{}, &.{ 2 * width, width, 3, 3 });
+    const d2 = try t.get(c, "vision_model.vit_downsampler2.weight", .{}, &.{ 4 * width, 2 * width, 3, 3 });
+    const pos = try t.get(c, "vision_model.positional_embedding", .{}, &.{ max_patches, width });
+    return .{ .d1 = d1, .d2 = d2, .pos = pos };
+}
+
+pub fn validate(c: *const ck.Checkpoint, hidden: u32) !void {
+    var v: Vision = undefined;
+    _ = try readTensors(&v, c, hidden);
+}
+
+test {
+    _ = @import("vision_test.zig");
 }

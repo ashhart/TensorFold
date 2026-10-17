@@ -89,7 +89,7 @@ pub const Model = struct {
             defer lib.deinit();
             m.attend_nax = try mtl.Pipeline.init(m.device, lib, "s5_attend_nax", false);
         }
-        if (m.checkpoint.has("vision_model.conv1.weight")) m.vision = try vision.Vision.load(gpa, m.device, &m.checkpoint);
+        if (m.checkpoint.has("vision_model.conv1.weight")) m.vision = try vision.Vision.load(gpa, m.device, &m.checkpoint, c.hidden);
         errdefer if (m.vision) |v| v.deinit();
         for (m.weights.layers) |l| {
             try m.addMm(l.attn.q);
