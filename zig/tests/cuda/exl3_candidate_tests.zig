@@ -1,11 +1,11 @@
-//! EXL3 projections on CUDA: codebooks and tiles bit for bit against core/exl3_format.zig, FP64 bounds, row windows.
+//! EXL3's tile candidate on CUDA: codebooks and tiles bit for bit against core/exl3_format.zig, FP64 bounds, rows.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 const fmt = core.exl3_format;
-const E = cuda.exl3_linear;
+const E = cuda.exl3_candidate;
 const st = core.safetensors;
 
 const k_max = 16384; // GLM-5.3-Flash's widest input (o_proj: 64 heads of 256)
@@ -63,9 +63,9 @@ fn gammaU(n: usize, unit: f64) f64 {
     return nu / (1 - nu);
 }
 
-/// `tf-cuda-test exl3 [DIR]`: codebooks, tiles, FP64 bounds and row windows; DIR adds a checkpoint's real matrices.
+/// `tf-cuda-test exl3-tiles [DIR]`: codebooks, tiles, FP64 bounds and row windows; DIR adds a checkpoint's matrices.
 pub fn run(gpu: Gpu, dir: ?[]const u8) !void {
-    var mod = try cuda.Module.load(gpu.d, cuda.kernels.exl3);
+    var mod = try cuda.Module.load(gpu.d, cuda.kernels.exl3_candidate);
     defer mod.unload();
     var k = try E.Kernels.resolve(gpu.d, mod, k_max);
     defer k.deinit();
@@ -84,8 +84,8 @@ pub fn run(gpu: Gpu, dir: ?[]const u8) !void {
     };
     for (cases, 0..) |c, i| try synthetic(gpu, &k, s, c, 0xE3 + i, &b);
     check.pass("{d} synthetic matrices, widths 1-8, three codebooks: {d} FP64 values, max error {e}, max {d:.4} of the bound, worst column {e} of the largest output", .{ cases.len, b.values, b.max_error, b.max_fraction, b.worst_column });
-    try windows(gpu, &k, s);
-    try fp32Out(gpu, &k, s);
+    try windows(gpu, s);
+    try fp32Out(gpu, s);
     if (dir) |d| try real(gpu, &k, s, d);
 }
 
@@ -313,7 +313,7 @@ fn getBf16(rig: *Rig, ptr: u64, out: []f32) !void {
 }
 
 /// Each row alone, then every window 1-16 and a 40-row prompt through qlinear: each row's bf16 bytes as when alone.
-fn windows(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
+fn windows(gpu: Gpu, s: cuda.Stream) !void {
     const a = gpu.gpa;
     var prng = std.Random.DefaultPrng.init(0x3D16);
     const h = try randomMatrix(a, prng.random(), .{ .k = 2048, .n = 256, .bits = 4, .book = .mul1 });
@@ -324,8 +324,10 @@ fn windows(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
     defer a.free(x);
     var rig: Rig = .{ .gpu = gpu };
     defer rig.deinit();
-    const w: cuda.qlinear.Weight = .{ .exl3 = try upload(&rig, h) };
-    const l: cuda.qlinear.Linear = .{ .exl3 = k };
+    var dense = try tilesDense(gpu);
+    defer dense.unload();
+    const w: cuda.qlinear.Weight = .{ .exl3 = weightOf(try upload(&rig, h)) };
+    const l: cuda.qlinear.Linear = .{ .exl3 = &dense };
     const xd = try rig.put(x);
     const out = try rig.zeros(prompt_rows * h.n * 2);
     const row_bytes = h.n * 2;
@@ -362,8 +364,8 @@ fn windows(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
     check.pass("decode windows of 1-16 rows ({d} input parts) and prompts of 2-{d} rows through qlinear: every row's bf16 bytes equal the row alone on its path", .{ E.split(h.k, h.n), prompt_rows });
 }
 
-/// decodeF32 and promptF32 through qlinear: within FP64 bounds, the same bits at every row count, the bf16 out their rounding.
-fn fp32Out(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
+/// decodeF32 and promptF32 through qlinear: within FP64 bounds, the same bits at every row count, bf16 their rounding.
+fn fp32Out(gpu: Gpu, s: cuda.Stream) !void {
     const a = gpu.gpa;
     var prng = std.Random.DefaultPrng.init(0xF32);
     const h = try randomMatrix(a, prng.random(), .{ .k = 2048, .n = 256, .bits = 4, .book = .mcg });
@@ -373,8 +375,10 @@ fn fp32Out(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
     defer a.free(x);
     var rig: Rig = .{ .gpu = gpu };
     defer rig.deinit();
-    const w: cuda.qlinear.Weight = .{ .exl3 = try upload(&rig, h) };
-    const l: cuda.qlinear.Linear = .{ .exl3 = k };
+    var dense = try tilesDense(gpu);
+    defer dense.unload();
+    const w: cuda.qlinear.Weight = .{ .exl3 = weightOf(try upload(&rig, h)) };
+    const l: cuda.qlinear.Linear = .{ .exl3 = &dense };
     const in: cuda.qlinear.Rows = .{ .x = try rig.put(x) };
     const o32 = try rig.zeros(rows * h.n * 4);
     const o16 = try rig.zeros(rows * h.n * 2);
@@ -413,6 +417,21 @@ fn fp32Out(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream) !void {
     check.pass("decodeF32 (1-{d} rows) and promptF32 (1-{d} rows) through qlinear: {d} FP64 values within bounds (max {d:.4} of the bound), the same bits at every row count, the bf16 out their rounding", .{ E.window, rows, b.values, b.max_fraction });
 }
 
+/// #837's Dense with these tiles chosen: the path a family takes through qlinear to the candidate.
+fn tilesDense(gpu: Gpu) !cuda.exl3.Dense {
+    var de = try cuda.exl3.Dense.load(gpu.d);
+    de.implementation = .tiles;
+    return de;
+}
+
+/// `m`'s stored tiles as #837's weight view.
+fn weightOf(m: E.Matrix) cuda.exl3.Weight {
+    const halves = m.bits * 2;
+    const at = cuda.exl3.strides(m.k, m.n, halves, false);
+    const book: u3 = @intCast(@backingInt(m.codebook));
+    return .{ .trellis = m.trellis, .suh = m.suh, .svh = m.svh, .k = @intCast(m.k), .n = @intCast(m.n), .halves = halves, .codebook = @fromBackingInt(@intCast(book)), .stride_k = at.k, .stride_nb = at.nb };
+}
+
 fn roundBf16(v: f32) u16 {
     const w: u32 = @bitCast(v);
     return @intCast((w + 0x7FFF + ((w >> 16) & 1)) >> 16);
@@ -438,7 +457,7 @@ fn real(gpu: Gpu, k: *const E.Kernels, s: cuda.Stream, dir: []const u8) !void {
         const wname = try std.fmt.allocPrint(a, "{s}.weight", .{name});
         defer a.free(wname);
         const shard = map.get(tname) orelse {
-            // a checkpoint may quantize only some matrices (experts-only EXL3): a plain .weight is skipped, a missing tensor fails
+            // a checkpoint may quantize only some matrices: a plain .weight is skipped, a missing tensor fails
             if (map.get(wname) == null) return error.TensorNotInIndex;
             std.debug.print("SKIP exl3 {s}: not EXL3 in this checkpoint (.weight)\n", .{name});
             continue;

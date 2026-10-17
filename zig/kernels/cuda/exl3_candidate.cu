@@ -1,5 +1,5 @@
 // EXL3 projections on CUDA: trellis tiles as stored ([K/16, N/16, 16 bits] int16), core/exl3_format.zig's codebooks.
-#include "exl3.cuh"
+#include "exl3_candidate.cuh"
 
 struct TfExl3Rows {
   unsigned rows, x_stride, y_stride, y_f32;

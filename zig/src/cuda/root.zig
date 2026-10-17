@@ -31,7 +31,6 @@ pub const qmmf = @import("qmmf.zig");
 pub const fp8 = @import("fp8.zig");
 pub const mxfp8 = @import("mxfp8.zig");
 pub const exlr8 = @import("exlr8.zig");
-pub const exl3_linear = @import("exl3_linear.zig");
 pub const nvfp4 = @import("nvfp4.zig");
 pub const segments = @import("segments.zig");
 pub const grouped = @import("grouped.zig");
@@ -60,6 +59,7 @@ pub const dense_rows = @import("dense_rows.zig");
 pub const exl3 = @import("exl3.zig");
 pub const exl3_experts = @import("exl3_experts.zig");
 pub const exl3_upload = @import("exl3_upload.zig");
+pub const exl3_candidate = @import("exl3_candidate.zig");
 
 test {
     _ = @import("memory.zig");
@@ -74,7 +74,7 @@ test {
     _ = @import("act_rows.zig");
     _ = @import("gdn_prep.zig");
     _ = @import("qk_rows.zig");
-    _ = @import("exl3_linear.zig");
+    _ = @import("exl3_candidate.zig");
     _ = @import("experts.zig");
     _ = @import("sample.zig");
     _ = @import("roce.zig");

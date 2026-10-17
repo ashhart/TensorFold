@@ -1,5 +1,6 @@
 //! The EXL3 decode-row linear (exl3/linear.cu's device code): the plan, a layer's tensors, and the two kernels.
 const std = @import("std");
+const candidate = @import("exl3_candidate.zig");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
 const launch_ = @import("launch.zig");
@@ -186,6 +187,9 @@ pub const Dense = struct {
     lin: Linear,
     xh: ?memory.DeviceBuffer = null, // the rotated inputs, 128 rows of the widest layer at most
     z: ?memory.DeviceBuffer = null, // the split partials, 128 rows at most
+    candidate_mod: ?Module = null,
+    candidate_k: ?candidate.Kernels = null,
+    implementation: enum { reference, tiles } = .reference,
     counters: ?memory.DeviceBuffer = null, // per pass and block, zeroed before every call
 
     pub fn load(d: *const Driver) !Dense {
@@ -193,6 +197,8 @@ pub const Dense = struct {
     }
 
     pub fn unload(de: *Dense) void {
+        if (de.candidate_k) |*k| k.deinit();
+        if (de.candidate_mod) |*m| m.unload();
         de.lin.unload();
         const slots = [_]*?memory.DeviceBuffer{ &de.xh, &de.z, &de.counters };
         for (slots) |slot| {
@@ -212,13 +218,42 @@ pub const Dense = struct {
 
     /// Decode rows: one call (the kernel takes 1..128), any count above in 128-row blocks.
     pub fn decode(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
+        if (de.implementation == .tiles) return de.tiles(s, w, x, x_dtype, rows, y, y_dtype, false);
         return de.blocks(s, w, x, x_dtype, rows, y, y_dtype);
     }
 
     /// Prompt rows: 128-row blocks of `matmul`, so a row's bits never depend on where its chunk starts.
     pub fn prompt(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
+        if (de.implementation == .tiles) return de.tiles(s, w, x, x_dtype, rows, y, y_dtype, true);
         return de.blocks(s, w, x, x_dtype, rows, y, y_dtype);
     }
+    pub fn candidateWeight(w: Weight) !candidate.Matrix {
+        const st = strides(w.k, w.n, w.halves, false);
+        if (w.halves % 2 != 0 or w.bias != 0 or w.stride_k != st.k or w.stride_nb != st.nb)
+            return error.CandidateFormat;
+        const m: candidate.Matrix = .{ .trellis = w.trellis, .suh = w.suh, .svh = w.svh, .k = w.k, .n = w.n, .bits = w.halves / 2, .codebook = @fromBackingInt(@intCast(@backingInt(w.codebook))) };
+        try m.check();
+        return m;
+    }
+
+    fn tiles(de: *Dense, s: Stream, w: Weight, x: u64, xd: DType, rows: usize, y: u64, yd: DType, prompt_path: bool) !void {
+        const m = try candidateWeight(w);
+        if (xd != .bf16 or yd == .f16) return error.CandidateFormat;
+        if (de.candidate_k == null or de.candidate_k.?.k_max < w.k) {
+            if (!kernels.available) return error.BuiltWithoutKernels;
+            var mod = try Module.load(de.d, kernels.exl3_candidate);
+            errdefer mod.unload();
+            const replacement = try candidate.Kernels.resolve(de.d, mod, w.k);
+            if (de.candidate_k) |*k| k.deinit();
+            if (de.candidate_mod) |*old| old.unload();
+            de.candidate_mod = mod;
+            de.candidate_k = replacement;
+        }
+        const k = &de.candidate_k.?;
+        if (prompt_path) return k.prompt(s, x, w.k, m, y, rows, yd == .f32);
+        return k.rows(s, x, w.k, m, y, rows, yd == .f32);
+    }
+
     fn blocks(de: *Dense, s: Stream, w: Weight, x: u64, x_dtype: DType, rows: usize, y: u64, y_dtype: DType) !void {
         const p = plan(w.k, w.n, 192, 8);
         const z: u64 = if (p.sk > 1) try de.scratch(&de.z, Linear.zBytes(w, 128)) else 0;
@@ -287,4 +322,18 @@ test "a failed scratch allocation keeps the old scratch owned" {
     try std.testing.expectError(error.NotReady, de.scratch(&slot, 32));
     try std.testing.expectEqual(@as(usize, 0), mock.frees);
     try std.testing.expectEqual(@as(usize, 16), slot.?.len);
+}
+
+test "candidate selection refuses layouts it cannot represent" {
+    const st = strides(128, 256, 8, false);
+    var w: Weight = .{ .trellis = 1, .suh = 2, .svh = 3, .k = 128, .n = 256, .halves = 8, .codebook = .mcg, .stride_k = st.k, .stride_nb = st.nb };
+    try std.testing.expectEqual(@as(u32, 4), (try Dense.candidateWeight(w)).bits);
+    w.halves = 7;
+    try std.testing.expectError(error.CandidateFormat, Dense.candidateWeight(w));
+    w.halves = 8;
+    w.bias = 4;
+    try std.testing.expectError(error.CandidateFormat, Dense.candidateWeight(w));
+    w.bias = 0;
+    w.stride_k = 0;
+    try std.testing.expectError(error.CandidateFormat, Dense.candidateWeight(w));
 }

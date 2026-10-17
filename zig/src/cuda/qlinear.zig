@@ -59,27 +59,27 @@ pub fn rowBits(bits: u8) u8 {
 
 /// One projection's weights in any format this module serves; every one but affine4 is a lane matmul mode.
 pub const Weight = union(enum) {
+    exl3: exl3.Weight,
     affine4: Affine4,
     fp8g: qmmf.Weight,
     mxfp8: qmmf.Weight, // e4m3 with UE8M0 scale bytes per 32 inputs
     nvfp4: qmmf.Weight,
     fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
     bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
-    exl3: exl3.Weight, // the trellis: decode and prompt rows through the same row-invariant kernel
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
+            .exl3 => |q| q.n,
             .affine4 => |q| q.n,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.n,
-            .exl3 => |q| q.n,
         };
     }
 
     pub fn inputs(w: Weight) usize {
         return switch (w) {
+            .exl3 => |q| q.k,
             .affine4 => |q| q.k,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.k,
-            .exl3 => |q| q.k,
         };
     }
 };
@@ -107,6 +107,11 @@ pub const Linear = struct {
     /// Decode rows: out (rows, n) bf16, each row's bits the same at every row count the format takes.
     pub fn decode(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         switch (w) {
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.decode(s, q, in.x, .bf16, rows, out, .bf16);
+            },
             .affine4 => |q| {
                 const a = l.affine4 orelse return error.FormatNotLoaded;
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
@@ -117,17 +122,17 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onLane(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
-            .exl3 => |q| {
-                const e = l.exl3 orelse return error.FormatNotLoaded;
-                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
-                return e.decode(s, q, in.x, .bf16, rows, out, .bf16);
-            },
         }
     }
 
     /// Prompt rows: out (rows, n) bf16 by the format's prompt GEMM.
     pub fn prompt(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         switch (w) {
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.prompt(s, q, in.x, .bf16, rows, out, .bf16);
+            },
             .affine4 => |q| {
                 const a = l.affine4 orelse return error.FormatNotLoaded;
                 if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
@@ -138,26 +143,31 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
-            .exl3 => |q| {
-                const e = l.exl3 orelse return error.FormatNotLoaded;
-                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
-                return e.prompt(s, q, in.x, .bf16, rows, out, .bf16);
-            },
         }
     }
 
-    /// Decode rows as decode(), out (rows, n) fp32 unrounded: a tensor-parallel rank's partial rows (nvfp4 only).
+    /// Decode rows to FP32 without the output BF16 cast (NVFP4 and EXL3), including TP partial rows.
     pub fn decodeF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.decode(s, q, in.x, .bf16, rows, out, .f32);
+            },
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };
         return l.onLaneAs(s, q, .fp4, in, out, .f32, rows);
     }
 
-    /// Prompt rows as prompt(), out (rows, n) fp32 unrounded (nvfp4 only).
+    /// Prompt rows to FP32 without the output BF16 cast (NVFP4 and EXL3).
     pub fn promptF32(l: Linear, s: Stream, w: Weight, in: Rows, out: u64, rows: usize) !void {
         const q = switch (w) {
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.prompt(s, q, in.x, .bf16, rows, out, .f32);
+            },
             .nvfp4 => |q| q,
             else => return error.EpilogueNotBuilt,
         };
@@ -569,48 +579,6 @@ test "split_k follows the Python shapes" {
     try std.testing.expectEqual(@as(usize, 1), splitK(131072, 2688));
 }
 
-test "a weight view reports its shape in every format" {
-    const a: Weight = .{ .affine4 = .{ .w = 0, .s = 0, .b = 0, .n = 10304, .k = 2688, .npad = 10304 } };
-    const f: Weight = .{ .fp8g = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
-    try std.testing.expectEqual(@as(usize, 10304), a.outputs());
-    try std.testing.expectEqual(@as(usize, 2560), f.inputs());
-}
-
-test "the exl3 weight view reports its shape and is refused when not loaded" {
-    const w: Weight = .{ .exl3 = .{ .trellis = 0, .suh = 0, .svh = 0, .k = 4096, .n = 1024, .halves = 8, .codebook = .mul1, .stride_k = 4096, .stride_nb = 256 } };
-    try std.testing.expectEqual(@as(usize, 1024), w.outputs());
-    try std.testing.expectEqual(@as(usize, 4096), w.inputs());
-    const l: Linear = .{};
-    const s: Stream = undefined; // never reached: the refusal comes first
-    try std.testing.expectError(error.FormatNotLoaded, l.decode(s, w, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, w, .{ .x = 0 }, 0, 1));
-}
-
-test "a format that is not loaded is refused before any launch" {
-    const l: Linear = .{};
-    const w: Weight = .{ .affine4 = .{ .w = 0, .s = 0, .b = 0, .n = 64, .k = 64, .npad = 64 } };
-    const s: Stream = undefined; // never reached: the refusal comes first
-    try std.testing.expectError(error.FormatNotLoaded, l.decode(s, w, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, w, .{ .x = 0 }, 0, 1));
-}
-
-test "the affine-4 tiles' sizes follow qmm_fast.tile" {
-    const l = Affine4.layout(10304, 2688); // Nemotron's in_proj: rows to whole 128s, 4 bits a weight, 2 bytes a group
-    try std.testing.expectEqual(@as(usize, 10368), l.npad);
-    try std.testing.expectEqual(@as(usize, 10368 * 2688 / 2), l.words);
-    try std.testing.expectEqual(@as(usize, 42 * 10368 * 2), l.scales);
-}
-
-test "a lane weight whose mode is not its format's is refused before any launch" {
-    const lane: qmmf.Lane = undefined; // never reached: the refusal comes first
-    const l: Linear = .{ .lane = &lane };
-    const fp4: qmmf.Weight = .{ .mode = .fp4, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
-    const s: Stream = undefined;
-    try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .fp8g = fp4 }, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.FormatMismatch, l.decode(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.FormatMismatch, l.prompt(s, .{ .mxfp8 = fp4 }, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, .{ .nvfp4 = fp4 }, .{ .x = 0 }, 0, 1));
-    const f8: qmmf.Weight = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 64, .k = 64, .npad = 128 };
-    try std.testing.expectError(error.EpilogueNotBuilt, l.decodeF32(s, .{ .fp8g = f8 }, .{ .x = 0 }, 0, 1));
-    try std.testing.expectError(error.EpilogueNotBuilt, l.promptF32(s, .{ .bf16 = f8 }, .{ .x = 0 }, 0, 1));
+test {
+    _ = @import("qlinear_test.zig");
 }
