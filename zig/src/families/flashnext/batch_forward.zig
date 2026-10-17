@@ -2,6 +2,7 @@
 const std = @import("std");
 const mtl = @import("metal");
 const fz = @import("replay.zig");
+const variants = @import("variants.zig");
 const Session = @import("session.zig").Session;
 const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
@@ -14,7 +15,8 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf) !void {
     if (r.tp != null or r.gpu_round) return error.BatchModeUnsupported;
     r.rows = rows;
     var cur: usize = 0;
-    try r.call("qa_embed_rows@embed", &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]});
+    var ce: [2]variants.Const = undefined;
+    try variants.callAs(r, "qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]}, variants.width(&ce, "BITS", "GS", m.embed_w));
     for (0..fz.LAYERS) |i| {
         const l = &m.layers[i];
         if (i > 0) try m.grouped(t.h[cur], t.h[1 - cur]) else try r.call("q4_hc_norm_none#[10240]", &.{t.h[cur]}, &.{ t.h[1 - cur], t.ssp });
@@ -25,7 +27,9 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf) !void {
             tabs[0] = t.ple_ids;
             tabs[1] = p.starts;
             for (p.tables, 0..) |b, j| tabs[2 + j] = b;
-            try r.call("qa_ple_lookup@ple", &tabs, &.{t.emb});
+            var cp: [2]variants.Const = undefined;
+            try variants.callAs(r, "qa_ple_lookup@ple", rows, &tabs, &.{t.emb}, variants.width(&cp, "BITS", "GS", p.w));
+            if (p.scale) |sc| sc.apply(r.enc, t.emb, rows * fz.D, r.serial);
             try m.lane(t.emb, fz.D, p.kv, "lane_qmm_bytes_grouped@ple.kv", t.kvp);
             for (segs) |g| {
                 const v = view(t.*, g.row0);
@@ -63,7 +67,7 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf) !void {
         r.touch(l.router);
         try m.hcProject(t.h[cur], l.mhc, "qa_hc_down@mhc", "qa_hc_up@mhc", t.inj_m);
         try r.router("q4_router_float@moe", t.mixed, l.router, t.rows, t.lg, rows);
-        try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
+        if (l.xw) |w| try variants.experts(r, "qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown, w) else try r.experts("qa_expert_gateup@moe.gate", "qa_expert_down_y@moe.down", t.mixed, t.lg, l.ex, t.act, t.pick, t.wts, t.rows, t.ydown);
     }
     try m.grouped(t.h[cur], t.h[1 - cur]);
     cur = 1 - cur;

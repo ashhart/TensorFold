@@ -588,3 +588,9 @@ pub const Backend = struct {
         snap.drop(self(ptr).gpa, @ptrCast(@alignCast(saved)));
     }
 };
+
+test "batch widths: shared verifier matches the legacy forward through lane rounds" {
+    if (comptime @hasDecl(mtl, "flashnext_recording")) {
+        try @import("batch_forward_test.zig").check(Backend.verify, Backend.keep);
+    } else return error.SkipZigTest;
+}

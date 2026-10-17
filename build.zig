@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/h3_host.zig").tests(b, target, test_step);
     @import("zig/build/digest.zig").steps(b, test_step, draft_ids, build_options);
     @import("zig/build/flashnext_budget.zig").steps(b, test_step);
+    @import("zig/build/flashnext_batch_host.zig").tests(b, test_step);
     if (b.graph.host.result.os.tag == .macos) {
         const budget_mods = metalEngineModules(b, b.graph.host, .Debug, draft_ids);
         const budget_empty = b.addWriteFiles().add("budget-compile-only.metallib", "");

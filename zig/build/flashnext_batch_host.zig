@@ -1,0 +1,17 @@
+//! Source and lane regressions with a recording Metal boundary, no shader compiler or GPU work.
+const std = @import("std");
+pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const metal = b.createModule(.{ .root_source_file = b.path("zig/flashnext_recording_metal.zig"), .target = b.graph.host });
+    const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
+    const empty = b.addWriteFiles().add("flashnext-test-empty.zig", "pub const bytes = \"\";\n");
+    sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = empty });
+    const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
+    const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
+    const root = b.createModule(.{ .root_source_file = b.path("zig/flashnext_batch_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
+    const tests_ = b.addTest(.{ .root_module = root, .filters = &.{"batch widths:"} });
+    const run = b.addRunArtifact(tests_);
+    run.has_side_effects = true;
+    const step = b.step("test-flashnext-batch-host", "Actual shared lane verification at checkpoint widths, without Metal execution");
+    step.dependOn(&run.step);
+    all.dependOn(step);
+}
