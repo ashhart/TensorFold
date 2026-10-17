@@ -259,6 +259,9 @@ extern "C" __global__ void tf_exl3_experts_rot_in(const RotInArgs a) {
 }
 
 __device__ __forceinline__ float bf16r(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
+// The SwiGLU clamps as torch.clamp has them: a NaN stays a NaN, where fminf and fmaxf hand back the limit.
+__device__ __forceinline__ float upTo(float x, float l) { return x > l ? l : x; }
+__device__ __forceinline__ float within(float x, float l) { return x > l ? l : (x < -l ? -l : x); }
 
 // Program (slot, 128-block of the width): splits summed in order, rotated, * svh, SwiGLU (0: bf16, 1: fp32), then Xd.
 struct GateUpArgs {
@@ -297,14 +300,14 @@ extern "C" __global__ void tf_exl3_gateup_epilogue(const GateUpArgs a) {
     for (int j = 0; j < 4; ++j) {
         float act;
         if (a.act_mode == 0) {
-            float gg = fminf(bf16r(gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j])), a.limit);
-            float uu = fminf(fmaxf(bf16r(uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j])),
-                                    -a.limit), a.limit);
+            float gg = bf16r(gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]));
+            float uu = bf16r(uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]));
+            if (a.limit > 0) { gg = upTo(gg, a.limit); uu = within(uu, a.limit); }
             act = bf16r(bf16r(gg / (1.f + expf(-gg))) * uu);
         } else {
-            float gg = fminf(gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]), a.limit);
-            float uu = fminf(fmaxf(uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]), -a.limit),
-                             a.limit);
+            float gg = gv[j] * HAD_SCALE * __half2float(a.svh_g[(size_t)e * a.n + n + j]);
+            float uu = uv[j] * HAD_SCALE * __half2float(a.svh_u[(size_t)e * a.n + n + j]);
+            if (a.limit > 0) { gg = upTo(gg, a.limit); uu = within(uu, a.limit); }
             act = gg / (1.f + expf(-gg)) * uu;
         }
         v[j] = act * __half2float(a.suh_d[(size_t)e * a.n + n + j]);
@@ -352,6 +355,7 @@ extern "C" __global__ void tf_exl3_down_combine(const DownArgs a) {
 #pragma unroll
         for (int j = 0; j < 4; ++j) o[j] = a.y[(size_t)p * a.d + n + j];
     }
+    if (!a.wts) return; // runSlots reads the same post-rotation per-slot FP32 outputs without reducing them.
     part[k][lane] = make_float4(o[0], o[1], o[2], o[3]);
     __syncthreads();
     if (k != 0) return;
@@ -421,7 +425,7 @@ extern "C" __global__ void tf_exl3_plan_finish(const PlanStage a) {
             if (a.epi == 2) {
                 float up = u[q] * tf_exl3::HAD_SCALE * __half2float(a.sv1[(size_t)e * a.n + n + q]);
                 if (a.act_mode == 0) { v = tf_exl3::bf16r(v); up = tf_exl3::bf16r(up); }
-                if (a.limit > 0) { v = fminf(v, a.limit); up = fminf(fmaxf(up, -a.limit), a.limit); }
+                if (a.limit > 0) { v = tf_exl3::upTo(v, a.limit); up = tf_exl3::within(up, a.limit); }
                 v = v / (1.f + expf(-v));
                 if (a.act_mode == 0) v = tf_exl3::bf16r(v);
                 v *= up;

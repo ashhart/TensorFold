@@ -141,6 +141,11 @@ pub const Experts = struct {
         e.mod.unload();
     }
 
+    /// Per-slot FP32 outputs after the same BF16-up contract; the caller owns its routing-weight reduction.
+    pub fn runSlots(e: *const Experts, s: Stream, l: Layer, x: u64, stride: usize, dtype: DType, pick: u64, rows: usize, sc: Scratch) !void {
+        try e.run(s, l, x, stride, dtype, pick, 0, rows, 0, sc);
+    }
+
     /// The routed experts of `rows` rows: group, rotate in, grouped gate/up, SwiGLU, grouped down, wts-weighted sum.
     pub fn run(e: *const Experts, s: Stream, l: Layer, x: u64, x_stride: usize, x_dtype: DType, pick: u64, wts: u64, rows: usize, out: u64, sc: Scratch) !void {
         const d = l.dims;

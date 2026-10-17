@@ -32,7 +32,7 @@ pub const Buffers = state.Buffers;
 /// The modules a forward launches from: our fatbins.
 pub const Modules = struct {
     glue: glue.Kernels,
-    mods: [9]cuda.Module,
+    mods: [8]cuda.Module,
     kda: kda.Kernels,
     lane: cuda.qmmf.Lane, // the NVFP4 linears' decode rows (qlinear)
     prompt: cuda.nvfp4.Prompt, // and their prompt rows
@@ -51,7 +51,7 @@ pub const Modules = struct {
         var m: Modules = undefined;
         var n: usize = 0;
         errdefer for (m.mods[0..n]) |*x| x.unload();
-        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue, k.glm_exl3, k.glm_mm }) |*x, image| {
+        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue, k.glm_mm }) |*x, image| {
             x.* = try cuda.Module.load(d, image);
             n += 1;
         }
@@ -68,8 +68,9 @@ pub const Modules = struct {
         m.quant = try quant.Kernels.load(m.mods[4]);
         m.q4 = try q4.Kernels.load(m.mods[5], m.mods[3], ctx);
         m.glue = try glue.Kernels.load(m.mods[6]);
-        m.exl3 = try exl3.Kernels.load(m.mods[7]);
-        m.mm = try mm_mod.Kernels.load(m.mods[8]);
+        m.exl3 = try exl3.Kernels.load(d);
+        errdefer m.exl3.unload();
+        m.mm = try mm_mod.Kernels.load(m.mods[7]);
         m.tiled = false;
         return m;
     }
@@ -84,6 +85,7 @@ pub const Modules = struct {
     }
 
     pub fn deinit(m: *Modules) void {
+        m.exl3.unload();
         for (&m.mods) |*x| x.unload();
         m.lane.unload();
         m.prompt.unload();

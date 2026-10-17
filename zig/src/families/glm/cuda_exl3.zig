@@ -54,6 +54,7 @@ pub const Experts = struct {
     svh_u: u64,
     suh_d: u64,
     svh_d: u64,
+    k2: u64, // independent per-expert projection widths in the common module
     shx: bool, // every expert's gate and up share one input rotation: a prompt rotates a row once, not once a pick
 };
 
@@ -78,13 +79,21 @@ pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Sp
         for (0..count) |e| {
             const t = try L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".trellis", .{ i, e });
             if (t.dtype != .i16 or t.rank != 3 or t.dim(0) != m.k / 16 or t.dim(1) != m.n / 16 or t.dim(2) != 64) return error.NotExl3Mcg4;
-            _ = L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".mcg", .{ i, e }) catch return error.NotExl3Mcg4;
+            const marker = L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".mcg", .{ i, e }) catch return error.NotExl3Mcg4;
+            if (marker.dtype != .i32 or marker.numel() != 1 or marker.bytes.len != 4 or
+                std.mem.readInt(u32, marker.bytes[0..4], .little) != @import("core").exl3_load.markers[0].value)
+                return error.NotExl3Mcg4;
             if (m.by_cols) { // every tile row, the rank's tile columns
                 const row = (m.n / 16) * tile;
                 for (0..kt) |r| try L.host.appendSlice(L.gpa, t.bytes[r * row + (cut.lo / 16) * tile ..][0 .. nt * tile]);
             } else try L.host.appendSlice(L.gpa, t.bytes[(cut.lo / 16) * nt * tile ..][0 .. kt * nt * tile]); // its tile rows
         }
-        @field(out, tw) = try L.put("layers.{d}.moe.exl3." ++ tw, .{i});
+        const base = try L.put("layers.{d}.moe.exl3." ++ tw, .{i});
+        for (0..count) |e| {
+            const ptr = base + e * kt * nt * tile;
+            try L.host.appendSlice(L.gpa, std.mem.asBytes(&ptr));
+        }
+        @field(out, tw) = try L.put("layers.{d}.moe.exl3." ++ tw ++ "_ptrs", .{i});
         for (0..count) |e| { // suh: the input's scales (gate, up: every input; down: the rank's)
             const t = try L.get("layers.{d}.mlp.experts.{d}." ++ proj ++ ".suh", .{ i, e });
             if (t.dtype != .f16 or t.numel() != m.k) return error.NotExl3Mcg4;
@@ -104,83 +113,52 @@ pub fn load(L: anytype, i: u32, count: usize, dims: usize, inter: usize, cut: Sp
         }
         @field(out, sv) = try L.put("layers.{d}.moe.exl3." ++ sv, .{i});
     }
+    for (0..count) |_| {
+        const bits: i32 = 8;
+        try L.host.appendSlice(L.gpa, std.mem.asBytes(&bits));
+    }
+    out.k2 = try L.put("layers.{d}.moe.exl3.k2", .{i});
     return out;
 }
 
-/// glm_exl3's kernels.
-pub const Kernels = struct {
-    rot_rows: cuda.Function,
-    rot_in: cuda.Function,
-    grouped: cuda.Function,
-    gateup: cuda.Function,
-    down: cuda.Function,
-    prompt_gu: cuda.Function,
-    prompt_dn: cuda.Function,
-    picks: cuda.Function,
-
-    pub fn load(m: cuda.Module) !Kernels {
-        var k: Kernels = undefined;
-        inline for (@typeInfo(Kernels).@"struct".field_names) |name| @field(k, name) = try m.function("glm_exl3_" ++ name);
-        return k;
-    }
-};
-
-/// Scratch beside the MoE block's (its eact holds the down inputs): 8-slot picks, rotated inputs, K-split partials.
+/// The selected common EXL3 owner. This file adapts the family's checkpoint shard and slot layout only.
+pub const Kernels = cuda.exl3_experts.Experts;
+const common = cuda.exl3_experts;
 pub const Scratch = struct { picks: u64, xg: u64, xu: u64, z: u64 };
-
-/// The picks a row holds (the kernels' pair = row * 8 + slot).
 pub const top_k = 8;
-/// Gate and up K slices in a decode window (down: 1); prompt chunks take the fused kernels, no partials.
-pub const decode_splits = 4;
-
-/// Bytes of each Scratch buffer for windows of `rows` rows: (picks, xg, xu, z); `shx`: one input rotation a layer.
+const chunk_rows = 64;
+fn layer(w: Experts, count: usize, dims: usize, width: usize, limit: f32) common.Layer {
+    return .{ .gate = w.gt, .up = w.ut, .down = w.dt, .gate_k2 = w.k2, .up_k2 = w.k2, .down_k2 = w.k2, .suh_g = w.suh_g, .suh_u = w.suh_u, .svh_g = w.svh_g, .svh_u = w.svh_u, .suh_d = w.suh_d, .svh_d = w.svh_d, .experts = count, .dims = dims, .width = width, .codebook = .mcg, .limit = limit, .act_mode = 0 };
+}
+fn shape(dims: usize, width: usize) common.Layer {
+    const w: Experts = .{ .gt = 0, .ut = 0, .dt = 0, .k2 = 0, .suh_g = 0, .suh_u = 0, .svh_g = 0, .svh_u = 0, .suh_d = 0, .svh_d = 0, .shx = false };
+    return layer(w, 4096, dims, width, 0);
+}
+/// A chunk's compacted picks ahead of the common scratch, 256-aligned; the usize keeps @min from narrowing to u7.
+fn picksBytes(rows: usize) usize {
+    const cap: usize = @min(rows, chunk_rows);
+    return std.mem.alignForward(usize, cap * top_k * 4, 256);
+}
 pub fn scratchBytes(rows: usize, dims: usize, width: usize, prefill: bool, shx: bool) [4]usize {
-    const pairs = rows * top_k;
-    const one = prefill and shx; // a prompt rotates each row once
-    return .{
-        pairs * 4,
-        (if (one) rows else pairs) * dims * 2,
-        if (one) 16 else pairs * dims * 2,
-        if (prefill) 16 else @max(2 * decode_splits * pairs * width, pairs * dims) * 4,
-    };
+    _ = .{ prefill, shx };
+    const n: usize = @min(rows, chunk_rows);
+    return .{ picksBytes(rows) + (common.scratchBytes(shape(dims, width), n, top_k) catch unreachable), 4, 4, 4 };
 }
-
-/// One launch's arguments, then the launch.
-fn go(f: cuda.Function, stream: cuda.Stream, grid: cuda.Dim3, threads: u32, args: anytype) !void {
-    var a: cuda.Args = .{};
-    inline for (args) |v| a.add(v);
-    try cuda.launch.launch(f, .{ .grid = grid, .block = .{ .x = threads } }, stream, &a);
-}
-
-/// Routed slots of `rows` rows (picks [rows][slots], shared last) into `ey` [rows][slots][dims] fp32, shared untouched.
 pub fn run(k: *const Kernels, ek: *const experts.Kernels, stream: cuda.Stream, w: Experts, sc: Scratch, plan_buf: cuda.grouped.Plan, x: u64, x_stride: usize, picks: u64, slots: usize, rows: usize, count: usize, dims: usize, width: usize, limit: f32, prompt: bool, ey: u64, xd: u64) !void {
+    _ = .{ ek, plan_buf, prompt, xd };
     if (slots != top_k + 1) return error.UnsupportedTopK;
     if (dims % 256 != 0 or width % 128 != 0) return error.NotExl3Mcg4;
-    const P = rows * top_k;
-    const D: i32 = @intCast(dims);
-    const N: i32 = @intCast(width);
-    const ys: i32 = @intCast(slots);
-    try go(k.picks, stream, .{ .x = @intCast((P + 255) / 256) }, 256, .{ picks, sc.picks, @as(i32, @intCast(rows)), @as(i32, @intCast(slots)) });
-    const plan: experts.Plan = .{ .route = plan_buf, .slots = top_k, .experts = count, .prompt = prompt };
-    try experts.route(ek, stream, sc.picks, P, plan);
-    const items: u32 = @intCast(experts.maxItems(P, count, if (prompt) experts.staged_tile else experts.tile));
-    const r = plan_buf;
-    const one = prompt and w.shx; // the prompt kernels read row pair >> 3: one rotated row a token
-    if (one) {
-        try go(k.rot_rows, stream, .{ .x = @intCast(rows), .y = @intCast(dims / 128) }, 32, .{ x, @as(i32, @intCast(x_stride)), w.suh_g, sc.xg, D });
-    } else {
-        try go(k.rot_in, stream, .{ .x = @intCast(P), .y = @intCast(dims / 128), .z = 2 }, 32, .{ x, @as(i32, @intCast(x_stride)), sc.picks, w.suh_g, w.suh_u, sc.xg, sc.xu, D });
+    const l = layer(w, count, dims, width, limit);
+    const cap: usize = @min(rows, chunk_rows);
+    const arena = sc.picks + picksBytes(rows);
+    const scratch = try common.scratch(arena, l, cap, top_k);
+    var at: usize = 0;
+    while (at < rows) : (at += chunk_rows) {
+        const n: usize = @min(chunk_rows, rows - at);
+        for (0..n) |r| try stream.d.check(stream.d.api.cuMemcpyDtoDAsync_v2(sc.picks + r * top_k * 4, picks + (at + r) * slots * 4, top_k * 4, stream.handle), "EXL3 compact route rows");
+        try k.runSlots(stream, l, x + at * x_stride * 2, x_stride, .bf16, sc.picks, n, scratch);
+        for (0..n) |r| try stream.d.check(stream.d.api.cuMemcpyDtoDAsync_v2(ey + (at + r) * slots * dims * 4, scratch.y + r * top_k * dims * 4, top_k * dims * 4, stream.handle), "EXL3 routed output slots");
     }
-    if (prompt) { // gate and up with their epilogue into xd; down with its epilogue into ey
-        try go(k.prompt_gu, stream, .{ .x = @intCast(width / 128), .y = items }, 256, .{ sc.xg, if (one) sc.xg else sc.xu, w.gt, w.ut, r.items, r.counts, r.members, w.svh_g, w.svh_u, w.suh_d, xd, D, N, @as(i32, if (one) 3 else 0), limit });
-        return go(k.prompt_dn, stream, .{ .x = @intCast(dims / 256), .y = items }, 256, .{ xd, w.dt, r.items, r.counts, r.members, w.svh_d, ey, N, D, ys });
-    }
-    const sk: i32 = decode_splits;
-    const nt = 8; // n tiles a block
-    try go(k.grouped, stream, .{ .x = items, .y = @intCast(width / (16 * nt)), .z = @intCast(2 * sk) }, 128, .{ sc.xg, sc.xu, w.gt, w.ut, r.items, r.counts, r.members, sc.z, D, N, @as(i32, @intCast(P)), sk });
-    try go(k.gateup, stream, .{ .x = @intCast(P), .y = @intCast(width / 128) }, 32, .{ sc.z, sc.picks, w.svh_g, w.svh_u, w.suh_d, xd, @as(i32, @intCast(P)), N, sk, limit });
-    try go(k.grouped, stream, .{ .x = items, .y = @intCast(dims / (16 * nt)), .z = 1 }, 128, .{ xd, xd, w.dt, w.dt, r.items, r.counts, r.members, sc.z, N, D, @as(i32, @intCast(P)), @as(i32, 1) });
-    try go(k.down, stream, .{ .x = @intCast(P), .y = @intCast(dims / 128) }, 32, .{ sc.z, sc.picks, w.svh_d, ey, @as(i32, @intCast(P)), D, @as(i32, 1), ys });
 }
 
 test "EXL3 admission: Mia-AiLab's block passes; other widths and codebooks are refused by name" {
@@ -197,4 +175,16 @@ test "EXL3 admission: Mia-AiLab's block passes; other widths and codebooks are r
     try std.testing.expectEqualStrings("EXL3 at 3 bits: the CUDA family reads 4-bit EXL3 experts", why.text());
     try std.testing.expectError(error.UnsupportedQuant, admit(gpa, "{\"text_config\": {\"quantization_config\": {\"quant_method\": \"exl3\", \"bits\": 4, \"codebook\": \"mul1\"}}}", &why));
     try std.testing.expectEqualStrings("EXL3 codebook \"mul1\": the CUDA family reads \"mcg\"", why.text());
+}
+
+test "a chunk's compacted picks end before the common scratch at every row count" {
+    for (1..3 * chunk_rows) |rows| {
+        const cap: usize = @min(rows, chunk_rows);
+        try std.testing.expect(picksBytes(rows) >= cap * top_k * 4);
+        try std.testing.expectEqual(@as(usize, 0), picksBytes(rows) % 256);
+    }
+}
+
+test "GLM's routed experts run on the common EXL3 module's kernels" {
+    try std.testing.expect(Kernels == cuda.exl3_experts.Experts);
 }
