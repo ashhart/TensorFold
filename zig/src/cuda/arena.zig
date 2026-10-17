@@ -87,8 +87,9 @@ pub const Arena = struct {
             return p;
         }
         const n: u64 = roundUp(len, a.o.alignment);
+        try a.live.ensureUnusedCapacity(a.gpa, 1); // before a range is taken: a failure leaves free list and cursor alone
         if (a.free_small.getPtr(n)) |l| if (l.pop()) |p| {
-            try a.live.put(a.gpa, p, n);
+            a.live.putAssumeCapacityNoClobber(p, n);
             a.stats.reused += 1;
             return p;
         };
@@ -105,7 +106,7 @@ pub const Arena = struct {
             a.stats.chunk_bytes += cl;
         }
         const p = a.cursor;
-        try a.live.put(a.gpa, p, n);
+        a.live.putAssumeCapacityNoClobber(p, n);
         a.cursor += n;
         a.stats.small += 1;
         return p;
@@ -446,4 +447,34 @@ test "arena: VMM keeps the first failed driver call and its code, later failures
     v.failed = null; // past the reserved range: no driver call at all
     try t.expectEqual(@as(?u64, null), be.chunk(be.ctx, 8 << 20));
     try t.expectEqualStrings("the reserved range", v.failed.?.call);
+}
+
+test "arena: a reuse whose address-map insertion fails keeps its range free, and the retry gets it" {
+    const t = std.testing;
+    var f: Fake = .{};
+    var fa = t.FailingAllocator.init(t.allocator, .{});
+    {
+        var a = Arena.init(fa.allocator(), f.backend(2 << 20), .{ .small_max = 1 << 20, .small_chunk = 4 << 20 });
+        defer a.deinit(); // testing.allocator underneath reports any leaked host bytes
+        const p = a.alloc(4096).?;
+        try t.expect(a.free(p));
+        // other sizes take back the room the free gave: inserting the reused range must grow the map
+        while (a.live.available > 0) _ = a.alloc(512).?;
+        const live = a.live.count();
+        const cursor = a.cursor;
+        const chunks = f.chunks;
+        fa.fail_index = fa.alloc_index; // the next allocation fails, and every one after it until healed
+        try t.expectEqual(@as(?u64, null), a.alloc(4096));
+        try t.expectEqual(live, a.live.count());
+        try t.expectEqual(cursor, a.cursor);
+        try t.expectEqual(chunks, f.chunks);
+        try t.expectEqualSlices(u64, &.{p}, a.free_small.get(4096).?.items);
+        try t.expectEqual(@as(u64, 0), a.stats.reused);
+        fa.fail_index = std.math.maxInt(usize);
+        try t.expectEqual(p, a.alloc(4096).?);
+        try t.expectEqual(@as(u64, 1), a.stats.reused);
+        try t.expectEqual(@as(usize, 0), a.free_small.get(4096).?.items.len);
+        try t.expect(a.free(p));
+    }
+    try t.expectEqual(f.chunks, f.released); // every chunk went back to the backend
 }
