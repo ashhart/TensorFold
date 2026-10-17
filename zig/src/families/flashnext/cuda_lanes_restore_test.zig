@@ -41,6 +41,12 @@ const Device = struct {
     }
 };
 
+pub fn fakeDriver() cuda.Driver {
+    Device.next = 0x100000;
+    Device.copies = 0;
+    return Device.driver();
+}
+
 /// Exercise the actual lane open and explicit snapshot entry points with a CPU control peer.
 pub fn run(comptime Cuda: type, comptime open: anytype, comptime restore: anytype, comptime drop: anytype, explicit: bool, drafting: bool) !void {
     const a = std.testing.allocator;

@@ -236,8 +236,7 @@ pub fn Namespace(comptime Tri: type) type {
                 if (ids.len == 0 or ids.len + s.max_new > self.context) return error.PromptTooLong;
                 const gop = try self.lanes.getOrPut(self.gpa, s);
                 if (gop.found_existing) dropLane(self, gop.value_ptr);
-                // Admit shared plain rounds when four or more streams are active.
-                const drafting = self.head != null and s.drafts and self.lanes.count() < 4;
+                const drafting = self.head != null and s.drafts;
                 // without the head's drafts, one row a stream a round: only a drafted window can rewind its states
                 if (!drafting) {
                     s.drafts = false;
@@ -552,6 +551,7 @@ pub fn Namespace(comptime Tri: type) type {
 
         test {
             _ = @import("cuda_lanes_restore_test.zig").Cases(Cuda, Cuda.open, snapRestore, dropLane);
+            _ = @import("cuda_lanes_admission_test.zig").Cases(Cuda, Cuda.open, dropLane);
         }
 
         // -- the prompt cache's copies ------------------------------------------------------------------------
