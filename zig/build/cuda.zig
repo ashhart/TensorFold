@@ -127,6 +127,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         }
         if (image.*) |file| fatbin_step.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
     }
+    // MiniMax H3's kernel image: its library and the contract's runner take it
+    const h3_image = if (nvcc) |tool| fatbin(b, tool, version orelse blk: {
+        const run = b.addSystemCommand(&.{ tool, "--version" });
+        run.has_side_effects = true;
+        break :blk run.captureStdOut(.{});
+    }, .{ .name = "h3", .flags = &.{"-O3"} }, sms) else null;
+    h3Library(b, target, optimize, h3_image);
     const cuda = runtime(b, target, optimize, if (nvcc != null or prebuilt != null) &images else &.{});
     const mods = family(b, target, optimize, cuda, draft_ids);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
@@ -157,7 +164,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
-    @import("kernel_contract.zig").cuda(b, runner_exe, controls);
+    @import("kernel_contract.zig").cuda(b, runner_exe, controls, h3_image);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
 }
 
@@ -181,6 +188,28 @@ fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
 /// RADIO image input (Nemotron Omni checkpoints): the processor, the tower and projector, the prompt rows.
 fn radioModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/radio/radio.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
+}
+
+/// `zig build tf-h3 -Dnvcc=...`: libtf_h3.so, MiniMax H3's blocks for a host pipeline, with its own kernel image.
+fn h3Library(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, h3_image: ?std.Build.LazyPath) void {
+    const step = b.step("tf-h3", "libtf_h3.so: MiniMax H3 / FastH3's transformer blocks on CUDA in bf16");
+    const image = h3_image orelse {
+        step.dependOn(&b.addFail("tf-h3 needs -Dnvcc").step);
+        return;
+    };
+    const cuda = runtime(b, target, optimize, &.{});
+    const lib = b.addLibrary(.{ .name = "tf_h3", .linkage = .dynamic, .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/families/h3/cuda_lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "cuda", .module = cuda }},
+    }) });
+    lib.root_module.addAnonymousImport("fatbin_h3", .{ .root_source_file = image });
+    // the rank-to-rank exchange of a sequence-parallel world: plain C over libibverbs (rdma-core)
+    lib.root_module.addCSourceFile(.{ .file = b.path("zig/src/families/h3/h3_xchg.c"), .flags = &.{ "-O2", "-std=gnu11" } });
+    lib.root_module.linkSystemLibrary("ibverbs", .{});
+    step.dependOn(&b.addInstallArtifact(lib, .{}).step);
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
@@ -242,6 +271,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const mods = family(b, host, .debug, cuda, draft_ids);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat);
     const native = native_modules.engines;
+    const h3_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_checkpoint })).step);
+    const h3_bounds = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/cuda_bounds.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_bounds })).step);
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{

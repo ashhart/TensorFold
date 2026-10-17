@@ -20,6 +20,22 @@ pub const Context = struct {
         return .{ .d = d, .device = dev, .handle = ctx };
     }
 
+    /// For a library in a host's process: the current device's primary context (device 0's if none), or error.Invalid.
+    pub fn shared(d: *const Driver) Error!Context {
+        var current: abi.Context = null;
+        try d.check(d.api.cuCtxGetCurrent(&current), "cuCtxGetCurrent");
+        if (current == null) return init(d, 0);
+        var dev: abi.Device = 0;
+        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        var ctx: abi.Context = null;
+        try d.check(d.api.cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
+        if (ctx != current) {
+            _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
+            return error.Invalid;
+        }
+        return .{ .d = d, .device = dev, .handle = ctx };
+    }
+
     /// Waits for all work, then drops this retain; resources made in it must be released first.
     pub fn deinit(self: *Context) void {
         _ = self.d.api.cuCtxSynchronize();
