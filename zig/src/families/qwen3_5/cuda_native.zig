@@ -275,7 +275,7 @@ const Lanes = struct {
     }
 
     fn backend(self: *Lanes) be.Backend {
-        return .{ .ptr = self, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
+        return .{ .ptr = self, .first_before_draft = true, .vtable = &.{ .prefill = prefillFn, .first = firstFn, .first_masked = firstMaskedFn, .queue = queueFn, .read = readFn, .verify = verifyFn, .keep = keepFn, .draft = draftFn, .prepare_features = prepareFeaturesFn, .features = featuresFn, .release = releaseFn } };
     }
 
     fn cast(ptr: *anyopaque) *Lanes {

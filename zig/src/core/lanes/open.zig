@@ -14,13 +14,17 @@ const int = trail.int;
 
 /// Prefill a stream, draw its first token and ask for its first drafts; it takes part from the next round.
 pub fn add(e: *Engine, s: *Stream) !void {
+    return addCommitted(e, s, null);
+}
+
+pub fn addCommitted(e: *Engine, s: *Stream, hook: ?be.Committed) !void {
     _ = e.arena.reset(.retain_capacity);
     try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     e.backend.prefill(s) catch |err| {
         if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
         return err;
     };
-    try opened(e, s);
+    try openedCommitted(e, s, .rule, hook);
 }
 
 /// How a stream's first drafts are sized: the depth rule, or the head's whole reach under node probabilities.
@@ -56,6 +60,11 @@ pub fn opened(e: *Engine, s: *Stream) !void {
 
 /// `opened` with its first drafts sized by `reach` (a family planner's prompts in pieces: `.head`).
 pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
+    return openedCommitted(e, s, reach, null);
+}
+
+fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
+    if (e.backend.first_before_draft and e.cfg.family_mtp and s.drafts) return @import("open_first.zig").opened(e, s, reach, hook);
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);
         return error.Cancelled;
@@ -115,6 +124,10 @@ pub fn fills(e: *const Engine) bool {
 
 /// One chunk of a stream's prompt pass; true once the stream is opened and joins the next round.
 pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
+    return fillStreamCommitted(e, s, first, null);
+}
+
+pub fn fillStreamCommitted(e: *Engine, s: *Stream, first: bool, hook: ?be.Committed) !bool {
     _ = e.arena.reset(.retain_capacity);
     if (first) try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     const chunk = e.backend.vtable.prefill_step orelse return error.NoPrefillSteps;
@@ -123,6 +136,6 @@ pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
         return err;
     };
     if (!done) return false;
-    try opened(e, s);
+    try openedCommitted(e, s, .rule, hook);
     return true;
 }

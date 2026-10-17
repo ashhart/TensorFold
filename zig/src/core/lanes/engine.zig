@@ -90,6 +90,7 @@ pub const Engine = struct {
     }
 
     pub const addStream = open.add;
+    pub const addStreamCommitted = open.addCommitted;
     pub const addStreams = open.addStreams;
     pub const max_together = open.max_together;
 
@@ -100,6 +101,7 @@ pub const Engine = struct {
     pub const opened = open.opened;
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
+    pub const fillStreamCommitted = open.fillStreamCommitted;
     pub const adopt = handover.adopt;
     pub const detach = handover.detach;
     pub const discard = handover.discard;

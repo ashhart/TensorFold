@@ -59,7 +59,10 @@ pub const DraftRequest = struct {
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
 };
 
+pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+
 pub const Backend = struct {
+    first_before_draft: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 

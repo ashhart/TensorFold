@@ -368,7 +368,7 @@ pub const LaneHost = struct {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
         }
-        h.core.addStream(&job.stream) catch |e| return h.failedPass(job, e);
+        h.core.addStreamCommitted(&job.stream, .{ .ptr = job, .call = firstCommitted }) catch |e| return h.failedPass(job, e);
         h.prefilled(job, began);
         _ = h.deliver(job);
         return true;
@@ -390,7 +390,7 @@ pub const LaneHost = struct {
         const job = h.filling.items[at];
         const first = !job.fill_began;
         job.fill_began = true;
-        const done = h.core.fillStream(&job.stream, first) catch |e| {
+        const done = h.core.fillStreamCommitted(&job.stream, first, .{ .ptr = job, .call = firstCommitted }) catch |e| {
             _ = switch (e) {
                 error.Cancelled => h.cancel(job),
                 error.LaneMemory => blk: {
@@ -413,7 +413,14 @@ pub const LaneHost = struct {
         return c.constraint(h.gpa, h.io, @fromBackingInt(@intCast(@backingInt(st.kind))), st.text, st.after);
     }
 
+    fn firstCommitted(ptr: *anyopaque) void {
+        const job: *Job = @ptrCast(@alignCast(ptr));
+        job.host.prefilled(job, job.began);
+        job.host.send(job);
+    }
+
     pub fn prefilled(h: *LaneHost, job: *Job, began: i96) void {
+        if (job.prefilled != null) return;
         const done = std.Io.Clock.awake.now(h.io).toNanoseconds();
         job.fill_on.store(false, .release); // the pass reported: status readers stop counting this fill
         h.lock();
@@ -464,6 +471,7 @@ pub const LaneHost = struct {
 
     /// No memory for another lane yet: the job waits at the queue's head, and admission holds until a job ends.
     fn requeue(h: *LaneHost, job: *Job) bool {
+        if (job.stream.pending != null or job.delivered != 0) return h.drop(job, "memory failure after first-token commit");
         h.lock();
         for (h.admitted.items, 0..) |j, i| if (j == job) {
             _ = h.admitted.orderedRemove(i);
@@ -577,4 +585,5 @@ test {
     _ = @import("lane_halt_test.zig");
     _ = @import("lane_host_end_test.zig");
     _ = @import("lane_review_test.zig");
+    _ = @import("lane_host_first_test.zig");
 }
