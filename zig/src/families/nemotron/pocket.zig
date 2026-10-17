@@ -8,6 +8,7 @@ const joint = @import("pocket_joint.zig");
 const pocket_dump = @import("pocket_dump.zig");
 const clock = @import("pocket_clock.zig");
 const reading = @import("pocket_read.zig");
+const forgetting = @import("pocket_forget.zig");
 
 const Example = examples.Example;
 const Acting = lesson_route.Acting;
@@ -39,7 +40,7 @@ const Taken = struct { slot: usize, neuron: usize, key: Key };
 pub const Placed = struct { layer: usize, neuron: usize, key: Key };
 
 /// A neuron a fact took, the rows it was fitted to fire on (in `pos`), and its fact's subject token (keyed on it).
-const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32, lesson: u32 };
+pub const Learned = struct { slot: usize, neuron: usize, key: Key, start: usize, count: usize, subject: u32, lesson: u32 };
 
 /// A read row: what it is to the open fact, whose key row it is (null: neither), its example and its place there.
 pub const Label = struct { kind: Kind, key: ?Key, ex: u32, row: u32 };
@@ -134,6 +135,7 @@ pub fn Pocket(comptime T: type) type {
         v: values.State = .{}, // the open fact's outputs as they are fitted
         clock: clock.Clock = .{}, // where the open round's time goes
         read: reading.Seen = .{}, // what the last read pass read, which a lesson begun again over the same keeps
+        forgot: forgetting.Kept = .{}, // what the last delete changed, until a save writes it or it is put back
 
         pub fn init(gpa: std.mem.Allocator) Self {
             const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
@@ -143,6 +145,7 @@ pub fn Pocket(comptime T: type) type {
         pub fn deinit(p: *Self) void {
             inline for (.{ "moe", "up", "down", "used", "taken", "rows", "labels", "keeps", "refits", "refit_up", "retired_lessons", "retired", "retired_w", "joint", "joint_down", "joint_answers", "learned", "pos", "subjects", "leads" }) |f| @field(p, f).deinit(p.gpa);
             p.read.deinit(p.gpa);
+            p.forgot.deinit(p.gpa);
             p.v.deinit(p.gpa);
         }
 
@@ -189,7 +192,7 @@ pub fn Pocket(comptime T: type) type {
         }
 
         /// The pocket's neurons as the shards hold them, read once: every MoE layer but the last.
-        fn load(p: *Self, t: *T, host: anytype) !void {
+        pub fn load(p: *Self, t: *T, host: anytype) !void {
             if (p.moe.items.len > 0) return;
             const c = t.config();
             // every MoE layer but the last (a nudge after it has no gradient to read), its neurons as loaded
