@@ -45,6 +45,12 @@ pub const Features = struct {
     ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
 };
 
+/// Takes a prompt chunk's tapped rows, the first at position `start`, while they are still held.
+pub const FeatureSink = struct {
+    ptr: *anyopaque,
+    take: *const fn (ptr: *anyopaque, s: *Stream, f: Features, start: u64) anyerror!void,
+};
+
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
 pub const DraftRequest = struct {
     stream: *Stream,
@@ -92,6 +98,8 @@ pub const Backend = struct {
         prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
         /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
+        /// The prompt pass handing `sink` each chunk's tapped rows as it makes them (null: features() after the pass).
+        prefill_features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, sink: FeatureSink) anyerror!void = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).

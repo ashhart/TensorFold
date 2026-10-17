@@ -24,9 +24,9 @@ fn rowDepth(s: c.Shape) usize {
     return 16 + 3 * ((s.k + 511) / 512) + 8;
 }
 
-/// A group's products in the tile op, its scale and bias, the groups in turn (tf-affine-ref's bound).
-fn groupDepth64(s: c.Shape) usize {
-    return 64 + s.k / 32 + 8;
+/// Sixteen products a tensor step, the steps over all of K in order (tf-affine-ref's bound for affine_mm).
+fn tensorDepth(s: c.Shape) usize {
+    return 16 + s.k / 16 + 8;
 }
 
 /// A group's 64 products in eight MMA steps, its sum, the groups a chunk takes, then the chunks' fixed tree.
@@ -39,15 +39,12 @@ fn laneDepth(s: c.Shape) usize {
     return 128 + 2 * (s.k / 32) + 32;
 }
 
-/// affine_mm's 4-bit codes enter as q + 128 and its bias as b - 128 s, so an infinite input meets opposite signs.
-const offset_inf = c.Known{ .gate = .nonfinite, .finding = "an infinite input gives NaN where MLX's s*sum(q x) + b*sum(x) keeps the infinity (the +128 code offset moves the bias to b - 128 s)" };
-
 pub fn spec(v: Variant, name: []const u8) c.Spec {
     const out: c.Elem = if (v.f32_out) .f32 else .bf16;
     const step: usize = @max(16, v.group);
     return switch (v.kind) {
         .row => .{ .name = name, .accum = .f32, .depth = rowDepth, .out = out, .tiles = .{ .{ .size = 2 }, .{ .size = 8, .step = 8, .min = 8 }, .{ .size = 512, .step = step, .min = step } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 3, .n = 4608, .k = 2688 } } },
-        .affine_mm => .{ .name = name, .accum = .f32, .depth = groupDepth64, .out = out, .known = if (v.bits == 4) offset_inf else null, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
+        .affine_mm => .{ .name = name, .accum = .f32, .depth = tensorDepth, .out = out, .tiles = .{ .{ .size = 64 }, .{ .size = 64, .step = 64, .min = 64 }, .{ .size = 128, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 128, .n = 2048, .k = 4096 }, .{ .rows = 65, .n = 1024, .k = 1024 } } },
         .simd, .simd_bits => .{ .name = name, .accum = .f32, .depth = simdDepth, .out = out, .tiles = .{ .{ .size = 8 }, .{ .size = 32, .step = 8, .min = 8 }, .{ .size = 512, .step = 64, .min = 64 } }, .served = &.{ .{ .rows = 16, .n = 2688, .k = 4096 }, .{ .rows = 9, .n = 6400, .k = 256 } } },
         .lane, .lane_reg => .{ .name = name, .accum = .f32, .depth = laneDepth, .out = out, .replaces = if (v.kind == .lane_reg) "the cooperative lane kernel" else null, .tiles = .{ .{ .size = 16 }, .{ .size = 32, .step = 16, .min = 32 }, .{ .size = 4 * v.group, .step = v.group, .min = v.group } }, .served = &.{ .{ .rows = 16, .n = 2048, .k = 2048 }, .{ .rows = 5, .n = 512, .k = 896 } } },
     };
@@ -70,7 +67,6 @@ pub const Proj = struct {
     w: rig_.Ref = undefined,
     s: rig_.Ref = undefined,
     b: rig_.Ref = undefined,
-    sums: rig_.Ref = undefined,
     tiled: rig_.Ref = undefined,
     base: rig_.Ref = undefined,
     out: rig_.Ref = undefined,
@@ -142,7 +138,7 @@ pub const Proj = struct {
         p.drop();
         if (!try p.takes(shape)) return false;
         var f = try Affine.init(p.a, shape, p.v.bits, p.v.group);
-        if (p.v.kind == .affine_mm and p.v.bits == 4) f.off = 128;
+        if (p.v.kind == .affine_mm) f.form = .rounded;
         p.f = f;
         try f.fill(fill, seed);
         const words = try p.a.alloc(u32, shape.n * shape.k * p.v.bits / 32);
@@ -155,7 +151,6 @@ pub const Proj = struct {
                 p.w = try p.rig.input(std.mem.sliceAsBytes(words));
                 p.s = try p.rig.input(std.mem.sliceAsBytes(f.scales));
                 p.b = try p.rig.input(std.mem.sliceAsBytes(f.biases));
-                if (p.v.kind == .affine_mm) p.sums = try p.rig.scratch(shape.rows * (shape.k / p.v.group) * 4);
             },
             .lane, .lane_reg => {
                 const l = p.layout(shape, false);
@@ -207,10 +202,8 @@ pub const Proj = struct {
             },
             .affine_mm => {
                 const x = .{ .buf = p.x.buf, .off = p.x.off };
-                const xs = .{ .buf = p.sums.buf, .off = p.sums.off };
                 const q = .{ .w = .{ .buf = p.w.buf, .off = p.w.off }, .s = .{ .buf = p.s.buf, .off = p.s.off }, .b = .{ .buf = p.b.buf, .off = p.b.off }, .n = @as(u32, @intCast(shape.n)), .k = @as(u32, @intCast(shape.k)) };
-                mm.rowSums(e, p.mm_p.?, @intCast(p.v.group), x, xs, @intCast(shape.rows), @intCast(shape.k));
-                mm.dense(e, p.mm_p.?, x, xs, q, .{ .buf = p.out.buf, .off = p.out.off }, @intCast(shape.rows));
+                mm.dense(e, p.mm_p.?, x, q, .{ .buf = p.out.buf, .off = p.out.off }, @intCast(shape.rows));
             },
             .lane, .lane_reg => try p.lane_p.?.encode(e, ref(p.x), ref(p.w), ref(p.s), ref(p.out), @intCast(shape.rows)),
         }

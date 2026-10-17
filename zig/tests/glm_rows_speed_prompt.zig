@@ -28,14 +28,11 @@ fn headsRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, 
 fn headsMm(e: mtl.ComputeEncoder, i: usize, mm: tf.affine_mm.Pipes, pool: Pool, io: Io, ldx: u32, kx: u32) void {
     var head = pool.at(i);
     head.n /= H;
-    tf.affine_mm.rowSumsAt(e, mm, 64, rf(io.x), rf(io.z), PM, H * kx, ldx);
-    tf.affine_mm.denseBatch(e, mm, rf(io.x), rf(io.z), head, rf(io.y), PM, H, .{
+    tf.affine_mm.denseBatch(e, mm, rf(io.x), head, rf(io.y), PM, H, .{
         .x_row = @intCast(ldx),
         .y_row = @intCast(H * head.n),
-        .sums_row = H,
         .x_batch = @intCast(kx),
         .y_batch = @intCast(head.n),
-        .sums_batch = 1,
         .w_batch = @intCast(head.n),
     });
 }
@@ -51,8 +48,7 @@ fn chunkRows(e: mtl.ComputeEncoder, i: usize, p: *const wide.Pipes, pool: Pool, 
 }
 fn chunkMm(e: mtl.ComputeEncoder, i: usize, mm: tf.affine_mm.Pipes, pool: Pool, io: Io) void {
     const q = pool.at(i);
-    tf.affine_mm.rowSums(e, mm, 64, rf(io.x), rf(io.z), PM, q.k);
-    tf.affine_mm.dense(e, mm, rf(io.x), rf(io.z), q, rf(io.y), PM);
+    tf.affine_mm.dense(e, mm, rf(io.x), q, rf(io.y), PM);
 }
 
 /// A prompt chunk's products where oQ's paths differ from uniform's, ms a chunk of 2048 rows.

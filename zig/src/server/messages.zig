@@ -31,9 +31,10 @@ pub fn normalize(cx: *Cx, messages: ?Value, late_system: []const u8, needs_user_
 pub const Media = struct {
     images: bool = false,
     videos: bool = false,
+    image_type: []const u8 = "image_url", // the part type the template reads (Vision.part_type)
 
     pub fn of(v: ?api.Vision) Media {
-        return .{ .images = v != null, .videos = v != null and v.?.video != null };
+        return .{ .images = v != null, .videos = v != null and v.?.video != null, .image_type = if (v) |x| x.part_type else "image_url" };
     }
 };
 
@@ -51,8 +52,8 @@ fn videoPart(cx: *Cx, part: Value) errors.Refused!Value {
     return .{ .object = out };
 }
 
-/// One image part as the template and the image path read it: {"type": "image_url", "image_url": {"url", "detail"?}}.
-fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
+/// One image part as the template and the image path read it: {"type": `kind`, "image_url": {"url", "detail"?}}.
+fn imagePart(cx: *Cx, part: Value, kind: []const u8) errors.Refused!Value {
     const iu = part.get("image_url") orelse return cx.refuse("an image_url content part must contain image_url");
     var url: []const u8 = "";
     var detail: ?Value = null;
@@ -70,7 +71,7 @@ fn imagePart(cx: *Cx, part: Value) errors.Refused!Value {
     try inner.put(cx.a, "url", .{ .string = url });
     if (detail) |d| try inner.put(cx.a, "detail", d);
     const out = try json.newObject(cx.a);
-    try out.put(cx.a, "type", .{ .string = "image_url" });
+    try out.put(cx.a, "type", .{ .string = kind });
     try out.put(cx.a, "image_url", .{ .object = inner });
     return .{ .object = out };
 }
@@ -95,10 +96,11 @@ pub fn normalizeWith(cx: *Cx, messages: ?Value, late_system: []const u8, needs_u
             var has_image = false;
             for (content.?.array) |part| {
                 const kind = if (part == .object and part.get("type") != null and part.get("type").? == .string) part.get("type").?.string else "";
-                if (images and std.mem.eql(u8, kind, "image_url")) {
+                // an image part, or one this normalization already wrote with the template's type (it runs twice)
+                if (images and (std.mem.eql(u8, kind, "image_url") or std.mem.eql(u8, kind, media.image_type))) {
                     // tool results carry screenshots too; the template renders them in its response
                     if (!std.mem.eql(u8, role.?.string, "user") and !std.mem.eql(u8, role.?.string, "tool")) return cx.refuse("image parts are accepted in user and tool messages only");
-                    try parts.append(cx.a, try imagePart(cx, part));
+                    try parts.append(cx.a, try imagePart(cx, part, media.image_type));
                     has_image = true;
                     continue;
                 }

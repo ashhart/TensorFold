@@ -121,10 +121,10 @@ pub const Vision = struct {
     image_token: u32,
     /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
     markers: []const u32 = &.{},
+    part_type: []const u8 = "image_url", // the content part type the template reads: OpenAI's, or "image" (most HF ones)
     /// Tokens the server writes around each image's rows (Nemotron Omni's <img> and </img>); null: the template's own.
     wrap: ?[2]u32 = null,
-    /// Image tokens one request may hold in all, and images.
-    image_tokens: u32,
+    image_tokens: u32, // the image tokens one request may hold in all, and its images
     max_images: u32,
     /// Video input, when the engine's family reads it.
     video: ?VideoOffer = null,
