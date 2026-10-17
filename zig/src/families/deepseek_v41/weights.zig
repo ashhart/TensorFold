@@ -21,6 +21,8 @@ pub const Attention = struct {
     wkv: Matrix,
     wo_b: Matrix,
     wo_a: [8]Matrix,
+    /// The eight wo_a slices as expert descriptors: one indexed product serves every slice.
+    wo_a_descriptors: mtl.Buffer,
     sink: Tensor,
     q_norm: Tensor,
     kv_norm: Tensor,
@@ -53,11 +55,17 @@ pub const Model = struct {
 
     /// Checkpoint buffers must outlive this borrowed model and every submitted command using it.
     pub fn deinit(self: *Model) void {
-        for (&self.layers) |*layer| for (layer.moe.descriptors) |buffer| buffer.deinit();
+        for (&self.layers) |*layer| {
+            for (layer.moe.descriptors) |buffer| buffer.deinit();
+            layer.attn.wo_a_descriptors.deinit();
+        }
         self.* = undefined;
     }
     pub fn registerResidency(self: *const Model, set: mtl.ResidencySet) void {
-        for (&self.layers) |*layer| for (layer.moe.descriptors) |buffer| set.add(buffer);
+        for (&self.layers) |*layer| {
+            for (layer.moe.descriptors) |buffer| set.add(buffer);
+            set.add(layer.attn.wo_a_descriptors);
+        }
     }
     pub fn residentBytes(_: *const Model) usize {
         return sizeofDescriptors();
@@ -66,7 +74,7 @@ pub const Model = struct {
 
 /// Admission adds these bytes to load.Plan.bytes; no dequantized weights or duplicate projections are allocated.
 pub fn sizeofDescriptors() usize {
-    return 40 * 3 * 384 * @sizeOf(exl3.ExpertDescriptor);
+    return 40 * (3 * 384 + 8) * @sizeOf(exl3.ExpertDescriptor);
 }
 
 /// Every executed tensor is checked using headers only, before checkpoint materialization or model allocation.
@@ -80,6 +88,15 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, engram: load.E
     try populate(true, checkpoint, &model, engram == .streamed);
     var owned: usize = 0;
     errdefer for (0..owned) |i| model.layers[i / 3].moe.descriptors[i % 3].deinit();
+    var slices: usize = 0;
+    errdefer for (model.layers[0..slices]) |*layer| layer.attn.wo_a_descriptors.deinit();
+    for (&model.layers) |*layer| {
+        const buffer = try device.buffer(8 * @sizeOf(exl3.ExpertDescriptor), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        layer.attn.wo_a_descriptors = buffer;
+        slices += 1;
+        const out: [*]exl3.ExpertDescriptor = @ptrCast(@alignCast(buffer.contents()));
+        for (layer.attn.wo_a, 0..) |m, slice| out[slice] = try exl3.descriptor(m);
+    }
     var prefix: [128]u8 = undefined;
     for (&model.layers, 0..) |*layer, layer_id| {
         inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {

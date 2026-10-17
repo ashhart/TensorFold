@@ -77,6 +77,8 @@ const Region = enum(usize) { qr, query, raw_kv, values, gates, latent, index_k, 
 pub const Workspace = struct {
     buffer: mtl.Buffer,
     selection: index.Scratch,
+    /// Row r of the batched wo_a product reads slice r % 8: token r / 8, group r % 8.
+    slices: mtl.Buffer,
     max_rows: u32,
     selection_layer: ?u32 = null,
     selection_position: u32 = 0,
@@ -87,17 +89,22 @@ pub const Workspace = struct {
     pub fn bytes(max_rows: u32) usize {
         var per_row: usize = 0;
         for (regions) |size| per_row += size;
-        return @as(usize, max_rows) * per_row + index.Scratch.bytes(max_rows);
+        return @as(usize, max_rows) * (per_row + 8 * 4) + index.Scratch.bytes(max_rows);
     }
     pub fn init(device: mtl.Device, max_rows: u32) !Workspace {
         if (max_rows == 0 or max_rows > 4096) return error.InvalidAttentionWorkspace;
-        const buffer = try device.buffer(bytes(max_rows) - index.Scratch.bytes(max_rows), mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        const slice_bytes = @as(usize, max_rows) * 8 * 4;
+        const buffer = try device.buffer(bytes(max_rows) - index.Scratch.bytes(max_rows) - slice_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer buffer.deinit();
+        const slices = try device.buffer(slice_bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        errdefer slices.deinit();
+        for (slices.slice(u32, @as(usize, max_rows) * 8), 0..) |*v, i| v.* = @intCast(i % 8);
         const selection = try index.Scratch.init(device, max_rows);
-        return .{ .buffer = buffer, .selection = selection, .max_rows = max_rows };
+        return .{ .buffer = buffer, .selection = selection, .slices = slices, .max_rows = max_rows };
     }
     pub fn deinit(w: *Workspace) void {
         w.buffer.deinit();
+        w.slices.deinit();
         w.selection.deinit();
     }
     pub fn residentBytes(w: *const Workspace) usize {
@@ -105,6 +112,7 @@ pub const Workspace = struct {
     }
     pub fn registerResidency(w: *const Workspace, set: mtl.ResidencySet) void {
         set.add(w.buffer);
+        set.add(w.slices);
         set.add(w.selection.buffer);
     }
     fn view(w: *const Workspace, region: Region) View {
@@ -262,9 +270,10 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const grouped = work.view(.grouped);
     const group_input = q_width / c.o_groups;
     const group_output = c.o_groups * c.o_lora_rank;
-    for (w.wo_a, 0..) |matrix, group| {
-        try projection(ep, e, .{ .trellis = matrix }, q.shifted(group * group_input * 2), grouped.shifted(group * c.o_lora_rank * 2), scratch, rows, q_width, group_output, .bf16);
-    }
+    // All eight slices in one indexed product: row 8 t + g is token t's group g, at the same
+    // input and output offsets the per-slice products used, with the same bits.
+    if (c.o_groups != 8) return error.UnsupportedAttentionGroups;
+    try exl3.encodeIndexed(ep, e, .{ .descriptors = core(.{ .buffer = w.wo_a_descriptors }), .count = 8, .k = group_input, .n = c.o_lora_rank }, core(q), core(grouped), scratch, .{ .count = @as(usize, rows) * 8, .x_stride = group_input, .y_stride = c.o_lora_rank, .output = .bf16, .routes = .{ .ids = core(.{ .buffer = work.slices }), .repeat = 1 } });
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .grouped, grouped);
     try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden_size, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .wo_b, y);

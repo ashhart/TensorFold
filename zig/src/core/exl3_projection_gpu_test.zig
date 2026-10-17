@@ -239,6 +239,51 @@ test "GPU router descriptors select mixed-width experts with gather and scatter 
     try std.testing.expectEqualSlices(u32, plain.slice(u32, 6 * n), indexed.slice(u32, 6 * n));
 }
 
+test "eight output slices as one indexed product keep each slice's strided bits" {
+    const device = try mtl.Device.init();
+    defer device.deinit();
+    var p = try ex.Pipelines.load(device);
+    defer p.deinit();
+    const queue = try device.queue();
+    defer queue.deinit();
+    const tokens = 3;
+    var slices: [8]Owned = undefined;
+    var made: usize = 0;
+    defer for (slices[0..made]) |w| w.deinit();
+    const widths = [_]u16{ 3, 4, 5, 6, 3, 8, 4, 6 };
+    for (&slices, widths, 0..) |*w, halves, i| {
+        w.* = try Owned.init(device, halves, .mul1, 40 + i);
+        made += 1;
+    }
+    const descriptors = try device.buffer(8 * @sizeOf(ex.ExpertDescriptor), mtl.ResourceOptions.shared);
+    defer descriptors.deinit();
+    for (slices, descriptors.slice(ex.ExpertDescriptor, 8)) |w, *d| d.* = try ex.descriptor(w.matrix);
+    const ids = try device.buffer(tokens * 8 * 4, mtl.ResourceOptions.shared);
+    defer ids.deinit();
+    for (ids.slice(u32, tokens * 8), 0..) |*v, i| v.* = @intCast(i % 8);
+    // x[token, slice*k + i] and y[token, slice*n + j], as wo_a reads q and writes its grouped rows.
+    const x = try device.buffer(tokens * 8 * k * 2, mtl.ResourceOptions.shared);
+    defer x.deinit();
+    for (x.slice(u16, tokens * 8 * k), 0..) |*v, i| v.* = bf16(@as(f32, @floatFromInt(@as(i32, @intCast(i % 29)) - 14)) / 16);
+    const indexed = try device.buffer(tokens * 8 * n * 2, mtl.ResourceOptions.shared);
+    defer indexed.deinit();
+    const plain = try device.buffer(tokens * 8 * n * 2, mtl.ResourceOptions.shared);
+    defer plain.deinit();
+    const scratch = try device.buffer(try ex.scratchBytes(k, n, tokens * 8), mtl.ResourceOptions.shared);
+    defer scratch.deinit();
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    for (slices) |w| ex.useMatrix(e, w.matrix);
+    try ex.encodeIndexed(&p, e, .{ .descriptors = .{ .buffer = descriptors }, .count = 8, .k = k, .n = n }, .{ .buffer = x }, .{ .buffer = indexed }, .{ .buffer = scratch }, .{ .count = tokens * 8, .x_stride = k, .y_stride = n, .routes = .{ .ids = .{ .buffer = ids }, .repeat = 1 } });
+    e.barrier();
+    for (slices, 0..) |w, slice| {
+        try ex.encode(&p, e, w.matrix, .{ .buffer = x, .offset = slice * k * 2 }, .{ .buffer = plain, .offset = slice * n * 2 }, .{ .buffer = scratch }, .{ .count = tokens, .x_stride = 8 * k, .y_stride = 8 * n });
+        e.barrier();
+    }
+    try complete(cb, e);
+    try std.testing.expectEqualSlices(u16, plain.slice(u16, tokens * 8 * n), indexed.slice(u16, tokens * 8 * n));
+}
+
 test "packed signs and GPU expert filtering preserve untouched output slots" {
     const device = try mtl.Device.init();
     defer device.deinit();
