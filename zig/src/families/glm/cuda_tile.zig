@@ -64,7 +64,8 @@ fn compact(w: *Weights, d: *const cuda.Driver, s: cuda.Stream, field: *u64, byte
         if (b.ptr == old) break i;
     } else return 0;
     const was = w.buffers.items[at].len;
-    const nb = try cuda.DeviceBuffer.alloc(d, bytes);
+    var nb = try cuda.DeviceBuffer.alloc(d, bytes);
+    errdefer nb.free(); // the weights own it only once it replaces the old buffer
     try d.check(d.api.cuMemcpyDtoDAsync_v2(nb.ptr, old, bytes, s.handle), "cuMemcpyDtoDAsync");
     try s.synchronize();
     w.buffers.items[at].free();
