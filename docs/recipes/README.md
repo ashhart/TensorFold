@@ -16,6 +16,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
+| DeepSeek-V4.1-Flash | [CUDA (Zig): tools and checks](deepseek-v4.1-cuda.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 
 ## Capability floor
