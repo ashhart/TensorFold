@@ -13,7 +13,12 @@ pub const max_ports = 8;
 const blob_bytes = 1 + 4 * max_ports;
 
 /// How many devices, and how: on a /24 the peer shares (`shared`), named by TF_TP_ROCE_HCA (`explicit`), or neither.
-pub const Pick = struct { n: usize, shared: bool, explicit: bool = false };
+pub const Pick = struct {
+    n: usize,
+    shared: bool,
+    explicit: bool = false,
+    verbs_open_error: ?@import("verbs").Error = null,
+};
 
 fn usable(p: rv.Port) bool {
     return p.active and p.ethernet and p.ipv4 != null;
@@ -97,12 +102,17 @@ pub fn select(cfg: Config, b: *bootstrap.Bootstrap, out: *[rv.max_hcas]rv.HcaSpe
 fn selectWithOpen(cfg: Config, b: *bootstrap.Bootstrap, out: *[rv.max_hcas]rv.HcaSpec, open: OpenFn) !Pick {
     var ports: [max_ports]rv.Port = undefined;
     var n_ports: usize = 0;
+    var open_error: ?@import("verbs").Error = null;
     if (open(null)) |opened| {
         var v = opened;
         defer v.close();
         n_ports = rv.scanPorts(&v, &ports);
-    } else |_| {}
-    return selectFrom(cfg, b, ports[0..n_ports], out);
+    } else |e| {
+        open_error = e;
+    }
+    var pick = try selectFrom(cfg, b, ports[0..n_ports], out);
+    pick.verbs_open_error = open_error;
+    return pick;
 }
 
 /// `select` over given ports (the scan's, or a test's fixture ports).
@@ -140,11 +150,14 @@ pub const HcaError = error{
     NoRoceDevice,
     /// this host's ports share no IPv4 /24 with the peer's: NCCL would not reach the peer on them either
     NoSharedSubnet,
-};
+} || @import("verbs").Error;
 
 /// `tf-tp-test hca`'s line for run_hosts.sh: `NCCL_IB_HCA=` the picked devices; never the first local ports alone.
 pub fn hcaLine(pick: Pick, specs: []const rv.HcaSpec, buf: *[list_bytes + 16]u8) HcaError![]const u8 {
-    if (pick.n == 0) return error.NoRoceDevice;
+    if (pick.n == 0) {
+        if (pick.verbs_open_error) |e| return e;
+        return error.NoRoceDevice;
+    }
     if (!pick.shared and !pick.explicit) return error.NoSharedSubnet;
     const prefix = "NCCL_IB_HCA=";
     @memcpy(buf[0..prefix.len], prefix);
