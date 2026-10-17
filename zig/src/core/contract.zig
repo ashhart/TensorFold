@@ -11,7 +11,7 @@ pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
 
 test {
-    _ = @import("contract/qwen_served_pending.zig");
+    _ = @import("contract/qwen_served_records.zig");
     _ = @import("contract/delta_slots_records.zig");
     _ = spec;
     _ = gates;
