@@ -464,14 +464,20 @@ pub const Model = struct {
             else => .f16,
         }, .y_dtype = .f32 });
         enc.barrier();
-        route.encode(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), .{ .rows = rows, .bias_dtype = switch (w.bias.dtype) {
+        const grouped: ?expert_groups.Scratch = if (m.grouped_prefill and rows >= 8) try ws.grouping(rows) else null;
+        const bias_dtype: route.Dtype = switch (w.bias.dtype) {
             .f32 => .f32,
             .f16 => .f16,
             .bf16 => .bf16,
             else => .f16,
-        } });
+        };
+        if (grouped == null) {
+            route.encodeMerged(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), ws.view(.moe_routes), .{ .rows = rows, .bias_dtype = bias_dtype, .merged_stride = 7, .merged_extra = work.shared_expert });
+            enc.barrier();
+            return m.moeMerged(enc, w, rows);
+        }
+        route.encode(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), .{ .rows = rows, .bias_dtype = bias_dtype });
         enc.barrier();
-        const grouped: ?expert_groups.Scratch = if (m.grouped_prefill and rows >= 8) try ws.grouping(rows) else null;
         var routed_rows = exl3.Rows{ .count = @as(usize, rows) * 6, .x_stride = 5120, .y_stride = 2304, .input_rows = rows, .output_rows = @as(usize, rows) * 6, .routes = .{ .ids = convert(ws.view(.route_ids)), .repeat = 6 } };
         if (grouped) |g| {
             try expert_groups.encode(enc, &p.groups, convert(ws.view(.route_ids)), g, 6);
@@ -500,6 +506,32 @@ pub const Model = struct {
         enc.barrier();
         try m.project(enc, w.shared[2], ws.view(.shared_activation), ws.view(.shared_down), rows, 2304, 5120, .bf16);
         ops.encodeCombine(enc, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = 6 * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120 });
+        enc.barrier();
+    }
+
+    /// The ungrouped MoE with the shared expert as each token's seventh row: one indexed product per
+    /// projection. Routed rows keep their unmerged positions; shared rows sit below the routed block
+    /// (work.moeSlot), so SwiGLU and combine read the same values as the separate shared path.
+    fn moeMerged(m: *Model, enc: mtl.ComputeEncoder, w: *const weights.Moe, rows: u32) !void {
+        const ws = &m.workspace;
+        const p = &m.pipelines;
+        const t: usize = ws.plan.rows;
+        const merged: usize = @as(usize, rows) * 7;
+        const shared_gate = ws.view(.gate).shifted(t * 6 * 2304 * 2);
+        const shared_up = ws.view(.up).shifted(t * 6 * 2304 * 2);
+        const shared_activation = ws.view(.activation).shifted(t * 6 * 2304 * 2);
+        const shared_down = ws.view(.routed).shifted(t * 6 * 5120 * 2);
+        const up_rows = exl3.Rows{ .count = merged, .x_stride = 5120, .y_stride = 2304, .output_ids = convert(ws.view(.moe_slots)), .output_rows = t * 7, .routes = .{ .ids = convert(ws.view(.moe_routes)), .repeat = 7 } };
+        for (0..2) |i| {
+            try exl3.encodeIndexed(&p.projection, enc, .{ .descriptors = .{ .buffer = w.descriptors[i] }, .count = 385, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(if (i == 0) .gate else .up)), ws.projection(), up_rows);
+            enc.barrier();
+        }
+        ops.encodeSwiGLU(enc, &p.ops, ws.view(.gate), ws.view(.up), ws.view(.route_weights), ws.view(.activation), .{ .rows = rows * 6, .width = 2304, .input_stride = 2304, .output_stride = 2304, .weighted = true });
+        ops.encodeSwiGLU(enc, &p.ops, shared_gate, shared_up, ws.view(.route_weights), shared_activation, .{ .rows = rows, .width = 2304, .input_stride = 2304, .output_stride = 2304 });
+        enc.barrier();
+        try exl3.encodeIndexed(&p.projection, enc, .{ .descriptors = .{ .buffer = w.descriptors[2] }, .count = 385, .k = 2304, .n = 5120 }, convert(ws.view(.activation)), convert(ws.view(.routed)), ws.projection(), .{ .count = merged, .x_stride = 2304, .y_stride = 5120, .input_ids = convert(ws.view(.moe_slots)), .input_rows = t * 7, .output_ids = convert(ws.view(.moe_slots)), .output_rows = t * 7, .routes = .{ .ids = convert(ws.view(.moe_routes)), .repeat = 1 } });
+        enc.barrier();
+        ops.encodeCombine(enc, &p.ops, ws.view(.routed), shared_down, ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = 6 * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120 });
         enc.barrier();
     }
 };

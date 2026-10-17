@@ -150,3 +150,40 @@ test "nonfinite router inputs propagate invalid routes without reading outside t
     try done(combine_cb, combine_encoder);
     for (output.slice(u16, 4)) |value| try std.testing.expect(std.math.isNan(support.fp(value)));
 }
+
+test "merged route output repeats each row's six IDs at stride seven with the shared expert last" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const queue = try device.queue();
+    defer queue.deinit();
+    var p = try route.Pipelines.load(device);
+    defer p.deinit();
+    var b = Buffers{ .device = device };
+    defer b.deinit();
+    const rows = 3;
+    const logits = try b.get(f32, rows * 384);
+    const bias = try b.get(f32, 384);
+    var prng = std.Random.DefaultPrng.init(7);
+    for (logits.slice(f32, rows * 384)) |*v| v.* = (prng.random().float(f32) - 0.5) * 8;
+    for (bias.slice(f32, 384)) |*v| v.* = (prng.random().float(f32) - 0.5) * 0.1;
+    const ids = try b.get(u32, rows * 6);
+    const weights = try b.get(f32, rows * 6);
+    const ids_merged = try b.get(u32, rows * 6);
+    const weights_merged = try b.get(f32, rows * 6);
+    const merged = try b.get(u32, rows * 7);
+    @memset(merged.slice(u32, rows * 7), 0xdead);
+    const cb = queue.commandBuffer();
+    const e = cb.compute(.serial);
+    route.encode(e, &p, view(logits), view(bias), view(ids), view(weights), .{ .rows = rows });
+    route.encodeMerged(e, &p, view(logits), view(bias), view(ids_merged), view(weights_merged), view(merged), .{ .rows = rows, .merged_stride = 7, .merged_extra = 384 });
+    try done(cb, e);
+    // The ordinary outputs are unchanged by the merged write.
+    try std.testing.expectEqualSlices(u32, ids.slice(u32, rows * 6), ids_merged.slice(u32, rows * 6));
+    try std.testing.expectEqualSlices(u32, @as([]const u32, @ptrCast(weights.slice(f32, rows * 6))), @as([]const u32, @ptrCast(weights_merged.slice(f32, rows * 6))));
+    for (0..rows) |r| {
+        for (0..6) |slot| try std.testing.expectEqual(ids.slice(u32, rows * 6)[r * 6 + slot], merged.slice(u32, rows * 7)[r * 7 + slot]);
+        try std.testing.expectEqual(@as(u32, 384), merged.slice(u32, rows * 7)[r * 7 + 6]);
+    }
+}

@@ -3,10 +3,11 @@
 using namespace metal;
 inline float lp(float x) { float u=1.0f+x; return u==1.0f?x:x*(log(u)/(u-1.0f)); }
 inline float score(float x) { return sqrt(x>20.0f?x:lp(exp(x))); }
-struct Shape { uint rows,logit_stride,output_stride; float temperature; uint bias_dtype; };
+struct Shape { uint rows,logit_stride,output_stride; float temperature; uint bias_dtype,merged_stride,merged_extra; };
 kernel void dsv41_route(const device float* logits [[buffer(0)]], const device uchar* bias [[buffer(1)]],
                         device uint* ids [[buffer(2)]], device float* weights [[buffer(3)]],
-                        constant Shape& d [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
+                        constant Shape& d [[buffer(4)]], device uint* merged [[buffer(5)]],
+                        uint row [[threadgroup_position_in_grid]],
                         uint t [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
                         uint sg [[simdgroup_index_in_threadgroup]]) {
   threadgroup float scores[384], select[384], best[4], picked[6];
@@ -36,6 +37,8 @@ kernel void dsv41_route(const device float* logits [[buffer(0)]], const device u
       if (lane==0) {
         winner=q;
         ids[ulong(row)*d.output_stride+slot]=q;
+        // The same six IDs again at merged_stride, for products that append a shared expert's row.
+        if (d.merged_stride) merged[ulong(row)*d.merged_stride+slot]=q;
         picked[slot]=q<384?scores[q]:NAN;
       }
     }
@@ -43,6 +46,7 @@ kernel void dsv41_route(const device float* logits [[buffer(0)]], const device u
     if (t==0 && winner<384) select[winner]=-INFINITY;
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
+  if (d.merged_stride && t==0) merged[ulong(row)*d.merged_stride+6]=d.merged_extra;
   if (t<6) {
     // Source CUDA reduces contiguous six-score rows with four lanes, then shuffles by 2 and 1.
     float left=(picked[0]+picked[4])+picked[2];

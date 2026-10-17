@@ -45,7 +45,19 @@ pub const Field = enum {
     engram_stage_s_1,
     engram_local_0,
     engram_local_1,
+    /// Merged MoE products (rows below the plan): each token's six routed IDs then the shared expert's.
+    moe_routes,
+    /// Where merged row 7 r + j lands in the gate, up, activation and routed fields (moeSlot).
+    moe_slots,
 };
+
+/// The shared expert as a seventh row per token: index of the routes table, and of descriptor tables.
+pub const shared_expert: u32 = 384;
+/// Merged MoE row 7 r + j: routed slot j of token r at row 6 r + j, the shared expert at row 6 t + r
+/// (t the plan's rows), below the routed block, so routed rows keep their unmerged positions.
+pub fn moeSlot(plan_rows: usize, r: usize, j: usize) u32 {
+    return @intCast(if (j < 6) r * 6 + j else plan_rows * 6 + r);
+}
 const count = std.enums.values(Field).len;
 
 pub const Plan = struct {
@@ -74,10 +86,10 @@ pub const Plan = struct {
         const sizes = [_]usize{
             t * 4,            hash.raw_vocab * 4, @as(usize, lanes) * 16,          t * 20480 * 2, t * 5120 * 2, t * 5120 * 2, t * 5120 * 2,
             t * 4 * 4,        t * 4 * 4,          t * 4 * 4,                       t * 16 * 4,    t * 24 * 4,   t * 4,        t * 24 * 4,
-            t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 6 * 2304 * 2,
-            t * 6 * 2304 * 2, t * 6 * 2304 * 2,   t * 6 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
+            t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 7 * 2304 * 2,
+            t * 7 * 2304 * 2, t * 7 * 2304 * 2,   t * 7 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
             t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, stage * 256,   stage * 256,  stage * 8,    stage * 8,
-            stage * 4,        stage * 4,
+            stage * 4,        stage * 4,        t * 7 * 4,                       t * 7 * 4,
         };
         var out = Plan{ .rows = rows, .lanes = lanes, .streamed = streamed, .offsets = undefined, .bytes = 0 };
         for (sizes, 0..) |size, i| {
@@ -99,6 +111,10 @@ pub const Workspace = struct {
         const w = Workspace{ .buffer = buffer, .plan = plan };
         @memcpy(buffer.contents()[plan.offsets[@backingInt(Field.token_map)]..][0..token_map.len], token_map);
         @memset(buffer.contents()[plan.offsets[@backingInt(Field.history)]..][0 .. @as(usize, plan.lanes) * 16], 0);
+        const slots: [*]u32 = @ptrCast(@alignCast(buffer.contents() + plan.offsets[@backingInt(Field.moe_slots)]));
+        for (0..plan.rows) |r| for (0..7) |j| {
+            slots[r * 7 + j] = moeSlot(plan.rows, r, j);
+        };
         return w;
     }
 

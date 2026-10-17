@@ -74,7 +74,7 @@ pub const Model = struct {
 
 /// Admission adds these bytes to load.Plan.bytes; no dequantized weights or duplicate projections are allocated.
 pub fn sizeofDescriptors() usize {
-    return 40 * (3 * 384 + 8) * @sizeOf(exl3.ExpertDescriptor);
+    return 40 * (3 * 385 + 8) * @sizeOf(exl3.ExpertDescriptor);
 }
 
 /// Every executed tensor is checked using headers only, before checkpoint materialization or model allocation.
@@ -100,7 +100,8 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, engram: load.E
     var prefix: [128]u8 = undefined;
     for (&model.layers, 0..) |*layer, layer_id| {
         inline for (.{ "w1", "w3", "w2" }, 0..) |part, projection| {
-            const bytes = 384 * @sizeOf(exl3.ExpertDescriptor);
+            // Entry 384 is the shared expert, so merged products can route it as a seventh row.
+            const bytes = 385 * @sizeOf(exl3.ExpertDescriptor);
             const buffer = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
             layer.moe.descriptors[projection] = buffer;
             owned += 1;
@@ -112,6 +113,7 @@ pub fn bind(device: mtl.Device, checkpoint: *const cp.Checkpoint, engram: load.E
                 try matrix(true, checkpoint, try named(&prefix, "layers.{d}.ffn.experts.{d}.{s}", .{ layer_id, expert, part }), k, n, &m);
                 out[expert] = try exl3.descriptor(m);
             }
+            out[384] = try exl3.descriptor(layer.moe.shared[projection]);
         }
     }
     return model;

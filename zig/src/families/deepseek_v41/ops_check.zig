@@ -188,4 +188,5 @@ test "V4.1 weighted SiLU preserves division rounding before BF16 activation" {
 test {
     _ = @import("mhc_test.zig");
     _ = @import("route_test.zig");
+    _ = @import("moe_merge_test.zig");
 }
