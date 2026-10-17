@@ -21,6 +21,8 @@ pub const Config = struct {
     max_patches: u32,
     max_model_len: u32,
     image_token: u32, // img_context_token_id
+    video_temporal: usize = 0, // frames packed to a video patch (video_temporal_patch_size); 0: the checkpoint has no video projection
+    video_target_patches: u32 = 1024, // the patches a video frame is sized to (video_target_num_patches)
 
     /// 4 patches (2 x 2) to one token: downsample_ratio 0.5.
     pub const shuffle = 2;
@@ -34,6 +36,11 @@ pub const Config = struct {
 
     pub fn patchWidth(c: Config) usize {
         return channels * c.patch * c.patch;
+    }
+
+    /// A video patch: `video_temporal` frames' patches side by side.
+    pub fn videoWidth(c: Config) usize {
+        return c.video_temporal * c.patchWidth();
     }
 
     /// The config, or null with `problem` (from `a`) naming what the kernels cannot read; NoVisionTower without one.
@@ -78,6 +85,8 @@ pub const Config = struct {
             .max_patches = @intCast(try size(field(pre, v, "max_num_patches"))),
             .max_model_len = if (pre) |p| @intCast(try size(p.get("max_model_len"))) else 16384,
             .image_token = @intCast(try size(root.get("img_context_token_id"))),
+            .video_temporal = if (root.get("video_temporal_patch_size")) |x| (if (x == .integer and x.integer > 0) @intCast(x.integer) else 0) else 0,
+            .video_target_patches = if (field(pre, v, "video_target_num_patches")) |x| (if (x == .integer and x.integer > 0) @intCast(x.integer) else 1024) else 1024,
         };
         if (c.hidden != try size(root.get("vit_hidden_size"))) return refuse(a, problem, "vit_hidden_size differs from the tower's hidden_size");
         if (c.dim() * c.heads != c.hidden or (c.dim() != 72 and c.dim() != 80)) return refuse(a, problem, "the tower's head width is not 72 or 80");
@@ -186,4 +195,26 @@ test "the public checkpoint's image side, and refusals by name" {
         defer a.free(why);
         try std.testing.expect(std.mem.startsWith(u8, why, "the tower's sizes are not positive"));
     }
+}
+
+test "the video side: the temporal patch size and the frame budget, none without one" {
+    const a = std.testing.allocator;
+    const text =
+        \\{"downsample_ratio": 0.5, "img_context_token_id": 18, "norm_mean": [0.48145466, 0.4578275, 0.40821073],
+        \\ "norm_std": [0.26862954, 0.26130258, 0.27577711], "projector_hidden_size": 20480, "ps_version": "v2",
+        \\ "vit_hidden_size": 1280, "video_temporal_patch_size": 2, "llm_config": {"hidden_size": 4096},
+        \\ "vision_config": {"model_type": "radio", "hidden_size": 1280, "num_hidden_layers": 32, "num_attention_heads": 16,
+        \\  "mlp_ratio": 4.0, "hidden_act": "gelu", "layer_norm_eps": 1e-06, "layerscale_value": 1.0, "qkv_bias": true,
+        \\  "use_swiglu_ffn": false, "patch_size": 16, "num_channels": 3, "num_cls_tokens": 3, "num_registers": 7,
+        \\  "max_img_size": 2048, "min_num_patches": 1024, "max_num_patches": 13312}}
+    ;
+    var problem: []const u8 = "";
+    const c = (try Config.parse(a, text, "{\"video_target_num_patches\": 1024, \"max_model_len\": 16384}", &problem)).?;
+    try std.testing.expectEqual(@as(usize, 2), c.video_temporal);
+    try std.testing.expectEqual(@as(usize, 1536), c.videoWidth());
+    try std.testing.expectEqual(@as(u32, 1024), c.video_target_patches);
+    const none = try std.mem.replaceOwned(u8, a, text, "\"video_temporal_patch_size\": 2, ", "");
+    defer a.free(none);
+    const d = (try Config.parse(a, none, null, &problem)).?;
+    try std.testing.expectEqual(@as(usize, 0), d.video_temporal);
 }

@@ -100,8 +100,11 @@ pub const Tower = struct {
         const gw: usize = img.gw;
         const n = gh * gw;
         const hd = c.hidden;
-        const pw = c.patchWidth();
+        // a video group's patches hold its frames side by side and go through the video projection
+        const video = c.video_temporal > 0 and img.pixels.len == n * c.videoWidth();
+        const pw = if (video) c.videoWidth() else c.patchWidth();
         if (n == 0 or n > c.max_patches or gh % 2 != 0 or gw % 2 != 0 or n / 4 != img.tokens or img.pixels.len != n * pw) return error.ImageShape;
+        if (n * pw > c.max_patches * c.patchWidth()) return error.ImageShape; // the scratch holds this many patch values
         // the float patches land in the f32 products' room (the patch Linear has no bias), cast to bf16 on the GPU
         try t.scratch.uploadAsync(b.acc - t.scratch.ptr, std.mem.sliceAsBytes(img.pixels), s.handle);
         try k.cast(s, b.acc, b.px, n * pw);
@@ -109,7 +112,7 @@ pub const Tower = struct {
         const rows = n + c.prefix;
         const feats = b.h + 2 * c.prefix * hd;
         try t.scratch.copyFrom(b.h - t.scratch.ptr, w.cls, 2 * c.prefix * hd, s.handle);
-        try g.run(s, b.px, w.patch, b.x, n, hd, pw, .bf16);
+        try g.run(s, b.px, if (video) w.video_patch else w.patch, b.x, n, hd, pw, .bf16);
         try k.positionAdd(s, b.x, w.table, feats, gh, gw, c.side, hd);
         const dim = c.dim();
         const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(dim))));

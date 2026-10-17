@@ -28,6 +28,7 @@ pub const Layer = struct {
 pub const Weights = struct {
     memory: cuda.DeviceBuffer,
     patch: u64, // [hidden, 3 * patch * patch], no bias
+    video_patch: u64, // [hidden, video_temporal * 3 * patch * patch] (0 without a video projection)
     table: u64, // the position table [side * side, hidden]
     cls: u64, // [prefix, hidden]: cls tokens, then registers
     final: u64, // vision_final_layernorm (unset without an MTP layer: Config.final_norm)
@@ -106,6 +107,7 @@ const Planner = struct {
         const h = c.hidden;
         var buf: [160]u8 = undefined;
         w.patch = try p.take(tower ++ "patch_generator.embedder.weight", &.{ h, c.patchWidth() }, false);
+        w.video_patch = if (c.video_temporal > 0) try p.take(tower ++ "patch_generator.video_embedder.weight", &.{ h, c.videoWidth() }, false) else 0;
         w.table = try p.take(tower ++ "patch_generator.pos_embed", &.{ 1, c.side * c.side, h }, false);
         w.cls = try p.take(tower ++ "patch_generator.cls_token.token", &.{ c.prefix, h }, false);
         for (w.layers, 0..) |*l, i| {

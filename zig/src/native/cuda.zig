@@ -15,7 +15,7 @@ const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native };
+const registry = .{ nemotron.native, nemotron.omni, nemotron.bolt, glm.native };
 
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
@@ -325,7 +325,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             return null;
         }
         const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
-        opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
+        opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images, .video_tokens = vo.video_tokens };
     }
     if (o.precision) |p| {
         if (!@hasField(F.Options, "precision")) {
@@ -335,6 +335,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
     }
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
+    if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
@@ -463,7 +464,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .logprobs = loaded.backend.vtable.first_row != null,
         .prompt_logprobs = loaded.backend.vtable.prompt_rows,
         .structures = loaded.backend.vtable.first_masked != null,
-        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
+        .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision, o.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
