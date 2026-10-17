@@ -19,16 +19,13 @@ pub const Stager = struct {
     stream: cuda.Stream,
     files: std.ArrayList(Mapping) = .empty,
     copies: std.ArrayList(Copy) = .empty,
-    /// Host-made bytes in flight: owned until the stream has been synchronized.
-    made: std.heap.ArenaAllocator,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, stream: cuda.Stream) Stager {
-        return .{ .gpa = gpa, .d = d, .stream = stream, .made = .init(gpa) };
+        return .{ .gpa = gpa, .d = d, .stream = stream };
     }
 
     pub fn deinit(st: *Stager) void {
-        st.stream.synchronize() catch {}; // copies of `made` bytes queued before a failure read them until here
-        st.made.deinit();
+        st.stream.synchronize() catch {};
         st.files.deinit(st.gpa);
         st.copies.deinit(st.gpa);
         st.* = undefined;
@@ -45,8 +42,7 @@ pub const Stager = struct {
         const p = @intFromPtr(bytes.ptr);
         for (st.files.items, 0..) |f, i| if (p >= f.base and p + bytes.len <= f.base + f.len)
             return st.copies.append(st.gpa, .{ .dst = dst, .file = i, .offset = p - f.base, .len = bytes.len });
-        const own = try st.made.allocator().dupe(u8, bytes);
-        try st.d.check(st.d.api.cuMemcpyHtoDAsync_v2(dst, own.ptr, own.len, st.stream.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(st.d, dst, bytes, st.stream);
     }
 
     /// Zeroes `n` device bytes at `dst` ahead of every copy `finish` makes.
@@ -96,7 +92,7 @@ const Device = struct {
     events: [2]cuda.Event = undefined,
 
     fn copy(x: *Device, dst: u64, bytes: []const u8) !void {
-        try x.d.check(x.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, x.stream.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(x.d, dst, bytes, x.stream);
     }
 
     fn done(x: *Device, slot: usize) !void {
