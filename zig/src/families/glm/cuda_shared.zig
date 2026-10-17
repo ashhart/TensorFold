@@ -10,12 +10,12 @@ const kda_block = @import("cuda_kda_block.zig");
 const dsa_block = @import("cuda_dsa_block.zig");
 
 /// Checks a shared window's segments against its `rows` rows, then each sequence holds its rows until its commit.
-pub fn begin(r: fw.Rank, rows: usize) !void {
+pub fn begin(r: fw.Rank, rows: usize, stream: cuda.Stream) !void {
     if (r.b.prefill) return error.BadWindow;
     var at: usize = 0;
     for (r.segs) |g| {
         if (g.row0 != at or g.rows == 0 or g.rows > fw.window_rows) return error.BadWindow;
-        if (g.st.pos + g.rows > g.st.capacity) return error.PastCapacity;
+        try g.st.ready(stream, g.rows);
         at += g.rows;
     }
     if (at != rows) return error.BadWindow;

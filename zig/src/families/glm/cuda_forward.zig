@@ -450,10 +450,10 @@ pub const Forward = struct {
         for (f.ranks) |r| {
             if (R == 0 or R > r.b.rows) return error.BadWindow;
             if (r.segs.len == 0) {
-                if (r.st.pos + R > r.st.capacity) return error.PastCapacity;
+                try r.st.ready(f.stream, R);
                 r.st.pending = R;
                 r.st.prompt = r.b.prefill;
-            } else try shared.begin(r, R);
+            } else try shared.begin(r, R, f.stream);
             try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
         }
         const c = &f.ranks[0].w.config;
@@ -520,7 +520,7 @@ pub const Forward = struct {
         for (f.ranks, hidden) |r, h| {
             if (r.w.mtp == null) return error.NoMtpHead;
             if (n == 0 or n > r.b.rows) return error.BadWindow;
-            if (r.st.mtp_len + n > r.st.capacity) return error.PastCapacity;
+            try r.st.readyMtp(f.stream, n);
             try cuda.copy_source.enqueue(f.d, r.b.ids, std.mem.sliceAsBytes(ids), f.stream);
             if (h != r.b.hin) try f.d.check(f.d.api.cuMemcpyDtoDAsync_v2(r.b.hin, h, n * D * 2, f.stream.handle), "cuMemcpyDtoDAsync");
             const m = r.w.mtp.?;
