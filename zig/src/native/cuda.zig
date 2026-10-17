@@ -21,6 +21,7 @@ const registry = .{ nemotron.native, nemotron.omni, glm.native };
 pub const records = true;
 
 pub const backends: []const []const u8 = &.{"cuda"};
+pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 1]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
@@ -319,6 +320,11 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
+    if (@hasField(F.Options, "mtp_drafts")) {
+        opts.mtp_drafts = o.mtp_drafts;
+        opts.mtp_confidence = o.mtp_confidence;
+        if (o.mtp_drafts == 0) opts.drafts = false;
+    }
     if (o.vision) |vo| {
         if (!@hasField(F.Options, "vision")) {
             problem.* = "--vision: this CUDA family reads no images; serve it without --vision";

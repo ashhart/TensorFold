@@ -25,6 +25,10 @@ The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower an
 16,384-token window the server admits 8 streams at 0.35 GiB each and keeps a prompt cache of about 8 to 10 GiB, and
 about 24 GB of the GB10's memory stays available. Leave the other ranks' variables below unset.
 
+For lone drafted streams, `--mtp-drafts` caps MTP depth (at most 15) and `--mtp-confidence` sets a
+cumulative-confidence threshold from 0 to 1 instead of the cost-based cutoff. A zero draft cap disables
+drafting. Copied continuations and concurrent streams otherwise retain their existing lane policies.
+
 ## Run on two GB10s
 
 Rank 0 runs the whole model and serves; rank 1 holds only its share of every MoE layer's experts (the MTP layer's
