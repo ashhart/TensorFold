@@ -71,6 +71,7 @@ pub const Modules = struct {
         m.exl3 = try exl3.Kernels.load(m.mods[7]);
         m.mm = try mm_mod.Kernels.load(m.mods[8]);
         m.tiled = false;
+        m.packs = null; // `m` starts undefined: the field default does not apply
         return m;
     }
 

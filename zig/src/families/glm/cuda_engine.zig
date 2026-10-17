@@ -145,15 +145,19 @@ pub const Engine = struct {
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
         e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
-        e.w = try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp);
         const packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
-        if (packs and !tiledLinears()) return error.PackedNeedsGlmMm; // only glm_mm reads packed tiles
+        if (packs and !tiledLinears()) return error.PackedNeedsGlmMm; // only glm_mm reads packed tiles: refused before loading
+        e.w = try weights.load(gpa, io, d, stream, e.m.tools(), checkpoint, c, share, layers, o.mtp);
+        errdefer e.w.deinit();
         if (tiledLinears()) { // our linears (glm_mm) on their tiled weights, packed if asked; TF_GLM_MM=0 keeps the glue's
             e.packs = try tile.tileLinears(gpa, &e.w, &e.m.mm, stream, d, o.settings.dense_bits, o.settings.head_bits);
             e.m.packs = &e.packs;
             e.m.tiled = true;
         }
-        errdefer e.w.deinit();
+        errdefer {
+            gpa.free(e.packs.ptrs);
+            gpa.free(e.packs.bits);
+        }
         try e.bind(0);
         errdefer {
             e.free(0);

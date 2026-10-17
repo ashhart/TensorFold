@@ -45,7 +45,10 @@ pub const Settings = struct {
             }
         }
         inline for (.{ .{ "TF_GLM_DENSE_BITS", "dense_bits" }, .{ "TF_GLM_HEAD_BITS", "head_bits" } }) |e| if (get(e[0])) |v| {
-            const b = std.fmt.parseInt(u8, v, 10) catch 0;
+            const b = std.fmt.parseInt(u8, v, 10) catch {
+                problem.* = e[0] ++ ": 4, 6, 8 or 16";
+                return error.BadSetting;
+            };
             @field(s, e[1]) = switch (b) {
                 4, 6, 8, 16 => b,
                 0 => 16, // the old family's spelling of bf16
@@ -259,6 +262,11 @@ fn bad(name: [:0]const u8) ?[]const u8 {
     return null;
 }
 
+fn typo(name: [:0]const u8) ?[]const u8 {
+    if (std.mem.eql(u8, name, "TF_GLM_DENSE_BITS")) return "abc";
+    return null;
+}
+
 test "settings from the environment: the defaults, the choices, and a refusal naming a bad value" {
     var problem: []const u8 = "";
     const s = try Settings.read(&fake, &problem);
@@ -266,6 +274,8 @@ test "settings from the environment: the defaults, the choices, and a refusal na
     try std.testing.expect(s.dense_bits == 4 and s.head_bits == 8);
     try std.testing.expectError(error.BadSetting, Settings.read(&bad, &problem));
     try std.testing.expectEqualStrings("TF_GLM_PREFILL_REDUCE: split or gather", problem);
+    try std.testing.expectError(error.BadSetting, Settings.read(&typo, &problem)); // a typo is refused, not read as bf16
+    try std.testing.expectEqualStrings("TF_GLM_DENSE_BITS: 4, 6, 8 or 16", problem);
 }
 
 test "fingerprints: agreeing ranks pass; the first differing field and rank are named" {
