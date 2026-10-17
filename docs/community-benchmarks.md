@@ -30,7 +30,7 @@ tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit -
 # Attach to a server you started first, in another terminal. Give the public checkpoint ID it serves,
 # and its --name as --model-id.
 tensorfold serve example-org/public-checkpoint --name local-model
-tensorfold benchmark example-org/public-checkpoint --server http://127.0.0.1:8080 --model-id local-model --backend mlx
+tensorfold benchmark example-org/public-checkpoint --server http://127.0.0.1:8888 --model-id local-model --backend mlx
 ```
 
 Attached-server results do not claim the client's hardware is the server's hardware. They carry unknown hardware, versions and checkpoint revisions and remain unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.

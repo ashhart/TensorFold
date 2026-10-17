@@ -1,5 +1,6 @@
 //! Saved lessons as shards beside the model's, a file a lesson (its blocks and router); both backends pass in `core`.
 const std = @import("std");
+const platform = @import("sys");
 const Config = @import("config.zig").Config;
 const shape = @import("learn_shape.zig");
 
@@ -27,7 +28,7 @@ pub fn Io(comptime core: type) type {
             while (true) : (k += 1) {
                 const path = try std.fs.path.joinZ(gpa, &.{ dir, try fileName(&buf, k) });
                 defer gpa.free(path);
-                if (std.c.unlink(path) != 0) break;
+                if (platform.c.unlink(path) != 0) break;
             }
             return bytes;
         }
@@ -127,7 +128,7 @@ pub fn Io(comptime core: type) type {
         pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !?Saved {
             const old = try std.fs.path.joinZ(gpa, &.{ dir, legacy });
             defer gpa.free(old);
-            if (std.c.access(old, std.c.F_OK) == 0) std.log.warn("slide: {s} holds lessons saved by an earlier version; they are not read", .{legacy});
+            if (platform.c.access(old, platform.c.F_OK) == 0) std.log.warn("slide: {s} holds lessons saved by an earlier version; they are not read", .{legacy});
             var lessons: std.ArrayList(Lesson) = .empty;
             errdefer {
                 for (lessons.items) |*l| l.file.close(io);

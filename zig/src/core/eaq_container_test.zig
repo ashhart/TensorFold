@@ -222,7 +222,8 @@ test "a shard linked outside the pack's folder is refused; a snapshot's links in
     defer pack.close(io);
     try fixture.write(gpa, io, pack, .none, .{});
     try std.Io.Dir.rename(pack, "model-00002.safetensors", tmp.dir, "outside.safetensors", io);
-    try pack.symLink(io, "../outside.safetensors", "model-00002.safetensors", .{});
+    pack.symLink(io, "../outside.safetensors", "model-00002.safetensors", .{}) catch |e|
+        return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     var why: eaq.Why = .{};
     try std.testing.expectError(error.ShardOutside, eaq.open(gpa, io, try std.fmt.bufPrint(&path, "{s}/pack", .{root}), .{ .why = &why }));
     try std.testing.expectEqualStrings("model-00002.safetensors", why.text());

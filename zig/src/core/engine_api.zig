@@ -287,9 +287,8 @@ pub const Open = struct {
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
-    /// --drafter: a draft model's directory for families that load one (Qwen3.8-27B's DFlash2); null: none.
+    /// --drafter: a draft model's directory (Qwen3.8-27B's DFlash2; null: none), and --drafter-bits: 4, or 0 for bf16.
     drafter: ?[]const u8 = null,
-    /// --drafter-bits: 4 prepares the drafter's weights in 4 bits; 0 keeps them bf16.
     drafter_bits: u8 = 4,
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
@@ -310,6 +309,7 @@ pub const Open = struct {
     slide: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
+    kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
