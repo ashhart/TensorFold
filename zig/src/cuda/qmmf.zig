@@ -149,6 +149,7 @@ pub const Lane = struct {
     /// matmul() writing y as `out` says: bf16, or fp32.
     pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {
         const p = plan(m, w.n, w.k, l.clusters);
+        if (p.reduce and part == 0) return error.MissingLanePart;
         const set = (if (out == .f32) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];

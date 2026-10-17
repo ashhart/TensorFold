@@ -36,6 +36,7 @@ test {
     _ = @import("cuda_bolt_lanes_test.zig");
     _ = @import("cuda_lanes.zig");
     _ = vision;
+    _ = @import("cuda_sm89_test.zig");
     _ = @import("config.zig");
     _ = @import("draft_ids.zig");
     _ = kernels;

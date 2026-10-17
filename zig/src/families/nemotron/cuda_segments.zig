@@ -85,7 +85,7 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
         for (0..c.parts) |k| { // every segment's ids go up on the caller's stream, ahead of the call's fork
             const rows = segs.chunkRows(c.rows, R, k);
             try e.ops().upload(bufs[k].p_ids, std.mem.sliceAsBytes(host[k * R ..][0..rows]));
-            const ops: kern.Ops = .{ .k = &e.k, .s = s.runner.stream(e.stream, k), .part = bufs[k].lane_part };
+            const ops = segmentOps(e, s, bufs[k], k);
             var f = fwd.Forward.init(e.c, &e.w, bufs[k], ops, e.max_len, e.nch, e.sampling != null);
             f.untaught = e.bound.untaught;
             f.vision = e.vision;
@@ -110,4 +110,8 @@ pub fn prefill(e: *Engine, s: *Segments, prompt: []const u32, head: ?*Head, part
     try o.copy(e.b.p_hidden, bufs[last].p_hidden, last_rows * e.c.hidden * 2);
     try o.copy(e.b.p_logits, bufs[last].p_logits, e.c.vocab * 2);
     try o.copy(e.b.p_sampled, bufs[last].p_sampled, 4);
+}
+
+pub fn segmentOps(e: *const Engine, s: *const Segments, b: *const state.Buffers, k: usize) kern.Ops {
+    return .{ .k = &e.k, .s = s.runner.stream(e.stream, k), .part = b.lane_part };
 }

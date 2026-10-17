@@ -195,7 +195,7 @@ pub const Engine = struct {
             return error.ContextUnsupported;
         }) else chunks;
         // ops() reads e.b, made below; the loader uploads and packs and runs no lane matmul
-        const load_ops: kern.Ops = .{ .k = &e.k, .s = e.stream };
+        const load_ops = e.loadOps();
         e.w = weights.load(gpa, io, load_ops, model_dir, e.c, mtp, &e.load_pending) catch |err| {
             if (e.load_pending != null) {
                 keep_owner = true;
@@ -399,6 +399,10 @@ pub const Engine = struct {
         e.decide = s.decide;
         if (e.head) |h| h.bindSeq(s);
         e.bound = s;
+    }
+
+    pub fn loadOps(e: *const Engine) kern.Ops {
+        return .{ .k = &e.k, .s = e.stream };
     }
 
     pub fn ops(e: *const Engine) kern.Ops {
