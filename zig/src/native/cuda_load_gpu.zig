@@ -156,7 +156,7 @@ const Fake = struct {
         const g = try t.allocator.create(Gpu);
         g.gpa = t.allocator;
         g.next = null;
-        g.driver.lib = try std.DynLib.open("/usr/lib/libSystem.B.dylib");
+        g.driver.lib = try std.DynLib.open(if (@import("builtin").os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
         g.driver.api.cuMemAlloc_v2 = alloc;
         g.driver.api.cuMemFree_v2 = free;
         g.driver.api.cuMemcpyHtoD_v2 = copy;
@@ -275,7 +275,7 @@ const Barrier = @import("load_barrier_test.zig");
 fn secondGpu(first: *Gpu) !*Gpu {
     const g = try t.allocator.create(Gpu);
     g.* = first.*;
-    g.driver.lib = try std.DynLib.open("/usr/lib/libSystem.B.dylib");
+    g.driver.lib = try std.DynLib.open(if (@import("builtin").os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     g.ctx = .{ .d = &g.driver, .device = 1, .handle = @ptrFromInt(7) };
     g.next = null;
     return g;
