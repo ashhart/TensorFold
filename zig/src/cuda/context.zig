@@ -40,6 +40,7 @@ pub const Context = struct {
     /// Waits for all work, then drops this retain; resources made in it must be released first.
     pub fn deinit(self: *Context) void {
         self.d.synchronize() catch {};
+        @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
         self.* = undefined;
     }
