@@ -3,7 +3,9 @@ const std = @import("std");
 const cuda = @import("cuda");
 const v = @import("qwen_cuda.zig");
 const M = struct {
-    var pending: bool = false;
+    const encoder: cuda.abi.Stream = @ptrFromInt(0xe0); // the tower's stream, apart from the default stream's null
+    var pending_default: bool = false; // a copy on the default stream that no wait has proven complete
+    var pending_encoder: bool = false;
     var bad_free: usize = 0;
     var copies: usize = 0;
     var fail_copy: usize = 0;
@@ -12,6 +14,13 @@ const M = struct {
     var mode: usize = 0;
     var live: usize = 0;
     var htod_pends: bool = false; // a synchronous upload accepted, its completion still owed to a wait
+    var default_waits: usize = 0;
+    fn busy() bool {
+        return pending_default or pending_encoder;
+    }
+    fn on(s: cuda.abi.Stream) *bool {
+        return if (s == encoder) &pending_encoder else &pending_default;
+    }
     fn alloc(_: *anyopaque, n: usize, al: std.mem.Alignment, ra: usize) ?[*]u8 {
         return std.testing.allocator.rawAlloc(n, al, ra);
     }
@@ -22,26 +31,28 @@ const M = struct {
         return null;
     }
     fn free(_: *anyopaque, b: []u8, al: std.mem.Alignment, ra: usize) void {
-        if (pending) bad_free += 1;
+        if (busy()) bad_free += 1;
         std.testing.allocator.rawFree(b, al, ra);
     }
-    fn copy(_: u64, _: ?*const anyopaque, _: usize, _: cuda.abi.Stream) callconv(.c) c_int {
+    fn copy(_: u64, _: ?*const anyopaque, _: usize, s: cuda.abi.Stream) callconv(.c) c_int {
         copies += 1;
         if (copies == fail_copy) return cuda.abi.error_not_ready;
-        pending = true;
+        on(s).* = true;
         return 0;
     }
-    fn sync(_: cuda.abi.Stream) callconv(.c) c_int {
+    fn sync(s: cuda.abi.Stream) callconv(.c) c_int {
         waits += 1;
-        if (pending and fail_waits > 0) {
+        if (s != encoder) default_waits += 1;
+        if (on(s).* and fail_waits > 0) {
             fail_waits -= 1;
             return cuda.abi.error_not_ready;
         }
-        pending = false;
+        on(s).* = false; // a stream's wait proves only its own copies
         return 0;
     }
     fn context() callconv(.c) c_int {
-        pending = false;
+        pending_default = false;
+        pending_encoder = false;
         return 0;
     }
     fn launch(_: cuda.abi.Function, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) c_int {
@@ -53,7 +64,7 @@ const M = struct {
             if (mode == 1) return error.InjectedPlanFailure;
         }
         pub fn deinit(_: *@This()) void {
-            if (pending) bad_free += 1;
+            if (busy()) bad_free += 1;
         }
     };
     fn dalloc(out: *u64, _: usize) callconv(.c) c_int {
@@ -62,12 +73,12 @@ const M = struct {
         return 0;
     }
     fn dfree(_: u64) callconv(.c) c_int {
-        if (pending) bad_free += 1;
+        if (busy()) bad_free += 1;
         live -= 1;
         return 0;
     }
     fn upload(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) c_int {
-        if (htod_pends) pending = true;
+        if (htod_pends) pending_default = true;
         return 0;
     }
     // the copy-source owner's pinned sources and events
@@ -78,7 +89,7 @@ const M = struct {
         return 0;
     }
     fn hostFree(ptr: ?*anyopaque) callconv(.c) c_int {
-        if (pending) bad_free += 1;
+        if (busy()) bad_free += 1;
         const base: [*]align(16) u8 = @alignCast(@as([*]u8, @ptrCast(ptr.?)) - 16);
         const n = std.mem.readInt(usize, base[0..@sizeOf(usize)], .little);
         std.testing.allocator.free(base[0..n]);
@@ -98,7 +109,9 @@ const M = struct {
         return 0;
     }
     fn setup(d: *cuda.Driver, t: *v.Tower) void {
-        pending = false;
+        pending_default = false;
+        pending_encoder = false;
+        default_waits = 0;
         bad_free = 0;
         copies = 0;
         fail_copy = 0;
@@ -124,7 +137,7 @@ const M = struct {
         t.* = undefined;
         t.gpa = .{ .ptr = t, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
         t.d = d;
-        t.s = .{ .d = d, .handle = null };
+        t.s = .{ .d = d, .handle = encoder };
         t.c = .{ .hidden = 64, .heads = 1, .depth = 1, .intermediate = 64, .out_hidden = 2560, .image_token = 50, .video_token = 51, .vision_start = 52, .vision_end = 53 };
         t.scratch = 0x100000;
         t.blocks = std.mem.zeroes(@TypeOf(t.blocks));
@@ -154,7 +167,8 @@ fn failure(mode: usize, copy: usize, waits: usize) !void {
     try std.testing.expectEqual(@as(usize, if (copy == 2) 2 else 4), M.copies);
     try std.testing.expectError(if (mode == 1) error.InjectedPlanFailure else error.NotReady, result);
     const bad = M.bad_free;
-    M.pending = false;
+    M.pending_default = false;
+    M.pending_encoder = false;
     try std.testing.expectEqual(@as(usize, 0), bad);
     try std.testing.expectEqual(@as(usize, 0), M.live);
     // A second request may reuse scratch only after the previous error drained.
@@ -181,6 +195,11 @@ fn uploadWait(follower: bool) !void {
     var d: cuda.Driver = undefined;
     var t: v.Tower = undefined;
     M.setup(&d, &t);
+    M.pending_default = true; // the fixture's own rule first: the encoder's wait leaves a default-stream copy owed
+    try t.s.synchronize();
+    try std.testing.expect(M.pending_default);
+    M.pending_default = false;
+    M.default_waits = 0;
     M.htod_pends = true;
     M.fail_waits = 2; // the upload's own wait fails, then the drain's stream wait; the context's completes
     const enc: v.media.Encoder = .{ .ctx = &t, .config = t.c, .driver = &d, .stream = t.s, .splice = .{ .d = &d, .handle = null }, .encode = M.encode };
@@ -194,8 +213,13 @@ fn uploadWait(follower: bool) !void {
         try std.testing.expectError(error.NotReady, v.media.Media.init(t.gpa, enc, &.{ 7, 52, 50, 53, 9 }, &images, .{}));
     }
     const bad = M.bad_free;
-    M.pending = false;
+    const owed = M.busy();
+    M.pending_default = false;
+    M.pending_encoder = false;
     try std.testing.expectEqual(@as(usize, 0), bad);
+    try std.testing.expect(!owed);
+    // the upload's wait and the drain's, both on the default stream: the encoder's wait proves none of its copies
+    try std.testing.expectEqual(@as(usize, 2), M.default_waits);
     try std.testing.expectEqual(@as(usize, 0), M.live);
 }
 test "an image plan whose upload fails its wait drains before the plan and buffers are freed" {
@@ -214,7 +238,7 @@ test "a tower load upload that fails its wait drains before load can free its ro
     M.fail_waits = 2;
     const rows: [64]u8 = @splat(1);
     try std.testing.expectError(error.NotReady, t.put(&rows));
-    try std.testing.expect(!M.pending);
+    try std.testing.expect(!M.busy());
 }
 const Child = struct {
     extern "c" fn fork() c_int;
