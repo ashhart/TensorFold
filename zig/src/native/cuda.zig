@@ -56,7 +56,7 @@ const failed_load = @import("cuda_load_gpu.zig");
 const Gpu = failed_load.Gpu;
 
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
-const Host = struct {
+pub const Host = struct {
     gpa: Allocator,
     gpu: ?*Gpu, // null in host tests: no context to bind
     family: *anyopaque,
@@ -90,7 +90,7 @@ const Host = struct {
         if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
     }
 
-    fn close(p: *anyopaque) void {
+    pub fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
         h.core.deinit();
@@ -121,7 +121,7 @@ const Host = struct {
     }
 
     /// The round loop and the lane host over the family's backend, its thread started.
-    fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
+    pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
         // a drafter's trees: the planner picks a lone stream's lanes, as deep as it drafts
@@ -594,20 +594,6 @@ test "Flash Next takes --vision at family admission" {
 
 test {
     _ = @import("cuda_vision_offer.zig");
-}
-
-test "nemotron learning safety: actual native close drains Nemotron before any source, trainer or parent free" {
-    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);
-}
-test "nemotron learning safety: direct Nemotron trainer destruction drains before its first owner free" {
-    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, true);
-}
-test "trainer close: real native close drains the accepted trainer before any child or parent is released" {
-    try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
-}
-test "trainer close: real native close drains the dense trainer before any child or parent is released" {
-    try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
-}
-test {
+    _ = @import("cuda_close_tests.zig");
     _ = kv_pages;
 }
