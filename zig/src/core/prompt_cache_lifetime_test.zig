@@ -84,7 +84,7 @@ test "budget pressure refuses a keep rather than evicting an outstanding lookup"
     try std.testing.expect(s.keep(&other, 4, null, &.{}, &.{}));
 }
 
-test "a failed restore on a valid state counts one failure and expires the entry" {
+test "a failed restore on a valid state counts one failure and hides the entry" {
     var arena: std.heap.ArenaAllocator = .init(a);
     defer arena.deinit();
     var f: Fake = .{ .gpa = a };
@@ -94,7 +94,8 @@ test "a failed restore on a valid state counts one failure and expires the entry
     const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
     s.resumed(entry, &prompt, false); // the backend refused: the pass prefills from the start
     try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
-    try std.testing.expect(entry.expired);
+    try std.testing.expectEqual(@as(usize, 0), f.live); // the failed report dropped the state
+    try std.testing.expect(s.find(&prompt, &.{}, &.{}) == null); // expired entries stay hidden
 }
 
 test "a failed restore on an already expired state counts its failure too" {
@@ -108,5 +109,6 @@ test "a failed restore on an already expired state counts its failure too" {
     s.expired(entry.saved); // a concurrent admission invalidated it between lookup and restore
     s.resumed(entry, &prompt, false);
     try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
-    try std.testing.expect(entry.expired);
+    try std.testing.expectEqual(@as(usize, 0), f.live);
+    try std.testing.expect(s.find(&prompt, &.{}, &.{}) == null);
 }
