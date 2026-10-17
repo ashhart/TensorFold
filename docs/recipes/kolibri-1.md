@@ -36,10 +36,12 @@ rounds run eager. Both give a row the same bits.
 
 ## Serving
 
-- Prompts run in passes of up to 2,048 rows, one a step, so other streams' rounds run between them. A row's bits do not
-  depend on its chunk: 1,000- and 1,536-row cuts give the 2,048-row cut's logits byte for byte.
+- Prompts run in passes of up to 8,192 rows, as the Python engine ran them, one a step, so other streams' rounds run
+  between them (a full pass holds them for about 3.7 s). A row's bits do not depend on its chunk: 1,000-, 1,536- and
+  2,048-row cuts of a 5,000- and a 20,000-token prompt give the 8,192-row passes' logits byte for byte.
 - Concurrent streams share rounds of up to 64 rows. Each stream's caches are allocated at load, one per `--parallel`
-  stream: at a 32k window 0.83 GiB a stream, at 64k 1.45 GiB.
+  stream: at a 32k window 1.29 GiB a stream, at 64k 1.92 GiB. Each sliding layer's ring holds a pass and its window
+  (8,768 keys).
 - The prompt cache keeps a stream's state at any row: full layers' keys up to it and each sliding layer's last 512.
 - Drafts: the lane core's copy drafts verify in windows of up to 16 rows. There is no draft head yet, so a request
   for head drafts and `--drafter` are refused by name.
@@ -57,7 +59,7 @@ zig-out/bin/tf-cuda-test kolibri-greedy MODEL PROMPTS N OUT   # greedy ids and t
 zig-out/bin/tf-cuda-test kolibri-logits MODEL IDS OUT  # teacher-forced logits of 2,048 rows, for quality
 ```
 
-`IDS` is a file of real-text token ids (5,000 or more for `kolibri-full`, 3,000 for `kolibri-layers`). Random ids give
+`IDS` is a file of real-text token ids (20,000 or more for `kolibri-full`, 3,000 for `kolibri-layers`). Random ids give
 flat logits and say nothing about quality.
 
 The native rows are not byte-equal to the Python engine's: its glue was Triton, these are the shared CUDA operators,
@@ -76,10 +78,9 @@ GB10, greedy, served by `tensorfold-native` with copy drafts on:
 | 4 streams, aggregate | 124.0 / 126.0 |
 | 8 streams, aggregate | 175.5 / 183.1 |
 
-Cold prompts (`bench_cache.py --require-cold`, `--prompt-cache-gib 0`): 2,048 tokens 1.00 s, 8,192 tokens 5.04 s,
-32,768 tokens 21.5 s to the first token.
+Cold prompts (`bench_cache.py --require-cold --repeats 3`, `--prompt-cache-gib 0`, median of the cold requests):
+2,048 tokens 0.97 s, 8,192 tokens 3.72 s, 32,768 tokens 16.8 s, 64,000 tokens 37.8 s to the first token.
 
 ## Next
 
 - The EAGLE-3 drafter through the lane core's drafter interface.
-- Prompt passes of 8,192 rows, as the Python engine ran them: each pass reads every expert once.

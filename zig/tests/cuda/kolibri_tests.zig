@@ -10,6 +10,8 @@ const Gpu = check.Gpu;
 const fwd = kolibri1.forward;
 const Rig = layer_tests.Rig;
 const readIds = layer_tests.readIds;
+/// Rows `logits` writes: 2,048, as the quality runs read them.
+const quality_rows = 2048;
 
 fn hash(tokens: []const u32) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
@@ -123,7 +125,7 @@ pub fn full(gpu: Gpu, model: []const u8, ids_file: []const u8, count_text: []con
     const ids = try readIds(gpu, ids_file);
     defer gpa.free(ids);
     var rig: Rig = undefined;
-    try rig.init(gpu, model, null, 16384, 4, fwd.prompt_rows);
+    try rig.init(gpu, model, null, 20480, 4, fwd.prompt_rows);
     defer rig.deinit();
     var kb = try kolibri1.backend.Kolibri.init(gpa, gpu.d, &rig.m, &rig.k, rig.s);
     defer kb.deinit();
@@ -170,26 +172,29 @@ pub fn full(gpu: Gpu, model: []const u8, ids_file: []const u8, count_text: []con
     check.pass("kolibri1 full: steps, drafted, sampled, shared rounds, prompt cuts and kept states equal the plain rows ({d} tokens each)", .{count});
 }
 
-/// A prompt's last logits cut on the 2,048 grid, in 1,000-row and in 1,536-row chunks: the same bytes?
+/// 5,000 and 20,000 rows' last logits on the pass grid against 1,000-, 1,536- and 2,048-row chunks: same bytes?
 fn cuts(r: *Rig, ids: []const u32) !usize {
     const gpa = r.gpu.gpa;
-    const p = ids[0..5000];
-    const grid = try r.prompt(0, p);
-    defer gpa.free(grid);
+    if (ids.len < 20000) return error.TooFewIds;
     var bad: usize = 0;
-    for ([_]usize{ 1000, 1536 }) |chunk| {
-        var at: usize = 0;
-        while (at < p.len) : (at += chunk) {
-            const end = @min(p.len, at + chunk);
-            try r.m.forward(r.ops(), &.{.{ .slot = 1, .p0 = at, .tokens = p[at..end] }}, true, null, r.logits.ptr);
+    for ([_]usize{ 5000, 20000 }) |len| {
+        const p = ids[0..len];
+        const grid = try r.prompt(0, p);
+        defer gpa.free(grid);
+        for ([_]usize{ 1000, 1536, 2048 }) |chunk| {
+            var at: usize = 0;
+            while (at < p.len) : (at += chunk) {
+                const end = @min(p.len, at + chunk);
+                try r.m.forward(r.ops(), &.{.{ .slot = 1, .p0 = at, .tokens = p[at..end] }}, true, null, r.logits.ptr);
+            }
+            const got = try r.read(1);
+            defer gpa.free(got);
+            const eq = std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(grid));
+            var most: f32 = 0;
+            for (got, grid) |g, w| most = @max(most, @abs(g - w));
+            std.debug.print("RESULT kolibri1 cuts: {d} rows in {d}-row chunks against {d}-row passes: {s} (largest difference {e:.3})\n", .{ len, chunk, fwd.prompt_rows, if (eq) "same bytes" else "differ", most });
+            if (!eq) bad += 1;
         }
-        const got = try r.read(1);
-        defer gpa.free(got);
-        const eq = std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(grid));
-        var most: f32 = 0;
-        for (got, grid) |g, w| most = @max(most, @abs(g - w));
-        std.debug.print("RESULT kolibri1 cuts: {d}-row chunks against the 2,048 grid: {s} (largest difference {e:.3})\n", .{ chunk, if (eq) "same bytes" else "differ", most });
-        if (!eq) bad += 1;
     }
     return bad;
 }
@@ -239,12 +244,12 @@ fn states(r: *Rig, kb: *kolibri1.backend.Kolibri, ids: []const u32, count: u32) 
     return bad;
 }
 
-/// Teacher-forced fp32 logits of the first 2,048 prompt rows to `out_path`; with `prompts`, each one's last row too.
+/// Teacher-forced fp32 logits of the first `quality_rows` rows to `out_path`; with `prompts`, each one's last row too.
 pub fn logits(gpu: Gpu, model: []const u8, ids_file: []const u8, out_path: []const u8, prompts: ?[]const u8) !void {
     const gpa = gpu.gpa;
     const ids = try readIds(gpu, ids_file);
     defer gpa.free(ids);
-    const n = @min(ids.len, fwd.prompt_rows);
+    const n = @min(ids.len, quality_rows);
     var rig: Rig = undefined;
     try rig.init(gpu, model, null, 4096, 1, fwd.prompt_rows);
     defer rig.deinit();

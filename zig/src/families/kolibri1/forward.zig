@@ -12,7 +12,7 @@ const experts = cuda.experts;
 const TreeAttention = cuda.tree_attention.TreeAttention;
 
 /// Prompt rows a forward takes: the chunk grid, from position 0.
-pub const prompt_rows = 2048;
+pub const prompt_rows = 8192;
 /// Decode rows a forward takes over every stream's window.
 pub const round_rows = 64;
 const key_block = 64; // the window kernels' key tile
@@ -377,6 +377,6 @@ pub const Model = struct {
 };
 
 test "the ring holds a prompt chunk and a window, in whole key tiles" {
-    try std.testing.expectEqual(@as(usize, 2624), ringSize(prompt_rows, 513));
+    try std.testing.expectEqual(@as(usize, 8768), ringSize(prompt_rows, 513));
     try std.testing.expect(ringSize(prompt_rows, 513) - 513 >= prompt_rows);
 }
