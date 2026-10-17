@@ -207,24 +207,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 }
 
 fn openDrama(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and o.lanes != 1)) {
-        problem.* = "Drama 3 serves one synthesis on one CUDA device: use --parallel 1 and no tensor parallelism";
+    if (refusals.drama(o)) |why| {
+        problem.* = why;
         return null;
     }
     const window = o.context orelse 8192;
     if (window < 1025 or window > 8192) {
         problem.* = "Drama 3 supports --context 1025 through 8192";
-        return null;
-    }
-    if (o.slide or o.drafter != null or o.mtp_drafts != null or o.mtp_confidence != null or
-        (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or
-        (o.keep != null and o.keep.? != 0) or o.policy.len != 0)
-    {
-        problem.* = "Drama 3 does not support learned weights, speculative drafts, retained prompt caches, or text-engine policies";
-        return null;
-    }
-    if (o.vision != null or o.precision != null or o.record != null or o.learn_conversations) {
-        problem.* = "Drama 3 reads no images or NVFP4 checkpoints and keeps no rows or conversation states: serve it without --vision, --precision, --record and --learn-conversations";
         return null;
     }
     const device = try setting(a, o.device, "TF_CUDA_DEVICE", 0, problem) orelse return null;
