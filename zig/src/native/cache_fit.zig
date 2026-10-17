@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const api = @import("engine_api");
 const mtl = @import("metal");
+const math = @import("cache_budget.zig");
 
 pub const GiB: u64 = 1 << 30;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
@@ -13,7 +14,7 @@ pub const MARGIN: u64 = mtl.ResidencySet.margin;
 pub const DEFAULT_CEILING: u64 = 16 * GiB;
 
 /// The cache's budget, what fits under the cap, and the cap itself (bytes).
-pub const Fit = struct { budget: u64, room: u64, cap: u64 };
+pub const Fit = math.Fit;
 
 /// For `total` bytes of RAM and `ready` once loaded: `gib` if it fits (or `over`), else what fits up to the ceiling.
 pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fit {
@@ -22,10 +23,7 @@ pub fn fit(total: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fi
 
 /// `fit` under a given ceiling `cap` (bytes) instead of 70% of RAM: a load limit covers the cache as well.
 pub fn fitUnder(cap: u64, ready: u64, gib: ?f64, over: bool) error{CacheOverCap}!Fit {
-    const room = cap -| ready -| MARGIN;
-    const want = if (gib) |g| (if (g > 0) std.math.lossyCast(u64, g * GiB) else 0) else @min(room, DEFAULT_CEILING);
-    if (want > room and !over) return error.CacheOverCap;
-    return .{ .budget = want, .room = room, .cap = cap };
+    return math.fitUnder(cap, ready, gib, over, .{ .margin = MARGIN, .ceiling = DEFAULT_CEILING });
 }
 
 /// Whether `bytes` held at once and the margin stay inside the 70% share of `total` bytes of RAM (0: unknown, never).

@@ -8,6 +8,7 @@ const Backend = tf.flashnext_backend.Backend;
 const Session = tf.flashnext_session.Session;
 const fx = tf.flashnext_engine;
 const fit = @import("cache_fit.zig");
+const budgets = @import("flashnext_batch_budget.zig");
 const Resident = @import("resident.zig").Resident;
 
 const Host = struct {
@@ -60,14 +61,15 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     const ready = fit.footprint() orelse return error.NoMemoryReading;
     const total = fit.ram() orelse return error.NoMemoryReading;
     const cap = try ceiling(total, eng.r.device.maxWorkingSet());
-    const reserved = if (!over) (if (cache_gib) |g| (if (g > 0) std.math.lossyCast(u64, g * fit.GiB) else 0) else 0) else 0;
+    var plan = try fit.budgetUnder(cap, cache_gib, over, 0, a, why, "");
+    const sizing = budgets.reserve(cap, ready, fit.MARGIN, plan.budget_bytes, cache_gib != null, over);
     const tiers = slotContexts(gpa, capacity) catch |err| {
         std.log.err("flash next: FLASHNEXT_SLOT_CONTEXTS is not a list of sessions: token counts of 1024 or more, CONTEXTxN for N alike, at most {d} sessions past the engine's own", .{tf.flashnext_replay.MAXR - 1});
         return err;
     };
     defer if (tiers) |t| gpa.free(t);
     const overhead = Session.overhead(tf.flashnext_replay.CAP) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
-    const available = cap -| ready -| fit.MARGIN -| reserved;
+    const available = sizing.sessions;
     if (available < overhead) {
         if (!streams_fixed and tiers == null) return single(gpa, io, eng, window, cache_gib, over, cap, a, why);
         return error.OverMemoryLimit;
@@ -103,13 +105,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     }
     try h.back.timeCosts();
     const allocated = fit.footprint() orelse return error.NoMemoryReading;
-    if (allocated +| fit.MARGIN +| reserved > cap) return error.OverMemoryLimit;
+    const final = try budgets.afterSessions(sizing, cap, allocated, fit.MARGIN);
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), tf.flashnext_replay.MAXR, tf.flashnext_replay.MAXR - 1);
     errdefer h.cfg.deinit(gpa);
     h.clock = .{ .io = io };
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.clock.clock());
     errdefer h.core.deinit();
-    const plan = try fit.budgetUnder(cap, cache_gib, over, 0, a, why, ""); // the cache under the same limit as the sessions
+    plan.ready_footprint_bytes = allocated;
+    plan.budget_bytes = final.cache;
+    plan.room_bytes = final.room;
+    plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .admit = if (tiers != null) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     // FLASHNEXT_NO_LONE=1 keeps even lone requests on shared rounds.
@@ -131,11 +136,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     errdefer dropResident(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.host.memory = .{ .ctx = h, .read = memory };
-    try h.host.start();
     var listed: [tf.flashnext_replay.MAXR * 8]u8 = undefined;
     var w: std.Io.Writer = .fixed(&listed);
     for (caps.items, 0..) |c, i| w.print("{s}{d}", .{ if (i == 0) "" else ",", c }) catch break;
-    std.log.info("Flash Next: {d} session slots ({s} tokens), shared target forwards, {s}{s}", .{ slots, w.buffered(), if (h.back.serial_drafts) "serial MTP drafts" else "every stream's drafts in one command buffer", if (h.host.lone != null) "; a lone request on the engine's own rounds" else "" });
+    var line: [640]u8 = undefined;
+    var startup: std.Io.Writer = .fixed(&line);
+    try budgets.startup(&startup, slots, w.buffered(), sizing, h.back.serial_drafts, h.host.lone != null);
+    try h.host.start();
+    std.log.info("{s}", .{startup.buffered()});
     return .{ .engine = h.host.engine(), .close = close, .ctx = h };
 }
 
