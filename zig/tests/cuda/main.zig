@@ -43,6 +43,7 @@ const usage =
     \\usage: tf-cuda-test <command>
     \\  info                      driver, device and library versions
     \\  smoke                     copies, fills, launches, argument packing, module globals
+    \\  shared-context            Context.shared and Stream.borrowed as a library inside a host's process sees them
     \\  graph                     stream capture, explicit graphs, node and whole-exec updates
     \\  overhead [n] [reps]       dependent one-thread kernels: plain stream vs one graph
     \\  overhead-pdl [n] [reps]   the same with programmatic dependent launch on every kernel
@@ -130,6 +131,7 @@ fn arg(rest: []const [:0]const u8, i: usize) ![]const u8 {
 fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "info")) return info(gpu);
     if (std.mem.eql(u8, cmd, "smoke")) return runtime_tests.smoke(gpu);
+    if (std.mem.eql(u8, cmd, "shared-context")) return runtime_tests.sharedContext(gpu);
     if (std.mem.eql(u8, cmd, "graph")) return runtime_tests.graphs(gpu);
     if (std.mem.eql(u8, cmd, "overhead") or std.mem.eql(u8, cmd, "overhead-pdl")) {
         const n = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 1000;
