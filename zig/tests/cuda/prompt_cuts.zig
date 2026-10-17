@@ -100,7 +100,7 @@ pub fn segments(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     var ids = try readIds(gpu, ids_path);
     defer ids.deinit(gpa);
     const n = ids.items.len;
-    try check.expect(n > R, "prompt-segments: the prompt needs more than {d} tokens, has {d}", .{ R, n });
+    try check.expect(n > (cuda.segments.MAX - 1) * R, "prompt-segments: {d} segments need more than {d} tokens, has {d}", .{ cuda.segments.MAX, (cuda.segments.MAX - 1) * R, n });
     const e = try nemotron.Engine.init(gpa, gpu.io, gpu.ctx, model, null, .{ .context = 16384, .mtp = true, .graphs = true, .sampling = null, .segments = 1 });
     defer e.deinit();
     const h = try nemotron.Head.init(e);
