@@ -3,7 +3,7 @@ const std = @import("std");
 const nemotron = @import("nemotron");
 const gt = @import("glue_tests.zig");
 const glue = nemotron.glue;
-const Rig = gt.Rig;
+const Rig = @import("glue_rig.zig").Rig;
 const at = gt.at;
 
 const page = 512; // rows a page holds: one attention chunk
