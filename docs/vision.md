@@ -146,8 +146,9 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash and Qwen3.8-27B on one Mac,
-and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at startup.
+4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash, Qwen3.8-27B and
+[Gemma 4 31B](recipes/gemma-4-native.md#images) on one Mac, and Nemotron 3.5 Super VL on CUDA. Other native engines
+refuse the flag at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
   `--vision`), a part may name a public HTTPS URL instead, fetched as 0.6.6 fetched it: port 443 without credentials
@@ -166,8 +167,8 @@ and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at start
   folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
   libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
   release; PNG images still serve. WebP is refused by name until a decoder exists; other formats are refused.
-- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the GLM5-Next
-  processor's sizing and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
+- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the model's
+  processor's sizing (GLM5-Next's, or Gemma 4's PIL processor) and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
   `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
   purpose: a CMYK JPEG is refused, and a JPEG holding several pictures (MPO) gives its first, which 0.6.6 refused.
 - Images are counted from the request's image parts. A user or tool message whose text spells the model's image

@@ -94,8 +94,8 @@ A replacement kernel names the kernel it replaces and gives `replaced`, which ru
 
 A gate failure on a kernel already shipped is reported, not hidden. Until its fix lands, its spec can carry a
 `known` entry naming the gate and what fails. That gate must keep failing (the run prints `KNOWN`); once a fix makes
-it pass, the run fails until the entry is removed. Today: affine_mm's 4-bit form gives NaN for an infinite input where
-MLX's formula keeps the infinity, because its codes enter the MMAs as q + 128 and its bias as b - 128 s.
+it pass, the run fails until the entry is removed. Today there is none: affine_mm's 4-bit form gave NaN for an
+infinite input until its tile took each weight as MLX's loader does, bf16(fma(s, q, b)), instead of q + 128.
 
 ## Coverage
 

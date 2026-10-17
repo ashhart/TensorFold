@@ -15,6 +15,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
+| Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
 
