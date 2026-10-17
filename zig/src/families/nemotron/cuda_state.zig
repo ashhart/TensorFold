@@ -85,6 +85,11 @@ fn seqSizes(c: Config, max_len: usize) [seq_fields.len]usize {
 
 const scratch_count = 43;
 
+/// Bytes of the shared expert's fixed plans (Buffers.shared): shared_words, or a latent MoE's plan for every row count.
+fn sharedBytes(c: Config) usize {
+    return (if (c.latent > 0) max_rows * Buffers.latentPlanWords(c) else shared_words) * 4;
+}
+
 /// Scratch windows and chunks share on one stream: window logits, chunk io, activations, the expert plan.
 fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
     const R: usize = pass_rows;
@@ -118,7 +123,7 @@ fn scratchSizes(c: Config, nch: usize) [scratch_count]usize {
         (if (lat) latent.routerSlices(D) else 6) * R * c.experts * 4, pairs * own * 4,                                R * ns * 4,
         pairs * own * 4,                                              items * 12,                                     8,
         pairs * own * 4,                                              (pairs * own + 1023) / 1024 * plan_experts * 4, pairs * c.expert_width * 2,
-        ymoe,                                                         shared_words * 4,                               R * kern.pocket_width * 4,
+        ymoe,                                                         sharedBytes(c),                                 R * kern.pocket_width * 4,
         R * c.latent * 2,                                             R * c.latent * 2,                               R * own * sw * 2,
         R * own * 4,                                                  job,                                            ck8,
         ck4,
@@ -231,7 +236,7 @@ pub const Buffers = struct {
     act: u64,
     ymoe: u64,
     rule: u64, // the sequence's sampled rule, as sample.cu reads it
-    shared: u64, // the shared expert's fixed plans: 32 members, then (items, counts) for 1..16 rows
+    shared: u64, // the shared expert's fixed plans (initShared): one for each row count of a window, written at load
     pocket: u64, // the pocket's activations, fp32 [rows, pocket_width]
     lat: u64, // a latent MoE's rows in the latent width (bf16)
     comb: u64, // its routed pairs' latent sum a row (bf16)
@@ -298,10 +303,29 @@ pub const Buffers = struct {
         return .{ .members = b.shared, .items = items, .counts = items + 6 * 4, .rank = 0, .hist = 0 };
     }
 
-    /// Writes every row count's shared plan (pairs in row order, one item a half since rows <= 16).
+    /// Words one row count's latent shared plan takes: the pairs of a window's rows, then their items and counts.
+    fn latentPlanWords(c: Config) usize {
+        return latentPlanAt(c).counts + 2;
+    }
+
+    /// Where a latent shared plan's items and counts start, in words from its members.
+    fn latentPlanAt(c: Config) struct { items: usize, counts: usize } {
+        const pairs = max_rows * c.ownShares();
+        return .{ .items = pairs, .counts = pairs + 3 * kern.maxItems(pairs, c.ownShares(), 16) };
+    }
+
+    /// A latent MoE's shared plan at `rows` rows (1 to max_rows) as initShared wrote it; rank and hist are b.plan's.
+    pub fn latentPlan(b: *const Buffers, c: Config, rows: usize) kern.Plan {
+        const at = latentPlanAt(c);
+        const members = b.shared + (rows - 1) * latentPlanWords(c) * 4;
+        return .{ .members = members, .items = members + at.items * 4, .counts = members + at.counts * 4, .rank = b.plan.rank, .hist = b.plan.hist };
+    }
+
+    /// Writes every row count's shared plan: a latent MoE's (row, share) pairs by Ops.plan, else pairs in row order.
     pub fn initShared(b: *const Buffers, ops: kern.Ops, c: Config) !void {
         if (c.latent > 0) {
             try latent.initShareIds(ops.k.latent.?, ops.s, b.sids, pass_rows, c.ownShares());
+            for (1..max_rows + 1) |rows| try ops.plan(b.sids, rows * c.ownShares(), c.ownShares(), 16, b.latentPlan(c, rows));
             return ops.s.synchronize();
         }
         var w: [shared_words]u32 = undefined;
@@ -366,3 +390,24 @@ pub const Buffers = struct {
         return if (b.carved) |x| x.kv[0].len + x.kv[1].len else 0;
     }
 };
+
+test "each row count's latent shared plan holds its pairs and items, apart from the next, inside the shared slot" {
+    var c: Config = undefined;
+    c.latent = 1024;
+    c.shares = 2;
+    var b: Buffers = undefined;
+    b.shared = 0;
+    b.plan.rank = 0;
+    b.plan.hist = 0;
+    for (1..c.shares + 1) |world| {
+        c.world = world;
+        const own = c.ownShares();
+        for (1..max_rows + 1) |rows| {
+            const p = b.latentPlan(c, rows);
+            try std.testing.expect(p.items - p.members >= rows * own * 4);
+            try std.testing.expect(p.counts - p.items >= 3 * kern.maxItems(rows * own, own, 16) * 4);
+            const end = p.counts + 8;
+            try std.testing.expect(if (rows < max_rows) end <= b.latentPlan(c, rows + 1).members else end <= sharedBytes(c));
+        }
+    }
+}

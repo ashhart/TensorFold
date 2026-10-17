@@ -59,6 +59,9 @@ rank order, so one GB10 and two give the same bits: on the eight release prompts
 sampled and one with thinking) were the same tokens at TP=1 and TP=2. A routed pick carries its share in its pair id,
 so one grouped launch serves every share a rank holds.
 
+Passes of up to a verify window's rows read shared-expert plans built when the buffers load, one per row count;
+longer prompt passes and the other rank's jobs plan the shared expert at their own row count.
+
 ## Precision
 
 On Blackwell the engine runs the checkpoint's own math by default (`--precision checkpoint`): e4m3 rows into the FP8

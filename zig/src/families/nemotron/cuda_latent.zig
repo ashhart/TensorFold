@@ -25,7 +25,7 @@ pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, t: Tables, id
 pub const mtp_id: u32 = 1 << 16;
 
 /// The scratch an expert pass uses: the plan, routed and shared activations, the shared expert's pair ids, NVFP4 rows.
-pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64 = 0 };
+pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64 = 0, shared_plan: ?kern.Plan = null }; // null: planned in `plan`
 
 /// nemotron_latent.cu's kernels.
 pub const Fns = struct {
@@ -338,17 +338,18 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
 pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
-    if (t.ck) |x| return four.partials(o, x, s.plan, s.act, s.sact, s.sids, s.ck4, picks, lat, hidden, rows, own, c, out);
+    if (t.ck) |x| return four.partials(o, x, s.plan, s.shared_plan, s.act, s.sact, s.sids, s.ck4, picks, lat, hidden, rows, own, c, out);
     const pairs = rows * c.top_k * own;
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
     const items = kern.maxItems(pairs, t.routed.experts, 16);
     try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
     try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
-    try o.plan(s.sids, rows * own, own, 16, s.plan);
+    const sp = s.shared_plan orelse s.plan;
+    if (s.shared_plan == null) try o.plan(s.sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
-    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, s.plan, s.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, s.plan, out + @as(u64, pairs) * c.latent * 4, sh_items, -1);
+    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out + @as(u64, pairs) * c.latent * 4, sh_items, -1);
 }
 
 /// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.
@@ -366,7 +367,7 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     try f.mark(.route);
     try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
     if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
-    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4 }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
+    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4, .shared_plan = if (rows <= state.max_rows) b.latentPlan(c, rows) else null }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
     try f.mark(.experts_down);
     // one GPU: shares interleaved by pair; ranks: each rank's rows in its own region of ymoe, in rank order
     var share_stride: u64 = Lw;

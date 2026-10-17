@@ -50,7 +50,7 @@ pub fn rowsAt(c: Config, rows: usize, base: u64) Rows {
 }
 
 /// One share set's expert rows into `out` (fp32), as latent.partials lays them out: routed pairs, then shared rows.
-pub fn partials(o: kern.Ops, t: Tables, plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+pub fn partials(o: kern.Ops, t: Tables, plan: kern.Plan, shared_plan: ?kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
     const q = if (o.k.ck) |*x| x else return error.CheckpointMathNotLoaded;
     if (ck4 == 0) return error.NoCheckpointRows;
     const at = rowsAt(c, @import("cuda_state.zig").pass_rows, ck4);
@@ -64,11 +64,12 @@ pub fn partials(o: kern.Ops, t: Tables, plan: kern.Plan, act: u64, sact: u64, si
     try q.down(o.s, r, at.act, pairs, rows, plan, out, items);
     const h = t.shared;
     try q.quant4(o.s, hidden, c.hidden, rows, c.hidden, h.up_act, at.hid);
-    try o.plan(sids, rows * own, own, 16, plan);
+    const sp = shared_plan orelse plan;
+    if (shared_plan == null) try o.plan(sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
-    try q.up(o.s, h, at.hid, rows, own, plan, sact, sh_items);
+    try q.up(o.s, h, at.hid, rows, own, sp, sact, sh_items);
     try q.quant4(o.s, sact, h.width, rows * own, h.width, h.down_act, at.sact);
-    try q.down(o.s, h, at.sact, rows * own, rows, plan, out + @as(u64, pairs) * c.latent * 4, sh_items);
+    try q.down(o.s, h, at.sact, rows * own, rows, sp, out + @as(u64, pairs) * c.latent * 4, sh_items);
 }
 
 test "a pass's NVFP4 rows" {
