@@ -12,12 +12,26 @@ response times and startup are not uniformly faster.
   The publication uses the identical 13 changed source files; their SHA256s
   are in [evidence.json](evidence.json). CUDA kernels and build inputs are
   unchanged, and all 37 compiled CUDA fatbins match the baseline byte for byte.
-- One NVIDIA DGX Spark, GB10/SM121, 128 GB unified memory; Linux ARM64,
-  Zig 0.17.0, ReleaseFast native CUDA server.
-  Both builds used image ID
+- One NVIDIA DGX Spark, GB10/SM121, 128 GB unified memory; Ubuntu 24.04.5 LTS,
+  aarch64. Host driver `580.178.04` (`nvidia-smi` CUDA line `13.0`, the
+  driver ceiling). That driver string was recorded on this Spark on 16 October
+  2026, and `/usr/bin/nvidia-smi` is dated 10 August 2026, before the 15 October
+  runs. Kernel `7.0.0-1019-nvidia` was read on this Spark on 17 October 2026;
+  it was not logged during the timing runs themselves.
+- Both builds used `nvcr.io/nvidia/pytorch:26.07-py3`, image
   `sha256:15b8de8baabe68e46afc51e88f3ccad5042013bafe8f244ec082ce0bb06d47e3`
-  and target `aarch64-linux-gnu.2.28`. Exact host distribution/kernel,
-  NVIDIA driver and CUDA toolkit versions were not captured in these receipts.
+  (created 2026-07-25), target `aarch64-linux-gnu.2.28`, Zig 0.17.0,
+  ReleaseFast. The toolkit in that image is CUDA `13.3.1.008`. Its `nvcc` is
+  release 13.3, V13.3.73 (`cuda_13.3.r13.3/compiler.38244171_0`), confirmed by
+  running `nvcc --version` in the image on 17 October 2026. The host `nvcc`
+  (13.0, V13.0.88) was not the compiler.
+- Native server SHA256, shared by the loaded panel, both startup orders and
+  the smoke runs: baseline
+  `5700939fd17c0ad52a84c7d4bdbeeba7975a6c96952375579fda0a5d70c306c6`,
+  candidate
+  `e42ab4fc5079bfdeafe61234de4d044fec62e18877568e87fb19bb7e9523d581`.
+  Each binary's source archive matches the baseline or candidate archive in
+  [evidence.json](evidence.json).
 - Target: `Vontra/Qwen3.8-27B-MLX-4bit`, revision
   `70ae7fac63274ff2eac54152031433374cb80f2f`.
 - Drafter: `z-lab/Qwen3.8-27B-DFlash2`, revision
@@ -45,11 +59,12 @@ Fresh short requests:
 | Chat | 4 | 338.9 → 324.0 | 18.89 → 19.24 | 13.862 → 13.624 |
 | Chat | 16 | 1152.3 → 1138.6 | 5.45 → 5.41 | 47.556 → 48.209 |
 
-TTFT improves 0.77–9.77% across all 12 loaded short fresh/repeat cells.
-The fresh single-stream chat cell has 2.32% lower measured decode speed and
-2.23% longer completion time; fresh sixteen-stream chat completes 1.37% later.
-All repeat-cell results and both original observations are in
-[metrics.csv](metrics.csv), including the slower cases.
+Loaded short TTFT is 0.77–9.77% lower across all 12 fresh/repeat cells.
+Beside that gain, fresh single-stream chat completion is 2.23% longer
+(decode 2.32% lower) and fresh sixteen-stream chat completion is 1.37% longer.
+This is delivery ordering after prefill. It is not faster prefill arithmetic
+and it is not a startup speedup. All repeat-cell results and both original
+observations are in [metrics.csv](metrics.csv), including the slower cases.
 
 Fresh four/sixteen-stream batches contain distinct prompts. Repeated batches
 send the same `s00` prompt to every stream after a primer, rather than repeating

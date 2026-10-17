@@ -68,7 +68,7 @@
     "scope": "Commit and hand off the already selected first token before preparing initial speculative drafts; capability forwarding and callback/error/cancellation/terminal lifetime handling. No kernel, model, prompt-cache, pooling, projection-sum reuse, staging-loader or segment-shape change."
   },
   "configuration": {
-    "hardware": "One NVIDIA DGX Spark (GB10)",
+    "hardware": "One NVIDIA DGX Spark (GB10, SM121, 128 GB unified memory)",
     "target": "Vontra Qwen3.8-27B MLX4",
     "target_snapshot": "70ae7fac63274ff2eac54152031433374cb80f2f",
     "drafter": "z-lab DFlash2",
@@ -79,7 +79,39 @@
     "prompt_cache_tokens": 0,
     "short_output_tokens": 256,
     "performance_sampling": "greedy",
-    "corpus_sha256": "3d0ff2a4484e2e7abb8f8cc365ee3a435c8fa6563eac9aaf9b44ded83dc7c90b"
+    "corpus_sha256": "3d0ff2a4484e2e7abb8f8cc365ee3a435c8fa6563eac9aaf9b44ded83dc7c90b",
+    "host": {
+      "distribution": "Ubuntu 24.04.5 LTS",
+      "architecture": "aarch64",
+      "kernel_read_on": "2026-10-17",
+      "kernel": "7.0.0-1019-nvidia",
+      "kernel_note": "Read on this Spark after the runs; not logged during the 15 October timing runs.",
+      "nvidia_driver": "580.178.04",
+      "nvidia_smi_cuda_line": "13.0",
+      "driver_note": "Same driver string recorded on this Spark on 16 October 2026. /usr/bin/nvidia-smi is dated 10 August 2026, before the timing runs. The nvidia-smi CUDA line is the driver ceiling, not the compiler."
+    },
+    "toolchain": {
+      "image": "nvcr.io/nvidia/pytorch:26.07-py3",
+      "image_id": "sha256:15b8de8baabe68e46afc51e88f3ccad5042013bafe8f244ec082ce0bb06d47e3",
+      "image_created": "2026-07-25T05:02:48Z",
+      "target": "aarch64-linux-gnu.2.28",
+      "zig": "0.17.0",
+      "optimize": "ReleaseFast",
+      "cuda_version": "13.3.1.008",
+      "nvcc": "release 13.3, V13.3.73",
+      "nvcc_build": "cuda_13.3.r13.3/compiler.38244171_0",
+      "nvcc_note": "Confirmed with nvcc --version inside the pinned image on 17 October 2026. Host nvcc 13.0 V13.0.88 was not the compiler."
+    },
+    "native_server_sha256": {
+      "baseline": "5700939fd17c0ad52a84c7d4bdbeeba7975a6c96952375579fda0a5d70c306c6",
+      "candidate": "e42ab4fc5079bfdeafe61234de4d044fec62e18877568e87fb19bb7e9523d581",
+      "runs": [
+        "pr836-panel-abba-20261015-111304",
+        "pr836-startup-forward-20261015-114237",
+        "pr836-startup-reverse-20261015-120303",
+        "pr836-smoke-20261015-110211"
+      ]
+    }
   },
   "coverage": {
     "panel_matched_pairs": 196,
@@ -3852,7 +3884,8 @@
     "Earlier first-token delivery lengthens the first-to-last decode interval even without slower completion. Actual completion regressions also occur and are retained in all metric rows.",
     "Status prefill timing boundary moves before initial drafting; this is not evidence of faster prefill kernels.",
     "The evolved-history control is not prompt-cache acceleration: initial TTFT-0.49%/completion+0.18%; follow-up TTFT-0.65%/completion+0.10%.",
-    "Performance figures apply to the exact changed-source hashes recorded here."
+    "Performance figures apply to the exact changed-source hashes recorded here.",
+    "Host driver 580.178.04 and image CUDA toolkit 13.3.1.008 / nvcc 13.3 V13.3.73 are pinned above. Kernel 7.0.0-1019-nvidia was read on 17 October 2026 and was not logged during the timing runs."
   ],
   "evidence_sha256": {
     "smoke-independent.json": "d19d02b56228534c136fb250429092b3a8dc3f9af0fc4750d0e93c4c59aaee5a",
