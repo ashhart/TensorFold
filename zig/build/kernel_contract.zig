@@ -13,6 +13,13 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     step.dependOn(family);
+    const delta = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/delta_slots_contract_test.zig"),
+        .target = b.graph.host,
+        .imports = &.{.{ .name = "contract", .module = module(b, b.graph.host, .debug) }},
+    }) }));
+    b.step("test-delta-slots-contract-host", "FP64 DeltaNet and slot corruption controls without shaders").dependOn(&delta.step);
+    step.dependOn(&delta.step);
 }
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.

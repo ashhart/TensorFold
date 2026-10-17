@@ -583,3 +583,6 @@ pub const all_cuda = cuda ++ paging.extra ++ @import("qwen_served_pending.zig").
 test {
     _ = paging;
 }
+
+/// The live Metal collector's list: the measured declarations, then the pipelines still unmeasured.
+pub const all_metal = metal ++ @import("delta_slots_pending.zig").records;

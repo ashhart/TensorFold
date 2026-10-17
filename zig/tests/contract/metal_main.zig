@@ -89,6 +89,7 @@ pub fn main(init: std.process.Init) !u8 {
         try @import("metal_repro.zig").affineInf(a, device, queue);
         return 0;
     }
+    if (o.gates) try @import("metal_delta_slots.zig").run(a, device, queue, o.only, o.seed);
     try gemma.requireComplete(gemma.entries);
     var gemma_list: std.ArrayList(*gemma.Probe) = .empty;
     defer {
