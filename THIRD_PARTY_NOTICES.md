@@ -100,7 +100,9 @@ checked bit for bit against ExLlamaV3's dequantization.
 
 The native `zig/src/core/exl3_format.zig` reference decoder, the `zig/src/core/exl3_projection*.zig` decoder and
 `zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
-under the Turboderp attribution above. No captured kernel binaries or model weights are bundled.
+under the Turboderp attribution above. So do the native checkpoint scan (`zig/src/core/exl3_load.zig`,
+`exl3_metal_load.zig`), the CUDA kernels (`zig/kernels/cuda/exl3_*.cu`, `exl3_decode.cuh`, `exl3_candidate.cuh`) and
+their Zig side (`zig/src/cuda/exl3*.zig`). No captured kernel binaries or model weights are bundled.
 
 The EXLR8 reader, decoder, pull and kernels (`zig/src/core/exlr8*.zig`, `zig/src/cli/pull_exlr8*.zig`,
 `zig/src/cuda/exlr8.zig`, `zig/kernels/metal/core/exlr8*.metal`, `zig/kernels/cuda/exlr8*.cu`) read kindlingai's exlr8
