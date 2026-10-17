@@ -86,7 +86,11 @@ Apache-2.0, without copying either implementation.
 The Python engine's GLM CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math,
 Apache-2.0, without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
 from Mia-AiLab without including recipe code.
-No native CUDA family serves GLM.
+The native CUDA GLM family (`zig/src/families/glm/cuda_*.zig`, its kernels in `zig/kernels/cuda/glm_*.cu`) implements
+the same math. Its image tower, on Metal (`zig/src/families/glm/vision.zig`) and on CUDA (`cuda_vision.zig`,
+`zig/kernels/cuda/glm_vision.cu`), and the PyTorch reference that checks it (`tools/glm_vision_ref.py`) follow
+mlx-vlm's `glm5_next` (`vision.py`, and `processing.py` for the reference's patches; MIT License, Copyright (c) 2025
+Prince Canuma) without importing it.
 
 In the Python engine, frozen at 0.6.6, GLM EXL3 (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`), the
 shared EXL3 module (`src/tensorfold/cuda/exl3/`) and the EXL3 loaders of Qwen3.8-27B and Qwen3.8 Flash Next
@@ -102,7 +106,8 @@ The native `zig/src/core/exl3_format.zig` reference decoder, the `zig/src/core/e
 `zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
 under the Turboderp attribution above. So do the native checkpoint scan (`zig/src/core/exl3_load.zig`,
 `exl3_metal_load.zig`), the CUDA kernels (`zig/kernels/cuda/exl3_*.cu`, `exl3_decode.cuh`, `exl3_candidate.cuh`) and
-their Zig side (`zig/src/cuda/exl3*.zig`). No captured kernel binaries or model weights are bundled.
+their Zig side (`zig/src/cuda/exl3*.zig`), and GLM's reader of its EXL3 experts (`zig/src/families/glm/cuda_exl3.zig`).
+No captured kernel binaries or model weights are bundled.
 
 The EXLR8 reader, decoder, pull and kernels (`zig/src/core/exlr8*.zig`, `zig/src/cli/pull_exlr8*.zig`,
 `zig/src/cuda/exlr8.zig`, `zig/kernels/metal/core/exlr8*.metal`, `zig/kernels/cuda/exlr8*.cu`) read kindlingai's exlr8
