@@ -69,6 +69,11 @@ pub fn run(gpu: Gpu) !void {
     const lin: cuda.qlinear.Linear = .{ .lane = &lane, .nvfp4_prompt = &gemm };
     for ([_]qmmf.Mode{ .fp8, .bf16 }) |mode| try lanes(gpu, rng, &pack, lin, stream, mode);
     try experts(gpu, rng, &pack, stream);
+    if (capability / 10 < 12) {
+        std.debug.print("SKIP modelopt checkpoint experts: the block-scaled FP4 mma needs sm_120a\n", .{});
+        return;
+    }
+    try checkpointExperts(gpu, rng, stream, capability / 10);
 }
 
 /// Every GPU repack byte-equal to its host twin.
@@ -341,6 +346,91 @@ fn experts(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, s: cuda.Stream)
     try check.expect(rel[1][0] <= 1.1 * rel[0][0] + 1e-6 and rel[1][1] <= 1.1 * rel[0][1] + 1e-6, "prompt form's error within the decode form's", .{});
     try check.expect(rel[1][0] < 1e-2 and rel[1][1] < 5e-3, "prompt form near fp64", .{});
     check.pass("nvfp4 relu^2 experts: rms error / rms(fp64) up {e:.3} (decode {e:.3}), down {e:.3} (decode {e:.3}); 13-row launch bytes == 40-row", .{ rel[1][0], rel[0][0], rel[1][1], rel[0][1] });
+}
+
+/// cuda/ck.zig's experts at 1 and 16 token rows (the _few kernels) byte-equal to the same pairs in a 40-row call.
+fn checkpointExperts(gpu: Gpu, rng: std.Random, s: cuda.Stream, major: u32) !void {
+    const a = gpu.gpa;
+    const e = 6;
+    const width = 320;
+    const dims = 256;
+    const rows = 40;
+    const slots = 2;
+    const pairs = rows * slots;
+    const sms: usize = @intCast(try gpu.ctx.attribute(.multiprocessor_count));
+    var ck = try cuda.ck.Ck.load(gpu.d, major, sms);
+    defer ck.unload();
+    var w: [2][2]cuda.DeviceBuffer = undefined; // up, down: words, scale tiles
+    var made: usize = 0;
+    defer for (w[0..made]) |*d| for (d) |*b| b.free();
+    for (0..2) |i| {
+        const n: usize = if (i == 0) width else dims;
+        const k: usize = if (i == 0) dims else width;
+        const codes = try a.alloc(u8, e * n * k / 2);
+        defer a.free(codes);
+        const scales = try a.alloc(u8, e * n * k / 16);
+        defer a.free(scales);
+        fill(rng, codes, .any);
+        fill(rng, scales, .scale);
+        var dc = try dev(gpu, codes);
+        defer dc.free();
+        var ds = try dev(gpu, scales);
+        defer ds.free();
+        const bytes = cuda.ck.Ck.packedBytes(e, n, k);
+        w[i] = .{ try cuda.DeviceBuffer.alloc(gpu.d, bytes[0]), try cuda.DeviceBuffer.alloc(gpu.d, bytes[1]) };
+        made += 1;
+        try ck.pack(s, dc.ptr, ds.ptr, e, n, k, 0, k, w[i][0].ptr, w[i][1].ptr);
+    }
+    var alphas: [2 * e]f32 = undefined;
+    for (&alphas) |*x| x.* = 0.005 + rng.float(f32) * 0.03;
+    var dal = try dev(gpu, std.mem.sliceAsBytes(&alphas));
+    defer dal.free();
+    const l: cuda.ck.Layer = .{ .up = w[0][0].ptr, .up_s = w[0][1].ptr, .down = w[1][0].ptr, .down_s = w[1][1].ptr, .up_alpha = dal.ptr, .down_alpha = dal.ptr + e * 4, .up_act = 0.05, .down_act = 0.5, .experts = e, .width = width, .dims = dims };
+    var picks: [pairs]i32 = undefined;
+    for (&picks) |*k| k.* = @intCast(rng.uintLessThan(u32, e));
+    const x = try bf16s(a, rng, rows * dims, 4);
+    defer a.free(x);
+    var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
+    defer mod.unload();
+    const router = try cuda.grouped.Router.resolve(mod);
+    var bufs: [5]cuda.DeviceBuffer = undefined;
+    for (&bufs, [5]usize{ pairs * 4, cuda.grouped.maxItems(pairs, e, 16) * 12, 8, 4, 4 }) |*b, n| b.* = try cuda.DeviceBuffer.alloc(gpu.d, n);
+    defer for (&bufs) |*b| b.free();
+    const plan: cuda.grouped.Plan = .{ .members = bufs[0].ptr, .items = bufs[1].ptr, .counts = bufs[2].ptr, .rank = bufs[3].ptr, .hist = bufs[4].ptr };
+    var dp = try dev(gpu, std.mem.sliceAsBytes(&picks));
+    defer dp.free();
+    var dx = try dev(gpu, std.mem.sliceAsBytes(x));
+    defer dx.free();
+    var xq = try cuda.DeviceBuffer.alloc(gpu.d, cuda.ck.rowsBytes(rows, dims));
+    defer xq.free();
+    var act = try cuda.DeviceBuffer.alloc(gpu.d, pairs * width * 2);
+    defer act.free();
+    var aq = try cuda.DeviceBuffer.alloc(gpu.d, cuda.ck.rowsBytes(pairs, width));
+    defer aq.free();
+    var y = try cuda.DeviceBuffer.alloc(gpu.d, pairs * dims * 4);
+    defer y.free();
+    var outs: [3][2][]u8 = undefined; // 40 rows (prompt kernels), then 1 and 16 (decode-sized): act, y
+    var got: usize = 0;
+    defer for (outs[0..got]) |o| for (o) |b| a.free(b);
+    for ([3]usize{ rows, 1, 16 }) |nrows| {
+        const np = nrows * slots;
+        try router.route(s, dp.ptr, np, e, 16, plan);
+        const items = cuda.grouped.maxItems(np, e, 16);
+        try act.fill8(0xff, s.handle);
+        try y.fill8(0xff, s.handle);
+        try ck.quant4(s, dx.ptr, dims, nrows, dims, l.up_act, xq.ptr);
+        try ck.up(s, l, xq.ptr, nrows, slots, plan, act.ptr, items);
+        try ck.quant4(s, act.ptr, width, np, width, l.down_act, aq.ptr);
+        try ck.down(s, l, aq.ptr, np, nrows, plan, y.ptr, items);
+        try s.synchronize();
+        outs[got] = .{ try check.download(gpu, act), try check.download(gpu, y) };
+        got += 1;
+    }
+    for (outs[1..], [2]usize{ 1, 16 }) |o, nrows| {
+        try check.sameBytes("checkpoint up, decode-sized against 40 rows", o[0][0 .. nrows * slots * width * 2], outs[0][0][0 .. nrows * slots * width * 2]);
+        try check.sameBytes("checkpoint down, decode-sized against 40 rows", o[1][0 .. nrows * slots * dims * 4], outs[0][1][0 .. nrows * slots * dims * 4]);
+    }
+    check.pass("checkpoint nvfp4 experts: 1 and 16 token rows (32 columns a warp, four steps in flight) byte-equal to the same pairs in a 40-row call (64 columns a warp)", .{});
 }
 
 /// Weight [r, c] of expert `x` of [n, k] NVFP4 matrices: e2m1 code times its e4m3 block scale.

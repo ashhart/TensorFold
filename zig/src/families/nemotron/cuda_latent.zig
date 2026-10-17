@@ -31,6 +31,7 @@ pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck
 pub const Fns = struct {
     mod: cuda.Module,
     topk: cuda.Function,
+    topk_few: cuda.Function,
     combine: cuda.Function,
     moe_out: cuda.Function,
     share_ids: cuda.Function,
@@ -41,6 +42,7 @@ pub const Fns = struct {
         return .{
             .mod = mod,
             .topk = try mod.function("tf_super_topk"),
+            .topk_few = try mod.function("tf_super_topk_few"),
             .combine = try mod.function("tf_super_combine"),
             .moe_out = try mod.function("tf_super_moe_out"),
             .share_ids = try mod.function("tf_super_share_ids"),
@@ -49,6 +51,18 @@ pub const Fns = struct {
 
     pub fn unload(x: *Fns) void {
         x.mod.unload();
+    }
+
+    /// Each row's top-k of `sk` slices (ids by pick and share, weights by pick): `few` an expert a thread, else a warp.
+    pub fn picks(x: Fns, s: cuda.Stream, few: bool, part: u64, bias: u64, ids: u64, wts: u64, rows: usize, scaling: f32, experts: usize, sk: usize, top_k: usize, shares: usize, norm_topk: bool) !void {
+        var t: cuda.Args = .{};
+        for ([_]u64{ part, bias, ids, wts }) |p| t.add(p);
+        t.add(int(rows));
+        t.add(scaling);
+        for ([_]usize{ experts, sk, top_k, shares }) |v| t.add(int(v));
+        t.add(@as(c_int, @intFromBool(norm_topk)));
+        if (few) return go(x.topk_few, s, .{ rows, 1, 1 }, @intCast((experts + 31) / 32 * 32), 0, &t);
+        try go(x.topk, s, .{ rows, 1, 1 }, 32, 0, &t);
     }
 };
 
@@ -319,14 +333,7 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     } else {
         try go(g.f.router, g.s, .{ (rows + 15) / 16, (c.experts + 15) / 16, sk }, 256, @intCast(2 * 16 * (per / 2 + 1) * 4), &a);
     }
-    const fns = f.ops.k.latent.?;
-    var t: cuda.Args = .{};
-    for ([_]u64{ b.part, m.bias, b.pick, b.wts }) |p| t.add(p);
-    t.add(int(rows));
-    t.add(c.routed_scaling);
-    for ([_]usize{ c.experts, sk, c.top_k, c.ownShares() }) |v| t.add(int(v));
-    t.add(@as(c_int, @intFromBool(c.norm_topk)));
-    try go(fns.topk, g.s, .{ rows, 1, 1 }, 32, 0, &t);
+    try f.ops.k.latent.?.picks(g.s, rows <= cuda.launch.few_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
 /// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
