@@ -128,7 +128,7 @@ pub fn release(eng: *fx.Engine, p: ?*vp.VisPrompt) void {
 
 /// Info.vision for a host: images, and videos when the checkpoint names a video token.
 pub fn offer(v: *Vision, ctx: *anyopaque, prepare_image: @FieldType(api.Vision, "prepare"), prepare_video: @FieldType(api.VideoOffer, "prepare")) api.Vision {
-    var o: api.Vision = .{ .ctx = ctx, .prepare = prepare_image, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.video.image_tokens, .max_images = v.max_images };
+    var o: api.Vision = .{ .ctx = ctx, .prepare = prepare_image, .image_token = v.c.image_token, .markers = &v.markers, .image_tokens = v.video.image_tokens, .max_images = v.max_images, .explain = vl.geometry.problem };
     if (v.c.video_token) |t| o.video = .{ .prepare = prepare_video, .video_token = t, .group_open = v.c.vision_start, .group_close = v.c.vision_end, .time_first = t, .markers = &v.video_markers, .video_tokens = v.video.video_tokens, .max_videos = v.video.max_videos, .max_frames = v.video.max_frames };
     return o;
 }

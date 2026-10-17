@@ -356,11 +356,19 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
-    if (window < 0 or (native > 0 and window > native)) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
+    const fz = tf.flashnext_replay;
+    const margin: i64 = tf.flashnext_engine.MARGIN;
+    // past the trained window (up to four times it) the engine rotates with static YaRN x4, every prompt alike
+    if (window < 0 or (native > 0 and window > 4 * native)) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window and its YaRN x4 reach ({d})", .{ window, native, 4 * native });
         return null;
     }
     const paired = o.speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null;
+    if (try fz.widen(window, native, margin, paired)) |text| {
+        problem.* = text;
+        return null;
+    }
+    const cap: i64 = @intCast(fz.CAP);
     if (tf.flashnext_batch_meta.refusal(o.lanes_fixed, o.lanes, paired, o.learn != null)) |text| {
         problem.* = text;
         return null;
@@ -368,7 +376,7 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     if (tf.flashnext_batch_meta.shared(o.lanes_fixed, o.lanes, paired, o.learn != null)) {
         var why: []const u8 = "";
         const shared: ?api.Opened = shared: {
-            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.vision, a, &why) catch |err| {
+            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, cap - margin) else cap - margin, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.vision, a, &why) catch |err| {
                 problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap or why.len > 0) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
                 return null;
             };

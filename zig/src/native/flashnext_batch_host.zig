@@ -56,7 +56,7 @@ fn slotGrow() usize {
 pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const capacity: usize = @intCast(@min(tf.flashnext_replay.CAP, window + fx.MARGIN));
+    const capacity: usize = @intCast(@min(@as(i64, @intCast(tf.flashnext_replay.CAP)), window + fx.MARGIN));
     const eng = try fx.Engine.load(gpa, io, dir, dump);
     errdefer eng.deinit();
     if (eng.r.tp != null) return error.BatchSpeedUpUnsupported;
@@ -92,9 +92,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
         }
         try caps.appendSlice(gpa, t);
     } else {
-        const n = try tf.flashnext_batch_meta.fit(streams, streams_fixed, room, Session.bytes(capacity));
+        // past the trained window only the engine's own session holds it (YaRN's); the others hold the trained window
+        const each = @min(capacity, tf.flashnext_replay.TRAINED + @as(usize, @intCast(fx.MARGIN)));
+        const n = try tf.flashnext_batch_meta.fit(streams, streams_fixed, room, Session.bytes(each));
         if (n < 2) return single(gpa, io, eng, window, cache_gib, over, cap, vis, a, why);
-        for (1..n) |_| try caps.append(gpa, capacity);
+        for (1..n) |_| try caps.append(gpa, each);
     }
     eng.hostMode();
     const slots: u32 = @intCast(caps.items.len);
@@ -106,7 +108,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     h.back = try Backend.init(gpa, eng, caps.items);
     errdefer h.back.deinit();
     if (vis != null) h.back.images = .{ .ctx = h, .build = buildImages, .release = releaseImages };
-    if (tiers != null) {
+    if (tiers != null or capacity > tf.flashnext_replay.TRAINED + @as(usize, @intCast(fx.MARGIN))) { // sessions of two sizes
         h.back.sized = true;
         h.back.grow = slotGrow();
     }
@@ -123,7 +125,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     plan.room_bytes = final.room;
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (tiers != null) .{ .ctx = &h.back, .fits = Backend.fits } else null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     // FLASHNEXT_NO_LONE=1 keeps even lone requests on shared rounds.
     if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun };
     if (vis) |v| {

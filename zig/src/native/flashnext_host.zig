@@ -472,7 +472,7 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    const context_limit: i64 = tf.flashnext_replay.CAP - fx.MARGIN;
+    const context_limit: i64 = @as(i64, @intCast(tf.flashnext_replay.CAP)) - fx.MARGIN;
     h.* = .{ .gpa = gpa, .io = io, .eng = eng, .follower = follower, .load_limit = limit orelse 0, .vis = vis, .info_ = .{ .name = "flashnext-zig", .prompt_cache_plan = cache_plan, .lanes = 1, .greedy_only = eng.r.tp != null, .context_window = @intCast(if (window > 0) @min(window, context_limit) else context_limit) } };
     h.warm = .{ .queue = eng.r.queue };
     if (vis) |v| h.info_.vision = images.offer(v, h, prepareImage, prepareVideo);

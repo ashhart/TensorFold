@@ -27,7 +27,6 @@ const D = fz.D;
 const WIDE = fz.WIDE;
 const LAYERS = fz.LAYERS;
 const VOCAB = fz.VOCAB;
-const CAP = fz.CAP;
 const PLE_TAIL = fz.PLE_TAIL;
 const GROUPS = fz.GROUPS;
 const MAXR = fz.MAXR;
@@ -259,7 +258,7 @@ pub const Engine = struct {
             attention_scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(cfg.head_dim)));
         }
         const m = try arena.create(Model);
-        m.* = .{ .r = r, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
+        m.* = .{ .r = r, .cap = fz.CAP, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
         for (0..LAYERS) |i| {
             const linear = i % 4 != 3;
             var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
@@ -276,11 +275,11 @@ pub const Engine = struct {
                 L.qn = try r.loadf("L{d}.att.qn", .{i});
                 L.kn = try r.loadf("L{d}.att.kn", .{i});
                 L.iqn = try r.loadf("L{d}.att.iqn", .{i});
-                L.keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
-                L.vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
-                L.raw = .{ .b = try r.buffer(CAP * 128 * 2) };
+                L.keys = .{ .b = try r.buffer(2 * fz.CAP * 256 * 2) };
+                L.vals = .{ .b = try r.buffer(2 * fz.CAP * 256 * 2) };
+                L.raw = .{ .b = try r.buffer(fz.CAP * 128 * 2) };
                 L.pool = try r.loadf("L{d}.att.pool", .{i});
-                L.pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) };
+                L.pooled = .{ .b = try r.buffer(fz.CAP / 4 * 128 * 2) };
             }
             for (expert_projs, 0..) |proj, j| {
                 for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
@@ -362,10 +361,10 @@ pub const Engine = struct {
             .zero8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
             .ids81 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
             .scale = try f32Buf(r, @floatCast(attention_scale)),
-            .log2base = try f32Buf(r, 23.253496170043945),
+            .log2base = try fz.ropeBuf(r, 23.253496170043945, fz.yarn_factor),
             .ple_ids = try i32Buf(r, &(@as([16 * MAXR]i32, @splat(0)))),
             .ple_meta = try B.of(r, 39 * 8),
-            .kvmeta = try i32Buf(r, &.{ 0, CAP, 1 }),
+            .kvmeta = try i32Buf(r, &.{ 0, @intCast(fz.CAP), 1 }),
             .vocab = try i32Buf(r, &.{VOCAB}),
         };
         {
@@ -397,11 +396,11 @@ pub const Engine = struct {
                 .ids = ids,
                 .ids_n = ids_n,
                 .ex = ex,
-                .keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
-                .vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
-                .raw = .{ .b = try r.buffer(CAP * 128 * 2) },
+                .keys = .{ .b = try r.buffer(2 * fz.CAP * 256 * 2) },
+                .vals = .{ .b = try r.buffer(2 * fz.CAP * 256 * 2) },
+                .raw = .{ .b = try r.buffer(fz.CAP * 128 * 2) },
                 .pool = try r.load("mtp.att.pool"),
-                .pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) },
+                .pooled = .{ .b = try r.buffer(fz.CAP / 4 * 128 * 2) },
                 .h = .{ try B.of(r, MAXR * WIDE * 2), try B.of(r, MAXR * WIDE * 2) },
                 .emb = try B.of(r, MAXR * D * 2),
                 .en = try B.of(r, MAXR * D * 2),
@@ -421,12 +420,12 @@ pub const Engine = struct {
                 .ids8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
                 .pos8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
                 .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-                .kvmeta = try i32Buf(r, &.{ 0, CAP, 1 }),
+                .kvmeta = try i32Buf(r, &.{ 0, @intCast(fz.CAP), 1 }),
                 .n_add = try i32Buf(r, &.{0}),
             };
             m.mtp.n_ids = try i32Buf(r, &.{@intCast(m.mtp.ids_n)});
         }
-        try r.shapes.put(arena, "Kc_shape", (try i32Buf(r, &.{ 1, 2, CAP, 256 })).b);
+        try r.shapes.put(arena, "Kc_shape", (try i32Buf(r, &.{ 1, 2, @intCast(fz.CAP), 256 })).b);
         try r.shapes.put(arena, "IDS_shape", (try i32Buf(r, &.{ MAXR, 1 })).b);
 
         e.r = r;
@@ -487,7 +486,8 @@ pub const Engine = struct {
 
     /// A prompt call of up to `left` rows: one chunk, as two staggered segments once each gets SEG_MIN rows.
     fn chunkCall(e: *const Engine, left: usize) segments.Call {
-        return if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
+        const step = fz.chunkRows(e.m.pos, e.pr.step); // past the trained window a chunk scores more blocks a row
+        return if (e.segments) segments.next(left, step, SEG_MIN) else .{ .rows = @min(step, left), .parts = 1 };
     }
 
     fn isEos(eos: []const u32, tok: u32) bool {
@@ -504,7 +504,7 @@ pub const Engine = struct {
         const r = e.r;
         const m = e.m;
         if (prompt.len == 0) return error.EmptyPrompt;
-        if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
+        if (prompt.len + max_tokens + MARGIN > fz.CAP) return error.ContextFull;
         if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
         for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
         if (out.sampling != null and r.tp != null) return error.SpeedUpGreedyOnly; // each Mac holds half the logits
@@ -659,7 +659,7 @@ pub const Engine = struct {
         }
         @memset(ar, 0);
         ar[1] = T;
-        const hs = e.hist.slice(u32, CAP + 64); // the history: the prompt and the first token
+        const hs = e.hist.slice(u32, fz.CAP + 64); // the history: the prompt and the first token
         @memcpy(hs[0..prompt.len], prompt);
         hs[prompt.len] = pick;
         ar[fz.AR_HLEN] = @intCast(prompt.len + 1);
@@ -667,7 +667,7 @@ pub const Engine = struct {
             ar[fz.AR_POS + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
             ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
         }
-        ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, CAP, @intCast(W0) };
+        ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, @intCast(fz.CAP), @intCast(W0) };
         watch.arm(ar, @intCast(T));
         const pm = m.t.ple_meta.b.slice(i64, 39);
         pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, 0 };
@@ -741,7 +741,7 @@ pub const Engine = struct {
                 next_depth) + 1;
             widths[(round + 1) % 4] = wn;
             if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
-            const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
+            const cfg = [4]u32{ @intCast(wr), @intCast(wn), @intCast(fz.CAP), 0 };
             r.enc.setPipeline(r.accept_pipe);
             for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
             r.enc.setBytes(std.mem.asBytes(&cfg), 5);

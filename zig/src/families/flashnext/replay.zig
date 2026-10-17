@@ -28,7 +28,30 @@ pub const D = 2560;
 pub const WIDE = 4 * D;
 pub const LAYERS = 48;
 pub const VOCAB = 248320;
-pub const CAP = 262144; // keys an attention layer holds in this runner
+/// The trained window, and the longest an engine opens with: YaRN x4 past it (static, every prompt scaled).
+pub const TRAINED: usize = 262144;
+pub const CAP_MAX: usize = 4 * TRAINED + 64; // a full 1,048,576-token window and the engine's margin past it
+/// Keys an attention layer of the engine's own model holds: TRAINED unless `setCap` asks for more before the load.
+pub var CAP: usize = TRAINED;
+/// The YaRN factor the engine's rotary takes at load (0: the plain rotary); `setCap` sets it past TRAINED.
+pub var yarn_factor: f64 = 0;
+
+/// The engine's window before its load: past the trained 262,144 (up to four times it) through static YaRN x4.
+pub fn setCap(window: usize) !void {
+    const cap = std.mem.alignForward(usize, @max(window, TRAINED), 4);
+    if (cap > CAP_MAX) return error.ContextTooLong;
+    CAP = cap;
+    yarn_factor = if (cap > TRAINED) 4 else 0;
+}
+
+/// A served window past the trained one (`native`): the cap set before the load, or why it is refused.
+pub fn widen(window: i64, native: i64, margin: i64, paired: bool) !?[]const u8 {
+    if (native <= 0 or window <= native) return null;
+    if (paired) return "--context past the trained window is served on one Mac; the --speed-up pair reads up to it";
+    try setCap(@intCast(window + margin));
+    std.log.info("flash next: a {d}-token window, past the trained {d}: static YaRN x4 for every prompt", .{ window, native });
+    return null;
+}
 pub const PLE_TAIL = 9;
 pub const GROUPS = 8;
 pub const MAXR = 16; // a decode window's rows at most
@@ -1505,7 +1528,7 @@ pub const Select = struct {
             .select = found[2].?,
             .start = try B.of(r, 16),
             .starts = try B.of(r, CATCH * 256),
-            .sc = try B.of(r, rows_max * (CAP / 4) * 4),
+            .sc = try B.of(r, @min(rows_max * (CAP / 4), @max(SC_WORDS, MAXR * (CAP / 4))) * 4),
             .keys = try B.of(r, rows_max * KW * 4),
             .complete = try B.of(r, rows_max * 4),
             .ends = try B.of(r, rows_max * 4),
@@ -1744,6 +1767,46 @@ pub const Tmp = struct {
     vocab: Buf,
 };
 
+/// The rotary's constants every rotary kernel reads: [log2(base), YaRN on, YaRN's cos and sin scale, 32 frequencies].
+pub fn ropeBuf(r: *Run, log2base: f32, factor: f64) !Buf {
+    const b = try r.buffer(35 * 4);
+    const v = b.slice(f32, 35);
+    @memset(v, 0);
+    v[0] = log2base;
+    v[2] = 1;
+    if (factor > 1) {
+        v[1] = 1;
+        const y = yarn(std.math.pow(f64, 2, log2base), factor, TRAINED);
+        v[2] = y.scale;
+        @memcpy(v[3..35], &y.freq);
+    }
+    return .{ .b = b };
+}
+
+/// transformers' _compute_yarn_parameters for the 64 rotary dims (beta 32 and 1, truncated ends), in torch's fp32.
+pub fn yarn(base: f64, factor: f64, trained: usize) struct { freq: [32]f32, scale: f32 } {
+    const dim: f64 = 64;
+    const tp: f64 = @floatFromInt(trained);
+    const dimOf = struct {
+        fn f(rot: f64, b: f64, max_pos: f64) f64 {
+            return 64 * @log(max_pos / (rot * 2 * std.math.pi)) / (2 * @log(b));
+        }
+    }.f;
+    const low = @max(@floor(dimOf(32, base, tp)), 0);
+    var high = @min(@ceil(dimOf(1, base, tp)), dim - 1);
+    if (low == high) high += 0.001;
+    var out: [32]f32 = undefined;
+    for (0..32) |k| {
+        const kf: f64 = @floatFromInt(k);
+        const pos_freq: f32 = @floatCast(std.math.pow(f64, base, @as(f64, @as(f32, @floatCast(2 * kf / dim)))));
+        const extra: f32 = 1.0 / pos_freq;
+        const inter: f32 = 1.0 / (@as(f32, @floatCast(factor)) * pos_freq);
+        const ef: f32 = 1 - @as(f32, @floatCast(std.math.clamp((kf - low) / (high - low), 0, 1)));
+        out[k] = inter * (1 - ef) + extra * ef;
+    }
+    return .{ .freq = out, .scale = @floatCast(0.1 * @log(factor) + 1) };
+}
+
 pub fn f32Buf(r: *Run, v: f32) !Buf {
     const b = try r.buffer(4);
     b.slice(f32, 1)[0] = v;
@@ -1832,7 +1895,7 @@ pub const Model = struct {
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
-    cap: usize = CAP,
+    cap: usize = TRAINED, // the engine's own model: CAP, set at load
     state: usize = 0, // the DeltaNet buffer pair holding the state
     state_row: usize = 0, // its row
     gpu_seconds: f64 = 0,
@@ -2379,6 +2442,15 @@ pub const copyDrafts = @import("drafts.zig").copyDrafts;
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
 pub const PMAX = 8192; // the prompt buffers' rows; `step` cuts the chunks
+/// A prompt selector's scores: PMAX rows by the trained window's blocks (2 GiB). Past it chunks take fewer rows.
+pub const SC_WORDS: usize = PMAX * (TRAINED / 4);
+
+/// The rows a prompt chunk from `pos` may take (at most `want`): every row scores the blocks before its end.
+pub fn chunkRows(pos: usize, want: usize) usize {
+    var rows = want;
+    while (rows > 64 and rows * ((pos + rows) / 4 + 1) > SC_WORDS) rows /= 2;
+    return rows;
+}
 pub const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
@@ -2808,7 +2880,7 @@ pub const Prompt = struct {
                     },
                     13 => {
                         p.bind(p.attn256, &.{ b.q, L3.keys, L3.vals, b.p });
-                        const ap = [4]i32{ @intCast(rows), @intCast(rows), 0, CAP };
+                        const ap = [4]i32{ @intCast(rows), @intCast(rows), 0, @intCast(m.cap) };
                         r.enc.setBytes(std.mem.asBytes(&ap), 4);
                         r.enc.setBuffer(m.t.scale.b, m.t.scale.off, 5);
                         r.enc.setBuffer(b.aout.b, b.aout.off, 6);
@@ -3380,4 +3452,17 @@ pub fn jsonInt(v: std.json.Value) i64 {
         .float => |x| @intFromFloat(x),
         else => 0,
     };
+}
+
+test "YaRN x4 frequencies and scale: transformers' table for base 1e7 over the trained 262,144" {
+    const y = yarn(1e7, 4, TRAINED);
+    const want = [_]f32{ 1.0, 0.6042963862419128, 0.36517414450645447, 0.22067339718341827, 0.1333521455526352, 0.08058421313762665, 0.04869675263762474, 0.02942727319896221, 0.017782794311642647, 0.010746078565716743, 0.006493816617876291, 0.003924189601093531, 0.0023713738191872835, 0.0014330126577988267, 0.0008659643353894353, 0.00047423981595784426, 0.00025693507632240653, 0.00013734975073020905, 7.217386882985011e-05, 3.707224823301658e-05, 1.844922371674329e-05, 8.759770025790203e-06, 3.849816039291909e-06, 2.3264301489689387e-06, 1.405853367941745e-06, 8.495520660289912e-07, 5.133812237545499e-07, 3.102344408034696e-07, 1.8747356023141037e-07, 1.1328959459433463e-07, 6.846049416253663e-08, 4.1370427084075345e-08 };
+    for (want, y.freq) |w, g| try std.testing.expectApproxEqRel(w, g, 1e-6);
+    try std.testing.expectApproxEqRel(@as(f32, 1.138629436111989), y.scale, 1e-6);
+}
+
+test "chunk rows shrink only past the trained window" {
+    try std.testing.expectEqual(@as(usize, PMAX), chunkRows(0, PMAX));
+    try std.testing.expectEqual(@as(usize, PMAX), chunkRows(200_000, PMAX));
+    try std.testing.expect(chunkRows(1_000_000, PMAX) <= 2048);
 }

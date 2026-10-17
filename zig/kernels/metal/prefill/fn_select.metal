@@ -56,9 +56,11 @@ using namespace metal;
   if (d < RD) {
     const int hr = RD / 2;
     const int i = d % hr;
-    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
+    // LOG2BASE[1] != 0: YaRN (the frequencies at [3, 35), cos and sin scaled by [2]); else the plain rotary
+    const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
     const float angle = float(4 * b) * freq;
-    const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
+    const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
+    const float c = metal::fast::cos(angle) * ys, s = metal::fast::sin(angle) * ys;
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;
   }
   POOLED[size_t(b) * DI + d] = bfloat(out);
