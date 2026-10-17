@@ -15,9 +15,12 @@ const slots = 1024;
 fn mirror(x: []f64, w: []f64, k: usize, rows: usize, n: usize) void {
     const h = k / 2;
     for (0..rows) |r| for (0..h) |i| {
+        // one sign, and 1 where w is nudged: partials pass fp16's spacing and every result is 4, a bf16 bound of 1/64
+        x[r * k + i] = if (i < 4) 1 else @abs(x[r * k + i]);
         x[r * k + h + i] = x[r * k + i];
     };
     for (0..n) |o| for (0..h) |i| {
+        w[o * k + i] = @abs(w[o * k + i]);
         w[o * k + h + i] = -w[o * k + i] + @as(f64, if (i < 4) 1 else 0);
     };
 }
