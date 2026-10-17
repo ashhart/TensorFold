@@ -19,13 +19,45 @@ collector sends its first request before any tokenization HTTP call and uses
 the already pinned corpus. If the long messages no longer share 4096 rendered
 tokens, fixture preparation fails rather than changing the benchmark silently.
 
-The four `*-unbound.json` files are protocol templates, not executable plans.
-They deliberately have `ready=false`, no model/build/binary or generated-input
-hashes, and an invalid unbound schema. A reviewed PR836 controller must bind
-the same target, drafter, tokenizer, server settings and inputs to both arms.
-The older v2 controller contains prior model paths and cannot be assumed to
-provide that binding. Keep the local smoke and safety gate ahead of the full
-panel; run the startup forward/reverse plans only after correctness passes.
+`panel-abba-unbound.json`, `smoke-unbound.json`,
+`startup-forward-unbound.json` and `startup-reverse-unbound.json` are the
+four protocol templates. Each has `ready=false`, empty build identity and no
+input hashes, so none of them is an executable plan. The host controller that
+filled those placeholders is not in this directory: it is tied to one
+machine's production service paths. Bind a replay by hand:
+
+- Build both arms from the source archives in the receipt and keep the
+  recorded native-server SHA256.
+- Serve the pinned target and drafter, BF16 KV, 32,768-token context, 16
+  slots, and zero restored prompt-cache tokens. Both arms use the same
+  settings.
+- Fill `{python}`, `{inputs}`, `{port}`, `{run}` and, for startup,
+  `{startup}` in the template's `client_argv`. Pass `--repeat-cache zero`
+  and the pinned `corpus.json`.
+- For a startup job, write the receipt before the client runs. Take
+  `launch_before_ns` on `time.perf_counter` before exec, and
+  `ready_probe_end_ns` at the end of the first successful readiness probe.
+  The client must use that same clock. It sends the first burst before any
+  tokenize or primer call.
+- Keep the smoke and safety gate ahead of the panel. Run the two startup
+  orders only after those checks pass. `startup-forward` is baseline-first;
+  `startup-reverse` is candidate-first.
+
+[../launches.csv](../launches.csv) is the 24 startup receipts reduced to those
+two anchors. Joined to the `first_burst` rows in
+[../requests.csv](../requests.csv):
+
+```
+launch = launch_before_ns / 1e9
+ready = ready_probe_end_ns / 1e9
+launch_to_ready_s = ready - launch
+launch_to_first_sse_s = min(first) - launch
+launch_to_last_done_s = max(done) - launch
+```
+
+Those durations rebuild the 18 launch-inclusive rows in
+[../metrics.csv](../metrics.csv). Each summary cell is the geometric mean of
+the baseline-first and candidate-first observations.
 
 The panel records first text SSE, decode, last DONE, output/token hashes,
 cache depth, and speculative work. Its smoke adds changed code and a growing

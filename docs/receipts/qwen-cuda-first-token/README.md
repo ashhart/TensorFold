@@ -130,6 +130,14 @@ seconds and are comparable only inside one server process. `ttft_s` and
 recorded by the collector. The prompts are the synthetic corpus in the
 harness, not a private transcript.
 
+The four `*-unbound.json` templates are in the harness directory. They are
+not executable: the host controller that bound them stays off this receipt
+because it contains this machine's production paths. The harness README
+gives the manual binding steps. [launches.csv](launches.csv) has the 24
+startup clock anchors. With the `first_burst` rows, it rebuilds the 18
+launch-inclusive metric rows; request rows alone do not, because launch and
+readiness are process clocks rather than request clocks.
+
 ## Correctness and checks
 
 - 376 paired timing requests match baseline/candidate request bodies, tokens

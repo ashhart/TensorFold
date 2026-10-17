@@ -1,0 +1,125 @@
+{
+  "acceptance": {
+    "cached_tokens": "zero for both arms and long follow-up",
+    "outputs": "exact paired token/output hashes for greedy; drafted/undrafted seeded controls; no filtered failures",
+    "restore": "same production container/config/voices and healthy idle service",
+    "startup": "warm_or_uncontrolled_os_cache only"
+  },
+  "build_identity": {
+    "base": null,
+    "candidate": null
+  },
+  "deadline_seconds": 7200,
+  "input_sha256": null,
+  "jobs": [
+    {
+      "build": "BASE_BUILD_UNBOUND",
+      "client_argv": [
+        "{python}",
+        "-B",
+        "{inputs}/integration/pr836/harness/run_panel.py",
+        "--base",
+        "http://127.0.0.1:{port}",
+        "--model",
+        "native-ttft",
+        "--label",
+        "base",
+        "--corpus",
+        "{inputs}/integration/pr836/harness/corpus.json",
+        "--long-manifest",
+        "{inputs}/integration/pr836/harness/long-manifest.json",
+        "--output",
+        "{run}/base-smoke-client.json",
+        "--repeat-cache",
+        "zero",
+        "--max-seconds",
+        "1800",
+        "--smoke"
+      ],
+      "environment": {},
+      "host_cache_gib": 0,
+      "label": "base-smoke",
+      "timeout_seconds": 1800
+    },
+    {
+      "build": "BASE_BUILD_UNBOUND",
+      "client_argv": [
+        "{python}",
+        "-B",
+        "{inputs}/integration/pr836/harness/run_safety.py",
+        "--base",
+        "http://127.0.0.1:{port}",
+        "--model",
+        "native-ttft",
+        "--label",
+        "base",
+        "--corpus",
+        "{inputs}/integration/pr836/harness/corpus.json",
+        "--output",
+        "{run}/base-safety-client.json"
+      ],
+      "environment": {},
+      "host_cache_gib": 0,
+      "label": "base-safety",
+      "timeout_seconds": 900
+    },
+    {
+      "build": "CANDIDATE_BUILD_UNBOUND",
+      "client_argv": [
+        "{python}",
+        "-B",
+        "{inputs}/integration/pr836/harness/run_panel.py",
+        "--base",
+        "http://127.0.0.1:{port}",
+        "--model",
+        "native-ttft",
+        "--label",
+        "candidate",
+        "--corpus",
+        "{inputs}/integration/pr836/harness/corpus.json",
+        "--long-manifest",
+        "{inputs}/integration/pr836/harness/long-manifest.json",
+        "--output",
+        "{run}/candidate-smoke-client.json",
+        "--repeat-cache",
+        "zero",
+        "--max-seconds",
+        "1800",
+        "--smoke"
+      ],
+      "environment": {},
+      "host_cache_gib": 0,
+      "label": "candidate-smoke",
+      "timeout_seconds": 1800
+    },
+    {
+      "build": "CANDIDATE_BUILD_UNBOUND",
+      "client_argv": [
+        "{python}",
+        "-B",
+        "{inputs}/integration/pr836/harness/run_safety.py",
+        "--base",
+        "http://127.0.0.1:{port}",
+        "--model",
+        "native-ttft",
+        "--label",
+        "candidate",
+        "--corpus",
+        "{inputs}/integration/pr836/harness/corpus.json",
+        "--output",
+        "{run}/candidate-safety-client.json"
+      ],
+      "environment": {},
+      "host_cache_gib": 0,
+      "label": "candidate-safety",
+      "timeout_seconds": 900
+    }
+  ],
+  "model_manifest_sha256": null,
+  "name": "smoke-unbound",
+  "native_environment": {},
+  "ready": false,
+  "reason_unbound": "Bind the same PR836 model, drafter, tokenizer fixtures, two source/build/binary receipts, and input hashes before execution; use a reviewed versioned controller.",
+  "schema": "pr836_ttft_unbound_v1",
+  "tokenizer_fixture_sha256": null
+}
