@@ -7,6 +7,7 @@ const fwd = @import("forward.zig");
 const loader = @import("load.zig");
 const multi = @import("runner_multi.zig");
 const slot_states = @import("slot_states.zig");
+pub const limits = @import("limits.zig");
 const Prof = dev.Prof;
 const a8 = fwd.a8;
 const forward = fwd.forward;
@@ -15,7 +16,10 @@ const load = loader.load;
 extern "c" fn lseek(fd: c_int, off: i64, whence: c_int) i64;
 extern "c" fn mmap(addr: ?*anyopaque, len: usize, prot: c_int, flags: c_int, fd: c_int, off: i64) ?*anyopaque;
 extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
+extern "c" fn close(fd: c_int) c_int;
+extern "c" fn munmap(addr: *anyopaque, len: usize) c_int;
 pub const MAX_SLOTS = loader.MAX_SLOTS;
+pub const freeAfterQueue = slot_states.freeAfterQueue;
 pub const Tensor = dev.Tensor;
 pub const Checkpoint = dev.Checkpoint;
 pub const Dev = dev.Dev;
@@ -44,6 +48,14 @@ pub var GS: u32 = 64;
 pub const GDN_IN = 16640; // qkv 10240 | z 6144 | a 48 | b 48 = 16480, padded to the GEMM tile (256)
 pub const ATT_IN = 14336; // (q 256 | gate 256) × 24 | k 1024 | v 1024
 pub var CHUNK: u32 = 1024; // prompt rows per forward (XPU_CHUNK, a multiple of 64)
+/// A forward's rows at most: a chunk, plus a rest under 128 rows joined to a prompt's last chunk.
+pub fn maxRows() u32 {
+    return CHUNK + 128;
+}
+/// Where a prompt chunk from `at` ends: CHUNK rows on, or the prompt's end when the rest is under 128 rows more.
+pub fn chunkEnd(at: usize, len: usize) usize {
+    return if (len - at < CHUNK + 128) len else at + CHUNK;
+}
 pub var MAX_CTX: u32 = 4096; // KV cache rows (XPU_CTX)
 pub const SPLIT = 32; // keys per attention split (decode.cl)
 pub const EPS: f32 = 1e-6;
@@ -136,37 +148,55 @@ pub const Runner = struct {
         if (std.c.getenv("XPU_A8_SITES")) |v| a8_sites = try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_A8")) |v| a8_group = if (std.mem.eql(u8, std.mem.span(v), "token")) std.math.maxInt(u32) else try std.fmt.parseInt(u32, std.mem.span(v), 10);
         if (std.c.getenv("XPU_DUMP_H")) |v| dump_h = open(v, 0o2101, @as(c_uint, 0o644)); // append
-        if (std.c.getenv("XPU_CHUNK")) |v| CHUNK = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        MAX_CTX = context;
+        if (std.c.getenv("XPU_CHUNK")) |v| CHUNK = try limits.chunk(std.mem.span(v));
+        MAX_CTX = try limits.context(context);
         {
             const marker = try std.fmt.allocPrintSentinel(alloc, "{s}/hadamard128", .{dir}, 0);
+            defer alloc.free(marker);
             const fd = open(marker.ptr, 0);
             rot_on = if (fd >= 0) 1 else 0;
+            if (fd >= 0) _ = close(fd);
         }
         if (prefill_int4 and (rot_on == 0 or !prefill_int8)) return error.Int4NeedsRotatedWeightsAndInt8;
         var ckpt: Checkpoint = .{};
+        errdefer ckpt.deinit();
         {
             const index_path = try std.fmt.allocPrintSentinel(alloc, "{s}/model.safetensors.index.json", .{dir}, 0);
+            defer alloc.free(index_path);
             const fd = open(index_path.ptr, 0);
             if (fd < 0) return error.FileNotFound;
-            const size: usize = @intCast(lseek(fd, 0, 2));
-            const text: [*]const u8 = @ptrCast(mmap(null, size, 1, 2, fd, 0) orelse return error.MmapFailed);
-            const parsed = try std.json.parseFromSlice(std.json.Value, alloc, text[0..size], .{});
+            defer _ = close(fd);
+            const end = lseek(fd, 0, 2);
+            if (end <= 0) return error.BadIndex;
+            const size: usize = @intCast(end);
+            const base = mmap(null, size, 1, 2, fd, 0) orelse return error.MmapFailed;
+            if (@intFromPtr(base) == std.math.maxInt(usize)) return error.MmapFailed; // MAP_FAILED
+            defer _ = munmap(base, size);
+            const parsed = std.json.parseFromSlice(std.json.Value, alloc, @as([*]const u8, @ptrCast(base))[0..size], .{}) catch return error.BadIndex;
+            defer parsed.deinit();
+            const map = if (parsed.value == .object) parsed.value.object.get("weight_map") else null;
+            if (map == null or map.? != .object) return error.BadIndex;
             var seen: std.ArrayList([]const u8) = .empty;
-            var it = parsed.value.object.get("weight_map").?.object.iterator();
+            defer seen.deinit(alloc);
+            var it = map.?.object.iterator();
             while (it.next()) |e| {
+                if (e.value_ptr.* != .string) return error.BadIndex;
                 const f = e.value_ptr.string;
                 for (seen.items) |s| {
                     if (std.mem.eql(u8, s, f)) break;
                 } else {
                     try seen.append(alloc, f);
-                    try ckpt.addShard(try std.fmt.allocPrintSentinel(alloc, "{s}/{s}", .{ dir, f }, 0));
+                    const shard = try std.fmt.allocPrintSentinel(alloc, "{s}/{s}", .{ dir, f }, 0);
+                    defer alloc.free(shard);
+                    try ckpt.addShard(shard);
                 }
             }
         }
         const r = try alloc.create(Runner);
+        errdefer alloc.destroy(r);
         r.* = .{ .d = .{ .g = try ze.Gpu.open(0xe223), .list = undefined, .k = undefined }, .model = undefined, .acts = undefined, .context = context, .ckpt = ckpt };
         const d = &r.d;
+        errdefer d.g.close();
         d.list = try d.g.immediate(0, 0);
         const mg = try d.g.module(&kb.glue);
         const md = try d.g.module(&kb.decode);
@@ -241,10 +271,19 @@ pub const Runner = struct {
         prof.on = prof_on;
         r.acts = try Acts.init(d);
         r.store(); // slot 0: the states the load allocated
-        try d.fill(r.acts.zeros, @as(u16, 0), CHUNK * 48 * 128 * 2);
-        try d.fill(r.acts.ones, @as(f32, 1.0), CHUNK * 48 * 4);
+        try d.fill(r.acts.zeros, @as(u16, 0), maxRows() * 48 * 128 * 2);
+        try d.fill(r.acts.ones, @as(f32, 1.0), maxRows() * 48 * 4);
         r.host_logits = try alloc.alloc(f32, VOCAB);
         return r;
+    }
+
+    /// Gives back the card's memory, the shards' mappings and the host buffers; `r` is gone after it.
+    pub fn deinit(r: *Runner) void {
+        r.d.deinit();
+        prof.on = false;
+        r.ckpt.deinit();
+        if (r.host_logits.len > 0) alloc.free(r.host_logits);
+        alloc.destroy(r);
     }
 
     /// Makes `slot` the one every call works on (states allocated on first use); other slots keep their state.
@@ -317,10 +356,10 @@ pub const Runner = struct {
     pub fn prompt(r: *Runner, ids: []const u32, last: bool) !void {
         var at: usize = 0;
         while (at < ids.len) {
-            const end = @min(ids.len, at + CHUNK);
+            const end = chunkEnd(at, ids.len);
             const want = last and end == ids.len;
             if (r.pos + (end - at) > r.context) return error.ContextFull;
-            if (try forward(&r.d, &r.model, &r.acts, @ptrCast(ids[at..end]), r.pos, .{ .want = if (want) .last else .none, .taps = r.taps_on })) |t| r.last = @intCast(t);
+            if (try forward(&r.d, &r.model, &r.acts, @ptrCast(ids[at..end]), r.pos, .{ .prompt = true, .want = if (want) .last else .none, .taps = r.taps_on })) |t| r.last = @intCast(t);
             if (r.taps_on) if (r.on_taps) |cb| try cb.f(cb.ctx, r.acts.taps, @intCast(end - at));
             r.pos += @intCast(end - at);
             at = end;
