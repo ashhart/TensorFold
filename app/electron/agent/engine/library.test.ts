@@ -155,6 +155,59 @@ try {
   const large = await lowMemory.scan()
   assert.equal(large.models.every((model) => !model.loadable), true)
 
+
+  // Large checkpoint metadata: a shard index above the old 4 MiB cap now scans, resolves, and stays bounded.
+  const bigModels = path.join(root, 'Big Metadata')
+  const bigValid = path.join(bigModels, 'big-index')
+  await fs.mkdir(bigValid, { recursive: true })
+  await fs.writeFile(path.join(bigValid, 'config.json'), JSON.stringify({ model_type: 'qwen3_5', quantization: { bits: 4, group_size: 64 } }))
+  await fs.writeFile(path.join(bigValid, 'tokenizer.json'), JSON.stringify({ model: { type: 'BPE', vocab: {} } }))
+  const bigHeader = Buffer.from(JSON.stringify({ weight: { dtype: 'F32', shape: [2], data_offsets: [0, 8] } }))
+  const bigPrefix = Buffer.alloc(8); bigPrefix.writeBigUInt64LE(BigInt(bigHeader.length))
+  const bigWeight = Buffer.concat([bigPrefix, bigHeader, Buffer.alloc(8, 1)])
+  await fs.writeFile(path.join(bigValid, 'model-00001-of-00001.safetensors'), bigWeight)
+  const pad = 5 * 1024 * 1024
+  const bigIndex = `{"metadata":{"total_size":${bigWeight.length},"pad":"${'x'.repeat(pad)}"},"weight_map":{"a":"model-00001-of-00001.safetensors","b":"model-00001-of-00001.safetensors"}}`
+  await fs.writeFile(path.join(bigValid, 'model.safetensors.index.json'), bigIndex)
+  const bigLib = library({ appHome: path.join(root, 'big-metadata-app') })
+  const bigFound = await bigLib.addFolder(bigModels)
+  const bigModel = bigFound.models.find((model) => model.path === bigValid)!
+  assert.equal(bigModel.complete, true, bigModel.reason ?? '')
+  assert.equal(bigModel.compatible, true)
+  assert.equal(bigModel.loadable, true)
+  assert.equal(bigModel.weightsBytes, bigWeight.length)
+  assert.equal(bigModel.memoryFloorBytes, bigWeight.length + 2 * 1024 ** 3)
+  assert.equal((await bigLib.resolve(bigModel.id)).path, bigValid, 'a checkpoint whose shard index exceeds the old cap resolves')
+
+  // An oversized tokenizer.json alone was never blocked: it is checked through safeFile(), not the JSON cap.
+  const bigTokenizer = path.join(bigModels, 'big-tokenizer')
+  await checkpoint(bigTokenizer)
+  await fs.truncate(path.join(bigTokenizer, 'tokenizer.json'), 5 * 1024 * 1024)
+  const tokenizerFound = await library({ appHome: path.join(root, 'big-tokenizer-app') }).addFolder(bigModels)
+  assert.equal(tokenizerFound.models.find((model) => model.path === bigTokenizer)?.loadable, true, 'an oversized tokenizer alone needs no limit change')
+
+  // A file above the new per-file cap is still rejected; sparse files keep the cost to the stat only.
+  const overLimit = path.join(bigModels, 'over-limit')
+  await checkpoint(overLimit)
+  const oversized = path.join(overLimit, 'model.safetensors.index.json')
+  await fs.writeFile(oversized, '')
+  await fs.truncate(oversized, 65 * 1024 * 1024)
+  const overFound = await library({ appHome: path.join(root, 'over-limit-app') }).addFolder(bigModels)
+  assert.match(overFound.models.find((model) => model.path === overLimit)!.reason!, /metadata is too large/)
+
+  // Malformed JSON in an index is still rejected.
+  const corrupt = path.join(bigModels, 'corrupt-index')
+  await checkpoint(corrupt)
+  await fs.writeFile(path.join(corrupt, 'model.safetensors.index.json'), '{"weight_map":')
+  const corruptFound = await library({ appHome: path.join(root, 'corrupt-index-app') }).addFolder(bigModels)
+  assert.match(corruptFound.models.find((model) => model.path === corrupt)!.reason!, /invalid JSON/)
+
+  // The scan-wide metadata budget stays bounded and reports a visible truncation.
+  const budgeted = library({ appHome: path.join(root, 'budget-app'), limits: { metadataBytes: 3 * 1024 * 1024 } })
+  const budgetFound = await budgeted.addFolder(bigModels)
+  assert.equal(budgetFound.truncated, true)
+  assert.match(budgetFound.warnings.join(' '), /safety limit/)
+
   const validRegistry = await fs.readFile(lib.file, 'utf8')
   await fs.writeFile(lib.file, '{')
   await assert.rejects(() => library().snapshot(), /library is invalid/)
