@@ -306,8 +306,9 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     p.tokens = kept;
     if (w.extra.len > 0) p.grammar_from = @intCast(w.rows.len);
     if (p.parents != null) {
+        // the grammar drafts only past a chain's last kept row (Constraint.chain), so its drafts extend that chain
         const parents = try a.alloc(i32, kept.len);
-        for (parents, w.parents[1..]) |*q, r| q.* = r - 1;
+        for (parents, 0..) |*q, i| q.* = if (i + 1 < w.parents.len) w.parents[i + 1] - 1 else @as(i32, @intCast(i)) - 1;
         p.parents = if (accept.isChain(parents)) null else parents;
     }
     if (p.branch_from > 0) {
