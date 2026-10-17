@@ -11,6 +11,7 @@ pub const Family = struct { model_type: []const u8, title: []const u8, formats: 
 const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "nemotron_h", .title = "Nemotron 3.5 Lightning" },
     .{ .model_type = "nemotron_h_omni", .title = "Nemotron 3.5 Super VL" },
+    .{ .model_type = "nemotron_h_puzzle", .title = "Nemotron 3.5 Bolt" },
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
@@ -114,14 +115,18 @@ pub fn configInt(a: Allocator, io: std.Io, dir: []const u8, key: []const u8) ?u6
     return if (v == .integer and v.integer >= 0) @intCast(v.integer) else null;
 }
 
-/// config.json's model_type, "unknown" when unreadable.
+/// config.json's model_type, "unknown" when unreadable; an omni wrapper of a puzzle model (Bolt) is nemotron_h_puzzle.
 pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
     const text = readSmall(a, io, pathJoin(a, dir, "config.json") catch return "unknown") orelse return "unknown";
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return "unknown";
     defer parsed.deinit();
     if (parsed.value != .object) return "unknown";
     const t = parsed.value.object.get("model_type") orelse return "unknown";
-    return if (t == .string) t.string else "unknown";
+    if (t != .string) return "unknown";
+    if (std.mem.eql(u8, t.string, "nemotron_h_omni")) if (parsed.value.object.get("llm_config")) |llm| if (llm == .object) {
+        if (llm.object.get("model_type")) |lt| if (lt == .string and std.mem.eql(u8, lt.string, "nemotron_h_puzzle")) return "nemotron_h_puzzle";
+    };
+    return a.dupe(u8, t.string) catch "unknown";
 }
 
 /// config.json's quantization: bits and group size, when the checkpoint is MLX-affine quantized.
@@ -196,6 +201,11 @@ test "cache layout helpers read a synthetic cache" {
     const snapshot = (try cachedSnapshot(a, io, hub, "Org/Name")).?;
     try std.testing.expect(std.mem.endsWith(u8, snapshot, "0123456789abcdef0123456789abcdef01234567"));
     try std.testing.expectEqualStrings("qwen4_exp", modelType(a, io, snapshot));
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snapshot, "config.json" }), .data = "{\"model_type\": \"nemotron_h_omni\", \"llm_config\": {\"model_type\": \"nemotron_h_puzzle\"}}" });
+    try std.testing.expectEqualStrings("nemotron_h_puzzle", modelType(a, io, snapshot));
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snapshot, "config.json" }), .data = "{\"model_type\": \"nemotron_h_omni\", \"llm_config\": {\"model_type\": \"nemotron_h\"}}" });
+    try std.testing.expectEqualStrings("nemotron_h_omni", modelType(a, io, snapshot));
+    try w.writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ snapshot, "config.json" }), .data = "{\"model_type\": \"qwen4_exp\", \"quantization\": {\"bits\": 6, \"group_size\": 32}, \"max_position_embeddings\": 65536}" });
     const q = quantization(a, io, snapshot).?;
     try std.testing.expectEqual(@as(u64, 6), q.bits);
     try std.testing.expectEqual(@as(u64, 32), q.group);

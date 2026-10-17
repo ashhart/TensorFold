@@ -315,7 +315,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.vision_video_tokens = @intCast(n);
     } else if (is(name, "--vision-image-tokens")) {
         const n = try int(u, a, name, v);
-        if (n < 16 or n > 16384) return fail(u, a, "argument --vision-image-tokens: expected 16 to 16384 tokens: '{s}'", .{v});
+        if (n < 16 or n > 262144) return fail(u, a, "argument --vision-image-tokens: expected 16 to 262144 tokens: '{s}'", .{v});
         out.vision_image_tokens = @intCast(n);
         out.vision_image_tokens_set = true;
     }
