@@ -528,6 +528,7 @@ pub const Runner = struct {
         var rh: [16]i32 = undefined;
         for (rows, 0..) |x, j| rh[j] = @intCast(x);
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.acts.mrows, &rh, n * 4, null, 0, null));
+        errdefer d.settle(); // rh and toks live in this frame and bits is the caller's: errors wait for the queue
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, r.acts.mbits, bits.ptr, bits.len * 4, null, 0, null));
         try d.launch(d.k.argmax_part_masked, .{ .x = 256, .y = @intCast(n) }, .{ r.acts.logits, @as(i32, VOCAB), r.acts.mbits, @as(i32, @intCast(words)), r.acts.mrows, r.acts.pv, r.acts.pi });
         try d.launch(d.k.argmax, .{ .x = @intCast(n) }, .{ r.acts.pv, r.acts.pi, r.acts.mtok });
@@ -581,4 +582,8 @@ test "every open starts from the process's options, and a second runner is refus
     try std.testing.expectEqual(before.chunk, CHUNK);
     live = true;
     try std.testing.expectError(error.RunnerOpen, Runner.init("/nonexistent", 4096));
+}
+
+test {
+    _ = @import("runner_drain_test.zig");
 }

@@ -307,6 +307,7 @@ pub const Drafter = struct {
 
     /// Frees the host side; the device buffers go with the runner's device (Runner.deinit), after this.
     pub fn deinit(dr: *Drafter) void {
+        dr.r.d.settle(); // the host tables and the top-k buffers below may still be in a queued copy
         alloc.free(dr.pv_host);
         alloc.free(dr.pi_host);
         dr.ckpt.deinit();
@@ -505,6 +506,7 @@ pub const Drafter = struct {
         const nul: ?*anyopaque = null;
         const rows_t: ?*anyopaque = if (one) nul else dr.rows_dev;
         try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, dr.ids, &tokens, R * 4, null, 0, null));
+        errdefer d.settle(); // tokens and sp live in this frame: an error returns only once the queue is idle
         const m = &dr.r.model;
         try q.embedRows(d, m, dr.ids, dr.x, R);
         const l32: i32 = @intCast(L);

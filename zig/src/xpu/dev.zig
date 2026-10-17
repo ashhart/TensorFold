@@ -62,6 +62,14 @@ pub const Checkpoint = struct {
 
 // ---------------------------------------------------------------- device
 
+/// A list that will not drain may still read or write host memory its callers free: the process ends (tests swap it).
+pub var lost: *const fn (rc: u32) void = exitLost;
+
+fn exitLost(rc: u32) void {
+    std.log.err("XPU: a command list did not drain (Level Zero 0x{x}): its copies may still use host memory, so the process ends", .{rc});
+    std.process.exit(1);
+}
+
 pub const Dev = struct {
     g: ze.Gpu,
     list: ze.H,
@@ -121,8 +129,14 @@ pub const Dev = struct {
 
     /// Waits for the queue, then gives the card back everything made on it (Gpu.close).
     pub fn deinit(d: *Dev) void {
-        d.sync() catch {}; // close waits for every list again, and destroys nothing if one will not drain
+        d.settle(); // the runner's host tables and staging go next: they must be idle
         d.g.close();
+    }
+
+    /// Waits for every command on the list; callers settle before host memory a queued copy reads or writes goes.
+    pub fn settle(d: *Dev) void {
+        const rc = d.g.api.zeCommandListHostSynchronize(d.list, std.math.maxInt(u64));
+        if (rc != 0) lost(rc);
     }
 
     pub fn kernel(d: *Dev, m: ze.H, name: [*:0]const u8, local: u32) !ze.H {
@@ -168,7 +182,7 @@ pub const Dev = struct {
     }
 
     pub fn sync(d: *Dev) !void {
-        try ze.check(d.g.api.zeCommandListHostSynchronize(d.list, std.math.maxInt(u64)));
+        d.settle();
         if (q.prof.on) {
             for (q.prof.events[0..q.prof.used], q.prof.kernel[0..q.prof.used]) |e, k| {
                 const t = try d.g.seconds(e);

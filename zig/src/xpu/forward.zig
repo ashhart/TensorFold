@@ -213,6 +213,7 @@ pub fn dump(d: *Dev, a: *Acts, T: u32, name: []const u8, with_r: bool) !void {
     const x = try alloc.alloc(f32, T * D);
     defer alloc.free(x);
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, x.ptr, a.x, T * D * 4, null, 0, null));
+    errdefer d.settle(); // x is freed on the way out: the copy into it must be done first
     if (with_r) {
         const r = try alloc.alloc(f16, T * D);
         defer alloc.free(r);
@@ -315,6 +316,7 @@ pub fn forward(d: *Dev, m: *Model, a: *Acts, ids: []const i32, p0: u32, mode: Mo
     const table = if (mode.tree) a.tree else a.chain;
     const mpos: ?*anyopaque = if (mode.multi) |mm| mm.pos else null;
     try ze.check(d.g.api.zeCommandListAppendMemoryCopy(d.list, a.ids, ids.ptr, ids.len * 4, null, 0, null));
+    errdefer d.settle(); // the queued copy reads the caller's ids: an error returns only once the queue is idle
     try embedRows(d, m, a.ids, a.x, T);
     if (p0 == 0) try dump(d, a, T, "embed", false);
     for (&m.layers, 0..) |*l, i| {
