@@ -57,14 +57,20 @@ __device__ __forceinline__ int partner(int d, int half) {
 
 using namespace fn_attn;
 
+__device__ __forceinline__ int media_pos(int pos, int d, int half, const int* rope3, int n, int delta) {
+    if (!rope3) return pos;
+    const int axis = (d < half ? d : d - half) % 3;
+    return pos < n ? rope3[axis * n + pos] : pos + delta;
+}
+
 // glue._attn_prep (text positions, bf16 cache), program (row, head): heads normed, rounded, roped, rounded, stored.
-extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
+__device__ __forceinline__ void fn_attn_prep_body(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
                                                                const float* __restrict__ QW, const float* __restrict__ KW,
                                                                const float* __restrict__ IW, const float* __restrict__ INV,
                                                                __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
                                                                __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
                                                                __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
-                                                               int NI, int IHD, int HALF) {
+                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
     __shared__ float scratch[32];
     const int r = blockIdx.x, head = blockIdx.y, d = threadIdx.x;
     const int pos = POS0[0] + r;
@@ -84,7 +90,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), w[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(bf(P[src + p]), rinv), w[p]));
-    const __nv_bfloat16 out = __float2bfloat16_rn(rope(xn, xpn, d, HALF, pos, INV));
+    const __nv_bfloat16 out = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(pos, d, HALF, rope3, n, delta), INV));
     if (head < NQ) {
         Q[(static_cast<long long>(r) * NQ + head) * HD + d] = out;
     } else if (!index) {
@@ -94,6 +100,26 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat
     } else {
         IQ[(static_cast<long long>(r) * NI + head - NQ - NKV) * IHD + d] = out;
     }
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_attn_prep(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
+                                                               const float* __restrict__ QW, const float* __restrict__ KW,
+                                                               const float* __restrict__ IW, const float* __restrict__ INV,
+                                                               __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
+                                                               __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
+                                                               __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
+                                                               int NI, int IHD, int HALF) {
+    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, nullptr, 0, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(256) fn_attn_prep_media(const __nv_bfloat16* __restrict__ P, const int* __restrict__ POS0,
+                                                               const float* __restrict__ QW, const float* __restrict__ KW,
+                                                               const float* __restrict__ IW, const float* __restrict__ INV,
+                                                               __nv_bfloat16* __restrict__ Q, __nv_bfloat16* __restrict__ KC,
+                                                               __nv_bfloat16* __restrict__ VC, __nv_bfloat16* __restrict__ IQ,
+                                                               __nv_bfloat16* __restrict__ IKC, float eps, int PW, int NQ, int NKV,
+                                                               int NI, int IHD, int HALF, const int* rope3, int n, int delta) {
+    fn_attn_prep_body(P, POS0, QW, KW, IW, INV, Q, KC, VC, IQ, IKC, eps, PW, NQ, NKV, NI, IHD, HALF, rope3, n, delta);
 }
 
 // glue._attn_gate, program (row, head) of HD threads: bf16(o / (1 + e^-gate)) and its 32-group sums.
@@ -109,10 +135,10 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_gate(const __nv_bfloat
 }
 
 // attention._pool, a block a completed block of RATIO indexer keys: their mean, rounded, normed and roped at its start.
-extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
+__device__ __forceinline__ void fn_qsa_pool_body(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
                                                               const int* __restrict__ POS0, const float* __restrict__ W,
                                                               const float* __restrict__ INV, float eps, int R, int DI, int HALF,
-                                                              int RATIO) {
+                                                              int RATIO, const int* rope3, int n, int delta) {
     __shared__ float scratch[32];
     __shared__ float xs[256];
     const int p0 = POS0[0];
@@ -126,7 +152,21 @@ extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat1
     const int p = partner(d, HALF);
     const float xn = rbf(__fmul_rn(__fmul_rn(x, rinv), W[d]));
     const float xpn = rbf(__fmul_rn(__fmul_rn(xs[p], rinv), W[p]));
-    POOLED[static_cast<long long>(b) * DI + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, RATIO * b, INV));
+    POOLED[static_cast<long long>(b) * DI + d] = __float2bfloat16_rn(rope(xn, xpn, d, HALF, media_pos(RATIO * b, d, HALF, rope3, n, delta), INV));
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
+                                                              const int* __restrict__ POS0, const float* __restrict__ W,
+                                                              const float* __restrict__ INV, float eps, int R, int DI, int HALF,
+                                                              int RATIO) {
+    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, nullptr, 0, 0);
+}
+
+extern "C" __global__ void __launch_bounds__(128) fn_qsa_pool_media(const __nv_bfloat16* __restrict__ IKC, __nv_bfloat16* __restrict__ POOLED,
+                                                              const int* __restrict__ POS0, const float* __restrict__ W,
+                                                              const float* __restrict__ INV, float eps, int R, int DI, int HALF,
+                                                              int RATIO, const int* rope3, int n, int delta) {
+    fn_qsa_pool_body(IKC, POOLED, POS0, W, INV, eps, R, DI, HALF, RATIO, rope3, n, delta);
 }
 
 // attention._scores, program (row, 64 blocks): the heads' sum of relu(q . k) / sqrt(DI), rows past TOP (DI 128).

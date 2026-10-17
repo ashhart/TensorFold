@@ -308,7 +308,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
     const whole = budget.weightBytes(io, o.dir);
-    const weights = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    const text_weights = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    const weights = text_weights + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
     const held0 = cuda.usage(false).device;
     // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest
     const Probe = struct {
@@ -588,6 +589,10 @@ test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
 }
 
-test "Flash Next refuses --vision before files or CUDA" {
-    try @import("cuda_flashnext_refusal_test.zig").vision(openWith);
+test "Flash Next takes --vision at family admission" {
+    try @import("cuda_flashnext_refusal_test.zig").vision();
+}
+
+test {
+    _ = @import("cuda_vision_offer.zig");
 }

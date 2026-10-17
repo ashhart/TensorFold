@@ -44,6 +44,7 @@ pub const Chain = struct {
 
 /// A sequence's head cache and the buffers a window needs: its rows' scores and streams, and what it rolls back to.
 pub const Draft = struct {
+    media: ?@import("cuda_media.zig").View = null,
     gpa: std.mem.Allocator,
     kc: cuda.DeviceBuffer,
     vc: cuda.DeviceBuffer,

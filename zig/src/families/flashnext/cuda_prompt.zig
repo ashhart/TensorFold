@@ -136,6 +136,7 @@ pub const Engine = struct {
     /// Rows a batched chunk takes at most (TF_FLASHNEXT_CHUNK; batch.default_chunk by default).
     chunk: usize,
     round_graph: round_graph.Cache = .{},
+    image_factory: ?*@import("cuda_images.zig").Vision = null,
     collective: ?*@import("cuda_collective.zig").Collective = null,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, driver: *cuda.Driver, stream: *cuda.Stream, model_dir: []const u8) !*Engine {
@@ -153,6 +154,7 @@ pub const Engine = struct {
         e.stream = stream;
         e.n_layers = 0;
         e.collective = null;
+        e.image_factory = null;
         e.round_graph = .{};
         errdefer for (e.layers[0..e.n_layers]) |*l| l.free(gpa);
         e.model_dir = try gpa.dupe(u8, model_dir);
@@ -352,7 +354,10 @@ pub const Engine = struct {
             .lanes = rows,
             .hooks = .{ .logits = .all, .logits_out = out },
         };
-        if (e.collective != null and round_graph.enabled()) {
+        const has_media = for (seqs) |q| {
+            if (q.media != null) break true;
+        } else false;
+        if (e.collective != null and round_graph.enabled() and !has_media) {
             const key = try round_graph.Key.init(seqs, s.ids, scores, out);
             try e.round_graph.run(key, &p, ids);
         } else try p.chunk(ids, 0, null);
@@ -367,6 +372,7 @@ pub const Engine = struct {
 
 /// One stream's caches. `fed` tokens have already gone through the model.
 pub const Seq = struct {
+    media: ?@import("cuda_media.zig").State = null,
     rank_id: u64 = 0,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
@@ -382,10 +388,11 @@ pub const Seq = struct {
 
     /// The caches a batched pass reads and leaves; `scores` the engine's block scores (Engine.reserveScores).
     pub fn view(s: *Seq, scores: u64) batch.SeqState {
-        return .{ .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores };
+        return .{ .media = if (s.media) |*m| m.view() else null, .conv = s.conv, .state = s.state, .kc = s.kc, .vc = s.vc, .ikc = s.ikc, .pooled = s.pooled, .tail = s.tail, .history = &s.history, .cap = s.cap, .scores = scores };
     }
 
     pub fn deinit(s: *Seq, gpa: std.mem.Allocator) void {
+        if (s.media) |*m| m.deinit();
         freeBufs(s.conv);
         freeBufs(s.state);
         freeBufs(s.kc);

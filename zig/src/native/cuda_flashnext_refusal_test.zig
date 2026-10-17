@@ -31,19 +31,9 @@ pub fn cache(comptime open: anytype) !void {
     }
 }
 
-pub fn vision(comptime open: anytype) !void {
-    const a = std.testing.allocator;
-    var problem: []const u8 = "";
-    const o: api.Open = .{
-        .dir = "/missing-flashnext-test-checkpoint",
-        .model_type = F.model_type,
-        .vision = .{},
-    };
-    try std.testing.expect((try open(F, a, a, std.testing.io, o, &problem)) == null);
-    try std.testing.expectEqualStrings(
-        "--vision: this CUDA family reads no images; serve it without --vision",
-        problem,
-    );
+pub fn vision() !void {
+    const o: api.Open = .{ .dir = "/missing-flashnext-test-checkpoint", .model_type = F.model_type, .vision = .{} };
+    try std.testing.expect(refusals.family(F, o) == null);
     const VisionFamily = struct {
         pub const Options = struct { vision: bool };
     };

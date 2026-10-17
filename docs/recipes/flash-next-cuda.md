@@ -31,7 +31,12 @@ tensorfold-native serve /path/to/checkpoint --temperature 0
 - `--no-drafts` serves without the MTP head; `"draft": false` on a request does the same for that request.
 - `TF_FLASHNEXT_DRAFTS` (1 to 15, default 6) and `TF_FLASHNEXT_CONFIDENCE` (default 0.60) set the head's chain.
 - The engine uploads 73.3 GiB of the checkpoint: the n-gram tables stay mapped from the shards, and the vision tower is
-  not loaded.
+  not loaded without `--vision`.
+- `--vision` (experimental) runs images through the Qwen-VL tower that Qwen's CUDA family runs too
+  (`zig/src/vision/qwen_cuda.zig`), on rank zero alone; its rows replace the prompt's image placeholders, M-RoPE
+  positions reach attention, the block indexer and the MTP head, and a second rank receives the rows over NCCL. The
+  checkpoint's preprocessor and processor files set the image processor. No checkpoint has been checked with images
+  yet.
 - It refuses another quantization, other shapes, and semantic settings its kernels fix (RMS epsilon, RoPE base, rotated
   share, type and scaling, the gate and activation types, attention bias, the layer roles, the n-gram layer, kernel
   and dilation): config.json is checked at load and the log names the field. It also refuses `--segments`, `--slide`

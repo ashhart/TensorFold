@@ -85,6 +85,7 @@ pub fn Ops(comptime Tri: type) type {
         pub fn prefillChunk(o: Self, seq: *prompt.Seq, d: *Draft, ids: []const u32, at: usize, stop: usize) !void {
             if (stop > d.cap or stop <= at or stop - at > d.rows_cap) return error.PromptTooLong;
             if (seq.fed != at or d.len != at or d.drafted != 0) return error.PositionMismatch;
+            d.media = if (seq.media) |*m| m.view() else null;
             const last = stop == ids.len;
             try o.forwardMain(seq, ids[at..stop], .{ .logits = if (last) .last else .none, .streams = d.streams.ptr });
             const head_to = @min(stop, ids.len - 1);
@@ -123,7 +124,7 @@ pub fn Ops(comptime Tri: type) type {
                 .k = &e.batch_k,
                 .s = s,
                 .m = .{ .table_w = e.table.w.ptr, .table_s = e.table.s.ptr, .table_b = e.table.b.ptr, .table_dense = e.table.dense, .layers = (&h.layer)[0..1], .mixer = h.mixer, .head = h.draft, .ngram = &e.ngram },
-                .seq = .{ .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
+                .seq = .{ .media = d.media, .conv = &.{}, .state = &.{}, .kc = (&d.kc)[0..1], .vc = (&d.vc)[0..1], .ikc = (&d.ikc)[0..1], .pooled = (&d.pooled)[0..1], .tail = d.kc, .history = &d.unused_history, .cap = d.cap, .scores = score_rows },
                 .hooks = .{ .logits = .none },
             };
             var at: usize = 0;
@@ -139,6 +140,7 @@ pub fn Ops(comptime Tri: type) type {
                 } else {
                     try tri.embed(s.ids, e.table.w.ptr, e.table.s.ptr, e.table.b.ptr, s.ple_keys, dims, streams, m);
                 }
+                try @import("cuda_media.zig").injectNext(d.media, o.stream(), s.ple_keys, d.len, m);
                 try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, m, dims, dims);
                 try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
                 try p.sumSlices(s.part, s.branch, true, m * dims, fc_sk);

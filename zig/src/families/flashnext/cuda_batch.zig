@@ -327,9 +327,9 @@ pub fn Pass(comptime Tri: type) type {
             const vc = self.seq.vc[ai].ptr;
             const ikc = self.seq.ikc[ai].ptr;
             const pooled = self.seq.pooled[ai].ptr;
-            try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0);
+            if (self.seq.media) |m| try m.attn(self.stream, pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, eps, n) else try self.tri.attnPrep(pa, at.pos, lw.q_scale.ptr, lw.k_scale.ptr, lw.i_scale.ptr, s.inv, at.q, kc, vc, at.iq, ikc, s.dummy, s.dummy, eps, n, 0);
             // attention.qsa_pool for the blocks these rows complete, then each block of rows' scores and attention
-            try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n);
+            if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n);
             const nb = scoreStride(self.seq.cap);
             var r0: usize = 0;
             var b: usize = 0;
@@ -478,6 +478,7 @@ pub fn Pass(comptime Tri: type) type {
             } else {
                 try self.tri.embed(s.ids, self.m.table_w, self.m.table_s, self.m.table_b, s.h, dims, streams, n);
             }
+            try @import("cuda_media.zig").inject(self.seq.media, self.lanes, self.stream, s.h, self.pos0, n);
             for (self.m.layers, 0..) |*lw, layer| {
                 const keep: LayerKeep = if (self.hooks.keep) |kp| kp.layers[layer] else .{};
                 if (layer == ple_layer) {

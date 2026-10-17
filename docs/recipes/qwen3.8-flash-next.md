@@ -432,8 +432,9 @@ TBD [release-0.3.5].
 
 ## Image input on CUDA
 
-Image input is the Python engine's. @shantanugoel added it for Flash Next in
-[#146](https://github.com/ashhart/TensorFold/pull/146), and the native binary refuses `--vision`.
-Use `--vision` on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh; text prefix
-caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
-sidecar conversion and verification.
+@shantanugoel added image input to the Python engine's Flash Next in
+[#146](https://github.com/ashhart/TensorFold/pull/146). There, use `--vision` on one CUDA GPU with `--parallel` of at
+least two. Image requests always prefill fresh; text prefix caching remains available. See the
+[image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.
+The native binary's CUDA engine takes `--vision` too, experimental, through the Qwen-VL tower that Qwen's CUDA family
+runs (see [Flash Next on CUDA](flash-next-cuda.md)).

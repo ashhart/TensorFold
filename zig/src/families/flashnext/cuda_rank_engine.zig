@@ -18,6 +18,8 @@ pub const Identity = extern struct {
     decode_graph: u64 = 0,
     mtp: u64 = 0,
     head_sharded: u64 = 0,
+    image_tokens: u64 = 0,
+    max_images: u64 = 0,
 };
 
 fn fileHash(a: std.mem.Allocator, io: std.Io, path: []const u8) ![32]u8 {
@@ -135,7 +137,7 @@ pub const Session = struct {
         return @min(local, peer.arg);
     }
 
-    fn command(s: *Session, input: wire.Header, payload: []const u8) !wire.Header {
+    pub fn command(s: *Session, input: wire.Header, payload: []const u8) !wire.Header {
         if (s.rank != 0 or s.stopped or s.collective.failed) return error.RankDisconnected;
         if (payload.len > wire.max_payload or input.bytes != payload.len) return error.BadRankFrame;
         errdefer s.poison();
@@ -148,7 +150,7 @@ pub const Session = struct {
         return h;
     }
 
-    fn ack(s: *Session, sent: wire.Header) !void {
+    pub fn ack(s: *Session, sent: wire.Header) !void {
         errdefer s.poison();
         const h = try s.link.receiveHeader(wire.deadline(30_000));
         if (h.kind != .ack or h.sequence != sent.sequence or h.object != sent.object or h.bytes != 0 or h.arg != 0) return error.BadRankFrame;
@@ -179,6 +181,8 @@ pub const Session = struct {
         }
         q.deinit(s.gpa);
     }
+
+    pub const setMedia = @import("cuda_rank_media.zig").send;
 
     pub fn forward(s: *Session, comptime Tri: type, tri: Tri, q: *prompt.Seq, ids: []const u32, hooks: prompt.batch.Hooks) !void {
         if (ids.len == 0 or ids.len > wire.max_payload / 4 or q.fed + ids.len > q.cap or hooks.keep != null or hooks.logits == .all) return error.UnsupportedRankOperation;
@@ -301,6 +305,10 @@ pub const Session = struct {
                 q.rank_id = h.object;
                 try s.seqs.put(s.gpa, h.object, q);
             },
+            .media => {
+                const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
+                try @import("cuda_rank_media.zig").receive(s, q, h, payload);
+            },
             .forward => {
                 const q = s.seqs.get(h.object) orelse return error.UnknownRankSequence;
                 const ids = try s.gpa.alloc(u32, payload.len / 4);
@@ -397,6 +405,7 @@ fn sameIdentity(a: Identity, b: Identity) bool {
 pub fn shape(h: wire.Header) !void {
     switch (h.kind) {
         .create => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
+        .media => if (h.object == 0 or h.arg == 0 or h.arg > prompt.max_tokens or h.flags != 0 or h.bytes == 0 or h.bytes % 12 != 0 or h.bytes / 12 > 64) return error.BadRankFrame,
         .forward => if (h.object == 0 or h.arg != 0 or h.bytes == 0 or h.bytes % 4 != 0 or (h.flags != @backingInt(prompt.batch.Logits.last) and h.flags != @backingInt(prompt.batch.Logits.none))) return error.BadRankFrame,
         .verify => if (h.object == 0 or h.arg != 0 or h.flags != 0 or h.bytes == 0 or h.bytes % 4 != 0 or h.bytes / 4 > mtp.max_rows) return error.BadRankFrame,
         .keep => if (h.object == 0 or h.arg == 0 or h.arg > mtp.max_rows or h.bytes != 0 or h.flags != 0) return error.BadRankFrame,
@@ -468,4 +477,16 @@ test "round payload rejects duplicate owners and out-of-vocabulary tokens before
     try std.testing.expectError(error.InvalidToken, roundPayload(&bytes));
     try std.testing.expectError(error.InvalidToken, tokenIds(&.{ 0, wt.vocab }));
     try std.testing.expectError(error.BadRankFrame, roundPayload(bytes[0..13]));
+}
+
+test "tensor ranks agree on image admission limits" {
+    const base: Identity = .{ .config = @splat(1), .index = @splat(2), .program = @splat(3), .checkpoint = @splat(4), .context = 4096, .chunk = 64 };
+    inline for (.{ "image_tokens", "max_images" }) |name| {
+        var changed = base;
+        @field(changed, name) = 1;
+        try std.testing.expect(!sameIdentity(base, changed));
+    }
+    try shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 12 });
+    try std.testing.expectError(error.BadRankFrame, shape(.{ .kind = .media, .object = 1, .arg = 4096, .bytes = 65 * 12 }));
+    _ = @import("cuda_rank_media.zig");
 }

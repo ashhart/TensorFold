@@ -252,3 +252,34 @@ test "a turn resumed from the prompt cache adds the ids past its resume point an
     // the prompt from 290 less the overlap (118 ids), then the prompt's last 64 with the reply's 20
     try std.testing.expectEqual(after1 + (344 - (290 - 64)) + 64 + 20, store.added);
 }
+
+test "a prompt with an image gets the same reply drafted and plain, each prefill holding the image" {
+    var s: Served = undefined;
+    try s.init();
+    defer s.deinit();
+    const Seen = struct {
+        n: usize = 0,
+        fn hook(ptr: *anyopaque, stream: *lanes.Stream, _: usize) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (stream.images.len == 1 and stream.images[0].at == 2 and
+                stream.images[0].pixels[0] == 0.25) self.n += 1;
+        }
+    };
+    var seen: Seen = .{};
+    s.target.prefill_hook = Seen.hook;
+    s.target.prefill_hook_ctx = &seen;
+    try s.host.start();
+    var drafted: Box = .{};
+    defer drafted.deinit();
+    var plain: Box = .{};
+    defer plain.deinit();
+    const image = api.Image{ .pixels = &.{0.25}, .gh = 2, .gw = 2, .at = 2, .tokens = 1 };
+    const request: Request = .{ .prompt = &.{ 3, 4, 9, 5, 6 }, .images = &.{image}, .max_tokens = 24 };
+    try std.testing.expectEqual(Reason.length, try s.run(&request, 1, &drafted));
+    var serial = request;
+    serial.drafts = false;
+    try std.testing.expectEqual(Reason.length, try s.run(&serial, 2, &plain));
+    try std.testing.expectEqualSlices(u32, drafted.tokens.items, plain.tokens.items);
+    try std.testing.expectEqual(@as(usize, 2), seen.n);
+    try std.testing.expect(drafted.rounds < plain.rounds);
+}

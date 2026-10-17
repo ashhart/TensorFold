@@ -91,6 +91,14 @@ pub const Collective = struct {
         try c.wait(null, wire.deadline(c.timeout_ms));
     }
 
+    pub fn broadcast(c: *Collective, stream: cuda.Stream, values: u64, bytes: usize) !void {
+        if (c.failed or c.comm == null) return error.RankDisconnected;
+        errdefer c.abort();
+        try c.link.checkPeer();
+        try c.submitted(c.lib.api.ncclBroadcast(values, values, bytes, .u8, 0, c.comm, stream.handle));
+        try c.wait(null, wire.deadline(c.timeout_ms));
+    }
+
     /// FP32 sum is enqueued on the compute stream; later kernels on that stream observe its result.
     pub fn sum(c: *Collective, stream: cuda.Stream, values: u64, count: usize) !void {
         if (c.failed or c.comm == null) return error.RankDisconnected;

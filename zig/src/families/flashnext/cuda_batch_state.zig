@@ -432,6 +432,7 @@ pub const Scratch = struct {
 
 /// A sequence's state the pass reads and leaves as the row-by-row path would.
 pub const SeqState = struct {
+    media: ?@import("cuda_media.zig").View = null,
     conv: []cuda.DeviceBuffer,
     state: []cuda.DeviceBuffer,
     kc: []cuda.DeviceBuffer,
