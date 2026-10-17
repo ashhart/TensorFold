@@ -87,7 +87,6 @@ extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan(const __nv_bfloat
                                                                  const int* __restrict__ META, __nv_bfloat16* __restrict__ Y, int R, float lo,
                                                                  float hi, int PROJ, int XD, int CD, int DTOFF, int H, int DH, int NG, int RMAX) {
     constexpr int DS = 128, TPR = 4, NJ = DS / TPR / 4, MR = 32;  // MR: kept and window rows a stage steps
-    // each stage's inputs load first, together: its steps then read shared memory alone
     __shared__ float4 bs[MR][DS / 4], cs[MR][DS / 4];
     __shared__ float xin[MR][32], gate[MR][32], dts[MR];
     const int h = blockIdx.x, g = h / (H / NG);
@@ -97,17 +96,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan(const __nv_bfloat
     const float a = A[h], dsk = DSK[h], dtb = DTB[h];
     float* s0 = S + (static_cast<int64_t>(h) * DH + d) * DS;
     float s[4 * NJ];
-#pragma unroll
-    for (int j = 0; j < NJ; ++j) {
-        const float4 t = *reinterpret_cast<const float4*>(s0 + 4 * (TPR * j + q));
-        s[4 * j] = t.x;
-        s[4 * j + 1] = t.y;
-        s[4 * j + 2] = t.z;
-        s[4 * j + 3] = t.w;
-    }
-    for (int i0 = 0; i0 < n; i0 += MR) {
-        const int count = min(MR, n - i0);
-        if (i0 > 0) __syncthreads();  // the last stage's steps are done with shared memory
+    // a stage's inputs load first, together: its steps then read shared memory alone
+    const auto load = [&](int i0, int count) {
         for (int t = threadIdx.x; t < count * (DS / 4); t += 128) {
             const int k = t / (DS / 4), c = t - k * (DS / 4), i = i0 + k;
             const bool prev = i < pk;
@@ -137,7 +127,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan(const __nv_bfloat
                 if (blockIdx.y == 0) DT[dt_at] = dts[k];
             }
         }
-        __syncthreads();
+    };
+    const auto steps = [&](int i0, int count) {
         for (int k = 0; k < count; ++k) {
             const int i = i0 + k;
             const bool prev = i < pk;
@@ -170,6 +161,23 @@ extern "C" __global__ void __launch_bounds__(128) tf_nemo_scan(const __nv_bfloat
             const float y = rbf(__fmaf_rn(x, dsk, out));
             Y[static_cast<int64_t>(row) * XD + h * DH + d] = __float2bfloat16_rn(__fmul_rn(gate[k][local], y));
         }
+    };
+    load(0, min(n, MR));  // before the state: its registers held through the loads would slow them
+#pragma unroll
+    for (int j = 0; j < NJ; ++j) {
+        const float4 t = *reinterpret_cast<const float4*>(s0 + 4 * (TPR * j + q));
+        s[4 * j] = t.x;
+        s[4 * j + 1] = t.y;
+        s[4 * j + 2] = t.z;
+        s[4 * j + 3] = t.w;
+    }
+    __syncthreads();
+    steps(0, min(n, MR));
+    for (int i0 = MR; i0 < n; i0 += MR) {
+        __syncthreads();  // the last stage's steps are done with shared memory
+        load(i0, min(MR, n - i0));
+        __syncthreads();
+        steps(i0, min(MR, n - i0));
     }
 }
 
