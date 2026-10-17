@@ -52,6 +52,7 @@ const kernels = [_]Kernel{
     .{ .name = "glm_glue", .flags = &.{"-O3"} }, // ours: the Python family's Triton glue by hand, its PTX op for op
     .{ .name = "glm_ops", .flags = &.{"-O3"} }, // ours: GLM's integer work the Python family did in torch (the DSA token lists)
     .{ .name = "glm_quant", .flags = torch_ops }, // ours: GLM's draft-only weight quantizers, torch at load in the Python family
+    .{ .name = "ling_glue", .flags = glue }, // ours: Ling-3.1's bf16 glue at the HF model's rounding points
     .{ .name = "torch_argmax", .src = "torch_ops/argmax", .flags = torch_ops },
     .{ .name = "torch_topk", .src = "torch_ops/topk", .flags = torch_ops },
     .{ .name = "torch_pointwise", .src = "torch_ops/pointwise", .flags = torch_ops },
@@ -154,6 +155,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     const glm_cuda = glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat);
     runner.addImport("glm_cuda", glm_cuda);
+    runner.addImport("ling_cuda", lingCuda(b, target, optimize, cuda, mods.core, mods.lanes, glm_cuda));
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
@@ -183,9 +185,17 @@ fn radioModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/radio/radio.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core }, .{ .name = "lanes", .module = lanes } } });
 }
 
+/// The Ling-3.1-flash CUDA family over the runtime, the core, the lane core and the GLM kernels it reuses.
+fn lingCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, glm: *std.Build.Module) *std.Build.Module {
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/families/ling/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    for ([_]struct { []const u8, *std.Build.Module }{ .{ "glm_cuda", glm }, .{ "cuda", cuda }, .{ "core", core }, .{ "lanes", lanes } }) |x| m.addImport(x[0], x[1]);
+    return m;
+}
+
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
 fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
+    const glm = glmCuda(b, target, optimize, cuda, core, lanes, heat);
     const mod = b.createModule(.{
         .root_source_file = b.path("zig/src/native/cuda.zig"),
         .target = target,
@@ -198,7 +208,8 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "nemotron", .module = nemotron },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
-            .{ .name = "glm_cuda", .module = glmCuda(b, target, optimize, cuda, core, lanes, heat) },
+            .{ .name = "glm_cuda", .module = glm },
+            .{ .name = "ling_cuda", .module = lingCuda(b, target, optimize, cuda, core, lanes, glm) },
         },
     });
     return .{ .api = api, .engines = mod };
@@ -272,6 +283,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     // the GLM-5.3-Flash CUDA family's host side
     const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
+    // Ling-3.1-flash's config loader and weight map, and its routing and limits as the GLM kernels take them
+    const ling = lingCuda(b, host, .debug, cuda, mods.core, mods.lanes, glm);
+    const ling_run = b.addRunArtifact(b.addTest(.{ .root_module = ling }));
+    step.dependOn(&ling_run.step);
+    b.step("test-ling", "Ling-3.1-flash's config loader and weight map (no GPU work)").dependOn(&ling_run.step);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);

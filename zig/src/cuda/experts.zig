@@ -26,6 +26,7 @@ pub const Layer = struct {
     dims: usize, // D
     experts: usize,
     limit: f32 = 0.0, // fp8g, nvfp4: the SwiGLU clamp, 0 for none
+    after: bool = false, // fp8g, nvfp4: clamp silu's output (Ling: min(silu(g), L)), not its input (silu(min(g, L)))
     relu2: bool = false, // nvfp4: up is one projection under relu^2 (Nemotron), not SwiGLU's gate and up
 };
 
@@ -47,7 +48,7 @@ pub const Grouped = struct {
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_bf16) return error.EpilogueNotBuilt;
-                if (skip >= 0 or l.limit != 0) return error.OptionNotBuilt;
+                if (skip >= 0 or l.limit != 0 or l.after) return error.OptionNotBuilt;
                 const up = epi == .up;
                 const nb = (if (up) l.width else l.dims) / 32;
                 const w = Affine4Experts.view(l, up);
@@ -64,7 +65,7 @@ pub const Grouped = struct {
             .affine4 => {
                 const a = g.affine4 orelse return error.FormatNotLoaded;
                 if (epi == .down_f32) return error.EpilogueNotBuilt;
-                if (skip >= 0 or l.limit != 0) return error.OptionNotBuilt;
+                if (skip >= 0 or l.limit != 0 or l.after) return error.OptionNotBuilt;
                 const up = epi == .up;
                 const nb = (if (up) l.width else l.dims) / 32;
                 const w = Affine4Experts.view(l, up);
@@ -179,6 +180,8 @@ pub const Fp8Experts = struct {
     mod: Module,
     fns: [2][3]Function, // decode, prompt; by Epi
     resident: [2][3]usize, // blocks the grid may hold: per SM times SMs
+    after: [2]Function, // decode, prompt: gate-up in Ling's clamp order (Layer.after)
+    after_resident: [2]usize,
 
     pub const cols = 32; // output columns a warp
     pub const block = 128; // the checkpoint's scale block, both ways
@@ -190,18 +193,24 @@ pub const Fp8Experts = struct {
         pub const p_gate_up = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi2ELi2ELi2ELi2EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const p_down_f32 = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi0ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const p_down_bf16 = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi1ELi3ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const gate_up_after = "_ZN14tf_fp8_experts17fp8_expert_kernelILi2ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const p_gate_up_after = "_ZN14tf_fp8_experts24fp8_expert_prompt_kernelILi2ELi4ELi2ELi2EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
     };
 
     pub fn load(d: *const Driver, sms: usize) !Fp8Experts {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.fp8_experts);
         errdefer mod.unload();
-        var e: Fp8Experts = .{ .mod = mod, .fns = undefined, .resident = undefined };
+        var e: Fp8Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .after = undefined, .after_resident = undefined };
         const names = [2][3][:0]const u8{ .{ symbols.gate_up, symbols.down_f32, symbols.down_bf16 }, .{ symbols.p_gate_up, symbols.p_down_f32, symbols.p_down_bf16 } };
         for (names, 0..) |set, i| for (set, 0..) |name, j| {
             e.fns[i][j] = try mod.function(name);
             e.resident[i][j] = @max(1, try e.fns[i][j].occupancy(128, 0)) * sms;
         };
+        for ([2][:0]const u8{ symbols.gate_up_after, symbols.p_gate_up_after }, 0..) |name, i| {
+            e.after[i] = try mod.function(name);
+            e.after_resident[i] = @max(1, try e.after[i].occupancy(128, 0)) * sms;
+        }
         return e;
     }
 
@@ -217,10 +226,12 @@ pub const Fp8Experts = struct {
         const n = if (gate) l.width else l.dims;
         const pi: usize = @intFromBool(prompt);
         const ei: usize = @backingInt(epi);
+        const after = gate and l.after;
+        const resident = if (after) e.after_resident[pi] else e.resident[pi][ei];
         const grid: usize = if (prompt) blk: {
             const cw: usize = if (gate) 2 else 4;
-            break :blk @min(items * (nb / cw), e.resident[pi][ei]);
-        } else @min((items * nb + 3) / 4, e.resident[pi][ei]);
+            break :blk @min(items * (nb / cw), resident);
+        } else @min((items * nb + 3) / 4, resident);
         if (grid < 1) return;
         var a: launch_.Args = .{};
         a.add(in.x);
@@ -234,7 +245,7 @@ pub const Fp8Experts = struct {
         a.add(@as(i32, @intCast(n)));
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
-        try launch_.launch(e.fns[pi][ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
+        try launch_.launch(if (after) e.after[pi] else e.fns[pi][ei], .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = 128, .y = 1, .z = 1 } }, s, &a);
     }
 
     /// e4m3 [n, k] of one expert as int32 [n/32][k/32][32][2][4]: lane (gq, t)'s half h, tile j (fp8/experts.py pack).
@@ -270,9 +281,9 @@ pub const Fp8Experts = struct {
 /// NVFP4 experts (nvfp4_experts.cu): decode rows 16 pairs at a time; prompt rows staged, 64 pairs a CTA.
 pub const Nvfp4Experts = struct {
     mod: Module,
-    fns: [4]Function, // by Epi, then relu^2 up
-    resident: [4]usize, // blocks the grid may hold: per SM times SMs
-    prompt_fns: [3]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down
+    fns: [5]Function, // by Epi, then relu^2 up, then gate-up in Ling's clamp order (Layer.after)
+    resident: [5]usize, // blocks the grid may hold: per SM times SMs
+    prompt_fns: [4]Function, // relu^2 up, SwiGLU gate-up, bf16 sums down, gate-up in Ling's order
 
     pub const cols = 32; // output columns a block
     pub const words = 144; // int32 a (32 columns, 32 inputs) block: 128 code words, then 16 of e4m3 scales
@@ -282,11 +293,12 @@ pub const Nvfp4Experts = struct {
         pub const down_f32 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi0ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const down_bf16 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi3ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
         pub const up_relu2 = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi1ELi1ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
-        pub const prompt = [3][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down" };
+        pub const gate_up_after = "_ZN16tf_nvfp4_experts19nvfp4_expert_kernelILi2ELi4ELi4EEEvPK13__nv_bfloat16iiPK5uint4PKfiiPKiSA_SA_Pvifi";
+        pub const prompt = [4][:0]const u8{ "tf_nvfp4_prompt_relu2", "tf_nvfp4_prompt_swiglu", "tf_nvfp4_prompt_down", "tf_nvfp4_prompt_swiglu_after" };
     };
 
-    /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down (GB10's fastest tiles).
-    pub const prompt_wn = [3]usize{ 8, 4, 8 };
+    /// The prompt entries' warps (32-column blocks) a CTA: relu^2 up, SwiGLU gate-up, down, Ling's gate-up.
+    pub const prompt_wn = [4]usize{ 8, 4, 8, 4 };
 
     /// Prompt4<M, 4, 1, WN>'s dynamic shared bytes: stages of 64 rows' 64 inputs, then WN x 2 blocks of `parts`.
     pub fn promptSmem(parts: usize, wn: usize) u32 {
@@ -300,11 +312,11 @@ pub const Nvfp4Experts = struct {
         var mod = try Module.load(d, kernels.nvfp4_experts);
         errdefer mod.unload();
         var e: Nvfp4Experts = .{ .mod = mod, .fns = undefined, .resident = undefined, .prompt_fns = undefined };
-        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2 }, 0..) |name, i| {
+        for ([_][:0]const u8{ symbols.gate_up, symbols.down_f32, symbols.down_bf16, symbols.up_relu2, symbols.gate_up_after }, 0..) |name, i| {
             e.fns[i] = try mod.function(name);
             e.resident[i] = @max(1, try e.fns[i].occupancy(128, 0)) * sms;
         }
-        for (symbols.prompt, &e.prompt_fns, [3]usize{ 1, 2, 1 }, prompt_wn) |name, *f, parts, wn| {
+        for (symbols.prompt, &e.prompt_fns, [4]usize{ 1, 2, 1, 2 }, prompt_wn) |name, *f, parts, wn| {
             f.* = try mod.function(name);
             try f.allowDynamicShared(promptSmem(parts, wn));
         }
@@ -320,7 +332,7 @@ pub const Nvfp4Experts = struct {
         const gate = epi == .up;
         const kg = (if (gate) l.dims else l.width) / 32;
         const nb = (if (gate) l.width else l.dims) / cols;
-        const ei: usize = if (gate and l.relu2) 3 else @backingInt(epi);
+        const ei: usize = if (gate and l.relu2) 3 else if (gate and l.after) 4 else @backingInt(epi);
         const grid = @min((items * nb + 3) / 4, e.resident[ei]);
         if (grid < 1) return;
         var a: launch_.Args = .{};
@@ -357,7 +369,7 @@ pub const Nvfp4Experts = struct {
         a.add(@as(i32, @intCast(if (gate) l.width else l.dims)));
         a.add(if (gate) l.limit else @as(f32, 0.0));
         a.add(skip);
-        const fi: usize = if (!gate) 2 else if (l.relu2) 0 else 1;
+        const fi: usize = if (!gate) 2 else if (l.relu2) 0 else if (l.after) 3 else 1;
         const cfg: launch_.Config = .{ .grid = .{ .x = @intCast(items * ((nb + prompt_wn[fi] - 1) / prompt_wn[fi])), .y = 1, .z = 1 }, .block = .{ .x = @intCast(prompt_wn[fi] * 32), .y = 1, .z = 1 }, .shared = promptSmem(parts, prompt_wn[fi]) };
         try launch_.launch(e.prompt_fns[fi], cfg, s, &a);
     }

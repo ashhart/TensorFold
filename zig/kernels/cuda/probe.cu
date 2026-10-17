@@ -60,3 +60,12 @@ extern "C" __global__ void tf_probe_pdl_step(unsigned long long* counter, unsign
     asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 #endif
 }
+
+// One thread busy for `ns` of the global timer: a stream kept busy while the host queues what follows it.
+extern "C" __global__ void tf_probe_spin(long long ns) {
+    long long t0, t;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t0));
+    do {
+        asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t));
+    } while (t - t0 < ns);
+}

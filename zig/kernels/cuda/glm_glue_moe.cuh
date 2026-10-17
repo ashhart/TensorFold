@@ -16,45 +16,140 @@ __device__ __forceinline__ float group64(const float* q) {
   return g;
 }
 
+// AFTER false: GLM's silu(min(g, L)); true: Ling's min(silu(g), L) (inclusionAI's SwigluStepAndMul). Both clip u.
+template <bool AFTER>
 __device__ __forceinline__ float swiglu1(float g, float u, float limit) {
-  g = fminf(g, limit);
+  if (!AFTER) g = fminf(g, limit);
   u = fminf(fmaxf(u, 0.0f - limit), limit);
-  const float s = rbf(div_full(g, exp_approx(0.0f - g) + 1.0f));
+  float s = rbf(div_full(g, exp_approx(0.0f - g) + 1.0f));
+  if (AFTER) s = fminf(s, limit);
   return rbf(__fmul_rn(u, s));
+}
+
+// Group-limited routing: -inf on every expert outside the `keep` groups of the best top-2 sums (ties to lower group).
+template <int MAXE>
+__device__ __forceinline__ void keep_groups(float* choice, int lane, int ne, int gs, int ng, int keep) {
+  float gscore = -INFINITY;  // lane g: group g's top-2 sum
+  const bool whole = gs % 32 == 0 && ne % 32 == 0;  // groups of whole i: one pass, no divisions (Ling's 64)
+  if (whole) {
+    const int per = gs / 32, ni = ne / 32;
+    float a = -INFINITY, b = -INFINITY;
+    int g = 0, left = per;
+#pragma unroll
+    for (int i = 0; i < MAXE; ++i) {
+      if (i >= ni) break;
+      const float c = choice[i];
+      if (c > a) {
+        b = a;
+        a = c;
+      } else if (c > b) {
+        b = c;
+      }
+      if (--left == 0) {
+        for (int o = 16; o > 0; o >>= 1) {
+          const float oa = __shfl_xor_sync(0xffffffffu, a, o), ob = __shfl_xor_sync(0xffffffffu, b, o);
+          b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+          a = fmaxf(a, oa);
+        }
+        if (lane == g) gscore = a + b;
+        a = b = -INFINITY;
+        ++g;
+        left = per;
+      }
+    }
+  }
+  for (int g = 0; g < (whole ? 0 : ng); ++g) {
+    float a = -INFINITY, b = -INFINITY;  // this lane's best two in group g, a >= b
+    for (int i = 0; i < MAXE; ++i) {
+      const int e = i * 32 + lane;
+      if (e < ne && e / gs == g) {
+        const float c = choice[i];
+        if (c > a) {
+          b = a;
+          a = c;
+        } else if (c > b) {
+          b = c;
+        }
+      }
+    }
+    for (int o = 16; o > 0; o >>= 1) {
+      const float oa = __shfl_xor_sync(0xffffffffu, a, o), ob = __shfl_xor_sync(0xffffffffu, b, o);
+      b = fmaxf(fminf(a, oa), fmaxf(b, ob));
+      a = fmaxf(a, oa);
+    }
+    if (lane == g) gscore = a + b;
+  }
+  bool live = lane < ng;
+  unsigned kept = 0u;
+  for (int k = 0; k < keep; ++k) {
+    float mx = live ? gscore : -INFINITY;
+    for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+    const unsigned at = __ballot_sync(0xffffffffu, live && gscore == mx);
+    if (at == 0u) break;
+    const int id = __ffs(at) - 1;
+    kept |= 1u << id;
+    if (lane == id) live = false;
+  }
+  if (whole) {
+    const int per = gs / 32, ni = ne / 32;
+    int g = 0, left = per;
+#pragma unroll
+    for (int i = 0; i < MAXE; ++i) {
+      if (i >= ni) break;
+      if (!((kept >> g) & 1u)) choice[i] = -INFINITY;
+      if (--left == 0) {
+        ++g;
+        left = per;
+      }
+    }
+    return;
+  }
+  for (int i = 0; i < MAXE; ++i) {
+    const int e = i * 32 + lane;
+    if (e < ne && !((kept >> (e / gs)) & 1u)) choice[i] = -INFINITY;
+  }
 }
 
 }  // namespace glm_moe
 
 // glue._swiglu with BLOCK 512 (128 threads, 4 values each, 64-group sums over 16 lanes), column block blockIdx.y.
-extern "C" __global__ void __launch_bounds__(128)
-    tf_glm_swiglu_512(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
-  const int64_t r = blockIdx.x, d0 = blockIdx.y * 512 + threadIdx.x * 4;
-  const uint2 gv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + d0);
-  const uint2 uv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + w + d0);
-  const __nv_bfloat16* gh = reinterpret_cast<const __nv_bfloat16*>(&gv);
-  const __nv_bfloat16* uh = reinterpret_cast<const __nv_bfloat16*>(&uv);
-  float a[4];
-  uint2 ov;
-  __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ov);
-  for (int j = 0; j < 4; ++j) {
-    a[j] = glm_moe::swiglu1(bf(gh[j]), bf(uh[j]), limit);
-    oh[j] = __float2bfloat16_rn(a[j]);
+#define TF_GLM_SWIGLU_512(NAME, AFTER)                                                                               \
+  extern "C" __global__ void __launch_bounds__(128)                                                                  \
+      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {                         \
+    const int64_t r = blockIdx.x, d0 = blockIdx.y * 512 + threadIdx.x * 4;                                           \
+    const uint2 gv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + d0);                                           \
+    const uint2 uv = *reinterpret_cast<const uint2*>(gu + r * 2 * w + w + d0);                                       \
+    const __nv_bfloat16* gh = reinterpret_cast<const __nv_bfloat16*>(&gv);                                           \
+    const __nv_bfloat16* uh = reinterpret_cast<const __nv_bfloat16*>(&uv);                                           \
+    float a[4];                                                                                                      \
+    uint2 ov;                                                                                                        \
+    __nv_bfloat16* oh = reinterpret_cast<__nv_bfloat16*>(&ov);                                                       \
+    for (int j = 0; j < 4; ++j) {                                                                                    \
+      a[j] = glm_moe::swiglu1<AFTER>(bf(gh[j]), bf(uh[j]), limit);                                                   \
+      oh[j] = __float2bfloat16_rn(a[j]);                                                                             \
+    }                                                                                                                \
+    *reinterpret_cast<uint2*>(out + r * w + d0) = ov;                                                                \
+    const float g = glm_moe::group64<4>(a);                                                                          \
+    if ((threadIdx.x & 15) == 0) xs[r * (w / 64) + d0 / 64] = g;                                                     \
   }
-  *reinterpret_cast<uint2*>(out + r * w + d0) = ov;
-  const float g = glm_moe::group64<4>(a);
-  if ((threadIdx.x & 15) == 0) xs[r * (w / 64) + d0 / 64] = g;
-}
 
 // glue._swiglu with BLOCK 64 (the TP=3 shared expert's 704): one value a thread, the warp's butterfly, then 2 warps.
-extern "C" __global__ void __launch_bounds__(64)
-    tf_glm_swiglu_64(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {
-  __shared__ float smem[2];
-  const int64_t r = blockIdx.x, d = blockIdx.y * 64 + threadIdx.x;
-  const float a = glm_moe::swiglu1(bf(gu[r * 2 * w + d]), bf(gu[r * 2 * w + w + d]), limit);
-  out[r * w + d] = __float2bfloat16_rn(a);
-  const float g = block_sum<2>(a, smem);
-  if (threadIdx.x == 0) xs[r * (w / 64) + blockIdx.y] = g;
-}
+#define TF_GLM_SWIGLU_64(NAME, AFTER)                                                                                \
+  extern "C" __global__ void __launch_bounds__(64)                                                                   \
+      NAME(const __nv_bfloat16* gu, __nv_bfloat16* out, float* xs, float limit, int64_t w) {                         \
+    __shared__ float smem[2];                                                                                        \
+    const int64_t r = blockIdx.x, d = blockIdx.y * 64 + threadIdx.x;                                                 \
+    const float a = glm_moe::swiglu1<AFTER>(bf(gu[r * 2 * w + d]), bf(gu[r * 2 * w + w + d]), limit);                \
+    out[r * w + d] = __float2bfloat16_rn(a);                                                                         \
+    const float g = block_sum<2>(a, smem);                                                                           \
+    if (threadIdx.x == 0) xs[r * (w / 64) + blockIdx.y] = g;                                                         \
+  }
+
+TF_GLM_SWIGLU_512(tf_glm_swiglu_512, false)
+TF_GLM_SWIGLU_64(tf_glm_swiglu_64, false)
+// Ling's order, the limit on silu's output: min(silu(g), L) * clip(u, -L, L).
+TF_GLM_SWIGLU_512(tf_ling_swiglu_512, true)
+TF_GLM_SWIGLU_64(tf_ling_swiglu_64, true)
 
 // qmm._group_sums: row blockIdx.x's 64-input sums, 8 lanes a group of 8 consecutive inputs each, 16 groups a block.
 extern "C" __global__ void __launch_bounds__(128)
@@ -66,10 +161,10 @@ extern "C" __global__ void __launch_bounds__(128)
   if ((threadIdx.x & 7) == 0 && g < kg) xs[m * kg + g] = s;
 }
 
-// glue._topk, a warp a row: top_k by sigmoid + bias (ties to lower id), normed if `norm`, x scale; then shared expert.
+// glue._topk, a warp a row: top_k of sigmoid + bias (lower id on ties) in the kept groups, normed, x scale; + shared.
 extern "C" __global__ void __launch_bounds__(32)
     tf_glm_topk(const float* logits, const float* bias, int* pick, float* wts, float scale, int ne, int top_k,
-                int norm) {
+                int norm, int n_group, int topk_group) {
   constexpr int MAXE = 16;  // 512 experts a row
   const int64_t r = blockIdx.x;
   const int lane = threadIdx.x;
@@ -79,6 +174,7 @@ extern "C" __global__ void __launch_bounds__(32)
     score[i] = e < ne ? div_full(1.0f, exp_approx(0.0f - logits[r * ne + e]) + 1.0f) : 0.0f;
     choice[i] = e < ne ? score[i] + bias[e] : -INFINITY;
   }
+  if (n_group > 1) glm_moe::keep_groups<MAXE>(choice, lane, ne, ne / n_group, n_group, topk_group);
   float total = 0.0f, mine = 0.0f;
   int mine_id = 0;
   for (int k = 0; k < top_k; ++k) {

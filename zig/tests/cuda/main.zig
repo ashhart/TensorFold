@@ -38,6 +38,11 @@ const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
 const radio_tests = @import("radio_tests.zig");
 const glm_lanes_tests = @import("glm_lanes_tests.zig");
 const glm_synth = @import("glm_synth.zig");
+const glm_ref_route = @import("glm_ref_route.zig");
+const ling_synth = @import("ling_synth.zig");
+const ling_weights = @import("ling_weights_tests.zig");
+const ling_real = @import("ling_weights_real.zig");
+const glm_kda_ling = @import("glm_kda_ling.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -91,10 +96,32 @@ const usage =
     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
     \\  glm-ref                   GLM projections (matmuls, router, attention, indexer, hc) against float64 (synthetic)
+    \\  ling-mla                  Ling's MLA (128-wide absorb/expand, rope, gate, 576-wide attention) vs float64 (synthetic)
+    \\  ling-mla-real <fixture>   Ling layer 7's MLA on real inputs vs HF and float64; decode, window and cut bytes
+    \\  glm-mla-same <fatbin>     GLM's MLA launches on this build vs a 6380c8da glm_glue fatbin, byte for byte
+    \\  glm-kda-ling FIXTURE      GLM KDA's paths on Ling-3.1 layer 0 (kda-real's fixture) against fla and float64
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
+    \\  glm-route-old <fatbin>    GLM's select and swiglu against an older glm_glue fatbin (6380c8da), byte for byte
+    \\  ling-route-old <fatbin>   group-limited select (Ling's shapes, odd groups, ties) vs an older glm_glue fatbin, byte for byte
+    \\  glm-route-ling <fixture>  Ling's group-limited routing on captured layer-4 logits vs float64, HF and exllamav3
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
+    \\  ling-synth <dir> [--format bf16|fp8|nvfp4] [--layers N]   a tiny Ling-3.1 checkpoint with the real names and config schema
+    \\  ling-weights <dir>        every layer of a Ling checkpoint loaded: projections vs float64, small tensors byte for byte
+    \\  ling-forward-synth <dir> <ref> [picks]   a ling-synth checkpoint's forward vs oracle/ling_forward.py; cuts, windows, batches
+    \\  ling-layer-real <dir> <fixture> [dump]   one real Ling-3.1 layer vs HF's captured output (oracle/ling_layer.py); exactness
+    \\  ling-layer-speed <dir> <fixture> [reps [rows,..]]   one real Ling-3.1 layer timed whole and op by op: decode, windows, prompts
+    \\  ling-layer-bytes <dir> <fixture> <out>   one real Ling-3.1 layer's outputs and states on every path into a file (cmp)
+    \\  ling-clamp <dir>          Ling's SwiGLU order min(silu(g), L): glue and the dir's grouped experts vs float64
+    \\  ling-clamp-old <dir> <fatbins>   the grouped expert instances vs an older build's fatbins, byte for byte
+    \\  ling-lanes <dir> <out> [ref] [--layers a,b] [--mtp]   Ling's lane backend: chunked, drafted, resumed, concurrent == plain
+    \\  ling-slots                the lane backend's slots over reused map buckets, in this build's mode (no GPU work)
+    \\  ling-ckpt-check <dir> [index]   every tensor's name, dtype and shape against the loader's, from the headers alone (no GPU work)
+    \\  ling-init-faults <dir> [--mtp] [--every N]   the backend opened with each driver call, then each host allocation, failing
+    \\  ling-mtp-real <dir> <fixture>   the real MTP layer vs HF's (oracle/ling_mtp.py); cut, window == decode rows
+    \\  ling-weights-real <dir> <refdir>   real Ling-3.1 layers 0, 4, 7 (4 experts) vs float64 and torch (oracle/ling_weights.py)
+    \\  ling-pack <dir> <layer> [experts [stage]]   one MoE layer's experts: read, pack and cold load timed; bytes vs the host packers
     \\
 ;
 
@@ -157,6 +184,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "nvfp4-experts")) return nvfp4_experts_tests.experts(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "ling-mla")) return @import("ling_ref_mla.zig").run(gpu);
+    if (std.mem.eql(u8, cmd, "ling-mla-real")) return @import("ling_mla_real.zig").run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-mla-same")) return @import("glm_mla_same.zig").run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-kda-ling")) return glm_kda_ling.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
@@ -191,7 +222,25 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "glm-route-old")) return glm_ref_route.old(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ling-route-old")) return glm_ref_route.lingOld(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "glm-route-ling")) return glm_ref_route.ling(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-synth")) return glm_synth.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ling-synth")) return ling_synth.run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "ling-weights")) return ling_weights.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ling-forward-synth")) return @import("ling_forward_synth.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null);
+    if (std.mem.eql(u8, cmd, "ling-layer-real")) return @import("ling_layer_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null);
+    if (std.mem.eql(u8, cmd, "ling-layer-speed")) return @import("ling_layer_speed.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else null, if (rest.len > 3) rest[3] else null);
+    if (std.mem.eql(u8, cmd, "ling-layer-bytes")) return @import("ling_layer_bytes.zig").run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "ling-clamp")) return @import("ling_clamp.zig").run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "ling-clamp-old")) return @import("ling_clamp.zig").old(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "ling-mtp-real")) return @import("ling_mtp_real.zig").run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "ling-lanes")) return @import("ling_lanes.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "ling-slots")) return lingSlots(gpu);
+    if (std.mem.eql(u8, cmd, "ling-ckpt-check")) return @import("ling_ckpt.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "ling-init-faults")) return @import("ling_faults.zig").run(gpu, rest);
+    if (std.mem.eql(u8, cmd, "ling-weights-real")) return ling_real.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "ling-pack")) return @import("ling_pack.zig").run(gpu, rest);
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
@@ -212,4 +261,9 @@ fn info(gpu: check.Gpu) !void {
 fn hasFlag(flags: []const [:0]const u8, name: []const u8) bool {
     for (flags) |f| if (std.mem.eql(u8, f, name)) return true;
     return false;
+}
+
+fn lingSlots(gpu: check.Gpu) !void {
+    try @import("ling_cuda").lanes.slotCheck(gpu.gpa);
+    check.pass("ling-slots: new streams take the lowest free slot over buckets holding stale slots ({t})", .{@import("builtin").mode});
 }

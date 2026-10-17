@@ -16,7 +16,7 @@ const Stream = stream_.Stream;
 /// Rows padded to whole 128-row blocks, as every lane format pads them.
 pub const padded = nvfp4.padded;
 
-/// modelopt_pack.cu's kernels; each matches a host packer (fp8.packCodes, qmmf.packBf16, nvfp4.pack*, Nvfp4Experts).
+/// modelopt_pack.cu's kernels; each matches a host packer (fp8.packCodes, qmmf.packBf16, nvfp4.pack*, the experts').
 pub const Packer = struct {
     mod: Module,
     fp8_lane: Function,
@@ -24,6 +24,7 @@ pub const Packer = struct {
     fp4_words: Function,
     fp4_scales: Function,
     fp4_experts: Function,
+    fp8_experts: Function,
 
     pub fn load(d: *const Driver) !Packer {
         if (!kernels.available) return error.BuiltWithoutKernels;
@@ -36,6 +37,7 @@ pub const Packer = struct {
             .fp4_words = try mod.function("tf_pack_fp4_words"),
             .fp4_scales = try mod.function("tf_pack_fp4_scales"),
             .fp4_experts = try mod.function("tf_pack_fp4_experts"),
+            .fp8_experts = try mod.function("tf_pack_fp8_experts"),
         };
     }
 
@@ -78,6 +80,17 @@ pub const Packer = struct {
         a.add(out);
         for ([_]usize{ n, ks, k0, k, parts, m }) |v| a.add(@as(i32, @intCast(v)));
         try launch_.launch(p.fp4_experts, .{ .grid = .{ .x = @intCast(k / 32), .y = @intCast(n / 32), .z = @intCast(count) }, .block = .{ .x = 144 } }, s, &a);
+    }
+
+    /// `count` experts' e4m3 [E][n][k] as part m of `parts` per (column block, k32 group) (Fp8Experts.packGateUp).
+    pub fn fp8Experts(p: *const Packer, s: Stream, src: u64, out: u64, count: usize, n: usize, k: usize, parts: usize, m: usize) !void {
+        if (n % 32 != 0 or k % 32 != 0 or m >= parts) return error.UnexpectedTensor;
+        if (count == 0) return;
+        var a: launch_.Args = .{};
+        a.add(src);
+        a.add(out);
+        for ([_]usize{ n, k, parts, m }) |v| a.add(@as(i32, @intCast(v)));
+        try launch_.launch(p.fp8_experts, .{ .grid = .{ .x = @intCast(k / 32), .y = @intCast(n / 32), .z = @intCast(count) }, .block = .{ .x = 256 } }, s, &a);
     }
 };
 

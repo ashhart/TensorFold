@@ -396,6 +396,7 @@ const Loader = struct {
             .shared_gu = gu,
             .shared_down = sd,
             .shared = sh.len(),
+            .shared_limit = c.swiglu_limit,
             .top_k = c.topk,
             .scale = c.routed_scale,
             .norm = c.norm_topk,

@@ -62,6 +62,17 @@ __device__ __forceinline__ float swiglu(float g, float u, float limit) {
   return bf(gv / (1.f + expf(-gv))) * uv;
 }
 
+// Ling's order (EPI 4): the limit on silu's output, min(silu(g), L) * clip(u, -L, L).
+__device__ __forceinline__ float swiglu_after(float g, float u, float limit) {
+  const float gv = bf(g);
+  float uv = bf(u), s = bf(gv / (1.f + expf(-gv)));
+  if (limit > 0.f) {
+    s = fminf(s, limit);
+    uv = fminf(fmaxf(uv, -limit), limit);
+  }
+  return s * uv;
+}
+
 __device__ __forceinline__ float relu2(float a) {
   const float u = fmaxf(bf(a), 0.f);
   return u * u;
@@ -88,6 +99,9 @@ __device__ __forceinline__ void epilogue(const float (&acc)[M][RT][NTW][4], int 
         } else if constexpr (EPI == 2) {
           o0 = swiglu(a0, acc[M - 1][r][j][2 * h], limit);
           o1 = swiglu(a1, acc[M - 1][r][j][2 * h + 1], limit);
+        } else if constexpr (EPI == 4) {
+          o0 = swiglu_after(a0, acc[M - 1][r][j][2 * h], limit);
+          o1 = swiglu_after(a1, acc[M - 1][r][j][2 * h + 1], limit);
         } else {
           o0 = a0;
           o1 = a1;
