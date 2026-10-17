@@ -5,7 +5,8 @@ import { checkClaudeCli } from '../../agent/claude-cli'
 import { defaultCliModels } from '../../agent/cli-models'
 import { builtinClis, cliToolStatuses } from '../../agent/cli-registry'
 import { fetchAiGatewayModels, isAiGatewayProvider } from '../../agent/model-gateway'
-import { fetchLmStudioModels, fetchOllamaModels, fetchOpenAiCompatibleModels, isLmStudioProvider, isOllamaProvider, isOpenRouterProvider } from '../../agent/local-providers'
+import { contextsFromModelsPayload, fetchLmStudioModels, fetchOllamaModels, fetchOpenAiCompatibleModelsDetailed, isLmStudioProvider, isOllamaProvider, isOpenRouterProvider } from '../../agent/local-providers'
+import { recordHostedContext, recordHostedContexts } from '../../agent/hosted-context'
 import { providerWithAccount, resolveProviderModel, selectProviderAccount } from '../../agent/provider-accounts'
 import { auditPreview, isSecretMask, maskedSecretUrlError } from '../../agent/security'
 import { createProviderFetch } from '../../agent/secure-fetch'
@@ -88,10 +89,12 @@ export async function runtimeProviderWithFreshModels(baseProvider: Provider, acc
   let provider = runtimeProvider(baseProvider, accountId)
   if (!providerUsesLocalCompatibleModels(provider)) return provider
   try {
-    const models = await fetchOpenAiCompatibleModels(provider.baseUrl, provider.apiKey, 1500)
-    if (models.length) {
-      rememberProviderModels(baseProvider.id, accountId ?? null, models)
-      provider = { ...provider, models }
+    const listed = await fetchOpenAiCompatibleModelsDetailed(provider.baseUrl, provider.apiKey, 1500)
+    if (listed.models.length) {
+      // The provider's own answer carries each model's window (vLLM's max_model_len); keep it.
+      recordHostedContexts(baseProvider.id, listed.models, listed.contextTokens)
+      rememberProviderModels(baseProvider.id, accountId ?? null, listed.models)
+      provider = { ...provider, models: listed.models }
     }
   } catch {
     // Keep the saved model list when a local server does not expose /models.
@@ -180,6 +183,8 @@ export async function listProviderModels(provider: Provider): Promise<string[]> 
   const json: any = await readBoundedJsonResponse(res, 'Provider models')
   const data: any[] = json?.data ?? json?.models ?? (Array.isArray(json) ? json : [])
   const ids = data.map((m) => (typeof m === 'string' ? m : m?.id ?? m?.name)).filter(Boolean)
+  const hosted = contextsFromModelsPayload(json)
+  for (const id of ids) if (typeof id === 'string') recordHostedContext(effectiveProvider.id, id, hosted[id.trim()])
   return Array.from(new Set(ids)).sort() as string[]
 }
 
