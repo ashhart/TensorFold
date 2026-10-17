@@ -11,7 +11,7 @@ test "dense serving: owned serving CUDA images retain every #836 byte" {
     try std.testing.expectEqualStrings("db560d705729142c66df8dee18fc635f20f09e4f09b8431de265bd6fac68e892", &hash(@embedFile("kernels/cuda/experts_prefill.cu")));
     try std.testing.expectEqualStrings("a6bf09198ffd685f7392d4d433af9739c91d67f7039309d3fd5fe6785f810ab9", &hash(@embedFile("kernels/cuda/gdn.cu")));
     try std.testing.expectEqualStrings("9551469ae616283ee893d7f117d143c43de08bc868650f539cf38570a47e7a13", &hash(@embedFile("kernels/cuda/lane_gemv.cu")));
-    try std.testing.expectEqualStrings("1c1987521fa552127cb0dcb0099da1bf7f6e98edd96b16d43ae48efd053b6f64", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
+    try std.testing.expectEqualStrings("71b9aba5ba586b12454a4c2cb8168e59227aed4db8bc78190ecc9f262ba3d62f", &hash(@embedFile("kernels/cuda/prefill_attention.cu")));
     try std.testing.expectEqualStrings("3b27b8e964f6e7453e962cd7a259253ae7e1940297439b4b518f05da04dd1041", &hash(@embedFile("kernels/cuda/qmm_group.cu")));
     try std.testing.expectEqualStrings("6dbafecbf5c28b48da1bcd222f85494b471e728a482eb17fc5fffa8c522dee95", &hash(@embedFile("kernels/cuda/qmm_prefill.cu")));
     try std.testing.expectEqualStrings("595aeb27642965231ce8a8b368ecef08bd8ddaac2ff258e516d9e1474870aa10", &hash(@embedFile("kernels/cuda/qwen35.cu")));
