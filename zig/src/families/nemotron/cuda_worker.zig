@@ -14,8 +14,8 @@ const state = @import("cuda_state.zig");
 const Source = @import("cuda_source.zig").Source;
 const Engine = @import("cuda_engine.zig").Engine;
 
-/// Rows a job's first message carries after its header; a longer job sends its rows in a second message.
-pub const small_rows = 16;
+/// Rows a job's first message carries after its header (a decode step's one row); more go in a second message.
+pub const small_rows = 1;
 const magic: u32 = 0x4a4f4253;
 const header_bytes = 64;
 const Job = enum(u32) { rows = 1, end = 2 };
@@ -199,7 +199,7 @@ test "a job's sections and messages" {
     c.latent = 1024;
     c.hidden = 4096;
     try std.testing.expectEqual([3]usize{ 0, 1536, 1536 + 16 * 2048 }, sections(c, 16));
-    try std.testing.expectEqual(@as(usize, 64 + 1536 + 16 * 2048 + 16 * 8192), firstBytes(c));
+    try std.testing.expectEqual(@as(usize, 64 + 256 + 2048 + 8192), firstBytes(c)); // one row, not 16 rows of padding
     try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[1] % 256); // an odd job's rows start aligned
     try std.testing.expectEqual(@as(usize, 0), sections(c, 1821)[2] % 256);
 }
