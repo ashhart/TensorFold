@@ -20,6 +20,7 @@ constant constexpr int PER = (TF_E + 31) / 32;
   for (int c = 0; c < 4; c++)
     for (int tn = 0; tn < 4; tn++) acc[c][tn] = 0.0f;
   for (int ii = 0; ii < 4; ii++) {
+    if (4 * int(lane) + ii >= ITERS) break; // widths under 4096 leave the last lanes idle
     float inter[4][4];
     for (int h = 0; h < 2; h++) {
       const uint4 v = w[ii * 2 + h];
