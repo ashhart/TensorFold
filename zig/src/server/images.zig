@@ -8,6 +8,7 @@ const model_text = @import("model_text.zig");
 const media_fetch = @import("media_fetch.zig");
 const videos = @import("videos.zig");
 const image_key = @import("image_key.zig");
+const image_pieces = @import("image_pieces.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -26,7 +27,7 @@ pub const Expanded = struct {
 const Part = struct { video: bool = false, url: []const u8, low: bool = false };
 
 /// The image and video parts of normalized `messages`, in the order the template meets them.
-fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
+fn parts(cx: *Cx, messages: Value, image_type: []const u8) errors.Refused![]const Part {
     var out: std.ArrayList(Part) = .empty;
     if (messages != .array) return out.items;
     for (messages.array) |m| {
@@ -35,7 +36,7 @@ fn parts(cx: *Cx, messages: Value) errors.Refused![]const Part {
         for (content.array) |p| {
             const kind = p.get("type") orelse continue;
             if (kind != .string) continue;
-            if (std.mem.eql(u8, kind.string, "image_url")) {
+            if (std.mem.eql(u8, kind.string, "image_url") or std.mem.eql(u8, kind.string, image_type)) { // as messages.zig wrote it
                 const iu = p.get("image_url").?;
                 const detail = iu.get("detail");
                 try out.append(cx.a, .{ .url = iu.get("url").?.string, .low = detail != null and std.mem.eql(u8, detail.?.string, "low") });
@@ -222,7 +223,7 @@ pub fn encodeShielded(text: model_text.Text, a: std.mem.Allocator, rendered: []c
 /// The prompt with image placeholders expanded to tokens and video ones to frame groups, its images and cache ids.
 pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx, messages: Value, ids: []const u32, history_len: usize) errors.Refused!?Expanded {
     const v = vision orelse return null;
-    const ps = try parts(cx, messages);
+    const ps = try parts(cx, messages, v.part_type);
     var n_images: usize = 0;
     for (ps) |p| n_images += @intFromBool(!p.video);
     const n_videos = ps.len - n_images;
@@ -280,7 +281,10 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         const before = out_ids.items.len;
         const after = close;
         close = null;
-        if (t == v.image_token) {
+        if (t == v.image_token and prepared[k].pieces.len > 0) {
+            try image_pieces.place(cx.a, &out_ids, &key, &imgs, t, prepared[k]);
+            k += 1;
+        } else if (t == v.image_token) {
             const img = prepared[k];
             k += 1;
             if (v.wrap) |w| try both(cx.a, &out_ids, &key, w[0]);
@@ -315,7 +319,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
 }
 
 /// Appends a token to the prompt and its cache key alike.
-fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
+pub fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
     try ids.append(a, t);
     try key.append(a, t);
 }

@@ -17,6 +17,7 @@ For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+| Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
 
 ## Capability floor
 
