@@ -179,3 +179,87 @@ test "a record is 64 bytes, and a name past 56 bytes is cut" {
     @memcpy(r.text[0..@min(name.len, r.text.len)], name[0..@min(name.len, r.text.len)]);
     try std.testing.expectEqual(@as(usize, 56), std.mem.sliceTo(&r.text, 0).len);
 }
+
+const ProcessTest = struct {
+    var last_pid: c_int = 0;
+    var last_fd: c_int = -1;
+    var last_reaped = false;
+    extern "c" fn fork() c_int;
+    extern "c" fn socketpair(c_int, c_int, c_int, *[2]c_int) c_int;
+    extern "c" fn kill(c_int, c_int) c_int;
+    fn check(mode: u8) !void {
+        var pair: [2]c_int = undefined;
+        if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+        const pid = fork();
+        if (pid < 0) {
+            _ = posix.system.close(pair[0]);
+            _ = posix.system.close(pair[1]);
+            return error.ForkFailed;
+        }
+        if (pid == 0) {
+            _ = posix.system.close(pair[1]);
+            ending.store(mode == 2, .release);
+            watch(pair[0], 0);
+            std.c._exit(0);
+        }
+        _ = posix.system.close(pair[0]);
+        last_pid = pid;
+        last_fd = pair[1];
+        last_reaped = false;
+        defer {
+            if (last_fd >= 0) {
+                _ = posix.system.close(last_fd);
+                last_fd = -1;
+            }
+            if (!last_reaped) {
+                _ = kill(pid, 9);
+                var cleanup: c_int = 0;
+                _ = std.c.waitpid(pid, &cleanup, 0);
+                last_reaped = true;
+            }
+        }
+        if (mode == 3) return error.InjectedParentFailure;
+        if (mode == 1) {
+            var record: Record = .{ .kind = error_kind, .rank = 1 };
+            @memcpy(record.text[0..8], "peer OOM");
+            const data = std.mem.asBytes(&record);
+            try std.testing.expectEqual(@as(isize, data.len), posix.system.write(pair[1], data.ptr, data.len));
+        }
+        _ = posix.system.close(pair[1]);
+        last_fd = -1;
+        var status: c_int = 0;
+        for (0..2000) |_| {
+            if (std.c.waitpid(pid, &status, 1) == pid) {
+                last_reaped = true;
+                try std.testing.expectEqual(@as(c_int, 0), status & 0x7f);
+                try std.testing.expectEqual(@as(c_int, if (mode == 2) 0 else 1), (status >> 8) & 0xff);
+                return;
+            }
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        _ = kill(pid, 9);
+        _ = std.c.waitpid(pid, &status, 0);
+        last_reaped = true;
+        return error.PeerDidNotStop;
+    }
+};
+test "the real peer watcher exits on a closed line and on an error record, and returns for an intentional end" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try ProcessTest.check(0);
+    try ProcessTest.check(1);
+    try ProcessTest.check(2);
+}
+
+test "a failing parent check still closes the line, kills and reaps the watcher's child" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    defer if (!ProcessTest.last_reaped) {
+        if (ProcessTest.last_fd >= 0) _ = posix.system.close(ProcessTest.last_fd);
+        _ = ProcessTest.kill(ProcessTest.last_pid, 9);
+        var status: c_int = 0;
+        _ = std.c.waitpid(ProcessTest.last_pid, &status, 0);
+    };
+    try std.testing.expectError(error.InjectedParentFailure, ProcessTest.check(3));
+    try std.testing.expect(ProcessTest.last_reaped);
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(c_int, -1), std.c.waitpid(ProcessTest.last_pid, &status, 1));
+}
