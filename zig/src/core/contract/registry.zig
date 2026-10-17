@@ -198,6 +198,9 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "exl3_experts tf_exl3_down_combine", .symbol = "tf_exl3_down_combine", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_rotate", .symbol = "tf_exl3_plan_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_finish", .symbol = "tf_exl3_plan_finish", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_rotate", .symbol = "tf_exl3_prompt_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 } } },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu", .symbol = "tf_exl3_prompt_gu", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 124, .static = 43264, .bound = 256 }, .{ .regs = 124, .static = 43264, .bound = 256 } } },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_0", .symbol = "tf_exl3_tc_0", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_1", .symbol = "tf_exl3_tc_1", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_candidate tf_exl3_tc_2", .symbol = "tf_exl3_tc_2", .image = "exl3_candidate", .threads = 256 }, .usage = .{ .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 }, .{ .regs = 128, .static = 8196, .bound = 256 } } },
@@ -325,6 +328,8 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "drama3_codec c_snake", .usage = .{ .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 21, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 }, .{ .regs = 26, .static = 0, .bound = 0 } } },
         .{ .name = "drama3_fp8 decode gate-up", .usage = .{ .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 157, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 }, .{ .regs = 163, .static = 0, .bound = 128 } } },
         .{ .name = "drama3_fp8 prompt gate-up", .usage = .{ .{ .regs = 213, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 }, .{ .regs = 212, .static = 32768, .bound = 128 } } },
+        .{ .name = "exl3_experts tf_exl3_prompt_gu", .usage = .{ .{ .regs = 128, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 } } },
+        .{ .name = "exl3_experts tf_exl3_prompt_down", .usage = .{ .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 126, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 }, .{ .regs = 127, .static = 43264, .bound = 256 } } },
     } ++ learning.cuda_132) },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
@@ -361,13 +366,6 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     }
     return u;
 }
-
-/// Unmeasured launches stay outside the measured set; live and fatbin audits must collect their missing records.
-pub const cuda_pending = [_]CudaRecord{
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_rotate", .symbol = "tf_exl3_prompt_rotate", .image = "exl3_experts", .threads = 32 }, .usage = none },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_gu", .symbol = "tf_exl3_prompt_gu", .image = "exl3_experts", .threads = 256 }, .usage = none },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_down", .symbol = "tf_exl3_prompt_down", .image = "exl3_experts", .threads = 256 }, .usage = none },
-};
 
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
@@ -576,18 +574,9 @@ const learning = @import("registry_learning.zig");
 const paging = @import("paging_pending.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-/// What the live audit checks: the serving records, then the learning, paging and still unmeasured launches.
-pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra ++ cuda_pending;
+/// What the live audit checks: the serving records, then the learning and paging launches.
+pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
 test {
     _ = learning;
     _ = paging;
-}
-
-test "pending CUDA launches have no invented usage and cannot pass the measured gate" {
-    for (cuda_pending) |r| {
-        try std.testing.expect(r.launch.threads > 0);
-        try std.testing.expectEqual(none, r.usage);
-        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
-        for (cuda) |measured| try std.testing.expect(!std.mem.eql(u8, r.launch.symbol, measured.launch.symbol));
-    }
 }
