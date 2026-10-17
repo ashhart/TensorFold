@@ -251,6 +251,9 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
     _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug);
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
+    // G8 for DeepSeek V4.1 releases that ship no chat template: a template against the release's encoding goldens
+    const dsv41_template = b.addExecutable(.{ .name = "tf-dsv41-template-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/dsv41_template_check.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "template", .module = template }} }) });
+    b.step("tf-dsv41-template-check", "A DeepSeek V4.1 chat template rendered by the engine against a release's encoding/tests goldens").dependOn(&b.addInstallArtifact(dsv41_template, .{}).step);
     // the chat-template engine's tests (zig/src/core/template/tests.zig), which no other test binary reaches
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/tests.zig"), .target = target, .optimize = .Debug, .link_libc = true }) })).step);
     // the engine seam's own tests (lane_host.zig), as zig/tests/server/zig_test.sh runs them
