@@ -4,6 +4,7 @@ const platform = @import("sys");
 const examples = @import("lesson_examples.zig");
 const adapters = @import("learn_shape.zig");
 const forgetting = @import("pocket_forget.zig");
+const marks = @import("pocket_mark.zig");
 
 const Example = examples.Example;
 const Lesson = examples.Lesson;
@@ -49,8 +50,22 @@ pub fn Hooks(comptime H: type) type {
             return H.pocketSave(f.b, f.gpa, f.io, layers, neurons, up, down);
         }
 
-        pub fn pocketRound(f: Self, up: []f32, down: []f32) !void {
-            return H.pocketRound(f.b, f.gpa, up, down);
+        /// The served checkpoint's layout: where pockets sit and learn, its width (family.zig).
+        pub fn layout(f: Self) @import("family.zig").Layout {
+            return H.layout(f.b);
+        }
+
+        /// A SwiGLU family's layer `layer` for the forward: gate rows, up rows (u / sharp) and outputs, [neurons, D].
+        pub fn pocketSwiglu(f: Self, layer: usize, gate: []const f32, up: []const f32, down: []const f32, used: usize) !void {
+            return H.pocketSwiglu(f.b, layer, gate, up, down, used);
+        }
+
+        pub fn pocketReadSwiglu(f: Self, layer: usize, gate: []f32, up: []f32, down: []f32) usize {
+            return H.pocketReadSwiglu(f.b, layer, gate, up, down);
+        }
+
+        pub fn pocketSaveSwiglu(f: Self, layers: []const usize, neurons: usize, gate: []f32, up: []f32, down: []f32) !usize {
+            return H.pocketSaveSwiglu(f.b, f.gpa, f.io, layers, neurons, gate, up, down);
         }
     };
 }
@@ -73,7 +88,10 @@ pub fn begin(l: anytype, lesson: Lesson) !void {
             try l.probe.begin(l.trainer.?, l.answers, l.owned.held);
             l.phase = .probe;
         },
-        .pocket => try startPocket(l),
+        .pocket => {
+            try startPocket(l);
+            try marks.mark(&l.pockets); // what taking this lesson out puts back
+        },
         .edit => if (comptime !editing(@TypeOf(l.*))) return error.EditsUnsupported else {
             try openEmpty(l);
             try startEdit(l);

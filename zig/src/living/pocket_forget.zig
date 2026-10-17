@@ -1,6 +1,7 @@
 //! A fact deleted on request: its neurons' inputs zeroed, their layers rounded as a save writes them, kept to put back.
 const std = @import("std");
 const pocket = @import("pocket.zig");
+const shards = @import("shards.zig");
 
 /// What the last delete changed, bit for bit as it was: whole layers' neurons and counts, every neuron's record.
 pub const Kept = struct {
@@ -9,17 +10,18 @@ pub const Kept = struct {
     slots: std.ArrayList(usize) = .empty, // the pocket slots it changed
     up: std.ArrayList(f32) = .empty, // [slots, neurons, D]: their input weights before
     down: std.ArrayList(f32) = .empty, // [slots, neurons, D]: their outputs before
+    gate: std.ArrayList(f32) = .empty, // SwiGLU: [slots, neurons, D], their gate rows before
     used: std.ArrayList(usize) = .empty, // [slots]: their counts before
     learned: std.ArrayList(pocket.Learned) = .empty, // the session's neuron records before
     learned_before: usize = 0,
     marks: usize = 0, // retired lessons before
 
     pub fn deinit(k: *Kept, gpa: std.mem.Allocator) void {
-        inline for (.{ "slots", "up", "down", "used", "learned" }) |f| @field(k, f).deinit(gpa);
+        inline for (.{ "slots", "up", "down", "gate", "used", "learned" }) |f| @field(k, f).deinit(gpa);
     }
 
     fn clear(k: *Kept) void {
-        inline for (.{ "slots", "up", "down", "used", "learned" }) |f| @field(k, f).clearRetainingCapacity();
+        inline for (.{ "slots", "up", "down", "gate", "used", "learned" }) |f| @field(k, f).clearRetainingCapacity();
         k.held = false;
         k.stale = false;
     }
@@ -43,8 +45,9 @@ pub fn settle(p: anytype) void {
 /// Neurons `gone` names that hold anything silenced, their layers rounded, freed at the top; how many held anything.
 pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usize {
     try p.load(t, host);
-    const d = t.config().hidden;
-    const n = pocket.neurons * d;
+    const P = @TypeOf(p.*);
+    const d = p.hidden;
+    const n = P.neurons * d;
     const k = &p.forgot;
     // a put-back the device has not taken yet is never dropped for a new delete
     if (k.stale) return error.PutBackNotOnDevice;
@@ -61,6 +64,7 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
     for (k.slots.items) |slot| {
         try k.up.appendSlice(p.gpa, p.up.items[slot * n ..][0..n]);
         try k.down.appendSlice(p.gpa, p.down.items[slot * n ..][0..n]);
+        if (P.swiglu) try k.gate.appendSlice(p.gpa, p.gate.items[slot * n ..][0..n]);
         try k.used.append(p.gpa, p.used.items[slot]);
     }
     try k.learned.appendSlice(p.gpa, p.learned.items);
@@ -69,6 +73,7 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
     k.learned_before = p.learned_before;
     k.marks = p.retired_lessons.items.len;
     k.held = true;
+    p.snap.valid = false; // a lesson begun before this delete puts back the pocket without it, never what it cut
     cut(p, t, host, gone) catch |e| {
         // put back whole; if the device cannot take it, that is the failure to report, the snapshot kept
         _ = unforget(p, t, host) catch |back| {
@@ -83,14 +88,14 @@ pub fn forget(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !usiz
 
 /// The cut itself, after the snapshot: input weights zeroed, records out, layers rounded, freed and uploaded.
 fn cut(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !void {
-    const d = t.config().hidden;
-    const n = pocket.neurons * d;
+    const d = p.hidden;
     const k = &p.forgot;
     for (gone) |g| {
         const slot = std.mem.indexOfScalar(usize, p.moe.items, g[0]) orelse continue;
         if (g[1] >= p.used.items[slot]) continue;
         // its input weights zeroed, so it never fires; its output stays, so the 4-bit groups it shares keep every bit
         @memset(p.neuron(p.up.items, slot, g[1], d), 0);
+        if (@TypeOf(p.*).swiglu) @memset(p.neuron(p.gate.items, slot, g[1], d), 0);
         // its record goes, so no later fact on the neuron is refitted as this one; its lesson's answers retire
         var i: usize = 0;
         while (i < p.learned.items.len) {
@@ -106,8 +111,8 @@ fn cut(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !void {
     }
     for (k.slots.items) |slot| {
         // the layer as its next save writes it, so the checks after this read what the shards will hold
-        try host.pocketRound(p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n]);
-        try settled(p.gpa, host, p.up.items[slot * n ..][0..n], p.down.items[slot * n ..][0..n]);
+        try shards.roundSlot(p, slot);
+        try settled(p, slot);
         // neurons at the top whose input weights are zero are free; one below a kept neuron stays taken
         while (p.used.items[slot] > 0 and std.mem.allEqual(f32, p.neuron(p.up.items, slot, p.used.items[slot] - 1, d), 0)) p.used.items[slot] -= 1;
         try p.upload(t, host, slot);
@@ -115,14 +120,14 @@ fn cut(p: anytype, t: anytype, host: anytype, gone: []const [2]u16) !void {
 }
 
 /// A rounded layer that a save would round to the same bits, else error.LayerRoundsAgain, so the delete is put back.
-fn settled(gpa: std.mem.Allocator, host: anytype, up: []const f32, down: []const f32) !void {
-    const again = try gpa.alloc(f32, up.len + down.len);
-    defer gpa.free(again);
-    @memcpy(again[0..up.len], up);
-    @memcpy(again[up.len..], down);
-    try host.pocketRound(again[0..up.len], again[up.len..]);
-    const same = std.mem.eql(u8, std.mem.sliceAsBytes(again[0..up.len]), std.mem.sliceAsBytes(up)) and std.mem.eql(u8, std.mem.sliceAsBytes(again[up.len..]), std.mem.sliceAsBytes(down));
-    if (!same) return error.LayerRoundsAgain;
+fn settled(p: anytype, slot: usize) !void {
+    const n = @TypeOf(p.*).neurons * p.hidden;
+    const lists = if (@TypeOf(p.*).swiglu) .{ &p.up, &p.down, &p.gate } else .{ &p.up, &p.down };
+    const was = try p.gpa.alloc(f32, lists.len * n);
+    defer p.gpa.free(was);
+    inline for (lists, 0..) |x, i| @memcpy(was[i * n ..][0..n], x.items[slot * n ..][0..n]);
+    try shards.roundSlot(p, slot); // the cut puts the layer back whole if it moved
+    inline for (lists, 0..) |x, i| if (!std.mem.eql(u8, std.mem.sliceAsBytes(was[i * n ..][0..n]), std.mem.sliceAsBytes(x.items[slot * n ..][0..n]))) return error.LayerRoundsAgain;
 }
 
 /// The last delete undone bit for bit; a layer the device does not take keeps the snapshot, and a call again retries.
@@ -132,10 +137,11 @@ pub fn unforget(p: anytype, t: anytype, host: anytype) !usize {
     try p.load(t, host);
     try p.learned.ensureTotalCapacity(p.gpa, k.learned.items.len);
     // the pocket whole as it was before any layer goes to the forward, so a failed upload leaves no layer half put back
-    const n = pocket.neurons * t.config().hidden;
+    const n = @TypeOf(p.*).neurons * p.hidden;
     for (k.slots.items, 0..) |slot, j| {
         @memcpy(p.up.items[slot * n ..][0..n], k.up.items[j * n ..][0..n]);
         @memcpy(p.down.items[slot * n ..][0..n], k.down.items[j * n ..][0..n]);
+        if (@TypeOf(p.*).swiglu) @memcpy(p.gate.items[slot * n ..][0..n], k.gate.items[j * n ..][0..n]);
         p.used.items[slot] = k.used.items[j];
     }
     p.learned.clearRetainingCapacity();

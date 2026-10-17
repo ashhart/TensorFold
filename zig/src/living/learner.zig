@@ -1,4 +1,4 @@
-//! Sliding Weights' lessons, one learner for every backend over a host that gives the trainer, weights and files.
+//! Living Weights' lessons, one learner for every family and backend over a host that gives the trainer and hooks.
 const std = @import("std");
 const platform = @import("sys");
 const adapters = @import("learn_shape.zig");
@@ -43,16 +43,18 @@ const replay_each = 8; // of a lesson's answers, its first (plain questions) joi
 /// A lesson builds (build) and learns (steps); an edit is written at its subject (edit), more rounds report (again).
 const Phase = enum { idle, build, steps, undo, reroute, drop, save, edit, again, probe, pocket, retire };
 
-/// The lessons over host H: its Trainer, max_rows, Ctx, layers, trainer, free, attach, write and seconds.
+/// The lessons over host H: its trainer and hooks (family.zig), routed blocks only when its trainer keeps `sites`.
 pub fn Learner(comptime H: type) type {
     return struct {
         const Self = @This();
-        const has_edits = @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
-        const has_pocket = @hasDecl(H.Trainer, "normed") and @hasDecl(H, "pocketSave"); // inputs, gradients, a pocket to write
+        const has_sites = @hasField(H.Trainer, "sites"); // Nemotron's routed blocks of ranks (the LoRA path)
+        const has_edits = has_sites and @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
+        const has_pocket = @hasDecl(H.Trainer, "normed") and (@hasDecl(H, "pocketSave") or @hasDecl(H, "pocketSaveSwiglu")); // inputs, gradients, a pocket to write
         const has_whole = has_edits or has_pocket; // lessons that change the model itself
+        const has_taps = has_pocket and @hasDecl(H.Trainer, "tapRows"); // a pocket lesson reads prompts in a conversation at any length
         const Edits = if (has_edits) editor.Editor(H.Trainer) else void;
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
-        const Pockets = if (has_pocket) pocket.Pocket(H.Trainer) else void;
+        const Pockets = if (has_pocket) pocket.Pocket(H.Trainer, H.family) else void;
         pub const Host = H;
 
         gpa: std.mem.Allocator,
@@ -95,9 +97,10 @@ pub fn Learner(comptime H: type) type {
         probe: Probes,
         pockets: Pockets, // every MoE layer's pocket of learned neurons
         pocketed: bool = false, // the last lesson put neurons in the pocket
+        plain: [4]std.ArrayList(Example) = @splat(.empty), // a lesson's lists as this learner reads them (readable)
 
         pub fn init(gpa: std.mem.Allocator, io: std.Io, b: H.Ctx) Self {
-            return .{ .gpa = gpa, .io = io, .b = b, .whole = platform.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
+            return .{ .gpa = gpa, .io = io, .b = b, .whole = !has_sites or platform.c.getenv("TF_SLIDE_ROUTED") == null, .edits = if (has_edits) Edits.init(gpa) else {}, .method = if (has_edits) whole_lessons.method() else .pocket, .probe = if (has_edits) Probes.init(gpa) else {}, .pockets = if (has_pocket) Pockets.init(gpa) else {} };
         }
 
         pub fn deinit(l: *Self) void {
@@ -126,6 +129,7 @@ pub fn Learner(comptime H: type) type {
             l.replay_of.deinit(l.gpa);
             l.live.deinit(l.gpa);
             l.live_of.deinit(l.gpa);
+            for (&l.plain) |*x| x.deinit(l.gpa);
         }
 
         /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
@@ -169,19 +173,20 @@ pub fn Learner(comptime H: type) type {
                 return;
             }
             if (lesson.train.len == 0) return;
-            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
-                if (ex.start < 1 or ex.start >= ex.ids.len or ex.ids.len - 1 > H.max_rows or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
-            };
+            l.lesson = try examples.readable(l.gpa, lesson, has_taps and l.whole and l.method == .pocket, H.max_rows, &l.plain);
             try l.ready();
-            if (lesson.more) {
+            const kept = l.lesson; // as this learner reads it: without the conversations its host cannot read
+            if (kept.more) {
                 if (l.whole) return if (has_whole) whole_lessons.more(l) else error.EditsUnsupported;
                 if (!l.opened) return error.NothingToContinue;
                 return l.start();
             }
-            try l.settleLast(lesson.train);
-            if (l.trainer.?.sites.rank + adapters.block > adapters.max_rank) return error.LearnedChangeFull;
-            l.trainer.?.sites.clear();
-            l.trainer.?.sketched = 0;
+            try l.settleLast(kept.train);
+            if (has_sites) {
+                if (l.trainer.?.sites.rank + adapters.block > adapters.max_rank) return error.LearnedChangeFull;
+                l.trainer.?.sites.clear();
+                l.trainer.?.sketched = 0;
+            }
             l.built = 0;
             l.bits.clearRetainingCapacity();
             l.seen.clearRetainingCapacity();
@@ -190,32 +195,36 @@ pub fn Learner(comptime H: type) type {
             for (l.keeps.items) |ex| l.gpa.free(ex.ids);
             l.keeps.clearRetainingCapacity();
             l.topic = false;
-            if (l.whole) return if (has_whole) whole_lessons.begin(l, lesson) else error.EditsUnsupported;
+            if (l.whole) return if (has_whole) whole_lessons.begin(l, kept) else error.EditsUnsupported;
+            if (comptime !has_sites) unreachable; // a host without routed blocks learns whole lessons only
             l.gpa.free(l.answers);
-            l.answers = try std.mem.concat(l.gpa, Example, &.{ lesson.train, lesson.think });
+            l.answers = try std.mem.concat(l.gpa, Example, &.{ kept.train, kept.think });
             l.phase = .build;
-            for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
-            for (lesson.near) |ex| try l.routes(ex, .near);
-            for (lesson.unasked) |ex| try l.routes(ex, .swap);
-            for ([_][]const Example{ lesson.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
+            for ([_][]const Example{ kept.train, kept.think, kept.held, kept.asked }) |xs| for (xs) |ex| try l.routes(ex, .fact);
+            for (kept.near) |ex| try l.routes(ex, .near);
+            for (kept.unasked) |ex| try l.routes(ex, .swap);
+            for ([_][]const Example{ kept.keep, l.replay.items }) |xs| for (xs) |ex| try l.routes(ex, .other);
         }
 
         /// The trainer, made the first time a lesson needs it.
         fn ready(l: *Self) !void {
             if (l.trainer != null) return;
             const t0 = H.seconds(l.io);
-            l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
+            if (has_sites) l.choice = try choice.Choice.init(l.gpa, H.layers(l.b));
             l.trainer = try H.trainer(l.gpa, l.io, l.b);
             std.log.info("slide: the trainer is ready in {d:.1} s", .{H.seconds(l.io) - t0});
-            l.trainer.?.sites.whole = l.whole;
-            for (&l.asks) |*side| {
-                side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
-                for (side.*) |*rows| rows.* = .empty;
+            if (has_sites) {
+                l.trainer.?.sites.whole = l.whole;
+                for (&l.asks) |*side| {
+                    side.* = try l.gpa.alloc(std.ArrayList(f32), H.layers(l.b));
+                    for (side.*) |*rows| rows.* = .empty;
+                }
             }
         }
 
         /// A round's steps from the open block as it is now, which an undo comes back to.
         fn start(l: *Self) !void {
+            if (comptime !has_sites) return error.RoutedUnsupported;
             try l.schedule(@max(@min(l.lesson.steps, max_steps), 1));
             l.trainer.?.sites.keep();
             l.can_undo = true;
@@ -232,7 +241,7 @@ pub fn Learner(comptime H: type) type {
         /// One bounded unit: one example sketched or projected, one step of learning (a check every few), or the undo.
         pub fn step(l: *Self) Step {
             var s = l.advance() catch |e| failed: {
-                if (l.phase == .steps) l.trainer.?.sites.restore();
+                if (has_sites and l.phase == .steps) l.trainer.?.sites.restore();
                 l.phase = .idle;
                 break :failed Step{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
             };
@@ -246,7 +255,7 @@ pub fn Learner(comptime H: type) type {
                 .undo => {
                     l.phase = .idle;
                     if (has_whole and l.whole and try whole_lessons.undo(l)) return .{ .done = true, .changed = true };
-                    if (!l.can_undo) return .{ .done = true };
+                    if (!has_sites or !l.can_undo) return .{ .done = true };
                     l.trainer.?.sites.restore();
                     l.can_undo = false;
                     l.kept_rounds -|= 1;
@@ -287,6 +296,7 @@ pub fn Learner(comptime H: type) type {
                 if (has_whole and !try whole_lessons.save(l)) try whole_lessons.foldOpen(l);
                 return .{ .done = true, .changed = true };
             }
+            if (comptime !has_sites) return .{ .done = true };
             const ranks = t.sites.rank - @as(usize, if (l.opened and l.kept_rounds == 0) adapters.block else 0);
             if (ranks == 0) return .{ .done = true };
             const t0 = H.seconds(l.io);
@@ -302,6 +312,7 @@ pub fn Learner(comptime H: type) type {
 
         /// A pass of `ex` in `mode` (`acting`: the open lesson acts on its reply); its first reads which kept ones act.
         fn pass(l: *Self, ex: Example, mode: train_mode.Mode, acting: bool) !f32 {
+            if (comptime !has_sites) return error.RoutedUnsupported;
             const t = l.trainer.?;
             const k = key(ex);
             const known = l.bits.get(k);
@@ -315,6 +326,7 @@ pub fn Learner(comptime H: type) type {
         /// Every lesson kept before the open one, all acting (an in-place learner's lessons are part of the model).
         pub fn keptLessons(l: *const Self) Acting {
             var bits: Acting = .empty;
+            if (comptime !has_sites) return bits; // no blocks: the pocket is the model's own
             for (0..l.trainer.?.sites.rank / adapters.block - @intFromBool(l.opened)) |b| bits.set(b);
             return bits;
         }
@@ -327,12 +339,14 @@ pub fn Learner(comptime H: type) type {
 
         /// Layer by layer, a routing prompt's decision row along the candidates, as the last project pass left it.
         fn ask(l: *Self, r: Asked) !void {
+            if (comptime !has_sites) return error.RoutedUnsupported;
             const t = l.trainer.?;
             for (l.asks[@backingInt(r.kind)], 0..) |*rows, k| try rows.appendSlice(l.gpa, t.projected(k, r.ex.ids.len - 1)[r.ex.decide * adapters.candidates ..][0..adapters.candidates]);
         }
 
         /// One example at a time: sketched, projected, routing rows copied; then the block chosen, its router fitted.
         fn buildOnce(l: *Self) !Step {
+            if (comptime !has_sites) return error.RoutedUnsupported;
             const t = l.trainer.?;
             const c = &l.choice.?;
             // an edit of the weights also keeps the questions about others, and reads every wording of the fact's
@@ -387,6 +401,7 @@ pub fn Learner(comptime H: type) type {
 
         /// The open block's router: if facts don't stand apart it acts on what most clear, learning to leave the rest.
         fn route(l: *Self) !void {
+            if (comptime !has_sites) return error.RoutedUnsupported;
             const t = l.trainer.?;
             var fit = try l.fitWith(&.{.fact}, &.{ .near, .swap, .other });
             defer fit.deinit(l.gpa);
@@ -451,6 +466,7 @@ pub fn Learner(comptime H: type) type {
         /// A taken question: a topic lesson keeps its answer for next round; a strict one refits its router without it.
         fn rerouteOnce(l: *Self) !Step {
             if (l.whole) return if (has_whole) whole_lessons.reroute(l) else unreachable;
+            if (comptime !has_sites) return error.RoutedUnsupported;
             if (l.topic) {
                 for (l.lesson.kept) |ex| try l.keeps.append(l.gpa, .{ .ids = try l.gpa.dupe(u32, ex.ids), .start = ex.start, .decide = ex.decide });
                 l.phase = .idle;
@@ -517,7 +533,7 @@ pub fn Learner(comptime H: type) type {
             const t = l.trainer.?;
             for (held) |ex| {
                 var bits = if (l.whole) l.keptLessons() else l.earlier(ex);
-                if (open) bits.set(t.sites.first() / adapters.block);
+                if (has_sites and open) bits.set(t.sites.first() / adapters.block);
                 if (!(try t.step(ex.ids, ex.start, .loss, .{ .decide = ex.decide, .bits = bits, .whole = l.whole })).recalled) return false;
             }
             return true;
@@ -527,7 +543,7 @@ pub fn Learner(comptime H: type) type {
         fn settleLast(l: *Self, answers: []const Example) !void {
             const now = try own(l.gpa, answers);
             if (has_whole and l.whole) try whole_lessons.settle(l);
-            if (l.opened and l.kept_rounds == 0) {
+            if (has_sites and l.opened and l.kept_rounds == 0) {
                 l.trainer.?.sites.needs()[l.trainer.?.sites.first() / adapters.block] = 0;
                 l.trainer.?.sites.close();
                 try H.attach(l.b, l.trainer.?);

@@ -1,30 +1,26 @@
 //! A delete on a pocket of three facts: their neurons zeroed and rounded, freed at the top, put back bit for bit.
 const std = @import("std");
-const cfg = @import("config.zig");
 const pocket = @import("pocket.zig");
 const forgetting = @import("pocket_forget.zig");
 const whole = @import("whole.zig");
 const examples = @import("lesson_examples.zig");
-const Shards = @import("pocket_shards.zig").Io(struct {
-    pub const shard_edit = @import("../../core/shard_edit.zig");
-    pub const safetensors = @import("../../core/safetensors.zig");
-    pub const affine4_host = @import("../../core/affine4_host.zig");
-});
+const family = @import("family.zig");
+const shards = @import("shards.zig");
+const F = @import("families.zig").nemotron_h;
 
 const d = 64;
 const layers = 4; // every MoE layer but the last holds a pocket: slots 0, 1 and 2
-const width = pocket.neurons * d;
 
-/// The trainer as the pocket reads it: only the model's shape.
-const Trainer = struct {
-    c: cfg.Config,
+/// The trainer as the pocket reads it: nothing (the shape is the host's layout).
+const Trainer = struct {};
 
-    pub fn config(t: *const Trainer) cfg.Config {
-        return t.c;
-    }
-};
+const P = pocket.Pocket(Trainer, F);
+const width = P.neurons * d;
 
-const P = pocket.Pocket(Trainer);
+/// A layer rounded as a save writes it: Nemotron's 4-bit groups of 64 (shards.zig).
+fn round(up: []f32, down: []f32) !void {
+    return shards.round(F, std.testing.allocator, d, &.{up}, down);
+}
 
 /// The backend: the pocket as the shards loaded it, and each layer's live copy as the forward reads it.
 const Device = struct {
@@ -36,7 +32,6 @@ const Device = struct {
     used: [layers]usize = @splat(0),
     uploads: usize = 0,
     saves: usize = 0,
-    gpa: std.mem.Allocator = std.testing.allocator, // what rounding allocates from
     fail_at: usize = 0, // the upload, counted from one, that fails once (0: none)
     fail_from: usize = 0, // the upload, counted from one, from which every upload fails (0: none)
     failing: bool = false, // every upload fails
@@ -61,8 +56,11 @@ const Device = struct {
         h.uploads += 1;
     }
 
-    pub fn pocketRound(h: *Device, up: []f32, down: []f32) !void {
-        return Shards.round(h.gpa, d, up, down);
+    /// Every layer's shared expert carries a pocket; all but the last learn.
+    pub fn layout(_: *Device) family.Layout {
+        var has: family.Layers = .empty;
+        for (0..layers) |l| has.set(l);
+        return .fromExperts(d, 64, layers, has);
     }
 };
 
@@ -80,6 +78,10 @@ const SaveHost = struct {
 
     pub fn pocketRead(h: Ctx, l: usize, up: []f32, down: []f32) usize {
         return h.pocketRead(l, up, down);
+    }
+
+    pub fn layout(h: Ctx) family.Layout {
+        return h.layout();
     }
 
     pub fn pocketSave(h: Ctx, _: std.mem.Allocator, _: std.Io, _: []const usize, _: usize, _: []f32, _: []f32) !usize {
@@ -119,16 +121,14 @@ fn three(h: *Device, p: *P, t: *Trainer) !void {
         h.loaded_used[x[0]] = @max(h.loaded_used[x[0]], x[1] + 1);
     }
     // the shards hold 4-bit values: the pocket as a save left it
-    for (0..layers) |l| try Shards.round(std.testing.allocator, d, &h.loaded_up[l], &h.loaded_down[l]);
+    for (0..layers) |l| try round(&h.loaded_up[l], &h.loaded_down[l]);
     try p.load(t, h);
     for (held, 0..) |x, i| try p.learned.append(p.gpa, .{ .slot = x[0], .neuron = x[1], .key = .reply, .start = i, .count = 1, .subject = 0, .lesson = @intCast(x[2]) });
     p.learned_before = 4; // C, the last lesson, found A's and B's
 }
 
 fn trainer() Trainer {
-    var c: cfg.Config = .{ .hidden = d, .vocab = 16, .layers = layers, .mamba_heads = 1, .mamba_head_dim = 1, .groups = 1, .state = 1, .conv_kernel = 4, .heads = 1, .kv_heads = 1, .head_dim = 1, .experts = 1, .top_k = 1, .expert_width = 64, .shared_width = 64, .routed_scaling = 1, .eps = 1e-5 };
-    for (0..layers) |l| c.kinds[l] = .moe;
-    return .{ .c = c };
+    return .{};
 }
 
 const b_neurons = [_][2]u16{ .{ 0, 1 }, .{ 2, 0 } };
@@ -147,7 +147,7 @@ test "a deleted fact's input weights go to zero, every output bit stays, its lay
     var want_up: [width]f32 = p.up.items[0..width].*;
     var want_down: [width]f32 = p.down.items[0..width].*;
     @memset(want_up[1 * d ..][0..d], 0);
-    try Shards.round(std.testing.allocator, d, &want_up, &want_down);
+    try round(&want_up, &want_down);
     try std.testing.expectEqual(@as(usize, 2), try forgetting.forget(&p, &t, &h, &b_neurons));
     try std.testing.expect(forgetting.pending(&p));
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&want_up), std.mem.sliceAsBytes(p.up.items[0..width]));
@@ -156,7 +156,7 @@ test "a deleted fact's input weights go to zero, every output bit stays, its lay
     // layer 2 as saved: B's input weights zero, every output bit as it was, B's own too, so no 4-bit group moves
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&h.loaded_down[2]), std.mem.sliceAsBytes(p.down.items[2 * width ..][0..width]));
     // A's and C's input weights keep every bit; layer 1 was not touched at all
-    for ([_][2]usize{ .{ 0, 0 }, .{ 0, 2 }, .{ 1, 0 }, .{ 1, 1 } }) |x| try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(before_up[(x[0] * pocket.neurons + x[1]) * d ..][0..d]), std.mem.sliceAsBytes(p.neuron(p.up.items, x[0], x[1], d)));
+    for ([_][2]usize{ .{ 0, 0 }, .{ 0, 2 }, .{ 1, 0 }, .{ 1, 1 } }) |x| try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(before_up[(x[0] * P.neurons + x[1]) * d ..][0..d]), std.mem.sliceAsBytes(p.neuron(p.up.items, x[0], x[1], d)));
     try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&h.loaded_down[1]), std.mem.sliceAsBytes(p.down.items[width..][0..width]));
     // layer 0's neuron 1 sits below C's, so it stays taken; layer 2 is empty again
     try std.testing.expectEqualSlices(usize, &.{ 3, 2, 0 }, p.used.items);
@@ -171,6 +171,18 @@ test "a deleted fact's input weights go to zero, every output bit stays, its lay
     try std.testing.expectEqualSlices(u32, &.{1}, p.retired_lessons.items);
     forgetting.settle(&p);
     try std.testing.expect(!forgetting.pending(&p));
+}
+
+test "a lesson begun before a delete, then taken out, never brings back what the delete cut" {
+    var t = trainer();
+    var h: Device = .{};
+    var p: P = .{ .gpa = std.testing.allocator, .mode = .auto };
+    defer p.deinit();
+    try three(&h, &p, &t);
+    try @import("pocket_mark.zig").mark(&p); // a lesson began; a refused save left its mark in place
+    try std.testing.expectEqual(@as(usize, 2), try forgetting.forget(&p, &t, &h, &b_neurons));
+    try p.undo(&t, &h);
+    for (b_neurons) |g| try std.testing.expect(std.mem.allEqual(f32, p.neuron(p.up.items, g[0], g[1], d), 0));
 }
 
 test "a delete put back restores every bit it changed, in the pocket and in the forward" {
@@ -317,13 +329,13 @@ fn expectLive(before: *const Device, now: *const Device) !void {
 
 test "an allocation or an upload that fails anywhere in a delete leaves the pocket and the forward as they were" {
     var t = trainer();
-    // each allocation of the delete in turn fails (the pocket's and the rounding's), until it goes through
+    // each allocation of the delete in turn fails (the pocket's, the rounding's among them), until it goes through
     var failures: usize = 0;
     while (true) : (failures += 1) {
         var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
         const h = try std.testing.allocator.create(Device);
         defer std.testing.allocator.destroy(h);
-        h.* = .{ .gpa = failing.allocator() };
+        h.* = .{};
         var p: P = .{ .gpa = failing.allocator(), .mode = .auto };
         defer p.deinit();
         try three(h, &p, &t);
@@ -440,10 +452,10 @@ test "a delete whose cut layer would round to other values when saved is put bac
         @memcpy(&cut_up, p.up.items[0..width]);
         @memcpy(&cut_down, p.down.items[0..width]);
         @memset(cut_up[1 * d ..][0..d], 0); // B's neuron at slot 0
-        try Shards.round(std.testing.allocator, d, &cut_up, &cut_down);
+        try round(&cut_up, &cut_down);
         const once_up = cut_up;
         const once_down = cut_down;
-        try Shards.round(std.testing.allocator, d, &cut_up, &cut_down);
+        try round(&cut_up, &cut_down);
         moves = !std.mem.eql(u8, std.mem.sliceAsBytes(&once_up), std.mem.sliceAsBytes(&cut_up)) or !std.mem.eql(u8, std.mem.sliceAsBytes(&once_down), std.mem.sliceAsBytes(&cut_down));
         if (moves) break;
     }
