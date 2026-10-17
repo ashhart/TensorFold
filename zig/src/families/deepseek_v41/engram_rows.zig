@@ -1,6 +1,7 @@
 //! Streamed Engram rows: a table stays in its safetensors shard; each chunk's row IDs are deduplicated,
 //! read with uncached preads on a few threads (or from a bounded row cache) and compacted into staging,
 //! so the unchanged gather kernel sees the same row bytes a resident table would hold.
+//! Misses go through a small `Fetcher` interface; the shard reader (`Pread`) is its only implementation.
 const std = @import("std");
 const paced = @import("../../core/paced_read.zig");
 
@@ -32,6 +33,9 @@ pub const Stats = struct {
     requested: u64 = 0,
     unique: u64 = 0,
     hits: u64 = 0,
+    /// Fetcher calls (one per stage call with misses) and the time spent inside them.
+    fetches: u64 = 0,
+    fetch_ns: u64 = 0,
     reads: u64 = 0,
     read_bytes: u64 = 0,
     /// Bytes of the scale column read at open; not part of `read_bytes`.
@@ -42,6 +46,8 @@ pub const Stats = struct {
         a.requested += b.requested;
         a.unique += b.unique;
         a.hits += b.hits;
+        a.fetches += b.fetches;
+        a.fetch_ns += b.fetch_ns;
         a.reads += b.reads;
         a.read_bytes += b.read_bytes;
         a.open_bytes += b.open_bytes;
@@ -190,21 +196,36 @@ const Window = struct {
     }
 };
 
-pub const Source = struct {
+/// Where missed rows come from. One `fetch` takes every missed row of a stage call at once (a decode token's
+/// rows in one call), ascending, and writes row i's 256 weight and 8 scale bytes at `slots[i]` of the outputs.
+/// Today's only implementation is `Pread`; a remote holder of the tables would be another.
+pub const Fetcher = struct {
+    ptr: *anyopaque,
+    fetch_fn: *const fn (*anyopaque, rows: []const u32, slots: []const u32, out_w: []u8, out_s: []u8) anyerror!Fetched,
+    deinit_fn: *const fn (*anyopaque) void,
+
+    pub fn fetch(f: Fetcher, rows: []const u32, slots: []const u32, out_w: []u8, out_s: []u8) !Fetched {
+        return f.fetch_fn(f.ptr, rows, slots, out_w, out_s);
+    }
+    pub fn deinit(f: Fetcher) void {
+        f.deinit_fn(f.ptr);
+    }
+};
+/// What one fetch cost: requests issued and bytes moved (disk bytes for `Pread`).
+pub const Fetched = struct { reads: u64 = 0, bytes: u64 = 0 };
+
+/// Rows from the shard with F_NOCACHE preads on up to `threads` threads; scales optionally held in RAM.
+pub const Pread = struct {
     gpa: std.mem.Allocator,
     file: File,
     fd: std.c.fd_t,
-    options: Options,
-    scales: ?[]u8,
-    cache: Cache,
-    unique: []u32,
-    miss_rows: []u32,
-    miss_slots: []u32,
+    scales: ?[]u8 = null,
     blocks: []paced.Stage,
-    stats: Stats = .{},
+    /// Bytes of the scale column read at open.
+    open_bytes: u64 = 0,
 
-    pub fn open(gpa: std.mem.Allocator, file: File, options: Options) !Source {
-        if (file.rows == 0 or file.rows > std.math.maxInt(u32) or options.max_ids == 0 or options.threads == 0) return error.InvalidEngramSource;
+    pub fn open(gpa: std.mem.Allocator, file: File, options: Options) !*Pread {
+        if (file.rows == 0 or file.rows > std.math.maxInt(u32) or options.threads == 0) return error.InvalidEngramSource;
         const weight_end = try std.math.add(usize, file.weight_begin, try std.math.mul(usize, file.rows, weight_bytes));
         const scale_end = try std.math.add(usize, file.scale_begin, try std.math.mul(usize, file.rows, scale_bytes));
         if (file.data_start + @max(weight_end, scale_end) > file.file_bytes) return error.InvalidEngramSource;
@@ -213,16 +234,9 @@ pub const Source = struct {
         errdefer _ = std.c.close(fd);
         if (std.c.fcntl(fd, 48, @as(c_int, 1)) != 0) return error.UncachedReadUnavailable; // F_NOCACHE
         if (std.c.lseek(fd, 0, std.c.SEEK.END) != file.file_bytes) return error.CheckpointChanged;
-        var self = Source{ .gpa = gpa, .file = file, .fd = fd, .options = options, .scales = null, .cache = undefined, .unique = &.{}, .miss_rows = &.{}, .miss_slots = &.{}, .blocks = &.{} };
-        self.cache = try Cache.init(gpa, options.cache_rows);
-        errdefer self.cache.deinit(gpa);
-        self.unique = try gpa.alloc(u32, options.max_ids);
-        errdefer gpa.free(self.unique);
-        self.miss_rows = try gpa.alloc(u32, options.max_ids);
-        errdefer gpa.free(self.miss_rows);
-        self.miss_slots = try gpa.alloc(u32, options.max_ids);
-        errdefer gpa.free(self.miss_slots);
-        self.blocks = try gpa.alloc(paced.Stage, options.threads);
+        const self = try gpa.create(Pread);
+        errdefer gpa.destroy(self);
+        self.* = .{ .gpa = gpa, .file = file, .fd = fd, .blocks = try gpa.alloc(paced.Stage, options.threads) };
         var made: usize = 0;
         errdefer {
             for (self.blocks[0..made]) |b| gpa.free(b);
@@ -245,36 +259,108 @@ pub const Source = struct {
                 done += n;
             }
             self.scales = all;
-            self.stats.open_bytes = bytes;
+            self.open_bytes = bytes;
         }
         return self;
     }
 
+    pub fn fetcher(self: *Pread) Fetcher {
+        return .{ .ptr = self, .fetch_fn = fetchErased, .deinit_fn = deinitErased };
+    }
+
+    fn deinitErased(ptr: *anyopaque) void {
+        const self: *Pread = @ptrCast(@alignCast(ptr));
+        _ = std.c.close(self.fd);
+        if (self.scales) |all| self.gpa.free(all);
+        for (self.blocks) |b| self.gpa.free(b);
+        self.gpa.free(self.blocks);
+        self.gpa.destroy(self);
+    }
+
+    fn fetchErased(ptr: *anyopaque, rows: []const u32, slots: []const u32, out_w: []u8, out_s: []u8) anyerror!Fetched {
+        const self: *Pread = @ptrCast(@alignCast(ptr));
+        const misses = rows.len;
+        if (misses == 0) return .{};
+        const workers = @min(self.blocks.len, (misses + 7) / 8);
+        var parts: [256]Part = undefined;
+        var threads: [256]?std.Thread = @splat(null);
+        const count = @min(workers, parts.len);
+        const per = (misses + count - 1) / count;
+        for (0..count) |i| {
+            const lo = @min(i * per, misses);
+            const hi = @min(lo + per, misses);
+            parts[i] = .{ .fd = self.fd, .file = &self.file, .rows = rows[lo..hi], .slots = slots[lo..hi], .out_w = out_w, .out_s = out_s, .scales = self.scales, .block = self.blocks[i] };
+        }
+        for (1..count) |i| threads[i] = std.Thread.spawn(.{}, Part.run, .{&parts[i]}) catch null;
+        for (0..count) |i| if (threads[i] == null) parts[i].run();
+        for (threads[0..count]) |t| if (t) |th| th.join();
+        var out: Fetched = .{};
+        for (parts[0..count]) |p| {
+            if (p.failed) return error.EngramReadFailed;
+            out.reads += p.reads;
+            out.bytes += p.bytes;
+        }
+        return out;
+    }
+};
+
+/// Dedup, row cache and staging for one table over any `Fetcher`; counts bytes and fetch latency per source.
+pub const Source = struct {
+    gpa: std.mem.Allocator,
+    rows: usize,
+    fetcher: Fetcher,
+    cache: Cache,
+    unique: []u32,
+    miss_rows: []u32,
+    miss_slots: []u32,
+    stats: Stats = .{},
+
+    /// The shard-backed source: a `Pread` fetcher over `file`.
+    pub fn open(gpa: std.mem.Allocator, file: File, options: Options) !Source {
+        const pread = try Pread.open(gpa, file, options);
+        const f = pread.fetcher();
+        errdefer f.deinit();
+        var s = try openFetcher(gpa, file.rows, f, options);
+        s.stats.open_bytes = pread.open_bytes;
+        return s;
+    }
+
+    /// A source over `fetcher`, which it owns from here on (deinit releases it).
+    pub fn openFetcher(gpa: std.mem.Allocator, row_count: usize, fetcher: Fetcher, options: Options) !Source {
+        if (row_count == 0 or row_count > std.math.maxInt(u32) or options.max_ids == 0) return error.InvalidEngramSource;
+        var self = Source{ .gpa = gpa, .rows = row_count, .fetcher = fetcher, .cache = undefined, .unique = &.{}, .miss_rows = &.{}, .miss_slots = &.{} };
+        self.cache = try Cache.init(gpa, options.cache_rows);
+        errdefer self.cache.deinit(gpa);
+        self.unique = try gpa.alloc(u32, options.max_ids);
+        errdefer gpa.free(self.unique);
+        self.miss_rows = try gpa.alloc(u32, options.max_ids);
+        errdefer gpa.free(self.miss_rows);
+        self.miss_slots = try gpa.alloc(u32, options.max_ids);
+        return self;
+    }
+
     pub fn deinit(s: *Source) void {
-        _ = std.c.close(s.fd);
-        if (s.scales) |all| s.gpa.free(all);
+        s.fetcher.deinit();
         s.cache.deinit(s.gpa);
         s.gpa.free(s.unique);
         s.gpa.free(s.miss_rows);
         s.gpa.free(s.miss_slots);
-        for (s.blocks) |b| s.gpa.free(b);
-        s.gpa.free(s.blocks);
         s.* = undefined;
     }
 
-    /// Host bytes this source holds beyond the staging buffers: scales, cache and scratch.
-    pub fn hostBytes(options: Options, rows: usize) usize {
-        const scales = if (options.scales_in_ram) rows * scale_bytes else 0;
+    /// Host bytes a shard-backed source holds beyond the staging buffers: scales, cache and scratch.
+    pub fn hostBytes(options: Options, row_count: usize) usize {
+        const scales = if (options.scales_in_ram) row_count * scale_bytes else 0;
         return scales + @as(usize, options.cache_rows) * (Cache.entry + 16) + options.max_ids * 12 + options.threads * 2 * paced.alignment;
     }
 
     /// Distinct rows of `ids` in ascending order land in `out_w`/`out_s`; `local[i]` is ids[i]'s staging row.
-    /// Returns the number of staged rows. Any ID past the table fails the call before a read.
+    /// Returns the number of staged rows. Any ID past the table fails the call before a fetch.
     pub fn stage(s: *Source, ids: []const u32, out_w: []u8, out_s: []u8, local: []u32) !u32 {
         if (ids.len == 0 or ids.len > s.unique.len or local.len < ids.len) return error.InvalidEngramStage;
         if (out_w.len < ids.len * weight_bytes or out_s.len < ids.len * scale_bytes) return error.InvalidEngramStage;
         const started = now();
-        for (ids) |id| if (id >= s.file.rows) return error.InvalidEngramRow;
+        for (ids) |id| if (id >= s.rows) return error.InvalidEngramRow;
         const unique = s.unique[0..ids.len];
         @memcpy(unique, ids);
         std.mem.sort(u32, unique, {}, std.sort.asc(u32));
@@ -300,31 +386,16 @@ pub const Source = struct {
                 misses += 1;
             }
         }
-        var reads: u64 = 0;
-        var bytes: u64 = 0;
+        var got: Fetched = .{};
+        var fetch_ns: u64 = 0;
         if (misses > 0) {
-            const workers = @min(s.blocks.len, (misses + 7) / 8);
-            var parts: [256]Part = undefined;
-            var threads: [256]?std.Thread = @splat(null);
-            const count = @min(workers, parts.len);
-            const per = (misses + count - 1) / count;
-            for (0..count) |i| {
-                const lo = @min(i * per, misses);
-                const hi = @min(lo + per, misses);
-                parts[i] = .{ .fd = s.fd, .file = &s.file, .rows = s.miss_rows[lo..hi], .slots = s.miss_slots[lo..hi], .out_w = out_w, .out_s = out_s, .scales = s.scales, .block = s.blocks[i] };
-            }
-            for (1..count) |i| threads[i] = std.Thread.spawn(.{}, Part.run, .{&parts[i]}) catch null;
-            for (0..count) |i| if (threads[i] == null) parts[i].run();
-            for (threads[0..count]) |t| if (t) |th| th.join();
-            for (parts[0..count]) |p| {
-                if (p.failed) return error.EngramReadFailed;
-                reads += p.reads;
-                bytes += p.bytes;
-            }
+            const before = now();
+            got = try s.fetcher.fetch(s.miss_rows[0..misses], s.miss_slots[0..misses], out_w, out_s);
+            fetch_ns = now() - before;
             for (s.miss_rows[0..misses], s.miss_slots[0..misses]) |row, slot|
                 s.cache.put(row, out_w[@as(usize, slot) * weight_bytes ..][0..weight_bytes], out_s[@as(usize, slot) * scale_bytes ..][0..scale_bytes]);
         }
-        s.stats.add(.{ .requested = ids.len, .unique = n, .hits = hits, .reads = reads, .read_bytes = bytes, .wait_ns = now() - started });
+        s.stats.add(.{ .requested = ids.len, .unique = n, .hits = hits, .fetches = @intFromBool(misses > 0), .reads = got.reads, .read_bytes = got.bytes, .fetch_ns = fetch_ns, .wait_ns = now() - started });
         return @intCast(n);
     }
 };
@@ -418,4 +489,45 @@ test "the row cache evicts the least recently used row" {
     try std.testing.expectEqual(@as(u8, 1), c.get(10).?[0]);
     try std.testing.expectEqual(@as(u8, 3), c.get(12).?[0]);
     try std.testing.expectEqual(@as(u8, 2), c.get(12).?[weight_bytes]);
+}
+
+test "any fetcher gets each stage call's misses in one ascending batch" {
+    const a = std.testing.allocator;
+    const Fake = struct {
+        calls: u32 = 0,
+        last: u32 = 0,
+        freed: bool = false,
+        fn fetch(ptr: *anyopaque, rows: []const u32, slots: []const u32, out_w: []u8, out_s: []u8) anyerror!Fetched {
+            const f: *@This() = @ptrCast(@alignCast(ptr));
+            f.calls += 1;
+            f.last = @intCast(rows.len);
+            for (1..rows.len) |i| if (rows[i - 1] >= rows[i]) return error.NotAscending;
+            for (rows, slots) |r, slot| {
+                @memset(out_w[@as(usize, slot) * weight_bytes ..][0..weight_bytes], @truncate(r));
+                @memset(out_s[@as(usize, slot) * scale_bytes ..][0..scale_bytes], @truncate(r +% 1));
+            }
+            return .{ .reads = 1, .bytes = rows.len * (weight_bytes + scale_bytes) };
+        }
+        fn deinit(ptr: *anyopaque) void {
+            const f: *@This() = @ptrCast(@alignCast(ptr));
+            f.freed = true;
+        }
+    };
+    var fake = Fake{};
+    var src = try Source.openFetcher(a, 100, .{ .ptr = &fake, .fetch_fn = Fake.fetch, .deinit_fn = Fake.deinit }, .{ .max_ids = 24, .cache_rows = 8 });
+    const ids = [_]u32{ 9, 3, 9, 50, 3, 7 };
+    var w: [ids.len * weight_bytes]u8 = undefined;
+    var sc: [ids.len * scale_bytes]u8 = undefined;
+    var local: [ids.len]u32 = undefined;
+    try std.testing.expectEqual(@as(u32, 4), try src.stage(&ids, &w, &sc, &local));
+    for (ids, local) |id, l| try std.testing.expectEqual(@as(u8, @truncate(id)), w[l * weight_bytes]);
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expectEqual(@as(u32, 4), fake.last);
+    _ = try src.stage(&ids, &w, &sc, &local); // all cached: no fetch
+    try std.testing.expectEqual(@as(u32, 1), fake.calls);
+    try std.testing.expectEqual(@as(u64, 1), src.stats.fetches);
+    try std.testing.expectEqual(@as(u64, 4 * (weight_bytes + scale_bytes)), src.stats.read_bytes);
+    try std.testing.expectEqual(@as(u64, 4), src.stats.hits);
+    src.deinit();
+    try std.testing.expect(fake.freed);
 }
