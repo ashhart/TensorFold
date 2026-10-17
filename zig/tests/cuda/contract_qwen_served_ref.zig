@@ -88,7 +88,7 @@ pub fn make(a: std.mem.Allocator, mode: Mode, rows: usize, variant: bool) !Fixtu
     var f = Fixture{ .a = a, .mode = mode, .grid = .{ @intCast(rows), 1, 1 }, .threads = 32 };
     switch (mode) {
         .router => try router(&f, rows, variant),
-        .topk => try topk(&f, rows),
+        .topk => try topk(&f, rows, variant),
         .combine => try combine(&f, rows, variant),
         .norm => try norm(&f, rows, variant),
         .attention, .tree => try attention(&f, rows, variant),
@@ -127,9 +127,16 @@ fn router(f: *Fixture, rows: usize, padded: bool) !void {
     f.grid = .{ @intCast((rows + 15) / 16), 17, 1 };
     f.threads = 256;
 }
-fn topk(f: *Fixture, rows: usize) !void {
+fn topk(f: *Fixture, rows: usize, unequal: bool) !void {
     const logits = try f.a.alloc(f32, rows * 257);
     for (logits, 0..) |*v, i| v.* = @as(f32, @floatFromInt((i * 17) % 31)) / 8 - 2;
+    if (unequal) for (0..rows) |row| {
+        for (0..256) |expert| {
+            const rank = (expert * 73 + row * 19) % 256;
+            logits[row * 257 + expert] = @as(f32, @floatFromInt(256 - rank)) / 16;
+        }
+        logits[row * 257 + 256] = -0.75 + @as(f32, @floatFromInt(row % 7)) / 8;
+    };
     const lp = try f.input(logits);
     const ip = try f.output(.i32, rows * 9);
     const wp = try f.output(.f32, rows * 9);
@@ -374,4 +381,37 @@ test "top-k tie breaks to lower IDs and shared sigmoid is independent" {
     const f = try make(arena.allocator(), .topk, 2, false);
     try std.testing.expectEqual(@as(f64, 20), f.results.items[0].want[0]);
     try std.testing.expectEqual(@as(f64, 256), f.results.items[0].want[8]);
+}
+
+test "top-k unequal scores reject uniform routed weights with correct picks" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rows = 128;
+    const f = try make(a, .topk, rows, true);
+    const ids = f.results.items[0];
+    const weights = f.results.items[1];
+    const picks = try a.alloc(u8, ids.want.len * 4);
+    const good = try a.alloc(u8, weights.want.len * 4);
+    for (ids.want, 0..) |id, i| std.mem.writeInt(i32, picks[i * 4 ..][0..4], @intFromFloat(id), .little);
+    for (weights.want, 0..) |weight, i| {
+        const rounded: f32 = @floatCast(val(bf(weight)));
+        std.mem.writeInt(u32, good[i * 4 ..][0..4], @bitCast(rounded), .little);
+    }
+    try std.testing.expect(ids.accepts(picks) and weights.accepts(good));
+    const uniform = try a.dupe(u8, good);
+    for (0..rows) |row| for (0..8) |slot| {
+        const at = 4 * (row * 9 + slot);
+        std.mem.writeInt(u32, uniform[at..][0..4], @bitCast(@as(f32, 0.125)), .little);
+    };
+    try std.testing.expect(!weights.accepts(uniform));
+    try std.testing.expectEqualSlices(f64, &.{ 0, 249, 242, 235, 228, 221, 214, 207 }, ids.want[0..8]);
+    for (0..rows) |row| {
+        const w = weights.want[row * 9 ..][0..8];
+        for (w[1..], w[0..7]) |next, prior| try std.testing.expect(prior > next);
+        try std.testing.expect(@abs(w[0] - 0.125) > weights.bound[row * 9]);
+    }
+    std.mem.writeInt(i32, picks[0..4], 249, .little);
+    std.mem.writeInt(i32, picks[4..8], 0, .little);
+    try std.testing.expect(!ids.accepts(picks));
 }
