@@ -386,3 +386,7 @@ test "H3 serialized full64 tiles no text or held frame and last valid slots" {
     f.set("tile_sizes", 1, 64);
     _ = try f.read();
 }
+
+test {
+    _ = @import("schedule_replace_test.zig");
+}

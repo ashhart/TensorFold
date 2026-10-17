@@ -100,30 +100,63 @@ pub fn reschedule(m: *Model, a: std.mem.Allocator, video: schedule.Schedule, aud
     _ = try shape.projection(t, k, 1, 1, 2 * m.hidden);
     const shared = mtl.ResourceOptions.shared;
     const input = try m.device.buffer(x.len * 2, shared);
+    defer input.deinit();
     @memcpy(input.slice(u16, x.len), x);
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const cb = m.queue.commandBuffer();
     const enc = cb.compute(.concurrent);
-    var name: [128]u8 = undefined;
-    for (m.blocks, 0..) |*b, i| {
-        b.tables = .{ .buffer = try m.device.buffer(6 * lines * m.hidden * 2, shared) };
-        try project(m, enc, input, try std.fmt.bufPrint(&name, "{s}{d}.adaln_proj.linear.", .{ names(m).block, i }), t, k, schedule.modalities, 6, m.hidden, b.tables.buffer);
-    }
-    m.final_table = .{ .buffer = try m.device.buffer(t * 2 * m.hidden * 2, shared) };
-    try project(m, enc, input, names(m).final, t, k, 1, 1, 2 * m.hidden, m.final_table.buffer);
-    enc.end();
-    cb.commit();
-    cb.wait();
-    if (cb.failure()) |why| {
-        std.debug.print("modulation failed: {s}\n", .{why});
-        return error.GpuFailed;
-    }
-    m.adaln = adaln;
-    m.times = p.index;
-    m.lines = lines;
-    const steps = Steps{ .video = try a.alloc([2]f32, video.timesteps.len), .audio = try a.alloc([2]f32, audio.timesteps.len) };
-    for (steps.video, 0..) |*s, i| s.* = if (hold) .{ 0.0, 1.0 } else video.euler(i);
-    for (steps.audio, 0..) |*s, i| s.* = audio.euler(i);
-    return steps;
+    var op = Replacement{ .allocator = a, .model = m, .input = input, .cb = cb, .enc = enc, .t = t, .k = k, .adaln = adaln, .times = p.index, .lines = lines, .video = video, .audio = audio, .hold = hold };
+    return @import("schedule_replace.zig").run(m, &op);
 }
+
+const Replacement = struct {
+    allocator: std.mem.Allocator,
+    model: *Model,
+    input: mtl.Buffer,
+    cb: mtl.CommandBuffer,
+    enc: mtl.ComputeEncoder,
+    t: usize,
+    k: usize,
+    adaln: []i32,
+    times: []i32,
+    lines: usize,
+    video: schedule.Schedule,
+    audio: schedule.Schedule,
+    hold: bool,
+    const Ref = @FieldType(Model, "final_table");
+    pub fn makeSteps(o: *@This()) !Steps {
+        const v = try o.allocator.alloc([2]f32, o.video.timesteps.len);
+        errdefer o.allocator.free(v);
+        const a = try o.allocator.alloc([2]f32, o.audio.timesteps.len);
+        for (v, 0..) |*s, i| s.* = if (o.hold) .{ 0.0, 1.0 } else o.video.euler(i);
+        for (a, 0..) |*s, i| s.* = o.audio.euler(i);
+        return .{ .video = v, .audio = a };
+    }
+    pub fn freeSteps(o: *@This(), s: Steps) void {
+        o.allocator.free(s.video);
+        o.allocator.free(s.audio);
+    }
+    pub fn block(o: *@This(), i: usize) !Ref {
+        const b = try o.model.device.buffer(6 * o.lines * o.model.hidden * 2, mtl.ResourceOptions.shared);
+        errdefer b.deinit();
+        var name: [128]u8 = undefined;
+        try project(o.model, o.enc, o.input, try std.fmt.bufPrint(&name, "{s}{d}.adaln_proj.linear.", .{ names(o.model).block, i }), o.t, o.k, schedule.modalities, 6, o.model.hidden, b);
+        return .{ .buffer = b };
+    }
+    pub fn final(o: *@This()) !Ref {
+        const b = try o.model.device.buffer(o.t * 2 * o.model.hidden * 2, mtl.ResourceOptions.shared);
+        errdefer b.deinit();
+        try project(o.model, o.enc, o.input, names(o.model).final, o.t, o.k, 1, 1, 2 * o.model.hidden, b);
+        return .{ .buffer = b };
+    }
+    pub fn finish(o: *@This()) !void {
+        o.enc.end();
+        o.cb.commit();
+        o.cb.wait();
+        if (o.cb.failure()) |_| return error.GpuFailed;
+    }
+    pub fn release(_: *@This(), ref: Ref) void {
+        ref.buffer.deinit();
+    }
+};
