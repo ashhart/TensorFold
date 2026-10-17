@@ -1,4 +1,4 @@
-//! The gates of `tensorfold merge --quantize`: identity of every untouched byte, FP64 precision, the quantizer itself.
+//! The gates of `tensorfold merge`: identity of every untouched byte, the fold's grid, FP64 precision, the quantizer.
 const std = @import("std");
 const st = @import("safetensors.zig");
 const lm = @import("lora_merge.zig");
@@ -29,22 +29,20 @@ pub fn zeroEffect(p: *const lp.Plan) bool {
     return true;
 }
 
-/// Every gate on a merged folder; true when all pass.
-pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir: []const u8, adapter: []const u8, dest: []const u8, shipped_dir: []const u8) !bool {
-    var dense = try lp.Shards.init(gpa, arena, io, w, dense_dir);
-    defer dense.deinit();
+/// Every gate on a merged folder (a fold onto the shipped scales unless `dense_dir` is given); true when all pass.
+pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir: ?[]const u8, adapter: []const u8, dest: []const u8, shipped_dir: []const u8) !bool {
+    var dense: ?lp.Shards = if (dense_dir) |d| try lp.Shards.init(gpa, arena, io, w, d) else null;
+    defer if (dense) |*d| d.deinit();
     var old = try lp.Shards.init(gpa, arena, io, w, shipped_dir);
     defer old.deinit();
     var new = try lp.Shards.init(gpa, arena, io, w, dest);
     defer new.deinit();
-    var p = try lp.plan(gpa, arena, io, w, &dense, &old, adapter);
+    var p = try lp.plan(gpa, arena, io, w, if (dense) |*d| d else null, &old, adapter);
     defer p.deinit(io);
     const zero = zeroEffect(&p);
     try w.print("adapter: {d} projections, r = {d}, alpha / r = {d}, zero effect: {}\n", .{ p.jobs.len, p.r, p.scale, zero });
-    var ok = try identity(gpa, arena, io, w, shipped_dir, dest, &p, zero);
+    var ok = try identity(gpa, arena, io, w, shipped_dir, dest, &p, zero, dense == null);
     for (p.jobs) |j| {
-        const x = try lp.denseOf(gpa, w, &dense, j);
-        defer gpa.free(x);
         const bq = try lp.quantOf(gpa, &old, j);
         defer lp.free(gpa, bq);
         const mq = try lp.quantOf(gpa, &new, j);
@@ -52,6 +50,12 @@ pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir:
         const f = try lp.factors(gpa, w, &p, j);
         defer gpa.free(f.a);
         defer gpa.free(f.b);
+        const d = if (dense) |*ds| ds else {
+            ok = try foldGates(gpa, arena, w, j, &p, f.a, f.b, bq, mq, zero) and ok;
+            continue;
+        };
+        const x = try lp.denseOf(gpa, w, d, j);
+        defer gpa.free(x);
         const r = try lm.measure(gpa, j.group, j.n, j.k, x, .{ .a = f.a, .b = f.b, .r = p.r, .scale = p.scale }, lm.viewOf(bq), lm.viewOf(mq));
         const m = r.merged;
         const s = r.shipped;
@@ -70,6 +74,21 @@ pub fn check(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense_dir:
     }
     try w.print("{s}\n", .{if (ok) "merge check: all gates pass" else "merge check: FAILED"});
     return ok;
+}
+
+/// A folded projection's gates: tables as shipped, every group as folded again, every code nearest its target.
+fn foldGates(gpa: Allocator, arena: Allocator, w: *Io.Writer, j: lp.Job, p: *const lp.Plan, a: []const f32, b: []const f32, shipped: lm.Quant, merged: lm.Quant, zero: bool) !bool {
+    const lora: lm.Lora = .{ .a = a, .b = b, .r = p.r, .scale = p.scale };
+    var bad: usize = 0;
+    const differ = lm.refold(gpa, j.group, j.n, j.k, lm.viewOf(shipped), lora, lm.viewOf(merged), &bad) catch |e| switch (e) {
+        error.NonFinite => return lp.refuse(w, j.module, try std.fmt.allocPrint(arena, "group {d}: a non-finite value, range or scale", .{bad})),
+        else => return e,
+    };
+    const far = try lm.offGrid(gpa, j.group, j.n, j.k, lm.viewOf(shipped), lora, lm.viewOf(merged));
+    const moved = lm.differingGroups(j.group, lm.viewOf(shipped), lm.viewOf(merged));
+    try w.print("{s} [{d} x {d}, group {d}]: {d} of {d} groups moved; folded again from the shipped tensor and the adapter: {d} differ from OUT; codes off the nearest step of their group's shipped grid: {d}\n", .{ j.module, j.n, j.k, j.group, moved, merged.scales.len, differ, far });
+    if (zero and moved != 0) try w.writeAll("  zero effect but codes moved\n");
+    return differ == 0 and far == 0 and (!zero or moved == 0);
 }
 
 /// The quantizer's output on each module's dense weight against the shipped words, scales and biases.
@@ -123,10 +142,11 @@ fn lessRange(_: void, a: Range, b: Range) bool {
     return a.begin < b.begin;
 }
 
-/// Every file of SHIPPED against OUT's: the same set, the same lengths, the same bytes outside the named payloads.
-pub fn identity(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, shipped: []const u8, dest: []const u8, p: *const lp.Plan, zero: bool) !bool {
+/// Every file of SHIPPED against OUT's: the same set, lengths and bytes outside the named payloads (a fold's weights).
+pub fn identity(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, shipped: []const u8, dest: []const u8, p: *const lp.Plan, zero: bool, fold: bool) !bool {
     var named: std.StringHashMapUnmanaged(void) = .empty;
-    for (p.jobs) |j| for ([_][]const u8{ "weight", "scales", "biases" }) |leaf| try named.put(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.shippedName(), leaf }), {});
+    const leaves = [_][]const u8{ "weight", "scales", "biases" };
+    for (p.jobs) |j| for (leaves[0..if (fold) 1 else 3]) |leaf| try named.put(arena, try std.fmt.allocPrint(arena, "{s}.{s}", .{ j.shippedName(), leaf }), {});
     var ok = true;
     const src = try listFiles(arena, io, w, shipped, &ok);
     const dst = try listFiles(arena, io, w, dest, &ok);

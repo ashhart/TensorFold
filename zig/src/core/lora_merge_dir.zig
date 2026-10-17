@@ -1,4 +1,4 @@
-//! `tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED`: LoRA into dense weights, quantized fresh, rest copied.
+//! `tensorfold merge`: a LoRA folded onto SHIPPED's own scales, or with `--quantize` into DENSE quantized fresh.
 const std = @import("std");
 const se = @import("shard_edit.zig");
 const lm = @import("lora_merge.zig");
@@ -11,8 +11,18 @@ pub const math = lm;
 pub const plan = lp;
 pub const gate = @import("lora_gate.zig");
 
-/// Runs the merge; refusals and failures go to `err` and the exit code is 1.
-pub fn run(gpa: Allocator, io: Io, out: *Io.Writer, err: *Io.Writer, dense: []const u8, adapter: []const u8, dest: []const u8, shipped: []const u8) !u8 {
+/// What `tensorfold merge` was asked: fold onto `shipped`'s grid, or, given `dense`, quantize `dense` plus the adapter.
+pub const Args = struct { dense: ?[]const u8 = null, adapter: []const u8, dest: []const u8, shipped: []const u8 };
+
+/// `merge`'s arguments after the subcommand, or null for any other form: MODEL ADAPTER OUT [--quantize SHIPPED].
+pub fn parseArgs(args: []const []const u8) ?Args {
+    if (args.len == 3) return .{ .adapter = args[1], .dest = args[2], .shipped = args[0] };
+    if (args.len == 5 and std.mem.eql(u8, args[3], "--quantize")) return .{ .dense = args[0], .adapter = args[1], .dest = args[2], .shipped = args[4] };
+    return null;
+}
+
+/// Runs the merge, a fold onto the shipped scales unless `dense` is given; refusals and failures exit 1 via `err`.
+pub fn run(gpa: Allocator, io: Io, out: *Io.Writer, err: *Io.Writer, dense: ?[]const u8, adapter: []const u8, dest: []const u8, shipped: []const u8) !u8 {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     merge(gpa, arena_state.allocator(), io, out, err, dense, adapter, dest, shipped) catch |e| {
@@ -22,12 +32,12 @@ pub fn run(gpa: Allocator, io: Io, out: *Io.Writer, err: *Io.Writer, dense: []co
     return 0;
 }
 
-fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Writer, dense_dir: []const u8, adapter: []const u8, dest: []const u8, shipped_dir: []const u8) !void {
-    var dense = try lp.Shards.init(gpa, arena, io, err, dense_dir);
-    defer dense.deinit();
+fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Writer, dense_dir: ?[]const u8, adapter: []const u8, dest: []const u8, shipped_dir: []const u8) !void {
+    var dense: ?lp.Shards = if (dense_dir) |d| try lp.Shards.init(gpa, arena, io, err, d) else null;
+    defer if (dense) |*d| d.deinit();
     var shipped = try lp.Shards.init(gpa, arena, io, err, shipped_dir);
     defer shipped.deinit();
-    var p = try lp.plan(gpa, arena, io, err, &dense, &shipped, adapter);
+    var p = try lp.plan(gpa, arena, io, err, if (dense) |*d| d else null, &shipped, adapter);
     defer p.deinit(io);
     try checkSource(io, err, shipped_dir);
     try freeDest(io, err, dest);
@@ -36,8 +46,6 @@ fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Wri
     try out.print("copying {s} to {s}\n", .{ shipped_dir, stage });
     try copyFolder(io, shipped_dir, stage);
     for (p.jobs) |j| {
-        const w = try lp.denseOf(gpa, err, &dense, j);
-        defer gpa.free(w);
         const old = try lp.quantOf(gpa, &shipped, j);
         defer lp.free(gpa, old);
         const f = try lp.factors(gpa, err, &p, j);
@@ -46,7 +54,13 @@ fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Wri
         const new = try lm.allocQuant(gpa, j.n, j.k, j.group);
         defer lm.freeQuant(gpa, new);
         var bad: usize = 0;
-        lm.mergeDense(gpa, j.group, j.n, j.k, w, .{ .a = f.a, .b = f.b, .r = p.r, .scale = p.scale }, new, &bad) catch |e| switch (e) {
+        const lora: lm.Lora = .{ .a = f.a, .b = f.b, .r = p.r, .scale = p.scale };
+        const done = if (dense) |*d| fresh: {
+            const w = try lp.denseOf(gpa, err, d, j);
+            defer gpa.free(w);
+            break :fresh lm.mergeDense(gpa, j.group, j.n, j.k, w, lora, new, &bad);
+        } else lm.foldShipped(gpa, j.group, j.n, j.k, lm.viewOf(old), lora, new, &bad);
+        done catch |e| switch (e) {
             error.NonFinite => return lp.refuse(err, j.module, try std.fmt.allocPrint(arena, "group {d}: a non-finite value, range or scale", .{bad})),
             else => return e,
         };
@@ -62,10 +76,11 @@ fn merge(gpa: Allocator, arena: Allocator, io: Io, out: *Io.Writer, err: *Io.Wri
             .{ .name = names[1], .dtype = .bf16, .shape = &shapes[1], .bytes = std.mem.sliceAsBytes(new.scales) },
             .{ .name = names[2], .dtype = .bf16, .shape = &shapes[2], .bytes = std.mem.sliceAsBytes(new.biases) },
         };
-        try se.overwrite(gpa, io, stage, &edits);
+        try se.overwrite(gpa, io, stage, edits[0..if (dense == null) 1 else 3]); // a fold moves codes only
     }
     try publish(io, err, stage, dest);
-    try out.print("merged {d} projections, r = {d}, alpha / r = {d}; wrote {s}\n", .{ p.jobs.len, p.r, p.scale, dest });
+    const how = if (dense == null) "folded onto the shipped scales" else "quantized fresh from the dense base";
+    try out.print("merged {d} projections ({s}), r = {d}, alpha / r = {d}; wrote {s}\n", .{ p.jobs.len, how, p.r, p.scale, dest });
 }
 
 /// Refuses a source folder holding anything but regular files (or symlinks to them): only flat folders are copied.
@@ -136,6 +151,7 @@ fn copyFolder(io: Io, base: []const u8, dest: []const u8) !void {
 
 test {
     _ = @import("lora_merge_dir_test.zig");
+    _ = @import("lora_fold_test.zig");
     _ = @import("lora_gate_test.zig");
     _ = @import("lora_quantizer_test.zig");
 }

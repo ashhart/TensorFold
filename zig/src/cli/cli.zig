@@ -11,6 +11,7 @@ const usage =
     \\       tensorfold info MODEL
     \\       tensorfold pull REPO[@REVISION]
     \\       tensorfold pull REPO[@REVISION] --exlr8 PROFILE --node R/N --dir DIR
+    \\       tensorfold merge MODEL ADAPTER OUT
     \\       tensorfold merge DENSE ADAPTER OUT --quantize SHIPPED
     \\
 ;
@@ -54,11 +55,11 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         return pull.run(a, init.io, &out.interface, &err.interface, env, null, args[1]);
     }
     if (std.mem.eql(u8, args[0], "merge")) {
-        if (args.len != 6 or !std.mem.eql(u8, args[4], "--quantize")) {
+        const m = lora_merge.parseArgs(args[1..]) orelse {
             try err.interface.writeAll(usage);
             return 2;
-        }
-        return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, args[1], args[2], args[3], args[5]);
+        };
+        return lora_merge.run(init.gpa, init.io, &out.interface, &err.interface, m.dense, m.adapter, m.dest, m.shipped);
     }
     if (args.len != 2) {
         try err.interface.writeAll(usage);
@@ -70,6 +71,7 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
 test "wants only the checkpoint subcommands" {
     try std.testing.expect(wants(&.{"models"}));
     try std.testing.expect(wants(&.{ "info", "Org/Flash" }));
+    try std.testing.expect(wants(&.{ "merge", "model", "adapter", "out" }));
     try std.testing.expect(wants(&.{ "merge", "dense", "adapter", "out", "--quantize", "shipped" }));
     try std.testing.expect(!wants(&.{"run"}) and !wants(&.{}) and !wants(&.{"serve"}));
 }

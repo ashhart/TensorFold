@@ -121,22 +121,28 @@ const prefix_rewrites = [_][2][]const u8{.{ "model.language_model.", "language_m
 /// One module's name in the dense source and in the shipped checkpoint.
 pub const Names = struct { dense: []const u8, shipped: []const u8 };
 
-/// The dense and shipped names of `module`, given in either namespace: the pair both folders hold a weight for.
-pub fn resolve(arena: Allocator, w: *Io.Writer, dense: *Shards, shipped: *Shards, module: []const u8) !Names {
+/// `module`'s dense and shipped names, in either namespace: the pair both folders hold a weight for, or SHIPPED's.
+pub fn resolve(arena: Allocator, w: *Io.Writer, dense: ?*Shards, shipped: *Shards, module: []const u8) !Names {
     var cands: std.ArrayList(Names) = .empty;
     try cands.append(arena, .{ .dense = module, .shipped = module });
     for (prefix_rewrites) |r| {
         if (std.mem.startsWith(u8, module, r[0])) try cands.append(arena, .{ .dense = module, .shipped = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[1], module[r[0].len..] }) });
-        if (std.mem.startsWith(u8, module, r[1])) try cands.append(arena, .{ .dense = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] }), .shipped = module });
+        if (dense != null and std.mem.startsWith(u8, module, r[1])) try cands.append(arena, .{ .dense = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] }), .shipped = module });
     }
     var found: std.ArrayList(Names) = .empty;
     var list: std.ArrayList(u8) = .empty;
     for (cands.items) |c| {
-        const in_dense = (try dense.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.dense}))) != null;
         const in_shipped = (try shipped.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.shipped}))) != null;
+        const d = dense orelse {
+            try list.print(arena, "{s}{s}.weight {s}", .{ if (list.items.len == 0) "" else "; ", c.shipped, if (in_shipped) "found" else "missing" });
+            if (in_shipped) try found.append(arena, c);
+            continue;
+        };
+        const in_dense = (try d.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.dense}))) != null;
         try list.print(arena, "{s}dense {s}.weight {s}, shipped {s}.weight {s}", .{ if (list.items.len == 0) "" else "; ", c.dense, if (in_dense) "found" else "missing", c.shipped, if (in_shipped) "found" else "missing" });
         if (in_dense and in_shipped) try found.append(arena, c);
     }
+    if (found.items.len == 0 and dense == null) return refuse(w, module, try std.fmt.allocPrint(arena, "not found in the checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
     if (found.items.len == 0) return refuse(w, module, try std.fmt.allocPrint(arena, "not found in both the dense base and the shipped checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
     if (found.items.len > 1) return refuse(w, module, try std.fmt.allocPrint(arena, "ambiguous: more than one name pair resolves (tried: {s})", .{list.items}));
     return found.items[0];

@@ -93,8 +93,8 @@ fn adapterConfig(arena: Allocator, io: Io, w: *Io.Writer, dir: []const u8) !stru
 
 const Pair = struct { a: ?[]const u8 = null, b: ?[]const u8 = null };
 
-/// The projections `adapter` names, each in the dense base and the shipped checkpoint, all checked before any write.
-pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: *Shards, shipped: *Shards, adapter: []const u8) !Plan {
+/// The projections `adapter` names, each in the shipped checkpoint (and the dense base, if any), checked before writes.
+pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: ?*Shards, shipped: *Shards, adapter: []const u8) !Plan {
     const cfg = try adapterConfig(arena, io, w, adapter);
     const quant = try quantConfig(arena, io, w, shipped.dir);
     const file_path = try std.fs.path.join(arena, &.{ adapter, "adapter_model.safetensors" });
@@ -123,7 +123,7 @@ pub fn plan(gpa: Allocator, arena: Allocator, io: Io, w: *Io.Writer, dense: *Sha
         const lay = try layoutOf(arena, w, shipped, quant, names.shipped);
         const shard = shipped.shardOf(try std.fmt.allocPrint(arena, "{s}.weight", .{names.shipped})).?;
         if (!(try checked.getOrPut(arena, shard)).found_existing) try checkDisjoint(w, shipped, shard);
-        _ = try sh.denseTensor(w, dense, names.dense, lay.n, lay.k);
+        if (dense) |d| _ = try sh.denseTensor(w, d, names.dense, lay.n, lay.k);
         const a = file.get(a_name).?;
         const b = file.get(b_name).?;
         _ = std.math.mul(usize, cfg.r, lay.k) catch return refuse(w, module, "adapter dimensions overflow");

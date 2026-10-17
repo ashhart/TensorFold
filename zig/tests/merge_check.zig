@@ -1,9 +1,9 @@
-//! tf-merge-check DENSE ADAPTER OUT SHIPPED, or --quantizer DENSE SHIPPED MODULE...: the gates of `merge --quantize`.
+//! tf-merge-check MODEL ADAPTER OUT (a fold), DENSE ADAPTER OUT SHIPPED, or --quantizer ...: the gates of `merge`.
 const std = @import("std");
 const merge = @import("lora_merge");
 const Io = std.Io;
 
-const usage = "usage: tf-merge-check DENSE ADAPTER OUT SHIPPED | tf-merge-check --quantizer DENSE SHIPPED MODULE...\n";
+const usage = "usage: tf-merge-check MODEL ADAPTER OUT | tf-merge-check DENSE ADAPTER OUT SHIPPED | tf-merge-check --quantizer DENSE SHIPPED MODULE...\n";
 
 pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
@@ -13,7 +13,9 @@ pub fn main(init: std.process.Init) !u8 {
     const w = &out.interface;
     const gpa = init.gpa;
     const arena = init.arena.allocator();
-    const run = if (args.len == 5 and !std.mem.eql(u8, args[1], "--quantizer"))
+    const run = if (args.len == 4 and !std.mem.eql(u8, args[1], "--quantizer"))
+        merge.gate.check(gpa, arena, init.io, w, null, args[2], args[3], args[1])
+    else if (args.len == 5 and !std.mem.eql(u8, args[1], "--quantizer"))
         merge.gate.check(gpa, arena, init.io, w, args[1], args[2], args[3], args[4])
     else if (args.len >= 5 and std.mem.eql(u8, args[1], "--quantizer"))
         merge.gate.quantizerCheck(gpa, arena, init.io, w, args[2], args[3], @ptrCast(args[4..]))

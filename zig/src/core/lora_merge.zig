@@ -1,4 +1,4 @@
-//! A PEFT LoRA folded into a projection's dense weights, quantized fresh as MLX does: names, merge, FP64 error.
+//! A PEFT LoRA folded into a projection, onto its shipped grid or into dense weights quantized fresh; FP64 error.
 const std = @import("std");
 const host4 = @import("affine4_host.zig");
 const lq = @import("lora_quant.zig");
@@ -86,6 +86,86 @@ pub fn recompute(gpa: std.mem.Allocator, group: usize, n: usize, k: usize, dense
     defer freeQuant(gpa, fresh);
     try mergeDense(gpa, group, n, k, dense, l, fresh, bad);
     return differingGroups(group, viewOf(fresh), merged);
+}
+
+fn checkShipped(n: usize, k: usize, group: usize, v: View) Error!void {
+    if (v.words.len != n * k / 8 or v.scales.len != n * k / group or v.biases.len != v.scales.len) return error.BadShape;
+}
+
+/// The nearest code to `t` on the grid `s * q + b`, q from 0 to 15, whichever sign the scale has.
+fn nearest(t: f64, s: f64, b: f64) u32 {
+    return @intFromFloat(std.math.clamp(@round((t - b) / s), 0, 15));
+}
+
+fn codeOf(words: []const u32, i: usize) u32 {
+    return (words[i / 8] >> @intCast(4 * (i % 8))) & 0xf;
+}
+
+/// `shipped + scale * B * A` on each group's own grid: nearest codes, the shipped tables; `bad` as in mergeDense.
+pub fn foldShipped(gpa: std.mem.Allocator, group: usize, n: usize, k: usize, shipped: View, l: Lora, out: Quant, bad: *usize) !void {
+    try checkShape(n, k, group, l);
+    try checkShipped(n, k, group, shipped);
+    try checkShipped(n, k, group, viewOf(out));
+    @memcpy(out.words, shipped.words);
+    @memcpy(out.scales, shipped.scales);
+    @memcpy(out.biases, shipped.biases);
+    const delta = try gpa.alloc(f64, k);
+    defer gpa.free(delta);
+    for (0..n) |o| {
+        deltaRow(l, k, o, delta);
+        for (delta, 0..) |d, c| {
+            if (d == 0) continue; // an unchanged value keeps its shipped code
+            const i = o * k + c;
+            const s: f64 = host4.f32of(shipped.scales[i / group]);
+            const b: f64 = host4.f32of(shipped.biases[i / group]);
+            const t = dequant64(group, shipped, i) + d;
+            if (!std.math.isFinite(t) or !std.math.isFinite(s) or !std.math.isFinite(b)) {
+                bad.* = i / group;
+                return error.NonFinite;
+            }
+            if (s == 0) continue; // every code of a zero-scale group decodes to its bias
+            const shift: u5 = @intCast(4 * (i % 8));
+            out.words[i / 8] = (out.words[i / 8] & ~(@as(u32, 0xf) << shift)) | (nearest(t, s, b) << shift);
+        }
+    }
+}
+
+/// The groups of `merged` that differ from `shipped + scale * B * A` folded again here, by the fold's own arithmetic.
+pub fn refold(gpa: std.mem.Allocator, group: usize, n: usize, k: usize, shipped: View, l: Lora, merged: View, bad: *usize) !usize {
+    const again = try allocQuant(gpa, n, k, group);
+    defer freeQuant(gpa, again);
+    try foldShipped(gpa, group, n, k, shipped, l, again, bad);
+    return differingGroups(group, viewOf(again), merged);
+}
+
+/// Codes of `merged` off the nearest step to `shipped + scale * B * A`, by distance, or in a group whose table moved.
+pub fn offGrid(gpa: std.mem.Allocator, group: usize, n: usize, k: usize, shipped: View, l: Lora, merged: View) !usize {
+    try checkShape(n, k, group, l);
+    try checkShipped(n, k, group, shipped);
+    try checkShipped(n, k, group, merged);
+    var far: usize = 0;
+    for (shipped.scales, merged.scales, shipped.biases, merged.biases) |s0, s1, b0, b1| {
+        if (s0 != s1 or b0 != b1) far += group;
+    }
+    const delta = try gpa.alloc(f64, k);
+    defer gpa.free(delta);
+    for (0..n) |o| {
+        deltaRow(l, k, o, delta);
+        for (delta, 0..) |d, c| {
+            const i = o * k + c;
+            const s: f64 = host4.f32of(shipped.scales[i / group]);
+            const q: f64 = @floatFromInt(codeOf(merged.words, i));
+            if (d == 0 or s == 0) {
+                far += @intFromBool(codeOf(merged.words, i) != codeOf(shipped.words, i));
+                continue;
+            }
+            // the code's place on the grid: within half a step of the target, or at the end the target lies past
+            const b: f64 = host4.f32of(shipped.biases[i / group]);
+            const u = (dequant64(group, shipped, i) + d - b) / s;
+            far += @intFromBool(!(@abs(q - u) <= 0.5 + 1e-9 or (q == 0 and u < 0) or (q == 15 and u > 15)));
+        }
+    }
+    return far;
 }
 
 /// The error of a quantization against an FP64 reference, per column (worst over rows) and in aggregate.

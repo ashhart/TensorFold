@@ -206,3 +206,18 @@ pub fn gates(s: *Scratch, base: []const u8, adapter: []const u8, msg: []u8) !str
     const ok = try dir.gate.check(std.testing.allocator, s.arena.allocator(), io, &w, try s.path(&.{"dense"}), adapter, try s.path(&.{"merged"}), base);
     return .{ .ok = ok, .out = w.buffered() };
 }
+
+/// `merge`'s default on the scratch folders: the adapter folded onto `base`'s own scales into `merged`.
+pub fn fold(s: *Scratch, base: []const u8, adapter: []const u8, msg: []u8) !Result {
+    var out = Io.Writer.fixed(msg[0 .. msg.len / 2]);
+    var err = Io.Writer.fixed(msg[msg.len / 2 ..]);
+    const code = try dir.run(std.testing.allocator, io, &out, &err, null, adapter, try s.path(&.{"merged"}), base);
+    return .{ .code = code, .out = out.buffered(), .err = err.buffered() };
+}
+
+/// The fold's tf-merge-check gates on the scratch folders, with what they printed.
+pub fn foldGates(s: *Scratch, base: []const u8, adapter: []const u8, msg: []u8) !struct { ok: bool, out: []const u8 } {
+    var w = Io.Writer.fixed(msg);
+    const ok = try dir.gate.check(std.testing.allocator, s.arena.allocator(), io, &w, null, adapter, try s.path(&.{"merged"}), base);
+    return .{ .ok = ok, .out = w.buffered() };
+}
