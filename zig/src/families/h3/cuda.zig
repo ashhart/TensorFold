@@ -81,7 +81,8 @@ pub const Model = struct {
         self.inputs = @splat(null);
         self.driver = try cuda.Driver.open();
         errdefer self.driver.close();
-        self.ctx = try cuda.Context.init(&self.driver, 0);
+        // the host's current context and so its device (device 0's only when the host has none yet)
+        self.ctx = try cuda.Context.shared(&self.driver);
         errdefer self.ctx.deinit();
         const d = &self.driver;
         self.module = try cuda.Module.load(d, &image);
@@ -89,7 +90,7 @@ pub const Model = struct {
         inline for (kernel_names, 0..) |name, i| self.functions[i] = try self.module.function(name);
         try self.function("h3_attention").allowDynamicShared(attention_shared);
         // the legacy default stream: work queued by the caller's framework comes first
-        self.stream = .{ .d = d, .handle = null };
+        self.stream = cuda.Stream.borrowed(d, null);
         self.gemms = try Gemms.init(gpa, d);
         errdefer self.gemms.deinit();
         try weights.read(self, path);
