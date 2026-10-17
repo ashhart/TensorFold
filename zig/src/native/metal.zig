@@ -14,6 +14,7 @@ const glm_dsa = @import("glm_dsa_host.zig");
 const slide_adapter = @import("slide_adapter.zig");
 const Slide = slide_adapter.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
+const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
 
 pub const backends: []const []const u8 = &.{"metal"};
@@ -37,6 +38,7 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
     .{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} },
     .{ .model_type = "gemma4_unified", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
 };
 
 /// Gemma 4 31B (gemma4) and 12B (gemma4_unified, its text model): one native family, gemma4.zig's host.
@@ -96,7 +98,8 @@ const Host = struct {
     gpa: Allocator,
     m: *nemotron.Model,
     metal: *nemotron.backend.Metal,
-    warm: mtl.keepalive.Target = undefined, // the model's queue, for the lane host's idle ticker
+    warm: mtl.keepalive.Target = undefined, // the residency set's queue, for the lane host's idle ticker
+    resident: ?Resident = null, // the weights, kept wired between requests by the ticker
     cfg: lanes.Config,
     clock: nemotron.timing.RoundClock,
     core: lanes.Engine,
@@ -128,6 +131,7 @@ const Host = struct {
         if (h.learned) |*m| m.deinit();
         h.core.deinit();
         h.cfg.deinit(h.gpa);
+        if (h.resident) |*r| r.deinit();
         h.metal.deinit();
         h.m.deinit();
         h.gpa.destroy(h);
@@ -149,12 +153,13 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "qwen4_exp")) return openFlashNext(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
-    if (o.vision != null) {
-        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 only, not {s} checkpoints", .{o.model_type});
+    if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl")) {
+        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Gemma 4 and Step-5 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "qwen3_5")) return @import("qwen35.zig").open(a, gpa, io, o, problem);
+    if (std.mem.eql(u8, o.model_type, "step5_vl")) return @import("step5.zig").open(a, gpa, io, o, problem);
     if (std.mem.eql(u8, o.model_type, "lfm2_moe")) return @import("lfm2_moe.zig").open(a, gpa, io, o, problem);
     if (!std.mem.eql(u8, o.model_type, "nemotron_h")) {
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
@@ -185,6 +190,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.m = m;
+    h.resident = null;
     const step = prefillStep(h.m.device);
     const capacity: usize = @intCast(if (window > 0) window else 1 << 18);
     h.metal = try nemotron.backend.Metal.init(gpa, h.m, .{
@@ -246,7 +252,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     errdefer if (h.learned) |*im| im.deinit();
     errdefer if (h.cache) |*store| if (store.disk) |r| r.deinit();
     if (h.metal.head != null) h.host.lone = .{ .ctx = h, .run = Host.lone };
-    h.warm = .{ .queue = h.m.queue };
+    {
+        var list: std.ArrayList(mtl.Buffer) = .empty; // the shards and the weights in the kernels' layouts
+        defer list.deinit(gpa);
+        for (h.m.checkpoint.shards.items) |sh| try list.append(gpa, sh.buffer);
+        try list.appendSlice(gpa, h.m.weights.owned.items);
+        h.resident = try Resident.hold(gpa, io, h.m.device, h.m.queue, list.items, "nemotron");
+    }
+    errdefer if (h.resident) |*r| r.deinit();
+    h.warm = if (h.resident) |*r| r.target() else .{ .queue = h.m.queue };
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     h.slide = null;
     if (o.slide) {
@@ -282,13 +296,13 @@ fn refusal(a: Allocator, o: api.Open, dense: bool) !?[]const u8 {
     const t = o.model_type;
     if (o.kv8) return "--kv-cache fp8 keeps fp8 caches on CUDA; the Metal engines keep bf16: serve without it";
     if (o.slide and !std.mem.eql(u8, t, "nemotron_h")) return try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on Macs yet", .{t});
-    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const one_mac: ?[]const u8 = if (std.mem.eql(u8, t, "nemotron_h")) "Nemotron" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.speed_up != null) if (one_mac) |name| return try std.fmt.allocPrint(a, "--speed-up joins two Macs for Flash Next, GLM-5.3-Flash and GLM-5.3 only: serve {s} without it", .{name});
     if (o.recall and std.mem.eql(u8, t, "qwen4_exp")) return recall_refusal;
     if (o.learn == null) return null;
     // the 27B writes conversation states
     if (o.learn_conversations and std.mem.eql(u8, t, "qwen3_5") and dense) return null;
-    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
+    const name: []const u8 = if (std.mem.eql(u8, t, "glm_moe_dsa")) "GLM-5.3 (EXLR8)" else if (std.mem.eql(u8, t, "lfm2_moe")) "LFM2.5-24B-A2B" else if (isGemma4(t)) "Gemma 4" else if (std.mem.eql(u8, t, "step5_vl")) "Step-5" else if (!std.mem.eql(u8, t, "qwen3_5")) return null else if (dense) "Qwen3.8-27B" else "Qwen3.5-2B";
     if (o.learn_conversations) return try std.fmt.allocPrint(a, "--learn-conversations keeps conversation states on disk for Qwen3.8-27B, Nemotron, Flash Next and GLM-5.3-Flash: serve {s} without it", .{name});
     const or_talks: []const u8 = if (dense) " (Qwen3.8-27B keeps conversation states on disk with --learn-conversations)" else "";
     return try std.fmt.allocPrint(a, "--learn learns prompt prefixes for Nemotron, Flash Next and GLM-5.3-Flash only{s}: serve {s} without --learn, --learn-dir or --learn-gib", .{ or_talks, name });

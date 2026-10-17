@@ -111,6 +111,7 @@ pub const Request = struct {
 /// Image and video input an engine serves, and --vision's limits (engine_vision.zig).
 const vision_types = @import("engine_vision.zig");
 pub const PreparedImage = vision_types.PreparedImage;
+pub const Piece = vision_types.Piece;
 pub const Vision = vision_types.Vision;
 pub const VideoSource = vision_types.VideoSource;
 pub const FrameSink = vision_types.FrameSink;

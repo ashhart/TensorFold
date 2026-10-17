@@ -8,6 +8,7 @@ const model_text = @import("model_text.zig");
 const media_fetch = @import("media_fetch.zig");
 const videos = @import("videos.zig");
 const image_key = @import("image_key.zig");
+const image_pieces = @import("image_pieces.zig");
 const Value = json.Value;
 const Cx = errors.Cx;
 
@@ -285,7 +286,10 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         const before = out_ids.items.len;
         const after = close;
         close = null;
-        if (t == v.image_token) {
+        if (t == v.image_token and prepared[k].pieces.len > 0) {
+            try image_pieces.place(cx.a, &out_ids, &key, &imgs, t, prepared[k]);
+            k += 1;
+        } else if (t == v.image_token) {
             const img = prepared[k];
             k += 1;
             if (v.wrap) |w| try both(cx.a, &out_ids, &key, w[0]);
@@ -326,7 +330,7 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
 }
 
 /// Appends a token to the prompt and its cache key alike.
-fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
+pub fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), t: u32) !void {
     try ids.append(a, t);
     try key.append(a, t);
 }

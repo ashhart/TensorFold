@@ -129,6 +129,10 @@ fn expectRenderRejected(source: []const u8) !void {
     try std.testing.expectError(error.TemplateFailed, template.render(a, &compiled, .null, .null, .{ .object = .empty }, false, &diag));
 }
 
+test "fromjson reads a string's JSON into values a template walks" {
+    try expect("{% for k, x in '{\"city\": \"Paris\", \"days\": 3}' | fromjson | items %}{{ k }}={{ x }};{% endfor %}", "{}", .{ .text = "city=Paris;days=3;", .raised = null });
+}
+
 test "dynamic keyword mappings feed dict constructors and scoped macros" {
     try expect("{{ dict({'a': 1}, b=2, **{'c': 3}) | tojson }}", "{}", .{ .text = "{\"a\": 1, \"b\": 2, \"c\": 3}", .raised = null });
     try expect("{{ dict({'a': 1}, **{'a': 2}) | tojson }}", "{}", .{ .text = "{\"a\": 2}", .raised = null });

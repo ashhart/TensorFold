@@ -37,6 +37,7 @@ pub const flashnext_think_check = @import("families/flashnext/think_check.zig");
 pub const glm = @import("families/glm/glm.zig");
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
 pub const gemma4 = @import("families/gemma4/gemma4.zig");
+pub const step5 = @import("families/step5/step5.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
@@ -60,6 +61,7 @@ test {
     _ = @import("families/qwen3_5/config.zig");
     _ = @import("families/gemma4/gemma4.zig");
     _ = @import("families/qwen3_5/backend.zig");
+    _ = @import("families/step5/step5.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");

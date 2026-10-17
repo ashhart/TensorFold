@@ -143,6 +143,14 @@ pub const core_deltanet = @embedFile("core/deltanet.metal");
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
+pub const step5_glue = @embedFile("step5/glue.metal");
+/// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
+pub const step5_sparse = @embedFile("step5/sparse.metal");
+/// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
+pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
+/// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
+pub const step5_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("step5/vision.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 

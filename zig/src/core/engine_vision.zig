@@ -3,7 +3,18 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 /// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
-pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
+pub const PreparedImage = struct {
+    pixels: []f32,
+    gh: u32,
+    gw: u32,
+    tokens: u32,
+    hash: u64,
+    /// The image as tower inputs in order, each image tokens between `before` and `after`; empty: `pixels` alone.
+    pieces: []const Piece = &.{},
+};
+
+/// One tower input of an image, and the tokens the placeholder expands to around its rows.
+pub const Piece = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, before: []const u32 = &.{}, after: []const u32 = &.{} };
 
 /// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
 pub const Vision = struct {
