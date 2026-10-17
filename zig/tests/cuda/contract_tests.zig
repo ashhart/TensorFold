@@ -8,6 +8,9 @@ const rows_k = @import("contract_rows.zig");
 const router_k = @import("contract_router.zig");
 const mm_k = @import("contract_mm.zig");
 const rank_k = @import("contract_rank.zig");
+const act_k = @import("contract_act.zig");
+const gdn_k = @import("contract_gdn.zig");
+const qk_k = @import("contract_qk.zig");
 
 const contract = core.contract;
 const g = contract.gates;
@@ -21,7 +24,7 @@ const controls = struct {
 
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "act_rows", "gdn_prep", "qk_rows" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -89,6 +92,24 @@ pub fn run(gpu: check.Gpu) !void {
     var rank = rank_k.Rank{ .rig = .{ .gpu = gpu, .s = s }, .sum = &rank_sum };
     defer rank.deinit();
     try kernels.append(a, rank.kernel());
+    var act_rows = try cuda.act_rows.ActRows.load(gpu.d);
+    defer act_rows.unload();
+    var acts: [std.enums.values(act_k.Which).len]act_k.Act = undefined;
+    for (std.enums.values(act_k.Which), &acts) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &act_rows, .arena = .init(a) };
+    defer for (&acts) |*x| x.deinit();
+    for (&acts) |*x| try kernels.append(a, x.kernel());
+    var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
+    defer gdn_prep.unload();
+    var gdns: [9]gdn_k.Gdn = undefined;
+    for (&gdns, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .dk = @as(usize, 64) << @intCast(i / 3), .part = @fromBackingInt(@intCast(i % 3)), .k = &gdn_prep, .arena = .init(a) };
+    defer for (&gdns) |*x| x.deinit();
+    for (&gdns) |*x| try kernels.append(a, x.kernel());
+    var qk_rows = try cuda.qk_rows.QkRows.load(gpu.d);
+    defer qk_rows.unload();
+    var qks: [qk_k.forms.len]qk_k.Qk = undefined;
+    for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
+    defer for (&qks) |*x| x.deinit();
+    for (&qks) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
