@@ -1,4 +1,4 @@
-//! A prompt chunk of up to 512 rows of one stream: core/affine_mm projections, the decode glue, the last row's logits.
+//! Prompt chunks on Gemma's private rounded-weight projections, with decode glue and last-row logits.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");

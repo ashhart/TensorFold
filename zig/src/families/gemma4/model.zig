@@ -60,7 +60,7 @@ pub const Model = struct {
     weights: weights.Weights,
     kernels: kernels.Kernels,
     projections: weights.Projections,
-    /// core/affine_mm's pipelines for prompt chunks: 4-bit groups of 64 from the checkpoint's own tensors.
+    /// Gemma's private affine pipelines for prompt chunks: 4-bit groups of 64 from the checkpoint's own tensors.
     mm: affine_mm.Pipes,
     /// RoPE inverse frequencies, float32 [dim / 2], for sliding and for global layers.
     inv_sliding: mtl.Buffer,

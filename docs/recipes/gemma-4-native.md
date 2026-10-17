@@ -45,7 +45,7 @@ its epilogue (the stack's rows interleaved in 16-row blocks, so a lane holds a g
 down projection sums its own input (`zig/kernels/metal/gemma4/fused.metal` on the lane core's `Fused` hook); a sliding
 layer's attention kernel preps its own query heads and writes the row's key and value, and with one key chunk writes
 the merged output itself. The same bits as the kernels apart.
-Prompts run in chunks of 512 rows on `core/affine_mm` and a tensor-unit attention kernel, at about 1,360
+Prompts run in chunks of 512 rows on Gemma's private `families/gemma4/affine_mm` and a tensor-unit attention kernel, at about 1,360
 tokens a second at 8k, 1,200 at 32k and 560 at 252k.
 
 The drafter is z-lab's DFlash (`zig/src/families/gemma4/dflash.zig`): five Qwen3-style layers reading six of the
@@ -104,7 +104,7 @@ resize, then 1/255), so an image becomes 256 to 280 tokens (70 or 140 with `deta
 `zig/src/families/gemma4/vision.zig` runs the 27-layer encoder on gemm_nax's tensor-unit GEMMs at torch's per-op bf16
 rounding: the patch projection and the x and y position rows, RMS norms in fp32 times their weights, per-head q, k and
 v norms, the axial 2D RoPE (theta 100, x on dims 0-35 and y on 36-71), attention with scale 1 as two batched GEMMs and
-a softmax, GELU-tanh gating, the 3 x 3 pooler, the standardization and the projection on core affine_mm. An image takes
+a softmax, GELU-tanh gating, the 3 x 3 pooler, the standardization and the projection on Gemma's private affine_mm. An image takes
 about 90 ms, and adds about 270 ms to a request's first token (a 290-token prompt with an image 365 ms, the text
 alone 92 ms). In the language model the image's rows replace its tokens' embeddings, and on the 50 sliding layers they
 see one another both ways, as `use_bidirectional_attention: "vision"` asks (the prompt attention kernel takes each
@@ -168,7 +168,7 @@ head and accumulates its own 64 output columns, the row maxes and fp32 probabili
 keys at a time. A 512-row chunk's 60 layers spend 138 ms there at 32k and 527 ms at 128k, where 16 rows a threadgroup
 spent 194 and 810 (mlx-lm's fused attention about 161 at 32k): the kernel streams keys and values, so what each load
 serves decides its rate, and vector loads, fetching a step ahead, and sparing interior blocks the mask and the rescale
-moved nothing. The prompt GEMMs are core affine_mm's, which dequantizes each step's weights to bf16 in its tile (scale
+moved nothing. The prompt GEMMs use Gemma's private affine_mm, which dequantizes each step's weights to bf16 in its tile (scale
 times code plus bias in fp32, rounded once, as mlx-lm's quantized matmul does) and accumulates on the tensor unit over
 the whole depth: a 512-row chunk's 60 layers take 284 ms there (mlx-lm's quantized matmuls 302), where the exact-codes
 design, its per-group scale and bias epilogue and its row-sums pass took 344. So the prompt path rounds its weights as
@@ -182,3 +182,12 @@ at 1, eight times the simdgroups at 8); the attention's 120 dispatches took 0.9 
 as the projections' prologues shortens by 0.2 (a prologue costs what the tail kernel cost, and only the dispatch gap
 goes) and the attention's prep and merge folded into its kernel by 0.6. `tf-gemma4-bench` prints the stages
 (`GEMMA_DSTAGES`), each shape plain and fused (`GEMMA_FUSED`) and the glue kernels alone (`GEMMA_GLUE`).
+
+## Shared arithmetic at landing
+
+The shared affine and lane kernels, their Zig encoders, other-family callers and numerical tests retain the released
+implementation. Gemma's rounded-weight dense source is in `zig/kernels/metal/gemma4/affine_mm.metal`. Its fused lane
+variant is in `zig/kernels/metal/gemma4/lane_projection.metal`, with host encoding in `families/gemma4/fused_lane.zig`.
+Ordinary Gemma lane packing and projections still use the shared lane module. The measurements above are the original
+PR's receipts. They do not qualify the isolated landing tree. Re-run numerical, resource, teacher-forced, draft/plain,
+resumed/fresh, concurrent/solo, vision and performance gates on that tree.

@@ -58,6 +58,8 @@ comptime {
 
 pub const Error = error{
     BadGemmaConfig,
+    BadGemmaContext,
+    BadGemmaEos,
     GemmaMoeNotServed,
     GemmaUnifiedNotServed,
     GemmaPerLayerInputsNotServed,
@@ -160,14 +162,17 @@ fn rope(o: std.json.ObjectMap, kind: []const u8, kind_type: []const u8, theta: f
     if (partial) |p| if (try number(try field(r, "partial_rotary_factor")) != p) return error.UnsupportedGemmaRotary;
 }
 
-fn eosIds(v: std.json.Value, c: *Config) void {
+fn eosIds(v: std.json.Value, c: *Config) Error!void {
     switch (v) {
-        .integer => |i| if (c.eos_count < c.eos.len) {
-            c.eos[c.eos_count] = @intCast(i);
-            c.eos_count += 1;
+        .integer => |i| {
+            if (i < 0 or i >= vocab) return error.BadGemmaEos;
+            if (c.eos_count < c.eos.len) {
+                c.eos[c.eos_count] = @intCast(i);
+                c.eos_count += 1;
+            }
         },
-        .array => |a| for (a.items) |x| eosIds(x, c),
-        else => {},
+        .array => |a| for (a.items) |x| try eosIds(x, c),
+        else => return error.BadGemmaEos,
     }
 }
 
@@ -206,17 +211,74 @@ pub fn parse(gpa: std.mem.Allocator, bytes: []const u8) Error!Config {
     try rope(ropes, "full_attention", "proportional", global_theta, 0.25);
     try quantization(root.get("quantization") orelse return error.UnsupportedGemmaQuantization);
     if (root.get("quantization_config")) |q| try quantization(q);
-    const context: usize = @intCast(try integer(text, "max_position_embeddings"));
-    if (context < 1 or context > 262144) return error.UnsupportedGemmaGeometry;
-    var c: Config = .{ .geo = geo, .context = context };
-    eosIds(root.get("eos_token_id") orelse try field(text, "eos_token_id"), &c);
-    if (c.eos_count == 0) return error.BadGemmaConfig;
+    const context = try integer(text, "max_position_embeddings");
+    if (context < 1 or context > 262144) return error.BadGemmaContext;
+    var c: Config = .{ .geo = geo, .context = @intCast(context) };
+    try eosIds(root.get("eos_token_id") orelse try field(text, "eos_token_id"), &c);
+    if (c.eos_count == 0) return error.BadGemmaEos;
     return c;
 }
 
 const fixture = @embedFile("fixtures/config.json");
 /// The 4-bit 12B's config as tools/zig/gemma4_12b_convert.py writes it: unified model types (the text model's part).
 const fixture_12b = @embedFile("fixtures/config_12b.json");
+
+fn boundaryFixture(base: []const u8, key: []const u8, value: []const u8, root_eos: bool) ![]u8 {
+    const a = std.testing.allocator;
+    var p = try std.json.parseFromSlice(std.json.Value, a, base, .{});
+    defer p.deinit();
+    const v = try std.json.parseFromSlice(std.json.Value, a, value, .{});
+    defer v.deinit();
+    if (root_eos) {
+        try p.value.object.put(p.arena.allocator(), key, v.value);
+    } else {
+        if (std.mem.eql(u8, key, "eos_token_id")) _ = p.value.object.swapRemove(key);
+        const text = p.value.object.getPtr("text_config").?;
+        try text.object.put(p.arena.allocator(), key, v.value);
+    }
+    return std.json.Stringify.valueAlloc(a, p.value, .{});
+}
+
+test "Gemma context boundaries refuse before unsigned conversion in both geometries" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ fixture, fixture_12b }) |base| {
+        for ([_][]const u8{ "-9223372036854775808", "-1", "0", "262145", "9223372036854775807" }) |value| {
+            const bytes = try boundaryFixture(base, "max_position_embeddings", value, false);
+            defer a.free(bytes);
+            try std.testing.expectError(error.BadGemmaContext, parse(a, bytes));
+        }
+        for ([_][]const u8{ "1", "262144" }) |value| {
+            const bytes = try boundaryFixture(base, "max_position_embeddings", value, false);
+            defer a.free(bytes);
+            const c = try parse(a, bytes);
+            try std.testing.expectEqual(try std.fmt.parseInt(usize, value, 10), c.context);
+        }
+    }
+}
+
+test "Gemma EOS scalar and array boundaries are checked at root and text fallback" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ fixture, fixture_12b }) |base| {
+        for ([_]bool{ false, true }) |root_eos| {
+            for ([_][]const u8{
+                "-1",   "262144",         "4294967296",   "9223372036854775807",
+                "[-1]", "[1,4294967296]", "[0,1,2,3,-1]", "[]",
+                "null", "\"1\"",
+            }) |value| {
+                const bytes = try boundaryFixture(base, "eos_token_id", value, root_eos);
+                defer a.free(bytes);
+                try std.testing.expectError(error.BadGemmaEos, parse(a, bytes));
+            }
+            for ([_][]const u8{ "0", "262143", "[0,262143]" }) |value| {
+                const bytes = try boundaryFixture(base, "eos_token_id", value, root_eos);
+                defer a.free(bytes);
+                const c = try parse(a, bytes);
+                try std.testing.expect(c.eos_count > 0);
+                for (c.eos[0..c.eos_count]) |id| try std.testing.expect(id < vocab);
+            }
+        }
+    }
+}
 
 fn edited(gpa: std.mem.Allocator, from: []const u8, to: []const u8) ![]u8 {
     return std.mem.replaceOwned(u8, gpa, fixture, from, to);

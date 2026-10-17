@@ -15,7 +15,7 @@ pub const Ref = lane.Ref;
 /// One packed linear (a stack of members along N): its lane layout's words and scale/bias pairs.
 pub const Linear = struct { w: mtl.Buffer, sb: mtl.Buffer, n: usize, k: usize };
 
-/// A linear as core/affine_mm reads it (prompt chunks): MLX's words, scales and biases, copied to aligned storage.
+/// MLX words, scales and biases copied to aligned storage for Gemma's private prompt projections.
 pub const Mlx = struct { w: Ref, s: Ref, b: Ref, n: u32, k: u32 };
 
 pub const Layer = struct {
