@@ -27,8 +27,8 @@ fn linear(m: *q.model.Model, job: Job) !q.projection.Linear {
             },
             else => error.ExpectedAttentionLayer,
         },
-        .gu => layer.gu,
-        .down => layer.down,
+        .gu => layer.mlp.dense.gu,
+        .down => layer.mlp.dense.down,
         .head => unreachable,
     };
 }

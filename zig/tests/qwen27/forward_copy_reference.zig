@@ -74,13 +74,13 @@ pub const Stages = struct {
         e.barrier();
         try m.kernels.norm(e, f.get(.hidden), f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), f.get(.residual), f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
-        try m.kernels.quant(e, layer.gu, f.get(.input), q.forward.sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
+        try m.kernels.quant(e, layer.mlp.dense.gu, f.get(.input), q.forward.sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
         e.barrier();
         try splitGu(m, e, m.config, s.rows);
         e.barrier();
         try m.kernels.mlp(e, f.get(.gate), f.get(.up), f.get(.dims), f.get(.activated), f.get(.act_sums), @intCast(m.config.intermediate), s.rows);
         e.barrier();
-        try m.kernels.quant(e, layer.down, f.get(.activated), q.forward.sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
+        try m.kernels.quant(e, layer.mlp.dense.down, f.get(.activated), q.forward.sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
         e.barrier();
         try m.glue.unstack(e, f.get(.residual), f.get(.hidden), .{ .width = h, .stride = h, .offset = 0, .rows = s.rows });
         e.barrier();

@@ -28,8 +28,8 @@ fn linears(w: q.gpu_weights.Weights, c: Class, out: []Linear) []Linear {
     var n: usize = 0;
     for (w.layers) |l| {
         const x: ?Linear = switch (c) {
-            .gate_up => l.gu,
-            .down => l.down,
+            .gate_up => if (l.mlp == .dense) l.mlp.dense.gu else null,
+            .down => if (l.mlp == .dense) l.mlp.dense.down else null,
             .gdn_qkv, .gdn_zba, .gdn_out => switch (l.mixer) {
                 .linear => |g| if (c == .gdn_qkv) g.qkv else if (c == .gdn_zba) g.zba else g.out,
                 .attention => null,
