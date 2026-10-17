@@ -183,5 +183,31 @@ reproduces the numpy oracle on every codebook and width and on real checkpoint b
 (the oracle vectors ship beside the test). Its real checkpoint bytes are one 128x128 block from
 `UnstableLlama/Qwen3.5-2B-exl3-8.00bpw` (mcg codebook, 8.00 bpw), in `zig/tests/fixtures/exl3_oracle.bin`.
 
-No model is registered for EXL3 yet: the Metal projection (#681) and the CUDA operators in review are the GPU parts
-so far.
+The scalar decoder and its oracle tests do not register an EXL3 model on their own; the native CUDA kernels below
+are checked against them.
+
+## Native CUDA (Zig)
+
+The Zig engine carries the same arithmetic as hand-written CUDA, ported from the Python engine's kernels so a
+row's bits match it:
+
+- `zig/kernels/cuda/exl3_decode.cuh`, `exl3_linear.cu`, `zig/src/cuda/exl3.zig`: the input rotation and the linear
+  for 1 to 128 rows, every codebook and width (the `mul1` half steps included), with the K split planned from the
+  layer's shape alone. `exl3.Dense` runs prompt rows in 128-row blocks of the same kernel, so a prompt row's bits
+  equal its decode-row bits wherever its chunk starts; `qlinear.Weight` has an `.exl3` arm for both.
+- `zig/kernels/cuda/exl3_experts.cu`, `zig/src/cuda/exl3_experts.zig`: grouped routed experts (member lists,
+  each expert's rotation, gate and up, GLM's SwiGLU roundings, down and the weighted combine), widths mixed within
+  a layer; an expert's member count never changes a row's bits.
+- `zig/src/core/exl3_load.zig`: every trellis group of a checkpoint from its safetensors headers;
+  `zig/src/cuda/exl3_upload.zig` puts a group, or a layer's experts, on the device.
+
+`tf-cuda-test exl3 DIR` checks them: every width and codebook against float64 references built on
+`exl3_format.zig`, row and chunk invariance, and, when `DIR` holds bytes the Python engine recorded on real checkpoint
+layers, those layers bit for bit, two whole layers of RED-SNOW-5.3-Flash (a KDA and a DSA layer, all 288 experts
+under real routing) included. The program that records them runs the Python engine and is not in this repository;
+`none` skips those checks. `tf-cuda-test exl3-tp2 RANK HOST:PORT DIR` runs the GLM split rules on two ranks over
+NCCL (output-column cuts, input-row cuts with fp32 partials summed rank 0 first, and the experts' intermediate cut)
+and checks every rank's bytes and the sums the same way.
+
+No family serves EXL3 natively yet: the Metal projection (#681) and these CUDA pieces are what a family's engine
+takes, through `qlinear` and `exl3_experts`.

@@ -8,6 +8,7 @@ const stream_ = @import("stream.zig");
 const qmmf = @import("qmmf.zig");
 const nvfp4 = @import("nvfp4.zig");
 const ck = @import("ck.zig");
+const exl3 = @import("exl3.zig");
 
 const Driver = driver.Driver;
 const Module = module.Module;
@@ -64,11 +65,13 @@ pub const Weight = union(enum) {
     nvfp4: qmmf.Weight,
     fp8: qmmf.Weight, // e4m3 with one fp32 scale (ModelOpt FP8)
     bf16: qmmf.Weight, // unquantized: the checkpoint's bf16 values
+    exl3: exl3.Weight, // the trellis: decode and prompt rows through the same row-invariant kernel
 
     pub fn outputs(w: Weight) usize {
         return switch (w) {
             .affine4 => |q| q.n,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.n,
+            .exl3 => |q| q.n,
         };
     }
 
@@ -76,6 +79,7 @@ pub const Weight = union(enum) {
         return switch (w) {
             .affine4 => |q| q.k,
             .fp8g, .mxfp8, .nvfp4, .fp8, .bf16 => |q| q.k,
+            .exl3 => |q| q.k,
         };
     }
 };
@@ -91,6 +95,7 @@ pub const Linear = struct {
     ck: ?*const ck.Ck = null, // the checkpoint's own math: an fp8 weight with an input scale takes e4m3 rows
     ck_rows: u64 = 0, // its e4m3 rows (at least rows * k bytes), and slice partials where no cluster meets them
     ck_part: u64 = 0,
+    exl3: ?*exl3.Dense = null, // the EXL3 kernels and the scratch the dense calls share
 
     /// e4m3 rows of x times an fp8 weight under its input scale, bf16 out: decode and prompt rows alike (row-exact).
     fn checkpoint(l: Linear, s: Stream, c: *const ck.Ck, q: qmmf.Weight, in: Rows, out: u64, rows: usize) !void {
@@ -112,6 +117,11 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onLane(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onLane(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.decode(s, q, in.x, .bf16, rows, out, .bf16);
+            },
         }
     }
 
@@ -128,6 +138,11 @@ pub const Linear = struct {
             .nvfp4 => |q| return l.onPrompt(s, q, .fp4, in, out, rows),
             .fp8 => |q| return if (q.act != 0 and l.ck != null) l.checkpoint(s, l.ck.?, q, in, out, rows) else l.onPrompt(s, q, .fp8, in, out, rows),
             .bf16 => |q| return l.onLane(s, q, .bf16, in, out, rows),
+            .exl3 => |q| {
+                const e = l.exl3 orelse return error.FormatNotLoaded;
+                if (in.ldx != 0 and in.ldx != q.k) return error.RowStride;
+                return e.prompt(s, q, in.x, .bf16, rows, out, .bf16);
+            },
         }
     }
 
@@ -559,6 +574,16 @@ test "a weight view reports its shape in every format" {
     const f: Weight = .{ .fp8g = .{ .mode = .fp8g, .codes = 0, .scales = 0, .n = 7168, .k = 2560, .npad = 7168 } };
     try std.testing.expectEqual(@as(usize, 10304), a.outputs());
     try std.testing.expectEqual(@as(usize, 2560), f.inputs());
+}
+
+test "the exl3 weight view reports its shape and is refused when not loaded" {
+    const w: Weight = .{ .exl3 = .{ .trellis = 0, .suh = 0, .svh = 0, .k = 4096, .n = 1024, .halves = 8, .codebook = .mul1, .stride_k = 4096, .stride_nb = 256 } };
+    try std.testing.expectEqual(@as(usize, 1024), w.outputs());
+    try std.testing.expectEqual(@as(usize, 4096), w.inputs());
+    const l: Linear = .{};
+    const s: Stream = undefined; // never reached: the refusal comes first
+    try std.testing.expectError(error.FormatNotLoaded, l.decode(s, w, .{ .x = 0 }, 0, 1));
+    try std.testing.expectError(error.FormatNotLoaded, l.prompt(s, w, .{ .x = 0 }, 0, 1));
 }
 
 test "a format that is not loaded is refused before any launch" {

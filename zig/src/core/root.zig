@@ -5,6 +5,7 @@ pub const exl3_format = @import("exl3_format.zig");
 pub const exlr8 = @import("exlr8.zig");
 pub const eaq_container = @import("eaq_container.zig");
 pub const checkpoint = @import("checkpoint.zig");
+pub const exl3_load = @import("exl3_load.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
 pub const draft_depth = @import("draft_depth.zig");
@@ -67,6 +68,7 @@ test {
     _ = exlr8;
     _ = eaq_container;
     _ = @import("eaq_container_test.zig");
+    _ = exl3_load;
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;

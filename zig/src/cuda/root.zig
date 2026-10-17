@@ -56,6 +56,9 @@ pub const block_attention = @import("block_attention.zig");
 pub const window_attention = @import("window_attention.zig");
 pub const moe_glue = @import("moe_glue.zig");
 pub const dense_rows = @import("dense_rows.zig");
+pub const exl3 = @import("exl3.zig");
+pub const exl3_experts = @import("exl3_experts.zig");
+pub const exl3_upload = @import("exl3_upload.zig");
 
 test {
     _ = @import("memory.zig");
@@ -84,6 +87,9 @@ test {
     _ = @import("mxfp8.zig");
     _ = carveout;
     _ = @import("nvfp4.zig");
+    _ = exl3;
+    _ = exl3_experts;
+    _ = exl3_upload;
     _ = @import("modelopt.zig");
     _ = @import("ck.zig");
     _ = @import("tp_watch.zig");
