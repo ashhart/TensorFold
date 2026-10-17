@@ -578,8 +578,8 @@ test {
 }
 
 const paging = @import("paging_pending.zig");
-/// What the live audit checks: the serving records, then the paging launches.
-pub const all_cuda = cuda ++ paging.extra;
+/// What the live audit checks: the serving records, then the paging launches and the served ones still unmeasured.
+pub const all_cuda = cuda ++ paging.extra ++ @import("qwen_served_pending.zig").records;
 test {
     _ = paging;
 }

@@ -9,6 +9,7 @@ pub const registry = @import("contract/registry.zig");
 pub const cubin = @import("contract/cubin.zig");
 
 test {
+    _ = @import("contract/qwen_served_pending.zig");
     _ = spec;
     _ = gates;
     _ = rows;
