@@ -321,8 +321,8 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        load_owner.closeEntry(e.ctx) catch {}; // this engine's context current first, whichever one the caller had
         if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
-        load_owner.closeEntry(e.ctx) catch {};
         e.stream.synchronize() catch {};
         e.spares.deinit();
         if (e.serial) |*g| g.deinit();
