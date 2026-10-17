@@ -64,8 +64,8 @@ fn contextWindow(requested: ?i64, native: i64, default: i64) error{ Negative, No
 fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
     const unified = (try ctx.attribute(.integrated)) != 0;
     const card = try ctx.memInfo();
-    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
-    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+    const text = if (unified and !platform.windows) budget.procText(a, io, "/proc/meminfo") else null;
+    const available = budget.counts(unified and !platform.windows, .{ .total = card.total, .available = card.free }, text) catch {
         problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
         return null;
     };
