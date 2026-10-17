@@ -10,8 +10,30 @@ const tr = cuda.tree_round;
 const ref = core.tree_round;
 
 comptime {
-    std.debug.assert(@sizeOf(tr.Result) == @sizeOf(ref.Result) and @sizeOf(tr.Pick) == @sizeOf(ref.Pick));
-    std.debug.assert(tr.max_rows == ref.max_rows);
+    // a CUDA round takes up to tr.max_rows rows, the core's helpers more (the 27B's Metal rounds), in the same fields
+    std.debug.assert(@sizeOf(tr.Pick) == @sizeOf(ref.Pick) and tr.max_rows <= ref.max_rows);
+}
+
+/// The core's result in CUDA's layout: its first tr.max_rows path and token entries, the rest of a CUDA round's.
+fn narrow(w: ref.Result) tr.Result {
+    var r: tr.Result = undefined;
+    const info = @typeInfo(tr.Result).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| @field(r, name) = switch (@typeInfo(T)) {
+        .array => @field(w, name)[0..tr.max_rows].*,
+        else => @field(w, name),
+    };
+    return r;
+}
+
+/// A CUDA result as the core's decode reads it, its arrays' entries past tr.max_rows zero.
+fn wide(g: tr.Result) ref.Result {
+    var r: ref.Result = .{};
+    const info = @typeInfo(tr.Result).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| switch (@typeInfo(T)) {
+        .array => @memcpy(@field(r, name)[0..tr.max_rows], &@field(g, name)),
+        else => @field(r, name) = @field(g, name),
+    };
+    return r;
 }
 
 fn bf16(x: f32) u16 {
@@ -91,14 +113,16 @@ const Round = struct {
         self.trees.deinit(gpa);
     }
 
-    /// Tree t's expected result: the oracle's, or a bad tree where the oracle refuses the shape.
-    fn want(self: *const Round, t: usize, vocab: u32) !ref.Result {
+    /// Tree t's expected result: the oracle's, or a bad tree where the oracle or a CUDA round's rows refuse the shape.
+    fn want(self: *const Round, t: usize, vocab: u32) !tr.Result {
         const x = self.trees.items[t];
+        const bad = narrow(.{ .status = @backingInt(ref.Status.bad_tree), .stop = @backingInt(ref.Stop.invalid) });
+        if (x.rows > tr.max_rows) return bad;
         const p = ref.Match{ .rows = x.rows, .vocab = vocab, .budget = x.budget, .eos_count = x.eos_count };
         const rows = @min(x.rows, self.tokens.items.len - x.first);
-        return ref.oracle(p, self.tokens.items[x.first..][0..rows], self.parents.items[x.first..][0..rows], @ptrCast(self.picks.items[x.first..][0..rows]), self.eos.items[x.eos_first..][0..x.eos_count]) catch |e| switch (e) {
-            error.BadRoundShape => .{ .status = @backingInt(ref.Status.bad_tree), .stop = @backingInt(ref.Stop.invalid) },
-        };
+        return narrow(ref.oracle(p, self.tokens.items[x.first..][0..rows], self.parents.items[x.first..][0..rows], @ptrCast(self.picks.items[x.first..][0..rows]), self.eos.items[x.eos_first..][0..x.eos_count]) catch |e| switch (e) {
+            error.BadRoundShape => return bad,
+        });
     }
 };
 
@@ -210,7 +234,7 @@ fn matches(gpu: Gpu, k: *const tr.Kernels, s: cuda.Stream) !void {
         try check.sameBytes("tree result", std.mem.asBytes(g), std.mem.asBytes(&w));
         const x = round.trees.items[t];
         if (x.rows >= 1 and x.rows <= tr.max_rows) {
-            const d = ref.decode(@ptrCast(g), .{ .rows = x.rows, .vocab = vocab_small, .budget = x.budget, .eos_count = x.eos_count }) catch |e| {
+            const d = ref.decode(&wide(g.*), .{ .rows = x.rows, .vocab = vocab_small, .budget = x.budget, .eos_count = x.eos_count }) catch |e| {
                 std.debug.print("FAIL tree {d}: decode {s}\n", .{ t, @errorName(e) });
                 return error.TestFailed;
             };
