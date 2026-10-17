@@ -379,6 +379,8 @@ pub const Store = struct {
         defer s.release(e);
         if (!ok) {
             s.counts.failed += 1;
+            const why: []const u8 = if (e.expired) "state already expired" else "backend refused the restore";
+            note("restore of the kept {d}-token state failed for a {d}-token prompt ({s}); prefilling from the start", .{ e.at, prompt.len, why });
             e.expired = true;
             return;
         }
