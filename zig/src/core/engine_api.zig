@@ -109,70 +109,6 @@ pub const Request = struct {
     }
 };
 
-/// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
-pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
-
-/// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
-pub const Vision = struct {
-    ctx: *anyopaque,
-    /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.
-    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedImage,
-    /// The token the chat template writes once per image, expanded to the image's tokens.
-    image_token: u32,
-    /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
-    markers: []const u32 = &.{},
-    /// Tokens the server writes around each image's rows (Nemotron Omni's <img> and </img>); null: the template's own.
-    wrap: ?[2]u32 = null,
-    /// Image tokens one request may hold in all, and images.
-    image_tokens: u32,
-    max_images: u32,
-    /// Video input, when the engine's family reads it.
-    video: ?VideoOffer = null,
-    /// The engine's words for a prepare error the server cannot word (a decoder library it lacks); null: the server's.
-    explain: ?*const fn (err: anyerror) ?[]const u8 = null,
-};
-
-/// A video's facts as the server's decoder reads them, and its frames on request.
-pub const VideoSource = struct {
-    frames: u64, // the stream's frame count
-    rate_num: u64, // its average frame rate, num / den
-    rate_den: u64,
-    width: u32,
-    height: u32,
-    ctx: *anyopaque,
-    /// The frames at ``indices`` (ascending, distinct), each to ``sink`` in order.
-    decode: *const fn (ctx: *anyopaque, indices: []const u32, sink: FrameSink) anyerror!void,
-};
-
-/// Where a decoded frame goes: RGB rows of ``width`` * 3 bytes, ``stride`` bytes apart.
-pub const FrameSink = struct {
-    ctx: *anyopaque,
-    take: *const fn (ctx: *anyopaque, k: usize, rgb: []const u8, width: u32, height: u32, stride: usize) anyerror!void,
-};
-
-/// A video prepared for the tower: each group of frames an image, and each group's time in seconds.
-pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64 };
-
-/// Video input an engine serves (``Vision.video``): how a decoded video becomes images and how the prompt holds them.
-pub const VideoOffer = struct {
-    /// ``src`` at most ``max_tokens`` tokens and ``max_frames`` sampled frames; allocated in ``a``.
-    prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
-    /// The token the chat template writes once per video, expanded to its groups.
-    video_token: u32,
-    /// The tokens around each group's image tokens; the group's time follows as text.
-    group_open: u32,
-    group_close: u32,
-    /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
-    markers: []const u32 = &.{},
-    /// Video tokens one request may hold in all, videos, and frames sampled a video.
-    video_tokens: u32,
-    max_videos: u32,
-    max_frames: u32,
-};
-
-/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
-pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
-
 pub const Reason = enum { stop, length, cancelled, failed };
 
 /// What a finished reply's rounds did, for its runtime fields and /metrics.
@@ -201,6 +137,8 @@ pub const Event = union(enum) {
     prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
+    /// A streamed speech request's samples now final, from its start: whole frames, rising, all before ``finished``.
+    audio: usize,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
     finished: struct { reason: Reason, stats: Stats = .{}, message: []const u8 = "" },
 };
@@ -214,6 +152,9 @@ pub const Sink = struct {
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
     name: []const u8 = "lanes",
+    /// Speech-only models must not be offered through the text completion routes.
+    text_generation: bool = true,
+    speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
     context_window: u32 = 0,
@@ -384,7 +325,7 @@ pub const Status = struct {
     fill_run: u64 = 0,
 };
 
-pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
+pub const SubmitError = error{ Closed, Busy, InvalidSpans, Unsupported, Stale }; // Stale: a learner's put-back has not reached the device
 
 /// What a reply refused or ended for `Stale` says, a submit's error and a queued job's failure alike.
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
@@ -473,6 +414,8 @@ pub const Engine = struct {
         decide: ?*const fn (ctx: *anyopaque, d: *Decision) error{ Failed, Refused }!void = null,
         /// Queue `request` for the family's learner; it stays valid until `done`. Null: this engine does not learn.
         learn: ?*const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) LearnError!void = null,
+        /// One synthesis; caller storage lives until finished. Null: this engine does not synthesize speech.
+        submit_speech: ?*const fn (ctx: *anyopaque, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void = null,
         /// Recall's record for every later request's drafts and writes, before any request (null: no record read).
         recall: ?*const fn (ctx: *anyopaque, store: *lanes.recall_store.Store) void = null,
         /// Queue a question about kept states for the engine thread (it stays valid until `done`); false: refused.
@@ -487,6 +430,10 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         return e.vtable.submit(e.ctx, id, request, sink);
+    }
+    pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
+        const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
         e.vtable.cancel(e.ctx, id);
@@ -588,6 +535,21 @@ pub const keepalive = @import("keepalive.zig");
 
 /// A model folder's original files kept before --slide first teaches it, its hold and its rollback (originals.zig).
 pub const originals = @import("originals.zig");
+
+/// Image and video input: what an engine offers and what the server prepares for its tower (vision_api.zig).
+pub const PreparedImage = @import("vision_api.zig").PreparedImage;
+pub const Vision = @import("vision_api.zig").Vision;
+pub const VideoSource = @import("vision_api.zig").VideoSource;
+pub const FrameSink = @import("vision_api.zig").FrameSink;
+pub const PreparedVideo = @import("vision_api.zig").PreparedVideo;
+pub const VideoOffer = @import("vision_api.zig").VideoOffer;
+pub const VisionOpen = @import("vision_api.zig").VisionOpen;
+
+/// One speech synthesis's request, result, offer and refusals (speech_api.zig).
+pub const SpeechRequest = @import("speech_api.zig").Request;
+pub const SpeechResult = @import("speech_api.zig").Result;
+pub const SpeechInfo = @import("speech_api.zig").Info;
+pub const SpeechSubmitError = @import("speech_api.zig").SubmitError;
 
 test {
     _ = @import("lane_host.zig");

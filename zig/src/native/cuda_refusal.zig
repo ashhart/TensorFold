@@ -19,6 +19,17 @@ pub fn lfm2(o: api.Open) ?[]const u8 {
 const lfm2_vision = "--vision: LFM2 reads the checkpoint's images through its own tower without the flag; " ++
     "serve it without --vision";
 
+/// Drama 3 serves one synthesis on one device, without the text engines' extras or flags it does not read.
+pub fn drama(o: api.Open) ?[]const u8 {
+    if (o.tp != 1 or o.rank != 0 or (o.lanes_fixed and o.lanes != 1)) return "Drama 3 serves one synthesis on one CUDA device: use --parallel 1 and no tensor parallelism";
+    if (o.slide or o.drafter != null or o.mtp_drafts != null or o.mtp_confidence != null or
+        (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or
+        (o.keep != null and o.keep.? != 0) or o.policy.len != 0)
+        return "Drama 3 does not support learned weights, speculative drafts, retained prompt caches, or text-engine policies";
+    if (o.vision != null or o.precision != null or o.record != null or o.learn_conversations) return "Drama 3 reads no images or NVFP4 checkpoints and keeps no rows or conversation states: serve it without --vision, --precision, --record and --learn-conversations";
+    return null;
+}
+
 /// A family takes --drafter only if it says so, and --learn-conversations only as Nemotron; null: `o` may open `F`.
 pub fn family(comptime F: type, o: api.Open) ?[]const u8 {
     if (o.drafter != null and !(@hasDecl(F, "takes_drafter") and F.takes_drafter)) return "--drafter loads a separate drafter, and this CUDA family drafts with its own MTP head: serve without --drafter";
@@ -67,4 +78,11 @@ test "--learn-conversations opens Nemotron only, the one CUDA family whose state
     const Other = struct {};
     try std.testing.expectStringStartsWith(family(Other, .{ .dir = "d", .model_type = "m", .learn_conversations = true }) orelse "", "--learn-conversations keeps");
     try std.testing.expect(family(nemotron.native, .{ .dir = "d", .model_type = "nemotron_h", .learn_conversations = true }) == null);
+}
+
+test "Drama 3 refuses tensor parallelism, the text engines' extras and the flags it does not read" {
+    try std.testing.expect(drama(.{ .dir = "d", .model_type = "fish_omni" }) == null);
+    try std.testing.expectStringStartsWith(drama(.{ .dir = "d", .model_type = "fish_omni", .tp = 2 }) orelse "", "Drama 3 serves one synthesis");
+    try std.testing.expectStringStartsWith(drama(.{ .dir = "d", .model_type = "fish_omni", .drafter = "/x" }) orelse "", "Drama 3 does not support");
+    try std.testing.expectStringStartsWith(drama(.{ .dir = "d", .model_type = "fish_omni", .vision = .{} }) orelse "", "Drama 3 reads no images");
 }

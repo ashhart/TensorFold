@@ -8,6 +8,7 @@ pub const DeviceBuffer = @import("memory.zig").DeviceBuffer;
 pub const HostBuffer = @import("memory.zig").HostBuffer;
 pub const usage = @import("memory.zig").usage;
 pub const Usage = @import("memory.zig").Usage;
+pub const setAllocationLimit = @import("memory.zig").setAllocationLimit;
 pub const carveout = @import("carveout.zig");
 pub const Carveout = carveout.Carveout;
 pub const Stream = @import("stream.zig").Stream;
