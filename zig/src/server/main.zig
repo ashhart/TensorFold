@@ -13,6 +13,9 @@ const slide_key = @import("slide_key.zig");
 const api = @import("engine_api");
 const recall_open = @import("recall_open.zig");
 const benchmark = @import("benchmark.zig");
+const deepseek = @import("deepseek.zig");
+const model_text = @import("model_text.zig");
+const family_mod = @import("family.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
@@ -106,7 +109,7 @@ pub fn main(init: std.process.Init) !u8 {
     var text_arena: std.heap.ArenaAllocator = .init(gpa); // the text's problem, written on its own thread
     defer text_arena.deinit();
     var text_problem: []const u8 = "";
-    const up = startup.both(io, loadText, .{ gpa, io, dir, args.chat_template, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
+    const up = startup.both(io, loadText, .{ gpa, io, dir, model_type, args.chat_template, init.environ_map, text_arena.allocator(), &text_problem }, engines.open, .{ a, gpa, io, dir, model_type, args, &problem }) catch |e| {
         if (text_problem.len > 0) return fail(text_problem);
         if (problem.len > 0) return fail(problem); // an engine that failed after saying why
         return e;
@@ -114,16 +117,22 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    defer up.engine.close(up.engine.ctx);
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.closeOnce();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
-    record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
+    record = switch (up.text) {
+        .hf => |h| recall_open.open(gpa, io, a, args, h, served, &problem),
+        .ds => if (args.recall) return fail("--recall reads the checkpoint's chat template text; DeepSeek-V4.1 serves its own encoding") else null,
+    } catch |e| {
         return if (problem.len > 0) fail(problem) else e;
     };
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
+        .stop = .{ .ctx = &closer, .close = Closer.close },
         .engine = up.engine.engine,
         .text = up.text.text(),
+        .family = up.text.family(),
         .served = served,
         .recall = record,
         .model_dir = dir,
@@ -135,18 +144,69 @@ pub fn main(init: std.process.Init) !u8 {
     });
 }
 
+/// Closes once: serve.run closes the engine before freeing the server, main's defer covers paths that end before it.
+const Closer = struct {
+    opened: engines.Opened,
+    closed: bool = false,
+
+    fn closeOnce(c: *Closer) void {
+        if (c.closed) return;
+        c.closed = true;
+        c.opened.close(c.opened.ctx);
+    }
+
+    fn close(ctx: *anyopaque) void {
+        closeOnce(@ptrCast(@alignCast(ctx)));
+    }
+};
+
 /// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
 fn forgetFail(env: *const std.process.Environ.Map) u32 {
     const v = env.get("TF_SLIDE_FORGET_FAIL") orelse return 0;
     return std.fmt.parseInt(u32, std.mem.trim(u8, v, " "), 10) catch 0;
 }
 
-/// HfText.load with every failure named in `problem`, so main tells the text's failure from the engine's.
-fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, template: ?[]const u8, pa: std.mem.Allocator, problem: *[]const u8) !*hf_text.HfText {
-    return hf_text.HfText.load(gpa, io, dir, template, pa, problem) catch |e| {
+/// The served text: a family's own (deepseek.zig), else the checkpoint's chat template (hf_text.zig).
+const Text = union(enum) {
+    hf: *hf_text.HfText,
+    ds: *deepseek.DeepSeek,
+
+    fn text(t: Text) model_text.Text {
+        return switch (t) {
+            .hf => |h| h.text(),
+            .ds => |d| d.text(),
+        };
+    }
+
+    fn family(t: Text) ?family_mod.Family {
+        return switch (t) {
+            .hf => null,
+            .ds => |d| d.family_(),
+        };
+    }
+
+    pub fn deinit(t: Text) void {
+        switch (t) {
+            .hf => |h| h.deinit(),
+            .ds => |d| d.deinit(true),
+        }
+    }
+};
+
+/// The model's text with every failure named in `problem`, so main tells the text's failure from the engine's.
+fn loadText(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []const u8, template: ?[]const u8, env: ?*const std.process.Environ.Map, pa: std.mem.Allocator, problem: *[]const u8) !Text {
+    return textOf(gpa, io, dir, model_type, template, env, pa, problem) catch |e| {
         if (problem.len == 0) problem.* = @errorName(e);
         return e;
     };
+}
+
+fn textOf(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, model_type: []const u8, template: ?[]const u8, env: ?*const std.process.Environ.Map, pa: std.mem.Allocator, problem: *[]const u8) !Text {
+    if (std.mem.eql(u8, model_type, deepseek.model_type)) {
+        const options = try deepseek.Options.fromEnv(env, problem);
+        return .{ .ds = try deepseek.DeepSeek.load(gpa, io, dir, options, pa, problem) };
+    }
+    return .{ .hf = try hf_text.HfText.load(gpa, io, dir, template, pa, problem) };
 }
 
 fn fail(message: []const u8) u8 {

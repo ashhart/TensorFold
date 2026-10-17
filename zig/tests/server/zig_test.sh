@@ -3,9 +3,12 @@
 set -euo pipefail
 zig="${ZIG:-zig}"
 root="$(cd "$(dirname "$0")/../../.." && pwd)"
-"$zig" test -lc --dep engine_api --dep tokenizer --dep template --dep json \
+d="$root/zig/src/families/deepseek_v41"
+"$zig" test -lc --dep engine_api --dep tokenizer --dep template --dep json --dep dsv41_serve \
   "-Mroot=$root/zig/src/server/root.zig" \
   "-Mjson=$root/zig/src/server/json.zig" \
+  --dep json --dep tokenizer --dep lanes --dep dsv41_serve_fixtures -lc "-Mdsv41_serve=$d/serve/root.zig" \
+  "-Mdsv41_serve_fixtures=$d/fixtures/serve/fixtures.zig" \
   --dep lanes "-Mengine_api=$root/zig/src/core/engine_api.zig" \
   "-Mlanes=$root/zig/src/core/lanes/lanes.zig" \
   "-Mtokenizer=$root/zig/src/core/tokenizer/tokenizer.zig" \

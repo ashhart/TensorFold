@@ -460,3 +460,124 @@ test "a family that keeps copies to shared rounds proposes none for a lone strea
         try std.testing.expectEqual(lone_copies, (try win.copyProposal(&engine, &s)).tokens.len >= 2);
     }
 }
+
+/// The cases' prompts in pieces, case i opened before round 2 i, others decoding; `join`: Config.join_tail.
+fn runPieces(cases: []const Case, join: bool, joins: *usize) ![][]u32 {
+    var cfg = try model();
+    defer cfg.deinit(gpa);
+    cfg.join_tail = join;
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.joinBackend(), clock.clock());
+    defer engine.deinit();
+    const streams = try gpa.alloc(sm.Stream, cases.len);
+    defer gpa.free(streams);
+    for (cases, streams) |c, *s| s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
+    defer for (streams) |*s| s.deinit(gpa);
+    var opened: usize = 0;
+    var round: usize = 0;
+    while (opened < streams.len or engine.activeCount() > 0) : (round += 1) {
+        if (opened < streams.len and round == 2 * opened) {
+            const s = &streams[opened];
+            _ = try engine.beginStream(s);
+            if (s.prompt_len > 1) try engine.piece(s, 0, s.prompt_len - 1, false);
+            try engine.finishStream(s);
+            opened += 1;
+        }
+        if (engine.activeCount() > 0) try engine.step();
+    }
+    joins.* = target.joins;
+    const out = try gpa.alloc([]u32, cases.len);
+    for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
+    return out;
+}
+
+test "a prompt's last token joins its first round's shared window: the same tokens, greedy and sampled" {
+    const cases = [_]Case{
+        .{ .prompt = &.{ 3, 1, 4, 1, 5, 9, 2, 6 }, .max_new = 37 },
+        .{ .prompt = &.{ 2, 7, 1, 8, 2, 8 }, .max_new = 29, .sampling = .{ .seed = 5, .temperature = 0.8, .top_k = 7 } },
+        .{ .prompt = &.{4}, .max_new = 21 },
+        .{ .prompt = &.{ 1, 1, 2, 3, 5 }, .max_new = 25, .drafts = false },
+        .{ .prompt = &.{ 6, 6, 6, 1 }, .max_new = 30, .think_budget = 1 },
+    };
+    var j0: usize = 0;
+    var j1: usize = 0;
+    const off = try runPieces(&cases, false, &j0);
+    defer free(off);
+    const on = try runPieces(&cases, true, &j1);
+    defer free(on);
+    try std.testing.expectEqual(@as(usize, 0), j0);
+    try std.testing.expectEqual(@as(usize, 3), j1); // not the undrafted stream nor the budget cutting the first token
+    for (off, on) |a, b| try std.testing.expectEqualSlices(u32, a, b);
+    // and the whole prompts' tokens
+    const whole = try run(&cases);
+    defer free(whole);
+    for (whole, on) |a, b| try std.testing.expectEqualSlices(u32, a, b);
+}
+
+/// Every prompt in one piece, all finished in one round (`together`: Engine.finishStreams), then rounds until done.
+fn runFinals(cases: []const Case, together: bool, calls: *usize, most: *usize) ![][]u32 {
+    var cfg = try model();
+    defer cfg.deinit(gpa);
+    cfg.join_tail = true;
+    cfg.join_drafts = together;
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.joinBackend(), clock.clock());
+    defer engine.deinit();
+    const streams = try gpa.alloc(sm.Stream, cases.len);
+    defer gpa.free(streams);
+    for (cases, streams) |c, *s| s.* = try sm.Stream.init(gpa, .{ .id = "s", .prompt = c.prompt, .max_new = c.max_new, .eos = &.{96}, .sampling = c.sampling, .drafts = c.drafts, .think_budget = c.think_budget, .think_close = &.{ 90, 91, 92 }, .think_end = 91 });
+    defer for (streams) |*s| s.deinit(gpa);
+    const ptrs = try gpa.alloc(*sm.Stream, cases.len);
+    defer gpa.free(ptrs);
+    for (streams, ptrs) |*s, *p| {
+        _ = try engine.beginStream(s);
+        if (s.prompt_len > 1) try engine.piece(s, 0, s.prompt_len - 1, false);
+        p.* = s;
+    }
+    // the finish phase alone: its draft calls and their largest
+    target.drafts_calls = 0;
+    target.drafts_most = 0;
+    if (together) {
+        const errs = try gpa.alloc(?anyerror, cases.len);
+        defer gpa.free(errs);
+        _ = try engine.finishStreams(ptrs, errs);
+        for (errs) |x| if (x) |e| return e;
+    } else for (ptrs) |s| try engine.finishStream(s);
+    calls.* = target.drafts_calls;
+    most.* = target.drafts_most;
+    while (engine.activeCount() > 0) try engine.step();
+    const out = try gpa.alloc([]u32, cases.len);
+    for (out, streams) |*o, *s| o.* = try gpa.dupe(u32, s.emitted());
+    return out;
+}
+
+test "a round's finished prompts get their first drafts in one call (Python's _windows), the same tokens" {
+    const cases = [_]Case{
+        .{ .prompt = &.{ 3, 1, 4, 1, 5, 9, 2, 6 }, .max_new = 37 },
+        .{ .prompt = &.{ 2, 7, 1, 8, 2, 8 }, .max_new = 29, .sampling = .{ .seed = 5, .temperature = 0.8, .top_k = 7 } },
+        .{ .prompt = &.{4}, .max_new = 21 },
+        .{ .prompt = &.{ 1, 1, 2, 3, 5 }, .max_new = 25, .drafts = false },
+        .{ .prompt = &.{ 6, 6, 6, 1 }, .max_new = 30, .think_budget = 1 },
+    };
+    var c1: usize = 0;
+    var m1: usize = 0;
+    var c0: usize = 0;
+    var m0: usize = 0;
+    const together = try runFinals(&cases, true, &c1, &m1);
+    defer free(together);
+    const apart = try runFinals(&cases, false, &c0, &m0);
+    defer free(apart);
+    for (apart, together) |a, b| try std.testing.expectEqualSlices(u32, a, b);
+    const whole = try run(&cases);
+    defer free(whole);
+    for (whole, together) |a, b| try std.testing.expectEqualSlices(u32, a, b);
+    // three joined prompts in one call, the budget-cut one its own, the undrafted none: 2 calls against 4
+    try std.testing.expectEqual(@as(usize, 2), c1);
+    try std.testing.expectEqual(@as(usize, 3), m1);
+    try std.testing.expectEqual(@as(usize, 4), c0);
+    try std.testing.expectEqual(@as(usize, 1), m0);
+}
