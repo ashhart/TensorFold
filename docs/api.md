@@ -148,7 +148,8 @@ sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 thro
 the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
 and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
 the Responses route and the request modes above return HTTP 400 when probabilities are requested.
-Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine
+and on GLM-5.3-Flash's CUDA engine.
 `choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
 (a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
@@ -264,16 +265,18 @@ macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dx
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
 `zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
-structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
-answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
-before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
-and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
+structured request gets HTTP 400. Nemotron (Metal and CUDA), GLM-5.3-Flash (CUDA) and Qwen3.5-2B (Metal) enforce it;
+other native engines answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU
+come back to the host before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a
+key, closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent
+replies are the same. GLM's ranks gather each constrained draw's rows whole, and rank 0, which holds the grammar, masks
+them.
 
 On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
 is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
-Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments inside the
-tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false` allows exactly
-one call. With thinking on, the grammar starts after the think end.
+Qwen3.5 write them, GLM's `<arg_key>` and `<arg_value>` tags, or a JSON object), each call to an offered tool (the
+named one only) with its arguments inside the tool's parameter schema; blank lines may come between calls, prose may
+not. `parallel_tool_calls: false` allows exactly one call. With thinking on, the grammar starts after the think end.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
