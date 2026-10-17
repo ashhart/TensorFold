@@ -125,10 +125,10 @@ pub fn reference(gpu: Gpu, model: []const u8, ids_file: []const u8) !void {
             const top = argmax(got) == std.mem.indexOfMax(f64, want);
             std.debug.print("RESULT kolibri1 reference case {d} {s}: max |logit - f64| {e:.3} of {d:.3}, top-1 {s}\n", .{ case, kind, most, scale, if (top) "equal" else "DIFFERS" });
             worst = @max(worst, most / scale);
-            if (!top or most > 0.02 * scale) bad += 1;
+            if (!top or most > 0.003 * scale) bad += 1; // clean rows stay near 0.1 %, a dropped bias or swapped scale passes 0.7 %
         }
     }
-    try check.expect(bad == 0, "kolibri1 reference: {d} rows past 2% of the logits' scale or a different top-1", .{bad});
+    try check.expect(bad == 0, "kolibri1 reference: {d} rows past 0.3% of the logits' scale or a different top-1", .{bad});
     check.pass("kolibri1 reference: layer 0 and the head within {d:.4} of the logits' scale of float64, top-1 equal", .{worst});
 }
 
