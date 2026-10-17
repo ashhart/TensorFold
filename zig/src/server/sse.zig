@@ -19,6 +19,11 @@ pub fn data(conn: *Conn, a: Allocator, payload: json.Value) error{Closed}!void {
     return conn.writeAll(std.mem.concat(a, u8, &.{ "data: ", text, "\n\n" }) catch return error.Closed);
 }
 
+/// An SSE comment line, which clients skip: it keeps a stream alive while nothing else is sent.
+pub fn comment(conn: *Conn) error{Closed}!void {
+    return conn.writeAll(": keepalive\n\n");
+}
+
 pub fn done(conn: *Conn) error{Closed}!void {
     return conn.writeAll("data: [DONE]\n\n");
 }

@@ -156,6 +156,8 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("glm_cuda", glm_cuda);
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
+    b.installArtifact(@import("dsv41.zig").runner(b, target, optimize, cuda, strip));
+    @import("sampling.zig").gpu(b, target, optimize, cuda, @import("dsv41.zig").kernels(b, target, optimize, cuda)); // tf-dsv41-samp: the keyed sampler's device steps
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
