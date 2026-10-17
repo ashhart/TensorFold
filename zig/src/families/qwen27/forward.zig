@@ -79,6 +79,14 @@ pub const Stages = struct {
         try m.kernels.norm(e, s.hidden, f.get(.output), wts.ref(layer.post_norm), f.get(.eps), f.get(.dims), s.residual, f.get(.input), f.get(.sums), h, s.rows);
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
+        const dense = switch (layer.mlp) {
+            .dense => |d| d,
+            .experts => |x| {
+                try m.moe.?.encode(e, x, f.get(.input), f.get(.output), s.rows, m.kernels.prompt);
+                s.pending = f.get(.output);
+                return;
+            },
+        };
         var up = f.get(.mixed);
         up.offset += @as(usize, m.config.intermediate) * 2;
         const width: u32 = @intCast(m.config.intermediate);
@@ -92,11 +100,11 @@ pub const Stages = struct {
             const all = width / 64;
             for (0..used) |slice| try m.kernels.aneInput(e, f.get(.input), f.get(.dims), .{ .buffer = share.inputs[slice].buffer }, h, width, share.columns, @intCast(slice * ane_mlp.width));
             try share.signal(lane, v[0]);
-            try m.kernels.quantSkip(lane.enc, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
+            try m.kernels.quantSkip(lane.enc, dense.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
             lane.enc.barrier();
             try m.kernels.mlpAne(lane.enc, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), planes, h, width, share.columns, s.rows, own, all - own);
             lane.enc.barrier();
-            try m.kernels.quantCut(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
+            try m.kernels.quantCut(lane.enc, dense.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
             share.wait(lane, v[1]);
             for (0..used) |slice| {
                 const base: u32 = @intCast(slice * ane_mlp.width);
@@ -106,12 +114,12 @@ pub const Stages = struct {
             s.pending = f.get(.output);
             return;
         } else {
-            try m.kernels.quant(e, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
+            try m.kernels.quant(e, dense.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows);
             e.barrier();
             try m.kernels.mlp(e, f.get(.mixed), up, f.get(.dims), f.get(.activated), f.get(.act_sums), width, s.rows);
         }
         lane.enc.barrier();
-        try m.kernels.quant(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
+        try m.kernels.quant(lane.enc, dense.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), f.get(.output), s.rows);
         lane.enc.barrier();
         s.pending = f.get(.output);
     }

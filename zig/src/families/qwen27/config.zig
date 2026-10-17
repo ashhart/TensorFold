@@ -1,4 +1,4 @@
-//! Dense Qwen text shapes, layer schedule, rotary metadata and ordered checkpoint EOS ids.
+//! Qwen text shapes (a dense MLP or routed experts), layer schedule, rotary metadata and ordered checkpoint EOS ids.
 const std = @import("std");
 
 pub const Kind = enum { linear, attention };
@@ -27,9 +27,18 @@ pub const Config = struct {
     eos_count: usize = 0,
     max_position: usize = 262144,
     mrope_interleaved: bool = true,
+    /// Routed experts (0: every layer's MLP is dense, `intermediate` wide), picks a token, and the expert widths.
+    experts: usize = 0,
+    topk: usize = 0,
+    moe_intermediate: usize = 0,
+    shared_intermediate: usize = 0,
 
     pub fn kind(c: Config, layer: usize) Kind {
         return c.kinds[layer];
+    }
+
+    pub fn moe(c: Config) bool {
+        return c.experts > 0;
     }
 
     pub fn qDim(c: Config) usize {
@@ -119,8 +128,12 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     const root = try object(parsed.value);
     const t = if (root.get("text_config")) |v| try object(v) else root;
     const model = t.get("model_type") orelse root.get("model_type") orelse return error.BadConfig;
-    if (model != .string or (!std.mem.eql(u8, model.string, "qwen3_5") and !std.mem.eql(u8, model.string, "qwen3_5_text"))) return error.NotQwenDense;
-    if (t.get("num_experts")) |v| if (try integer(v, true) != 0) return error.NotQwenDense;
+    if (model != .string) return error.NotQwenDense;
+    const moe = std.mem.eql(u8, model.string, "qwen3_5_moe") or std.mem.eql(u8, model.string, "qwen3_5_moe_text");
+    if (!moe and !std.mem.eql(u8, model.string, "qwen3_5") and !std.mem.eql(u8, model.string, "qwen3_5_text")) return error.NotQwenDense;
+    if (!moe) if (t.get("num_experts")) |v| if (try integer(v, true) != 0) return error.NotQwenDense;
+    // the router's weights are the picks' softmax, renormalized (Qwen's default)
+    if (moe) if (t.get("norm_topk_prob")) |v| if (v != .bool or !v.bool) return error.UnsupportedRouter;
     if (try flag(root, "tie_word_embeddings") or try flag(t, "tie_word_embeddings")) return error.TiedEmbeddingHead;
     if (t.get("attn_output_gate")) |v| if (v != .bool or !v.bool) return error.UnsupportedAttentionGate;
     inline for (.{ .{ "hidden_act", "silu" }, .{ "output_gate_type", "swish" }, .{ "linear_attn_state_dtype", "float32" } }) |entry| {
@@ -137,7 +150,7 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
     if (factor <= 0 or factor > 1) return error.BadConfig;
     var c = Config{
         .hidden = hidden,
-        .intermediate = try required(t, "intermediate_size"),
+        .intermediate = if (moe) 0 else try required(t, "intermediate_size"),
         .layers = try required(t, "num_hidden_layers"),
         .vocab = try required(t, "vocab_size"),
         .heads = heads,
@@ -152,6 +165,13 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, generation: ?[]const u8) 
         .rope_dims = @intFromFloat(@as(f64, @floatFromInt(head_dim)) * factor),
         .rope_theta = if (rope) |r| try optional(r, "rope_theta", try optional(t, "rope_theta", 10000000)) else try optional(t, "rope_theta", 10000000),
     };
+    if (moe) {
+        c.experts = try required(t, "num_experts");
+        c.topk = try required(t, "num_experts_per_tok");
+        c.moe_intermediate = try required(t, "moe_intermediate_size");
+        c.shared_intermediate = try required(t, "shared_expert_intermediate_size");
+        if (c.topk > c.experts) return error.BadConfig;
+    }
     if (t.get("max_position_embeddings")) |v| c.max_position = try integer(v, false);
     if (rope) |r| if (r.get("mrope_interleaved")) |v| {
         if (v != .bool or !v.bool) return error.UnsupportedMrope;
@@ -246,6 +266,27 @@ test "dense config refuses MoE and tied embedding heads" {
     const tied = try edit(a, "tie_word_embeddings", .{ .bool = true });
     defer a.free(tied);
     try std.testing.expectError(error.TiedEmbeddingHead, parse(a, tied, null));
+}
+
+test "a MoE config reads its experts and has no dense MLP width" {
+    const a = std.testing.allocator;
+    const text =
+        \\{"model_type":"qwen3_5_moe","text_config":{"model_type":"qwen3_5_moe_text","hidden_size":64,
+        \\"num_hidden_layers":4,"num_attention_heads":4,"num_key_value_heads":2,"head_dim":16,"vocab_size":97,
+        \\"linear_num_key_heads":2,"linear_num_value_heads":4,"linear_key_head_dim":16,"linear_value_head_dim":16,
+        \\"linear_conv_kernel_dim":4,"num_experts":8,"num_experts_per_tok":2,"moe_intermediate_size":32,
+        \\"shared_expert_intermediate_size":32,"eos_token_id":2}}
+    ;
+    const c = try parse(a, text, null);
+    try std.testing.expect(c.moe());
+    try std.testing.expectEqual(@as(usize, 0), c.intermediate);
+    try std.testing.expectEqual([4]usize{ 8, 2, 32, 32 }, [4]usize{ c.experts, c.topk, c.moe_intermediate, c.shared_intermediate });
+    const plain = try std.mem.replaceOwned(u8, a, text, "\"num_experts_per_tok\":2", "\"num_experts_per_tok\":2,\"norm_topk_prob\":false");
+    defer a.free(plain);
+    try std.testing.expectError(error.UnsupportedRouter, parse(a, plain, null));
+    const missing = try std.mem.replaceOwned(u8, a, text, "\"num_experts\":8,", "");
+    defer a.free(missing);
+    try std.testing.expectError(error.BadConfig, parse(a, missing, null));
 }
 
 test "invalid scalar shapes and types fail without a cast trap" {

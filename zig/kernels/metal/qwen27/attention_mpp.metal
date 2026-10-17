@@ -3,7 +3,13 @@
 #include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
 using namespace mpp::tensor_ops;
-constant constexpr int G = 6, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4; // a row's key chunk is its node word 2
+// Query heads a key head and key heads: the 27B's unless the loader defines the checkpoint's.
+#ifndef Q27_GROUP
+#define Q27_GROUP 6
+#define Q27_KV_HEADS 4
+#endif
+// a row's key chunk is its node word 2
+constant constexpr int G = Q27_GROUP, HK = Q27_KV_HEADS, D = 256, TK = 64, MAXD = 128, MG = 8, MS = 12, NW = 4;
 struct Q27AttnReadPtrs { device const bfloat* keys; device const bfloat* values; };
 
 // SG tiles a threadgroup, a simdgroup pair each: both run scores and softmax, one owns each half of the head dim.
@@ -317,10 +323,10 @@ kernel void q27_attn_merge(device const float* POA [[buffer(0)]], device const f
   }
   const int h = hk * G + g;
   for (int i = 0; i < DP; i++) {
-    const int64_t index = ((int64_t)node * (G * 4) + h) * D + lane * DP + i;
+    const int64_t index = ((int64_t)node * (G * HK) + h) * D + lane * DP + i;
     const bfloat v = static_cast<bfloat>(o[i] / l);
     if (gated) {
-      const float gate = float(QG[((int64_t)node * (G * 4) + h) * 2 * D + D + lane * DP + i]);
+      const float gate = float(QG[((int64_t)node * (G * HK) + h) * 2 * D + D + lane * DP + i]);
       OUT[index] = static_cast<bfloat>(float(v) * q27_round(1.0f / (1.0f + exp(-gate)), 0));
     } else OUT[index] = v;
   }

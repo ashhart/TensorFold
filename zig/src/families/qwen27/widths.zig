@@ -52,13 +52,21 @@ pub fn shape(c: cfg.Config, m: Member) [2]usize {
     };
 }
 
-/// The device matrices of a layer: members fused into one output, in output-row order.
-pub fn stacks(kind: cfg.Kind) []const []const Member {
-    return switch (kind) {
+/// The device matrices of a layer: members fused into one output, in output-row order; a MoE layer has no dense MLP.
+pub fn stacks(kind: cfg.Kind, dense: bool) []const []const Member {
+    const all: []const []const Member = switch (kind) {
         .linear => &.{ &.{ .gate, .up }, &.{.down}, &.{.qkv}, &.{ .z, .b, .a }, &.{.out} },
         .attention => &.{ &.{ .gate, .up }, &.{.down}, &.{.q}, &.{ .k, .v }, &.{.o} },
     };
+    return if (dense) all else all[2..];
 }
+
+/// A MoE layer's expert matrices (routed and shared) and its two routers, each group of one width.
+const expert_leaves = [_][]const u8{ "mlp.switch_mlp.gate_proj", "mlp.switch_mlp.up_proj", "mlp.switch_mlp.down_proj", "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj", "mlp.shared_expert.down_proj" };
+const router_leaves = [_][]const u8{ "mlp.gate", "mlp.shared_expert_gate" };
+/// The widths the expert path runs: 4-bit g64 experts on the tiles, 8-bit g64 routers dequantized at load.
+pub const moe_experts = uniform;
+pub const moe_router = Width{ .bits = 8, .group = 64 };
 
 /// A stack's products as [first, count]: one for a stack of one width, else one a member, as the reference runs them.
 pub fn runs(ws: []const Width, out: [][2]usize) [][2]usize {
@@ -75,6 +83,9 @@ pub const Widths = struct {
     layers: [][members]Width,
     embed: Width,
     head: Width,
+    /// A MoE checkpoint's expert and router widths, each one width in every layer (resolve refuses a mix).
+    experts: Width = moe_experts,
+    router: Width = moe_router,
 
     /// Resolves only loaded modules, so draft-head (MTP) and vision overrides never decide admission.
     pub fn resolve(a: std.mem.Allocator, f: *const affine.Formats, c: cfg.Config) !Widths {
@@ -82,13 +93,19 @@ pub const Widths = struct {
         const layers = try a.alloc([members]Width, c.layers);
         errdefer a.free(layers);
         var name: [96]u8 = undefined;
+        var w: Widths = .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
         for (layers, 0..) |*l, i| {
             l.* = @splat(uniform);
-            for (stacks(c.kind(i))) |stack| for (stack) |m| {
+            for (stacks(c.kind(i), !c.moe())) |stack| for (stack) |m| {
                 l[@backingInt(m)] = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, leaf(m) }));
             };
+            if (!c.moe()) continue;
+            inline for (.{ .{ &expert_leaves, &w.experts }, .{ &router_leaves, &w.router } }) |set| for (set[0], 0..) |module, j| {
+                const got = try one(f, try std.fmt.bufPrint(&name, "model.layers.{d}.{s}", .{ i, module }));
+                if (i == 0 and j == 0) set[1].* = got else if (!std.meta.eql(got, set[1].*)) return error.MixedExpertWidths;
+            };
         }
-        return .{ .allocator = a, .layers = layers, .embed = try one(f, "model.embed_tokens"), .head = try one(f, "lm_head") };
+        return w;
     }
 
     /// Every module 4-bit g64, for synthetic graphs.
@@ -142,7 +159,17 @@ pub const Why = struct { layer: ?usize = null, module: []const u8 = "", width: W
 
 pub fn admit(w: *const Widths, c: cfg.Config, chip: Chip, why: *Why) !void {
     var buf: [3][2]usize = undefined;
-    for (0..c.layers) |i| for (stacks(c.kind(i))) |stack| {
+    if (c.moe()) {
+        if (!std.meta.eql(w.experts, moe_experts)) {
+            why.* = .{ .module = "mlp.switch_mlp", .width = w.experts, .reason = error.UnsupportedExpertWidth };
+            return error.UnqualifiedQwenFormat;
+        }
+        if (!std.meta.eql(w.router, moe_router)) {
+            why.* = .{ .module = "mlp.gate", .width = w.router, .reason = error.UnsupportedRouterWidth };
+            return error.UnqualifiedQwenFormat;
+        }
+    }
+    for (0..c.layers) |i| for (stacks(c.kind(i), !c.moe())) |stack| {
         var ws: [3]Width = undefined;
         for (stack, 0..) |m, j| ws[j] = w.of(i, m);
         const list = runs(ws[0..stack.len], &buf);
@@ -259,6 +286,41 @@ test "a dense projection and an unsupported global group refuse" {
     var why: Why = .{};
     try std.testing.expectError(error.UnqualifiedQwenFormat, testAdmit("{\"bits\":4,\"group_size\":64,\"model.layers.3.self_attn.q_proj\":false}", .{ .tensor_units = false }, &why));
     try std.testing.expectError(error.BadAffine, testAdmit("{\"bits\":4,\"group_size\":16}", .{ .tensor_units = false }, &why));
+}
+
+fn moeAdmit(quantization: []const u8, why: *Why) !void {
+    const a = std.testing.allocator;
+    const text = try std.fmt.allocPrint(a,
+        \\{{"model_type":"qwen3_5_moe","text_config":{{"model_type":"qwen3_5_moe_text","hidden_size":2048,
+        \\"num_hidden_layers":40,"num_attention_heads":16,"num_key_value_heads":2,"head_dim":256,"vocab_size":248320,
+        \\"linear_num_key_heads":16,"linear_num_value_heads":32,"linear_key_head_dim":128,"linear_value_head_dim":128,
+        \\"linear_conv_kernel_dim":4,"num_experts":256,"num_experts_per_tok":8,"moe_intermediate_size":512,
+        \\"shared_expert_intermediate_size":512,"eos_token_id":248044}},"quantization":{s}}}
+    , .{quantization});
+    defer a.free(text);
+    const c = try cfg.parse(a, text, null);
+    var f = try affine.Formats.init(a, text);
+    defer f.deinit();
+    var w = try Widths.resolve(a, &f, c);
+    defer w.deinit();
+    return admit(&w, c, .{ .tensor_units = false }, why);
+}
+
+test "a MoE checkpoint admits 4-bit experts with 8-bit routers and refuses other expert widths" {
+    var why: Why = .{};
+    var q: std.ArrayList(u8) = .empty;
+    defer q.deinit(std.testing.allocator);
+    try q.appendSlice(std.testing.allocator, "{\"group_size\":64,\"bits\":4");
+    for (0..40) |i| for (router_leaves) |r| try q.print(std.testing.allocator, ",\"language_model.model.layers.{d}.{s}\":{{\"group_size\":64,\"bits\":8}}", .{ i, r });
+    const good = try std.fmt.allocPrint(std.testing.allocator, "{s}}}", .{q.items});
+    defer std.testing.allocator.free(good);
+    try moeAdmit(good, &why);
+    try std.testing.expectError(error.UnqualifiedQwenFormat, moeAdmit("{\"group_size\":64,\"bits\":4}", &why));
+    try std.testing.expectEqualStrings("mlp.gate", why.module);
+    try std.testing.expectError(error.UnqualifiedQwenFormat, moeAdmit("{\"group_size\":64,\"bits\":8}", &why));
+    try std.testing.expectEqualStrings("mlp.switch_mlp", why.module);
+    try q.appendSlice(std.testing.allocator, ",\"language_model.model.layers.7.mlp.switch_mlp.up_proj\":{\"group_size\":64,\"bits\":8}}");
+    try std.testing.expectError(error.MixedExpertWidths, moeAdmit(q.items, &why));
 }
 
 test "a 4/64 run off the 32-row lanes, such as a lone 48-row in_proj_b, takes the row kernels on tensor units" {

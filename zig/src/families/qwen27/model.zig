@@ -11,6 +11,7 @@ const quant = @import("quant_gpu.zig");
 const glue = @import("glue_gpu.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
+const moe_stage = @import("moe.zig");
 
 const ane_policy = @import("ane_policy.zig");
 
@@ -28,6 +29,8 @@ pub const Model = struct {
     ane: ?*ane_mlp.Share = null,
     /// A deferred share still needs the checkpoint mappings, until loadShare decides and closes them.
     share_pending: bool = false,
+    /// The expert MLPs' pipelines and scratch, for a MoE checkpoint.
+    moe: ?*moe_stage.Stage = null,
     /// widths.Widths.tag: 0 for a uniform 4-bit g64 checkpoint.
     widths_tag: u64 = 0,
 
@@ -88,6 +91,8 @@ pub const Model = struct {
         errdefer m.glue.deinit();
         m.frame = try Frame.init(m.device, c, @max(rows, promptRows()));
         errdefer m.frame.deinit();
+        m.moe = if (c.moe()) try moe_stage.Stage.init(a, m.device, c, rows, m.weights.layers[0].mlp.experts) else null;
+        errdefer if (m.moe) |s| s.deinit(a);
         m.ane = null;
         m.share_pending = true;
         if (!later) try m.finishShare(null, share_fits);
@@ -138,6 +143,7 @@ pub const Model = struct {
 
     pub fn deinit(m: *Model) void {
         if (m.ane) |share| share.deinit();
+        if (m.moe) |s| s.deinit(m.allocator);
         m.frame.deinit();
         m.glue.deinit();
         m.kernels.deinit();
@@ -157,9 +163,21 @@ pub fn promptRows() u32 {
     return if (n >= 16 and n <= @import("gpu_frame.zig").max_rows and n % 16 == 0) n else default;
 }
 
+/// What differs between the qualified checkpoints; vocab, head and GDN key widths, conv and rotary are shared.
+const Shape = struct { hidden: usize, intermediate: usize, layers: usize, heads: usize, kv_heads: usize, v_heads: usize, experts: usize = 0, topk: usize = 0, moe_intermediate: usize = 0, shared_intermediate: usize = 0 };
+/// Qwen3.8-27B (dense) and Qwen3.6-35B-A3B (256 routed experts, 8 a token, and a shared expert).
+const qualified = [_]Shape{
+    .{ .hidden = 5120, .intermediate = 17408, .layers = 64, .heads = 24, .kv_heads = 4, .v_heads = 48 },
+    .{ .hidden = 2048, .intermediate = 0, .layers = 40, .heads = 16, .kv_heads = 2, .v_heads = 32, .experts = 256, .topk = 8, .moe_intermediate = 512, .shared_intermediate = 512 },
+};
+
 /// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
-    if (c.hidden != 5120 or c.intermediate != 17408 or c.layers != 64 or c.vocab != 248320 or c.heads != 24 or c.kv_heads != 4 or c.head_dim != 256 or c.k_heads != 16 or c.v_heads != 48 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
+    const s = Shape{ .hidden = c.hidden, .intermediate = c.intermediate, .layers = c.layers, .heads = c.heads, .kv_heads = c.kv_heads, .v_heads = c.v_heads, .experts = c.experts, .topk = c.topk, .moe_intermediate = c.moe_intermediate, .shared_intermediate = c.shared_intermediate };
+    const known = for (qualified) |q| {
+        if (std.meta.eql(q, s)) break true;
+    } else false;
+    if (!known or c.vocab != 248320 or c.head_dim != 256 or c.k_heads != 16 or c.dk != 128 or c.dv != 128 or c.conv_kernel != 4 or c.rope_dims != 64) return error.UnqualifiedQwenShape;
     for (c.kinds[0..c.layers], 0..) |kind, i| if (kind != (if ((i + 1) % 4 == 0) cfg.Kind.attention else cfg.Kind.linear)) return error.UnqualifiedLayerSchedule;
 }
 
@@ -175,6 +193,29 @@ test "unknown and older GPU generations refuse before any weight load" {
     try std.testing.expect(!qualifiedGeneration(12));
     try std.testing.expect(qualifiedGeneration(18));
     try std.testing.expect(!qualifiedGeneration(19));
+}
+
+test "the 27B and the 35B-A3B shapes qualify and a mix of the two does not" {
+    const base = cfg.Config{ .hidden = 5120, .intermediate = 17408, .layers = 64, .vocab = 248320, .heads = 24, .kv_heads = 4, .head_dim = 256, .k_heads = 16, .v_heads = 48, .dk = 128, .dv = 128, .conv_kernel = 4, .eps = 1e-6, .rope_dims = 64, .rope_theta = 1e7 };
+    var c = base;
+    for (c.kinds[0..c.layers], 0..) |*k, i| k.* = if ((i + 1) % 4 == 0) .attention else .linear;
+    try supported(c);
+    var moe = c;
+    moe.hidden = 2048;
+    moe.intermediate = 0;
+    moe.layers = 40;
+    moe.heads = 16;
+    moe.kv_heads = 2;
+    moe.v_heads = 32;
+    moe.experts = 256;
+    moe.topk = 8;
+    moe.moe_intermediate = 512;
+    moe.shared_intermediate = 512;
+    try supported(moe);
+    moe.heads = 24;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(moe));
+    c.experts = 256;
+    try std.testing.expectError(error.UnqualifiedQwenShape, supported(c));
 }
 
 test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 weights" {
