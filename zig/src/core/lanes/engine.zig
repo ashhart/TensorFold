@@ -490,7 +490,8 @@ pub const Engine = struct {
     /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.
     fn pipelinedRound(e: *Engine, s: *Stream) !Result {
         const before = s.mode;
-        const mode = s.mode orelse .pipe;
+        // an adopted stream holds neither a mode nor a queued step: it starts where a drain step leaves one
+        const mode: sm.Mode = s.mode orelse if (s.inflight == null) .verify else .pipe;
         var result: Result = .{ .rows = 1, .keep = 1, .got = &.{} };
         if (mode == .verify or mode == .exit) {
             const verifying = mode == .verify and e.cfg.family_width >= 2;
