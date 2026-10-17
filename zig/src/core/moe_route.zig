@@ -1,9 +1,9 @@
-//! A MoE layer's route on Metal in two launches for 1-16 rows (kernels/metal/core/moe_route.metal): sigmoid + bias routers.
+//! A MoE layer's route on Metal (kernels/metal/core/moe_route.metal): logits for any rows, sigmoid + bias top-k to 16.
 const std = @import("std");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 
-/// The router's shape: hidden width, experts (a multiple of 4, at most 512), picks a row, rows a launch at most.
+/// The router's shape: hidden width, experts (a multiple of 4, at most 512), picks a row, rows a selection at most.
 pub const Shape = struct { hidden: u32, experts: u32, topk: u32, max_rows: u32 = 16, out_bf16: bool = false };
 
 /// The kernel source with `shape`'s constants.
