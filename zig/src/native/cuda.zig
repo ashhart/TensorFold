@@ -24,10 +24,8 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
 const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native };
-
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
-
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 2]api.Family = undefined;
@@ -37,9 +35,7 @@ pub const families: []const api.Family = blk: {
     const final = out;
     break :blk &final;
 };
-
 const gib: f64 = 1 << 30;
-
 const cuda_device = @import("cuda_device.zig");
 pub const chip = cuda_device.chip;
 pub const deviceName = cuda_device.deviceName;
@@ -598,4 +594,8 @@ test "nemotron learning safety: direct Nemotron trainer destruction drains befor
 }
 test "trainer close: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
+}
+
+test "trainer close: real native close drains the dense trainer before any child or parent is released" {
+    try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

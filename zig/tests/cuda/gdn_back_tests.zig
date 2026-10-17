@@ -8,8 +8,8 @@ const gt = cuda.gdn_train;
 
 const NK = 16;
 const NV = 48;
-const HIDDEN = 2560;
-const GROUP = 32;
+var HIDDEN: usize = 2560;
+var GROUP: usize = 32;
 const EPS: f32 = 1e-6;
 const DK = gt.dk;
 const DV = gt.dv;
@@ -410,6 +410,17 @@ fn runCase(r: *Rig, case: Case, kern: *const gt.Kernels) !void {
 }
 
 pub fn run(gpu: Gpu) !void {
+    return runShape(gpu, 2560, 32);
+}
+pub fn runShape(gpu: Gpu, hidden: usize, group: usize) !void {
+    const old_h = HIDDEN;
+    const old_g = GROUP;
+    defer { HIDDEN = old_h; GROUP = old_g; }
+    HIDDEN = hidden;
+    GROUP = group;
+    return runCurrent(gpu);
+}
+fn runCurrent(gpu: Gpu) !void {
     if (!cuda.kernels.available) {
         std.debug.print("SKIP gdn-back: built without the CUDA kernels (no -Dnvcc or -Dfatbins)\n", .{});
         return;

@@ -1,4 +1,4 @@
-//! A Gated DeltaNet layer's input-gradient backward (gdn_train.cu), its forward recomputed from kept projection rows.
+//! Flash Next's Gated DeltaNet backward for Living Weights (gdn_train.cu).
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -15,7 +15,7 @@ const Args = launch_.Args;
 pub const dk = 128;
 pub const dv = 128;
 pub const taps = 4;
-/// Chain rows between state checkpoints (gdn_train.cu's CK): the replay area, nv ck dv dk fp32, stays in L2.
+/// Chain rows between state checkpoints (gdn_train.cu's CK): 4 keeps the replay area.
 pub const ck = 4;
 /// Blocks of 256 threads a value head's chain runs in, each 32 of its state rows (gdn_train.cu's SPLIT).
 pub const split = 4;
@@ -54,6 +54,18 @@ pub const Layer = struct {
     in_proj: Q4, // [qkv | z | b | a] x hidden
     out_proj: Q4, // hidden x nv dv
 };
+
+/// Both family adapters use the same fixed head width and affine layouts; reject before shape casts or launches.
+pub fn validate(l: Layer, rows: usize) !void {
+    if (rows == 0 or rows > 1024 or l.nk == 0 or l.nk > 32 or l.nv == 0 or l.nv > 128 or l.nv % l.nk != 0 or
+        l.hidden == 0 or l.hidden > 8192 or l.hidden % 64 != 0 or !std.math.isFinite(l.eps) or l.eps <= 0)
+        return error.BadGdnShape;
+    const proj = (2 * l.nk + 2 * l.nv) * dk + 2 * l.nv;
+    if (l.in_proj.n != proj or l.in_proj.k != l.hidden or l.out_proj.n != l.hidden or l.out_proj.k != l.nv * dv)
+        return error.BadGdnShape;
+    for ([_]Q4{ l.in_proj, l.out_proj }) |q| if ((q.group != 32 and q.group != 64) or q.k % q.group != 0)
+        return error.BadGdnShape;
+}
 
 const names = [_][:0]const u8{ "tf_gdn_front", "tf_gdn_scan_fwd", "tf_gdn_norm_back", "tf_gdn_scan_back", "tf_gdn_qk_back", "tf_gdn_gates_back", "tf_gdn_conv_back", "tf_gdn_dequant" };
 const train_names = [_][:0]const u8{ "tf_train_narrow", "tf_train_gemm" };
@@ -139,7 +151,7 @@ pub const Scratch = struct {
         };
     }
 
-    fn padded(n: usize) usize {
+    pub fn padded(n: usize) usize {
         return (n + 255) / 256 * 256;
     }
 
@@ -162,10 +174,17 @@ pub const Scratch = struct {
     }
 };
 
+/// A family's own 4-bit product for backwardAll's two projections, taken instead of the narrow.
+pub const Product = struct {
+    ctx: *const anyopaque,
+    f: *const fn (ctx: *const anyopaque, x: u64, m: Q4, y: u64, rows: usize, add: bool) anyerror!void,
+};
+
 /// Launches on one stream.
 pub const Ops = struct {
     k: *const Kernels,
     s: Stream,
+    q4: ?Product = null, // backwardAll's projections through the family's own product (null: productWith)
 
     fn go(o: Ops, comptime name: []const u8, grid: [3]u32, block: u32, args: *Args) !void {
         try launch_.launch(o.k.fns[index(&names, name)], .{ .grid = .{ .x = grid[0], .y = grid[1], .z = grid[2] }, .block = .{ .x = block } }, o.s, args);
@@ -202,9 +221,15 @@ pub const Ops = struct {
 
     /// dy back through the chain: dq and dk shares, dv into dact, dg and dbeta.
     pub fn scanBack(o: Ops, sc: Scratch, s: Shape) !void {
+        return o.scanBackFrom(sc, s, 0);
+    }
+
+    /// scanBack walked back only to the chunk holding row `from`: the rows from it on, the same bits.
+    pub fn scanBackFrom(o: Ops, sc: Scratch, s: Shape, from: usize) !void {
         var a: Args = .{};
         for ([_]u64{ sc.act, sc.q, sc.k, sc.g, sc.beta, sc.ckpt, sc.dy, sc.work, sc.dqp, sc.dkp, sc.dact, sc.dg, sc.dbeta }) |v| a.add(v);
         a.add(s);
+        a.add(@as(c_int, @intCast(from)));
         try o.go("tf_gdn_scan_back", .{ u(@intCast(s.nv * split)), 1, 1 }, 256, &a);
     }
 
@@ -243,28 +268,36 @@ pub const Ops = struct {
 
     /// y [rows, m.k] (+)= bf16(x) [rows, m.n] times the dequantized matrix: its input's gradient from its output's.
     pub fn product(o: Ops, x: u64, m: Q4, y: u64, rows: usize, sc: Scratch, add: bool) !void {
+        return o.productWith(x, m, y, rows, sc.xb, sc.wt, add);
+    }
+
+    /// product with the narrowed left side in xb [rows, m.n] bf16 and the dequantized matrix in wt.
+    fn productWith(o: Ops, x: u64, m: Q4, y: u64, rows: usize, xb: u64, wt: u64, add: bool) !void {
         var a: Args = .{};
         a.add(x);
-        a.add(sc.xb);
+        a.add(xb);
         a.add(@as(c_longlong, @intCast(rows * m.n)));
         try o.goTrain("tf_train_narrow", .{ up(rows * m.n, 256), 1, 1 }, 256, &a);
-        try o.dequant(m, sc.wt);
+        try o.dequant(m, wt);
         var g: Args = .{};
-        for ([_]u64{ sc.xb, sc.wt, y }) |v| g.add(v);
+        for ([_]u64{ xb, wt, y }) |v| g.add(v);
         for ([_]usize{ rows, m.k, m.n, m.n, m.k, m.k }) |v| g.add(int(v));
         g.add(@as(c_int, @intFromBool(add)));
         try o.goTrain("tf_train_gemm", .{ up(m.k, 64), up(rows, 64), 1 }, 128, &g);
     }
 
-    /// The forward from P [rows, proj] bf16 after conv history hist [3, conv] and state init [nv, dv, dk] (null: 0).
+    /// The forward for training: P [rows, proj] bf16 (the layer's kept in-projection rows) after the prefix's conv.
     pub fn forward(o: Ops, l: Layer, sc: Scratch, p: u64, hist: ?u64, init: ?u64, rows: usize) !void {
+        try validate(l, rows);
+        if (rows > 512) return error.BadGdnShape;
         const s = Shape.init(rows, l.nk, l.nv);
         try o.front(p, hist, l.conv_w, l.a_log, l.dt_bias, sc, s);
         try o.scanFwd(init, sc, s);
     }
 
-    /// dx [rows, hidden] (+)= the layer's input gradient from gy [rows, hidden] fp32, its output's; runs `forward` too.
+    /// dx [rows, hidden] (+)= the layer's input gradient from gy [rows, hidden] fp32, its output's.
     pub fn backward(o: Ops, l: Layer, sc: Scratch, p: u64, hist: ?u64, init: ?u64, gy: u64, dx: u64, rows: usize, add: bool) !void {
+        try validate(l, rows);
         const s = Shape.init(rows, l.nk, l.nv);
         try o.forward(l, sc, p, hist, init, rows);
         try o.product(gy, l.out_proj, sc.dout, rows, sc, false);
@@ -275,6 +308,53 @@ pub const Ops = struct {
         try o.convBack(p, hist, l.conv_w, sc, s);
         try o.product(sc.dproj, l.in_proj, dx, rows, sc, add);
     }
+
+    /// backward for several sequences of one pass side by side (their rows contiguous in gy and dx).
+    pub fn backwardAll(o: Ops, l: Layer, sc: Scratch, w: Wide, runs: []const Run, gy: u64, dx: u64, rows: usize, add: bool) !void {
+        try validate(l, rows);
+        var end: usize = 0;
+        for (runs) |r| {
+            if (r.rows == 0 or r.rows > 512 or r.at != end or r.rows > rows - end) return error.BadGdnShape;
+            end += r.rows;
+        }
+        if (end != rows) return error.BadGdnShape;
+        const proj: usize = @intCast(Shape.init(1, l.nk, l.nv).proj);
+        if (o.q4) |q| try q.f(q.ctx, gy, l.out_proj, w.dout, rows, false) else try o.productWith(gy, l.out_proj, w.dout, rows, w.xb, sc.wt, false);
+        for (runs) |r| {
+            const s = Shape.init(r.rows, l.nk, l.nv);
+            var one = sc;
+            one.dout = w.dout + r.at * l.nv * dv * 4;
+            one.dproj = w.dproj + r.at * proj * 4;
+            try o.forward(l, one, r.p, r.hist, r.init, r.rows);
+            try o.normBack(r.p, l.norm_w, one, s, l.eps);
+            try o.scanBack(one, s); // replay the whole causal prefix; all following reads are initialized
+            try o.qkBack(one, s);
+            try o.gatesBack(r.p, l.a_log, l.dt_bias, one, s);
+            try o.convBack(r.p, r.hist, l.conv_w, one, s);
+        }
+        if (o.q4) |q| try q.f(q.ctx, w.dproj, l.in_proj, dx, rows, add) else try o.productWith(w.dproj, l.in_proj, dx, rows, w.xb, sc.wt, add);
+    }
+};
+
+/// One sequence of a pass the layer's backward reads: its kept in-projection rows.
+pub const Run = struct { p: u64, hist: ?u64 = null, init: ?u64 = null, rows: usize, at: usize, from: usize = 0 }; // from: the first row whose gradient is needed
+
+/// Buffers over every row of a pass: the out projection's input gradient [rows, nv dv] fp32.
+pub const Wide = struct {
+    dout: u64,
+    dproj: u64,
+    xb: u64,
+
+    pub fn bytes(rows: usize, nk: usize, nv: usize, hidden: usize) usize {
+        const proj: usize = @intCast(Shape.init(1, nk, nv).proj);
+        return Scratch.padded(rows * nv * dv * 4) + Scratch.padded(rows * proj * 4) + Scratch.padded(rows * @max(proj, hidden) * 2);
+    }
+
+    pub fn carve(base: u64, rows: usize, nk: usize, nv: usize) Wide {
+        const proj: usize = @intCast(Shape.init(1, nk, nv).proj);
+        const dproj = base + Scratch.padded(rows * nv * dv * 4);
+        return .{ .dout = base, .dproj = dproj, .xb = dproj + Scratch.padded(rows * proj * 4) };
+    }
 };
 
 test "the scratch buffers tile their allocation" {
@@ -284,4 +364,20 @@ test "the scratch buffers tile their allocation" {
     try std.testing.expectEqual(@as(c_int, 16480), Shape.init(1, 16, 48).proj);
     try std.testing.expectEqual(@as(usize, 256 / ck), Shape.init(256, 16, 48).chunks());
     try std.testing.expectEqual(@as(usize, 37 / ck + 1), Shape.init(37, 16, 48).chunks());
+}
+
+test "gdn train shapes: one shared GDN descriptor accepts both group sizes and refuses unsafe shapes before launch" {
+    var layer: Layer = .{ .nk = 16, .nv = 48, .hidden = 5120, .eps = 1e-6, .conv_w = 0, .a_log = 0, .dt_bias = 0, .norm_w = 0, .in_proj = .{ .w = 0, .s = 0, .b = 0, .n = 16480, .k = 5120 }, .out_proj = .{ .w = 0, .s = 0, .b = 0, .n = 5120, .k = 6144 } };
+    for ([_]usize{ 32, 64 }) |group| {
+        layer.in_proj.group = group;
+        layer.out_proj.group = group;
+        try validate(layer, 512);
+    }
+    try std.testing.expectError(error.BadGdnShape, validate(layer, 0));
+    try std.testing.expectError(error.BadGdnShape, validate(layer, 1025));
+    layer.nk = 0;
+    try std.testing.expectError(error.BadGdnShape, validate(layer, 512));
+    layer.nk = 16;
+    layer.out_proj.group = 63;
+    try std.testing.expectError(error.BadGdnShape, validate(layer, 512));
 }

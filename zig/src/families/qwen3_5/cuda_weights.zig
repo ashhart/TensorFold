@@ -161,6 +161,10 @@ fn pack4(e: *Engine, into: anytype, raw: [3]u64, n: usize, k: usize) !Affine4 {
 
 /// An MLX projection of `bits` codes packed from the staging buffer into `into`'s arena; 4-bit modules take affine-4.
 pub fn linear(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: []const u8, name: []const u8, n: usize, k: usize, bits: u8) !Proj {
+    if (e.g.pocket > 0 and std.mem.startsWith(u8, name, "mlp.")) {
+        if (bits != 4) return error.UnsupportedLearningFormat;
+        return .{ .a4 = try linearWide(e, into, ck, stage, prefix, name, n, k) };
+    }
     var buf: [160]u8 = undefined;
     var parts: [3][]const u8 = undefined;
     const specs = [_]struct { []const u8, core.checkpoint.DType, usize }{ .{ "weight", .u32, k * bits / 32 }, .{ "scales", .bf16, k / 64 }, .{ "biases", .bf16, k / 64 } };
@@ -325,6 +329,7 @@ pub fn load(e: *Engine, ck: *core.Checkpoint, stage: *DeviceBuffer) !void {
             .mlp = if (g.moe()) try routed(e, e, ck, stage, p, g.expert_bits) else .{ .dense = .{ .gate = ps.get(.gate), .up = ps.get(.up), .down = ps.get(.down) } },
             .mixer = undefined,
         };
+        if (g.pocket > 0) try loadPocket(e, ck, p, i);
         if (g.linear[i]) {
             l.mixer = .{ .delta = .{
                 .qkv = ps.get(.qkv),
@@ -371,4 +376,46 @@ test "a uniform 4-bit checkpoint keeps its sizes; other modules take their own w
 
 test {
     _ = @import("cuda_expert_pack.zig");
+}
+
+
+fn linearWide(e: *Engine, into: anytype, ck: *core.Checkpoint, stage: *DeviceBuffer, prefix: []const u8, name: []const u8, n: usize, k: usize) !Affine4 {
+    const down = std.mem.eql(u8, name, "mlp.down_proj");
+    const na = n + if (down) @as(usize, 0) else e.g.pocket;
+    const ka = k + if (down) e.g.pocket else 0;
+    var buf: [192]u8 = undefined;
+    var raw: [3]u64 = undefined;
+    var at: usize = 0;
+    const parts = [_]struct { []const u8, core.checkpoint.DType, usize, usize }{
+        .{ "weight", .u32, k / 8 * 4, ka / 8 * 4 },    .{ "scales", .bf16, k / 64 * 2, ka / 64 * 2 },
+        .{ "biases", .bf16, k / 64 * 2, ka / 64 * 2 },
+    };
+    for (parts, &raw) |p, *ptr| {
+        const t = try ck.expect(try std.fmt.bufPrint(&buf, "{s}{s}.{s}", .{ prefix, name, p[0] }), p[1], &.{ na, p[3] / (if (p[1] == .u32) @as(usize, 4) else 2) });
+        const cut = try @import("cuda_wide.zig").base(e.gpa, t.bytes, n, p[3], p[2]);
+        defer e.gpa.free(cut);
+        try stage.upload(at, cut);
+        ptr.* = stage.ptr + at;
+        at += cut.len;
+    }
+    const l = Affine4.layout(n, k);
+    const q: Affine4 = .{ .w = try into.alloc(l.words), .s = try into.alloc(l.scales), .b = try into.alloc(l.scales), .n = n, .k = k, .npad = l.npad };
+    errdefer @import("qwen_vision").completion.drain(e.d, e.stream);
+    try e.affine.pack(e.stream, raw[0], raw[1], raw[2], q);
+    try e.stream.synchronize();
+    return q;
+}
+fn loadPocket(e: *Engine, ck: *core.Checkpoint, prefix: []const u8, layer: usize) !void {
+    const n = e.g.pocket * e.g.hidden;
+    const host = try e.gpa.alloc(f32, 3 * n);
+    defer e.gpa.free(host);
+    const wide = @import("cuda_wide.zig");
+    try wide.read(ck, prefix, "mlp.gate_proj", e.g.intermediate, e.g.hidden, host[0..n]);
+    try wide.read(ck, prefix, "mlp.up_proj", e.g.intermediate, e.g.hidden, host[n..][0..n]);
+    try wide.read(ck, prefix, "mlp.down_proj", e.g.hidden, e.g.intermediate, host[2 * n ..][0..n]);
+    var used: usize = 0;
+    for (0..e.g.pocket) |j| if (std.mem.indexOfNone(f32, host[n + j * e.g.hidden ..][0..e.g.hidden], &.{0}) != null) {
+        used = j + 1;
+    };
+    try e.pockets.set(e.stream, layer, host[0..n], host[n..][0..n], host[2 * n ..][0..n], used);
 }

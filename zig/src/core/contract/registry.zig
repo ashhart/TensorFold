@@ -609,4 +609,6 @@ pub const refreshed_cuda = blk: {
     }
     break :blk records;
 };
-pub const all_cuda = refreshed_cuda ++ gradient_pending;
+pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
+pub const all_cuda = refreshed_cuda ++ gradient_pending ++ qwen_learning_pending;
+test { _ = @import("qwen_learning_pending.zig"); }

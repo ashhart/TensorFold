@@ -1,6 +1,4 @@
-// A Gated DeltaNet layer's forward for training and its input-gradient backward: fp32 from bf16, roundings as identity.
-
-// The forward uses the serving chain's operations in its order (built with --fmad=false), so y has the serving bits.
+// Living Weights: the Gated DeltaNet layer's forward for training and its input-gradient backward (cuda/gdn_train.zig).
 
 #include <cuda_bf16.h>
 #include <stdint.h>
@@ -78,7 +76,7 @@ __device__ __forceinline__ void store_state(const float (&s)[4][4], float* base,
         *reinterpret_cast<float4*>(base + (warp * 4 + j) * DK + lane * 4) = make_float4(s[j][0], s[j][1], s[j][2], s[j][3]);
 }
 
-// The serving chain's update: one delta-rule step on this thread's block of the state (decay, read k, correct to v).
+// gdn.cu's update: one delta-rule step on this thread's block of the state (decay, read along k, correct toward v).
 __device__ __forceinline__ void update(float (&s)[4][4], const float (&kk)[4], const float* vrow, int warp, float g,
                                        float beta) {
 #pragma unroll
@@ -100,7 +98,7 @@ __device__ __forceinline__ void update(float (&s)[4][4], const float (&kk)[4], c
 
 // ---- the forward for training --------------------------------------------------------------------------------------
 
-// Block (row, head): heads below nk conv and L2-norm q and k, the rest conv v and make g and beta; act keeps the convs.
+// Block (row, head), gdn_io.cu's front: heads < nk conv q and k and L2-norm them (q times DK^-0.5).
 extern "C" __global__ void __launch_bounds__(128) tf_gdn_front(const bf16* __restrict__ P, const bf16* __restrict__ hist,
                                                                const bf16* __restrict__ cw, const float* __restrict__ a_log,
                                                                const float* __restrict__ dt_bias, bf16* __restrict__ act,
@@ -140,7 +138,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_front(const bf16* __res
     }
 }
 
-// A value head's chain from init (null: 0) in SPLIT blocks of 32 state rows: y, and the state every CK rows into ckpt.
+// One value head's chain from init [nv][DV][DK] (null: zeros), SPLIT blocks of 256 threads a head.
 extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_fwd(const bf16* __restrict__ act, const float* __restrict__ q,
                                                                   const float* __restrict__ k, const float* __restrict__ g,
                                                                   const float* __restrict__ beta, const float* __restrict__ init,
@@ -177,7 +175,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_fwd(const bf16* __
 
 // ---- the backward ---------------------------------------------------------------------------------------------------
 
-// Block (row, value head): the gated RMS norm undone from dout, giving dy and dz (into dproj's z columns).
+// Block (row, value head): the gated RMS norm undone. dout [rows.
 extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* __restrict__ y, const bf16* __restrict__ P,
                                                                    const bf16* __restrict__ norm_w, const float* __restrict__ dout,
                                                                    float* __restrict__ dy, float* __restrict__ dproj, GdnShape s,
@@ -206,14 +204,14 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_norm_back(const bf16* _
     dy[row + t] = ri * dn - ri * ri * ri * yv * dot / (float)DV;
 }
 
-// A value head's chain backward, last chunk first, each chunk's states replayed from its checkpoint into work.
+// One value head's chain backward, SPLIT blocks of 256 threads a head as the forward (each its 32 state rows).
 extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_back(const bf16* __restrict__ act, const float* __restrict__ q,
                                                                    const float* __restrict__ k, const float* __restrict__ g,
                                                                    const float* __restrict__ beta, const float* __restrict__ ckpt,
                                                                    const float* __restrict__ dy, float* __restrict__ work,
                                                                    float* __restrict__ dqp, float* __restrict__ dkp,
                                                                    float* __restrict__ dact, float* __restrict__ dg,
-                                                                   float* __restrict__ dbeta, GdnShape s) {
+                                                                   float* __restrict__ dbeta, GdnShape s, int from) {
     constexpr int WARPS = ROWS / 4;
     __shared__ float qs[DK], ks[DK], vs[ROWS], dos[ROWS];
     __shared__ float red_q[WARPS][DK], red_k[WARPS][DK];
@@ -229,7 +227,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_back(const bf16* _
     for (int j = 0; j < 4; ++j)
 #pragma unroll
         for (int i = 0; i < 4; ++i) ds[j][i] = 0.0f;
-    for (int c = nch - 1; c >= 0; --c) {
+    for (int c = nch - 1; c >= from / CK; --c) {
         const int first = c * CK, last = min(first + CK, s.rows);
         {
             // the state before each of the chunk's rows, each thread its own elements
@@ -360,7 +358,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_gdn_scan_back(const bf16* _
     }
 }
 
-// Block (row, key head): the dq and dk shares summed in order, then each L2 norm undone into dact's q and k columns.
+// Block (row, key head): the value heads' dq and dk shares summed in head and block order.
 extern "C" __global__ void __launch_bounds__(128) tf_gdn_qk_back(const bf16* __restrict__ act, const float* __restrict__ dqp,
                                                                  const float* __restrict__ dkp, float* __restrict__ dact,
                                                                  GdnShape s) {
@@ -380,7 +378,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_gdn_qk_back(const bf16* __r
     }
 }
 
-// Block r, thread h: dg and dbeta summed back to dproj's a and b columns, softplus's slope 1 past 20 as the forward.
+// Block r, thread h: dg and dbeta (the chain blocks' shares summed) back to dproj's a and b columns.
 extern "C" __global__ void tf_gdn_gates_back(const bf16* __restrict__ P, const float* __restrict__ a_log,
                                              const float* __restrict__ dt_bias, const float* __restrict__ g,
                                              const float* __restrict__ dg, const float* __restrict__ dbeta,
@@ -399,7 +397,7 @@ extern "C" __global__ void tf_gdn_gates_back(const bf16* __restrict__ P, const f
     dproj[at + s.nv + h] = -dgs * g[r * s.nv + h] * expf(a_log[h]) * sx;
 }
 
-// The causal conv and its SiLU undone into dproj's qkv columns, from P and hist; the history gets no gradient.
+// The depthwise causal conv and its SiLU undone into dproj's qkv columns.
 extern "C" __global__ void tf_gdn_conv_back(const bf16* __restrict__ P, const bf16* __restrict__ hist,
                                             const bf16* __restrict__ cw, const float* __restrict__ dact,
                                             float* __restrict__ dproj, GdnShape s) {
@@ -416,7 +414,7 @@ extern "C" __global__ void tf_gdn_conv_back(const bf16* __restrict__ P, const bf
     dproj[(size_t)r * s.proj + c] = acc;
 }
 
-// An MLX affine 4-bit [N, K] matrix as bf16 [N, K]: train.cu's tf_train_dequant at any group size.
+// A 4-bit [N, K] MLX affine matrix (8 codes a word, a bf16 scale and bias every `group`) as bf16 [N, K], in order.
 extern "C" __global__ void tf_gdn_dequant(const unsigned* __restrict__ w, const bf16* __restrict__ scales,
                                           const bf16* __restrict__ biases, bf16* __restrict__ out, long long count, int group) {
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
