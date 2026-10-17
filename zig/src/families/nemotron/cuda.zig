@@ -26,6 +26,7 @@ pub const train_ops = @import("cuda_train_ops.zig");
 pub const glue = @import("cuda_glue.zig");
 pub const glue_ref = @import("glue_ref.zig");
 pub const glue_math = @import("glue_math.zig");
+pub const latent = @import("cuda_latent.zig");
 pub const reuse = @import("cuda_reuse.zig");
 pub const pages = @import("cuda_pages.zig");
 pub const slide = @import("cuda_slide.zig");

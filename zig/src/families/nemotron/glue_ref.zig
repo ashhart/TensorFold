@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const m = @import("glue_math.zig");
+const config = @import("config.zig");
 
 const fma = m.fma;
 const bf = m.bf16ToF32;
@@ -157,34 +158,53 @@ pub fn router(x: []const u16, w: []const u16, part: []f32, rows: usize, d: usize
     };
 }
 
-/// Sum slices in order, rank sigmoid scores plus bias (lowest id on ties), then add shared slots.
+/// Row `r`'s picks best first (ids, scores), each then -inf: sigmoid plus bias, ties to the lower id; returns the sum.
+fn pickRow(part: []const f32, bias: []const f32, r: usize, rows: usize, e: usize, sk: usize, ids: []usize, probs: []f32) f32 {
+    var score: [config.latent_max_experts]f32 = undefined;
+    var sel: [config.latent_max_experts]f32 = undefined;
+    for (0..e) |ex| {
+        var logit: f32 = 0;
+        for (0..sk) |s| logit = logit + part[(s * rows + r) * e + ex];
+        score[ex] = m.sigmoid(logit);
+        const v = score[ex] + bias[ex];
+        sel[ex] = if (std.math.isNan(v)) -std.math.inf(f32) else v;
+    }
+    var total: f32 = 0;
+    for (ids, probs) |*id, *p| {
+        var bi: usize = 0;
+        for (1..e) |ex| if (sel[ex] > sel[bi]) {
+            bi = ex;
+        };
+        p.* = score[bi];
+        id.* = bi;
+        total = total + score[bi];
+        sel[bi] = -std.math.inf(f32);
+    }
+    return total;
+}
+
+/// tf_nemo_topk: pickRow's picks, then the shared slots.
 pub fn topk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: usize, scaling: f32, e: usize, sk: usize, top_k: usize, ns: usize, norm: bool) void {
-    var score: [512]f32 = undefined; // the top-k kernel's MAXC: up to 512 experts
-    var sel: [512]f32 = undefined;
+    var probs: [config.latent_max_picks]f32 = undefined;
+    var ids: [config.latent_max_picks]usize = undefined;
     for (0..rows) |r| {
-        for (0..e) |ex| {
-            var logit: f32 = 0;
-            for (0..sk) |s| logit = logit + part[(s * rows + r) * e + ex];
-            score[ex] = m.sigmoid(logit);
-            const v = score[ex] + bias[ex];
-            sel[ex] = if (std.math.isNan(v)) -std.math.inf(f32) else v;
-        }
-        var total: f32 = 0;
-        var probs: [16]f32 = undefined;
-        var ids: [16]i32 = undefined;
-        for (0..top_k) |k| {
-            var bi: usize = 0;
-            for (1..e) |ex| if (sel[ex] > sel[bi]) {
-                bi = ex;
-            };
-            probs[k] = score[bi];
-            ids[k] = @intCast(bi);
-            total = total + score[bi];
-            sel[bi] = -std.math.inf(f32);
-        }
+        const total = pickRow(part, bias, r, rows, e, sk, ids[0..top_k], probs[0..top_k]);
         for (0..ns) |k| {
-            idx[r * ns + k] = if (k < top_k) ids[k] else @intCast(e + k - top_k);
+            idx[r * ns + k] = @intCast(if (k < top_k) ids[k] else e + k - top_k);
             wt[r * ns + k] = if (k >= top_k) 1.0 else if (norm) (probs[k] / (total + 1e-20)) * scaling else probs[k] * scaling;
+        }
+    }
+}
+
+/// tf_super_topk: pickRow's picks; pick k's pair ids s * e + expert at (r * top_k + k) * shares + s.
+pub fn superTopk(part: []const f32, bias: []const f32, idx: []i32, wt: []f32, rows: usize, scaling: f32, e: usize, sk: usize, top_k: usize, shares: usize, norm: bool) void {
+    var probs: [config.latent_max_picks]f32 = undefined;
+    var ids: [config.latent_max_picks]usize = undefined;
+    for (0..rows) |r| {
+        const total = pickRow(part, bias, r, rows, e, sk, ids[0..top_k], probs[0..top_k]);
+        for (0..top_k) |k| {
+            wt[r * top_k + k] = if (norm) (probs[k] / (total + 1e-20)) * scaling else probs[k] * scaling;
+            for (0..shares) |s| idx[(r * top_k + k) * shares + s] = @intCast(s * e + ids[k]);
         }
     }
 }

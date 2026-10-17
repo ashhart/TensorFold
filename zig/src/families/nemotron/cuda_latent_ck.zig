@@ -61,14 +61,14 @@ pub fn partials(o: kern.Ops, t: Tables, plan: kern.Plan, act: u64, sact: u64, si
     const items = kern.maxItems(pairs, r.experts, 16);
     try q.up(o.s, r, at.lat, rows, c.top_k * own, plan, act, items);
     try q.quant4(o.s, act, r.width, pairs, r.width, r.down_act, at.act);
-    try q.down(o.s, r, at.act, pairs, plan, out, items);
+    try q.down(o.s, r, at.act, pairs, rows, plan, out, items);
     const h = t.shared;
     try q.quant4(o.s, hidden, c.hidden, rows, c.hidden, h.up_act, at.hid);
     try o.plan(sids, rows * own, own, 16, plan);
     const sh_items = kern.maxItems(rows * own, own, 16);
     try q.up(o.s, h, at.hid, rows, own, plan, sact, sh_items);
     try q.quant4(o.s, sact, h.width, rows * own, h.width, h.down_act, at.sact);
-    try q.down(o.s, h, at.sact, rows * own, plan, out + @as(u64, pairs) * c.latent * 4, sh_items);
+    try q.down(o.s, h, at.sact, rows * own, rows, plan, out + @as(u64, pairs) * c.latent * 4, sh_items);
 }
 
 test "a pass's NVFP4 rows" {

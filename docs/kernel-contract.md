@@ -104,10 +104,11 @@ Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), a
 formats on the M5's tensor units, where its reg kernel must equal the cooperative one bit for bit), and tile_qmm's
 prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the tiles). Gate 5 also holds the rest of
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
-CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, qmm_group's cluster
-tile, lane_gemv and its split-K form (both bit-equal to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4
-tiles with fp32 out (K slices met in a cluster, fused, or by `reduce_kernel<true>`), and the reduce-scatter's
-`tf_rank_sum`.
+CUDA: the RMS norm rows (16-byte form and the fp32-out tree), Nemotron's router logits and top-k, the latent top-k's
+decode form (bit-equal to `tf_super_topk`), qmm_group's cluster tile, lane_gemv and its split-K form (both bit-equal
+to it), prompt16's FP4 tile with bf16 and fp32 out, qmmf's FP4 tiles with fp32 out (K slices met in a cluster, fused,
+or by `reduce_kernel<true>`), the checkpoint math's decode-sized NVFP4 experts (bit-equal to its prompt kernels, sm_120
+up), and the reduce-scatter's `tf_rank_sum`.
 
 ## CUDA records per nvcc release
 
