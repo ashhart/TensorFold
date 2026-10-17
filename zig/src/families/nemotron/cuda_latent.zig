@@ -357,7 +357,7 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     const Lw: u64 = c.latent;
     try route(f, m, b.y, rows);
     try f.mark(.route);
-    try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
+    try o.linear().decode(o.s, lt.into, .{ .x = b.y, .part = o.part }, b.lat, rows);
     if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
     try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4 }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
     try f.mark(.experts_down);
@@ -385,7 +385,7 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     a.add(b.comb);
     a.add(int(c.latent));
     try go(fns.combine, o.s, .{ rows, (c.latent + 255) / 256, 1 }, 256, 0, &a);
-    try o.linear().decode(o.s, lt.out, .{ .x = b.comb }, b.delta, rows);
+    try o.linear().decode(o.s, lt.out, .{ .x = b.comb, .part = o.part }, b.delta, rows);
     var z: cuda.Args = .{};
     z.add(b.delta);
     z.add(b.ymoe + @as(u64, pairs) * Lw * 4);
