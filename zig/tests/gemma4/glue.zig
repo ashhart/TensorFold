@@ -1,4 +1,4 @@
-//! Gemma 4 dense glue kernels against gemma4_dump.py's fixtures: embed, norm, q/k/v, attention, tails, softcap.
+//! Gemma 4 dense glue kernels against the reference's dumped fixtures: embed, norm, q/k/v, attention, tails, softcap.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

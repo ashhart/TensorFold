@@ -109,7 +109,7 @@ harness's thinking plan (`--plan thinking`) was not run for this release.
 ## Verification
 
 The references are gilby's `gemma4_unified` Python engine (`6b0ead7a`, MLX 0.32.3, mlx-lm 0.32.0, lane kernels) for
-decode and mlx-lm for long prompts (`tools/zig/gemma4_gate.py ... --family gemma4_unified`).
+decode and mlx-lm for long prompts (the gate script on #975's branch, with `--family gemma4_unified`).
 
 - Decode, four chat prompts x 128 greedy tokens: three equal the reference's tokens; the fourth parts at its second
   token on a near-tie (18.25 against 17.875 there, 18.125 for both here). As for the 31B since its speed work

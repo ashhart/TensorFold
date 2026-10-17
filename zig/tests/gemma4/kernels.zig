@@ -1,4 +1,4 @@
-//! Gemma 4 dense decode kernels against tools/zig/gemma4_dump.py's fixtures: each output's bits, by window width.
+//! Gemma 4 dense decode kernels against the reference's dumped fixtures: each output's bits, by window width.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

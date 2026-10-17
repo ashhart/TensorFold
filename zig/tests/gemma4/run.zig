@@ -1,4 +1,4 @@
-//! Gemma 4 dense greedy decode on the native engine: tokens and top-two margins for gemma4_gate.py check.
+//! Gemma 4 dense greedy decode on the native engine: tokens and top-two margins for the oracle's check.
 const std = @import("std");
 const tf = @import("tensorfold");
 

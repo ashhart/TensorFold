@@ -33,7 +33,7 @@ decode kernels (gilby's `gemma4-dense` branch, #360, built on cshintov's Gemma k
 points, and MLX's own ops where that reference calls them: the looped RMS norm, the 4-bit embedding times its bf16
 scale, `geglu` and the soft-cap as bf16 ops, and the global layers' RoPE frequencies from MLX's precise `pow`.
 Each output equals the reference's bit for bit at 1, 2 and 16 rows (`tf-gemma4-kernels`, `tf-gemma4-glue`, on
-fixtures from `tools/zig/gemma4_dump.py`) at the reference's K split. Decode takes each shape's fastest split instead
+fixtures dumped from that reference) at the reference's K split. Decode takes each shape's fastest split instead
 (`weights.splitK`: 4 for o and down, 8 for the gate/up stack and the head), another fp32 summation order: at one row a
 handful of outputs a linear move by one bf16 step (5 of 43,008 on gate_up, 99 of 262,144 on the head, none on qkv).
 
@@ -121,16 +121,15 @@ alone, and text-only prompts keep their bits (the receipts above, unchanged).
 
 ## Verification
 
-The oracle is gilby's `gemma4-dense` Python engine (`a6ff795e`, MLX 0.32.3, mlx-lm 0.32.0) with lane kernels.
+The oracle is gilby's `gemma4-dense` Python engine (`a6ff795e`, MLX 0.32.3, mlx-lm 0.32.0) with lane kernels. The
+scripts that run it and compare (`tools/zig/gemma4_gate.py`, `gemma4_dump.py`) import that Python engine, so they
+stay on #879's branch; this tree holds the native side of each step:
 
 ```bash
-python tools/zig/gemma4_gate.py oracle --model M --out O --tokens 128 --prompt decode   # in the oracle's venv
-zig-out/bin/tf-gemma4-run M O N 128 16 && python tools/zig/gemma4_gate.py check --oracle O --native N
+zig-out/bin/tf-gemma4-run M O N 128 16   # O: the oracle's tokens and margins for four chat prompts; N: ours
 zig-out/bin/tf-gemma4-lanes M O && GEMMA_DRAFTER=D zig-out/bin/tf-gemma4-lanes M O
-zig-out/bin/tf-gemma4-run M O R 128 512 && python tools/zig/gemma4_gate.py served --oracle O --native R
-python tools/zig/gemma4_gate.py prompts --model M --out IDS   # 8k, 32k, 64k, 128k and 252k prompts from the repo's text
-python tools/zig/gemma4_gate.py oracle --model M --out L --ids IDS --tokens 49 --prompt mlx
-zig-out/bin/tf-gemma4-run M L NL 49 512 && python tools/zig/gemma4_gate.py check --oracle L --native NL
+zig-out/bin/tf-gemma4-run M O R 128 512
+zig-out/bin/tf-gemma4-run M L NL 49 512  # L: the oracle's long prompts (8k to 252k tokens)
 ```
 
 - Four chat prompts, 128 greedy tokens, prompts fed one row at a time or in windows of 16: three equal the oracle
