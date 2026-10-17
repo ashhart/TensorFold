@@ -6,7 +6,7 @@ const contract = @import("contract");
 const sources = @import("kernel_sources");
 const rig_ = @import("rig.zig");
 const ref = contract.delta_slots_ref;
-const declared = contract.delta_slots_pending;
+const declared = contract.delta_slots_records;
 fn expect(ok: bool) !void {
     if (!ok) return error.DeltaSlotsContractFailed;
 }

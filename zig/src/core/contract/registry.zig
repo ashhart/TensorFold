@@ -584,5 +584,5 @@ test {
     _ = paging;
 }
 
-/// The live Metal collector's list: the measured declarations, then the pipelines still unmeasured.
-pub const all_metal = metal ++ @import("delta_slots_pending.zig").records;
+/// The live Metal collector's list: the serving declarations, then the 27B's register-slot DeltaNet pipelines.
+pub const all_metal = metal ++ @import("delta_slots_records.zig").records;
