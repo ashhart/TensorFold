@@ -4,6 +4,11 @@ Temporary uploads clone input into core-owned storage. A failed completion retai
 wait in its saved driver, context and stream proves completion. Destination buffers and parent CUDA objects still
 need their own completion boundary. The source owner does not replace those guards.
 
+Not every host-to-device copy goes through the owner. Qwen's kept prompt states (families/qwen3_5/cuda_reuse.zig)
+restore from their own pinned snapshot with direct copies on the engine's stream. A restore marks the snapshot read
+until a stream wait proves those copies done; dropping a marked snapshot waits once more and frees it only if that
+wait succeeds, else keeps it with a warning.
+
 Admission charges CPU source bytes, pinned buffer capacities and Node sizes before allocation. The process-wide
 limit is 1 GiB and 4096 owners. It includes active reusable storage, quarantine, and owners inside disposal callbacks.
 Driver allocator bookkeeping and event internals are outside the byte count; their owner count is bounded.

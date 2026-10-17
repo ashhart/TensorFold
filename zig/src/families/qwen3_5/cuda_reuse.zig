@@ -198,8 +198,11 @@ pub fn drop(ptr: *anyopaque, saved: *anyopaque) void {
     dropCopy(t.e, @ptrCast(@alignCast(saved)));
 }
 
-/// Frees a kept state's host copy, unless a failed restore's copies may still read it: then it stays, as a save's.
+/// Frees a kept state's host copy; after a failed restore, only once this drop's own wait proves the copies done.
 pub fn dropCopy(e: *Engine, copy: *Copy) void {
+    if (copy.reading) if (e.stream.synchronize()) |_| {
+        copy.reading = false;
+    } else |_| {};
     if (copy.reading) std.log.warn("qwen3_5: a kept state's host copy stays: a restore's copies from it did not drain", .{}) else copy.host.free();
     e.gpa.free(copy.images);
     e.gpa.destroy(copy);
@@ -330,7 +333,7 @@ const RestoreFake = struct {
     }
 };
 
-test "a restore whose later copy fails keeps its host copy through a drop while the stream will not drain" {
+test "a failed restore's host copy stays through a drop until a wait, the restore's or the drop's, drains the stream" {
     var api: cuda.abi.Api = undefined;
     api.cuMemcpyHtoDAsync_v2 = RestoreFake.htod;
     api.cuStreamSynchronize = RestoreFake.sync;
@@ -348,18 +351,20 @@ test "a restore whose later copy fails keeps its host copy through a drop while 
     cache.kv = .{ .d = &d, .ptr = 0x10000, .len = 0 };
     cache.state = .{ .d = &d, .ptr = 0x20000, .len = 0 };
     const l: Layout = .{ .g = e.g, .format = .bf16, .cap = 64, .at = 10 };
-    for ([_]bool{ true, false }) |stuck| {
+    // the stream stuck through the restore and the drop, stuck only through the restore, or never
+    for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, false } }) |stuck| {
         RestoreFake.copies = 0;
         RestoreFake.freed = 0;
-        RestoreFake.stuck = stuck;
+        RestoreFake.stuck = stuck[0];
         const copy = try std.testing.allocator.create(Copy);
         copy.* = .{ .host = try cuda.HostBuffer.alloc(&d, @intCast(l.total())), .len = l.total(), .at = 10, .delta = 0, .format = .bf16, .images = try std.testing.allocator.alloc(Seen, 0) };
         const pinned = copy.host.bytes; // the fake's free keeps them: the test gives them back
         defer std.testing.allocator.free(pinned);
         try std.testing.expectError(error.NotReady, restoreCache(&e, &cache, copy, &.{}));
         try std.testing.expectEqual(@as(usize, 2), RestoreFake.copies); // the state queued, the first head's rows refused
+        RestoreFake.stuck = stuck[1];
         dropCopy(&e, copy);
         // a stream that will not drain may still read the copy: the drop leaves it; once drained, the drop frees it
-        try std.testing.expectEqual(@as(usize, @intFromBool(!stuck)), RestoreFake.freed);
+        try std.testing.expectEqual(@as(usize, @intFromBool(!stuck[1])), RestoreFake.freed);
     }
 }
