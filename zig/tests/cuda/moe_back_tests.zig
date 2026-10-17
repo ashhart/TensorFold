@@ -344,7 +344,7 @@ fn moeScratch(r: *Rig, rows: usize) !q4.MoeScratch {
 }
 
 /// experts_pack.cu's kernel at group 32, as Flash Next's engine packs its experts.
-const pack_symbol: [:0]const u8 = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiii";
+const pack_symbol: [:0]const u8 = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiiiii";
 
 /// Bytes of one expert's packed [n, k] blocks (experts_pack.cu at group 32: 160 words a 32 x 32 block).
 fn packedBytes(n: usize, k: usize) usize {
@@ -359,7 +359,7 @@ fn packOne(r: *Rig, f: cuda.Function, routed: *const HQ4, shared: *const HQ4, n:
         const m = c[0];
         var a: cuda.Args = .{};
         for ([_]u64{ try r.dev(u32, m.words), try r.dev(u16, m.sc), try r.dev(u16, m.bi), out + c[2] }) |v| a.add(v);
-        for ([_]usize{ n, k / 8, k / 32, n / 32 }) |v| a.add(@as(c_int, @intCast(v)));
+        for ([_]usize{ n, k / 8, k / 32, n / 32, 1, 0 }) |v| a.add(@as(c_int, @intCast(v))); // one table, the 0th
         try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(k / 32), .y = @intCast(n / 32), .z = c[1] }, .block = .{ .x = 160 } }, r.s, &a);
     }
     return out;
