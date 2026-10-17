@@ -101,7 +101,7 @@ pub fn model() !*h3.Model {
     const m = try std.testing.allocator.create(h3.Model);
     m.* = undefined;
     m.gpa = std.testing.allocator;
-    m.driver.lib = try std.DynLib.open("/usr/lib/libSystem.B.dylib");
+    m.driver.lib = try std.DynLib.open(if (@import("builtin").os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     m.driver.api.cuCtxSetCurrent = current;
     m.driver.api.cuCtxSynchronize = sync;
     m.driver.api.cuStreamSynchronize = streamSync;
@@ -124,7 +124,7 @@ pub fn model() !*h3.Model {
     m.blocks = try m.gpa.alloc(h3.Block, 1);
     m.blocks[0] = .{ .qkvc = empty, .out = empty, .fc1 = empty, .fc2 = empty, .norms = empty };
     m.gemms = .{ .gpa = m.gpa, .lt = undefined, .workspace = empty };
-    m.gemms.lt.lib = try std.DynLib.open("/usr/lib/libSystem.B.dylib");
+    m.gemms.lt.lib = try std.DynLib.open(if (@import("builtin").os.tag == .macos) "/usr/lib/libSystem.B.dylib" else "libc.so.6");
     m.hidden = 128;
     m.inner = 128;
     m.heads = 1;
