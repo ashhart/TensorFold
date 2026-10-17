@@ -155,19 +155,20 @@ pub const Model = struct {
         var name: [128]u8 = undefined;
         while (ck.entry(try std.fmt.bufPrint(&name, "{s}.{d}.norm1.weight", .{ prefix, layers })) != null) layers += 1;
 
-        // a case made for a first frame has a seventh count, the keyframe's rows
+        // six counts, a seventh for a first frame's rows, an eighth for Ref2VA's held audio: checked before use
         const counts = (case.names.get("geometry") orelse return error.MissingTensor).shape[0];
+        if (counts < 6) return error.ShortGeometry;
         const geometry = try case.copy(i32, gpa, try case.at("geometry", .i32, counts), counts);
         defer gpa.free(geometry);
-        self.prefix_tiles = @intCast(geometry[0]);
-        self.tiles = @intCast(geometry[0] + geometry[1]);
-        self.keep = @intCast(geometry[2]);
-        self.text = @intCast(geometry[3]);
-        self.audio = @intCast(geometry[4]);
-        self.video = @intCast(geometry[5]);
-        self.condition = if (counts > 6) @intCast(geometry[6]) else 0;
-        // a Ref2VA case has an eighth: the reference audio rows at the front of the audio
-        self.held_audio = if (counts > 7) @intCast(geometry[7]) else 0;
+        const g = try schedule.geometry(geometry);
+        self.prefix_tiles = g.prefix_tiles;
+        self.tiles = g.tiles;
+        self.keep = g.keep;
+        self.text = g.rows.text;
+        self.audio = g.rows.audio;
+        self.video = g.rows.video;
+        self.condition = g.rows.condition;
+        self.held_audio = g.rows.held_audio;
         self.rows = self.text + self.condition + self.audio + self.video;
         const rows = self.rows;
         const hidden = self.hidden;

@@ -84,6 +84,24 @@ pub const Schedule = struct {
 /// Rows in the engine's order (text, keyframe, audio with held audio first, video); `hold` keeps all but audio still.
 pub const Rows = struct { text: usize, condition: usize = 0, audio: usize, held_audio: usize = 0, video: usize, hold: bool = false };
 
+/// A case's packed geometry: its tiles and its rows.
+pub const Geometry = struct { prefix_tiles: usize, tiles: usize, keep: usize, rows: Rows };
+
+/// h3_case.py's 6-8 counts (tiles: prefix, video, kept; rows: text, audio, video, keyframe, held audio), checked.
+pub fn geometry(counts: []const i32) error{ ShortGeometry, BadGeometry, HeldAudioTooLong }!Geometry {
+    if (counts.len < 6) return error.ShortGeometry;
+    if (counts.len > 8) return error.BadGeometry;
+    var n: [8]usize = @splat(0);
+    for (counts, 0..) |c, i| n[i] = std.math.cast(usize, c) orelse return error.BadGeometry;
+    if (n[7] > n[4]) return error.HeldAudioTooLong;
+    return .{
+        .prefix_tiles = n[0],
+        .tiles = n[0] + n[1],
+        .keep = n[2],
+        .rows = .{ .text = n[3], .audio = n[4], .video = n[5], .condition = n[6], .held_audio = n[7] },
+    };
+}
+
 /// The distinct timesteps of a run, sorted, and for every step each row's index into them.
 pub const Plan = struct { table: []f32, index: []i32 };
 
@@ -181,4 +199,20 @@ test "the plan: keyframe rows held at 0.999, held audio at 1, one sorted table o
     // step 0: text 0.5, keyframe 0.999, held audio 1, audio 0.25, video 0.5
     try std.testing.expectEqualSlices(i32, &.{ 1, 3, 4, 0, 1 }, p.index[0..5]);
     try std.testing.expectEqualSlices(i32, &.{ 2, 3, 4, 1, 2 }, p.index[5..10]);
+}
+
+test "the case's geometry: six to eight counts, none negative, held audio within the audio" {
+    const g = try geometry(&.{ 1, 3, 2, 10, 20, 30 });
+    try std.testing.expectEqual(@as(usize, 4), g.tiles);
+    try std.testing.expectEqual(@as(usize, 0), g.rows.condition);
+    try std.testing.expectEqual(@as(usize, 0), g.rows.held_audio);
+    const r = try geometry(&.{ 1, 3, 2, 10, 20, 30, 5, 20 });
+    try std.testing.expectEqual(Rows{ .text = 10, .condition = 5, .audio = 20, .held_audio = 20, .video = 30 }, r.rows);
+    try std.testing.expectError(error.ShortGeometry, geometry(&.{}));
+    try std.testing.expectError(error.ShortGeometry, geometry(&.{ 1, 3, 2, 10, 20 }));
+    try std.testing.expectError(error.BadGeometry, geometry(&.{ 1, 3, 2, 10, 20, 30, 0, 0, 0 }));
+    try std.testing.expectError(error.BadGeometry, geometry(&.{ 1, 3, 2, -10, 20, 30 }));
+    try std.testing.expectError(error.BadGeometry, geometry(&.{ 1, 3, 2, 10, 20, 30, 0, std.math.minInt(i32) }));
+    try std.testing.expectError(error.HeldAudioTooLong, geometry(&.{ 1, 3, 2, 10, 20, 30, 0, 21 }));
+    try std.testing.expectError(error.HeldAudioTooLong, geometry(&.{ 1, 3, 2, 10, 0, 30, 0, 1 }));
 }
