@@ -379,3 +379,24 @@ test "a Hugging Face snapshot's shard is checked against its blob name: the righ
     _ = try contentOf(io, good, false);
     try std.testing.expectError(error.ShardBytesDiffer, contentOf(io, bad, false));
 }
+
+test "the identity reads headers, not tensor bytes or the folder's name: another tensor name changes it" {
+    const io = std.testing.io;
+    const gpa = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cfg = "{\"hidden_size\": 8}";
+    try write(io, tmp.dir, "a", cfg, 9, null, null);
+    try write(io, tmp.dir, "b", cfg, 10, null, null); // another dense byte under the same header, in another folder
+    try write(io, tmp.dir, "n", cfg, 9, null, null);
+    const bytes = try tmp.dir.readFileAlloc(io, "n/model.safetensors", gpa, .limited(1 << 24));
+    defer gpa.free(bytes);
+    bytes[10] = 'n'; // the first tensor's name: "m.layers.0.d.weight" becomes "n.layers.0.d.weight"
+    try tmp.dir.writeFile(io, .{ .sub_path = "n/model.safetensors", .data = bytes });
+    var path: [3][]u8 = undefined;
+    for ([_][]const u8{ "a", "b", "n" }, &path) |s, *p| p.* = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, s });
+    defer for (path) |p| gpa.free(p);
+    const a = try identity(gpa, io, path[0]);
+    try std.testing.expectEqual(a, try identity(gpa, io, path[1]));
+    try std.testing.expect(!std.mem.eql(u8, &a, &try identity(gpa, io, path[2])));
+}

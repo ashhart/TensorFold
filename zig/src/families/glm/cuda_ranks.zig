@@ -60,7 +60,7 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 5, // this struct's version
+    layout: u32 = 6, // this struct's version
     world: u32,
     rank: u32,
     split: u32,
@@ -73,7 +73,8 @@ pub const Fingerprint = extern struct {
     heat_low: f64,
     config: [32]u8, // sha256 of config.json
     program: [32]u8, // sha256 of this executable
-    checkpoint: [64]u8, // the checkpoint folder's last name (the snapshot's revision), zero padded
+    checkpoint: [32]u8, // core.checkpoint_identity (config, index, shard names, sizes, headers), not the folder's name
+    revision: [64]u8, // a hub snapshot's revision (the folder under snapshots/), zero padded; zero for any other folder
 
     pub const Field = enum {
         layout,
@@ -90,6 +91,7 @@ pub const Fingerprint = extern struct {
         config,
         program,
         checkpoint,
+        revision,
     };
 
     pub fn of(
@@ -100,6 +102,7 @@ pub const Fingerprint = extern struct {
         mtp: bool,
         config: [32]u8,
         program: [32]u8,
+        checkpoint: [32]u8,
         checkpoint_dir: []const u8,
     ) Fingerprint {
         var f: Fingerprint = .{
@@ -115,11 +118,15 @@ pub const Fingerprint = extern struct {
             .heat_low = if (s.heat) |b| b.low_c else 0,
             .config = config,
             .program = program,
-            .checkpoint = @splat(0),
+            .checkpoint = checkpoint,
+            .revision = @splat(0),
         };
-        const name = std.fs.path.basename(std.mem.trimEnd(u8, checkpoint_dir, "/"));
-        const n = @min(name.len, f.checkpoint.len);
-        @memcpy(f.checkpoint[0..n], name[0..n]);
+        const dir = std.mem.trimEnd(u8, checkpoint_dir, "/");
+        if (std.mem.eql(u8, std.fs.path.basename(std.fs.path.dirname(dir) orelse ""), "snapshots")) {
+            const name = std.fs.path.basename(dir);
+            const n = @min(name.len, f.revision.len);
+            @memcpy(f.revision[0..n], name[0..n]);
+        }
         return f;
     }
 };
@@ -149,6 +156,9 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
             if (!std.mem.eql(u8, std.mem.asBytes(&@field(f, name)), std.mem.asBytes(&@field(all[0], name))))
                 return .{ .field = @field(Fingerprint.Field, name), .rank = r };
         }
+        // a revision counts only where both ranks read a hub snapshot: a copy elsewhere has the same contents or not
+        if (f.revision[0] != 0 and all[0].revision[0] != 0 and !std.mem.eql(u8, &f.revision, &all[0].revision))
+            return .{ .field = .revision, .rank = r };
     }
     return null;
 }
@@ -218,7 +228,8 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .heat_low => "TF_HEAT_LOW",
         .config => "config.json",
         .program => "the executable",
-        .checkpoint => "the checkpoint's snapshot folder",
+        .checkpoint => "the checkpoint's config, index or its shards' names, sizes and headers",
+        .revision => "the hub snapshot's revision",
     };
 }
 
@@ -247,21 +258,26 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
     const h0: [32]u8 = @splat(1);
     const h1: [32]u8 = @splat(2);
     var all = [_]Fingerprint{
-        Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37/"),
-        Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37"),
+        Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, h0, "/hub/snapshots/423acf37/"),
+        Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, h0, "/hub/snapshots/423acf37"),
     };
     try std.testing.expect(mismatch(&all) == null);
     all[1].program = h1;
     try std.testing.expectEqual(Fingerprint.Field.program, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, .{ .split = false }, 8192, true, h0, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Mismatch{ .field = .split, .rank = 1 }, mismatch(&all).?);
-    all[1] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 0, .{}, 8192, true, h0, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Fingerprint.Field.rank, mismatch(&all).?.field);
     const heat_on: Settings = .{ .heat = .{ .high_c = 92, .low_c = 88 } };
-    all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, "/hub/snapshots/423acf37");
+    all[1] = Fingerprint.of(2, 1, heat_on, 8192, true, h0, h0, h0, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Fingerprint.Field.heat_high, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, "/hub/snapshots/other");
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, h1, "/hub/snapshots/423acf37");
     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
-    all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, "/hub/snapshots/423acf37"); // --no-drafts on rank 1 only
+    // the same contents under another folder's name agree; two hub snapshots must also be the same revision
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, h0, "/data/glm-copy");
+    try std.testing.expect(mismatch(&all) == null);
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h0, h0, h0, "/hub/snapshots/other");
+    try std.testing.expectEqual(Mismatch{ .field = .revision, .rank = 1 }, mismatch(&all).?);
+    all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, h0, "/hub/snapshots/423acf37"); // --no-drafts on rank 1 only
     try std.testing.expectEqual(Mismatch{ .field = .mtp, .rank = 1 }, mismatch(&all).?);
 }

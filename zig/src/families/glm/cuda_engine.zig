@@ -11,6 +11,7 @@ const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
+const checkpoint_identity = @import("core").checkpoint_identity;
 
 pub const Options = struct {
     capacity: usize, // tokens a sequence holds
@@ -107,6 +108,7 @@ pub const Engine = struct {
         errdefer stream.deinit();
         const config_hash = try ranks.hashFile(a, io, cfg_path);
         const program_hash = try ranks.hashFile(a, io, "/proc/self/exe");
+        const checkpoint_hash = try checkpoint_identity.identity(a, io, checkpoint);
         const fp = ranks.Fingerprint.of(
             world,
             rank,
@@ -115,6 +117,7 @@ pub const Engine = struct {
             o.mtp,
             config_hash,
             program_hash,
+            checkpoint_hash,
             checkpoint,
         );
         try ranks.agree(d, lib, comm, stream, fp, try a.alloc(ranks.Fingerprint, world));

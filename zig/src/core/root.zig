@@ -7,6 +7,7 @@ pub const eaq_container = @import("eaq_container.zig");
 pub const checkpoint = @import("checkpoint.zig");
 pub const direct_io = @import("direct_io.zig");
 pub const Checkpoint = checkpoint.Checkpoint;
+pub const checkpoint_identity = @import("checkpoint_identity.zig");
 pub const draft_depth = @import("draft_depth.zig");
 pub const CopyIndex = @import("copy_index.zig").CopyIndex;
 pub const tokenizer = @import("tokenizer"); // a module of its own, so the native server shares it
@@ -47,6 +48,7 @@ test {
     _ = @import("eaq_container_test.zig");
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
+    _ = checkpoint_identity;
     _ = direct_io;
     _ = draft_depth;
     _ = @import("copy_index.zig");

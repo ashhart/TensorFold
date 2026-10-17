@@ -105,7 +105,7 @@ const Fingerprint = extern struct {
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
-    weights: [32]u8, // the checkpoint's identity (cuda_identity.zig): config, index, shard names, sizes, headers
+    weights: [32]u8, // the checkpoint's identity (core.checkpoint_identity): config, index, shard names, sizes, headers
 
     fn of(c: Config, program: [32]u8, weights: [32]u8) Fingerprint {
         var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program, .weights = weights };
@@ -122,7 +122,7 @@ pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_gr
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
-    const weights = try @import("cuda_identity.zig").identity(gpa, io, dir); // every byte is compared at ready
+    const weights = try core.checkpoint_identity.identity(gpa, io, dir); // every byte is compared at ready
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
     try g.gather(Fingerprint, d, s, Fingerprint.of(c, program, weights), all[0..c.world]);
