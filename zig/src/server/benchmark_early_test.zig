@@ -53,7 +53,14 @@ test "issue 969: sampled early stops keep counts and seeds, suppress aggregates 
         try std.testing.expectEqual(case == .full, cells[0].complete);
         try std.testing.expectEqual(case == .full, cells[0].delivery != null and cells[0].ttft != null);
         try std.testing.expect(cells[1].complete and cells[1].delivery != null);
-        const request = (try json.parse(a, f.request(2).body)).ok;
+        var completion: usize = 0;
+        const measured = for (0..f.count()) |i| {
+            const sent = f.request(i);
+            if (!std.mem.eql(u8, sent.path, "/v1/completions")) continue;
+            if (completion == 2) break sent;
+            completion += 1;
+        } else return error.MissingMeasuredRequest;
+        const request = (try json.parse(a, measured.body)).ok;
         try std.testing.expectEqual(@as(?i64, 1235), request.get("seed").?.int64());
         try std.testing.expectEqual(@as(?i64, 20), request.get("top_k").?.int64());
         try std.testing.expectEqual(@as(?f64, 0.95), suite.number(request.get("top_p")));

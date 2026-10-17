@@ -324,3 +324,43 @@ test "an attached run copies an accepted server manifest into its receipt and is
     try std.testing.expectEqualStrings("partial", v.get("hardware").?.get("source").?.string);
     try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", v.get("model").?.get("revision").?.string);
 }
+
+const no_rank =
+    \\{"schema_version":1,"runtime":{"tensorfold_version":"9.8.7","backend":"cuda","python_version":"none",
+    \\"platform":"linux"},"model":{"revision":"0123456789abcdef0123456789abcdef01234567"},
+    \\"hardware":{"system_memory_bytes":1000,"memory_type":"unified","gpus":[{"name":"Example GPU","memory_bytes":null,
+    \\"cores":null}],"gpu_count":1,"source":"partial"}}
+;
+const no_revision =
+    \\{"schema_version":1,"rank_count":2,"runtime":{"tensorfold_version":"9.8.7","backend":"cuda","python_version":"none",
+    \\"platform":"linux"},"model":{},
+    \\"hardware":{"system_memory_bytes":1000,"memory_type":"unified","gpus":[{"name":"Example GPU","memory_bytes":null,
+    \\"cores":null}],"gpu_count":1,"source":"partial"}}
+;
+
+test "an attached run whose accepted manifest lacks its rank count or revision is called unranked" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ no_rank, no_revision }, 0..) |doc, i| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        var r = try Run.init(a, &tmp);
+        const routes = try a.dupe(fake.Route, &.{
+            .{ .method = "GET", .path = "/v1/benchmark/manifest", .replies = try a.dupe([]const fake.Write, &.{try fake.jsonReply(a, "200 OK", doc)}) },
+            .{ .method = "POST", .path = "/v1/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, false, 4, 15)}) },
+            .{ .method = "POST", .path = "/v1/chat/completions", .replies = try a.dupe([]const fake.Write, &.{try fake.reply(a, true, 4, 15)}) },
+        });
+        const f = try fake.Fake.start(std.testing.allocator, routes);
+        defer f.stop();
+        const out = try r.path("run.json");
+        try std.testing.expectEqual(@as(u8, 0), try r.command(try cli.runArgs(&r, try f.url(a, ""), out)));
+        try std.testing.expect(r.has("does not attest a rank count and checkpoint revision; this result is unranked"));
+        try std.testing.expect(r.has("Receipt saved") and !r.has("hardware and checkpoint revisions are unknown"));
+        var problem: []const u8 = "";
+        const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
+        try std.testing.expectEqualStrings("partial", v.get("hardware").?.get("source").?.string);
+        const missing_field = if (i == 0) v.get("settings").?.get("rank_count").? else v.get("model").?.get("revision").?;
+        try std.testing.expect(missing_field == .null);
+    }
+}

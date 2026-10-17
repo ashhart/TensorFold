@@ -55,7 +55,7 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
 pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
     const none: std.process.Environ.Map = .init(a);
     const env = srv.config.environ orelse &none;
-    const backend = if (srv.config.identity.backend.len > 0) srv.config.identity.backend else "cuda";
+    const backend = srv.config.identity.backend;
     routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir));
 }
 

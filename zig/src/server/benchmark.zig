@@ -232,8 +232,11 @@ fn show(ctx: *const Context, v: json.Value) !void {
     if (settings.get("managed").? != .bool or !settings.get("managed").?.bool) {
         const source = json.strOr(v.get("hardware").?.get("source"));
         const version = json.strOr(v.get("runtime").?.get("tensorfold_version"));
+        const pinned = settings.get("rank_count").? != .null and v.get("model").?.get("revision").? != .null;
         if (std.mem.eql(u8, source, "unavailable") or std.mem.eql(u8, version, "unknown"))
-            try say(ctx, "Attached-server hardware and checkpoint revisions are unknown; this result is unranked.", .{});
+            try say(ctx, "Attached-server hardware and checkpoint revisions are unknown; this result is unranked.", .{})
+        else if (!pinned)
+            try say(ctx, "The attached server's manifest does not attest a rank count and checkpoint revision; this result is unranked.", .{});
     }
     if (std.mem.eql(u8, json.strOr(v.get("runtime").?.get("backend")), "rocm"))
         try say(ctx, "This rocm receipt is saved locally; it cannot be published until the board accepts rocm.", .{});

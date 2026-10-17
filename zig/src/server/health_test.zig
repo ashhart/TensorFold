@@ -300,9 +300,14 @@ const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: test\r\nConne
 
 /// The manifest a server with `environ` sends over a socket, parsed back as a client reads it.
 fn manifestServed(a: Allocator, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
+    return manifestWithBackend(a, environ, "cuda");
+}
+
+fn manifestWithBackend(a: Allocator, environ: ?*const std.process.Environ.Map, backend: []const u8) !std.json.ObjectMap {
     var engine: Idle = .{};
     var text: Bytes = .{};
-    const identity = build_identity.of(WithGpu, a, "9.8.7", 1);
+    var identity = build_identity.of(WithGpu, a, "9.8.7", 1);
+    identity.backend = backend;
     const config: server.Config = .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity, .environ = environ };
     const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), config, null);
     defer srv.deinit();
@@ -339,4 +344,11 @@ test "the manifest names the rank count and revision from the server's environme
     const bare = try manifestServed(a, null);
     try std.testing.expect(bare.get("rank_count") == null);
     try std.testing.expect(bare.get("model").?.object.get("revision") == null);
+}
+
+test "benchmark manifest: an unknown server backend is never attested as CUDA" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const o = try manifestWithBackend(arena.allocator(), null, "");
+    try std.testing.expectEqualStrings("", o.get("runtime").?.object.get("backend").?.string);
 }
