@@ -504,7 +504,7 @@ const FakeQueue = struct {
     }
 };
 
-test "a pass whose second upload or whose record fails leaves no copy reading the staging when it is reused" {
+test "a pass whose first or second upload or whose record fails leaves no copy reading the staging when it is reused" {
     const Case = struct { fail_copy: ?usize, fail_record: bool };
     const cases = [_]Case{
         .{ .fail_copy = 1, .fail_record = false },

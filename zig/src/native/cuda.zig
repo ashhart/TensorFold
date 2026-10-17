@@ -7,6 +7,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const flashnext = @import("flashnext");
 const family_memory = @import("cuda_family_memory.zig");
+const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
 const glm = @import("glm_cuda");
@@ -324,27 +325,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     var probe: Probe = .{ .a = a, .io = io, .ctx = &g.ctx, .held = held0, .problem = problem };
     var opts: F.Options = .{ .context = @intCast(window), .drafts = o.drafts, .segments = segments, .slide = o.slide };
-    if (@hasField(F.Options, "rank")) {
-        opts.tp = @intCast(o.tp);
-        opts.rank = @intCast(o.rank);
-        opts.master = if (o.master.len > 0) o.master else null;
-        opts.master_port = o.master_port;
-    }
-    if (comptime @hasField(F.Options, "vision")) {
-        if (o.vision) |vo| {
-            const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
-            opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
-        }
-    }
-    if (o.precision) |p| {
-        if (!@hasField(F.Options, "precision")) {
-            problem.* = "--precision: this CUDA family reads no NVFP4 checkpoint; serve it without --precision";
-            return null;
-        }
-        opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
-    }
+    if (!family_options.set(F, o, &opts, problem)) return null;
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
-    if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
