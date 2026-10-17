@@ -33,7 +33,7 @@ pub fn prefillWith(e: *Engine, prompt: []const u32, dump: ?*Dump, head: ?*Head, 
 pub fn prefillFrom(e: *Engine, prompt: []const u32, from: usize, dump: ?*Dump, head: ?*Head, cancel: ?Cancel, keep: ?Keep) !u32 {
     if (prompt.len == 0) return error.EmptyPrompt;
     if (from >= prompt.len) return error.BadReuse;
-    if (prompt.len + state.max_rows > e.max_len) return error.ContextFull;
+    if (prompt.len + state.max_rows > e.cap()) return error.ContextFull;
     if (from == 0) {
         try e.reset();
         if (head) |h| try h.reset();

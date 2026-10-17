@@ -15,6 +15,7 @@ const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 const lesson_route = @import("lesson_route.zig");
+const Pages = @import("cuda_pages.zig").Pages;
 
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
@@ -25,8 +26,8 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 
-/// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
+/// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
+const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
 
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
@@ -42,6 +43,8 @@ pub const Cuda = struct {
     head: ?*Head,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     own_free: bool = true, // no stream holds the engine's own sequence
+    pages: ?*Pages = null, // the other streams' sequences and KV pages, made at load (null: a window each, at prefill)
+    paged_only: bool = false, // TF_KV_PAGES=all: every stream on pages, the engine's own sequence left idle (checks)
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
@@ -70,7 +73,9 @@ pub const Cuda = struct {
 
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
-        while (it.next()) |l| if (!l.own) self.e.freeSeq(l.seq);
+        while (it.next()) |l| if (l.paged) {
+            _ = self.pages.?.close(l.seq);
+        } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.pinned.free();
         self.rows_out.free();
@@ -254,11 +259,17 @@ pub const Cuda = struct {
         const gop = try self.lanes.getOrPut(self.gpa, s);
         if (gop.found_existing) self.drop(gop.value_ptr.*);
         // the engine's own sequence while it is free: its rounds replay the captured graphs
-        const own = self.own_free and e.serial != null and !s.untaught; // the own graphs carry the pocket
-        gop.value_ptr.* = .{ .own = own, .stats = e.stats, .seq = if (own) &e.own else e.newSeq() catch |err| {
-            self.lanes.removeByPtr(gop.key_ptr);
-            return err;
-        } };
+        const own = self.own_free and e.serial != null and !s.untaught and !self.paged_only; // the own graphs carry the pocket
+        const seq = if (own) &e.own else if (self.pages) |p| p.open(ids.len, s.max_new, s.untaught) else e.newSeq();
+        gop.value_ptr.* = .{
+            .own = own,
+            .paged = !own and self.pages != null,
+            .stats = e.stats,
+            .seq = seq catch |err| {
+                self.lanes.removeByPtr(gop.key_ptr); // nothing held: a LaneMemory request waits for a stream to end
+                return err;
+            },
+        };
         if (own) self.own_free = false;
         gop.value_ptr.seq.untaught = s.untaught;
         e.bind(gop.value_ptr.seq);
@@ -497,7 +508,7 @@ pub const Cuda = struct {
             }
             if (r.depth > mtp.max_chain) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
-            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
             batched += 1;
@@ -521,6 +532,15 @@ pub const Cuda = struct {
             const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;
             std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of graphs it captured for itself, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
         }
-        if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
+        if (l.own) self.own_free = true else if (l.paged) {
+            _ = self.pages.?.close(l.seq);
+        } else self.e.freeSeq(l.seq);
+    }
+
+    /// The lane host's admission: the engine's own sequence is free, or the pool holds the request's pages now.
+    pub fn fits(self: *const Cuda, prompt: usize, max_tokens: usize) bool {
+        if (self.own_free and !self.paged_only) return true;
+        const p = self.pages orelse return true;
+        return p.fits(prompt, max_tokens);
     }
 };

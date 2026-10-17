@@ -42,6 +42,13 @@ const Lane = struct {
     filling: bool = false,
 };
 
+/// Where a lane's caches come from: taken before its prompt goes in, given back once it is released.
+pub const Reserve = struct {
+    ctx: *anyopaque,
+    take: *const fn (ctx: *anyopaque, s: *Stream) anyerror!void,
+    give: *const fn (ctx: *anyopaque, s: *Stream) void,
+};
+
 pub const Fake = struct {
     gpa: Allocator,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
@@ -58,6 +65,7 @@ pub const Fake = struct {
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
     ranked: bool = false, // the head gives its held chain back (alternatives)
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
+    reserve: ?Reserve = null, // a new lane's caches come from here first (LaneMemory: no room yet); release gives them back
     fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
     last_rows: usize = 0, // the last verify's rows, for test clocks
     last_sampled: bool = false, // and whether one of its streams drew keyed samples
@@ -127,7 +135,7 @@ pub const Fake = struct {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
         if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
-        const got = try x.lanes.getOrPut(x.gpa, s);
+        const got = try x.newLane(s);
         if (got.found_existing) freeLane(x.gpa, got.value_ptr);
         got.value_ptr.* = .{};
         const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
@@ -145,7 +153,7 @@ pub const Fake = struct {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
         if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
-        const got = try x.lanes.getOrPut(x.gpa, s);
+        const got = try x.newLane(s);
         if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
         if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };
         const l = got.value_ptr;
@@ -158,6 +166,17 @@ pub const Fake = struct {
         l.filling = false;
         try x.fillPrompt(l, s);
         return true;
+    }
+
+    /// The stream's lane, its caches reserved first when it has none yet.
+    fn newLane(x: *Fake, s: *Stream) !std.AutoHashMapUnmanaged(*Stream, Lane).GetOrPutResult {
+        const r = x.reserve orelse return x.lanes.getOrPut(x.gpa, s);
+        if (x.lanes.contains(s)) return x.lanes.getOrPut(x.gpa, s);
+        try r.take(r.ctx, s);
+        return x.lanes.getOrPut(x.gpa, s) catch |e| {
+            r.give(r.ctx, s);
+            return e;
+        };
     }
 
     /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
@@ -331,6 +350,7 @@ pub const Fake = struct {
         if (x.lanes.fetchRemove(s)) |kv| {
             var l = kv.value;
             freeLane(x.gpa, &l);
+            if (x.reserve) |r| r.give(r.ctx, s);
         }
     }
 };

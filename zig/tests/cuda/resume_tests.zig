@@ -72,7 +72,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const h = try nemotron.Head.init(e);
     defer h.deinit();
     var target: reuse.Target = .{ .e = e, .head = h };
-    _ = try reuse.ready(&target, 16 << 30); // spare Mamba buffers, as a served cache sets aside
+    _ = try reuse.slots(&target, 16); // snapshot slots, as a served cache makes them
     const len = ids.len;
     const fresh = try digest(gpa, e, h, len, try e.prefillFrom(ids, 0, null, h, null, null));
     const marks = [_]u32{ 1, 7, 1500, 2047, 2048, 2049, @intCast(len - 5), @intCast(len - 1) }; // inside chunks, and one at an end
@@ -84,11 +84,11 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8) !void {
     const kept = try digest(gpa, e, h, len, first);
     try check.expect(std.mem.eql(u8, &fresh, &kept), "a pass that keeps states differs from one that keeps none", .{});
     for (saver.at[0..saver.n], saver.saved[0..saver.n]) |at, s| {
-        try check.expect(reuse.held(s) == reuse.bytes(&target, at), "the state at {d} holds {d} bytes, the budget counts {d}", .{ at, reuse.held(s), reuse.bytes(&target, at) });
+        try check.expect(reuse.held(&target, s) == reuse.bytes(&target, at) + reuse.mambaBytes(e.c), "the state at {d} holds {d} bytes, the budget counts {d} and a slot", .{ at, reuse.held(&target, s), reuse.bytes(&target, at) });
         _ = try e.prefillFrom(other, 0, null, h, null, null); // every row the prompt reads holds another prompt's
         try reuse.restore(&target, null, s);
         const got = try digest(gpa, e, h, len, try e.prefillFrom(ids, at, null, h, null, null));
-        std.debug.print("RESULT resume from {d} of {d}: {d} bytes kept, {s}\n", .{ at, len, reuse.held(s), if (std.mem.eql(u8, &fresh, &got)) "equal" else "DIFFER" });
+        std.debug.print("RESULT resume from {d} of {d}: {d} bytes kept, {s}\n", .{ at, len, reuse.held(&target, s), if (std.mem.eql(u8, &fresh, &got)) "equal" else "DIFFER" });
         try check.expect(std.mem.eql(u8, &fresh, &got), "the pass resumed at {d} differs from the fresh one", .{at});
     }
     const seq = try e.newSeq(); // another stream's sequence, as a later request restores into one
@@ -121,7 +121,7 @@ pub fn insideChunks(gpu: check.Gpu, model: []const u8, ids_path: []const u8, n_t
     const h = try nemotron.Head.init(e);
     defer h.deinit();
     var target: reuse.Target = .{ .e = e, .head = h };
-    _ = try reuse.ready(&target, 16 << 30); // the first marks of a chunk take spares, the rest allocate
+    _ = try reuse.slots(&target, 64); // every mark of a pattern, both passes, takes a slot
     const fresh = try digest(gpa, e, h, n, try e.prefillFrom(ids, 0, null, h, null, null));
     var bad: usize = 0;
     var it = std.mem.splitScalar(u8, patterns, ';');

@@ -129,7 +129,7 @@ pub const Engine = struct {
     prompt_rows: ?PromptRows = null, // a prompt pass's rows for prompt_logprobs (serial chunks, from 0)
     taps: ?Taps = null, // a prompt pass's hidden rows for a recorder (serial chunks)
     armed: marks.Armed = .{}, // the marks inside the prompt chunk about to run (cuda_marks.zig)
-    spares: marks.Spares = .{}, // free Mamba buffers the prompt cache set aside for the next marks
+    snaps: marks.Slots = .{}, // the prompt cache's snapshot slots, made at load (cuda_reuse.slots)
     last_chunk: usize = 0, // where the last prompt pass's last chunk started (the prompt's last row: len - 1 - this)
     tp: ?cuda.tp_group.Group = null, // a latent MoE over ranks (TF_NEMOTRON_RANK of TF_NEMOTRON_WORLD)
     vision: ?*@import("cuda_vision.zig").Vision = null, // --vision: the tower and a prompt pass's image rows
@@ -297,7 +297,7 @@ pub const Engine = struct {
     pub fn deinit(e: *Engine) void {
         if (e.tp != null) @import("cuda_worker.zig").end(e) catch {}; // the other ranks leave their job loops
         e.stream.synchronize() catch {};
-        e.spares.deinit();
+        e.snaps.deinit();
         if (e.serial) |*g| g.deinit();
         seq_graphs.free(e.gpa, &e.own.graphs); // masked windows'
         for (&e.windows) |*set| for (set) |*g| if (g.*) |*x| x.deinit();
@@ -359,8 +359,9 @@ pub const Engine = struct {
     /// Act on sequence `s` from here on: its buffers replace the bound one's, which keeps where it stands.
     pub fn bind(e: *Engine, s: *state.Seq) void {
         const old = e.bound;
-        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide, .untaught = old.untaught };
+        old.* = .{ .arena = old.arena, .carved = old.carved, .ptr = old.ptr, .table = old.table, .pages = old.pages, .cap = old.cap, .head = old.head, .graphs = old.graphs, .epoch = old.epoch, .pos = e.pos, .parity = e.parity, .prev_keep = e.prev_keep, .rows = e.rows, .head_pos = if (e.head) |h| h.pos else 0, .sampling = e.sampling, .slot = old.slot, .decide = e.decide, .untaught = old.untaught };
         inline for (state.seq_fields, s.ptr) |name, p| @field(e.b, name) = p;
+        e.b.table = s.table;
         e.pos = s.pos;
         e.parity = s.parity;
         e.prev_keep = s.prev_keep;
@@ -372,12 +373,23 @@ pub const Engine = struct {
         e.bound = s;
     }
 
+    /// Rows the bound sequence's caches hold: the window, or a paged sequence's pages.
+    pub fn cap(e: *const Engine) usize {
+        return if (e.bound.cap > 0) e.bound.cap else e.max_len;
+    }
+
+    /// Bytes of one KV page: every attention layer's K and V rows of an attention chunk, and the head's.
+    pub fn pageBytes(e: *const Engine) u64 {
+        return (e.c.count(.attention) + @intFromBool(e.head != null)) * 2 * state.chunk_keys * state.kvRowBytes(e.c);
+    }
+
     pub fn ops(e: *const Engine) kern.Ops {
         return .{ .k = &e.k, .s = e.stream };
     }
 
     pub fn forward(e: *const Engine, dump: ?*Dump) Forward {
         var f = Forward.init(e.c, &e.w, &e.b, e.ops(), e.max_len, e.nch, e.sampling != null);
+        f.page_elems = e.pageBytes() / 2;
         f.dump = dump;
         f.slot = e.slot;
         f.untaught = e.bound.untaught;
@@ -447,7 +459,7 @@ pub const Engine = struct {
     /// verify with a grammar's bits for each row: its logits masked before its draws, a graph each row count once made.
     pub fn verifyMasked(e: *Engine, ids: []const u32, rows: usize, dump: ?*Dump, mask: Mask) !void {
         if (rows < 1 or rows > state.max_rows or ids.len > rows) return error.BadWindow;
-        if (e.pos + rows > e.max_len) return error.ContextFull;
+        if (e.pos + rows > e.cap()) return error.ContextFull;
         try e.copied.synchronize();
         const host = e.pinned.slice(u32);
         host[pin_meta..][0..4].* = e.metaRow();
@@ -493,7 +505,7 @@ pub const Engine = struct {
         var row0: usize = 0;
         for (parts, 0..) |p, k| {
             e.bind(p.seq);
-            if (e.pos + p.rows > e.max_len) return error.ContextFull;
+            if (e.pos + p.rows > e.cap()) return error.ContextFull;
             const slot = host[k * 64 ..][0..64];
             slot[0..4].* = e.metaRow();
             @memcpy(slot[4..][0..p.ids.len], p.ids);

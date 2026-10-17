@@ -63,7 +63,7 @@ pub fn mixer(f: *const fwd.Forward, w: *const fwd.Walk, i: usize, spans: []const
                 try o.fill32(b.p_meta, @intCast(sp.skip), 4);
                 try f.glue.kvWrite(qkv, kc, vc, b.p_meta, sp.rows, f.ashape());
                 try o.torch().copyRows(qkv, c.qkvDim() * 2, q, qd * 2, qd * 2, sp.rows);
-                try o.prefillAttention(q, kc, vc, b.att + @as(u64, sp.at) * qd * 2, sp.skip, sp.rows, c.heads, c.kv_heads, scale);
+                try o.prefillAttention(q, kc, vc, b.att + @as(u64, sp.at) * qd * 2, sp.skip, sp.rows, c.heads, c.kv_heads, scale, 0, 0); // the trainer's own rows
                 if (pf.prime) {
                     try o.copy(pf.store.keysAt(sp.slot, w.aj, false), kc, sp.rows * kvd);
                     try o.copy(pf.store.keysAt(sp.slot, w.aj, true), vc, sp.rows * kvd);

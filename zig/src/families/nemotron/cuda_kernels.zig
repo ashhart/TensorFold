@@ -8,7 +8,7 @@ const glue = @import("cuda_glue.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
-    const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
+    const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
     const scan_rows = "_ZN12tf_scan_rows11scan_kernelILb0EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
     const scan_snaps = "_ZN12tf_scan_rows11scan_kernelILb1EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
 };
@@ -353,12 +353,14 @@ pub const Ops = struct {
     }
 
     /// prefill_attention (head dim 128): q (rows, heads, 128) at positions p0.. against caches filled through them.
-    pub fn prefillAttention(o: Ops, q: u64, kc: u64, vc: u64, out: u64, p0: usize, rows: usize, heads: usize, kv_heads: usize, scale: f32) !void {
+    pub fn prefillAttention(o: Ops, q: u64, kc: u64, vc: u64, out: u64, p0: usize, rows: usize, heads: usize, kv_heads: usize, scale: f32, pt: u64, ps: u64) !void {
         const g = heads / kv_heads;
         var a: cuda.Args = .{};
         for ([_]u64{ q, kc, vc, out }) |v| a.add(v);
         for ([_]usize{ p0, rows, heads, kv_heads, g }) |v| a.add(int(v));
         a.add(scale);
+        a.add(pt); // the stream's page table (0: contiguous rows), then the elements between pages
+        a.add(@as(i64, @intCast(ps)));
         try o.go(o.k.pattn, .{ (rows + 15) / 16, kv_heads * (g / 8), 1 }, 256, pattn_smem, &a);
     }
 
