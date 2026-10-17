@@ -99,11 +99,11 @@ test "shared affine expert scatter and GLU thresholds match release" {
         }
     }
 }
-test "released Metal source bytes are pinned without shader compilation" {
+test "landed Metal source bytes are pinned without shader compilation" {
     {
         var hash: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(ks.core_affine_mm, &hash, .{});
-        try std.testing.expectEqualStrings("5b1d859e49d221711c7d5c8b50f6f10a3ec1907aff1778b3e6825dbd167c86ee", &std.fmt.bytesToHex(hash, .lower));
+        try std.testing.expectEqualStrings("d8f47cbbddf24502ca2c16cfdef0672731cc2dbe59ad027f47a3e662bcf8f627", &std.fmt.bytesToHex(hash, .lower));
     }
     {
         var hash: [32]u8 = undefined;
@@ -172,4 +172,29 @@ test "Gemma rounded dense and fused source are separate from shared libraries" {
     try proj.encodeFused(.{ .r = &record }, rr, rr, rr, rr, .{ .a = @splat(rr), .o = @splat(rr) }, 1);
     try std.testing.expectEqual(mtl.Size.of(4, 1, 1), record.passes[0].grid);
     try std.testing.expectEqual(mtl.Size.of(256, 1, 1), record.passes[0].threads);
+}
+
+test "gemma4 widths: real Gemma row encoder keeps mixed pitches across 16 row chunks" {
+    const family_weights = @import("src/families/gemma4/weights.zig");
+    const cfg = @import("src/families/gemma4/config.zig");
+    for (cfg.widths.bit_widths) |bits| {
+        const x = family_weights.Linear{ .w = .{ .id = 2 }, .sb = .{ .id = 3 }, .n = 32, .k = 256, .format = .{ .bits = bits, .group = 64 }, .col = 32, .y_stride = 128 };
+        const l = family_weights.layout(cfg.unified12b, x);
+        try std.testing.expectEqual(@as(?usize, 128), l.y_stride);
+        const p = lane.Projection{ .pipe = 101, .n = 32, .k = 256, .group_count = 4, .weight_bytes = l.weightWords() * 4, .metadata_bytes = l.metadataElements() * 2, .output_bytes = 2, .y_stride = l.y_stride.?, .tile_count = 1, .sk = l.sk, .reg = l.reg, .sums_pipe = if (l.reg) 100 else null, .sums_buffer = if (l.reg) .{ .id = 5 } else null };
+        var r: mtl.Record = .{};
+        try x.encodeRows(p, .{ .r = &r }, .{ .buf = .{ .id = 1 }, .off = 16 }, .{ .buf = .{ .id = 4 }, .off = 64 + x.col * 2 }, 33);
+        const step: usize = if (l.reg) 2 else 1;
+        try std.testing.expectEqual(@as(usize, 3) * step, r.n);
+        for (0..3) |part| {
+            const pass = r.passes[(part + 1) * step - 1];
+            try std.testing.expectEqual(mtl.Bound{ .id = 1, .off = 16 + part * 16 * 256 * 2 }, pass.buffers[0]);
+            try std.testing.expectEqual(mtl.Bound{ .id = 4, .off = 64 + 32 * 2 + part * 16 * 128 * 2 }, pass.buffers[4]);
+            const rows = try val(pass, [2]i32, 3);
+            try std.testing.expectEqual(@as(i32, if (part == 2) 1 else 16), rows[0]);
+        }
+        var bad = x;
+        bad.y_stride = 16;
+        try std.testing.expectError(error.InvalidOutputStride, family_weights.layout(cfg.unified12b, bad).validate());
+    }
 }

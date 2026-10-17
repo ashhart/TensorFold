@@ -11,7 +11,7 @@ test "packed pair second publication failure releases every buffer once" {
     const words: [1024]u32 = @splat(0);
     const scales: [128]u16 = @splat(0);
     const biases: [128]u16 = @splat(0);
-    const result = weights.packArrays(fail.allocator(), .{}, &w.owned, cfg.dense31b, &words, &scales, &biases, 32, 256);
+    const result = weights.packArrays(fail.allocator(), .{}, &w.owned, cfg.dense31b, &words, &scales, &biases, .{ .w = undefined, .sb = undefined, .n = 32, .k = 256 });
     w.deinit(std.testing.allocator);
     try std.testing.expectError(error.OutOfMemory, result);
     try std.testing.expectEqual(@as(usize, 2), mtl.made);

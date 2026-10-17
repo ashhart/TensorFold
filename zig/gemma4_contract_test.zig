@@ -152,3 +152,80 @@ test "registered stress simulators prove their stated accumulator margins" {
         try std.testing.expect(margins[1] >= spec.sums.bf16);
     }
 }
+
+test "gemma4 widths: every dense and embedding specialization is registered" {
+    try std.testing.expectEqual(@as(usize, 22), family.all_entries.len);
+    try std.testing.expectEqual(@as(usize, 24), family.embed_entries.len);
+    var seen: [2][6][2]bool = @splat(@splat(@splat(false)));
+    for (family.embed_entries) |v| {
+        const gi: usize = if (v.geo.hidden == 5376) 0 else 1;
+        const bi = std.mem.indexOfScalar(u8, &@import("tensorfold").gemma4.config.widths.bit_widths, v.bits).?;
+        const ai = @intFromBool(v.assistant);
+        try std.testing.expect(!seen[gi][bi][ai]);
+        seen[gi][bi][ai] = true;
+        const source = try v.source(std.testing.allocator);
+        defer std.testing.allocator.free(source);
+        const define = try std.fmt.allocPrint(std.testing.allocator, "#define EB {d}\n", .{v.bits});
+        defer std.testing.allocator.free(define);
+        try std.testing.expect(std.mem.indexOf(u8, source, define) != null);
+        try std.testing.expect(std.mem.indexOf(u8, source, v.symbol()) != null);
+    }
+    for (seen) |widths| for (widths) |kinds| for (kinds) |has| try std.testing.expect(has);
+}
+
+test "gemma4 widths: production embedding probes cover strided clamps hidden rows and guards" {
+    const mtl = @import("metal");
+    const E = @import("tests/contract/metal_gemma4_embed.zig").Probe;
+    const a = std.testing.allocator;
+    const c = contract.spec;
+    for (family.embed_entries) |v| {
+        mtl.reset();
+        var p = try E.init(a, .{}, .{}, v);
+        defer p.deinit();
+        try std.testing.expect(try p.prepare(.{ .rows = 3, .n = v.geo.hidden, .k = v.geo.hidden }, .random, 87));
+        const values = try a.alloc(f64, p.count() * 2);
+        defer a.free(values);
+        try p.reference(values[0..p.count()], values[p.count()..]);
+        const d = v.geo.hidden;
+        const stride: usize = if (v.assistant) 2 * d else d;
+        for (0..3) |r| {
+            const id: usize = if (v.assistant and r == 2) 4 else r;
+            for ([_]usize{ 0, 1, 2, 31, 32, 63, 64, d - 1 }) |i| {
+                const code = (id * d + i) * 37 + 87;
+                const group = id * (d / 64) + i / 64;
+                const weight = @import("tests/contract/gemma4_math.zig").roundedWeight(c.fromBf16(p.scales[group]), @intCast(code % (@as(usize, 1) << @intCast(v.bits))), c.fromBf16(p.biases[group]));
+                try std.testing.expectEqual(@as(f64, c.fromBf16(c.toBf16(@floatCast(weight * 0.75)))), values[r * stride + i]);
+                if (v.assistant) try std.testing.expectEqual(@as(f64, c.fromBf16(p.hidden[r * d + i])), values[r * stride + d + i]);
+            }
+        }
+        const k = p.kernel();
+        try std.testing.expect(try k.vt.intact(k.ctx));
+        p.y.buf.contents()[p.y.off - 1] = 0;
+        try std.testing.expect(!try k.vt.intact(k.ctx));
+    }
+}
+
+test "gemma4 widths: mixed run numerical fixture keeps every padding column guarded" {
+    const mtl = @import("metal");
+    const P = @import("tests/contract/metal_gemma4_mixed.zig").Probe;
+    const c = contract.spec;
+    const a = std.testing.allocator;
+    mtl.reset();
+    var p = P.init(a, .{}, .{});
+    defer p.deinit();
+    try std.testing.expect(try p.prepare(.{ .rows = 17, .n = 96, .k = 256 }, .random, 977));
+    const values = try a.alloc(f64, p.count() * 2);
+    defer a.free(values);
+    try p.reference(values[0..p.count()], values[p.count()..]);
+    for (values[0..p.count()], 0..) |v, i| {
+        const out = p.rig.bytes(p.y, 17 * 128 * 2);
+        const at = ((i / 96) * 128 + 16 + i % 96) * 2;
+        std.mem.writeInt(u16, out[at..][0..2], c.toBf16(@floatCast(v)), .little);
+    }
+    const k = p.kernel();
+    try std.testing.expect(try k.vt.intact(k.ctx));
+    const bytes = try k.vt.output(k.ctx);
+    for (values[0..p.count()], 0..) |v, i| try std.testing.expectEqual(@as(f64, c.fromBf16(c.toBf16(@floatCast(v)))), c.read(.bf16, bytes, i));
+    p.rig.bytes(p.y, 17 * 128 * 2)[0] = 0;
+    try std.testing.expect(!try k.vt.intact(k.ctx));
+}

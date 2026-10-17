@@ -15,6 +15,8 @@ const drama3_k = @import("metal_drama3.zig");
 const flash_pool = @import("metal_flashnext_pool.zig");
 const flash = @import("metal_flashnext.zig");
 const gemma = @import("metal_gemma4.zig");
+const gemma_embed = @import("metal_gemma4_embed.zig");
+const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const g = contract.gates;
 const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro]";
 
@@ -99,7 +101,7 @@ pub fn main(init: std.process.Init) !u8 {
         gemma_list.deinit(a);
     }
     var kernels: std.ArrayList(g.Kernel) = .empty;
-    for (gemma.entries) |v| {
+    for (gemma.all_entries) |v| {
         if (!wanted(o, v.name)) continue;
         if (!tensor) {
             std.debug.print("UNSUPPORTED {s}: tensor units required; Gemma coverage unchecked\n", .{v.name});
@@ -109,6 +111,21 @@ pub fn main(init: std.process.Init) !u8 {
         if (v.geo.hidden == 5376 and (v.kind != 1 or std.mem.endsWith(u8, v.name, "sliding"))) {
             try gemma.append(a, device, queue, v, true, &gemma_list, &kernels);
         }
+    }
+    var embeddings: [24]gemma_embed.Probe = undefined;
+    var embed_made: usize = 0;
+    defer for (embeddings[0..embed_made]) |*p| p.deinit();
+    for (gemma_embed.entries) |v| {
+        if (!wanted(o, v.name)) continue;
+        embeddings[embed_made] = try gemma_embed.Probe.init(a, device, queue, v);
+        embed_made += 1;
+    }
+    for (embeddings[0..embed_made]) |*p| try kernels.append(a, p.kernel());
+    var mixed = gemma_mixed.Probe.init(a, device, queue);
+    defer mixed.deinit();
+    if (wanted(o, mixed.kernel().spec.name)) {
+        if (!tensor) return error.TensorUnitsRequired;
+        try kernels.append(a, mixed.kernel());
     }
     var rows_list: std.ArrayList(*rows_k.Row) = .empty;
     var proj_list: std.ArrayList(*affine_k.Proj) = .empty;
@@ -198,6 +215,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (o.limits) {
         lim = try limits_k.gate(a, init.io, device, o.offline);
         lim += try gemma.limits(a, device, o.only);
+        lim += try gemma_embed.limits(a, device, o.only);
+        lim += try gemma_mixed.limits(a, device, o.only);
     }
     const t2 = std.Io.Clock.awake.now(init.io);
     const ms = struct {

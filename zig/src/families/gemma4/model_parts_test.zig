@@ -12,7 +12,7 @@ const Fake = struct {
             freed[h.id] += 1;
         }
     };
-    const Model = struct { mm: [1]Handle, inv_sliding: Handle, inv_global: Handle };
+    const Model = struct { mm: [3]?[1]Handle = @splat(null), inv_sliding: Handle, inv_global: Handle };
     fn point() !void {
         step += 1;
         if (step == fail) return error.Injected;
@@ -23,8 +23,17 @@ const Fake = struct {
         made += 1;
         return .{ .id = id };
     }
-    pub fn pipelines(_: *Model) ![1]Handle {
-        return .{try acquire()};
+    pub fn pipelines(m: *Model) !void {
+        for (&m.mm) |*set| {
+            const handle = try acquire();
+            set.* = .{handle};
+        }
+    }
+    pub fn releasePipelines(m: *Model) void {
+        for (&m.mm) |*set| if (set.*) |ps| {
+            for (ps) |h| h.deinit();
+            set.* = null;
+        };
     }
     pub fn buffer(_: *Model, _: bool) !Handle {
         return acquire();
@@ -38,7 +47,7 @@ fn boundary(fail: usize) !void {
     Fake.fail = fail;
     Fake.made = 0;
     Fake.freed = @splat(0);
-    var m: Fake.Model = undefined;
+    var m: Fake.Model = .{ .inv_sliding = undefined, .inv_global = undefined };
     const result = load(&m, Fake);
     var leaks: usize = 0;
     for (Fake.freed[0..Fake.made], 0..) |n, i| {
@@ -55,26 +64,31 @@ test "private pipeline failure has no published handle" {
     try boundary(1);
 }
 test "sliding inverse allocation releases the private pipeline" {
-    try boundary(2);
+    try boundary(4);
 }
 test "global inverse allocation releases the first table and private pipeline" {
-    try boundary(3);
-}
-test "inverse operations unwind both tables and private pipeline" {
-    try boundary(4);
     try boundary(5);
 }
-test "successful late load transfers all three owners" {
+test "inverse operations unwind both tables and private pipeline" {
+    try boundary(6);
+    try boundary(7);
+}
+test "successful late load transfers all owners" {
     Fake.step = 0;
     Fake.fail = 0;
     Fake.made = 0;
     Fake.freed = @splat(0);
-    var m: Fake.Model = undefined;
+    var m: Fake.Model = .{ .inv_sliding = undefined, .inv_global = undefined };
     try load(&m, Fake);
-    try std.testing.expectEqual(@as(usize, 3), Fake.made);
-    for (Fake.freed[0..3]) |n| try std.testing.expectEqual(@as(usize, 0), n);
-    m.mm[0].deinit();
+    try std.testing.expectEqual(@as(usize, 5), Fake.made);
+    for (Fake.freed[0..5]) |n| try std.testing.expectEqual(@as(usize, 0), n);
+    Fake.releasePipelines(&m);
     m.inv_sliding.deinit();
     m.inv_global.deinit();
-    for (Fake.freed[0..3]) |n| try std.testing.expectEqual(@as(usize, 1), n);
+    for (Fake.freed[0..5]) |n| try std.testing.expectEqual(@as(usize, 1), n);
+}
+
+test "later width pipeline failure releases all previously completed widths" {
+    try boundary(2);
+    try boundary(3);
 }

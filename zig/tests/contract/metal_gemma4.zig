@@ -13,6 +13,7 @@ const mm = tf.gemma4.affine_mm;
 const fused = tf.gemma4.fused_lane;
 const I = math.Interval;
 pub const entries = family.entries;
+pub const all_entries = family.all_entries;
 pub const requireComplete = family.requireComplete;
 fn depth(s: c.Shape) usize {
     return 128 + 2 * (s.k / 32) + 32;
@@ -48,7 +49,7 @@ pub const Probe = struct {
     pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, v: family.Variant, corrupt: bool) !Probe {
         var p = Probe{ .a = a, .rig = .{ .a = a, .device = device, .queue = queue }, .v = v, .corrupt = corrupt, .served = .{ .{ .rows = if (v.kind == 0) 65 else 5, .n = 128, .k = v.k }, .{ .rows = 1, .n = 256, .k = v.k } } };
         if (v.kind == 0) {
-            const src = try mm.source(device, a, .{});
+            const src = try mm.source(device, a, .{ .bits = v.bits });
             defer a.free(src);
             p.dense = .{try rig_.pipeline(device, src, "tf_affine_mm")};
         }
@@ -111,7 +112,7 @@ pub const Probe = struct {
         p.drop();
         if (shape.k != p.v.k or shape.rows == 0 or shape.rows > 65 or shape.n == 0 or shape.n % 64 != 0) return false;
         if (p.v.kind != 0) p.layout(shape.n).validate() catch return false;
-        var f = try contract.affine.Affine.init(p.a, shape, 4, 64);
+        var f = try contract.affine.Affine.init(p.a, shape, p.v.bits, 64);
         var transferred = false;
         errdefer if (!transferred) f.deinit();
         try f.fill(fill, seed);
@@ -122,7 +123,7 @@ pub const Probe = struct {
         if (p.v.kind == 1 or p.v.kind == 2) try p.prologue(f, fill, seed);
         p.f = f;
         transferred = true;
-        const words = try p.a.alloc(u32, shape.n * shape.k / 8);
+        const words = try p.a.alloc(u32, shape.n * shape.k * p.v.bits / 32);
         defer p.a.free(words);
         f.words(words);
         p.x = try p.rig.input(std.mem.sliceAsBytes(f.x));
@@ -312,11 +313,11 @@ pub const Probe = struct {
 };
 pub fn limits(a: std.mem.Allocator, device: mtl.Device, only: ?[]const u8) !usize {
     var problems: usize = 0;
-    for (entries) |v| {
+    for (all_entries) |v| {
         if (only) |s| {
             if (std.mem.indexOf(u8, v.name, s) == null) continue;
         }
-        const text = if (v.kind == 0) try mm.source(device, a, .{}) else try fused.source(a, v.layout());
+        const text = if (v.kind == 0) try mm.source(device, a, .{ .bits = v.bits }) else try fused.source(a, v.layout());
         defer a.free(text);
         const source = if (v.kind == 0) try a.dupe(u8, text) else try tf.gemma4.contracts.adapt(device, a, text);
         defer a.free(source);

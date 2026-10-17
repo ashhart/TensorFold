@@ -6,6 +6,34 @@ const prompt_attention = @import("kernel_sources").gemma4_prompt_attention;
 const frags = @import("../../core/frags.zig");
 const cfg = @import("config.zig");
 
+/// The exact glue specialization used by the target and assistant constructors.
+pub fn glueSource(a: std.mem.Allocator, geo: cfg.Geometry, global: bool, q_only: bool, embed_bits: u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, &cfg.widths.bit_widths, embed_bits) == null) return error.UnsupportedGemmaQuantization;
+    const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
+    const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
+    const shape: [3]usize = if (global) .{ 64, 1, 4 } else .{ 128, 4, 4 };
+    const width = geo.query_heads * dh + (if (q_only) 0 else nk * dh * @as(usize, if (global) 1 else 2));
+    return std.fmt.allocPrint(a,
+        \\#define D {d}
+        \\#define T 256
+        \\#define DH {d}
+        \\#define NQ {d}
+        \\#define NK {d}
+        \\#define VK {d}
+        \\#define W {d}
+        \\#define HK {d}
+        \\#define G {d}
+        \\#define CK {d}
+        \\#define S {d}
+        \\#define BLK {d}
+        \\#define SCALE 1.0f
+        \\#define GELU_C0 0.7978845608028654f
+        \\#define GELU_C1 0.044715f
+        \\#define EB {d}
+        \\{s}
+    , .{ geo.hidden, dh, geo.query_heads, nk, @intFromBool(global), width, nk, geo.query_heads / nk, shape[0], shape[1], shape[2], embed_bits, glue });
+}
+
 /// One layer kind's pipelines; the kind-free ones (embed, norms, tails, geglu, softcap) are the same in both.
 pub const Kind = struct {
     embed: mtl.Pipeline,
@@ -39,26 +67,7 @@ pub const Kind = struct {
         const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
         const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
         const shape: [3]usize = if (global) .{ 64, 1, 4 } else .{ 128, 4, 4 };
-        const width = geo.query_heads * dh + (if (q_only) 0 else nk * dh * @as(usize, if (global) 1 else 2));
-        const text = try std.fmt.allocPrint(a,
-            \\#define D {d}
-            \\#define T 256
-            \\#define DH {d}
-            \\#define NQ {d}
-            \\#define NK {d}
-            \\#define VK {d}
-            \\#define W {d}
-            \\#define HK {d}
-            \\#define G {d}
-            \\#define CK {d}
-            \\#define S {d}
-            \\#define BLK {d}
-            \\#define SCALE 1.0f
-            \\#define GELU_C0 0.7978845608028654f
-            \\#define GELU_C1 0.044715f
-            \\#define EB {d}
-            \\{s}
-        , .{ geo.hidden, dh, geo.query_heads, nk, @intFromBool(global), width, nk, geo.query_heads / nk, shape[0], shape[1], shape[2], embed_bits, glue });
+        const text = try glueSource(a, geo, global, q_only, embed_bits);
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();

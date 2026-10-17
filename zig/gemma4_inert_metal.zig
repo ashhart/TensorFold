@@ -94,6 +94,7 @@ pub const CommandBuffer = struct {
     }
 };
 pub const ComputeEncoder = struct {
+    pub fn barrier(_: @This()) void {}
     pub fn setPipeline(_: @This(), _: Pipeline) void {}
     pub fn setBuffer(_: @This(), _: Buffer, _: usize, _: usize) void {}
     pub fn setValue(_: @This(), _: anytype, _: usize) void {}

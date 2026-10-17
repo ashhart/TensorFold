@@ -31,11 +31,16 @@ pub const Linear = struct {
 
     /// `rows` of x [rows, k] through a general-unpack pipeline, which takes 16 rows an encode: y's rows y_stride apart.
     pub fn encodeRows(x: Linear, p: lane.Projection, e: mtl.ComputeEncoder, in: Ref, y: Ref, rows: usize) !void {
+        return x.encodeRefsRows(p, e, in, .{ .buf = x.w }, .{ .buf = x.sb }, y, rows);
+    }
+
+    /// The same row encoder with explicit packed references, including guarded contract buffers.
+    pub fn encodeRefsRows(x: Linear, p: lane.Projection, e: mtl.ComputeEncoder, in: Ref, w: Ref, sb: Ref, y: Ref, rows: usize) !void {
         const pitch = x.y_stride orelse x.n;
         var r: usize = 0;
         while (r < rows) : (r += 16) {
             const n = @min(16, rows - r);
-            try p.encode(e, .{ .buf = in.buf, .off = in.off + r * x.k * 2 }, .{ .buf = x.w }, .{ .buf = x.sb }, .{ .buf = y.buf, .off = y.off + r * pitch * 2 }, @intCast(n));
+            try p.encode(e, .{ .buf = in.buf, .off = in.off + r * x.k * 2 }, w, sb, .{ .buf = y.buf, .off = y.off + r * pitch * 2 }, @intCast(n));
         }
     }
 };
@@ -230,8 +235,9 @@ pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayL
     errdefer sb.deinit();
     try lane.pack(l, words, scales, biases, wb.slice(u32, l.weightWords()), sb.slice(u16, l.metadataElements()));
     if (l.reg) try lane.regOrder(device, &.{.{ .w = .{ .buf = wb }, .n = x.n, .k = x.k }});
-    try owned.append(gpa, wb);
-    try owned.append(gpa, sb);
+    try owned.ensureUnusedCapacity(gpa, 2);
+    owned.appendAssumeCapacity(wb);
+    owned.appendAssumeCapacity(sb);
     var out = x;
     out.w = wb;
     out.sb = sb;

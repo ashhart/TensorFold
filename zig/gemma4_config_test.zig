@@ -1,0 +1,4 @@
+//! Import the parser from a root that also admits the common quantization module.
+test {
+    _ = @import("src/families/gemma4/config.zig");
+}

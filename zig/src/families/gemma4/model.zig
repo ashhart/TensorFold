@@ -103,16 +103,31 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.picks = try round.Ops.init(m.device);
         errdefer m.picks.deinit();
-        errdefer for (m.mm) |o| if (o) |ps| for (ps) |p| p.deinit();
-        for (m.config.widths.layers[0..m.config.geo.layers]) |l| for (l) |w| try m.pipesFor(w.bits);
-        try m.pipesFor(m.config.widths.vision.bits);
-        const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        m.inv_sliding = try m.device.buffer(cfg.sliding_dim / 2 * 4, opts);
-        m.inv_global = try m.device.buffer(cfg.global_dim / 2 * 4, opts);
-        try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, false, m.inv_sliding.slice(f32, cfg.sliding_dim / 2));
-        try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, true, m.inv_global.slice(f32, cfg.global_dim / 2));
+        try m.loadPromptPipelines();
         return m;
     }
+
+    pub fn loadPromptPipelines(m: *Model) !void {
+        try @import("model_parts.zig").load(m, PromptOps);
+    }
+    const PromptOps = struct {
+        pub fn pipelines(m: *Model) !void {
+            for (m.config.widths.layers[0..m.config.geo.layers]) |l| for (l) |w| try m.pipesFor(w.bits);
+            try m.pipesFor(m.config.widths.vision.bits);
+        }
+        pub fn releasePipelines(m: *Model) void {
+            for (&m.mm) |*set| if (set.*) |ps| {
+                for (ps) |pipe| pipe.deinit();
+                set.* = null;
+            };
+        }
+        pub fn buffer(m: *Model, global: bool) !mtl.Buffer {
+            return m.device.buffer((if (global) @as(usize, cfg.global_dim) else cfg.sliding_dim) / 2 * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        }
+        pub fn inverse(m: *Model, global: bool, buf: mtl.Buffer) !void {
+            try kernels.inverseFrequencies(&m.kernels, m.queue, m.device, global, buf.slice(f32, (if (global) @as(usize, cfg.global_dim) else cfg.sliding_dim) / 2));
+        }
+    };
 
     /// affine_mm's pipelines at `bits` (groups of 64), compiled the first time a width needs them.
     fn pipesFor(m: *Model, bits: u8) !void {
