@@ -14,6 +14,7 @@ pub const Mailbox = struct {
     prompt_rows: ?[]api.LogprobRow = null, // one a prompt token after the first, for requests with prompt_logprobs
     cached: ?u32 = null,
     prefilled_ns: ?i96 = null,
+    audio: usize = 0, // samples a streamed speech request has made final
     finished: bool = false,
     reason: api.Reason = .stop,
     stats: api.Stats = .{},
@@ -37,6 +38,7 @@ pub const Mailbox = struct {
                 m.tokens.appendSlice(m.gpa, t) catch {};
                 m.chunks.append(m.gpa, m.tokens.items.len) catch {};
             },
+            .audio => |n| m.audio = n,
             .finished => |f| {
                 m.finished = true;
                 m.reason = f.reason;

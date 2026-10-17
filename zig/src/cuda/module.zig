@@ -53,6 +53,12 @@ pub const Module = struct {
         try self.d.check(self.d.api.cuModuleGetGlobal_v2(&g.ptr, &g.len, self.handle, name.ptr), "cuModuleGetGlobal");
         return g;
     }
+
+    /// Whether the loaded image defines device global `name`; any driver failure answers false, never an error.
+    pub fn holds(self: Module, name: [:0]const u8) bool {
+        var g: Global = .{ .ptr = 0, .len = 0 };
+        return self.d.api.cuModuleGetGlobal_v2(&g.ptr, &g.len, self.handle, name.ptr) == abi.success;
+    }
 };
 
 pub const Function = struct {
@@ -81,3 +87,24 @@ pub const Function = struct {
         try self.setAttribute(.max_dynamic_shared_size_bytes, @intCast(bytes));
     }
 };
+
+test "holds answers whether the image defines a global, and false on any driver failure" {
+    const Fake = struct {
+        fn getGlobal(ptr: *abi.DevicePtr, len: *usize, _: abi.Module, name: [*:0]const u8) callconv(.c) abi.Result {
+            const n = std.mem.span(name);
+            if (std.mem.eql(u8, n, "marker")) {
+                ptr.* = 0x1000;
+                len.* = 4;
+                return abi.success;
+            }
+            // CUDA_ERROR_INVALID_CONTEXT: a failure that is not a missing name
+            return if (std.mem.eql(u8, n, "lost")) 201 else abi.error_not_found;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuModuleGetGlobal_v2 = Fake.getGlobal;
+    const m: Module = .{ .d = &d, .handle = null };
+    try std.testing.expect(m.holds("marker"));
+    try std.testing.expect(!m.holds("absent"));
+    try std.testing.expect(!m.holds("lost"));
+}

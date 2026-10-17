@@ -31,6 +31,8 @@ const norms_tests = @import("norms_tests.zig");
 const norm_rows_tests = @import("norm_rows_tests.zig");
 const pocket_tests = @import("pocket_tests.zig");
 const recapture_tests = @import("recapture_tests.zig");
+const drama_conv_tests = @import("drama_conv_tests.zig");
+const drama_qk_tests = @import("drama_qk_tests.zig");
 const contract_tests = @import("contract_tests.zig");
 const lfm2_attention_tests = @import("lfm2_attention_tests.zig");
 const lfm2_kernel_tests = @import("lfm2_kernel_tests.zig");
@@ -59,6 +61,8 @@ const usage =
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
     \\  norms                     RMS norm and the residual step against float64 references (synthetic)
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
+    \\  drama-conv                phase-specific causal convolution, history and chunk boundaries (synthetic)
+    \\  drama-qk                  Q/K norm and rotary precision, positions and cache bounds (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  lfm2-kernels              LFM2's glue kernels against their host references at d1's shapes (synthetic rows)
@@ -164,6 +168,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "drama-conv")) return drama_conv_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "drama-qk")) return drama_qk_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "pocket"))
