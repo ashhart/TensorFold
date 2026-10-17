@@ -165,6 +165,8 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: anytype, dir: []const u8, ran
     dr.succ = try gpa.alloc(u16, df.VOCAB * df.RANK);
     @memcpy(std.mem.sliceAsBytes(dr.succ), try l.read("candidate_selector.successor_codebook", df.VOCAB * df.RANK * 2));
     try carve(dr, d, head.n);
+    if (std.c.getenv("TF_GLM_DFLASH2_LOG")) |v| dr.log = std.fmt.parseInt(u64, std.mem.span(v), 10) catch 0;
+    if (std.c.getenv("TF_GLM_DFLASH2_PROF") != null) dr.prof = io;
     dr.h_cpos = try gpa.alloc(i64, df.MAX_CTX);
     dr.h_crings = try gpa.alloc(u64, df.MAX_CTX);
     dr.cand = try gpa.alloc(i32, world * df.MAX_M * df.CW);

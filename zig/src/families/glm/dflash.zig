@@ -95,6 +95,9 @@ pub const Drafter = struct {
     verifies: u64 = 0, // verifies so far: a slot's rows are still in taps_step while its v_step is the latest
     lost: u64 = 0, // drafts whose verify rows were gone (their context restarted)
     calls: u64 = 0,
+    log: u64 = 0, // TF_GLM_DFLASH2_LOG=n: the first n rounds' drafts logged (rank 0)
+    prof: ?std.Io = null, // TF_GLM_DFLASH2_PROF=1: each phase synchronized and timed, logged every 64 rounds
+    phase_ms: [4]f64 = @splat(0), // ingest, tables, block pass, selector
     // device scratch (carved by dflash_load)
     x: u64 = 0,
     y: u64 = 0,
@@ -160,6 +163,15 @@ pub const Drafter = struct {
         g.destroy(dr);
     }
 
+    /// TF_GLM_DFLASH2_PROF: the stream idle, the time since `since` added to its phase; the new mark.
+    fn mark(dr: *Drafter, e: anytype, since: ?struct { i96, usize }) !i96 {
+        const io = dr.prof orelse return 0;
+        try e.stream.synchronize();
+        const now = std.Io.Clock.awake.now(io).toNanoseconds();
+        if (since) |s| dr.phase_ms[s[1]] += @as(f64, @floatFromInt(now - s[0])) / 1e6;
+        return now;
+    }
+
     /// Where a forward's taps go: a prompt chunk's rows or a verify's.
     pub fn taps(dr: *const Drafter, chunk: bool) taps_mod.Taps {
         return .{ .f = dr.k.tap, .out = if (chunk) dr.taps_prefill else dr.taps_step };
@@ -220,6 +232,7 @@ pub const Drafter = struct {
     pub fn draft(dr: *Drafter, e: anytype, reqs: []const Req) !void {
         if (reqs.len == 0) return;
         if (reqs.len > MAX_S) return error.TooManyStreams;
+        var tm = try dr.mark(e, null);
         var runs: [MAX_S]Run = undefined;
         var nr: usize = 0;
         for (reqs) |q| {
@@ -234,6 +247,7 @@ pub const Drafter = struct {
             nr += 1;
         }
         try dr.ingest(e, runs[0..nr]);
+        tm = try dr.mark(e, .{ tm, 0 });
         const S = reqs.len;
         for (reqs, 0..) |q, i| {
             const s = &dr.slots.items[q.slot];
@@ -252,12 +266,22 @@ pub const Drafter = struct {
         try block.upload(dr, e, dr.starts, std.mem.sliceAsBytes(dr.h_starts[0..S]));
         try block.upload(dr, e, dr.froms, std.mem.sliceAsBytes(dr.h_froms[0..S]));
         const rank0 = reqs[0].out != null;
+        tm = try dr.mark(e, .{ tm, 1 });
         try block.pass(dr, e, S, rank0);
+        tm = try dr.mark(e, .{ tm, 2 });
         if (rank0) {
             try block.download(dr, e, std.mem.sliceAsBytes(dr.cand[0 .. 2 * M * CW]), dr.gtk);
             try block.download(dr, e, std.mem.sliceAsBytes(dr.gh[0 .. M * RANK]), dr.g);
             for (reqs, 0..) |q, i| select.select(dr, i, M, q);
+            if (dr.log > dr.calls) for (reqs) |q| std.log.info("dflash2 round {d}: slot {d} pos {d} kept {d} anchor {d} drafts {any}", .{ dr.calls, q.slot, q.pos, q.n, q.anchor, q.out.?[0 .. BLOCK - 1] });
+            if (dr.calls % 256 == 255) std.log.info("dflash2: {d} rounds, {d} contexts restarted", .{ dr.calls + 1, dr.lost });
         }
+        _ = try dr.mark(e, .{ tm, 3 });
         dr.calls += 1;
+        if (dr.prof != null and dr.calls % 64 == 0) {
+            const k: f64 = 64;
+            std.log.info("dflash2 ms a round: ingest {d:.2} tables {d:.2} block {d:.2} select {d:.2}", .{ dr.phase_ms[0] / k, dr.phase_ms[1] / k, dr.phase_ms[2] / k, dr.phase_ms[3] / k });
+            dr.phase_ms = @splat(0);
+        }
     }
 };
