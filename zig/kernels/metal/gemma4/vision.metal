@@ -164,9 +164,48 @@ struct G4vRows { uint width; uint weighted; float eps; };
   out[ulong(p.y) * G4V_W + p.x] = bfloat((h - float(bias[p.x])) * float(scale[p.x]));
 }
 
-// An image's rows over the prompt's embedded rows, 5376 bf16 a row: the soft tokens go in unscaled.
+// An image's rows over the prompt's embedded rows, G4V_OUT (the language model's width) bf16 a row, unscaled.
 [[kernel]] void g4v_rows(const device uint4* src [[buffer(0)]], device uint4* dst [[buffer(1)]],
                          uint2 p [[thread_position_in_grid]]) {
-  if (p.x >= 5376 / 8) return;
-  dst[ulong(p.y) * (5376 / 8) + p.x] = src[ulong(p.y) * (5376 / 8) + p.x];
+  if (p.x >= G4V_OUT / 8) return;
+  dst[ulong(p.y) * (G4V_OUT / 8) + p.x] = src[ulong(p.y) * (G4V_OUT / 8) + p.x];
+}
+
+// The 12B's image embedder (Gemma4UnifiedVisionEmbedder): a bf16 nn.LayerNorm a row, in fp32 and rounded once.
+struct G4uNorm {
+  uint width;
+  uint add; // 1: plus a Linear's bias in fp32 (addmm's one rounding); 2: bf16(x + bf16(pos[px][0] + pos[py][1]))
+  uint gw;  // the merged grid's width (add 2)
+  float eps;
+};
+
+inline float g4u_in(const device bfloat* x, const device bfloat* extra, constant G4uNorm& p, uint row, uint i) {
+  const float v = float(x[ulong(row) * p.width + i]);
+  if (p.add == 1) return v + float(extra[i]);
+  if (p.add == 2) {
+    const uint px = row % p.gw, py = row / p.gw;
+    const float e = g4v_bf(float(extra[ulong(2 * px) * p.width + i]) + float(extra[ulong(2 * py + 1) * p.width + i]));
+    return g4v_bf(v + e);
+  }
+  return v;
+}
+
+[[kernel]] void g4u_norm(const device bfloat* x [[buffer(0)]], const device bfloat* w [[buffer(1)]],
+                         const device bfloat* b [[buffer(2)]], const device bfloat* extra [[buffer(3)]],
+                         device bfloat* y [[buffer(4)]], constant G4uNorm& p [[buffer(5)]],
+                         uint row [[threadgroup_position_in_grid]], uint t [[thread_position_in_threadgroup]],
+                         uint n [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+                         uint sg [[simdgroup_index_in_threadgroup]]) {
+  threadgroup float part[33];
+  float s = 0.0f;
+  for (uint i = t; i < p.width; i += n) s += g4u_in(x, extra, p, row, i);
+  const float mean = g4v_group_sum(s, part, n, lane, sg) / float(p.width);
+  float d2 = 0.0f;
+  for (uint i = t; i < p.width; i += n) {
+    const float d = g4u_in(x, extra, p, row, i) - mean;
+    d2 += d * d;
+  }
+  const float r = metal::precise::rsqrt(g4v_group_sum(d2, part, n, lane, sg) / float(p.width) + p.eps);
+  device bfloat* yr = y + ulong(row) * p.width;
+  for (uint i = t; i < p.width; i += n) yr[i] = bfloat((g4u_in(x, extra, p, row, i) - mean) * r * float(w[i]) + float(b[i]));
 }

@@ -43,20 +43,20 @@ pub fn referenceSplit(n: usize, k: usize) usize {
 }
 
 /// The split each shape streams fastest at on one row (tf-gemma4-bench GEMMA_FUSED), not the reference's order.
-pub fn splitK(n: usize, k: usize) usize {
-    if (k == cfg.hidden and n >= 2 * cfg.intermediate) return 8; // the gate/up stack and the head: 84-group chains at 1
-    if (n == cfg.hidden) return 4; // o and down, 168 tiles: two waves of 256-thread groups at 8
+pub fn splitK(geo: cfg.Geometry, n: usize, k: usize) usize {
+    if (k == geo.hidden and n >= 2 * geo.intermediate) return 8; // the gate/up stack and the head: long chains at 1
+    if (n == geo.hidden) return 4; // o and down: two waves of 256-thread groups at 8
     return referenceSplit(n, k);
 }
 
 /// The reg kernel (4-bit groups of 64 in tensor-op registers, up to 128 rows a weight read): lane_qmm's words.
-pub fn layout(n: usize, k: usize) lane.Layout {
-    return .{ .n = n, .k = k, .format = .{ .bits = cfg.bits, .group = cfg.group }, .sk = splitK(n, k), .precompute_sums = true, .reg = true };
+pub fn layout(geo: cfg.Geometry, n: usize, k: usize) lane.Layout {
+    return .{ .n = n, .k = k, .format = .{ .bits = cfg.bits, .group = cfg.group }, .sk = splitK(geo, n, k), .precompute_sums = true, .reg = true };
 }
 
 /// The same kernel with a layer's glue as its prologue (gemma4/fused.metal's TF_FUSE kinds) for one-row windows.
-pub fn fusedLayout(n: usize, k: usize, fuse: u8) fused.Layout {
-    const l = layout(n, k);
+pub fn fusedLayout(geo: cfg.Geometry, n: usize, k: usize, fuse: u8) fused.Layout {
+    const l = layout(geo, n, k);
     return .{ .projection = l, .source = ks.gemma4_fused, .defines = switch (fuse) {
         1 => "#define TF_FUSE 1\n",
         2 => "#define TF_FUSE 2\n",
@@ -65,7 +65,8 @@ pub fn fusedLayout(n: usize, k: usize, fuse: u8) fused.Layout {
 }
 
 pub const Weights = struct {
-    layers: [cfg.layers]Layer,
+    /// The geometry's layers first; the rest unset.
+    layers: [cfg.max_layers]Layer,
     head: Linear,
     embed_w: Ref,
     embed_s: Ref,
@@ -103,7 +104,7 @@ fn ref(c: *const ckpt.Checkpoint, name: []const u8) !Ref {
 }
 
 /// The members' MLX tensors stacked along N into the lane layout; `interleave`: two members in alternate 16-row blocks.
-fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), prefix: []const u8, members: []const []const u8, interleave: bool) !Linear {
+fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, prefix: []const u8, members: []const []const u8, interleave: bool) !Linear {
     var name: [160]u8 = undefined;
     var n: usize = 0;
     var k: usize = 0;
@@ -137,12 +138,12 @@ fn pack(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, o
         }
         row += rows;
     }
-    return packArrays(gpa, device, owned, words, scales, biases, n, k);
+    return packArrays(gpa, device, owned, geo, words, scales, biases, n, k);
 }
 
 /// MLX affine 4-bit words, scales and biases [n, k] packed into the lane layout, reg order; `owned` keeps the buffers.
-pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), words: []const u32, scales: []const u16, biases: []const u16, n: usize, k: usize) !Linear {
-    const l = layout(n, k);
+pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayList(mtl.Buffer), geo: cfg.Geometry, words: []const u32, scales: []const u16, biases: []const u16, n: usize, k: usize) !Linear {
+    const l = layout(geo, n, k);
     const wb = try device.buffer(l.weightWords() * 4, shared);
     errdefer wb.deinit();
     const sb = try device.buffer(l.metadataElements() * 2, shared);
@@ -154,26 +155,26 @@ pub fn packArrays(gpa: std.mem.Allocator, device: mtl.Device, owned: *std.ArrayL
     return .{ .w = wb, .sb = sb, .n = n, .k = k };
 }
 
-pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint) !Weights {
+pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoint, geo: cfg.Geometry) !Weights {
     var w: Weights = undefined;
     w.owned = .empty;
     errdefer w.deinit(gpa);
     var p: [96]u8 = undefined;
     var name: [160]u8 = undefined;
-    for (&w.layers, 0..) |*l, i| {
+    for (w.layers[0..geo.layers], 0..) |*l, i| {
         const pre = try std.fmt.bufPrint(&p, "language_model.model.layers.{d}.", .{i});
         const qkv: []const []const u8 = if (cfg.global(i)) &.{ "self_attn.q_proj", "self_attn.k_proj" } else &.{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj" };
-        l.qkv = try pack(gpa, device, c, &w.owned, pre, qkv, false);
-        l.o = try pack(gpa, device, c, &w.owned, pre, &.{"self_attn.o_proj"}, false);
-        l.gate_up = try pack(gpa, device, c, &w.owned, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, true);
-        l.down = try pack(gpa, device, c, &w.owned, pre, &.{"mlp.down_proj"}, false);
+        l.qkv = try pack(gpa, device, c, &w.owned, geo, pre, qkv, false);
+        l.o = try pack(gpa, device, c, &w.owned, geo, pre, &.{"self_attn.o_proj"}, false);
+        l.gate_up = try pack(gpa, device, c, &w.owned, geo, pre, &.{ "mlp.gate_proj", "mlp.up_proj" }, true);
+        l.down = try pack(gpa, device, c, &w.owned, geo, pre, &.{"mlp.down_proj"}, false);
         for (&l.mlx, [_][]const u8{ "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj" }) |*x, member| {
             x.* = if (cfg.global(i) and std.mem.eql(u8, member, "self_attn.v_proj")) l.mlx[1] else try mlxCopy(gpa, device, c, &w.owned, pre, member); // global layers: no v_proj, never read
         }
         inline for (.{ "q_norm", "k_norm", "input_norm", "post_attention", "pre_feedforward", "post_feedforward", "scalar" }, .{ "self_attn.q_norm.weight", "self_attn.k_norm.weight", "input_layernorm.weight", "post_attention_layernorm.weight", "pre_feedforward_layernorm.weight", "post_feedforward_layernorm.weight", "layer_scalar" }) |field, t|
             @field(l, field) = try ref(c, try std.fmt.bufPrint(&name, "{s}{s}", .{ pre, t }));
     }
-    w.head = try pack(gpa, device, c, &w.owned, "language_model.model.", &.{"embed_tokens"}, false);
+    w.head = try pack(gpa, device, c, &w.owned, geo, "language_model.model.", &.{"embed_tokens"}, false);
     w.embed_w = try ref(c, "language_model.model.embed_tokens.weight");
     w.embed_s = try ref(c, "language_model.model.embed_tokens.scales");
     w.embed_b = try ref(c, "language_model.model.embed_tokens.biases");
@@ -181,20 +182,21 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
     return w;
 }
 
-/// The lane pipelines, one per distinct (n, k): the 31B has seven, and four fused ones for one-row windows.
+/// The lane pipelines, one per distinct (n, k): seven, and four fused ones for one-row windows.
 pub const Projections = struct {
+    geo: cfg.Geometry,
     list: std.ArrayList(struct { n: usize, k: usize, p: lane.Projection }) = .empty,
     fused_list: std.ArrayList(struct { n: usize, k: usize, fuse: u8, p: fused.Projection }) = .empty,
     pub fn get(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, n: usize, k: usize) !lane.Projection {
         for (ps.list.items) |v| if (v.n == n and v.k == k) return v.p;
-        const p = try lane.Projection.init(gpa, device, layout(n, k));
+        const p = try lane.Projection.init(gpa, device, layout(ps.geo, n, k));
         errdefer p.deinit();
         try ps.list.append(gpa, .{ .n = n, .k = k, .p = p });
         return p;
     }
     pub fn getFused(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, n: usize, k: usize, fuse: u8) !fused.Projection {
         for (ps.fused_list.items) |v| if (v.n == n and v.k == k and v.fuse == fuse) return v.p;
-        const p = try fused.Projection.init(gpa, device, fusedLayout(n, k, fuse));
+        const p = try fused.Projection.init(gpa, device, fusedLayout(ps.geo, n, k, fuse));
         errdefer p.deinit();
         try ps.fused_list.append(gpa, .{ .n = n, .k = k, .fuse = fuse, .p = p });
         return p;

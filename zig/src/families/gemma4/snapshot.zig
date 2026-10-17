@@ -32,10 +32,10 @@ fn ring(layer: usize, value: bool, base: usize, width: usize, lo: usize, hi: usi
 
 /// The pieces of `cache` (its capacity places the global heads) a state at `at` holds: what the next rows read.
 fn pieces(cache: *const st.Cache, at: usize, out: *std.ArrayList(Piece), gpa: std.mem.Allocator) !void {
-    for (0..cfg.layers) |i| {
+    for (0..cache.geo.layers) |i| {
         const width = cfg.headDim(i) * 2;
         const slots = st.slotsOf(i, cache.capacity);
-        for (0..cfg.kvHeads(i)) |h| for ([_]bool{ false, true }) |value| {
+        for (0..cache.geo.kvHeads(i)) |h| for ([_]bool{ false, true }) |value| {
             const base = h * slots * width;
             if (cfg.global(i)) {
                 try out.append(gpa, .{ .layer = i, .value = value, .off = base, .len = at * width });
@@ -45,18 +45,18 @@ fn pieces(cache: *const st.Cache, at: usize, out: *std.ArrayList(Piece), gpa: st
 }
 
 /// Bytes a state after `at` prompt tokens takes.
-pub fn bytes(at: usize) u64 {
+pub fn bytes(geo: cfg.Geometry, at: usize) u64 {
     var total: u64 = 0;
-    for (0..cfg.layers) |i| {
+    for (0..geo.layers) |i| {
         const rows = if (cfg.global(i)) at else @min(at, cfg.window);
-        total += 2 * cfg.kvHeads(i) * rows * cfg.headDim(i) * 2;
+        total += 2 * geo.kvHeads(i) * rows * cfg.headDim(i) * 2;
     }
     return total;
 }
 
 /// Copy `cache`'s state at its length into a new snapshot.
 pub fn save(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, cache: *const st.Cache) !Snap {
-    const n = bytes(cache.len);
+    const n = bytes(cache.geo, cache.len);
     const buf = try device.buffer(@intCast(@max(n, 16)), mtl.ResourceOptions.private);
     errdefer buf.deinit();
     try copy(gpa, queue, cache, cache.len, buf, true);
@@ -96,8 +96,8 @@ fn copy(gpa: std.mem.Allocator, queue: mtl.Queue, cache: *const st.Cache, at: us
 }
 
 test "a state's bytes match its pieces, rings wrapped or not" {
-    var cache = st.Cache{ .k = undefined, .v = undefined, .logits = undefined, .capacity = 1 << 18 };
-    for ([_]usize{ 1, 5, 1000, 1024, 1500, 1536, 2600, 100_003 }) |at| {
+    for ([_]cfg.Geometry{ cfg.dense31b, cfg.unified12b }) |geo| for ([_]usize{ 1, 5, 1000, 1024, 1500, 1536, 2600, 100_003 }) |at| {
+        var cache = st.Cache{ .k = undefined, .v = undefined, .geo = geo, .logits = undefined, .capacity = 1 << 18 };
         var list: std.ArrayList(Piece) = .empty;
         defer list.deinit(std.testing.allocator);
         try pieces(&cache, at, &list, std.testing.allocator);
@@ -105,8 +105,8 @@ test "a state's bytes match its pieces, rings wrapped or not" {
         for (list.items) |p| {
             sum += p.len;
             const slots = st.slotsOf(p.layer, cache.capacity);
-            try std.testing.expect(p.off + p.len <= cfg.kvHeads(p.layer) * slots * cfg.headDim(p.layer) * 2);
+            try std.testing.expect(p.off + p.len <= geo.kvHeads(p.layer) * slots * cfg.headDim(p.layer) * 2);
         }
-        try std.testing.expectEqual(bytes(at), sum);
-    }
+        try std.testing.expectEqual(bytes(geo, at), sum);
+    };
 }

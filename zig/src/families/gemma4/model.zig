@@ -1,4 +1,4 @@
-//! A native Gemma 4 dense model: admitted config, packed weights, the glue pipelines and the lane projections.
+//! A native Gemma 4 dense model (31B or 12B): admitted config, packed weights, the glue pipelines, lane projections.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -9,6 +9,47 @@ const kernels = @import("kernels.zig");
 const affine_mm = @import("affine_mm.zig");
 const round = @import("tree_round_gpu");
 const vision = @import("vision.zig");
+const vision_unified = @import("vision_unified.zig");
+const image = @import("image.zig");
+const lane = @import("../../core/lane_projection.zig");
+
+/// The image input: the 31B's tower (27 encoder layers, pooling) or the 12B's embedder (48-px patches, no layers).
+pub const Tower = union(enum) {
+    encoder: *vision.Vision,
+    embedder: *vision_unified.Embedder,
+
+    /// An image's patches (image.prepare's, in `layout`'s order) to `out` [gh * gw / 9, the model's hidden].
+    pub fn encode(t: Tower, e: mtl.ComputeEncoder, pixels: []const f32, gh: u32, gw: u32, out: lane.Ref) !void {
+        switch (t) {
+            inline else => |v| try v.encode(e, pixels, gh, gw, out, null),
+        }
+    }
+
+    pub fn inject(t: Tower, e: mtl.ComputeEncoder, src: lane.Ref, dst: lane.Ref, n: u32) void {
+        switch (t) {
+            inline else => |v| v.inject(e, src, dst, n),
+        }
+    }
+
+    /// The patches' order the processor writes for this input.
+    pub fn layout(t: Tower) image.Layout {
+        return if (t == .encoder) .patches else .merged;
+    }
+
+    /// The working buffers a residency set holds.
+    pub fn buffers(t: Tower) []const mtl.Buffer {
+        return switch (t) {
+            .encoder => |v| &.{ v.scratch, v.patches, v.cos, v.sin },
+            .embedder => |v| &.{ v.scratch, v.patches },
+        };
+    }
+
+    pub fn deinit(t: Tower) void {
+        switch (t) {
+            inline else => |v| v.deinit(),
+        }
+    }
+};
 
 pub const Model = struct {
     gpa: std.mem.Allocator,
@@ -18,7 +59,7 @@ pub const Model = struct {
     checkpoint: ckpt.Checkpoint,
     weights: weights.Weights,
     kernels: kernels.Kernels,
-    projections: weights.Projections = .{},
+    projections: weights.Projections,
     /// core/affine_mm's pipelines for prompt chunks: 4-bit groups of 64 from the checkpoint's own tensors.
     mm: affine_mm.Pipes,
     /// RoPE inverse frequencies, float32 [dim / 2], for sliding and for global layers.
@@ -27,24 +68,24 @@ pub const Model = struct {
     /// The core's bf16 argmax: a window's greedy tokens on the GPU (the lowest index among ties, as mx.argmax).
     picks: round.Ops,
     /// A drafter's tapped layers: each layer's index among the taps (-1: untapped), and how many there are.
-    tap_of: [cfg.layers]i8 = @splat(-1),
+    tap_of: [cfg.max_layers]i8 = @splat(-1),
     taps: u32 = 0,
     /// One-row windows take the fused pipelines (the glue as the projections' prologues); off for the bench's check.
     fuse: bool = true,
-    /// The image tower, once loadVision read it (serve --vision).
-    vision: ?*vision.Vision = null,
+    /// The image input, once loadVision read it (serve --vision).
+    vision: ?Tower = null,
 
     pub fn load(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !*Model {
         const m = try gpa.create(Model);
         errdefer gpa.destroy(m);
         m.* = undefined;
         m.gpa = gpa;
-        m.projections = .{};
         m.tap_of = @splat(-1);
         m.taps = 0;
         m.fuse = true;
         m.vision = null;
         m.config = try cfg.Config.read(gpa, io, dir);
+        m.projections = .{ .geo = m.config.geo };
         m.device = try mtl.Device.init();
         errdefer m.device.deinit();
         if (!m.device.tensorUnits()) return error.GemmaNeedsTensorUnits;
@@ -55,9 +96,9 @@ pub const Model = struct {
         const files = try shards.shardFiles(gpa, io, dir);
         defer shards.freeShardFiles(gpa, files);
         for (files) |path| try m.checkpoint.addFileSelected(m.device, path, "", "language_model.");
-        m.weights = try weights.load(gpa, m.device, &m.checkpoint);
+        m.weights = try weights.load(gpa, m.device, &m.checkpoint, m.config.geo);
         errdefer m.weights.deinit(gpa);
-        m.kernels = try kernels.Kernels.init(gpa, m.device);
+        m.kernels = try kernels.Kernels.init(gpa, m.device, m.config.geo);
         errdefer m.kernels.deinit();
         m.picks = try round.Ops.init(m.device);
         errdefer m.picks.deinit();
@@ -76,14 +117,20 @@ pub const Model = struct {
         return m;
     }
 
-    /// The checkpoint's image tower and projection beside the language model; error.NoGemmaVision when it has none.
+    /// The checkpoint's image input (the 12B's embedder, the 31B's tower); error.NoGemmaVision when it has none.
     pub fn loadVision(m: *Model, io: std.Io, dir: []const u8) !void {
         if (m.vision != null) return;
         const files = try shards.shardFiles(m.gpa, io, dir);
         defer shards.freeShardFiles(m.gpa, files);
+        if (m.config.geo.unified()) {
+            try vision_unified.addTensors(&m.checkpoint, m.device, files);
+            if (!vision_unified.present(&m.checkpoint)) return error.NoGemmaVision;
+            m.vision = .{ .embedder = try vision_unified.Embedder.load(m.gpa, m.device, &m.checkpoint, m.config.geo.hidden) };
+            return;
+        }
         try vision.addTensors(&m.checkpoint, m.device, files);
         if (!vision.present(&m.checkpoint)) return error.NoGemmaVision;
-        m.vision = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm);
+        m.vision = .{ .encoder = try vision.Vision.load(m.gpa, m.device, &m.checkpoint, m.mm, m.config.geo.hidden) };
     }
 
     /// The drafter's taps, in its feature order: each a layer whose output (layer scalar applied) it reads.
@@ -91,7 +138,7 @@ pub const Model = struct {
         if (layers.len == 0 or layers.len > 8) return error.BadGemmaTaps;
         m.tap_of = @splat(-1);
         for (layers, 0..) |l, t| {
-            if (l >= cfg.layers or m.tap_of[l] >= 0) return error.BadGemmaTaps;
+            if (l >= m.config.geo.layers or m.tap_of[l] >= 0) return error.BadGemmaTaps;
             m.tap_of[l] = @intCast(t);
         }
         m.taps = @intCast(layers.len);

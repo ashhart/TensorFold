@@ -21,11 +21,11 @@ and 40 at 32k. With z-lab's DFlash drafter
 a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat and code, 10 on copying replies,
 2 on open-ended prose), with the same tokens.
 
-The loader admits the dense 31B's geometry only: 60 layers, five sliding-window layers (window 1,024, head dim 256)
-to each global one (head dim 512, keys reused as values, proportional RoPE), GeGLU, the tied 262,144-token head with
-its logit soft-cap, uniform affine 4-bit in groups of 64. It refuses the 26B-A4B MoE, the 12B (`gemma4_unified`),
-per-layer inputs, shared KV layers and per-module widths, each by name. With `--vision` it also loads the image tower
-([images](#images)).
+For the 31B the loader admits its dense geometry exactly: 60 layers, five sliding-window layers (window 1,024, head dim
+256) to each global one (head dim 512, keys reused as values, proportional RoPE), GeGLU, the tied 262,144-token head
+with its logit soft-cap, uniform affine 4-bit in groups of 64. It refuses the 26B-A4B MoE, per-layer inputs, shared KV
+layers and per-module widths, each by name. With `--vision` it also loads the image tower ([images](#images)). The 12B
+(`gemma4_unified`) runs on the same family with its MTP assistant: [Gemma 4 12B, native Metal](gemma-4-12b-native.md).
 
 Every linear, the tied head included, runs on the core lane projection (`zig/src/core/lane_projection.zig`) on M5
 tensor units; the rest of a layer is `zig/kernels/metal/gemma4/glue.metal`. The glue ports the Python reference's

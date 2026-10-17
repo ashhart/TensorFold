@@ -1,4 +1,4 @@
-//! One stream's decode window through Gemma 4 dense: embed, 60 layers of glue and lane projections, the head.
+//! One stream's decode window through Gemma 4 dense: embed, each layer's glue and lane projections, the head.
 const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
@@ -75,6 +75,7 @@ fn bindRef(e: mtl.ComputeEncoder, r: weights.Ref, i: usize) void {
 
 /// Every segment's rows in one forward: soft-capped logits in s.logits by segment; each cache grows by its rows.
 pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const u32) !void {
+    const geo = m.config.geo;
     var rows: usize = 0;
     for (segments) |seg| {
         if (seg.rows == 0 or seg.cache.len + seg.rows > seg.cache.capacity) return error.ContextFull;
@@ -86,7 +87,7 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     var at: usize = 0;
     for (segments) |seg| {
         var sub: usize = 0;
-        while (sub < seg.rows) : (sub += attend_rows) for (chunks[at + sub]) |n| if (cfg.query_heads * attend_rows * n > s.slots) return error.ContextFull;
+        while (sub < seg.rows) : (sub += attend_rows) for (chunks[at + sub]) |n| if (geo.query_heads * attend_rows * n > s.slots) return error.ContextFull;
         at += seg.rows;
     }
     const w = &m.weights;
@@ -99,8 +100,8 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     bindRef(e, w.embed_s, 2);
     bindRef(e, w.embed_b, 3);
     bind(e, &.{s.h[0]}, 4);
-    e.setValue(embedScale(), 5);
-    e.dispatchThreads(.{ .width = cfg.hidden / 2, .height = rows }, .{ .width = 256 });
+    e.setValue(embedScale(geo.hidden), 5);
+    e.dispatchThreads(.{ .width = geo.hidden / 2, .height = rows }, .{ .width = 256 });
     e.setPipeline(ks.rms);
     bind(e, &.{s.h[0]}, 0);
     bindRef(e, w.layers[0].input_norm, 1);
@@ -110,11 +111,11 @@ pub fn run(m: *Model, s: *state.Scratch, segments: []const Segment, ids: []const
     e.dispatchGroups(.{ .width = rows }, .{ .width = 1024 });
     var cur: usize = 0;
     const fused = rows == 1 and m.fuse;
-    for (0..cfg.layers) |i| {
+    for (0..geo.layers) |i| {
         try layer(m, e, s, segments, &chunks, i, cur, rows, .{}, fused);
         cur = 1 - cur;
     }
-    if (fused) denseTail(m, e, s, cfg.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
+    if (fused) denseTail(m, e, s, geo.layers - 1, 1 - cur, rows); // the last layer's tail, no projection to carry it
     try project(m, s, e, w.head, s.normed[cur], s.logits, rows);
     e.setPipeline(ks.softcap);
     bind(e, &.{s.logits}, 0);
@@ -146,7 +147,8 @@ pub fn window(m: *Model, s: *state.Scratch, c: *state.Cache, ids: []const u32, p
 pub fn tapRef(m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize) struct { ref: lane.Ref, stride: i32 } {
     const t = m.tap_of[i];
     if (taps == null or t < 0) return .{ .ref = .{ .buf = spare }, .stride = 0 };
-    return .{ .ref = .{ .buf = taps.?, .off = @as(usize, @intCast(t)) * cfg.hidden * 2 }, .stride = @intCast(m.taps * cfg.hidden) };
+    const hidden = m.config.geo.hidden;
+    return .{ .ref = .{ .buf = taps.?, .off = @as(usize, @intCast(t)) * hidden * 2 }, .stride = @intCast(m.taps * hidden) };
 }
 
 pub fn tapOut(e: mtl.ComputeEncoder, m: *const Model, taps: ?mtl.Buffer, spare: mtl.Buffer, i: usize, index: usize) void {
@@ -162,7 +164,7 @@ fn denseTail(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, i: usize, cur:
     bind(e, &.{ s.hn, s.y }, 0);
     bindRef(e, l.post_feedforward, 2);
     bindRef(e, l.scalar, 3);
-    bindRef(e, if (i + 1 < cfg.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, 4);
+    bindRef(e, if (i + 1 < m.config.geo.layers) m.weights.layers[i + 1].input_norm else m.weights.final_norm, 4);
     e.setValue(cfg.eps, 5);
     bind(e, &.{ s.h[1 - cur], s.normed[1 - cur] }, 6);
     sumsOut(e, s, rows, 8);
@@ -177,18 +179,19 @@ fn projectFused(m: *Model, e: mtl.ComputeEncoder, l: weights.Linear, fuse: u8, x
 }
 
 /// sqrt(hidden) as MLX multiplies by it: a weak-typed scalar, rounded to bf16 first.
-pub fn embedScale() f32 {
-    const x: f32 = @sqrt(@as(f32, cfg.hidden));
+pub fn embedScale(hidden: usize) f32 {
+    const x: f32 = @sqrt(@as(f32, @floatFromInt(hidden)));
     const b: u32 = @bitCast(x);
     return @bitCast((b + 0x7FFF + ((b >> 16) & 1)) & 0xFFFF0000);
 }
 
 /// Layer i on a window's rows; `fused` (one row): dense tails as the next qkv's prologue, attention tails as gate/up's.
 pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []const Segment, chunks: *const Chunks, i: usize, cur: usize, rows: usize, st: Stages, fused: bool) !void {
+    const geo = m.config.geo;
     const global = cfg.global(i);
     const kd: *const Kind = m.kernels.kind(global);
     const l = &m.weights.layers[i];
-    const nk = cfg.kvHeads(i);
+    const nk = geo.kvHeads(i);
     const dh = cfg.headDim(i);
     const kind: usize = @intFromBool(global);
     const width = l.qkv.n;
@@ -206,7 +209,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             continue;
         }
         const kv_off = at * nk * dh * 2; // this stream's keys and values [nk, n, dh] in s.k, s.v
-        const q_off = at * cfg.query_heads * dh * 2;
+        const q_off = at * geo.query_heads * dh * 2;
         const prep = !(fused and !global); // a fused sliding layer's attention kernel preps its own heads
         if (prep) {
             e.setPipeline(kd.qkv);
@@ -221,7 +224,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             e.setBuffer(s.v, kv_off, 8);
             bind(e, &.{ c.k[i], c.v[i] }, 9); // keys and values straight into the cache at each row's slot
             e.setValue([3]i32{ if (global) 0 else state.ring, @intCast(state.slotsOf(i, c.capacity)), 0 }, 11);
-            e.dispatchGroups(.{ .width = cfg.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
+            e.dispatchGroups(.{ .width = geo.query_heads + 2 * nk, .height = n }, .{ .width = 32 });
         }
         var sub: usize = 0;
         while (sub < n) : (sub += attend_rows) {
@@ -230,7 +233,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             if (global) { // the tensor units, a key head's eight query heads as one tile: each key read once a token
                 const nch = chunks[r][kind]; // from the first key, in 256-key chunks (prepare)
                 e.setPipeline(kd.decode_attn);
-                e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
+                e.setBuffer(s.q, r * geo.query_heads * dh * 2, 0);
                 bind(e, &.{ c.k[i], c.v[i] }, 1);
                 e.setValue([4]i32{ @intCast(rn), @intCast(c.len + sub), @intCast(state.slotsOf(i, c.capacity)), @intCast(nch) }, 3);
                 bind(e, &.{ s.pm, s.pl, s.po }, 4);
@@ -238,15 +241,15 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
                 e.setPipeline(kd.merge);
                 bind(e, &.{ s.pm, s.pl, s.po }, 0);
                 e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
-                e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 4);
+                e.setBuffer(s.attn, r * geo.query_heads * dh * 2, 4);
                 e.setBuffer(s.sums, r * 4, 5); // this sub-batch's rows of the o projection's sums
                 e.setValue(@as(i32, @intCast(rows)), 6);
-                e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
+                e.dispatchGroups(.{ .width = 1, .height = geo.query_heads, .depth = rn }, .{ .width = 32 });
                 continue;
             }
             const direct = !prep and chunks[r][kind] == 1; // one chunk: the kernel writes the merged output itself
             e.setPipeline(kd.partial);
-            e.setBuffer(s.q, r * cfg.query_heads * dh * 2, 0);
+            e.setBuffer(s.q, r * geo.query_heads * dh * 2, 0);
             bind(e, &.{ c.k[i], c.v[i], c.k[i], c.v[i] }, 1); // the new rows were written first: every key is a cached one
             e.setBuffer(s.pos, r * 4, 5);
             e.setBuffer(s.lo[kind], r * 4, 6);
@@ -259,7 +262,7 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             bind(e, &.{m.inv_sliding}, 15);
             e.setValue(cfg.eps, 16);
             e.setValue([2]i32{ @intFromBool(!prep), @intFromBool(direct) }, 17);
-            e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 18);
+            e.setBuffer(s.attn, r * geo.query_heads * dh * 2, 18);
             e.setBuffer(s.sums, r * 4, 19);
             e.setValue(@as(i32, @intCast(rows)), 20);
             bind(e, &.{ c.k[i], c.v[i] }, 21);
@@ -268,10 +271,10 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
             e.setPipeline(kd.merge);
             bind(e, &.{ s.pm, s.pl, s.po }, 0);
             e.setBuffer(s.meta[kind], r * state.meta_ints * 4, 3);
-            e.setBuffer(s.attn, r * cfg.query_heads * dh * 2, 4);
+            e.setBuffer(s.attn, r * geo.query_heads * dh * 2, 4);
             e.setBuffer(s.sums, r * 4, 5);
             e.setValue(@as(i32, @intCast(rows)), 6);
-            e.dispatchGroups(.{ .width = 1, .height = cfg.query_heads, .depth = rn }, .{ .width = 32 });
+            e.dispatchGroups(.{ .width = 1, .height = geo.query_heads, .depth = rn }, .{ .width = 32 });
         }
         at += n;
     }
@@ -297,10 +300,10 @@ pub fn layer(m: *Model, e: mtl.ComputeEncoder, s: *state.Scratch, segments: []co
     if (st.mm) try project(m, s, e, l.gate_up, s.n_mlp, s.gate_up, rows);
     e.setPipeline(kd.geglu);
     bind(e, &.{ s.gate_up, s.act }, 0);
-    e.setValue(@as(u32, cfg.intermediate), 2);
+    e.setValue(@as(u32, @intCast(geo.intermediate)), 2);
     sumsOut(e, s, rows, 3);
     e.setValue(@as(i32, 1), 5); // the stack's rows interleaved in 16-row blocks
-    e.dispatchGroups(.{ .width = cfg.intermediate / 64, .height = rows }, .{ .width = 64 });
+    e.dispatchGroups(.{ .width = geo.intermediate / 64, .height = rows }, .{ .width = 64 });
     if (st.mm) try project(m, s, e, l.down, s.act, s.y, rows);
     denseTail(m, e, s, i, cur, rows);
 }

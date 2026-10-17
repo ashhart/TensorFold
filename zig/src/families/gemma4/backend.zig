@@ -31,13 +31,15 @@ pub const Metal = struct {
     shared_timed: usize = 0,
     io: std.Io,
     trace: bool = false, // GEMMA_DRAFT_TRACE: each verify's rows and wall time on stderr
+    /// Whether the drafter keeps a context with a kept state (DFlash does); the MTP assistant reads the target's alone.
+    resume_needs_draft: bool = true,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, model: *Model, options: Options) !*Metal {
         const out = try gpa.create(Metal);
         errdefer gpa.destroy(out);
-        var scratch = try st.Scratch.init(model.device, options.capacity);
+        var scratch = try st.Scratch.init(model.device, model.config.geo, options.capacity);
         errdefer scratch.deinit();
-        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = scratch, .prompt_scratch = try prompt.Scratch.init(model.device, options.capacity) };
+        out.* = .{ .gpa = gpa, .io = io, .trace = std.c.getenv("GEMMA_DRAFT_TRACE") != null, .model = model, .options = options, .scratch = scratch, .prompt_scratch = try prompt.Scratch.init(model.device, model.config.geo, options.capacity) };
         return out;
     }
 
@@ -61,7 +63,7 @@ pub const Metal = struct {
     /// A window of each width 1..16 at position 0 on a throwaway cache, the second of two runs timed.
     pub fn measure(self: *Metal) !void {
         const io = self.io;
-        var cache = try st.Cache.init(self.model.device, 256);
+        var cache = try st.Cache.init(self.model.device, self.model.config.geo, 256);
         defer cache.deinit();
         var ids: [st.max_rows]u32 = @splat(2);
         for (1..st.max_rows + 1) |rows| {
@@ -83,7 +85,7 @@ pub const Metal = struct {
     /// The forward's ms at `rows` rows (up to 128) of one stream, the second of two runs.
     pub fn timeRows(self: *Metal, rows: usize) !f64 {
         const io = self.io;
-        var cache = try st.Cache.init(self.model.device, 256);
+        var cache = try st.Cache.init(self.model.device, self.model.config.geo, 256);
         defer cache.deinit();
         var ids: [st.prompt_rows]u32 = @splat(2);
         var ms: f64 = 0;
@@ -126,7 +128,7 @@ pub const Metal = struct {
 
     /// A tapped row's bytes: every tap's hidden row, bf16.
     fn tapBytes(self: *const Metal) usize {
-        return self.model.taps * cfg.hidden * 2;
+        return self.model.taps * self.model.config.geo.hidden * 2;
     }
 
     /// The drafter's layers: both scratches keep their rows from now on.
@@ -156,7 +158,7 @@ pub const Metal = struct {
         const cache = try self.gpa.create(st.Cache);
         errdefer self.gpa.destroy(cache);
         const capacity = @min(self.options.capacity, (ids.len + stream.max_new + st.max_rows + 63) / 64 * 64);
-        cache.* = try st.Cache.init(self.model.device, capacity);
+        cache.* = try st.Cache.init(self.model.device, self.model.config.geo, capacity);
         errdefer cache.deinit();
         try self.caches.put(self.gpa, stream, cache); // a mark's save finds it there
         errdefer _ = self.caches.remove(stream);
@@ -165,8 +167,8 @@ pub const Metal = struct {
             const snap: *const snapshot.Snap = @ptrCast(@alignCast(saved));
             var inside = false; // an image's rows see each other: a state inside one is not resumed
             for (stream.images) |im| inside = inside or (im.at < snap.at and snap.at < im.at + im.tokens);
-            // a drafting stream resumes only a state kept with its drafter's context (dflash.zig keepLane)
-            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null;
+            // a drafting stream resumes only a state kept with its drafter's context, if any (dflash.zig keepLane)
+            const drafter_less = stream.drafts and self.prompt_scratch.taps != null and snap.draft == null and self.resume_needs_draft;
             if (snap.at < ids.len and !inside and !drafter_less) {
                 if (snapshot.restore(self.gpa, self.model.queue, snap, cache)) stream.cached = snap.at else |_| stream.reuse_failed = true;
             } else stream.reuse_failed = true;
@@ -214,15 +216,16 @@ pub const Metal = struct {
         }
         if (total == 0) return null;
         const v = self.model.vision orelse return error.NoGemmaVision;
-        const buf = try self.model.device.buffer(total * cfg.hidden * 2, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
+        const hidden = self.model.config.geo.hidden;
+        const buf = try self.model.device.buffer(total * hidden * 2, mtl.ResourceOptions.private | mtl.ResourceOptions.untracked);
         errdefer buf.deinit();
         var row: usize = 0;
         for (stream.images) |im| { // one command buffer an image: the tower's host-written inputs are one image's
             if (im.at < from) continue;
-            const rows: prompt.Span = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = buf, .off = row * cfg.hidden * 2 } };
+            const rows: prompt.Span = .{ .at = im.at, .n = im.tokens, .rows = .{ .buf = buf, .off = row * hidden * 2 } };
             const cb = self.model.queue.commandBuffer();
             const e = cb.compute(.serial);
-            try v.encode(e, im.pixels, im.gh, im.gw, rows.rows, null);
+            try v.encode(e, im.pixels, im.gh, im.gw, rows.rows);
             e.end();
             cb.commit();
             cb.wait();
@@ -336,8 +339,8 @@ pub const Metal = struct {
     }
 
     /// The prompt cache's Snapshots functions: a stream's caches at a mark, copied on the GPU.
-    pub fn snapBytes(_: *anyopaque, at: u32) u64 {
-        return snapshot.bytes(at);
+    pub fn snapBytes(ptr: *anyopaque, at: u32) u64 {
+        return snapshot.bytes(cast(ptr).model.config.geo, at);
     }
 
     pub fn snapSave(ptr: *anyopaque, owner: ?*anyopaque, at: u32) anyerror!*anyopaque {

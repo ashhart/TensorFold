@@ -1,9 +1,10 @@
-//! Gemma 4's image tower against tools/zig/gemma4_vision_fixtures.py's dumps: patches bit for bit, then each stage.
+//! Gemma 4's image input against tools/zig/gemma4_vision_fixtures.py's dumps: patches bit for bit, then each stage.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const g = tf.gemma4;
 const vision = g.vision;
+const unified = g.vision_unified;
 const ck = tf.checkpoint;
 const shards = tf.checkpoint_host;
 const affine_mm = tf.gemma4.affine_mm;
@@ -18,12 +19,41 @@ const usage =
     \\features fail when their error averaged over the images is past torch's average.
 ;
 
-const stages = [_]struct { name: []const u8, stop: ?u32, width: usize, pooled: bool }{
-    .{ .name = "embed", .stop = 0, .width = vision.width, .pooled = false },
-    .{ .name = "block0", .stop = 1, .width = vision.width, .pooled = false },
-    .{ .name = "blocks", .stop = vision.depth, .width = vision.width, .pooled = false },
-    .{ .name = "pooled", .stop = null, .width = vision.width, .pooled = true },
-    .{ .name = "features", .stop = null, .width = vision.out_hidden, .pooled = false },
+/// Each stage's rows; a null width: the language model's (the projection's output). `from`: where the rows are left.
+const Stage = struct { name: []const u8, stop: ?u32, width: ?usize, from: enum { x, pooled, c, d, out } };
+const stages = [_]Stage{
+    .{ .name = "embed", .stop = 0, .width = vision.width, .from = .x },
+    .{ .name = "block0", .stop = 1, .width = vision.width, .from = .x },
+    .{ .name = "blocks", .stop = vision.depth, .width = vision.width, .from = .x },
+    .{ .name = "pooled", .stop = null, .width = vision.width, .from = .pooled },
+    .{ .name = "features", .stop = null, .width = null, .from = .out },
+};
+/// The 12B's embedder: patch_ln2's rows, pos_norm's, then the projection's.
+const unified_stages = [_]Stage{
+    .{ .name = "patch", .stop = 0, .width = unified.width, .from = .c },
+    .{ .name = "posed", .stop = 1, .width = unified.width, .from = .d },
+    .{ .name = "features", .stop = null, .width = null, .from = .out },
+};
+
+const Input = union(enum) {
+    tower: *vision.Vision,
+    embedder: *unified.Embedder,
+
+    fn encode(in: Input, e: mtl.ComputeEncoder, pixels: []const f32, gh: u32, gw: u32, out: vision.Ref, stop: ?u32) !void {
+        switch (in) {
+            inline else => |v| try v.encode(e, pixels, gh, gw, out, stop),
+        }
+    }
+
+    fn rows(in: Input, s: Stage, out: mtl.Buffer) vision.Ref {
+        return switch (s.from) {
+            .x => in.tower.x,
+            .pooled => in.tower.pooled,
+            .c => in.embedder.c,
+            .d => in.embedder.d,
+            .out => .{ .buf = out },
+        };
+    }
 };
 
 fn readFile(a: std.mem.Allocator, dir: []const u8, name: []const u8) ![]u8 {
@@ -77,7 +107,8 @@ pub fn main(init: std.process.Init) !void {
     defer c.deinit();
     const files = try shards.shardFiles(gpa, init.io, args[1]);
     defer shards.freeShardFiles(gpa, files);
-    try vision.addTensors(&c, device, files);
+    const geo = (try g.config.Config.read(gpa, init.io, args[1])).geo;
+    if (geo.unified()) try unified.addTensors(&c, device, files) else try vision.addTensors(&c, device, files);
     var mm: affine_mm.Pipes = undefined;
     {
         const text = try affine_mm.source(device, gpa, .{});
@@ -87,9 +118,13 @@ pub fn main(init: std.process.Init) !void {
         for (&mm, affine_mm.names) |*p, name| p.* = try mtl.Pipeline.init(device, lib, name, false);
     }
     defer for (mm) |p| p.deinit();
-    const v = try vision.Vision.load(gpa, device, &c, mm);
-    defer v.deinit();
-    const out = try device.buffer(vision.max_patches / 9 * vision.out_hidden * 2, mtl.ResourceOptions.shared);
+    const in: Input = if (geo.unified()) .{ .embedder = try unified.Embedder.load(gpa, device, &c, geo.hidden) } else .{ .tower = try vision.Vision.load(gpa, device, &c, mm, geo.hidden) };
+    defer switch (in) {
+        inline else => |v| v.deinit(),
+    };
+    const list: []const Stage = if (geo.unified()) &unified_stages else &stages;
+    const layout: g.image.Layout = if (geo.unified()) .merged else .patches;
+    const out = try device.buffer(vision.max_patches / 9 * geo.hidden * 2, mtl.ResourceOptions.shared);
     defer out.deinit();
     const back = try device.buffer(vision.max_patches * vision.width * 2, mtl.ResourceOptions.shared);
     defer back.deinit();
@@ -101,7 +136,7 @@ pub fn main(init: std.process.Init) !void {
         const f = try mtl.MappedFile.open(image_path);
         defer f.deinit();
         const max_tokens: u32 = @intCast(meta.object.get("max_tokens").?.integer);
-        const prep = try g.image.prepare(init.io, a, f.bytes[0..f.size], max_tokens);
+        const prep = try g.image.prepare(init.io, a, f.bytes[0..f.size], max_tokens, layout);
         const want_patches = try floats(a, ref, "patches.f32");
         var differ: usize = 0;
         var largest: f32 = 0;
@@ -117,17 +152,18 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("{s}: grid {d}x{d}, {d} tokens; patches: {d} of {d} values differ (largest {d:.6})\n", .{ std.fs.path.basename(ref), prep.gw, prep.gh, prep.tokens, differ, want_patches.len, largest });
         if (differ != 0) failed = true;
         const P = prep.gh * prep.gw;
-        for (stages) |s| {
+        for (list) |s| {
+            const width = s.width orelse geo.hidden;
             const cb = queue.commandBuffer();
             const e = cb.compute(.serial);
             const t0 = std.Io.Clock.awake.now(init.io).toNanoseconds();
-            try v.encode(e, want_patches, prep.gh, prep.gw, .{ .buf = out }, s.stop); // the reference's input: the tower's error alone
+            try in.encode(e, want_patches, prep.gh, prep.gw, .{ .buf = out }, s.stop); // the reference's input: the tower's error alone
             e.end();
-            const rows: usize = if (s.stop != null) P else prep.tokens;
-            const from = if (s.stop != null) v.x else if (s.pooled) v.pooled else vision.Ref{ .buf = out };
+            const rows: usize = if (s.from == .x) P else prep.tokens;
+            const from = in.rows(s, out);
             if (from.buf.id != out.id) {
                 const b = cb.blit();
-                b.copy(from.buf, from.off, back, 0, rows * s.width * 2);
+                b.copy(from.buf, from.off, back, 0, rows * width * 2);
                 b.end();
             }
             cb.commit();
@@ -138,7 +174,7 @@ pub fn main(init: std.process.Init) !void {
             }
             const ms = @as(f64, @floatFromInt(std.Io.Clock.awake.now(init.io).toNanoseconds() - t0)) / 1e6;
             const src: [*]const u16 = @ptrCast(@alignCast(if (from.buf.id != out.id) back.contents() else out.contents()));
-            const got = try a.alloc(f32, rows * s.width);
+            const got = try a.alloc(f32, rows * width);
             for (got, 0..) |*x, i| x.* = @bitCast(@as(u32, src[i]) << 16);
             const want = try floats(a, ref, try std.fmt.allocPrint(a, "{s}_fp32.f32", .{s.name}));
             const torch = try floats(a, ref, try std.fmt.allocPrint(a, "{s}.f32", .{s.name}));
@@ -147,10 +183,10 @@ pub fn main(init: std.process.Init) !void {
                 failed = true;
                 continue;
             }
-            const n = compare(got, want, s.width);
-            const t = compare(torch, want, s.width);
+            const n = compare(got, want, width);
+            const t = compare(torch, want, width);
             const ok = n[0] <= t[0] * 1.1;
-            if (s.stop == null and !s.pooled) {
+            if (s.from == .out) {
                 sums[0] += n[0];
                 sums[1] += t[0];
             }

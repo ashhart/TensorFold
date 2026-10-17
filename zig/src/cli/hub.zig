@@ -15,6 +15,7 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
     .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
+    .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
 };
 
@@ -175,7 +176,8 @@ fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
 test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Nemotron 3.5 Lightning", family("nemotron_h").?.title);
     try std.testing.expectEqualStrings("Qwen3.8 Flash Next", family("qwen4_exp").?.title);
-    try std.testing.expect(family("gemma4_unified") == null);
+    try std.testing.expectEqualStrings("Gemma 4 12B", family("gemma4_unified").?.title);
+    try std.testing.expect(family("gemma3n") == null);
     try std.testing.expect(family("unknown") == null);
 }
 

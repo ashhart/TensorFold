@@ -71,9 +71,14 @@ def greedy(family, ids: list[int], count: int, prompt: str) -> tuple[list[int], 
 def oracle(args: argparse.Namespace) -> None:
     import tensorfold
 
-    if tensorfold.__version__ != "0.6.5":
-        raise SystemExit(f"Need gilby's gemma4-dense branch (tensorfold 0.6.5), got {tensorfold.__version__}")
-    from tensorfold.families.gemma4.model import load
+    # the 31B's oracle is gilby's gemma4-dense branch (0.6.5), the 12B's his gemma4_unified commit (0.6.6)
+    want = "0.6.6" if args.family == "gemma4_unified" else "0.6.5"
+    if tensorfold.__version__ != want:
+        raise SystemExit(f"Need gilby's {args.family} oracle (tensorfold {want}), got {tensorfold.__version__}")
+    if args.family == "gemma4_unified":
+        from tensorfold.families.gemma4_unified.model import load
+    else:
+        from tensorfold.families.gemma4.model import load
 
     family, tokenizer = load(args.model, backend="lane", check=False)
     out = args.out
@@ -91,7 +96,8 @@ def oracle(args: argparse.Namespace) -> None:
         np.asarray(family.last_row).astype(np.float32).tofile(out / f"{name}.last.f32")
         print(f"{name}: {len(ids)} prompt tokens, {tokenizer.decode(tokens)[:80]!r}", flush=True)
     receipt = {"environment": environment(), "model": str(args.model), "prompt_path": args.prompt,
-               "decode": family.decode.backend, "kinds": sorted({k for p in family.decode.qkv for k in p.kinds}),
+               "decode": family.decode.backend,
+               "kinds": sorted({k for p in family.decode.qkv for k in getattr(p, "kinds", ())}),
                "tokens": args.tokens, "results": results}
     (out / "oracle.json").write_text(json.dumps(receipt, indent=1) + "\n")
 
@@ -210,6 +216,7 @@ def main() -> None:
     o.add_argument("--ids", type=Path, help="JSON {name: [ids]} in place of the four chat prompts")
     o.add_argument("--tokens", type=int, default=128)
     o.add_argument("--prompt", choices=("decode", "mlx"), default="decode")
+    o.add_argument("--family", choices=("gemma4", "gemma4_unified"), default="gemma4", help="the 31B's, or the 12B's")
     p = sub.add_parser("prompts")
     p.add_argument("--model", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
