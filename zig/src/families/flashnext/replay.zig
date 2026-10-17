@@ -1,6 +1,7 @@
 //! Flash Next on our Metal runtime: the Python engine's recorded kernels (a dump from tools/zig/flashnext_dump.py)
 //! replayed from Zig, with our own kernels for wide experts, prompt chunks, block selection and GPU-side rounds.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const roles_gen = @import("roles_gen.zig");
@@ -43,7 +44,7 @@ pub const Buf = struct {
         return .{ .b = x.b, .off = x.off + bytes };
     }
 };
-pub const Entry = struct { fd: std.c.fd_t, at: usize, len: usize };
+pub const Entry = struct { fd: platform.c.fd_t, at: usize, len: usize };
 pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "", text: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
@@ -814,10 +815,10 @@ const hc_up_source =
     \\
 ;
 
-pub fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
+pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
@@ -936,7 +937,7 @@ pub const Run = struct {
 
     /// Every tensor of a safetensors file in the index, at its absolute offset.
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
