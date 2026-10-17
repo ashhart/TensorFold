@@ -178,7 +178,7 @@ pub const Ck = struct {
     }
 
     /// Columns of `n` a warp of the up and down kernels takes, by up_fns' order.
-    const warp_columns = [2]usize{ 64, 32 };
+    pub const warp_columns = [2]usize{ 64, 32 };
 
     /// relu^2 up over a plan: NVFP4 rows (quant4's, at `rows`, `k` wide; row = pair / slots) to bf16 [pairs][width].
     pub fn up(c: *const Ck, s: Stream, l: Layer, rows: u64, nrows: usize, slots: usize, p: Plan, out: u64, items: usize) !void {
@@ -192,7 +192,8 @@ pub const Ck = struct {
         return run(s, c.down_fns[few], c.resident[few][1], warp_columns[few], rows, nrows, 0, l.down, l.down_s, l.down_alpha, l.width, l.dims, p, out, items);
     }
 
-    fn run(s: Stream, f: Function, resident: usize, columns: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
+    /// One grouped launch of `f` over a plan: NVFP4 rows at `rows` (`nrows` of `k`), `n` columns of `columns` a warp.
+    pub fn run(s: Stream, f: Function, resident: usize, columns: usize, rows: u64, nrows: usize, slots: usize, w: u64, ws: u64, al: u64, k: usize, n: usize, p: Plan, out: u64, items: usize) !void {
         const nb = n / columns;
         const grid = @min((items * nb + 3) / 4, resident);
         if (grid < 1) return;
