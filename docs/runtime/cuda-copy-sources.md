@@ -25,7 +25,8 @@ disposing both graph objects, wait before release; failed disposal quarantines t
 an executable graph's reference to arbitrary host memory.
 
 Registered busy owners remain visible throughout query, event destruction and host-release callbacks.
-Driver.close waits for those callbacks. A retained nonbusy quarantine conservatively keeps the library loaded;
+Driver.close waits for those callbacks, and frees every spare stage before the library goes, one a reaper parks
+while close waits included. A retained nonbusy quarantine conservatively keeps the library loaded;
 close must be retried after recovery. Callers serialize ordinary submissions and Driver destruction. The helper's
 reaper/close tests exercise the supported concurrent disposal path, not arbitrary concurrent use of Driver.api.
 

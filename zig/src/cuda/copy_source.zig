@@ -148,8 +148,14 @@ pub fn dropSpares(d: *const Driver, context: abi.Context) void {
     dropMatching(d, context, false);
 }
 fn dropMatching(d: *const Driver, context: abi.Context, all: bool) void {
-    var out: ?*Node = null;
     lock();
+    const out = unlinkSpares(d, context, all);
+    unlock();
+    releaseList(out);
+}
+/// The spares of `d` (in `context` unless `all`) out of the list, the lock held; the caller frees them unlocked.
+fn unlinkSpares(d: *const Driver, context: abi.Context, all: bool) ?*Node {
+    var out: ?*Node = null;
     var at = &spares;
     while (at.*) |n| {
         if (n.driver != @intFromPtr(d) or (!all and n.context != context)) {
@@ -162,7 +168,10 @@ fn dropMatching(d: *const Driver, context: abi.Context, all: bool) void {
         n.next = out;
         out = n;
     }
-    unlock();
+    return out;
+}
+fn releaseList(list: ?*Node) void {
+    var out = list;
     while (out) |n| {
         out = n.next;
         n.release();
@@ -215,10 +224,16 @@ pub fn captureEnd(stream: streams.Stream) void {
     capture_scope.end(stream, current_context);
 }
 pub fn keepDriver(d: *const Driver) bool {
-    dropMatching(d, null, true); // spares are complete: only tracked owners keep the library
     lock();
     defer unlock();
     while (true) {
+        // spares are complete, so they go first; a reaper close waits on may park one, so look again after each wait
+        if (unlinkSpares(d, null, true)) |out| {
+            unlock();
+            releaseList(out);
+            lock();
+            continue;
+        }
         var kept = false;
         var busy = false;
         var at = head;
@@ -549,6 +564,9 @@ test "driver close waits through reaper query, event destruction and host releas
 }
 test "driver close waits through completion release callbacks" {
     try @import("copy_source_race_test.zig").run(reap, true);
+}
+test "driver close frees the spare a reaper parks while close waits on it" {
+    try @import("copy_source_close_test.zig").run(reap);
 }
 test {
     _ = @import("copy_source_context_test.zig");
