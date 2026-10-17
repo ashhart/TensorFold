@@ -54,7 +54,7 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 This section describes the Python 0.6.6 engine's CUDA family; its `--tp`, `--rank`, `--master` and `--prefill-fp8`
 flags are that engine's, and the native binary refuses them. The native CUDA build serves Nemotron on one GPU, from
 the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests sharing each round, and its own
-`--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set a lone stream's MTP drafts; see the
+`--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
 
 CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls

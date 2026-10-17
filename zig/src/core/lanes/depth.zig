@@ -58,6 +58,7 @@ pub const Rule = struct {
     draft_step_ms: f64 = 0, // a shared round's draft past a stream's first (budgets price it)
     plain_guard: bool,
     node_probabilities: bool,
+    confidence_floor: ?f64 = null,
     batch_rows: u32,
     batched_heads: bool = false, // one batch drafts every stream of a shared round (its steps: the deepest stream's)
     round_ms: Table = .{}, // a round's wall time by drafts, every stream's: what sampled streams price by
@@ -141,6 +142,7 @@ pub const Rule = struct {
     pub fn depth(r: *Rule, who: Who) !i64 {
         const most = @min(@as(i64, r.most_drafts), @max(1, who.draft_room - 1));
         if (most <= 0) return 0;
+        if (r.confidence_floor != null) return most;
         const p = try r.rates(who);
         if (r.family_costs.empty()) {
             const want: i64 = if (p[0] < 0.8) 1 else if (p[0] < 0.9) 2 else 3;
@@ -201,6 +203,10 @@ pub const Rule = struct {
 
     /// Head drafts for the streams of a shared round, sized by allocation over their chain chances.
     pub fn budgets(r: *Rule, whos: []Who, probe: Probe, sampled: bool, out: []i64) !void {
+        if (r.confidence_floor != null) {
+            for (whos, out) |*w, *o| o.* = try r.headDepth(w, null, probe);
+            return;
+        }
         if (r.node_probabilities) {
             for (whos, out) |*w, *o| {
                 const inner = try r.headDepth(w, null, probe);

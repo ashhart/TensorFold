@@ -221,13 +221,17 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = try alloc.chainProbabilities(a, &.{e.cfg.copy_rate}, n);
         } else {
             fx.* = 1;
-            pr.* = try nodeChances(e, p.stream, n);
+            const chances = try nodeChances(e, p.stream, n);
+            const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
+            pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
-    for (plans, probs, counts) |*p, chances, c| {
+    const untimed: @import("table.zig").Table = .{};
+    const explicit = e.cfg.draft_confidence != null;
+    const counts = try alloc.allocate(a, fixed, probs, if (explicit) &untimed else &e.cfg.shared_costs, if (explicit) 0 else e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
+    for (plans, counts) |*p, c| {
         if (p.kind == .head) p.stream.granted = c;
-        if (chances.len == 0 or c == chances.len) continue;
+        if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
         if (c == 0) {
             p.kind = .none;
             p.held = 0;
@@ -291,6 +295,7 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
             if (try chances(e.backend.ptr, s, out)) return out;
         }
     }
+    if (e.cfg.draft_confidence != null) return error.NoDraftProbabilities;
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 

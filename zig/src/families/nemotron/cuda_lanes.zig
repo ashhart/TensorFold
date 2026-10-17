@@ -102,6 +102,7 @@ pub const Cuda = struct {
             .first_row = firstRowFn,
             .first_masked = firstMaskedFn,
             .held = heldFn,
+            .probabilities = probabilitiesFn,
             .prepare_features = prepareFeaturesFn,
             .features = featuresFn,
             .prompt_rows = true,
@@ -142,6 +143,13 @@ pub const Cuda = struct {
         @memcpy(out, held);
     }
 
+    pub fn draftControls(self: *const Cuda) lanes.mtp_policy.Controls {
+        return .{ .cap = self.mtp_drafts, .floor = self.mtp_confidence };
+    }
+    fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
+        return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
+    }
+
     /// The facts the round loop reads at setup: windows up to 16 rows, one stream a forward, this GPU's costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
@@ -153,7 +161,9 @@ pub const Cuda = struct {
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
-            .drafts = mtp.max_chain,
+            .drafts = @intCast(self.draftControls().limit(mtp.max_chain)),
+            .draft_confidence = self.mtp_confidence,
+            .draft_probabilities = self.mtp_confidence != null,
             .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
@@ -561,6 +571,8 @@ test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
     c.copy_drafts = true;
     c.cost_count = 0;
     c.mtp_ms = 0;
+    c.mtp_drafts = null;
+    c.mtp_confidence = null;
     const f = c.facts();
     try std.testing.expectEqual(@as(u32, state.max_rows), f.exact_width);
     try std.testing.expect(f.hidden_rows);

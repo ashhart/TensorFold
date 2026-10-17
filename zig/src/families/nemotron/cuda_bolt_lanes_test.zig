@@ -15,6 +15,8 @@ fn run(drafts: bool, global: bool) !Result {
     adapter.copy_drafts = global;
     adapter.cost_count = 0;
     adapter.mtp_ms = 0;
+    adapter.mtp_drafts = null;
+    adapter.mtp_confidence = null;
     var cfg = try lanes.Config.init(a, adapter.facts(), 16, 15);
     defer cfg.deinit(a);
     try std.testing.expect(cfg.family_streams);

@@ -16,6 +16,7 @@ pub const cost_rule = @import("cost_rule.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
 pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
+pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");

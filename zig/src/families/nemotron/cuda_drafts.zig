@@ -22,7 +22,7 @@ fn depth(h: *Head, rule: *const DepthRule) !usize {
     var run: f64 = 1.0;
     var n: usize = 0;
     var j: usize = 1;
-    while (j <= mtp.max_chain) : (j += 1) {
+    while (j <= rule.most) : (j += 1) {
         if (j > 1) try h.launch(j);
         run *= try h.confidence(j);
         if (!rule.keep(j, run)) break;

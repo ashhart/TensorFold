@@ -17,6 +17,7 @@ pub const decode = @import("cuda_decode.zig");
 pub const Drafter = @import("cuda_drafts.zig").Drafter;
 pub const Head = @import("cuda_mtp.zig").Head;
 pub const Lanes = @import("cuda_lanes.zig").Cuda;
+pub const mtp_policy = @import("cuda_mtp_policy.zig");
 pub const native = @import("cuda_native.zig");
 pub const train = @import("cuda_train.zig");
 /// Bolt's image tower (C-RADIO) and projector: one image's patches to the rows its `<image>` placeholders take.

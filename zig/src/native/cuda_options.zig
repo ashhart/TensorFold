@@ -36,3 +36,18 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     return true;
 }
+
+test "mtp policy: native options forward positive controls and preserve the explicit zero switch" {
+    const F = struct {
+        pub const Options = struct { drafts: bool = true, mtp_drafts: ?u32 = null, mtp_confidence: ?f64 = null };
+    };
+    var opts: F.Options = .{};
+    var why: []const u8 = "";
+    try std.testing.expect(set(F, .{ .dir = "", .model_type = "nemotron_h", .mtp_drafts = 2, .mtp_confidence = 0.5 }, &opts, &why));
+    try std.testing.expectEqual(@as(?u32, 2), opts.mtp_drafts);
+    try std.testing.expectEqual(@as(?f64, 0.5), opts.mtp_confidence);
+    try std.testing.expect(opts.drafts);
+    opts = .{};
+    try std.testing.expect(set(F, .{ .dir = "", .model_type = "nemotron_h", .mtp_drafts = 0 }, &opts, &why));
+    try std.testing.expect(!opts.drafts);
+}
