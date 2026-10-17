@@ -229,7 +229,7 @@ pub const Server = struct {
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
-    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
+    /// The model's grammar compiler: tokenizer.json, the text model's vocab_size, the eos ids.
     fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
         srv.grammar_mutex.lockUncancelable(srv.io);
         defer srv.grammar_mutex.unlock(srv.io);
@@ -244,19 +244,15 @@ pub const Server = struct {
                 .ok => |v| v,
                 .err => break :blk "config.json is not JSON",
             };
-            var vocab: ?u32 = null;
-            for ([_]?json.Value{ cfg.get("text_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
-                vocab = @intCast(n);
-            };
-            if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";
+            const vocab = grammar.vocabSize(cfg) orelse break :blk "structured output needs the checkpoint's config.json vocab_size";
             var err: [512]u8 = undefined;
             const c = a.create(api.grammar.Compiler) catch break :blk "out of memory";
-            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab.?, srv.eos, &err) catch |e| break :blk switch (e) {
+            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab, srv.eos, &err) catch |e| break :blk switch (e) {
                 error.NoGrammarLibrary => "the server cannot load " ++ api.grammar.library ++ " (xgrammar; zig build grammar)",
                 else => a.dupe(u8, std.mem.sliceTo(&err, 0)) catch "out of memory",
             };
             srv.grammars = c;
-            log.line("structured output: xgrammar over {d} tokens", .{vocab.?});
+            log.line("structured output: xgrammar over {d} tokens", .{vocab});
             break :blk null;
         };
         return srv.grammars;
