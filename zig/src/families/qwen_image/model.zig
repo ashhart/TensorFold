@@ -14,19 +14,36 @@ const D = cfg.head_dim;
 pub const Scratch = struct {
     parts: [18]usize,
 
-    pub fn of(text: usize, image: usize) Scratch {
-        const rows = @max(text, image);
-        const keys = text + image;
-        const wide = rows * H * 2;
-        const mlp = rows * cfg.mlp_width * 2;
-        const lat = image * cfg.channels * 2;
-        const rope = keys * D / 2 * 4;
-        return .{ .parts = .{ wide, wide, wide, wide, wide, wide, wide, mlp, mlp, wide, keys * H * 2, keys * H * 2, lat, lat, text * cfg.context * 2, rope, rope, 5 * H * 2 } };
+    fn mul(a: usize, b: usize) error{ScratchOverflow}!usize {
+        return std.math.mul(usize, a, b) catch error.ScratchOverflow;
     }
 
-    pub fn bytes(s: Scratch) usize {
+    fn add(a: usize, b: usize) error{ScratchOverflow}!usize {
+        return std.math.add(usize, a, b) catch error.ScratchOverflow;
+    }
+
+    pub fn of(text: usize, image: usize) !Scratch {
+        if (text == 0) return error.EmptyPrompt;
+        if (image == 0) return error.BadImageSize;
+        const rows = @max(text, image);
+        const keys = try add(text, image);
+        const wide = try mul(rows, H * 2);
+        const mlp = try mul(rows, cfg.mlp_width * 2);
+        const lat = try mul(image, cfg.channels * 2);
+        const rope = try mul(keys, D / 2 * 4);
+        const kv = try mul(keys, H * 2);
+        const txt = try mul(text, cfg.context * 2);
+        if (rows > std.math.maxInt(u32) / cfg.mlp_width or keys > std.math.maxInt(u32) / H)
+            return error.ImageTooLarge;
+        return .{ .parts = .{
+            wide, wide, wide, wide, wide, wide, wide, mlp,  mlp,
+            wide, kv,   kv,   lat,  lat,  txt,  rope, rope, 5 * H * 2,
+        } };
+    }
+
+    pub fn bytes(s: Scratch) !usize {
         var total: usize = 0;
-        for (s.parts) |n| total += std.mem.alignForward(usize, n, 256);
+        for (s.parts) |n| total = try add(total, (try add(n, 255)) & ~@as(usize, 255));
         return total;
     }
 };
@@ -69,25 +86,27 @@ pub const Model = struct {
     /// The transformer of checkpoint folder `dir`, with scratch for a `text`-row prompt and a width x height image.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, device: mtl.Device, dir: []const u8, text: usize, width: usize, height: usize) !*Model {
         const g = try cfg.grid(width, height);
+        const image = try Scratch.mul(g.rows, g.columns);
+        const plan = try Scratch.of(text, image);
+        const scratch_bytes = try plan.bytes();
+        const store_bytes = try Scratch.mul(text, 2 * cfg.layers * H * 2);
         const t = try gpa.create(Model);
         errdefer gpa.destroy(t);
         t.* = undefined;
         t.gpa = gpa;
         t.text = text;
-        t.image = g.rows * g.columns;
+        t.image = image;
         t.columns = g.columns;
-        if (text == 0) return error.EmptyPrompt;
         t.queue = try device.queue();
         errdefer t.queue.deinit();
         t.k = try ks.Kernels.load(gpa, device);
         errdefer t.k.deinit();
         t.w = try wts.load(gpa, io, device, dir);
         errdefer t.w.deinit();
-        const plan = Scratch.of(text, t.image);
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        t.scratch = try device.buffer(plan.bytes(), opts);
+        t.scratch = try device.buffer(scratch_bytes, opts);
         errdefer t.scratch.deinit();
-        t.store = try device.buffer(2 * cfg.layers * text * H * 2, opts);
+        t.store = try device.buffer(store_bytes, opts);
         errdefer t.store.deinit();
         var at: usize = 0;
         const views = [_]*Ref{ &t.x, &t.xn, &t.qr, &t.kr, &t.vr, &t.att, &t.y, &t.wa, &t.wb, &t.q, &t.k_, &t.v, &t.lat, &t.vel, &t.txt, &t.cos, &t.sin, &t.mods };
@@ -228,6 +247,40 @@ pub const Model = struct {
 };
 
 test "scratch for a 1344 x 768 image after a 94-row prompt" {
-    const s = Scratch.of(94, 4032);
-    try std.testing.expectEqual(@as(usize, 533_978_112), s.bytes()); // the two MLP halves the largest parts
+    const s = try Scratch.of(94, 4032);
+    try std.testing.expectEqual(@as(usize, 533_978_112), try s.bytes());
+}
+
+test "scratch rejects row products, alignment and total overflow without allocating" {
+    const huge = std.math.maxInt(usize);
+    try std.testing.expectError(error.ScratchOverflow, Scratch.of(huge, 1));
+    try std.testing.expectError(error.ScratchOverflow, Scratch.of(huge / 2, 1));
+    const alignment: Scratch = .{ .parts = @splat(huge) };
+    try std.testing.expectError(error.ScratchOverflow, alignment.bytes());
+    const total: Scratch = .{ .parts = @splat(huge / 4 + 1) };
+    try std.testing.expectError(error.ScratchOverflow, total.bytes());
+    try std.testing.expectError(error.EmptyPrompt, Scratch.of(0, 1));
+    try std.testing.expectError(error.BadImageSize, Scratch.of(1, 0));
+}
+
+test "model load validates huge dimensions before touching a Metal device or checkpoint" {
+    const huge = std.math.maxInt(usize) - (cfg.pixels_per_row - 1);
+    try std.testing.expectError(error.ImageTooLarge, Model.load(
+        std.testing.allocator,
+        std.testing.io,
+        undefined,
+        "unused",
+        1,
+        huge,
+        huge,
+    ));
+    try std.testing.expectError(error.ScratchOverflow, Model.load(
+        std.testing.allocator,
+        std.testing.io,
+        undefined,
+        "unused",
+        std.math.maxInt(usize),
+        16,
+        16,
+    ));
 }

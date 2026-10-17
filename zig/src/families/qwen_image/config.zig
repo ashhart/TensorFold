@@ -19,7 +19,13 @@ pub const pixels_per_row = 16;
 /// The latent grid of a width x height image: rows (height / 16) by columns (width / 16).
 pub fn grid(width: usize, height: usize) !struct { rows: usize, columns: usize } {
     if (width == 0 or height == 0 or width % pixels_per_row != 0 or height % pixels_per_row != 0) return error.BadImageSize;
-    return .{ .rows = height / pixels_per_row, .columns = width / pixels_per_row };
+    const rows = height / pixels_per_row;
+    const columns = width / pixels_per_row;
+    const count = std.math.mul(usize, rows, columns) catch return error.ImageTooLarge;
+    // Metal row offsets use uint elements in the widest MLP buffer.
+    if (rows > std.math.maxInt(u32) or columns > std.math.maxInt(u32) or count > std.math.maxInt(u32) / mlp_width)
+        return error.ImageTooLarge;
+    return .{ .rows = rows, .columns = columns };
 }
 
 /// Accepts the transformer config this family runs (QwenImage21Transformer2DModel at its released size), else an error.
@@ -40,6 +46,13 @@ pub fn check(gpa: std.mem.Allocator, text: []const u8) !void {
     }
     const causal = o.get("causal_condition") orelse return error.BadConfig;
     if (causal != .bool or !causal.bool) return error.UnsupportedGeometry;
+    const epsilon = o.get("eps") orelse return error.BadConfig;
+    const value: f64 = switch (epsilon) {
+        .float => |v| v,
+        .integer => |v| @floatFromInt(v),
+        else => return error.BadConfig,
+    };
+    if (value != 1e-6) return error.UnsupportedEpsilon;
     const rope = o.get("axes_dims_rope") orelse return error.BadConfig;
     if (rope != .array or rope.array.items.len != 3) return error.BadConfig;
     for (rope.array.items, axes) |v, a| if (v != .integer or v.integer != a) return error.UnsupportedGeometry;
@@ -66,4 +79,29 @@ test "the released transformer config passes; another depth, rotary or class doe
     try std.testing.expectEqual(@as(usize, 48), (try grid(1344, 768)).rows);
     try std.testing.expectEqual(@as(usize, 84), (try grid(1344, 768)).columns);
     try std.testing.expectError(error.BadImageSize, grid(1000, 768));
+}
+
+test "aligned huge image dimensions are refused without overflowing their latent grid" {
+    const huge = std.math.maxInt(usize) - (pixels_per_row - 1);
+    try std.testing.expectError(error.ImageTooLarge, grid(huge, huge));
+    try std.testing.expectError(error.ImageTooLarge, grid(huge, pixels_per_row));
+}
+
+test "the fixed kernel epsilon must agree with the checkpoint" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "0", "-1", "1e-5" }) |value| {
+        const replacement = try std.fmt.allocPrint(a, "\"eps\": {s}", .{value});
+        defer a.free(replacement);
+        const text = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06", replacement);
+        defer a.free(text);
+        try std.testing.expect(!std.mem.eql(u8, text, sample));
+        try std.testing.expectError(error.UnsupportedEpsilon, check(a, text));
+    }
+    const wrong_type = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06", "\"eps\": null");
+    defer a.free(wrong_type);
+    try std.testing.expectError(error.BadConfig, check(a, wrong_type));
+    const missing = try std.mem.replaceOwned(u8, a, sample, "\"eps\": 1e-06, ", "");
+    defer a.free(missing);
+    try std.testing.expectError(error.BadConfig, check(a, missing));
+    try check(a, sample);
 }
