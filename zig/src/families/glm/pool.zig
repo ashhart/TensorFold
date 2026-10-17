@@ -114,7 +114,7 @@ fn placeWith(sl: *Slots, n: u32, from: ?*const snapshot.Snap, mover: anytype) !u
     while (true) {
         if (from) |f| if (f.held) |h| if (clearAt(sl, h[0], n, f)) return h[0];
         if (findRun(sl, n, true)) |at| return at;
-        if (evictHeld(sl, from, false)) continue;
+        if (evictHeld(sl, from, false, false)) continue;
         if (from) |f| if (!f.stale and f.held != null) if (findExcept(sl, n, true, f)) |at| {
             mover.move(sl, f, at) catch |err| {
                 std.log.warn("glm: restoring {d} tokens failed ({s}); pool relocation aborted", .{ f.at, @errorName(err) });
@@ -123,7 +123,8 @@ fn placeWith(sl: *Slots, n: u32, from: ?*const snapshot.Snap, mover: anytype) !u
             @constCast(f).held.?[0] = at;
             return at;
         };
-        if (!evictHeld(sl, from, true)) return error.PoolFull;
+        if (evictHeld(sl, from, false, true)) continue;
+        if (!evictHeld(sl, from, true, true)) return error.PoolFull;
     }
 }
 
@@ -149,25 +150,20 @@ fn clearAt(sl: *const Slots, at: u32, n: u32, own: *const snapshot.Snap) bool {
     return true;
 }
 
-/// The oldest kept state holding pool blocks, `spare` last, gives them up and goes stale; false when none holds any.
-fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap, allow_spare: bool) bool {
-    var pick: ?*snapshot.Snap = null;
-    var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if ((allow_spare or snap.* != spare) and snap.*.held != null and (pick == null or first(snap.*, pick.?, spare))) {
-        pick = snap.*;
-    };
-    const snap = pick orelse return false;
+/// Evict only an eligible held state; selected-prefix relocation precedes borrowed-state eviction.
+fn evictHeld(sl: *Slots, spare: ?*const snapshot.Snap, allow_spare: bool, allow_borrowed: bool) bool {
+    const snap = oldest(sl, spare, allow_spare, allow_borrowed) orelse return false;
     snap.held = null;
     snap.stale = true;
     kept_mod.wentStale(sl, snap);
     return true;
 }
 
-/// The oldest held snap; `any` includes a state an outstanding lookup still restores, which goes last.
-fn oldest(sl: *Slots, spare: ?*const snapshot.Snap, any: bool) ?*snapshot.Snap {
+/// The oldest eligible held snap, with the selected prefix last when it is eligible.
+fn oldest(sl: *Slots, spare: ?*const snapshot.Snap, allow_spare: bool, allow_borrowed: bool) ?*snapshot.Snap {
     var best: ?*snapshot.Snap = null;
     var it = sl.snaps.valueIterator();
-    while (it.next()) |snap| if (snap.*.held != null and (any or !borrowed(sl, snap.*))) if (best == null or first(snap.*, best.?, spare)) {
+    while (it.next()) |snap| if (snap.*.held != null and (allow_spare or snap.* != spare) and (allow_borrowed or !borrowed(sl, snap.*))) if (best == null or first(snap.*, best.?, spare)) {
         best = snap.*;
     };
     return best;
@@ -288,7 +284,7 @@ test "GLM expiry: with no restore, held prefixes give their blocks up oldest fir
     try std.testing.expect(older.stale and !newer.stale);
 }
 
-test "a held state an outstanding lookup still restores gives its blocks up last" {
+test "GLM expiry: a held state an outstanding lookup still restores gives its blocks up last" {
     const gpa = std.testing.allocator;
     var slots: [2]Slot = undefined;
     for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
@@ -306,7 +302,7 @@ test "a held state an outstanding lookup still restores gives its blocks up last
     try std.testing.expect(!borrowed_snap.stale);
 }
 
-test "a borrowed state's blocks still free when nothing else can serve the pass" {
+test "GLM expiry: a borrowed state's blocks still free when nothing else can serve the pass" {
     const gpa = std.testing.allocator;
     var slots: [1]Slot = undefined;
     for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
@@ -318,4 +314,20 @@ test "a borrowed state's blocks still free when nothing else can serve the pass"
     defer sl.borrowed = null;
     try std.testing.expectEqual(@as(u32, 0), try placeWith(&sl, 12, null, MetadataMover{})); // liveness: the borrowed state went last, not never
     try std.testing.expect(borrowed_snap.stale);
+}
+
+test "GLM expiry: selected prefix relocates before evicting another outstanding restore" {
+    const gpa = std.testing.allocator;
+    var slots: [1]Slot = undefined;
+    for (&slots) |*x| x.* = .{ .s = undefined, .held = undefined, .last = undefined };
+    var sl = testSlots(&slots, 16);
+    defer sl.snaps.deinit(gpa);
+    var other: snapshot.Snap = .{ .id = 1, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 0, 4 } };
+    var own: snapshot.Snap = .{ .id = 2, .at = 700, .buf = undefined, .bytes = 0, .held = .{ 9, 3 } };
+    try sl.snaps.put(gpa, other.id, &other);
+    try sl.snaps.put(gpa, own.id, &own);
+    sl.borrowed = .{ .ctx = &sl, .f = ofBorrowed };
+    try std.testing.expectEqual(@as(u32, 4), try placeWith(&sl, 10, &own, MetadataMover{}));
+    try std.testing.expectEqual(@as(u32, 4), own.held.?[0]);
+    try std.testing.expect(!own.stale and !other.stale);
 }

@@ -35,4 +35,5 @@ test "GLM expiry: a counted deferred restore failure logs once without token tex
 
 test {
     _ = @import("families/glm/expiry_test.zig");
+    _ = @import("core/prompt_cache_lifetime_test.zig");
 }

@@ -210,8 +210,8 @@ pub const Lanes = struct {
         const saved = s.reuse.saved orelse return null;
         const k: *const engine.Kept = @ptrCast(@alignCast(saved));
         if (k.at != s.reuse.at or k.at == 0 or k.at >= len or k.at % fw.prefill_rows != 0 or !self.x.e.holds(k.id)) {
-            std.log.warn("glm: prompt cache restore refused: kept {d} of {d} prompt tokens", .{ k.at, len });
             s.reuse_failed = true;
+            s.reuse_error = if (k.at == 0 or k.at >= len) error.SnapshotNotPrefix else if (k.at != s.reuse.at or k.at % fw.prefill_rows != 0) error.SnapshotOutOfStep else error.SnapshotStale;
             return null;
         }
         s.cached = k.at;

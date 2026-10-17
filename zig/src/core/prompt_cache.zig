@@ -114,7 +114,8 @@ pub const Entry = struct {
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
 
-pub const RestoreLog = struct { ctx: *anyopaque, write: *const fn (*anyopaque, u32, anyerror) void };
+pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
+pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
 
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
@@ -391,10 +392,8 @@ pub const Store = struct {
         if (std.mem.indexOfScalar(*Entry, s.entries.items, e) == null) return;
         defer s.release(e);
         if (failure) |err| {
-            if (s.restore_log) |log| log.write(log.ctx, e.at, err) else note("restoring {d} tokens failed ({s}); discarding cached state", .{ e.at, @errorName(err) });
+            @import("prompt_cache_restore.zig").report(s.restore_log, .{ .kept = e.at, .prompt = prompt.len, .expired = e.expired, .err = err });
             s.counts.failed += 1;
-            const why: []const u8 = if (e.expired) "state already expired" else "backend refused the restore";
-            note("restore of the kept {d}-token state failed for a {d}-token prompt ({s}); prefilling from the start", .{ e.at, prompt.len, why });
             e.expired = true;
             return;
         }
