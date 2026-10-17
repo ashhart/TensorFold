@@ -594,3 +594,19 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         try std.testing.expectEqual(topk.usage[0], usageFor(topk, c[0])[0]);
     }
 }
+
+test "train launch records: every new gradient launch stays unqualified without compiler receipts" {
+    try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);
+    for (gradient_pending) |record| try std.testing.expect(try checkCuda(std.testing.allocator, &.{record}, true) > 0);
+}
+
+pub const gradient_pending = @import("gradient_pending.zig").records;
+pub const refreshed_cuda = blk: {
+    var records = cuda;
+    for (&records) |*record| {
+        if (std.mem.eql(u8, record.launch.symbol, "fn_attn_prep") or
+            std.mem.eql(u8, record.launch.symbol, "fn_qsa_pool")) record.usage = none;
+    }
+    break :blk records;
+};
+pub const all_cuda = refreshed_cuda ++ gradient_pending;

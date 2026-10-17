@@ -85,7 +85,8 @@ pub const Family = struct {
     /// Whether the description holds together: a neuron's rows match its inputs, the pocket a whole number of groups.
     pub fn check(f: Family) !void {
         if (f.names.inputs.len != f.neuron.inputs()) return error.BadFamily;
-        if (f.quant.bits == 0 or 32 % f.quant.bits != 0 or f.quant.group == 0 or f.neurons == 0 or f.neurons % f.quant.group != 0) return error.BadFamily;
+        if (f.quant.bits == 0 or f.quant.bits > 32 or 32 % f.quant.bits != 0 or f.quant.group == 0 or f.neurons == 0 or f.neurons % f.quant.group != 0) return error.BadFamily;
+        if (!std.math.isFinite(f.neuron.margin) or f.neuron.margin <= 0) return error.BadFamily;
         if (f.neuron.act == .swiglu and !wholePowerOfTwo(f.neuron.sharp)) return error.BadFamily;
     }
 };
@@ -158,4 +159,20 @@ test "a description with no code width, or a SwiGLU sharp that is not a whole po
     f = base;
     f.neuron.sharp = 32;
     try f.check();
+}
+
+test "SwiGLU descriptions reject fractional, nonfinite and oversized sharpness" {
+    var f = @import("families.zig").qwen4_exp;
+    for ([_]f32{ 16.5, 0, -16, std.math.inf(f32), std.math.nan(f32), 4294967296 }) |sharp| {
+        f.neuron.sharp = sharp;
+        try std.testing.expectError(error.BadFamily, f.check());
+    }
+}
+
+test "zero and oversized quantization bits are refused before arithmetic" {
+    var f = @import("families.zig").qwen4_exp;
+    for ([_]u8{ 0, 3, 33, 255 }) |bits| {
+        f.quant.bits = bits;
+        try std.testing.expectError(error.BadFamily, f.check());
+    }
 }

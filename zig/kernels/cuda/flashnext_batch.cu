@@ -314,3 +314,14 @@ extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __
         spr[r] = 1;
     }
 }
+
+// Training or a live pocket requests the ordered FP32 expert sum.
+extern "C" __global__ void fn_moe_sum(const float* __restrict__ y, const float* __restrict__ wts, float* __restrict__ out,
+                                      int d, int slots) {
+    const int r = blockIdx.x, col = blockIdx.y * blockDim.x + threadIdx.x;
+    if (col >= d) return;
+    float acc = 0.0f;
+    for (int k = 0; k < slots; ++k)
+        acc = __fmaf_rn(y[(static_cast<long long>(r) * slots + k) * d + col], wts[r * slots + k], acc);
+    out[static_cast<long long>(r) * d + col] = acc;
+}

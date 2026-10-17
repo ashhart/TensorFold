@@ -192,6 +192,7 @@ const record = @import("cuda_record.zig");
 
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
@@ -594,4 +595,7 @@ test "nemotron learning safety: actual native close drains Nemotron before any s
 }
 test "nemotron learning safety: direct Nemotron trainer destruction drains before its first owner free" {
     try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, true);
+}
+test "trainer close: real native close drains the accepted trainer before any child or parent is released" {
+    try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

@@ -28,6 +28,7 @@ pub fn check(srv: *Server, cx: *Cx, id: u32, which: Which, before: []const Earli
     const a = cx.a;
     var facts: std.ArrayList(Earlier) = .empty;
     for (try srv.slide.earlier(a, id)) |f| if (which == .all or f.recalled == null) try facts.append(a, f);
+    for (facts.items) |f| if (f.asked.len == 0) return error.EarlierQuestionsMissing;
     var asking: std.ArrayList(side.Asking) = .empty;
     for (facts.items) |f| for (f.asked) |w| try asking.append(a, .{ .question = w.question, .before = try talks.turns(srv, cx, w.context, gone) });
     const replies = try side.askAll(srv, cx, asking.items, gone);

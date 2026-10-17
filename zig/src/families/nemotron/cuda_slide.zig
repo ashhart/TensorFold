@@ -119,9 +119,17 @@ const Host = struct {
     }
 
     /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
+    pub fn pocketSaveBegin(m: Ctx, _: std.mem.Allocator, io: std.Io) !void {
+        return @import("save_guard").begin(io, m.dir);
+    }
+
+    pub fn pocketSaveFinish(m: Ctx, _: std.mem.Allocator, io: std.Io) !void {
+        return @import("save_guard").finish(io, m.dir);
+    }
+
     pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
         try m.e.stream.synchronize();
-        return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
+        return PocketShards.writePending(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
     }
 };
 

@@ -145,7 +145,9 @@ pub fn Learner(comptime H: type) type {
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
-            if (has_pocket and l.trainer != null) try whole_lessons.heal(l); // a put-back the device lacks goes first
+            if (has_pocket and l.trainer != null) {
+                if (lesson.save) try whole_lessons.healLive(l) else try whole_lessons.heal(l);
+            }
             l.lesson = lesson;
             if (lesson.undo) {
                 l.phase = .undo;
@@ -238,12 +240,9 @@ pub fn Learner(comptime H: type) type {
 
         /// One bounded unit: one example sketched or projected, one step of learning (a check every few), or the undo.
         pub fn step(l: *Self) Step {
-            var s = l.advance() catch |e| failed: {
-                if (has_sites and l.phase == .steps) l.trainer.?.sites.restore();
-                l.phase = .idle;
-                break :failed Step{ .done = true, .changed = true, .report = .{ .failed = @errorName(e) } };
-            };
-            s.stale = has_pocket and whole_lessons.stale(l);
+            const operation = l.phase;
+            var s = l.advance() catch |e| @import("learner_failure.zig").failed(l, operation, e, has_sites, has_pocket);
+            s.stale = s.stale or (has_pocket and whole_lessons.stale(l));
             return s;
         }
 

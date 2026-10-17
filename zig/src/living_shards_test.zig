@@ -5,6 +5,7 @@ const host4 = @import("core/affine4_host.zig");
 
 test {
     _ = @import("families/nemotron/pocket_shards_test.zig");
+    _ = @import("families/flashnext/pocket_shards_test.zig");
 }
 
 test "living's affine writer at 4 bits in groups of 64 writes the very codes, scales and biases affine4_host does" {

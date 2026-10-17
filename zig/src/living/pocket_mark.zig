@@ -1,98 +1,59 @@
-//! The pocket as a lesson found it, put back bit for bit when the lesson is taken out; its layers rounded as saved.
+//! A lesson's complete pocket checkpoint, including SwiGLU gates and the earlier lessons' metadata.
 const std = @import("std");
 const shards = @import("shards.zig");
-
-/// The pocket when a lesson began: every neuron's weights, the neurons in use, how much was learned before it.
-pub const Snap = struct {
-    valid: bool = false, // false once a save has written the pocket: no lesson before it is put back
-    up: std.ArrayList(f32) = .empty,
-    down: std.ArrayList(f32) = .empty,
-    gate: std.ArrayList(f32) = .empty, // SwiGLU's gate rows
-    used: std.ArrayList(usize) = .empty,
-    learned: usize = 0,
-    pos: usize = 0,
-    hash: u64 = 0,
-
-    pub fn deinit(s: *Snap, gpa: std.mem.Allocator) void {
-        s.up.deinit(gpa);
-        s.down.deinit(gpa);
-        s.gate.deinit(gpa);
-        s.used.deinit(gpa);
-    }
-};
-
-/// The pocket's weights and neurons in use as one number: the same number, the same bits.
-pub fn hash(p: anytype) u64 {
-    var h = std.hash.Wyhash.init(0);
-    h.update(std.mem.sliceAsBytes(p.up.items));
-    h.update(std.mem.sliceAsBytes(p.down.items));
-    h.update(std.mem.sliceAsBytes(p.gate.items));
-    h.update(std.mem.sliceAsBytes(p.used.items));
-    return h.final();
+pub fn Snap(comptime Learned: type) type {
+    return struct {
+        valid: bool = false,
+        up: std.ArrayList(f32) = .empty,
+        down: std.ArrayList(f32) = .empty,
+        gate: std.ArrayList(f32) = .empty,
+        used: std.ArrayList(usize) = .empty,
+        learned: std.ArrayList(Learned) = .empty,
+        pos: std.ArrayList(u16) = .empty,
+        retired_lessons: std.ArrayList(u32) = .empty,
+        lesson: u32 = 0,
+        learned_before: usize = 0,
+        pos_before: usize = 0,
+        pub fn deinit(s: *@This(), a: std.mem.Allocator) void {
+            inline for (.{ "up", "down", "gate", "used", "learned", "pos", "retired_lessons" }) |f| @field(s, f).deinit(a);
+        }
+    };
 }
-
-/// The pocket as a new fact's lesson finds it, which taking that lesson out puts back.
 pub fn mark(p: anytype) !void {
-    const s = &p.snap;
-    inline for (.{ "up", "down", "gate", "used" }) |f| {
-        @field(s, f).clearRetainingCapacity();
-        try @field(s, f).appendSlice(p.gpa, @field(p, f).items);
+    p.snap.valid = false;
+    inline for (.{ "up", "down", "gate", "used", "learned", "pos", "retired_lessons" }) |f| {
+        const dst = &@field(p.snap, f);
+        dst.clearRetainingCapacity();
+        try dst.appendSlice(p.gpa, @field(p, f).items);
     }
-    s.learned = p.learned.items.len;
-    s.pos = p.pos.items.len;
-    s.hash = hash(p);
-    s.valid = true;
+    inline for (.{ "lesson", "learned_before", "pos_before" }) |f| @field(p.snap, f) = @field(p, f);
+    p.snap.valid = true;
 }
-
-/// The pocket put back as the open lesson found it, each layer that changed handed to the forward; false with no mark.
 pub fn restore(p: anytype, t: anytype, host: anytype) !bool {
-    const s = &p.snap;
-    if (!s.valid or s.up.items.len != p.up.items.len or s.gate.items.len != p.gate.items.len or s.used.items.len != p.used.items.len) return false;
-    const n = p.up.items.len / @max(p.used.items.len, 1);
-    const was = hash(p);
-    for (0..p.used.items.len) |j| {
-        const up = p.up.items[j * n ..][0..n];
-        const down = p.down.items[j * n ..][0..n];
-        const g = if (p.gate.items.len > 0) n else 0; // SwiGLU's gate rows; relu^2 has none
-        const gate = p.gate.items[j * g ..][0..g];
-        const was_gate = s.gate.items[j * g ..][0..g];
-        const same = p.used.items[j] == s.used.items[j] and
-            std.mem.eql(u8, std.mem.sliceAsBytes(up), std.mem.sliceAsBytes(s.up.items[j * n ..][0..n])) and
-            std.mem.eql(u8, std.mem.sliceAsBytes(down), std.mem.sliceAsBytes(s.down.items[j * n ..][0..n])) and
-            std.mem.eql(u8, std.mem.sliceAsBytes(gate), std.mem.sliceAsBytes(was_gate));
-        if (same) continue;
-        @memcpy(up, s.up.items[j * n ..][0..n]);
-        @memcpy(down, s.down.items[j * n ..][0..n]);
-        @memcpy(gate, was_gate);
-        p.used.items[j] = s.used.items[j];
-        try p.upload(t, host, j);
+    if (!p.snap.valid) return false;
+    inline for (.{ "up", "down", "gate", "used", "learned", "pos", "retired_lessons" }) |f| {
+        const dst = &@field(p, f);
+        try dst.resize(p.gpa, @field(p.snap, f).items.len);
+        @memcpy(dst.items, @field(p.snap, f).items);
     }
-    p.learned.shrinkRetainingCapacity(s.learned);
-    p.pos.shrinkRetainingCapacity(s.pos);
-    const now = hash(p);
-    std.log.info("slide pocket: the lesson taken out: the pocket put back as the lesson found it ({x:0>16} -> {x:0>16}, {s})", .{ was, now, if (now == s.hash) "the same bits" else "NOT the same bits" });
+    inline for (.{ "lesson", "learned_before", "pos_before" }) |f| @field(p, f) = @field(p.snap, f);
+    for (0..p.used.items.len) |j| try p.upload(t, host, j);
+    inline for (.{ "up", "down", "gate", "used", "learned", "pos", "retired_lessons" }) |f| {
+        if (!std.mem.eql(u8, std.mem.sliceAsBytes(@field(p, f).items), std.mem.sliceAsBytes(@field(p.snap, f).items))) return error.PocketRestoreMismatch;
+    }
     return true;
 }
 
-/// The open fact's layers rounded as a save writes them (every neuron there shares the output's groups) and uploaded.
+pub fn hash(p: anytype) u64 {
+    var h = std.hash.Wyhash.init(0);
+    inline for (.{ "up", "down", "gate", "used" }) |f| h.update(std.mem.sliceAsBytes(@field(p, f).items));
+    return h.final();
+}
+
+/// The rounded state judged by the learner.
 pub fn asWritten(p: anytype, t: anytype, host: anytype) !void {
-    var done: std.ArrayList(usize) = .empty;
-    defer done.deinit(p.gpa);
-    for (p.taken.items) |x| try once(p.gpa, &done, x.slot);
-    for (p.refits.items) |x| try once(p.gpa, &done, x.slot);
-    for (p.joint.items) |x| try once(p.gpa, &done, x.slot);
-    const was = hash(p);
-    for (done.items) |j| {
-        try shards.roundSlot(p, j);
-        try p.upload(t, host, j);
-    }
-    if (done.items.len > 0) std.log.info("slide pocket: {d} layers' neurons rounded as the shards hold them ({s})", .{ done.items.len, if (hash(p) == was) "already were" else "changed" });
+    return p.asWritten(t, host);
 }
-
-fn once(gpa: std.mem.Allocator, list: *std.ArrayList(usize), j: usize) !void {
-    if (std.mem.indexOfScalar(usize, list.items, j) == null) try list.append(gpa, j);
-}
-
 test "a lesson taken out puts the pocket back bit for bit: its neurons, an earlier one it refitted, the rounding" {
     const gpa = std.testing.allocator;
     const d = 64;

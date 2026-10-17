@@ -17,6 +17,7 @@ pub fn addTo(
     target: std.Build.ResolvedTarget,
     optimize: std.builtin.OptimizeMode,
 ) *std.Build.Module {
+    if (!m.import_table.contains("living")) m.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true }));
     const j = json(b, target, optimize);
     m.addImport("json", j);
     // a build whose engines learn hands the server their own living module; the rest read only its families

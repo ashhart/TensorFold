@@ -13,6 +13,12 @@ pub fn Io(comptime core: type) type {
     return struct {
         /// The learned neurons of `layers` into `dir`'s shards, quantized as `F` stores them, handed back; the bytes.
         pub fn write(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, comptime F: Family, lay: Layout, layers: []const usize, neurons: usize, inputs: []const []f32, down: []f32) !usize {
+            const bytes = try writePending(gpa, io, dir, F, lay, layers, neurons, inputs, down);
+            try se.save_guard.finish(io, dir);
+            return bytes;
+        }
+
+        pub fn writePending(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, comptime F: Family, lay: Layout, layers: []const usize, neurons: usize, inputs: []const []f32, down: []f32) !usize {
             const q = F.quant;
             const d = lay.hidden;
             const own = lay.width;
@@ -45,6 +51,7 @@ pub fn Io(comptime core: type) type {
                 // the MTP head's expert in the index: grown with the model's own, zero neurons
                 bytes += try expert(F, arena, &files, &edits, m.base, own, neurons, d, &zs, z);
             };
+            try se.save_guard.begin(io, dir);
             if (widen) try se.grow(gpa, io, dir, edits.items) else try se.overwrite(gpa, io, dir, edits.items);
             if (mtp) |m| if (m.file) |name| {
                 // in its own file, zero neurons: that file rewritten whole, apart from the index

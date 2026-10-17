@@ -13,6 +13,10 @@ pub fn Io(comptime core: type) type {
             return Shards.write(gpa, io, dir, pocket_layout.family, pocket_layout.layout(c), layers, neurons, &.{up}, down);
         }
 
+        pub fn writePending(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, c: cfg.Config, layers: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
+            return Shards.writePending(gpa, io, dir, pocket_layout.family, pocket_layout.layout(c), layers, neurons, &.{up}, down);
+        }
+
         /// One layer's pocket, `up` and `down` [neurons, D], rounded in place to the 4-bit values `write` hands back.
         pub fn round(gpa: std.mem.Allocator, d: usize, up: []f32, down: []f32) !void {
             return living.shards.round(pocket_layout.family, gpa, d, &.{up}, down);

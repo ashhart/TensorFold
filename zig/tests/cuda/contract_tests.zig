@@ -36,7 +36,7 @@ const h3_image = struct {
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "norms", "nemotron_route", "qmm_group", "lane_gemv", "prompt16", "qmmf", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -182,6 +182,14 @@ pub fn run(gpu: check.Gpu) !void {
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
+    try @import("gdn_back_tests.zig").run(gpu);
+    try @import("q4_back_tests.zig").run(gpu);
+    try @import("moe_back_tests.zig").run(gpu);
+    try @import("attn_back_tests.zig").run(gpu);
+    try @import("fn_hc_back_tests.zig").run(gpu);
+    try @import("fn_moe_back_tests.zig").run(gpu);
+    try @import("fn_pocket_tests.zig").run(gpu, 0);
+    std.debug.print("PASS gradient component suites (FP64 and finite-difference checks); resource receipts still required\n", .{});
     const t1 = check.now(gpu.io);
     const lim = try live(gpu);
     const t2 = check.now(gpu.io);
@@ -191,8 +199,8 @@ pub fn run(gpu: check.Gpu) !void {
 
 /// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
 fn live(gpu: check.Gpu) !usize {
-    var n = try registry.checkCuda(gpu.gpa, &registry.cuda, false);
-    std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.cuda.len, n });
+    var n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
+    std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
     const at = for (limits.sms, 0..) |t, i| {
         if (t.sm == sm) break i;
@@ -211,7 +219,7 @@ fn live(gpu: check.Gpu) !usize {
         std.debug.print("{s} limits live sm_{d} {s}: the driver says {d}, the table {d}\n", .{ if (got == d[2]) "PASS" else "FAIL", sm, d[0], got, d[2] });
     }
     var said: ?limits.Nvcc = null;
-    for (registry.cuda ++ registry.cuda_controls) |r| {
+    for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         const bytes = image(r.launch.image);
         const rel = try built(gpu.gpa, bytes, sm);
@@ -255,7 +263,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
     const a = gpu.gpa;
     var n: usize = 0;
     var said: ?limits.Nvcc = null;
-    for (registry.cuda ++ registry.cuda_controls) |r| {
+    for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         const path = try std.fmt.allocPrint(a, "{s}/{s}.fatbin", .{ dir, r.launch.image });
         defer a.free(path);
