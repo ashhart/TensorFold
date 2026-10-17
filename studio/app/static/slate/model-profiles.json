@@ -1,0 +1,1067 @@
+{
+ "version": 1,
+ "profiles": [
+  {
+   "id": "gpt-image-2",
+   "label": "GPT Image 2",
+   "vendor": "OpenAI",
+   "kind": "image",
+   "dialect": {
+    "style": "structured-sections",
+    "guidance": "Write a compact labeled brief rather than a wall of prose: lead with the scene or background, then the subject, then the key details, then any hard constraints, keeping that word order consistent across a series so edits stay predictable. The model follows instruction-style language well, so phrase restrictions as direct instructions ('the frame contains no visible logos') instead of relying on a negative field, which does not exist. Any literal on-screen text should be wrapped in quotation marks and, for unusual names or spellings, spelled out letter by letter; text placement is decent but still the weakest area, so keep signage short. Prefer a lean first prompt followed by small single-change follow-ups over one enormous prompt, and when iterating on an edit, restate a short preserve-list so unrelated parts of the frame do not drift. Cinematic vocabulary (lens length, key light direction, film stock) is understood and rewarded, but stack it as a short technical clause rather than scattering it through the description."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": null,
+    "durations": null,
+    "aspectRatios": [
+     "1:1",
+     "3:2",
+     "2:3",
+     "16:9",
+     "9:16",
+     "auto"
+    ],
+    "fps": null,
+    "resolutions": [
+     "1024x1024",
+     "2048x2048",
+     "1536x1024",
+     "1024x1536",
+     "2048x1152",
+     "3840x2160",
+     "2160x3840",
+     "auto"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "quality",
+     "type": "enum",
+     "values": [
+      "low",
+      "medium",
+      "high",
+      "auto"
+     ],
+     "note": "Use medium or high for dense text or multi-font layouts."
+    },
+    {
+     "name": "size",
+     "type": "enum",
+     "values": [
+      "1024x1024",
+      "2048x2048",
+      "1536x1024",
+      "1024x1536",
+      "2048x1152",
+      "3840x2160",
+      "2160x3840",
+      "auto"
+     ],
+     "note": "Dimensions must be multiples of 16; max edge 3840px; max aspect ratio 3:1."
+    },
+    {
+     "name": "output_format",
+     "type": "enum",
+     "values": [
+      "png",
+      "jpeg",
+      "webp"
+     ],
+     "note": "PNG is the default. Transparent backgrounds are not supported."
+    },
+    {
+     "name": "output_compression",
+     "type": "number",
+     "values": [
+      "0-100"
+     ],
+     "note": "JPEG and WebP only."
+    },
+    {
+     "name": "moderation",
+     "type": "enum",
+     "values": [
+      "auto",
+      "low"
+     ],
+     "note": "Two-stage filter runs on both the prompt and the output regardless of setting."
+    },
+    {
+     "name": "n",
+     "type": "number",
+     "note": "Number of images per request."
+    }
+   ],
+   "notes": "Model snapshot gpt-image-2-2026-04-21, released April 2026. Max prompt length is not published by OpenAI, so maxChars is null rather than guessed. There is no settable seed input (a seed appears in response metadata only) and no negative-prompt parameter, so exclusions must be written into the prompt. Reference images go through the images.edit endpoint and are locked to high input fidelity. API access requires organization verification."
+  },
+  {
+   "id": "midjourney",
+   "label": "Midjourney V8.2",
+   "vendor": "Midjourney",
+   "kind": "image",
+   "dialect": {
+    "style": "cinematic-prose",
+    "guidance": "Describe the shot the way you would brief a cinematographer, in flowing natural language, not as a comma-separated tag dump — current versions parse sentences and punish keyword soup with generic results. Order the description as subject, then subject detail, then context (where and when), then mood and style, then technical craft notes (lens, film stock, light quality), and append parameters last. Exclusions belong in --no rather than in the sentence, since phrasing something as 'without X' tends to summon X. Literal text goes in quotation marks and should stay to a few words: long sentences, complex fonts and multiple text elements in one frame are still unreliable. Reach for --style raw when the prompt is already art-directed and you want adherence over Midjourney's default aesthetic push, and reserve high --stylize for when you want it to editorialize."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": null,
+    "durations": null,
+    "aspectRatios": [
+     "1:1",
+     "4:5",
+     "2:3",
+     "3:2",
+     "16:9",
+     "9:16",
+     "21:9"
+    ],
+    "fps": null,
+    "resolutions": [
+     "2048px long edge (--hd)"
+    ]
+   },
+   "features": {
+    "negativePrompt": true,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": true
+   },
+   "params": [
+    {
+     "name": "--ar",
+     "type": "string",
+     "note": "Arbitrary ratios accepted; ceiling reported as 14:1, or 4:1 in HD mode. The listed ratios are common presets, not an exhaustive allowlist."
+    },
+    {
+     "name": "--stylize",
+     "type": "number",
+     "values": [
+      "0-1000"
+     ],
+     "note": "Higher values let Midjourney impose its house aesthetic over literal prompt adherence."
+    },
+    {
+     "name": "--chaos",
+     "type": "number",
+     "values": [
+      "0-100"
+     ],
+     "note": "Spread between the four grid variations."
+    },
+    {
+     "name": "--weird",
+     "type": "number",
+     "values": [
+      "0-3000"
+     ],
+     "note": "Documented as not fully compatible with --seed."
+    },
+    {
+     "name": "--style",
+     "type": "enum",
+     "values": [
+      "raw"
+     ],
+     "note": "Suppresses the default aesthetic pass for stronger prompt adherence."
+    },
+    {
+     "name": "--no",
+     "type": "string",
+     "note": "Negative terms, comma separated."
+    },
+    {
+     "name": "--seed",
+     "type": "number",
+     "note": "Reproduction is near-identical rather than exact."
+    },
+    {
+     "name": "--sref",
+     "type": "string",
+     "note": "Style reference URL; paired with --sw style weight."
+    },
+    {
+     "name": "--oref",
+     "type": "string",
+     "note": "Omni reference URL for subject transfer; paired with --ow omni weight."
+    },
+    {
+     "name": "--iw",
+     "type": "number",
+     "note": "Image weight for supplied image prompts."
+    },
+    {
+     "name": "--hd",
+     "type": "flag",
+     "note": "2048px output; --sd is the faster standard-resolution mode."
+    }
+   ],
+   "notes": "V8.2 became the default on July 24, 2026, replacing V8.1. V7 remains selectable and is the safer choice when you need full feature coverage, since some V8 reference features route through V7 internally. Midjourney's docs site blocks automated fetching, so exact numeric ranges for --stylize, --chaos, --weird, --sw, --ow and --seed were cross-referenced from secondary guides rather than the primary docs and should be treated as approximate. Max prompt length, current --quality values, standard-mode base resolution, and whether Draft Mode is available on V8.2 could not be verified and are omitted or null."
+  },
+  {
+   "id": "krea",
+   "label": "Krea 2",
+   "vendor": "Krea",
+   "kind": "image",
+   "dialect": {
+    "style": "cinematic-prose",
+    "guidance": "Write plain descriptive sentences covering subject, setting, mood, lighting and finish — Krea's models read natural language and do not need tag syntax. The house aesthetic is already tuned toward photographic naturalism and restrained color grading, so you rarely need to ask for 'photorealistic'; spend those words on specific art direction instead (time of day, light source, lens behavior, grade reference). Krea is documented as more creative than literal, so if you need exact composition, state it flatly and briefly rather than burying it in atmosphere. Style is better carried by reference images than by adjectives: supply a reference and dial its influence weight rather than piling on style words. Keep prompts specific but not exhaustive — technical photography and art-direction terminology lands well, while long lists of redundant quality adjectives do not."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": null,
+    "durations": null,
+    "aspectRatios": [
+     "1:1",
+     "4:3",
+     "3:2",
+     "16:9",
+     "2.35:1",
+     "4:5",
+     "2:3",
+     "9:16"
+    ],
+    "fps": null,
+    "resolutions": [
+     "1K",
+     "1.5K",
+     "4K (via Enhancer upscale)"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "aspect_ratio",
+     "type": "enum",
+     "values": [
+      "1:1",
+      "4:3",
+      "3:2",
+      "16:9",
+      "2.35:1",
+      "4:5",
+      "2:3",
+      "9:16"
+     ],
+     "note": "Ratio list confirmed for Krea 1; Krea 2's full list was not published."
+    },
+    {
+     "name": "resolution",
+     "type": "enum",
+     "values": [
+      "1K",
+      "1.5K"
+     ],
+     "note": "Higher output is reached through the separate Enhancer upscale, not a generation parameter."
+    },
+    {
+     "name": "reference_images",
+     "type": "list",
+     "note": "Up to 3 references for style guidance; Krea 2 adds per-reference influence weights and multi-reference blending."
+    },
+    {
+     "name": "checkpoint",
+     "type": "enum",
+     "values": [
+      "Krea 2 Raw",
+      "Krea 2 Turbo"
+     ],
+     "note": "Turbo is the distilled speed variant; Raw is the base model."
+    }
+   ],
+   "notes": "Krea 2 (announced May 2026, ~12B parameters, built from scratch rather than as a FLUX fine-tune) is the current flagship, superseding Krea 1. The FLUX.1 Krea [dev] open-weights model, co-developed with Black Forest Labs, is a separate lineage sharing the same naturalistic aesthetic bias. Negative-prompt support, seed control, and guidance/step parameters are not documented anywhere Krea publishes, so those flags are set false to mean 'not exposed' rather than confirmed absent. Krea 2's resolution ceiling, full aspect-ratio list, and max prompt length are unverified; the values shown are Krea 1's confirmed figures. A realtime generation mode also exists but its parameters were not verified."
+  },
+  {
+   "id": "flux-3",
+   "label": "FLUX 3",
+   "vendor": "Black Forest Labs",
+   "kind": "video",
+   "dialect": {
+    "style": "cinematic-prose",
+    "guidance": "Follow BFL's published FLUX prompt order, extended with motion and sound: subject, location, style, camera framing, lighting, colour, effect, then supporting elements — start with the concrete subject and the single action it performs across the clip, and add a slot only when it changes the shot. BFL's own advice is to start short and add only what alters the image; 10-30 words is a sketch, 30-80 covers most scenes, and 80-300 is for genuinely complex multi-subject direction, so treat 'specific detail helps, filler hurts' as the length rule rather than padding a lens-and-wardrobe inventory. Always include one audio cue — an effect, a room tone, a music mood or a spoken line — because picture and audio are generated in the same pass and an unwritten soundtrack is one the model chooses for you; name the spoken language when the scene has dialogue. Keep each generation to a single clear action and chain clips for longer sequences instead of packing a scene change into one 20-second take. Write flowing prose, not comma-separated tag lists, which read as broken sentences to the text encoder. FLUX models do not take negative prompts, and BFL's documented replacement is to name what fills the space instead — turn 'no crowds' into 'empty pathways', not 'without people'. Put any on-screen text in quotation marks and give exact colours as hex codes, both documented FLUX behaviours. Camera direction lives entirely in the prose; there is no move parameter, no seed and no published API reference to fall back on."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 20,
+    "durations": [
+     5,
+     10,
+     15,
+     20
+    ],
+    "aspectRatios": null,
+    "fps": null,
+    "resolutions": [
+     "480p",
+     "720p"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "mode",
+     "type": "enum",
+     "values": [
+      "text-to-video",
+      "image-to-video",
+      "video-to-video",
+      "keyframe-to-video",
+      "audio-continuation"
+     ],
+     "note": "Generation modes named in BFL's launch post; the actual API field name is not published."
+    },
+    {
+     "name": "duration",
+     "type": "enum",
+     "values": [
+      5,
+      10,
+      15,
+      20,
+      "auto"
+     ],
+     "note": "Steps reported by hosting providers, plus an auto setting that lets the model pick. 20s is the single-generation ceiling; go longer by chaining clips."
+    },
+    {
+     "name": "resolution",
+     "type": "enum",
+     "values": [
+      "480p",
+      "720p"
+     ],
+     "note": "720p is the only figure BFL's launch post names, and it appears there only as the setting for preliminary evaluations. 480p comes from hosting providers. 1080p is reported as expected to follow but is not live."
+    },
+    {
+     "name": "reference_images",
+     "type": "list",
+     "note": "Up to 10 image references. Early-access reports say reference adherence is still inconsistent for image-to-video."
+    },
+    {
+     "name": "audio",
+     "type": "boolean",
+     "values": [
+      "always on"
+     ],
+     "note": "Native synchronized audio is produced with every clip; no silent mode is documented. Multilingual dialogue is supported — declare the language in the prompt."
+    },
+    {
+     "name": "seed",
+     "type": "number",
+     "note": "Not documented for FLUX 3 Video early access. Do not assume reproducibility."
+    },
+    {
+     "name": "variant",
+     "type": "enum",
+     "values": [
+      "FLUX 3 Video",
+      "FLUX 3 Image",
+      "FLUX 3 Action / FLUX-mimic",
+      "FLUX 3 Dev"
+     ],
+     "note": "Only FLUX 3 Video is reachable, via gated early access. FLUX 3 Image early access had not opened as of July 31, 2026; FLUX 3 Dev open weights are planned for later in 2026."
+    }
+   ],
+   "notes": "kind was changed from image to video on July 31, 2026. FLUX 3 launched July 23, 2026 as a multimodal image/video/audio/action model, but the only generation surface that actually exists is FLUX 3 Video (native audio, gated early access) — BFL's FLUX 3 Image early access had still not opened as of this update, so 'FLUX 3' as a target today means video with sound. For stills, target FLUX.2 rather than this profile; the previous revision of this entry described FLUX.2 limits and those have been removed to avoid implying they apply to FLUX 3. Re-checked August 4, 2026: BFL still publishes NO FLUX 3 documentation of any kind — the docs.bfl.ai index (docs.bfl.ml/llms.txt) lists no FLUX 3 page, no video endpoint and no video prompting guide, and BFL's own agent-skills repo (github.com/black-forest-labs/skills) covers FLUX.1 and FLUX.2 only. The only first-party FLUX 3 material is the launch post at bfl.ai/blog/flux-3, which names the modes, the 20s ceiling, native audio, multilingual dialogue, multi-shot via agentic chaining and 720p preliminary evaluations, but gives no prompting instructions. The guidance field therefore leans on BFL's model-family prompting guides — the component order and length tiers from docs.bfl.ai/guides/prompting_unified_building, and 'most FLUX models do not support negative prompts' plus the positive-replacement strategy from docs.bfl.ai/guides/prompting_unified_technical — which are written for FLUX.2 stills and are applied here as family conventions, not as documented FLUX 3 Video behaviour. UNVERIFIED, left null or false: max prompt length, fps, the aspect-ratio enum (the launch post says 'a broad range' and reporting spans 9:16 through 21:9, but no explicit list is published), seed support, and negative-prompt support. Booleans in features are set false where a capability is undocumented rather than confirmed absent — treat false as 'do not rely on it'. Duration, resolution and reference-count values here are cross-referenced from hosting providers and early-access reporting, and parameter names are indicative rather than exact."
+  },
+  {
+   "id": "seedance-2",
+   "label": "Seedance 2.5 (Dreamina)",
+   "vendor": "ByteDance",
+   "kind": "video",
+   "dialect": {
+    "style": "structured-sections",
+    "guidance": "Follow the official core formula in order: Subject + Action/Event, then Scene & Environment, Visual Style, Camera (shot size, angle, movement, cuts), and Audio — omit what is not needed; parameters never go in the prompt. Name and bind every distinct subject to its reference with @-role lines ('@Image 1 defines KAIA's face, hair, and amber jacket. Do not use the image background.') — one mapping per line, always with use-only/do-not-use exclusions, and add a [Subject Profile] block when one character spans scenes. For multi-event or long (up to 30s) shots, break the story into consecutive [Stage] blocks with exactly ONE primary change each and an explicit visible End state (positions, prop ownership, light) — time ranges (0-5 seconds: …) are budgets, not edit points; use an exact time only for one critical beat. Write audio inline with the official syntax: (music), <sound effects>, {dialogue}, 【subtitles】, and reinforce non-default dialogue language before the line ('Dialogue language: American English. She says…'). Translate emotions into 2-4 observable cues (eyes, brows, breathing, hands) rather than mood words alone, and translate uncommon camera terms into subject + visible change + direction (rack focus: leaves blur as her face sharpens). Standard terms (push in, orbit, dolly zoom, FPV, bullet time, whip-pan, handheld) work directly — but always say which subject the camera follows, where the move starts and ends. One camera move per shot stays the safest default; end every prompt by checking consistency: character count, wardrobe, prop ownership, spatial direction."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 30,
+    "durations": null,
+    "aspectRatios": [
+     "21:9",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16"
+    ],
+    "fps": null,
+    "resolutions": [
+     "480p",
+     "720p",
+     "1080p",
+     "4k"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": true,
+    "imageInput": true,
+    "cameraControls": true,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "model",
+     "type": "enum",
+     "values": [
+      "doubao-seedance-2-0-260128",
+      "doubao-seedance-2-0-fast-260128",
+      "doubao-seedance-2-0-mini-260615"
+     ],
+     "note": "Ark model IDs for Seedance 2.0, 2.0 Fast and 2.0 Mini. Feature sets are near-identical; Fast and Mini trade quality for cost and cap out at 720p."
+    },
+    {
+     "name": "duration",
+     "type": "number",
+     "values": [
+      "4-15"
+     ],
+     "note": "Whole seconds, 4 to 15, on all three variants. Sent as \"duration\": 5."
+    },
+    {
+     "name": "ratio",
+     "type": "enum",
+     "values": [
+      "21:9",
+      "16:9",
+      "4:3",
+      "1:1",
+      "3:4",
+      "9:16"
+     ],
+     "note": "Sent as \"ratio\": \"16:9\". No adaptive/auto value is listed in the model table."
+    },
+    {
+     "name": "resolution",
+     "type": "enum",
+     "values": [
+      "480p",
+      "720p",
+      "1080p",
+      "4k"
+     ],
+     "note": "Seedance 2.0 supports all four (4k is 10-bit and is rate-limited far harder). Seedance 2.0 Fast and Mini are 480p/720p only."
+    },
+    {
+     "name": "generate_audio",
+     "type": "boolean",
+     "values": [
+      "true",
+      "false"
+     ],
+     "note": "Turns on joint audio+video generation. Seedance 2.0 natively generates sound with picture; audio is not merely a reference input."
+    },
+    {
+     "name": "return_last_frame",
+     "type": "boolean",
+     "values": [
+      "true",
+      "false"
+     ],
+     "note": "Returns the final frame of the clip as an image, for chaining a following generation."
+    },
+    {
+     "name": "service_tier",
+     "type": "enum",
+     "values": [
+      "flex"
+     ],
+     "note": "Selects cheaper offline/batch inference."
+    },
+    {
+     "name": "content",
+     "type": "list",
+     "note": "Multimodal array of typed items — text, image_url, video_url, audio_url — each optionally carrying a role: reference_image, reference_video, first_frame, last_frame."
+    },
+    {
+     "name": "reference_inputs",
+     "type": "list",
+     "note": "Per request: 0-9 images, 0-3 videos, 0-3 audio clips, plus the required text. 'Text + audio' and audio-only inputs are rejected. Video extension chains at most 3 clips totalling 15s. Best results come from 4-5 references, not a full set."
+    }
+   ],
+   "notes": "Guidance distilled from the official Dreamina Seedance 2.5 Prompt Guide (ByteDance Feishu doc, updated 2026-07-31). References: up to 30 images (≤4K), 10 videos (≤30s combined), 10 audio clips (≤30s combined); recommended 1-8 distinct subjects. Also supports video editing (source video is the sole editing master; aspect/duration auto-locked), forward/backward extension (align the boundary frame first), first/last-frame + multi-keyframe control, storyboard grids (≤15 panels), coarse/fine blockout re-rendering (pairs with Blockout exports), one-click video, and seamless transitions. Max prompt length and fps still unpublished."
+  },
+  {
+   "id": "minimax-h3",
+   "label": "MiniMax Hailuo H3",
+   "vendor": "MiniMax",
+   "kind": "video",
+   "dialect": {
+    "style": "h3-shot-grammar",
+    "guidance": "Compile to MiniMax's own H3 prompt grammar (published with the open weights at huggingface.co/MiniMaxAI/MiniMax-H3). A prompt is three labeled fields, always in this order: integrated_multimodal_description (the picture), overall_soundscape (ambience and physical sound), non_diegetic_music (score). In the description, open with 1-2 sentences establishing visual style (cinematic, live-action, 2D-animated, 3D CG, claymation, watercolor, vintage film), then break the video into [Shot 1], [Shot 2]... blocks. [Shot 1] takes no timestamp; every later shot starts 'At MM:SS.SSS, the camera cuts to...' with strictly increasing timestamps — this is the documented multi-shot and timing control, so compile Slate beat sheets straight into shot markers. Camera moves use the official vocabulary — Zoom/Push In/Out, Pan Left/Right, Truck Left/Right, Tilt Up/Down, Pedestal Up/Down, Arc Shot, Tracking Shot, Static Shot, Shake Slightly/Strongly, POV, Roll Clockwise/Counterclockwise — modified 'with small/large amplitude' and 'at slow/fast speed' ('The camera pushes in with small amplitude at slow speed toward the folded letter.'). Dialogue: tag speakers (S1), (S2) in playback order and wrap lines as <d>[English] actual words</d> — always restate the language tag, and keep character voice consistent by reusing the same (Sx). Off-screen lines: 'says in an off-screen voiceover ... while his lips remain completely closed'. Dialogue continuing across a cut is wrapped in <scenetrans> and described as continuing seamlessly; interrupted speech takes <cutoff>. On-screen text goes in \"English double quotation marks\" verbatim. overall_soundscape is 1-4 sentences of concrete ambience and action sound (wind, footsteps, impacts, breathing) — no dialogue or music; non_diegetic_music is 1-3 sentences of instrumentation, tempo and dynamics — no abstract mood words; write N/A only for intended silence. H3 renders native 32 kHz stereo in the same pass, so any sound left unwritten is chosen for you. With frame anchors, put the task instruction on the first line, blank line, then the fields: image-to-video 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.'; first-and-last-frame prompts state which picture aligns with 0.00 and which with the ending timestamp, and describe first-frame state, observable intermediate change, and last-frame landing so the motion path is closed. Full reference mode (up to 9 images, 3 videos, 3 audio clips, 12 files total; audio never alone) uses the four label types: <Subject N> for reusable visible content (cite sources inside the definition — 'appearance comes from <Picture 1> and walking motion comes from <Video 1>'), <Picture N> only for actual frame anchors, <Video N> only for whole-video relationships, <Audio N> for copied or referenced sound; a voice reference for a speaker is written '<Subject N> (S1)'. Open with subject_definitions, then a summary prefixed by bracketed task types ([keyframe completion], [reference generation], [video editing], [video continuation], [audio reuse], [audio reference], combined with +), then retention_analysis marking each label fully_preserved / partially_preserved / attribute_transfer / weak_reference (audio: fully_copy / partially_copy / reference / weak_reference), then the shot-by-shot description citing each label where it applies. Keep every label's meaning identical across all sections. Spend the character budget on physical specifics — what moves, in which direction, lit by what — and restate identity-critical wardrobe and features in prose next to the reference label rather than trusting the image alone. Dialogue is stable in 11 languages (Arabic, Chinese, English, French, German, Italian, Japanese, Korean, Portuguese, Russian, Spanish)."
+   },
+   "limits": {
+    "maxChars": 7000,
+    "maxDurationSec": 15,
+    "durations": [
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10,
+     11,
+     12,
+     13,
+     14,
+     15
+    ],
+    "aspectRatios": [
+     "adaptive",
+     "21:9",
+     "16:9",
+     "4:3",
+     "1:1",
+     "3:4",
+     "9:16"
+    ],
+    "fps": [
+     24
+    ],
+    "resolutions": [
+     "768P",
+     "2K"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": true,
+    "imageInput": true,
+    "cameraControls": true,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "model",
+     "type": "enum",
+     "values": [
+      "MiniMax-H3"
+     ],
+     "note": "The model name in MiniMax's own V2 video-generation API. Some third-party hosts expose the same model as 'hailuo-03'."
+    },
+    {
+     "name": "content",
+     "type": "list",
+     "note": "Required multimodal array. Each element has a type — text, image_url, video_url, audio_url — and an optional role: first_frame, last_frame, reference_image, reference_video, reference_audio, base_video. Exactly one non-empty text item is mandatory; frame roles and reference roles cannot be mixed in one request."
+    },
+    {
+     "name": "duration",
+     "type": "number",
+     "values": [
+      "4-15"
+     ],
+     "note": "Required, whole seconds only, 4 to 15. The 4s floor is stated in MiniMax's API reference."
+    },
+    {
+     "name": "resolution",
+     "type": "enum",
+     "values": [
+      "768P",
+      "2K"
+     ],
+     "note": "Both are generally available; MiniMax's launch post says 2K is the default tier and 768P is the cheaper one."
+    },
+    {
+     "name": "ratio",
+     "type": "enum",
+     "values": [
+      "adaptive",
+      "21:9",
+      "16:9",
+      "4:3",
+      "1:1",
+      "3:4",
+      "9:16"
+     ],
+     "note": "Defaults to adaptive. Text-to-video requires a concrete ratio and rejects adaptive; first/last-frame mode ignores the field and always follows the input image; reference mode accepts either. Input images and videos must have a width/height ratio in [0.4, 2.5]."
+    },
+    {
+     "name": "reference_files",
+     "type": "list",
+     "note": "Omni-reference, 12 files maximum overall: up to 9 images, up to 3 video clips and up to 3 audio clips, with video and audio each 2-15s per clip and 15s combined. Audio cannot be sent alone — at least one reference image or video is required. Per-file caps: video 50 MB, image 30 MB, audio 15 MB, request body 64 MB."
+    },
+    {
+     "name": "audio",
+     "type": "boolean",
+     "values": [
+      "always on"
+     ],
+     "note": "Native stereo generated jointly with picture — dialogue, effects and music come out of the same pass. No silent mode is documented and there is no audio toggle in the API."
+    },
+    {
+     "name": "h3_context_ir",
+     "type": "string",
+     "note": "Separate async endpoint that reads the same multimodal content and returns an expanded structured prompt in content.prompt without generating video. Useful as a prompt-compilation step."
+    },
+    {
+     "name": "regeneration",
+     "type": "string",
+     "note": "Upscales an existing 768P H3 result to 2K by resubmitting the original content plus one video_url item with role=base_video. Implemented as in-context regeneration by the base model rather than a separate super-resolution pass."
+    },
+    {
+     "name": "callback_url",
+     "type": "string",
+     "note": "Optional task-status webhook; MiniMax first sends a challenge that must be echoed back within 3 seconds."
+    },
+    {
+     "name": "seed",
+     "type": "number",
+     "note": "Not present in the V2 video-generation API reference."
+    }
+   ],
+   "notes": "Re-verified August 4, 2026. Platform API facts (params, limits, file caps) from platform.minimax.io as before. Prompt grammar replaced with MiniMax's official H3 prompt-writing guides published with the open weights: huggingface.co/MiniMaxAI/MiniMax-H3 docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md (three-field format, [Shot N] markers with MM:SS.SSS timestamps, camera vocabulary with amplitude/speed, (Sx) speakers, <d>[Language]</d> dialogue, <scenetrans>/<cutoff>, task-type instruction lines for I2VA/FL2VA/L2VA) and docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md (<Subject/Picture/Video/Audio N> labels, bracketed task-type summary, retention_analysis markers). These supersede the earlier 'no shot-marker syntax documented' finding — timecodeBeats is now true and beat sheets compile to shot markers. Output fps set to 24 per the model card. Seed and negative-prompt support remain undocumented — false means 'do not rely on it'. The model card states 4-15s duration, up to 2K (default short side 768), 32 kHz stereo audio, and stable dialogue in 11 languages."
+  },
+  {
+   "id": "ltx-2.3",
+   "label": "LTX-2.3",
+   "vendor": "Lightricks",
+   "kind": "video",
+   "dialect": {
+    "style": "cinematic-prose",
+    "guidance": "Write one flowing paragraph of roughly two hundred words, in chronological order, with no labels, headers or tag lists — the model was documented and tuned around exactly this shape. Order the content as main action first, then the specific movements within it, then character description, then environment, then camera angle and move, then lighting, and finally any change that occurs during the shot. Because generation is single-pass audio and video, describe the soundscape in the same paragraph (footsteps on gravel, distant traffic, a low room tone); ambient sound and effects come out markedly stronger than speech, so avoid hanging a shot on a spoken line. Camera language is understood natively and dedicated dolly and jib controls exist, so name the move plainly rather than implying it. Avoid timestamp syntax here — nothing in the documentation supports timecoded beats, and chronological prose is the supported way to sequence action."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 10,
+    "durations": null,
+    "aspectRatios": [
+     "16:9",
+     "9:16"
+    ],
+    "fps": null,
+    "resolutions": [
+     "720p",
+     "1080p",
+     "4K"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": true,
+    "seeds": true
+   },
+   "params": [
+    {
+     "name": "variant",
+     "type": "enum",
+     "values": [
+      "ltx-2.3-22b-dev",
+      "ltx-2.3-22b-distilled",
+      "ltx-2.3-22b-fast",
+      "ltx-2.3-22b-pro"
+     ],
+     "note": "The distilled build runs in as few as 8 denoising steps."
+    },
+    {
+     "name": "enhance_prompt",
+     "type": "boolean",
+     "note": "Automatic prompt enrichment before generation."
+    },
+    {
+     "name": "seed",
+     "type": "number",
+     "note": "Exposed in the official inference scripts."
+    },
+    {
+     "name": "guidance_scale",
+     "type": "number",
+     "values": [
+      "3-3.5 recommended"
+     ],
+     "note": "From the repository's own documentation."
+    },
+    {
+     "name": "num_frames",
+     "type": "number",
+     "note": "Must equal a multiple of 8 plus 1 (9, 17, 25 ... 257). Width and height must each be divisible by 32."
+    },
+    {
+     "name": "generate_audio",
+     "type": "boolean",
+     "note": "Parameter name comes from third-party API wrappers; the official spelling is unverified."
+    }
+   ],
+   "notes": "LTX-2 shipped January 6, 2026 as the first production-ready open-weights model combining 4K output, synchronized audio and open training code; LTX-2.3 is the current 22B-parameter checkpoint update, whose exact release date is unverified. Duration figures conflict across sources: audio-synced generation is documented around 10 seconds while third-party guides claim 6-20s or longer for the older non-audio pipeline, so maxDurationSec uses the conservative verified figure and durations is null. The frequently cited 50fps ceiling could not be confirmed against Lightricks' own material, so fps is null. Negative-prompt support is not mentioned in any official material and is set false meaning 'not documented'. Aspect ratios are inferred from the documented 1920x1080 and 1080x1920 outputs rather than from a published list."
+  },
+  {
+   "id": "kling",
+   "label": "Kling 3.0",
+   "vendor": "Kuaishou",
+   "kind": "video",
+   "dialect": {
+    "style": "structured-sections",
+    "guidance": "Order the prompt as scene, then characters, then action, then camera, then audio and style — Kling reads that progression reliably and loses coherence when the same information arrives scrambled. Use plain, explicit camera phrasing ('the camera slowly pushes in on her face') rather than layered cinematic jargon; simple statements outperform elaborate ones here, even though the model does understand terms like macro close-up, tracking shot and shot-reverse-shot. Audio and dialogue are generated natively in the same pass, so put spoken lines and sound design in the trailing audio-and-style section, attributing each line to a named character. Put quality and artifact exclusions in the separate negative_prompt field rather than the main text — this is one of the few models where a real negative field exists and works. Keep the described action within the clip's actual duration; asking for three distinct events in a five-second generation reliably produces a blur of all three."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 15,
+    "durations": [
+     5,
+     10
+    ],
+    "aspectRatios": [
+     "16:9",
+     "9:16",
+     "1:1"
+    ],
+    "fps": null,
+    "resolutions": [
+     "720p (std)",
+     "1080p (pro)",
+     "4K"
+    ]
+   },
+   "features": {
+    "negativePrompt": true,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": true,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "mode",
+     "type": "enum",
+     "values": [
+      "std",
+      "pro",
+      "4k"
+     ],
+     "note": "std is 720p, pro is 1080p, 4k is native rather than upscaled."
+    },
+    {
+     "name": "duration",
+     "type": "enum",
+     "values": [
+      5,
+      10
+     ],
+     "note": "Kling 3.0 advertises a 3-15s range while API documentation shows discrete 5/10 values; the two claims conflict."
+    },
+    {
+     "name": "negative_prompt",
+     "type": "string",
+     "note": "Standard use is artifact terms: blur, distortion, shaky camera, low quality."
+    },
+    {
+     "name": "cfg_scale",
+     "type": "number",
+     "values": [
+      "0-1, default 0.5"
+     ],
+     "note": "Higher values increase prompt adherence at the cost of motion flexibility. Was unsupported on 2.x models; its status on 3.0 is unverified."
+    },
+    {
+     "name": "camera_control",
+     "type": "object",
+     "note": "Structured camera parameter reported by API integrators; not confirmed against Kling's own reference."
+    },
+    {
+     "name": "aspect_ratio",
+     "type": "enum",
+     "values": [
+      "16:9",
+      "9:16",
+      "1:1"
+     ]
+    }
+   ],
+   "notes": "Kling 3.0 launched February 4, 2026 (confirmed via Kuaishou investor relations), with a faster Kling 3.0 Turbo variant following June 17, 2026. It generates synchronized video and audio in one pass with multi-language lip sync. Kling's own API documentation was unreachable, so parameter names and ranges were corroborated across multiple API integrators rather than the primary source. The 4K-at-60fps claim is third-party only, so fps is null. Max prompt length, seed support, and whether timestamped beat direction works are all unverified; the multi-shot toggle handles angle changes but is not confirmed to be timestamp-driven."
+  },
+  {
+   "id": "sora",
+   "label": "Sora 2",
+   "vendor": "OpenAI",
+   "kind": "video",
+   "dialect": {
+    "style": "structured-sections",
+    "guidance": "Open with a prose description of the scene, follow it with a short cinematography block (shot size, angle, lens, mood), then a bulleted list of action beats in order, then a separate dialogue block at the bottom. Format dialogue as one line per turn with a character name and quoted speech, keeping lines short and conversational — audio is generated natively and long speeches drift out of sync. Camera and lens language is rewarded and specific: name the shot ('medium close-up, eye level, 32mm spherical prime') rather than gesturing at a look. Timestamped beats using explicit second ranges do work and appear in OpenAI's own advanced examples, but they are presented as a professional shot-list technique rather than the default; plain ordered beats are the standard recommendation and are more forgiving. There is no negative prompt, so any exclusion has to be phrased as something affirmatively present in the frame."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 20,
+    "durations": [
+     4,
+     8,
+     12,
+     16,
+     20
+    ],
+    "aspectRatios": [
+     "16:9",
+     "9:16"
+    ],
+    "fps": null,
+    "resolutions": [
+     "1280x720",
+     "720x1280",
+     "1792x1024",
+     "1024x1792",
+     "1920x1080",
+     "1080x1920"
+    ]
+   },
+   "features": {
+    "negativePrompt": false,
+    "timecodeBeats": true,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": false
+   },
+   "params": [
+    {
+     "name": "model",
+     "type": "enum",
+     "values": [
+      "sora-2",
+      "sora-2-pro"
+     ],
+     "note": "Only sora-2-pro offers the 1024x1792, 1792x1024, 1080x1920 and 1920x1080 sizes."
+    },
+    {
+     "name": "seconds",
+     "type": "enum",
+     "values": [
+      4,
+      8,
+      12,
+      16,
+      20
+     ],
+     "note": "Default 4. Up to 6 extensions can chain a generation out to 120s total."
+    },
+    {
+     "name": "size",
+     "type": "enum",
+     "values": [
+      "1280x720",
+      "720x1280",
+      "1792x1024",
+      "1024x1792",
+      "1920x1080",
+      "1080x1920"
+     ]
+    },
+    {
+     "name": "input_reference",
+     "type": "string",
+     "note": "Acts as the first frame; must match the target output resolution exactly. JPEG, PNG or WebP."
+    }
+   ],
+   "notes": "SUNSET WARNING: OpenAI discontinued the Sora web and mobile apps on April 26, 2026, and notified developers that the Videos API and every sora-2 model snapshot will be removed from the API on September 24, 2026, with no replacement named. Any workflow targeting Sora should be treated as short-lived. Sora 2 itself shipped in late September 2025 and remains the current and final version — there is no Sora 3. Max prompt length and output fps are not published, so both are null. Up to 2 uploaded character references (2-4s reference clips) are supported per generation. There is no seed parameter and no structured camera-control parameter; camera direction is prompt text only."
+  },
+  {
+   "id": "veo",
+   "label": "Veo 3.1",
+   "vendor": "Google",
+   "kind": "video",
+   "dialect": {
+    "style": "structured-sections",
+    "guidance": "Follow Google's own five-part formula in order: cinematography, subject, action, context, then style and ambiance — the leading cinematography clause is what most reliably fixes the shot. Timestamp prompting is officially supported and is the strongest tool here: write beats as [00:00-00:02] with a shot description, and hang inline SFX: and Emotion: cues inside each beat to direct the native audio track alongside the picture. Dialogue is written as ordinary attributed prose with quoted speech (a woman turns and says, \"We have to leave now.\"), not as a screenplay-style character label. Use the negativePrompt field for artifact and style exclusions rather than writing 'no X' into the main prompt. Camera vocabulary is well understood — dolly, tracking, crane, aerial, slow pan, plus composition and lens terms — but there is no structured camera parameter, so it all lives in the prompt text, and the whole prompt must fit inside 1,024 tokens."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": 8,
+    "durations": [
+     4,
+     6,
+     8
+    ],
+    "aspectRatios": [
+     "16:9",
+     "9:16"
+    ],
+    "fps": [
+     24
+    ],
+    "resolutions": [
+     "720p",
+     "1080p",
+     "4k"
+    ]
+   },
+   "features": {
+    "negativePrompt": true,
+    "timecodeBeats": true,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": true
+   },
+   "params": [
+    {
+     "name": "durationSeconds",
+     "type": "enum",
+     "values": [
+      4,
+      6,
+      8
+     ],
+     "note": "Must be 8 when using 1080p, 4k, extension, or reference images."
+    },
+    {
+     "name": "aspectRatio",
+     "type": "enum",
+     "values": [
+      "16:9",
+      "9:16"
+     ],
+     "note": "16:9 is the default."
+    },
+    {
+     "name": "resolution",
+     "type": "enum",
+     "values": [
+      "720p",
+      "1080p",
+      "4k"
+     ],
+     "note": "720p is the default; 1080p and 4k require an 8s duration, and 4k is preview."
+    },
+    {
+     "name": "negativePrompt",
+     "type": "string",
+     "note": "Artifact and style exclusions, e.g. blurry, low quality, distorted."
+    },
+    {
+     "name": "seed",
+     "type": "number",
+     "note": "Improves reproducibility but is explicitly documented as not guaranteeing determinism."
+    },
+    {
+     "name": "image",
+     "type": "string",
+     "note": "Start-frame conditioning."
+    },
+    {
+     "name": "lastFrame",
+     "type": "string",
+     "note": "End-frame conditioning for interpolation between two stills."
+    },
+    {
+     "name": "referenceImages",
+     "type": "list",
+     "note": "Up to 3 reference images; forces an 8s duration."
+    },
+    {
+     "name": "personGeneration",
+     "type": "enum",
+     "values": [
+      "allow_all"
+     ],
+     "note": "Only this value is documented for text-to-video and extension."
+    }
+   ],
+   "notes": "Veo 3.1 is current, with fast and lite preview variants (veo-3.1-generate-preview, veo-3.1-fast-generate-preview). There is no Veo 4 — at Google I/O 2026 Google launched Gemini Omni as a separate parallel multimodal track rather than a Veo successor. The prompt limit is 1,024 tokens, confirmed on two official pages; the equivalent character count is not published, so maxChars is null. Native audio is always on for 3.1 with no documented disable flag. The negativePrompt capability is confirmed in Google's own prompting guide, though the exact camelCase parameter spelling is corroborated more strongly through API reference mirrors than a single canonical page."
+  },
+  {
+   "id": "comfyui",
+   "label": "ComfyUI (node graph)",
+   "vendor": "Comfy Org",
+   "kind": "node-graph",
+   "dialect": {
+    "style": "tag-list",
+    "guidance": "Emit two separate strings — a positive prompt and a negative prompt — since ComfyUI feeds them through two CLIP Text Encode nodes into the sampler's positive and negative conditioning inputs. Match the phrasing to the checkpoint: SD1.5 and SDXL are CLIP-based and respond best to comma-separated keyword tags in rough importance order, while Flux-family and other T5 or LLM-encoder models want natural-language sentences and treat tag soup as malformed input. Use (word:1.2) to emphasize and (word:0.8) to de-emphasize, where 1.0 is neutral; bare nested parentheses multiply by about 1.1 per level, so ((word)) is roughly 1.21, but explicit numeric weights are clearer and should be preferred. Textual-inversion embeddings are referenced inline as embedding:filename and work in either prompt, which is the usual home for quality-negative embeddings. Critically, Flux models run at CFG near 1, so the negative prompt has effectively no exclusion power there — leave it empty and state desired qualities positively ('hands with five clearly separated fingers') rather than negating defects."
+   },
+   "limits": {
+    "maxChars": null,
+    "maxDurationSec": null,
+    "durations": null,
+    "aspectRatios": null,
+    "fps": null,
+    "resolutions": [
+     "512x512 (SD1.5 native)",
+     "1024x1024 (SDXL and Flux native)"
+    ]
+   },
+   "features": {
+    "negativePrompt": true,
+    "timecodeBeats": false,
+    "imageInput": true,
+    "cameraControls": false,
+    "seeds": true
+   },
+   "params": [
+    {
+     "name": "seed",
+     "type": "number",
+     "note": "KSampler input; fixed seeds make A/B prompt comparisons meaningful."
+    },
+    {
+     "name": "steps",
+     "type": "number",
+     "note": "Commonly 20-30 for SDXL and lower for distilled or Flux graphs. Community consensus, not an official spec."
+    },
+    {
+     "name": "cfg",
+     "type": "number",
+     "note": "Typically 4-8 for SD1.5 and SDXL. Pinned near 1.0 for Flux, which is why negative prompts are inert there; Flux uses a FluxGuidance node instead."
+    },
+    {
+     "name": "sampler_name",
+     "type": "enum",
+     "values": [
+      "euler",
+      "dpmpp_2m",
+      "dpmpp_sde",
+      "uni_pc"
+     ],
+     "note": "Non-exhaustive; the available list depends on the installed build."
+    },
+    {
+     "name": "scheduler",
+     "type": "enum",
+     "values": [
+      "normal",
+      "karras",
+      "exponential",
+      "sgm_uniform"
+     ]
+    },
+    {
+     "name": "denoise",
+     "type": "number",
+     "values": [
+      "1.0 for text-to-image"
+     ],
+     "note": "Lower values set image-to-image strength."
+    },
+    {
+     "name": "width / height",
+     "type": "number",
+     "note": "Set on the Empty Latent Image node; match the checkpoint's native training resolution or a standard bucket to avoid duplication artifacts."
+    },
+    {
+     "name": "BREAK",
+     "type": "keyword",
+     "note": "Not native to ComfyUI. Requires a custom node such as CLIPTextEncodeBREAK; segments a prompt into independently encoded chunks to stop concepts bleeding across the 75-token boundary."
+    }
+   ],
+   "notes": "These are stable graph conventions rather than a versioned product, so nothing here is tied to a release date. Weighting is implemented as interpolation toward a neutral embedding rather than a naive multiply, which is why very high weights degrade rather than intensify. BREAK is an imported convention from other UIs and needs a custom node installed. Recommended numeric ranges for steps, cfg and samplers are community consensus — ComfyUI core publishes no prescriptive settings document — so treat them as starting defaults, not verified specifications. The negativePrompt flag is true because the graph always exposes the input, even though it is functionally inert on Flux-family checkpoints."
+  }
+ ]
+}
