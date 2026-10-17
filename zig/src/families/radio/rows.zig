@@ -74,7 +74,14 @@ pub const Rows = struct {
 pub fn cut(sp: Span, lo: u32, hi: u32) ?[3]u32 {
     const from = @max(lo, sp.at);
     const to = @min(hi, sp.at + sp.n);
-    return if (from < to) .{ from, sp.row + from - sp.at, to - from } else null;
+    return if (from < to) .{ from, sp.row + (from - sp.at), to - from } else null; // the offset first: no u32 overflow
+}
+
+test "a cut near the top of the u32 range takes its offset before adding the buffer row" {
+    const sp: Span = .{ .at = 0xffffff00, .n = 128, .row = 256, .image = 0 };
+    try std.testing.expectEqual([3]u32{ 0xffffff00, 256, 0x40 }, cut(sp, 0xffffff00, 0xffffff40).?);
+    try std.testing.expectEqual([3]u32{ 0xffffff40, 320, 0x40 }, cut(sp, 0xffffff40, 0xffffffff).?);
+    try std.testing.expect(cut(sp, 0xffffff80, 0xffffffff) == null);
 }
 
 test "a pass from a restored point plans only the images that end past it, rows back to back" {
