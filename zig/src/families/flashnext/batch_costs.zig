@@ -130,3 +130,10 @@ test "timing needs the scratch prompt and the widest window past it" {
     try std.testing.expect(fits(ROWS));
     try std.testing.expect(!fits(160)); // --context 128's sessions
 }
+
+pub fn facts(b: anytype) lanes.Model {
+    const c: ?*const Costs = if (b.costs) |*x| x else null;
+    // Timed forwards price shared rounds; each extra draft costs one chained head step.
+    const lone_priced = c != null and std.c.getenv("FZ_LONE_UNPRICED") == null; // not `lone`: that names the lone driver
+    return .{ .exact_width = fz.MAXR, .first_copy_rows = 4, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 8, .streams_exact = true, .hidden_rows = true, .batch_rows = fz.MAXR, .max_streams = @intCast(b.sessions.len), .draft_streams = !b.serial_drafts, .shared_costs = if (c) |x| &x.shared else &.{}, .draft_step_ms = if (c != null and !b.serial_drafts) c.?.step_ms else 0, .window_costs = if (lone_priced) &c.?.shared else &.{}, .mtp_step_ms = if (lone_priced) c.?.step_ms else 0 };
+}

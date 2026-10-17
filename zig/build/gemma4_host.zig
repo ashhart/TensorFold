@@ -31,6 +31,7 @@ pub fn tests(b: *std.Build, sources: *std.Build.Module) *std.Build.Step {
 
 pub fn compileHost(b: *std.Build, metal: *std.Build.Module, engine: *std.Build.Module, lanes: *std.Build.Module, sources: *std.Build.Module) void {
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/contract/metal_main.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+    runner.addImport("h3_kernels", b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/h3/kernels.zig") }));
     const contract_root = b.createModule(.{ .root_source_file = b.path("zig/gemma4_contract_compile.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "runner", .module = runner }} });
     const contract_object = b.addObject(.{ .name = "gemma4-contract-compile", .root_module = contract_root });
     _ = contract_object.getEmittedBin();

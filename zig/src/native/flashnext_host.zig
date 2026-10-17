@@ -11,6 +11,8 @@ const disk = @import("flashnext_disk.zig");
 const Snaps = @import("flashnext_snaps.zig").Snaps;
 const Resident = @import("resident.zig").Resident;
 const images = @import("flashnext_images.zig");
+const holdResident = @import("flashnext_residency.zig").hold;
+const dropResident = @import("flashnext_residency.zig").drop;
 const Allocator = std.mem.Allocator;
 
 const Job = struct {
@@ -494,19 +496,6 @@ pub fn openWarmed(gpa: Allocator, io: std.Io, eng: *fx.Engine, window: i64, cach
     return h;
 }
 
-/// The engine's buffers in one residency set the idle keepalive's ticks use; buffers made later join it or stay out.
-fn holdResident(h: *Host) !void {
-    var list: std.ArrayList(mtl.Buffer) = .empty;
-    defer list.deinit(h.gpa);
-    try list.appendSlice(h.gpa, h.eng.r.held.items);
-    if (h.vis) |v| try list.appendSlice(h.gpa, &v.buffers());
-    h.resident = try Resident.holdUnder(h.gpa, h.io, h.eng.r.device, h.eng.r.queue, list.items, "flash next", if (h.load_limit > 0) h.load_limit else null) orelse return;
-    const r = &h.resident.?;
-    h.warm = r.target();
-    h.eng.r.follow = r.follow();
-    h.eng.snap_pool.follow = r.follow(); // kept states' buffers join it, and leave it before they are freed
-}
-
 /// Info.vision's video prepare: on the HTTP thread.
 fn prepareVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens: u32, max_frames: u32) anyerror!api.PreparedVideo {
     const h: *Host = @ptrCast(@alignCast(ctx));
@@ -517,16 +506,6 @@ fn prepareVideo(ctx: *anyopaque, a: Allocator, src: api.VideoSource, max_tokens:
 fn prepareImage(ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
     const h: *Host = @ptrCast(@alignCast(ctx));
     return images.prepare(h.vis.?, h.io, a, bytes, max_tokens);
-}
-
-/// The set released; the engine's allocators stop reporting to it first.
-fn dropResident(h: *Host) void {
-    const r = if (h.resident) |*x| x else return;
-    h.eng.r.follow = null;
-    h.eng.snap_pool.follow = null;
-    r.deinit();
-    h.resident = null;
-    h.warm = .{ .queue = h.eng.r.queue };
 }
 
 fn follow(eng: *fx.Engine) void {

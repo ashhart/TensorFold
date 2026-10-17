@@ -83,18 +83,18 @@ pub const Masks = struct {
 pub fn draw(gpa: std.mem.Allocator, row: []const u16, mask: []const u32, sampling: ?lanes.Sampling, position: u32) !u32 {
     const v = try gpa.alloc(f32, row.len);
     defer gpa.free(v);
-    var any = false;
+    var best: ?u32 = null;
     for (v, row, 0..) |*x, h, i| {
         const on = lanes.grammar.allows(mask, i);
         x.* = if (on) @bitCast(@as(u32, h) << 16) else -std.math.inf(f32);
-        any = any or on;
+        if (x.* > -std.math.inf(f32) and (best == null or x.* > v[best.?])) best = @intCast(i);
     }
-    if (!any) return error.NoAllowedToken;
-    if (sampling) |s| return lanes.gpu_full.sample(gpa, v, s, position, null);
-    var at: u32 = 0;
-    for (v, 0..) |x, i| if (x > v[at]) {
-        at = @intCast(i);
-    };
+    const at = best orelse return error.NoAllowedToken;
+    if (sampling) |s| {
+        const picked = try lanes.gpu_full.sample(gpa, v, s, position, null);
+        if (!lanes.grammar.allows(mask, picked) or !(v[picked] > -std.math.inf(f32))) return error.NoAllowedToken;
+        return picked;
+    }
     return at;
 }
 

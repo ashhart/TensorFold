@@ -85,12 +85,7 @@ pub const Backend = struct {
         return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
     }
 
-    pub fn facts(b: *Backend) lanes.Model {
-        const c: ?*const batch_costs.Costs = if (b.costs) |*x| x else null;
-        // Timed forwards price shared rounds; each extra draft costs one chained head step.
-        const lone_priced = c != null and std.c.getenv("FZ_LONE_UNPRICED") == null; // not `lone`: that names the lone driver
-        return .{ .exact_width = fz.MAXR, .first_copy_rows = 4, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 8, .streams_exact = true, .hidden_rows = true, .batch_rows = fz.MAXR, .max_streams = @intCast(b.sessions.len), .draft_streams = !b.serial_drafts, .shared_costs = if (c) |x| &x.shared else &.{}, .draft_step_ms = if (c != null and !b.serial_drafts) c.?.step_ms else 0, .window_costs = if (lone_priced) &c.?.shared else &.{}, .mtp_step_ms = if (lone_priced) c.?.step_ms else 0 };
-    }
+    pub const facts = batch_costs.facts;
 
     fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));

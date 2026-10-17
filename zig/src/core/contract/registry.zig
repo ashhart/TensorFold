@@ -587,3 +587,6 @@ test {
     _ = paging;
     _ = glm;
 }
+
+/// The live collector includes unmeasured Metal pipelines as well as the measured declarations.
+pub const all_metal = metal ++ @import("flashnext_pending.zig").records;

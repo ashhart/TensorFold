@@ -553,6 +553,7 @@ pub const LaneHost = struct {
 };
 
 test {
+    _ = @import("lane_host_frame_test.zig");
     _ = @import("lane_host_test.zig");
     _ = @import("lane_rounds_test.zig");
     _ = @import("lane_halt_test.zig");
