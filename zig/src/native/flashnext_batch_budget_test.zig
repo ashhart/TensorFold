@@ -10,7 +10,7 @@ fn plan(cap: u64, ready: u64, gib: ?f64, over: bool) !batch.Reservation {
     return batch.reserve(cap, ready, policy.margin, f.budget, gib != null, over);
 }
 
-test "T49 unset cache reserves the single-host default before automatic sessions" {
+test "unset cache reserves the single-host default before automatic sessions" {
     const r = try plan(80 * GiB, 40 * GiB, null, false);
     try std.testing.expectEqual(@as(u64, 16 * GiB), r.cache);
     try std.testing.expectEqual(r.cache, r.reserved);
@@ -24,7 +24,7 @@ test "T49 unset cache reserves the single-host default before automatic sessions
     try std.testing.expectEqual(@as(u64, 16 * GiB), override_without_value.reserved);
 }
 
-test "T49 explicit cache values include zero and retain override semantics" {
+test "explicit cache values include zero and retain override semantics" {
     const r = try plan(80 * GiB, 40 * GiB, 8, false);
     try std.testing.expectEqual(@as(u64, 8 * GiB), r.cache);
     try std.testing.expectEqual(@as(u64, 8 * GiB), r.reserved);
@@ -42,7 +42,7 @@ test "T49 explicit cache values include zero and retain override semantics" {
     try std.testing.expectEqual(@as(u64, 38 * GiB), over.sessions);
 }
 
-test "T49 default is bounded by available room and cannot wrap at the ceiling" {
+test "default is bounded by available room and cannot wrap at the ceiling" {
     for ([_]u64{ 0, 1, 2 * GiB, 4 * GiB, 16 * GiB, 17 * GiB, std.math.maxInt(u64) }) |room| {
         const r = try plan(std.math.maxInt(u64), std.math.maxInt(u64) - room, null, false);
         const available = room -| policy.margin;
@@ -54,7 +54,7 @@ test "T49 default is bounded by available room and cannot wrap at the ceiling" {
     try std.testing.expectEqual(@as(u64, 0), past.sessions);
 }
 
-test "T49 startup names session and prompt-cache budgets on the served line" {
+test "startup names session and prompt-cache budgets on the served line" {
     var bytes: [512]u8 = undefined;
     var w: std.Io.Writer = .fixed(&bytes);
     try batch.startup(&w, 6, "262112,262112", try plan(80 * GiB, 40 * GiB, null, false), false, true);
@@ -70,7 +70,7 @@ test "T49 startup names session and prompt-cache budgets on the served line" {
     try std.testing.expect(std.mem.indexOf(u8, w.buffered(), "serial MTP") != null);
 }
 
-test "T49 measured sessions cannot shrink the chosen cache or spend its reservation" {
+test "measured sessions cannot shrink the chosen cache or spend its reservation" {
     const r = try plan(80 * GiB, 40 * GiB, null, false);
     const fitted = try batch.afterSessions(r, 80 * GiB, 62 * GiB, policy.margin);
     try std.testing.expectEqual(@as(u64, 16 * GiB), fitted.cache);
