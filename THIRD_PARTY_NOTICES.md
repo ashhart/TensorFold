@@ -153,6 +153,11 @@ unmodified `encoding/encoding_dsv4.py` of
 The MTP layer that engine drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`. The native engine has no DeepSeek-V4 family and ships none of these files.
 
+`zig/kernels/cuda/ggml_iq2xxs_tables.cuh` holds [ggml](https://github.com/ggml-org/ggml)'s IQ2_XXS grid and sign
+tables as `ggml-common.h` defines them, MIT License, Copyright (c) 2023-2026 The ggml authors (the license text is
+below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0 kernels that use them for Nemotron 3.5
+Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
+
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
 without derivatives; only the Python engine reads that drafter. Each checkpoint keeps its own license.
