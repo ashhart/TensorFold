@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const h3 = @import("cuda.zig");
+const bounds = @import("cuda_bounds.zig");
 const Model = h3.Model;
 const head_dim = h3.head_dim;
 const slot_tile = h3.slot_tile;
@@ -63,37 +64,36 @@ fn pair(self: *Model, bytes: usize, zero: bool) ![2]u64 {
 pub fn prepare(self: *Model, rows: usize, tiles: usize, prefix: usize, keep: usize, slot: u64, own0: usize, own1: usize, exchange: bool) !void {
     const g = &self.geometry;
     if (g.rows == rows and g.tiles == tiles and g.prefix == prefix and g.keep == keep and g.own0 == own0 and g.own1 == own1 and g.exchange == exchange) return;
-    release(self);
-    const hidden = self.hidden;
-    const inner = self.inner;
-    const heads = self.heads;
-    const slots = tiles * slot_tile;
-    g.y = try buffer(self, rows * hidden * 2, false);
-    g.xn = try buffer(self, rows * hidden * 2, false);
-    g.qkvc = try buffer(self, rows * 4 * inner * 2, false);
-    // slots past a tile's real rows are never written: they stay zero
-    g.tq = try buffer(self, heads * slots * head_dim * 2, true);
-    g.tk = try pair(self, heads * slots * head_dim * 2, true);
-    g.tv = try pair(self, heads * slots * head_dim * 2, true);
-    g.qp = try buffer(self, heads * tiles * head_dim * 4, false);
-    g.kp = try pair(self, heads * tiles * head_dim * 4, false);
-    g.vp = try pair(self, heads * tiles * head_dim * 4, false);
+    // every size, and the exchange region's, checked before anything is released or allocated
+    const sz = try bounds.bytes(.{ .rows = rows, .tiles = tiles, .prefix = prefix, .keep = keep, .hidden = self.hidden, .inner = self.inner, .heads = self.heads, .mlp = self.mlp, .head_dim = head_dim, .slot_tile = slot_tile, .exchange = exchange });
     if (exchange) {
         // ranks exchange through the registered region, tile after tile, in the half of the block's parity
         const t = &self.tp.?;
-        g.unit = heads * (2 * slot_tile * head_dim * 2 + 2 * head_dim * 4);
-        g.half = (tiles * g.unit + 4095) / 4096 * 4096;
-        if (2 * g.half > t.region.bytes.len) {
-            std.debug.print("tensorfold h3: the exchange region holds {d} MB, this sequence needs {d} MB\n", .{ t.region.bytes.len >> 20, (2 * g.half) >> 20 });
+        if (sz.region > t.region.bytes.len) {
+            std.debug.print("tensorfold h3: the exchange region holds {d} MB, this sequence needs {d} MB\n", .{ t.region.bytes.len >> 20, sz.region >> 20 });
             return error.RegionTooSmall;
         }
     }
-    g.scores = try buffer(self, heads * tiles * tiles * 4, false);
-    g.chosen = try buffer(self, heads * @max(tiles - prefix, 1) * (prefix + keep) * 4, false);
-    g.coarse = try buffer(self, heads * tiles * head_dim * 4, false);
-    g.ya = try buffer(self, rows * inner * 2, false);
-    g.wide = try buffer(self, rows * 2 * self.mlp * 2, false);
-    g.act = try buffer(self, rows * self.mlp * 2, false);
+    release(self);
+    const slots = tiles * slot_tile;
+    g.y = try buffer(self, sz.stream, false);
+    g.xn = try buffer(self, sz.stream, false);
+    g.qkvc = try buffer(self, sz.qkvc, false);
+    // slots past a tile's real rows are never written: they stay zero
+    g.tq = try buffer(self, sz.tiled, true);
+    g.tk = try pair(self, sz.tiled, true);
+    g.tv = try pair(self, sz.tiled, true);
+    g.qp = try buffer(self, sz.pooled, false);
+    g.kp = try pair(self, sz.pooled, false);
+    g.vp = try pair(self, sz.pooled, false);
+    g.unit = sz.unit;
+    g.half = sz.half;
+    g.scores = try buffer(self, sz.scores, false);
+    g.chosen = try buffer(self, sz.chosen, false);
+    g.coarse = try buffer(self, sz.pooled, false);
+    g.ya = try buffer(self, sz.ya, false);
+    g.wide = try buffer(self, sz.wide, false);
+    g.act = try buffer(self, sz.act, false);
     // the row at each slot (or -1), and the list of every tile
     const row_of = try self.gpa.alloc(i32, slots);
     defer self.gpa.free(row_of);
@@ -111,9 +111,9 @@ pub fn prepare(self: *Model, rows: usize, tiles: usize, prefix: usize, keep: usi
     const all = try self.gpa.alloc(i32, tiles);
     defer self.gpa.free(all);
     for (all, 0..) |*t, i| t.* = @intCast(i);
-    g.row_of = try buffer(self, slots * 4, false);
+    g.row_of = try buffer(self, sz.row_of, false);
     try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(row_of));
-    g.all = try buffer(self, tiles * 4, false);
+    g.all = try buffer(self, sz.all, false);
     try g.buffers[g.used - 1].upload(0, std.mem.sliceAsBytes(all));
     g.rows = rows;
     g.tiles = tiles;
