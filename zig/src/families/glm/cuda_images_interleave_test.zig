@@ -101,3 +101,49 @@ test "an image stream's rows survive a shorter text stream between its prompt ch
 test "a stream's media rows survive another stream's different media between its prompt chunks" {
     try run(true);
 }
+
+test "slot 0's stream released while another slot is bound leaves that slot's own release whole" {
+    const a = std.testing.allocator;
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = Fake.alloc;
+    d.api.cuMemFree_v2 = Fake.free;
+    d.api.cuMemcpyHtoD_v2 = Fake.upload;
+    d.api.cuMemcpyHtoDAsync_v2 = Fake.uploadAsync;
+    d.api.cuStreamSynchronize = Fake.sync;
+    d.api.cuLaunchKernel = Fake.launch;
+    const stream: cuda.Stream = .{ .d = &d, .handle = @ptrFromInt(0x55) };
+    var map: [2049]i32 = undefined;
+    var v: Images = undefined;
+    v.gpa = a;
+    v.d = &d;
+    v.limits = .{ .image_tokens = 4, .max_images = 2 };
+    v.video_ids = null;
+    v.spans = .empty;
+    v.slot = 0;
+    v.saved = .empty;
+    v.rows = .{ .d = &d, .ptr = 0x1000, .len = 4096, .borrowed = true };
+    v.map = .{ .d = &d, .ptr = 0x2000, .len = 8196, .borrowed = true };
+    v.host_map = &map;
+    v.run.stream = stream;
+    v.run.f.inject = .{ .d = &d, .handle = null };
+    defer {
+        var it = v.saved.valueIterator();
+        while (it.next()) |state| {
+            state.rows.free();
+            state.spans.deinit(a);
+        }
+        v.saved.deinit(a);
+        v.rows.free();
+        v.spans.deinit(a);
+    }
+    try v.take(0, &.{ 1, 2, 0 });
+    try v.take(5, &.{ 3, 1, 0 }); // slot 0's rows and spans are put aside
+    v.release(0); // slot 0's stream ends first: its rows go
+    v.release(5); // then slot 5's: its buffer is slot 0's from here
+    try std.testing.expectEqual(@as(u32, 0), v.slot);
+    try std.testing.expectEqual(@as(usize, 0), v.spans.items.len);
+    try std.testing.expectEqual(@as(usize, 0), v.saved.count());
+    try v.take(0, &.{ 1, 2, 0 });
+    try v.splice(stream, 0, 0, 4, 0x3000, 1);
+    try std.testing.expectEqualSlices(i32, &.{ -1, 0, 1, -1 }, map[0..4]);
+}

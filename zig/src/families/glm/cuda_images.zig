@@ -130,11 +130,12 @@ pub const Images = struct {
             v.clear();
             return;
         }
-        v.rows.free();
-        v.spans.deinit(v.gpa);
-        const zero = v.saved.fetchRemove(0).?.value;
-        v.rows = zero.rows;
-        v.spans = zero.spans;
+        if (v.saved.fetchRemove(0)) |zero| { // slot 0's rows and spans as its stream left them
+            v.rows.free();
+            v.spans.deinit(v.gpa);
+            v.rows = zero.value.rows;
+            v.spans = zero.value.spans;
+        } else v.clear(); // slot 0's stream ended while this slot was bound: this buffer is slot 0's now
         v.slot = 0;
     }
 
