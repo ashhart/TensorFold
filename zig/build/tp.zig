@@ -51,7 +51,9 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
         module(b, host, .debug, runtime(b, host, .debug))
     else
         portable }));
-    b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests").dependOn(&tests.step);
+    const tp_step = b.step("test-tp", "TP bootstrap, failure, settings and in-process transport tests");
+    tp_step.dependOn(&tests.step);
+    tp_step.dependOn(cli_step);
     test_step.dependOn(&tests.step);
     const linux = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, linux, .debug);
@@ -82,6 +84,15 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             check.expectStdErrEqual(cli.usage);
             cli_step.dependOn(&check.step);
             test_step.dependOn(&check.step);
+        }
+        if (image == null) {
+            const kernel = b.addRunArtifact(exe);
+            kernel.addArg("kernel");
+            kernel.setEnvironmentVariable("TF_TP_WORLD", "invalid");
+            kernel.expectExitCode(1);
+            kernel.expectStdErrEqual("mailbox kernel 0 B\n");
+            cli_step.dependOn(&kernel.step);
+            test_step.dependOn(&kernel.step);
         }
     }
     b.installArtifact(exe);
