@@ -31,14 +31,14 @@ fn fixture(c: *ck.Checkpoint) !void {
     try add(c, "vision_model.positional_embedding", &.{ 52 * 52, w });
 }
 
-test "T50 tower projector requires the language width it actually writes" {
+test "step5 host: tower projector requires the language width it actually writes" {
     try production.requireHidden(4096);
     for ([_]u32{ 0, 128, 4095, 4097, std.math.maxInt(u32) }) |hidden| {
         try std.testing.expectError(error.UnsupportedStep5Tower, production.requireHidden(hidden));
     }
 }
 
-test "T50 every tower tensor validates its axes before any GPU allocation" {
+test "step5 host: every tower tensor validates its axes before any GPU allocation" {
     var cp = ck.Checkpoint.init(std.testing.allocator);
     defer cp.deinit();
     try fixture(&cp);
@@ -54,7 +54,7 @@ test "T50 every tower tensor validates its axes before any GPU allocation" {
     }
 }
 
-test "T50 tower same-count transposes and invalid byte extents are refused" {
+test "step5 host: tower same-count transposes and invalid byte extents are refused" {
     var cp = ck.Checkpoint.init(std.testing.allocator);
     defer cp.deinit();
     try fixture(&cp);
@@ -66,7 +66,7 @@ test "T50 tower same-count transposes and invalid byte extents are refused" {
     try std.testing.expectError(error.UnexpectedStep5Tensor, production.validate(&cp, 4096));
 }
 
-test "T50 malformed tower returns before an undefined device or pipeline is used" {
+test "step5 host: malformed tower returns before an undefined device or pipeline is used" {
     var cp = ck.Checkpoint.init(std.testing.allocator);
     defer cp.deinit();
     try fixture(&cp);
@@ -75,7 +75,7 @@ test "T50 malformed tower returns before an undefined device or pipeline is used
     try std.testing.expectError(error.UnexpectedStep5Tensor, production.Vision.load(std.testing.allocator, undefined, &cp, 4096));
 }
 
-test "T50 tower equivalent flattened patch and singleton-batch position layouts stay admitted" {
+test "step5 host: tower equivalent flattened patch and singleton-batch position layouts stay admitted" {
     var cp = ck.Checkpoint.init(std.testing.allocator);
     defer cp.deinit();
     try fixture(&cp);

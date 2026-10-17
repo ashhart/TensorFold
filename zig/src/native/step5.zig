@@ -170,7 +170,7 @@ const CacheFixture = struct {
     }
 };
 
-test "T50 cache callback updates the owned store rather than a temporary value" {
+test "step5 host: cache callback updates the owned store rather than a temporary value" {
     var f: CacheFixture = .{};
     var h: Host = undefined;
     h.cache_cap = 500;
@@ -182,7 +182,7 @@ test "T50 cache callback updates the owned store rather than a temporary value" 
     try std.testing.expectEqual(@as(u64, 500), h.cache.?.budget);
 }
 
-test "T50 cache callback evicts from the real store and preserves the restored entry" {
+test "step5 host: cache callback evicts from the real store and preserves the restored entry" {
     var f: CacheFixture = .{};
     var h: Host = undefined;
     h.cache_cap = 1000;
@@ -209,7 +209,7 @@ test "T50 cache callback evicts from the real store and preserves the restored e
     try std.testing.expectEqual(@as(u64, 2), store.counts.evicted);
 }
 
-test "T50 cache callback with no configured cache leaves no state to mutate" {
+test "step5 host: cache callback with no configured cache leaves no state to mutate" {
     var h: Host = undefined;
     h.cache = null;
     fitCache(&h, 0, null, &.{});

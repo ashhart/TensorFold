@@ -14,7 +14,7 @@ fn accept(w: Tensor, s: Tensor, b: Tensor, stack: usize, n: usize, k: usize) !vo
     _ = try production.checkedAffine(w, s, b, stack, n, k);
 }
 
-test "T50 affine expert axes cannot be replaced by equal element counts" {
+test "step5 host: affine expert axes cannot be replaced by equal element counts" {
     const w = tensor(.u32, &.{ 4, 16, 8 });
     const s = tensor(.bf16, &.{ 4, 16, 1 });
     try accept(w, s, s, 4, 16, 128);
@@ -24,7 +24,7 @@ test "T50 affine expert axes cannot be replaced by equal element counts" {
     try std.testing.expectError(error.UnexpectedStep5Tensor, accept(w, tensor(.bf16, &.{ 64, 1 }), s, 4, 16, 128));
 }
 
-test "T50 affine invalid rank bytes and packed widths return named errors without traps" {
+test "step5 host: affine invalid rank bytes and packed widths return named errors without traps" {
     var w = tensor(.u32, &.{ 4, 16, 8 });
     const s = tensor(.bf16, &.{ 4, 16, 1 });
     for ([_]usize{ 0, 1, 2, 4, std.math.maxInt(usize) }) |rank| {

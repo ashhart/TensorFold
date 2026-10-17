@@ -191,7 +191,7 @@ test "a sliced Step-5 config: kinds, spans, thetas and the dense limit" {
     }
 }
 
-test "T50 expert geometry is refused by the serialized config before loading" {
+test "step5 host: expert geometry is refused by the serialized config before loading" {
     const fixture = @embedFile("config_fixture.json");
     const Case = struct { from: []const u8, to: []const u8 };
     const cases = [_]Case{
@@ -209,7 +209,7 @@ test "T50 expert geometry is refused by the serialized config before loading" {
     }
 }
 
-test "T50 expert endpoints and released rotary refusals stay admitted or refused" {
+test "step5 host: expert endpoints and released rotary refusals stay admitted or refused" {
     var c = Config{};
     try validateExperts(&c);
     for ([_]u32{ 4, 512 }) |experts| for ([_]u32{ 1, @min(experts, 16) }) |topk| {
