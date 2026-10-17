@@ -4,7 +4,8 @@ The native CUDA build serves Flash Next (`qwen4_exp`) on one NVIDIA GPU from an 
 with its MTP head, on kernels built in this repository. A set of the Python 0.6.1 engine's Triton kernels, captured
 and packed, can stand in for its glue to compare against that engine's teacher path. @AdrianBinDC started the port in
 [#476](https://github.com/ashhart/TensorFold/pull/476); it is tracked in
-[#472](https://github.com/ashhart/TensorFold/issues/472). It has been run on a GB10 (sm_121) only.
+[#472](https://github.com/ashhart/TensorFold/issues/472). Its authors ran the model on a GB10 (sm_121); our kernel tests
+also pass on an RTX PRO 6000 (sm_120).
 
 ## Experimental ModelOpt and two-rank path
 
@@ -65,8 +66,9 @@ The family supplies its config check, weight loading and packing, the layer grap
 (`flashnext_hc.cu`), attention with its gate and the sparse indexer's pooling, scores and block selection
 (`flashnext_attn.cu`, `flashnext_batch.cu`), the Gated DeltaNet chain, the n-gram gather and the MTP head.
 
-Every kernel keeps a row's own sums in a fixed order, so a row's bits are the same at any width: drafted windows equal
-serial decoding, rounds equal lone streams, and resumed prompts equal fresh ones. The glue kernels round to bf16 where
+The text path's kernels keep each row's own sums in a fixed order, so a row's bits are the same at any width; the
+authors' text checks below compare drafted, concurrent and resumed replies with their plain, solo and fresh controls.
+Images, through the cuBLASLt tower, are not qualified that way yet. The glue kernels round to bf16 where
 the Python engine's do, with IEEE division and square root and a within-one-ulp exp; the router and the 4-bit
 hyper-connection dots run on mma tiles with K in ascending order.
 
