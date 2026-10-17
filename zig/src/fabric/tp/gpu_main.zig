@@ -73,10 +73,13 @@ fn hca(cfg: tp.Config, io: std.Io) !u8 {
     var buf: [tp.roce_pick.list_bytes + 16]u8 = undefined;
     const line = tp.roce_pick.hcaLine(pick, &specs, &buf) catch |e| {
         const why = switch (e) {
-            error.NoRoceDevice => "no active Ethernet RDMA port with an IPv4 RoCE v2 GID on this host",
-            error.NoSharedSubnet => "no RoCE port here shares an IPv4 /24 with the peer's",
+            error.LibraryUnavailable => "could not load libibverbs.so.1 (LibraryUnavailable); check the RDMA userspace installation",
+            error.MissingSymbol => "libibverbs.so.1 lacks required symbols (MissingSymbol); check the RDMA userspace installation",
+            error.NoRoceDevice => "no active Ethernet RDMA port with an IPv4 RoCE v2 GID on this host: name the peer's ports in TF_TP_ROCE_HCA or NCCL_IB_HCA",
+            error.NoSharedSubnet => "no RoCE port here shares an IPv4 /24 with the peer's: name the peer's ports in TF_TP_ROCE_HCA or NCCL_IB_HCA",
+            else => @errorName(e),
         };
-        std.debug.print("FAIL hca rank {d}: {s}: name the peer's ports in TF_TP_ROCE_HCA or NCCL_IB_HCA\n", .{ cfg.rank, why });
+        std.debug.print("FAIL hca rank {d}: {s}\n", .{ cfg.rank, why });
         return 1;
     };
     var names: [tp.roce_pick.list_bytes]u8 = undefined;
