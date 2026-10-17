@@ -114,7 +114,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    defer up.engine.close(up.engine.ctx);
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.closeOnce();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
     record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
@@ -122,6 +123,7 @@ pub fn main(init: std.process.Init) !u8 {
     };
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
+        .stop = .{ .ctx = &closer, .close = Closer.close },
         .engine = up.engine.engine,
         .text = up.text.text(),
         .served = served,
@@ -134,6 +136,22 @@ pub fn main(init: std.process.Init) !u8 {
         .forget_fail = if (comptime @import("build_options").slide_test_hooks) forgetFail(init.environ_map) else 0,
     });
 }
+
+/// Closes once: serve.run closes the engine before freeing the server, main's defer covers paths that end before it.
+const Closer = struct {
+    opened: engines.Opened,
+    closed: bool = false,
+
+    fn closeOnce(c: *Closer) void {
+        if (c.closed) return;
+        c.closed = true;
+        c.opened.close(c.opened.ctx);
+    }
+
+    fn close(ctx: *anyopaque) void {
+        closeOnce(@ptrCast(@alignCast(ctx)));
+    }
+};
 
 /// TF_SLIDE_FORGET_FAIL in a -Dslide-test-hooks build: the fact whose check a delete fails, so its put-back is seen.
 fn forgetFail(env: *const std.process.Environ.Map) u32 {
