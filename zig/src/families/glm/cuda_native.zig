@@ -116,15 +116,18 @@ fn warmPeers(d: *const cuda.Driver, g: *const cuda.tp_group.Group) !void {
     try s.synchronize();
 }
 
-/// TF_ROCE_MAX_KB: a RoCE gather's largest shard (default 4096 KiB; 512 cost glm_cuda 24-43% at 8 streams).
-fn roceCap() usize {
-    const v = std.c.getenv("TF_ROCE_MAX_KB") orelse return 4096 << 10;
-    return (std.fmt.parseInt(usize, std.mem.span(v), 10) catch 4096) << 10;
+/// TF_ROCE_MAX_KB in KiB, bounded by the RDMA scatter/gather length before any allocation.
+pub fn roceBytes(text: ?[]const u8) !usize {
+    const v = text orelse return 4096 << 10;
+    const n = std.fmt.parseInt(usize, v, 10) catch return error.BadRoceCap;
+    if (n == 0 or n > std.math.maxInt(u32) / 1024) return error.BadRoceCap;
+    return std.math.mul(usize, n, 1024) catch return error.BadRoceCap;
 }
 
 pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kernels: ?[]const u8, o: Options) !Loaded {
     _ = kernels; // our own kernels: a captured set is not used
     const p = try place();
+    const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     var problem: []const u8 = "";
     const set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
@@ -133,14 +136,14 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     };
     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
-    return openRank(gpa, io, ctx, dir, o, p, set) catch |err| {
+    return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
         cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this rank's error
         return err;
     };
 }
 
 /// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
-fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings) !Loaded {
+fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings, roce_bytes: usize) !Loaded {
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -169,7 +172,7 @@ fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         };
     }
     errdefer if (own.e.images) |v| v.deinit();
-    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roceCap()); // both ranks bring it up or neither does
+    try own.group.openRoce(gpa, io, ctx.d, own.e.stream, roce_bytes); // both ranks bring it up or neither does
     errdefer if (own.group.fast) |f| f.deinit();
     own.e.group = &own.group;
     own.link = try follow.Link.init(gpa, ctx.d, &own.group.lib, own.group.comm, own.e.stream, try linkCapacity(cap, o.vision));
@@ -266,6 +269,7 @@ fn close(ptr: *anyopaque) void {
 /// The server's words for this family's refusals.
 pub fn explain(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.BadRoceCap => "TF_ROCE_MAX_KB: give an integer from 1 through 4194303 KiB, or unset it for 4096 KiB",
         error.NoRank => "GLM-5.3-Flash runs at TP over hosts: set TF_GLM_RANK and TF_GLM_WORLD on every host (WORLD 1: one GPU, with TF_GLM_LAYERS for a thin model)",
         error.NoCommId => "GLM-5.3-Flash's ranks meet over NCCL: with TF_GLM_WORLD 2 or more, set NCCL_COMM_ID to rank 0's address:port on every host",
         error.RankMismatch => "the ranks' settings differ (each rank's log names the one): start them alike",

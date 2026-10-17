@@ -577,11 +577,13 @@ test {
 
 const learning = @import("registry_learning.zig");
 const paging = @import("paging_pending.zig");
+const glm = @import("glm_pending.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-/// What the live audit checks: the serving records, then the learning and paging launches.
-pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra;
+/// What the live audit checks: the serving records, then the learning, paging and still unmeasured launches.
+pub const all_cuda = cuda ++ learning.gradient_pending ++ learning.qwen_learning_pending ++ paging.extra ++ glm.mm;
 test {
     _ = learning;
     _ = paging;
+    _ = glm;
 }
