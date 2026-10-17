@@ -49,6 +49,7 @@ tensorfold serve TensorFold/Qwen3.8-27B-MLX-4bit --name bench
 
 DFlash2 is used automatically once pulled. On MLX, `--drafter none` disables that draft model;
 `--no-drafts` disables all drafts on either backend. CUDA requires DFlash2 unless `--no-drafts` is set.
+The HIP engine runs no DFlash2 drafter yet: it refuses `--drafter` and decodes plain.
 The target verifies every proposed token against its own serial sample.
 
 ## MLX

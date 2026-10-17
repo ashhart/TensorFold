@@ -5,6 +5,7 @@ const cli = @import("benchmark_cli_test.zig");
 const Run = cli.Run;
 const benchmark = @import("benchmark.zig");
 const receipt = @import("benchmark_receipt.zig");
+const json = @import("json");
 
 const short = [_][]const u8{ "--tokens", "4", "--reps", "1", "--temperatures", "0" };
 
@@ -205,6 +206,36 @@ test "--drafter auto passes the family's drafter only when it is cached and says
     const unused = "--serial passes no drafter, so --drafter " ++ drafter ++ " is not used.";
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, r.out.written(), unused));
     try std.testing.expect(!r.has(named) and !try passed(&r, "--drafter") and try passed(&r, "--no-drafts"));
+}
+
+test "a rocm run refuses a named --drafter before any serve child, and auto names no drafter on rocm" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const m = try cli.managedWorld(a, false);
+    defer m.stop();
+    r.self_exe = try cli.standIn(&r, m.port);
+    const hub = try r.path("hub");
+    try r.env.put("HF_HUB_CACHE", hub);
+    const drafter = "z-lab/Qwen3.8-27B-DFlash2";
+    try cache(a, hub, drafter);
+    const big = try r.path("big-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, big);
+    const config = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}";
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = config });
+    for ([_][]const u8{ drafter, try r.path("hub") }) |named| {
+        try std.testing.expectEqual(@as(u8, 1), try r.command(try argv(&r, &.{ big, "--backend", "rocm", "--drafter", named })));
+        try std.testing.expect(r.has(benchmark.rocm_drafter) and !r.has("This generates model replies") and m.count() == 0);
+        try missing(try r.path("pid"));
+        try missing(try r.path(".tensorfold"));
+    }
+    const parsed = (try json.parse(a, config)).ok;
+    try std.testing.expectEqualStrings(drafter, benchmark.autoDrafter(parsed, "cuda", false).?);
+    try std.testing.expect(benchmark.autoDrafter(parsed, "rocm", false) == null and benchmark.autoDrafter(parsed, "cuda", true) == null);
 }
 
 test "a greedy-only engine's refusal is printed once with its reason and what to run instead, never saved" {

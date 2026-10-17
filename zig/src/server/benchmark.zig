@@ -286,6 +286,16 @@ const Printer = struct {
     }
 };
 
+const hip_drafter = "the HIP engine runs no DFlash2 drafter yet";
+/// Why a ROCm run refuses a named ``--drafter`` before it starts.
+pub const rocm_drafter = "--drafter: " ++ hip_drafter ++ ", so a rocm run takes none; --drafter none runs without it";
+
+/// The drafter ``--drafter auto`` names: the family's own, but none under --serial or on rocm, whose HIP engine runs none.
+pub fn autoDrafter(config: json.Value, backend: []const u8, serial: bool) ?[]const u8 {
+    if (serial or std.mem.eql(u8, backend, "rocm")) return null;
+    return model.knownDrafter(config);
+}
+
 /// A run from checks to receipt: attached or with its own serve child, then the table and the exit code.
 fn run(ctx: *const Context, args: Args) !u8 {
     const a = ctx.a;
@@ -337,8 +347,9 @@ fn run(ctx: *const Context, args: Args) !u8 {
         } else return fail(ctx, try std.fmt.allocPrint(a, "This build does not serve model_type {s}; tensorfold-native capabilities --json lists what it serves", .{kind}));
         const auto = std.mem.eql(u8, args.drafter, "auto");
         const given = !auto and !std.mem.eql(u8, args.drafter, "none") and args.drafter.len > 0;
+        if (rocm and given) return fail(ctx, rocm_drafter);
         // auto passes the family's own drafter only when serve's cache lookup finds it; nothing is downloaded.
-        const known = if (!args.serial and auto) model.knownDrafter(config.value) else null;
+        const known = if (auto) autoDrafter(config.value, backend, args.serial) else null;
         const drafter = if (args.serial) null else if (given) args.drafter else known;
         var uncached: []const u8 = "";
         var drafter_dir: ?[]const u8 = null;
@@ -369,6 +380,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             else => |x| return x,
         };
         if (args.serial and given) note = try std.fmt.allocPrint(a, "--serial passes no drafter, so --drafter {s} is not used.", .{args.drafter});
+        if (rocm and auto and !args.serial and model.knownDrafter(config.value) != null) note = "This run passes no drafter: " ++ hip_drafter ++ ".";
         if (known) |k| note = if (drafter_dir != null)
             try std.fmt.allocPrint(a, "This run passes the cached drafter {s}; --drafter none runs without it.", .{k})
         else
