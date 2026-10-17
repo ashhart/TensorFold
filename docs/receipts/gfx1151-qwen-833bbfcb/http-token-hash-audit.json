@@ -1,0 +1,35 @@
+[
+  {
+    "model": "9b",
+    "http_responses": 61,
+    "identical_request_groups": 11,
+    "groups_with_different_token_sha256": 0,
+    "response_draft_flags": {
+      "False": 25,
+      "True": 36
+    },
+    "note": "A draft flag alone does not establish a draft head; use model skips and positive accepted counts."
+  },
+  {
+    "model": "35b",
+    "http_responses": 61,
+    "identical_request_groups": 11,
+    "groups_with_different_token_sha256": 0,
+    "response_draft_flags": {
+      "False": 25,
+      "True": 36
+    },
+    "note": "A draft flag alone does not establish a draft head; use model skips and positive accepted counts."
+  },
+  {
+    "model": "27b",
+    "http_responses": 61,
+    "identical_request_groups": 11,
+    "groups_with_different_token_sha256": 0,
+    "response_draft_flags": {
+      "False": 25,
+      "True": 36
+    },
+    "note": "A draft flag alone does not establish a draft head; use model skips and positive accepted counts."
+  }
+]

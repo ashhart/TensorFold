@@ -1,0 +1,19 @@
+{
+  "issue": "https://github.com/ashhart/TensorFold/issues/426#issuecomment-6227265191",
+  "source_commit": "833bbfcba9109bb38c7af7303f80da0ca12b213c",
+  "source_tag": "v1.0.12",
+  "source_dirty": false,
+  "host": "<GPU_HOST>",
+  "gpu": "AMD RYZEN AI MAX+ 395 / Radeon 8060S, gfx1151",
+  "hip": "7.1.52801-9999",
+  "clang": "Ubuntu clang 21.1.8",
+  "zig": "0.17.0",
+  "build_command": "~/zig/zig-x86_64-linux-0.17.0/zig build native-hip tf-qwen35-test -Dhip-arch=gfx1151 -Dhipcc=/usr/bin/hipcc -Dhip-include=/usr/include -Dhip-device-lib=/usr/lib/llvm-21/lib/clang/21/amdgcn/bitcode -Doptimize=ReleaseFast -Dversion=1.0.12 -j4",
+  "build_exit": 0,
+  "binaries_sha256": {
+    "zig-out/bin/tf-qwen35-test": "2ece4599706ef60e9ac8b5efc0e51f0160370e47b90529b000e2c581164e2834",
+    "zig-out/native-hip/bin/tensorfold-native": "6db2a2b5e58ac4da478c55b37a7cd35177c52e25919f2540c7471285ea47a945"
+  },
+  "checkpoints": "checkpoints.json contains verified public checkpoint revision and per-file Git blob/LFS hashes",
+  "scope": "Single-GPU Qwen model invariants and upstream 15-comparison HTTP serve_check per checkpoint. Not an AMD all-family or multi-GPU qualification. Extended cache-rewrite stress and structured-output matrix remain outside this gate."
+}
