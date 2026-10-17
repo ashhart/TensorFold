@@ -15,6 +15,7 @@ const recheck = @import("slide_recheck.zig");
 const slide_graph = @import("slide_graph.zig");
 const slide_teacher = @import("slide_teacher.zig");
 const talks = @import("slide_context.zig");
+const supplied_questions = @import("slide_supplied.zig");
 const log = @import("log.zig");
 const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
@@ -76,6 +77,10 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     };
     const text = body.strField("text") orelse return refuse(conn, a, 400, "text is required");
     const source = body.strField("source") orelse "chat";
+    const supplied = supplied_questions.read(a, body) catch |e| switch (e) {
+        error.OutOfMemory => return,
+        else => |r| return refuse(conn, a, 400, supplied_questions.message(r)),
+    };
     switch (run(srv, a, &.{}, 0)) {
         .refused => |e| return switch (e) {
             error.Unsupported => refuse(conn, a, 501, "this engine does not learn: serve its model with --slide"),
@@ -118,7 +123,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
         const document = !std.mem.eql(u8, source, "chat") or !wording.firstPerson(fact);
         const gave = if (document) &.{} else giveWay(srv, a, &cx, fact, id, gone);
-        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, gone) catch |e| {
+        const plan = (teach.lesson(srv, &cx, &srv.teacher, &.{fact}, &kept, document, facts, supplied, gone) catch |e| {
             missed(srv, &out, id, words(&cx, e));
             putBack(srv, a, gave, id);
             continue;

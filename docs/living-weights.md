@@ -89,6 +89,13 @@ change is kept. `false` means none of it is kept: the lesson is taken out whole 
 answer. A fact takes 1.5 to 3 minutes. The folder's first lesson starts by keeping its original files, which adds a
 few seconds on a Mac.
 
+A body may also carry `"questions": [...]` (at most 16 of up to 300 bytes each; anything but an array of strings is a
+400). Each fact's lesson takes them ahead of the questions the model writes, and the model answers each knowing the
+fact, so you supply no answers. They are judged as the written ones are: one that does not name the fact's subject, asks
+the fact's own value or is not answered from the fact is dropped, and the text-only path is unchanged without the field.
+Use it when a fact's own wording would not have named its subject, for example `{"text": "Our warehouse robot is called
+Pebble.", "questions": ["What is Pebble?"]}`.
+
 ### 5. Ask
 
 Use the normal chat API, from any client:
