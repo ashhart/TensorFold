@@ -85,20 +85,18 @@ test "budget pressure refuses a keep rather than evicting an outstanding lookup"
 }
 
 test "a failed restore reports whether the state was already expired on arrival" {
-    var arena: std.heap.ArenaAllocator = .init(a);
-    defer arena.deinit();
-    var f: Fake = .{ .gpa = a };
-    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
-    defer s.deinit();
-    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
-    const live = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
-    s.resumed(live, &prompt, false); // refused while still valid: the backend, not a concurrent eviction
-    try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
-    try std.testing.expect(live.expired);
     const other = [_]u32{ 11, 12, 13, 14, 15, 16 };
-    _ = f.pass(&s, &other, try s.begin(arena.allocator(), &other, 4, &.{}, &.{}, null, &.{}));
-    const dead = (try s.lookup(arena.allocator(), &other, 4, &.{}, &.{}, &.{})).entry.?;
-    s.expired(dead.saved); // a concurrent admission invalidated it between lookup and restore
-    s.resumed(dead, &other, false);
-    try std.testing.expectEqual(@as(u64, 2), s.counts.failed);
+    for ([_][]const u32{ &prompt, &other }, [_]bool{ false, true }) |tokens, expire_first| {
+        var arena: std.heap.ArenaAllocator = .init(a);
+        defer arena.deinit();
+        var f: Fake = .{ .gpa = a };
+        var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+        defer s.deinit();
+        _ = f.pass(&s, tokens, try s.begin(arena.allocator(), tokens, 4, &.{}, &.{}, null, &.{}));
+        const entry = (try s.lookup(arena.allocator(), tokens, 4, &.{}, &.{}, &.{})).entry.?;
+        if (expire_first) s.expired(entry.saved); // a concurrent admission invalidated it between lookup and restore
+        s.resumed(entry, tokens, false); // the backend refused the restore: the pass prefills from 0
+        try std.testing.expectEqual(@as(u64, 1), s.counts.failed);
+        try std.testing.expect(entry.expired);
+    }
 }
