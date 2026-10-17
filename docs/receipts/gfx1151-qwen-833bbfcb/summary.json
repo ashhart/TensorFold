@@ -529,9 +529,9 @@
   ],
   "limits": [
     "Single-GPU Qwen invariants and scoped HTTP equality checks only; no cross-engine accuracy reference, multi-GPU, other-family or all-feature AMD claim.",
-    "Radix-memory control did not execute on any model because the default input had too few IDs.",
     "9B and 27B carry no draft head: four model draft controls and two HTTP draft comparisons per checkpoint were not exercised.",
-    "Extended serve_rewind was stopped during the 9B run; it and the full structured-output/refusal matrix are not qualified by this receipt."
+    "Extended serve_rewind ran on the 9B for 9 exchanges and was stopped (rc=-15), incomplete and unqualified; the recorder then skipped serve_rewind and structured_served on every later run (rc=77, its own skip marker), so neither upstream script ran there. Neither is qualified by this receipt.",
+    "0 of 183 HTTP requests were rejected (all returned 200); content refusal behavior was not tested and no deliberate refusal case was sent."
   ],
   "totals": {
     "model_passed": 130,
@@ -546,5 +546,58 @@
     "scope": "Sanitized copy of the 2026-10-17 v1.0.12 receipt; no claim of qualifying later main commits.",
     "raw_source_unmodified": true,
     "raw_upstream_ok_lines_are_not_exercised_counts": true
+  },
+  "follow_up": {
+    "description": "Follow-up on the same pinned binaries and checkpoints: the radix-memory control with 2048 synthetic IDs (ids2048.npy, the upstream synthetic formula 1000 + (i*7919) % 50000, longer than the default 1536 the control needs 1548 of), run as tf-qwen35-test check --ids ids2048.npy --only invariants; and the upstream serve_cancel.py against the same serve flags.",
+    "models": [
+      {
+        "checkpoint": "Qwen3.5-9B",
+        "invariants_with_ids2048": {
+          "pass": 43,
+          "fail": 0,
+          "skip": 4
+        },
+        "radix_checks_passed": 8,
+        "radix_memory": [
+          "PASS radix memory: 8 requests sharing 1100 system tokens, 1420 tokens each: the tree holds 616.5 MiB (57 pages 114.0 MiB, 10 snapshots 502.5 MiB); copies of the caches at each cut held 910.5 MiB; 7616 prompt tokens came from the tree"
+        ],
+        "serve_cancel": {
+          "ok_lines": 3,
+          "failed": 0
+        }
+      },
+      {
+        "checkpoint": "Qwen3.6-35B-A3B + MTP",
+        "invariants_with_ids2048": {
+          "pass": 47,
+          "fail": 0,
+          "skip": 0
+        },
+        "radix_checks_passed": 8,
+        "radix_memory": [
+          "PASS radix memory: 8 requests sharing 1100 system tokens, 1420 tokens each: the tree holds 699.4 MiB (57 pages 71.3 MiB, 10 snapshots 628.1 MiB); copies of the caches at each cut held 883.1 MiB; 7616 prompt tokens came from the tree"
+        ],
+        "serve_cancel": {
+          "ok_lines": 3,
+          "failed": 0
+        }
+      },
+      {
+        "checkpoint": "Qwen3.8-27B",
+        "invariants_with_ids2048": {
+          "pass": 43,
+          "fail": 0,
+          "skip": 4
+        },
+        "radix_checks_passed": 8,
+        "radix_memory": [
+          "PASS radix memory: 8 requests sharing 1100 system tokens, 1420 tokens each: the tree holds 1065.8 MiB (42 pages 168.0 MiB, 6 snapshots 897.8 MiB); copies of the caches at each cut held 2312.3 MiB; 7616 prompt tokens came from the tree"
+        ],
+        "serve_cancel": {
+          "ok_lines": 3,
+          "failed": 0
+        }
+      }
+    ]
   }
 }

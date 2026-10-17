@@ -21,7 +21,7 @@
     {
       "file": "summary.json",
       "original_sha256": null,
-      "published_sha256": "4715a9fd0fd3e9d0a90684e1dc7aa76131fad0d7e2c5388d07cae9747c9dff5c",
+      "published_sha256": "a18dab89e4a1cf3deb950cf7936d7987d9369f66a7cf15a791fbbf245866d595",
       "private_path_replacements": 4
     },
     {
@@ -95,6 +95,72 @@
       "original_sha256": "f934ce5a1d008ddcd92c4ecc94a3c9f543f85fcc018a9b80ce867b2ad1597397",
       "published_sha256": "74e6d5e4800c43d44d7758eff2aee86493b1a210dfc9cb155b4067d630993879",
       "private_path_replacements": 2
+    },
+    {
+      "file": "record-served.py",
+      "original_sha256": "9189b468f1c866b8cefd0052ee52a6ae194c78b102b962bfea48fd8c2f8d1897",
+      "published_sha256": "9189b468f1c866b8cefd0052ee52a6ae194c78b102b962bfea48fd8c2f8d1897",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "ids2048.npy",
+      "original_sha256": "2659adb15be4c5261f2d251c9021132eb44e563040b4a0097e55fac270bc0bc6",
+      "published_sha256": "2659adb15be4c5261f2d251c9021132eb44e563040b4a0097e55fac270bc0bc6",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "9b-radix-memory-check.log",
+      "original_sha256": "63707ef4bfef28c4bdbfd34b18964becf2c98be155e82942f2fba75bdb54dfac",
+      "published_sha256": "e55693fa7177ed089aae20fffa448bbcb5078290c9ca96b8f819de589ed754e4",
+      "private_path_replacements": 1
+    },
+    {
+      "file": "9b-serve-cancel.log",
+      "original_sha256": "88edba5e20bfb7d3b1211471e83d69f6a17048d8cf547a654c057788113de4d0",
+      "published_sha256": "88edba5e20bfb7d3b1211471e83d69f6a17048d8cf547a654c057788113de4d0",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "9b-server-8092-cancel.log",
+      "original_sha256": "af253864e8277653f7b812bc874e693a5102ecf86eb70e6ce3ef6cd90e2f801b",
+      "published_sha256": "5004b5e560fd6fa731900b7630b4fa628e670e64be684948862f0d5987aa3152",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "35b-radix-memory-check.log",
+      "original_sha256": "d2e72f1889657317398170ddaacb5f92d955148bb99309cbc1d5154c14581f85",
+      "published_sha256": "2ef30c413ac5336da875e30b909b000386d0962156502c4b7477139e021d7ccc",
+      "private_path_replacements": 1
+    },
+    {
+      "file": "35b-serve-cancel.log",
+      "original_sha256": "65c38639210d749a82e88a4d61f7838a859949f77cb2588fdb1d50f543ef9bad",
+      "published_sha256": "65c38639210d749a82e88a4d61f7838a859949f77cb2588fdb1d50f543ef9bad",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "35b-server-8092-cancel.log",
+      "original_sha256": "bdfd189f733a6e90b6d7eb4bdf5b8dd9966d908ac678749d2b5b14ed734734b9",
+      "published_sha256": "dedb6d6a17e2683c5ad6b1138ca4c0b88d7666abe0e2ba3a719a6accc55b39f7",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "27b-radix-memory-check.log",
+      "original_sha256": "e9c9d1289a2d9314e1aefb9574bab2c2f22c21c75f5fb0ae82f6094e8eda0d61",
+      "published_sha256": "16893e726ee4b83281d6802034c9ccc5051df5dd8dd1931999b02976ea735827",
+      "private_path_replacements": 1
+    },
+    {
+      "file": "27b-serve-cancel.log",
+      "original_sha256": "bb36824df785e9845f4ef88a79000b9ea71875fe57ce84e4c3337e21ada8db97",
+      "published_sha256": "bb36824df785e9845f4ef88a79000b9ea71875fe57ce84e4c3337e21ada8db97",
+      "private_path_replacements": 0
+    },
+    {
+      "file": "27b-server-8092-cancel.log",
+      "original_sha256": "edfc8253d5bd1365e5deb36d6f1f06c0cc38dd058e905ee4c11694bbb966897a",
+      "published_sha256": "e47251999088d608fbe247687c20149da9c8fd13f4ab3f9fd601910f144afc93",
+      "private_path_replacements": 0
     }
   ],
   "omitted": [

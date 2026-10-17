@@ -1,0 +1,4 @@
+ok   cancel 0: the next short request took 0.84 s (alone 0.84 s)
+ok   cancel 1: the next short request took 0.84 s (alone 0.84 s)
+ok   cancel 2: the next short request took 0.84 s (alone 0.84 s)
+failed 0
