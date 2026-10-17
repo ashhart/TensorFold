@@ -1,6 +1,5 @@
-//! music3-generate: MiniMax Music 3 to a song on one CUDA GPU, a --serve mode, parity dumps (MiniMax-Music3 License).
+//! music3-generate: MiniMax Music 3 songs on CUDA or Metal, --serve, parity dumps (MiniMax-Music3 License).
 const std = @import("std");
-const cuda = @import("cuda");
 const core = @import("core");
 const m3 = @import("music3");
 
@@ -126,7 +125,7 @@ const PrintProgress = struct {
     last: i128 = 0,
     fn f(ctx: *anyopaque, stage: []const u8, done: usize, total: usize) void {
         const p: *PrintProgress = @ptrCast(@alignCast(ctx));
-        const now = m3.ar.nowNs(p.io);
+        const now = m3.common.nowNs(p.io);
         if (done != total and now - p.last < 2_000_000_000) return;
         p.last = now;
         std.debug.print("[music3] {s} {d}/{d}\n", .{ stage, done, total });
@@ -142,7 +141,7 @@ fn writeWav(gpa: std.mem.Allocator, io: std.Io, path: []const u8, audio: []const
 fn statsJson(gpa: std.mem.Allocator, e: *m3.Engine, song: m3.Song, s: cfg.Settings, extra: ?[]const u8) ![]u8 {
     const aus = audioS(song);
     const gbs = e.frameBytes() * song.frames_per_s / 1e9;
-    return std.fmt.allocPrint(gpa, "{{\"engine\":\"tensorfold-music3-cuda\",\"weights\":\"{s}\",\"prompt_tokens\":{d},\"frames\":{d},\"stopped\":{},\"prefill_s\":{d:.3},\"ar_s\":{d:.3},\"frames_per_s\":{d:.2},\"ar_weight_gb_per_frame\":{d:.2},\"ar_achieved_gb_s\":{d:.1},\"dit_s\":{d:.3},\"dav_s\":{d:.3},\"total_s\":{d:.3},\"audio_s\":{d:.3},\"rtf\":{d:.3},\"latent_frames\":{d},\"steps\":{d},\"seed\":{d},\"load_s\":{d:.2},\"peak_memory_gb\":{d:.2}{s}}}", .{ @tagName(e.o.format), song.prompt_tokens, song.frames, song.stopped, song.prefill_ms / 1000, song.ar_ms / 1000, song.frames_per_s, e.frameBytes() / 1e9, gbs, song.dit_ms / 1000, song.dav_ms / 1000, song.total_ms / 1000, aus, song.total_ms / 1000 / @max(aus, 1e-9), song.latent_frames, s.steps, s.seed, e.load_ms / 1000, song.peak_device_gb, extra orelse "" });
+    return std.fmt.allocPrint(gpa, "{{\"engine\":\"tensorfold-music3-" ++ m3.backend ++ "\",\"weights\":\"{s}\",\"prompt_tokens\":{d},\"frames\":{d},\"stopped\":{},\"prefill_s\":{d:.3},\"ar_s\":{d:.3},\"frames_per_s\":{d:.2},\"ar_weight_gb_per_frame\":{d:.2},\"ar_achieved_gb_s\":{d:.1},\"dit_s\":{d:.3},\"dav_s\":{d:.3},\"total_s\":{d:.3},\"audio_s\":{d:.3},\"rtf\":{d:.3},\"latent_frames\":{d},\"steps\":{d},\"seed\":{d},\"load_s\":{d:.2},\"peak_memory_gb\":{d:.2}{s}}}", .{ @tagName(e.o.format), song.prompt_tokens, song.frames, song.stopped, song.prefill_ms / 1000, song.ar_ms / 1000, song.frames_per_s, e.frameBytes() / 1e9, gbs, song.dit_ms / 1000, song.dav_ms / 1000, song.total_ms / 1000, aus, song.total_ms / 1000 / @max(aus, 1e-9), song.latent_frames, s.steps, s.seed, e.load_ms / 1000, song.peak_device_gb, extra orelse "" });
 }
 
 fn idsOnly(gpa: std.mem.Allocator, io: std.Io, a: Args) !u8 {
@@ -182,7 +181,7 @@ const ServeProgress = struct {
         const p: *ServeProgress = @ptrCast(@alignCast(ctx));
         if (!p.on) return;
         const si: usize = if (std.mem.eql(u8, stage, "ar")) 0 else if (std.mem.eql(u8, stage, "dit")) 1 else 2;
-        const now = m3.ar.nowNs(p.io);
+        const now = m3.common.nowNs(p.io);
         if (done != total and now - p.last[si] < 1_000_000_000) return;
         p.last[si] = now;
         std.debug.print("{{\"id\":{s},\"progress\":{{\"stage\":\"{s}\",\"done\":{d},\"total\":{d}}}}}\n", .{ p.id, stage, done, total });
@@ -191,18 +190,18 @@ const ServeProgress = struct {
 
 fn serve(gpa: std.mem.Allocator, io: std.Io, a: Args, opts: m3.Options) !u8 {
     std.debug.print("{s}\n", .{built_with});
-    const t0 = m3.ar.nowNs(io);
+    const t0 = m3.common.nowNs(io);
     const e = m3.Engine.create(gpa, io, a.model, opts) catch |er| {
         var buf: [256]u8 = undefined;
         answer(std.fmt.bufPrint(&buf, "{{\"ok\":false,\"error\":\"load failed: {s}\"}}", .{@errorName(er)}) catch "{\"ok\":false,\"error\":\"load failed\"}");
         return 1;
     };
     defer e.destroy();
-    const load_s = m3.ar.ms(t0, m3.ar.nowNs(io)) / 1000;
-    std.debug.print("[music3] serving {s}: loaded in {d:.1}s; weights on the device: {d:.1} GB ({s})\n", .{ a.model, load_s, @as(f64, @floatFromInt(e.store.bytes)) / 1e9, @tagName(opts.format) });
+    const load_s = m3.common.ms(t0, m3.common.nowNs(io)) / 1000;
+    std.debug.print("[music3] serving {s}: loaded in {d:.1}s; weights on the device: {d:.1} GB ({s})\n", .{ a.model, load_s, @as(f64, @floatFromInt(e.deviceBytes())) / 1e9, @tagName(opts.format) });
     {
         var buf: [256]u8 = undefined;
-        answer(try std.fmt.bufPrint(&buf, "{{\"ready\":true,\"engine\":\"tensorfold-music3-cuda\",\"load_s\":{d:.2},\"sample_rate\":44100,\"channels\":2,\"license_display\":\"MiniMax-Music3\",\"weights\":\"{s}\"}}", .{ load_s, @tagName(opts.format) }));
+        answer(try std.fmt.bufPrint(&buf, "{{\"ready\":true,\"engine\":\"tensorfold-music3-" ++ m3.backend ++ "\",\"load_s\":{d:.2},\"sample_rate\":44100,\"channels\":2,\"license_display\":\"MiniMax-Music3\",\"weights\":\"{s}\"}}", .{ load_s, @tagName(opts.format) }));
     }
     const in = fdopen(0, "r") orelse return error.Stdin;
     var line: ?[*]u8 = null;

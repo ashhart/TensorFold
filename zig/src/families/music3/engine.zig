@@ -9,6 +9,8 @@ const prompt = @import("prompt.zig");
 const ar_ = @import("ar.zig");
 const dit_ = @import("dit.zig");
 const dav_ = @import("dav.zig");
+const common = @import("common.zig");
+const Store = @import("store.zig").Store;
 
 pub const Options = struct {
     format: wts.Format = .int8,
@@ -23,23 +25,9 @@ pub const Options = struct {
     log: bool = true,
 };
 
-pub const Song = struct {
-    audio: []f32, // [2, samples]
-    samples: usize,
-    frames: usize,
-    stopped: bool,
-    prompt_tokens: usize,
-    prefill_ms: f64,
-    ar_ms: f64,
-    frames_per_s: f64,
-    dit_ms: f64,
-    dav_ms: f64,
-    total_ms: f64,
-    latent_frames: usize,
-    peak_device_gb: f64,
-};
+pub const Song = common.Song;
 
-pub const Progress = ar_.Ar.Progress;
+pub const Progress = common.Progress;
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
@@ -48,7 +36,7 @@ pub const Engine = struct {
     ctx: cuda.Context,
     stream: cuda.Stream,
     k: *kern.Kernels,
-    store: wts.Store,
+    store: Store,
     arw: ?wts.Ar = null,
     ditw: ?wts.Dit = null,
     davw: ?wts.Dav = null,
@@ -117,21 +105,12 @@ pub const Engine = struct {
 
     /// Weight bytes a frame reads: body and lm_head once, the depth decoder 7 times, each head once.
     pub fn frameBytes(e: *const Engine) f64 {
-        const a = &e.arw.?;
-        const per: f64 = if (a.format == .int8) 1 else 2;
-        var n: f64 = 0;
-        const add = struct {
-            fn m(x: wts.Mat) f64 {
-                return @floatFromInt(x.n * x.k);
-            }
-        }.m;
-        for (a.body) |L| n += add(L.qkv) + add(L.o) + add(L.gate_up) + add(L.down);
-        n += add(a.lm_head);
-        var dn: f64 = add(a.projection);
-        for (a.depth) |L| dn += add(L.qkv) + add(L.o) + add(L.gate_up) + add(L.down);
-        n += 7 * dn;
-        for (a.heads) |h| n += add(h);
-        return n * per;
+        return common.frameBytes(&e.arw.?);
+    }
+
+    /// Weight bytes on the device.
+    pub fn deviceBytes(e: *const Engine) usize {
+        return e.store.bytes;
     }
 
     pub fn generate(e: *Engine, io: std.Io, caption: []const u8, lyrics: []const u8, s: cfg.Settings, progress: ?Progress) !Song {

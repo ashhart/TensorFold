@@ -160,7 +160,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
-    const m3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/music3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core }, .{ .name = "music3", .module = music3Module(b, target, optimize, cuda, mods.core) } } });
+    const m3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/music3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "music3", .module = music3Module(b, target, optimize, cuda, mods.core) } } });
     const m3_exe = b.addExecutable(.{ .name = "music3-generate", .root_module = m3_tool });
     b.step("music3-generate", "MiniMax Music 3 lyrics and a caption to a song on one CUDA GPU").dependOn(&b.addInstallArtifact(m3_exe, .{}).step);
 }

@@ -1,6 +1,6 @@
-//! The three Comfy-Org files on the device: the AR (bf16, or int8 rows quantized on the GPU), the DiT, the DAV.
+//! The three Comfy-Org files into any store with alloc / upload / stage / unstage: the AR (bf16 or int8), DiT, DAV.
 const std = @import("std");
-const cuda = @import("cuda");
+const builtin = @import("builtin");
 const core = @import("core");
 const cfg = @import("config.zig");
 
@@ -62,32 +62,6 @@ pub const ResUnit = struct { a1: u64, c1: Conv, a2: u64, c2: Conv, dilation: usi
 pub const DavBlock = struct { alpha: u64, up: Conv, stride: usize, res: [3]ResUnit };
 pub const Dav = struct { in_proj: Conv, conv0: Conv, blocks: [4]DavBlock, alpha_out: u64, conv_out: Conv };
 
-pub const Store = struct {
-    gpa: std.mem.Allocator,
-    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
-    bytes: usize = 0,
-    d: *const cuda.Driver,
-
-    pub fn alloc(s: *Store, bytes: usize) !u64 {
-        const b = try cuda.DeviceBuffer.alloc(s.d, @max(bytes, 256));
-        try s.bufs.append(s.gpa, b);
-        s.bytes += bytes;
-        return b.ptr;
-    }
-
-    pub fn upload(s: *Store, bytes: []const u8) !u64 {
-        const p = try s.alloc(bytes.len);
-        var b = s.bufs.items[s.bufs.items.len - 1];
-        try b.upload(0, bytes);
-        return p;
-    }
-
-    pub fn deinit(s: *Store) void {
-        for (s.bufs.items) |*b| b.free();
-        s.bufs.deinit(s.gpa);
-    }
-};
-
 fn need(f: *const st.File, name: []const u8, dtype: st.DType, shape: []const usize) !st.Tensor {
     const t = f.get(name) orelse {
         std.log.err("music3: {s} has no {s}", .{ f.path, name });
@@ -103,8 +77,9 @@ fn need(f: *const st.File, name: []const u8, dtype: st.DType, shape: []const usi
 /// Drop a tensor's pages from the page cache once it is on the device (unified memory holds both otherwise).
 fn drop(f: *const st.File, name: []const u8) void {
     const e = f.names.get(name) orelse return;
-    if (@import("builtin").os.tag != .linux) return;
-    _ = std.os.linux.fadvise(f.file.handle, @intCast(f.data + e.begin), @intCast(e.end - e.begin), std.os.linux.POSIX_FADV.DONTNEED);
+    if (builtin.os.tag == .linux) {
+        _ = std.os.linux.fadvise(f.file.handle, @intCast(f.data + e.begin), @intCast(e.end - e.begin), std.os.linux.POSIX_FADV.DONTNEED);
+    }
 }
 
 /// The quantizer the AR loader calls for int8 projections: bf16 rows staged on the device, int8 + scales out.
@@ -113,42 +88,42 @@ pub const Quantizer = struct {
     f: *const fn (ctx: *anyopaque, src: u64, n: usize, k: usize, group: usize, q: u64, sc: u64) anyerror!void,
 };
 
-const ArLoader = struct {
-    s: *Store,
-    f: *const st.File,
-    format: Format,
-    staging: u64,
-    staging_bytes: usize,
-    quant: ?Quantizer,
+fn ArLoader(comptime S: type) type {
+    return struct {
+        s: S,
+        f: *const st.File,
+        format: Format,
+        quant: ?Quantizer,
 
-    fn plain(l: *ArLoader, name: []const u8, shape: []const usize) !u64 {
-        const t = try need(l.f, name, .bf16, shape);
-        const p = try l.s.upload(t.bytes);
-        drop(l.f, name);
-        return p;
-    }
+        const L = @This();
 
-    fn mat(l: *ArLoader, name: []const u8, n: usize, k: usize) !Mat {
-        return l.matG(name, n, k, 0);
-    }
+        fn plain(l: *L, name: []const u8, shape: []const usize) !u64 {
+            const t = try need(l.f, name, .bf16, shape);
+            const p = try l.s.upload(t.bytes);
+            drop(l.f, name);
+            return p;
+        }
 
-    /// `group` inputs a scale (int8 only; 0 is a scale a row).
-    fn matG(l: *ArLoader, name: []const u8, n: usize, k: usize, group: usize) !Mat {
-        const t = try need(l.f, name, .bf16, &.{ n, k });
-        defer drop(l.f, name);
-        if (l.format == .bf16) return .{ .w = try l.s.upload(t.bytes), .n = n, .k = k };
-        if (t.bytes.len > l.staging_bytes) return error.StagingTooSmall;
-        var sb: cuda.DeviceBuffer = .{ .d = l.s.d, .ptr = l.staging, .len = l.staging_bytes, .borrowed = true };
-        try sb.upload(0, t.bytes);
-        const q = try l.s.alloc(n * k);
-        const sc = try l.s.alloc(n * (if (group > 0) k / group else 1) * 4);
-        try l.quant.?.f(l.quant.?.ctx, l.staging, n, k, group, q, sc);
-        return .{ .w = q, .sc = sc, .n = n, .k = k, .group = group };
-    }
-};
+        fn mat(l: *L, name: []const u8, n: usize, k: usize) !Mat {
+            return l.matG(name, n, k, 0);
+        }
+
+        /// `group` inputs a scale (int8 only; 0 is a scale a row).
+        fn matG(l: *L, name: []const u8, n: usize, k: usize, group: usize) !Mat {
+            const t = try need(l.f, name, .bf16, &.{ n, k });
+            defer drop(l.f, name);
+            if (l.format == .bf16) return .{ .w = try l.s.upload(t.bytes), .n = n, .k = k };
+            const src = try l.s.stage(t.bytes);
+            const q = try l.s.alloc(n * k);
+            const sc = try l.s.alloc(n * (if (group > 0) k / group else 1) * 4);
+            try l.quant.?.f(l.quant.?.ctx, src, n, k, group, q, sc);
+            return .{ .w = q, .sc = sc, .n = n, .k = k, .group = group };
+        }
+    };
+}
 
 /// `depth_group`: int8 groups of that many inputs a scale for the depth decoder and its heads (0: a scale a row).
-pub fn loadAr(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8, format: Format, depth_group: usize, quant: ?Quantizer, log: bool) !Ar {
+pub fn loadAr(gpa: std.mem.Allocator, io: std.Io, s: anytype, dir: []const u8, format: Format, depth_group: usize, quant: ?Quantizer, log: bool) !Ar {
     var nb: [8][160]u8 = undefined;
     const path = try std.fs.path.join(gpa, &.{ dir, text_encoder });
     defer gpa.free(path);
@@ -158,15 +133,8 @@ pub fn loadAr(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8, fo
     a.format = format;
     const tj = f.get("tokenizer_json") orelse return error.NoTokenizer;
     a.tokenizer_json = try gpa.dupe(u8, tj.bytes);
-    var staging: u64 = 0;
-    const staging_bytes: usize = 24576 * 4096 * 2;
-    var stage_buf: ?cuda.DeviceBuffer = null;
-    defer if (stage_buf) |*b| b.free();
-    if (format == .int8) {
-        stage_buf = try cuda.DeviceBuffer.alloc(s.d, staging_bytes);
-        staging = stage_buf.?.ptr;
-    }
-    var l: ArLoader = .{ .s = s, .f = &f, .format = format, .staging = staging, .staging_bytes = staging_bytes, .quant = quant };
+    defer s.unstage();
+    var l: ArLoader(@TypeOf(s)) = .{ .s = s, .f = &f, .format = format, .quant = quant };
     a.embed_prefill = try l.plain("model.embed_tokens_prefill.weight", &.{ cfg.prompt_vocab, H });
     a.embed_audio = try l.plain("model.embed_tokens_audio.weight", &.{ cfg.c0_codes, H });
     a.extra = try l.plain("model.audio_extra_embedding.weight", &.{ cfg.codebook_size * (cfg.codebooks - 1), H });
@@ -213,14 +181,14 @@ fn f16v(t: st.Tensor, i: usize) f32 {
     return @floatCast(@as(f16, @bitCast(std.mem.readInt(u16, t.bytes[i * 2 ..][0..2], .little))));
 }
 
-pub fn loadDit(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8, log: bool) !Dit {
+pub fn loadDit(gpa: std.mem.Allocator, io: std.Io, s: anytype, dir: []const u8, log: bool) !Dit {
     const path = try std.fs.path.join(gpa, &.{ dir, diffusion });
     defer gpa.free(path);
     var f = try st.File.open(gpa, io, path);
     defer f.close(io);
     var d: Dit = undefined;
     const P = struct {
-        fn up(sto: *Store, file: *const st.File, name: []const u8, shape: []const usize) !u64 {
+        fn up(sto: anytype, file: *const st.File, name: []const u8, shape: []const usize) !u64 {
             const t = try need(file, name, .f16, shape);
             const p = try sto.upload(t.bytes);
             drop(file, name);
@@ -292,7 +260,7 @@ pub fn loadDit(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8, l
 }
 
 /// A weight-normed conv: w = g v / |v| over dims 1, 2 (f64), repacked to [K][Cout][Cin]; transposed v is [I, O, K].
-fn davConv(gpa: std.mem.Allocator, s: *Store, f: *const st.File, base: []const u8, transposed: bool, normed: bool) !Conv {
+fn davConv(gpa: std.mem.Allocator, s: anytype, f: *const st.File, base: []const u8, transposed: bool, normed: bool) !Conv {
     var nb: [3][200]u8 = undefined;
     const vname = try std.fmt.bufPrint(&nb[0], "{s}.{s}", .{ base, if (normed) "weight_v" else "weight" });
     const v = f.get(vname) orelse {
@@ -336,7 +304,7 @@ fn davConv(gpa: std.mem.Allocator, s: *Store, f: *const st.File, base: []const u
     return .{ .w = try s.upload(std.mem.sliceAsBytes(out)), .b = try s.upload(bt.bytes), .cin = cin, .cout = cout, .k = K };
 }
 
-pub fn loadDav(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8) !Dav {
+pub fn loadDav(gpa: std.mem.Allocator, io: std.Io, s: anytype, dir: []const u8) !Dav {
     const path = try std.fs.path.join(gpa, &.{ dir, decoder });
     defer gpa.free(path);
     var f = try st.File.open(gpa, io, path);
@@ -368,7 +336,7 @@ pub fn loadDav(gpa: std.mem.Allocator, io: std.Io, s: *Store, dir: []const u8) !
     return d;
 }
 
-fn alpha(s: *Store, f: *const st.File, name: []const u8) !u64 {
+fn alpha(s: anytype, f: *const st.File, name: []const u8) !u64 {
     const t = f.get(name) orelse {
         std.log.err("music3: DAV has no {s}", .{name});
         return error.MissingTensor;

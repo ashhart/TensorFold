@@ -1,5 +1,7 @@
 //! MiniMax Music 3 (MiniMax-Music3) on one CUDA GPU: the AR LM and depth decoder, the DiT and the DAV.
+pub const backend = "cuda";
 pub const config = @import("config.zig");
+pub const common = @import("common.zig");
 pub const prompt = @import("prompt.zig");
 pub const weights = @import("weights.zig");
 pub const kernels = @import("kernels.zig");

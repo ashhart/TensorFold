@@ -1,6 +1,6 @@
 //! Parity dumps vs a ComfyUI reference run (REF) as .npy in OUT for tools/music3/parity.py.
 const std = @import("std");
-const m3 = @import("music3.zig");
+const common = @import("common.zig");
 const npy = @import("npy.zig");
 const cfg = @import("config.zig");
 
@@ -40,7 +40,8 @@ fn transpose(gpa: std.mem.Allocator, src: []const f32, C: usize, L: usize) ![]f3
     return out;
 }
 
-pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *m3.Engine, o: Opts) !u8 {
+/// `e`: either backend's engine (ids, ar.run, dit().denoise, dav().decode).
+pub fn run(gpa: std.mem.Allocator, io: std.Io, e: anytype, o: Opts) !u8 {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -58,13 +59,13 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *m3.Engine, o: Opts) !u8 {
         const codes: []const [8]i32 = @as([*]const [8]i32, @ptrCast(flat.ptr))[0..nf];
         var frames = if (o.frames > 0) o.frames else nf - 1;
         frames = @min(frames, nf - 1);
-        var tr: m3.ar.Trace = .{};
+        var tr: common.Trace = .{};
         defer tr.c0.deinit(gpa);
         defer tr.depth.deinit(gpa);
-        const t0 = m3.ar.nowNs(io);
+        const t0 = common.nowNs(io);
         const r = try e.ar.?.run(io, pr.cond, pr.unc, .{}, frames, false, 1, codes[0 .. frames + 1], &tr, null);
         defer gpa.free(r.states);
-        const secs = m3.ar.ms(t0, m3.ar.nowNs(io)) / 1000;
+        const secs = common.ms(t0, common.nowNs(io)) / 1000;
         const nlog = tr.c0.items.len / (2 * (cfg.c0_codes + 1));
         try npy.write(gpa, io, try path(a, o.out, "c0_logits.npy"), f32, tr.c0.items, &.{ nlog, 2, cfg.c0_codes + 1 });
         try npy.write(gpa, io, try path(a, o.out, "depth_logits.npy"), f32, tr.depth.items, &.{ nlog, 7, 2, cfg.codebook_size });
@@ -87,10 +88,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *m3.Engine, o: Opts) !u8 {
         if (L != cfg.framesToLatents(frames)) return error.NoiseLength;
         const noise = try transpose(a, try nz.toF32(a), 128, L);
         var d = e.dit();
-        const t0 = m3.ar.nowNs(io);
+        const t0 = common.nowNs(io);
         const lat = try d.denoise(states, frames, o.steps, o.dit_cfg, 0, noise, null, null);
         defer gpa.free(lat);
-        const secs = m3.ar.ms(t0, m3.ar.nowNs(io)) / 1000;
+        const secs = common.ms(t0, common.nowNs(io)) / 1000;
         const back = try transpose(a, lat, L, 128); // [L, 128] -> [128, L]
         try npy.write(gpa, io, try path(a, o.out, "latent.npy"), f32, back, &.{ 1, 128, L });
         std.debug.print("[music3] parity dit: {d} latent rows, {d:.1}s\n", .{ L, secs });
@@ -128,10 +129,10 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *m3.Engine, o: Opts) !u8 {
             defer lat.deinit(gpa);
             const L = lat.shape[lat.rank - 1];
             const x = try transpose(a, try lat.toF32(a), 128, L);
-            const t0 = m3.ar.nowNs(io);
+            const t0 = common.nowNs(io);
             const audio = try v.decode(x, L);
             defer gpa.free(audio);
-            const secs = m3.ar.ms(t0, m3.ar.nowNs(io)) / 1000;
+            const secs = common.ms(t0, common.nowNs(io)) / 1000;
             try npy.write(gpa, io, try path(a, o.out, "audio.npy"), f32, audio, &.{ 2, L * 512 });
             std.debug.print("[music3] parity dav: {d} latent rows, {d:.2}s\n", .{ L, secs });
         } else |_| {}

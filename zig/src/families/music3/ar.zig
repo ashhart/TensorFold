@@ -4,32 +4,15 @@ const cuda = @import("cuda");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
+const common = @import("common.zig");
 
 const H = cfg.hidden;
 const Buf = cuda.DeviceBuffer;
 const decode_splits = 16;
 
-pub const Sampling = struct {
-    ar_cfg: f32 = 1.5,
-    top_k: i32 = 50,
-    seed: u64 = 0, // the AR stage's own seed (config.deriveSeed(song seed, "ar"))
-};
-
-/// Per-frame logits for parity (teacher forcing): code 0 [2, 16385] and the depth heads [7, 2, 1024], fp32.
-pub const Trace = struct {
-    c0: std.ArrayList(f32) = .empty,
-    depth: std.ArrayList(f32) = .empty,
-};
-
-pub const Result = struct {
-    states: []u16, // bf16 [frames, 8 * 4096] of the kept frames (frame 0 dropped, as the reference)
-    frames: usize,
-    stopped: bool,
-    prompt_tokens: usize,
-    prefill_ms: f64,
-    ar_ms: f64,
-    frames_per_s: f64,
-};
+pub const Sampling = common.Sampling;
+pub const Trace = common.Trace;
+pub const Result = common.Result;
 
 pub const Ar = struct {
     gpa: std.mem.Allocator,
@@ -323,10 +306,7 @@ pub const Ar = struct {
         try a.graph.?.launchOn(a.s);
     }
 
-    pub const Progress = struct {
-        ctx: *anyopaque,
-        f: *const fn (ctx: *anyopaque, stage: []const u8, done: usize, total: usize) void,
-    };
+    pub const Progress = common.Progress;
 
     /// Prompt, then frames to the stop code or `limit` kept; `forced_codes` replaces every draw, `trace` keeps logits.
     pub fn run(a: *Ar, io: std.Io, ids: []const u32, unc: []const u32, smp: Sampling, limit: usize, graphs: bool, sync_every: usize, forced_codes: ?[]const [8]i32, trace: ?*Trace, progress: ?Progress) !Result {
@@ -376,10 +356,5 @@ pub const Ar = struct {
     }
 };
 
-pub fn nowNs(io: std.Io) i128 {
-    return @intCast(std.Io.Clock.awake.now(io).toNanoseconds());
-}
-
-pub fn ms(a: i128, b: i128) f64 {
-    return @as(f64, @floatFromInt(b - a)) / 1e6;
-}
+pub const nowNs = common.nowNs;
+pub const ms = common.ms;
