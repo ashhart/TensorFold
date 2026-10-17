@@ -9,7 +9,7 @@ const weights = @import("cuda_weights.zig");
 const state = @import("cuda_state.zig");
 const Dump = @import("cuda_dump.zig").Dump;
 const train_ops = @import("cuda_train_ops.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 const kept = @import("cuda_marks.zig");
 const latent = @import("cuda_latent.zig");
 

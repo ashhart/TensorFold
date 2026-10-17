@@ -332,7 +332,7 @@ pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a 
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = @import("learning_api.zig").LearnRequest;

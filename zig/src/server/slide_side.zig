@@ -38,8 +38,8 @@ pub fn each(n: usize, job: anytype) !void {
     if (code != 0) return @errorFromInt(code);
 }
 
-/// A question as `ask` puts it (at most `max` tokens), with thinking as `askThinking` does, or after `before`'s turns.
-pub const Asking = struct { question: []const u8, max: i64 = 48, thinking: bool = false, base: bool = false, before: []const [2][]const u8 = &.{} }; // base: as shipped
+/// A question as `ask` puts it (at most `max` tokens), or with thinking on as `askThinking` does; `base`: as shipped.
+pub const Asking = struct { question: []const u8, max: i64 = 48, thinking: bool = false, base: bool = false };
 
 /// Each question's reply, asked side by side.
 pub fn askAll(srv: *Server, cx: *Cx, qs: []const Asking, gone: anytype) ![]chat.Reply {
@@ -54,7 +54,7 @@ pub fn askAll(srv: *Server, cx: *Cx, qs: []const Asking, gone: anytype) ![]chat.
         pub fn run(j: *const @This(), i: usize) !void {
             var jcx: Cx = .{ .a = j.a };
             const q = j.qs[i];
-            j.out[i] = if (q.thinking) (if (q.base) try slide_ask.askThinkingBase(j.srv, &jcx, q.question, j.gone) else try slide_ask.askThinking(j.srv, &jcx, q.question, j.gone)) else if (q.before.len > 0) try slide_ask.askIn(j.srv, &jcx, q.before, q.question, q.max, q.base, j.gone) else if (q.base) try slide_ask.askBase(j.srv, &jcx, null, q.question, q.max, j.gone) else try slide_ask.ask(j.srv, &jcx, null, q.question, q.max, j.gone);
+            j.out[i] = if (q.base) (if (q.thinking) try slide_ask.askThinkingBase(j.srv, &jcx, q.question, j.gone) else try slide_ask.askBase(j.srv, &jcx, null, q.question, q.max, j.gone)) else if (q.thinking) try slide_ask.askThinking(j.srv, &jcx, q.question, j.gone) else try slide_ask.ask(j.srv, &jcx, null, q.question, q.max, j.gone);
         }
     };
     try each(qs.len, &Job{ .srv = srv, .a = cx.a, .qs = qs, .gone = gone, .out = out });

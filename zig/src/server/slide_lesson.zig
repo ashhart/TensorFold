@@ -55,7 +55,6 @@ const bankAnswers = slide_teacher.bankAnswers;
 const thinks = slide_teacher.thinks;
 const turnEnd = slide_teacher.turnEnd;
 const slide_pick = @import("slide_pick.zig");
-const talks = @import("slide_context.zig");
 const Unseen = slide_pick.Unseen;
 const heldPair = slide_pick.heldPair;
 const dice = slide_pick.dice;
@@ -85,7 +84,7 @@ pub const check_tokens = 32; // a check's reply read before and after a lesson
 pub const Check = struct { question: []const u8, before: []const u8, thinking: []const u8 = "", invents: bool = false }; // invents: an untold check
 
 /// A held-out question, the answer the model wrote for it from its fact, and which fact.
-pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "", context: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it; context: the conversation it is asked after
+pub const Held = struct { question: []const u8, answer: []const u8, fact: usize, subject: []const u8 = "", short: []const u8 = "" }; // subject: the word an edit keys on; short: the fewest words that answer it
 
 /// A lesson for the learner, its facts, and what to ask after it; `probes` are wordings it never trains on.
 pub const Plan = struct { full: api.LearnRequest, facts: []const []const u8, held: []const Held, probes: []const Held = &.{}, checks: []const Check, thinks: bool = false, document: bool = false, stale: slide_teacher.Stale = .{} };
@@ -118,10 +117,8 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
     var keep: std.ArrayList(api.Example) = .empty;
     var checks: std.ArrayList(Check) = .empty;
     teacher.lessons += 1;
-    var free: std.ArrayList([]const u8) = .empty; // questions about the user no fact of the lesson answers
     for (prompts.personal_prompts, 0..) |q, i| {
         if (try answeredByAny(srv, cx, told, kept, parts.own.items, q, document, gone)) continue;
-        try free.append(a, q);
         const reply = try ask(srv, cx, null, q, check_tokens, gone);
         if (heldBack(teacher.lessons, i)) {
             try checks.append(a, .{ .question = q, .before = reply.content });
@@ -176,7 +173,6 @@ pub fn lesson(srv: *Server, cx: *Cx, teacher: *Teacher, told: []const []const u8
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, null, q));
         try parts.unasked.append(a, try slide_ask.promptOnly(srv, cx, a, prompts.systems[i % prompts.systems.len], q));
     }
-    if (!document) try talks.unanswered(srv, cx, &parts.unasked, free.items, gone);
     // the near misses set aside, never trained on, check that the fact stays put
     try checks.appendSlice(a, parts.aside.items);
     log.line("slide: {d} near misses trained on, {d} set aside to check", .{ parts.near.items.len, parts.aside.items.len });
@@ -403,7 +399,6 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         thought += @intFromBool(think != null);
         if (held) try parts.held.append(a, r);
     }
-    try talks.checkIn(a, &parts.held, refs.items[pair[0]], refs.items[pair[1]]); // a fact back only when asked cold fails
     // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes)
     for (pairs.items, refs.items, 0..) |ex, r, i| {
         if (i == pair[0] or i == pair[1]) continue;
@@ -457,7 +452,6 @@ fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
         if (!std.mem.eql(u8, r.subject, s)) log.line("slide: \"{s}\": neuron key \"{s}\", neighbour subject \"{s}\"", .{ r.question, r.subject, s });
     };
     try routerData(srv, cx, parts, fact, f, refs.items, subjects.items, kept, asked_all, answered_all, language, gone);
-    try talks.learn(srv, cx, .{ .train = &parts.train, .asked = &parts.asked, .unasked = &parts.unasked }, refs.items, pairs.items, pair, kept, gone);
     return true;
 }
 
@@ -548,7 +542,7 @@ fn routerData(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usize, 
 }
 
 /// An answer's tokens after another head (a question under a system message, or after an exchange), keyed as before.
-pub fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !api.Example {
+fn under(srv: *Server, cx: *Cx, head: api.Example, body: []const u32, r: Held) !api.Example {
     var ex: api.Example = .{ .ids = try std.mem.concat(cx.a, u32, &.{ head.ids, body }), .start = @intCast(head.ids.len), .decide = head.decide };
     ex.subject = try subjectRow(srv, cx, ex, r.subject);
     ex.value = try slide_subject.valueRow(srv, cx, ex, r.short);

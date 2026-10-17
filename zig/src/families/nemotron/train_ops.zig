@@ -7,7 +7,7 @@ const wts = @import("weights.zig");
 const pl = @import("prefill_launch.zig");
 const pk = @import("prefill_kernels.zig");
 const layers = @import("layers.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 
 const Buffer = mtl.Buffer;
 const At = pl.At;

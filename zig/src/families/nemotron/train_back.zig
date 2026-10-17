@@ -7,7 +7,7 @@ const pre = @import("prefill.zig");
 const pl = @import("prefill_launch.zig");
 const ops = @import("train_ops.zig");
 const adapters = @import("adapters.zig");
-const Span = @import("living").train_mode.Span;
+const Span = @import("train_mode.zig").Span;
 const Store = @import("train_prefix.zig").Store;
 
 const Buffer = mtl.Buffer;

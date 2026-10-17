@@ -1,6 +1,6 @@
 //! Learning in the weights: sequences side by side forward through every layer, their losses, back to each change.
 const std = @import("std");
-const train_mode = @import("living").train_mode;
+const train_mode = @import("train_mode.zig");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const st = @import("state.zig");
@@ -11,9 +11,9 @@ const back = @import("train_back.zig");
 const job = @import("train_job.zig");
 const adapters = @import("adapters.zig");
 const backend = @import("backend.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 const prefix = @import("train_prefix.zig");
-const Count = @import("living").pocket_clock.Count;
+const Count = @import("pocket_clock.zig").Count;
 
 const Metal = backend.Metal;
 const At = pl.At;

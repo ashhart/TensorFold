@@ -189,7 +189,7 @@ fn taughtAt(text: *ByteText, m: *Model, path: ?[]const u8) !Taught {
         id.* = srv.slide.add(f[0], "chat", 100);
         srv.slide.mark(id.*, .learned);
         srv.slide.placed(id.*, &.{ .{ .layer = f[3], .neuron = 0, .key = .reply }, .{ .layer = f[3] + 10, .neuron = 0, .key = .reply } });
-        srv.slide.asked(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
+        srv.slide.expects(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
     }
     try srv.teacher.remember("sister", "What is my sister's name?", "Your sister is called Ana.");
     return out;

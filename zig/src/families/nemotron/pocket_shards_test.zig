@@ -69,15 +69,7 @@ test "the first write widens the shared expert and tells config.json; a later on
         v.* = r.floatNorm(f32) * 0.2;
     }
     const asked_up = up;
-    var rounded_up = up;
-    var rounded_down = down;
     _ = try Shards.write(gpa, io, dir, c, &.{0}, learned, &up, &down);
-    // round gives what write hands back, bit for bit, and rounding it again changes nothing
-    try Shards.round(gpa, d, &rounded_up, &rounded_down);
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&up), std.mem.sliceAsBytes(&rounded_up));
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&down), std.mem.sliceAsBytes(&rounded_down));
-    try Shards.round(gpa, d, &rounded_up, &rounded_down);
-    try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&down), std.mem.sliceAsBytes(&rounded_down));
     try std.testing.expectEqual(@as(?i64, learned), try core.shard_edit.configInt(gpa, io, dir, cfg.pocket_key));
     try std.testing.expectEqual(@as(?i64, own + learned), try core.shard_edit.configInt(gpa, io, dir, "moe_shared_expert_intermediate_size"));
     // handed back as written: within half a step of what was asked

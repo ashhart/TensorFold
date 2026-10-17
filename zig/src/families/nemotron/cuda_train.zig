@@ -1,6 +1,6 @@
 //! Learning in the weights on CUDA (train.zig on Metal): sequences side by side forward, their losses, and back.
 const std = @import("std");
-const train_mode = @import("living").train_mode;
+const train_mode = @import("train_mode.zig");
 const cuda = @import("cuda");
 const core = @import("core");
 const Config = @import("config.zig").Config;
@@ -10,14 +10,13 @@ const fwd = @import("cuda_forward.zig");
 const engine = @import("cuda_engine.zig");
 const ops = @import("cuda_train_ops.zig");
 const sites_mod = @import("cuda_sites.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 const back = @import("cuda_train_back.zig");
 const tfw = @import("cuda_train_fwd.zig");
 const lay = @import("cuda_train_layout.zig");
 const prefix = @import("cuda_train_prefix.zig");
-const Count = @import("living").pocket_clock.Count;
+const Count = @import("pocket_clock.zig").Count;
 const Source = @import("cuda_source.zig").Source;
-const taps = @import("cuda_train_tap.zig");
 
 /// Rows a sequence learns from at most: a question and its answer (attention's backward reads at most 256).
 pub const max_rows = 256;
@@ -146,7 +145,6 @@ pub const Trainer = struct {
     pack: usize = pack_rows, // rows a pass may hold here
     prefixes: prefix.Store = undefined, // sequences' prompt prefixes, run once and their states kept
     count: Count = .{}, // passes run and the rows they held
-    tap: ?taps.Tap = null, // made the first time a prompt in a conversation is read (tapRows)
 
     /// The model's shape, as the pocket and the probe read it on either backend.
     pub fn config(t: *const Trainer) Config {
@@ -244,7 +242,6 @@ pub const Trainer = struct {
 
     pub fn deinit(t: *Trainer) void {
         const gpa = t.gpa;
-        if (t.tap) |*x| x.deinit();
         t.prefixes.deinit(gpa);
         t.sites.attach(&t.e.w, false);
         t.sites.deinit();
@@ -352,8 +349,6 @@ pub const Trainer = struct {
     fn scales(t: *const Trainer) []f32 {
         return t.host.slice(f32, 5 * pack_rows)[4 * pack_rows ..];
     }
-
-    pub const tapRows = taps.rows;
 
     /// Layer i's output projection as loaded: the matrix its learned change sits after.
     pub fn outProj(t: *const Trainer, i: usize) Mat {

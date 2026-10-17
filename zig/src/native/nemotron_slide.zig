@@ -1,4 +1,4 @@
-//! A family's Living Weights learner behind the lane host's learn hook: lessons in, learn events out.
+//! Nemotron's Sliding Weights learner behind the lane host's learn hook: lessons in, learn events out.
 const std = @import("std");
 const api = @import("engine_api");
 const Allocator = std.mem.Allocator;
@@ -6,9 +6,9 @@ const Allocator = std.mem.Allocator;
 /// Neurons a learn event carries at most; a fact takes about ten.
 const max_neurons = 64;
 
-/// Why --slide cannot learn into `dir` (`Checks`: linked and plainShared files; `copy`: the copy to make), or null.
+/// Why --slide cannot learn into `dir` (`Checks`: its plainShared and linked; `copy`: the copy to make), or null.
 pub fn refusal(comptime Checks: type, a: Allocator, io: std.Io, dir: []const u8, copy: []const u8) !?[]const u8 {
-    if (@hasDecl(Checks, "plainShared")) if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
+    if (try Checks.plainShared(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide adds learned neurons beside every shared expert, and {s} in {s} is unquantized, as TensorFold 1.0.3 to 1.0.6 saved their lessons: serve this folder without --slide (what it learned stays), or teach a fresh copy", .{ name, dir });
     if (try Checks.linked(a, io, dir)) |name| return try std.fmt.allocPrint(a, "--slide rewrites the model's own files, and {s} in {s} is a link to data another file shares (a Hugging Face cache's blob, or a hard link), so learning would change that file too: serve a copy made with {s}", .{ name, dir, copy });
     return null;
 }
@@ -100,7 +100,7 @@ pub fn Adapter(comptime slide: type) type {
 
         fn examples(al: Allocator, xs: []const api.Example) ![]slide.Example {
             const out = try al.alloc(slide.Example, xs.len);
-            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value, .context = x.context };
+            for (xs, out) |x, *o| o.* = .{ .ids = x.ids, .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
             return out;
         }
 

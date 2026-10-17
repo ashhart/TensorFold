@@ -4,7 +4,7 @@ const std = @import("std");
 pub const max_steps = 400;
 
 /// Token ids, the answer from `start`; `decide`: the reply's first row; `subject`, `value`: key rows (0: none).
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // context: rows of a conversation before its own turn, which other examples share (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 };
 
 /// One fact's examples; `more` another round, `undo` one back, `save` writes every kept lesson.
 pub const Lesson = struct {
@@ -90,30 +90,9 @@ pub fn own(gpa: std.mem.Allocator, xs: []const Example) ![]Example {
         gpa.free(out);
     }
     for (xs, out) |x, *o| {
-        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value, .context = x.context };
+        o.* = .{ .ids = try gpa.dupe(u32, x.ids), .start = x.start, .decide = x.decide, .subject = x.subject, .value = x.value };
         made += 1;
     }
-    return out;
-}
-
-/// `lesson` checked, as a learner reads it: a prompt in a conversation longer than its passes' `rows` only by `taps`.
-pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
-    for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
-        if (ex.start < 1 or ex.start >= ex.ids.len or ex.decide + 1 >= ex.ids.len) return error.ExampleTooLong;
-        // a prompt in a conversation is read through the host's taps, at any length
-        if (ex.ids.len - 1 > rows and ex.context == 0) return error.ExampleTooLong;
-    };
-    var out = lesson;
-    var dropped: usize = 0;
-    // answers are read by passes whole; other wordings and near misses may be read through the trainer's taps
-    for ([_]*[]const Example{ &out.train, &out.think, &out.asked, &out.unasked }, bufs, 0..) |list, *buf, i| {
-        buf.clearRetainingCapacity();
-        for (list.*) |ex| if (ex.context == 0 or ex.ids.len - 1 <= rows or (taps and i >= 2)) try buf.append(gpa, ex) else {
-            dropped += 1;
-        };
-        list.* = buf.items;
-    }
-    if (dropped > 0) std.log.info("slide: {d} prompts in a conversation are left out: longer than this learner reads", .{dropped});
     return out;
 }
 
@@ -135,23 +114,4 @@ pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
 
 pub fn disownLesson(gpa: std.mem.Allocator, lesson: Lesson) void {
     inline for (edit_lists) |f| disown(gpa, @constCast(@field(lesson, f)));
-}
-
-test "a learner without taps reads a prompt in a conversation only when its passes hold it" {
-    const gpa = std.testing.allocator;
-    const long: [40]u32 = @splat(0);
-    const short: Example = .{ .ids = long[0..8], .start = 7, .decide = 6, .context = 4 };
-    const far: Example = .{ .ids = &long, .start = 39, .decide = 38, .context = 30 };
-    const cold: Example = .{ .ids = long[0..8], .start = 7, .decide = 6 };
-    const lesson: Lesson = .{ .train = &.{ cold, far }, .asked = &.{ short, far }, .unasked = &.{far} };
-    var bufs: [4]std.ArrayList(Example) = @splat(.empty);
-    defer for (&bufs) |*b| b.deinit(gpa);
-    const plain = try readable(gpa, lesson, false, 16, &bufs);
-    try std.testing.expectEqual(@as(usize, 1), plain.train.len);
-    try std.testing.expectEqual(@as(usize, 1), plain.asked.len);
-    try std.testing.expectEqual(@as(usize, 0), plain.unasked.len);
-    const tapped = try readable(gpa, lesson, true, 16, &bufs);
-    try std.testing.expectEqual(@as(usize, 1), tapped.train.len); // an answer is read by passes whole
-    try std.testing.expectEqual(@as(usize, 2), tapped.asked.len);
-    try std.testing.expectEqual(@as(usize, 1), tapped.unasked.len);
 }

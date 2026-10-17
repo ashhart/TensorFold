@@ -6,7 +6,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 const state = @import("cuda_state.zig");
 const reuse = @import("cuda_reuse.zig");
 const mtp = @import("cuda_mtp.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 
 /// One paged sequence, made at load, and the lease of the stream that holds it.
 const Lane = struct { seq: *state.Seq, lease: kv.Lease = .{}, used: bool = false };

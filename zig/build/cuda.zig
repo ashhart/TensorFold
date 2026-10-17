@@ -24,14 +24,12 @@ pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     return cuda;
 }
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module } {
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
     core.addImport("tokenizer", tokenizer);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const heat = b.createModule(.{ .root_source_file = b.path("zig/src/core/heat.zig"), .target = target, .optimize = optimize, .link_libc = true });
-    // Living Weights' family-neutral learner: a family's lessons, and the server's view of them, import it
-    const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const nemotron = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     nemotron.addImport("cuda", cuda);
     nemotron.addImport("core", core);
@@ -40,14 +38,13 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     nemotron.addImport("nemotron_draft_ids", draft_ids);
     const radio = radioModule(b, target, optimize, cuda, core, lanes);
     nemotron.addImport("radio", radio);
-    nemotron.addImport("living", living);
     const qwen35 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
     qwen35.addImport("cuda", cuda);
     qwen35.addImport("core", core);
     qwen35.addImport("lanes", lanes);
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
-    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio, .living = living };
+    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio };
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
@@ -118,7 +115,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.step("compile-modelopt-startup", "Compile actual native startup with test-only absent GPU images").dependOn(&startup.step);
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls, h3_image);
-    const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
+    const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, build_options, true, strip);
     b.step("compile-config-server", "Compile the actual CUDA server config entry point without installing or running").dependOn(&server_exe.step);
     // tf-qwen35-cuda: the Qwen CUDA forward's rows for a reference to compare, and its tower on picture files
     const q35 = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
@@ -198,7 +195,7 @@ fn checkpointCli(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, living: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool, strip: ?bool) *std.Build.Step.Compile {
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool, strip: ?bool) *std.Build.Step.Compile {
     const m = engines(b, target, optimize, cuda, core, lanes, nemotron, heat, qwen35, qwen_vision);
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -207,7 +204,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "living", .module = living }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
+        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
     _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
@@ -369,7 +366,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .target = host,
         .optimize = .debug,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living } },
+        .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
     windows_port.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"hardware names"} })).step);
@@ -427,15 +424,6 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
     _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
-    // Living Weights: the family-neutral learner, then the pocket in each family's shards over the core's shard files
-    const living_run = b.addRunArtifact(b.addTest(.{ .root_module = mods.living }));
-    const shards = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "living", .module = mods.living }} });
-    const shards_run = b.addRunArtifact(b.addTest(.{ .root_module = shards }));
-    step.dependOn(&living_run.step);
-    step.dependOn(&shards_run.step);
-    const living_step = b.step("test-living", "Living Weights' learner and the pocket in each family's shards, on the host");
-    living_step.dependOn(&living_run.step);
-    living_step.dependOn(&shards_run.step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
     cli.addImport("core", mods.core);
@@ -477,7 +465,7 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     };
     const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
     const mods = family(b, target, .fast, cuda, draft_ids);
-    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
+    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, build_options, false, null);
 }
 
 /// SASS targets every release fatbin holds: Ampere (sm_80, sm_86), RTX 50/PRO Blackwell (sm_120), GB10 (sm_121).

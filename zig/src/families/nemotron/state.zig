@@ -3,7 +3,7 @@ const std = @import("std");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const fwd = @import("forward.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 

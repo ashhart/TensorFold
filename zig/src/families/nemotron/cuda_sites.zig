@@ -4,9 +4,9 @@ const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const weights = @import("cuda_weights.zig");
 const train_ops = @import("cuda_train_ops.zig");
-const subspace = @import("living").subspace;
+const subspace = @import("subspace.zig");
 const shape = @import("learn_shape.zig");
-const route = @import("living").lesson_route;
+const route = @import("lesson_route.zig");
 
 pub const block = shape.block;
 pub const max_rank = shape.max_rank;

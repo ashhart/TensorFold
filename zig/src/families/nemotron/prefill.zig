@@ -9,7 +9,7 @@ const pk = @import("prefill_kernels.zig");
 const pl = @import("prefill_launch.zig");
 const mixers = @import("prefill_mixers.zig");
 const layers = @import("layers.zig");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 const Model = @import("model.zig").Model;
 
 const Buffer = mtl.Buffer;

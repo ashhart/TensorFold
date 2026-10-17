@@ -59,8 +59,15 @@ test {
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
     _ = @import("families/nemotron/kernels.zig");
+    _ = @import("families/nemotron/subspace.zig"); // a new block's directions
     _ = @import("families/nemotron/living_test.zig"); // saved lessons and their routers, beside the shards
     _ = @import("families/nemotron/pocket_shards_test.zig"); // learned neurons in the shards themselves
+    _ = @import("families/nemotron/pocket_forget_test.zig"); // a fact deleted on request, and put back
+    _ = @import("families/nemotron/pocket.zig"); // which row a fact's neurons fire at
+    _ = @import("families/nemotron/pocket_fit.zig"); // where a fact's neurons fire, and stay silent
+    _ = @import("families/nemotron/router.zig"); // when a lesson acts on a reply
+    _ = @import("families/nemotron/lesson_route.zig");
+    _ = @import("families/nemotron/learner.zig");
     _ = @import("families/flashnext/tp_settings.zig"); // speed-up settings read without a typed JSON parse
     _ = @import("families/flashnext/follow.zig"); // rank 1's reply hash
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.

@@ -1,7 +1,7 @@
 //! Device buffers of one Nemotron sequence: its caches and recurrent state, and the scratch a window or chunk uses.
 
 const std = @import("std");
-const lesson_route = @import("living").lesson_route;
+const lesson_route = @import("lesson_route.zig");
 const cuda = @import("cuda");
 const Config = @import("config.zig").Config;
 const kern = @import("cuda_kernels.zig");

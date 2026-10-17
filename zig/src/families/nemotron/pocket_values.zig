@@ -131,7 +131,8 @@ const Drawn = struct { own: bool, joint: bool = false, which: usize, seq: Seq };
 /// One output step: its fact answers, then those that are to stay, side by side; then Adam, and every few the judge.
 pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
     const s = &p.v;
-    const d = p.hidden;
+    const c = t.config();
+    const d = c.hidden;
     const k = p.taken.items.len + p.joint.items.len; // the open fact's neurons, then the earlier ones fitted with them
     const vals = s.adam.items[0 .. k * d];
     const grad = s.adam.items[3 * k * d ..][0 .. k * d];
@@ -252,7 +253,8 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
 /// Answer `dr`, the pass's i-th, into the step: its loss, and each neuron's push times its activation at its row.
 fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32) void {
     const s = &p.v;
-    const d = p.hidden;
+    const c = t.config();
+    const d = c.hidden;
     const masks = dr.seq.nudge.layers;
     const rows = dr.seq.nudge.rows;
     const sp = t.spans[i];
@@ -274,10 +276,8 @@ fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32)
         const key = @backingInt(x.key);
         if (masks[key] == 0) continue;
         const l = p.moe.items[x.slot];
-        const row = sp.row(rows[key]);
-        // relu(u x)^2, or a SwiGLU's silu(g x) (u x) / sharp; times its expert's gate there when one scales it
-        var a = p.act(x.slot, x.neuron, t.normed(l, row));
-        if (@TypeOf(p.*).gated) a *= t.gateAt(l, row);
+        const z = dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(l, sp.row(rows[key])));
+        const a = if (z > 0) z * z else 0;
         subspace.axpy(grad[j * d ..][0..d], dr.seq.scale * a, t.pushAt(i, key, l));
         if (dr.own and s.size.items[j] == 0) s.size.items[j] = normBf16(t.residual(l + 1, sp.row(rows[key])));
     }
@@ -358,7 +358,7 @@ fn judgeOnce(p: anytype, t: anytype, host: anytype, vals: []f32) !bool {
 /// The outputs into the pocket's neurons and the forward; the held-out answers judged next.
 fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     const s = &p.v;
-    const d = p.hidden;
+    const d = t.config().hidden;
     try put(p, t, host, vals, d);
     t.from = @splat(std.math.maxInt(u32));
     std.log.info("slide pocket: {d} answers' first rows run once, {d} rows the steps did not run again", .{ s.prefixes.slots, s.prefixes.skipped });
@@ -382,7 +382,6 @@ fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
 
 /// The held-out answers judged token for token with the pocket in the forward, side by side; true once judged.
 pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
-    try @import("pocket_mark.zig").asWritten(p, t, host); // judged, and asked after, as a save writes it
     if (p.held.len > 0) try verifyForward(p, t, host, p.held[0]);
     const got = try p.gpa.alloc(Result, p.held.len);
     defer p.gpa.free(got);
@@ -396,9 +395,9 @@ pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
     return true;
 }
 
-/// Logs the forward's change after the fact's lowest neuron on `ex` against its act(x) v, to spot a bad forward.
+/// Logs the forward's change after the fact's lowest neuron on `ex` against its relu(u x)^2 v, to spot a bad forward.
 fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
-    const d = p.hidden;
+    const d = t.config().hidden;
     var low: ?std.meta.Elem(@TypeOf(p.taken.items)) = null;
     var row: usize = 0;
     for (p.taken.items) |x| {
@@ -421,8 +420,8 @@ fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
     t.nudge = .{};
     _ = try t.step(ex.ids, ex.start, .target, turn);
     for (with, t.residual(l + 1, row)) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
-    var a = p.act(k.slot, k.neuron, t.normed(l, row));
-    if (@TypeOf(p.*).gated) a *= t.gateAt(l, row);
+    const z = dotBf16(p.neuron(p.up.items, k.slot, k.neuron, d), t.normed(l, row));
+    const a = if (z > 0) z * z else 0;
     const v = p.neuron(p.down.items, k.slot, k.neuron, d);
     for (want, v) |*o, x| o.* = a * x;
     @memcpy(saved, v);

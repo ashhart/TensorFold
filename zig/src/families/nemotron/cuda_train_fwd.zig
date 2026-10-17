@@ -6,7 +6,7 @@ const state = @import("cuda_state.zig");
 const weights = @import("cuda_weights.zig");
 const fwd = @import("cuda_forward.zig");
 const train_ops = @import("cuda_train_ops.zig");
-const Span = @import("living").train_mode.Span;
+const Span = @import("train_mode.zig").Span;
 const Store = @import("cuda_train_prefix.zig").Store;
 
 /// The open fact's pocket neurons scaled row by row: `rows` f32 [rows] on the device, at layer l from `from[l]` on.

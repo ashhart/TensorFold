@@ -1,7 +1,7 @@
 //! Nemotron's Sliding Weights learner on CUDA: learner.zig's lessons over the CUDA trainer, the engine and its shards.
 const std = @import("std");
 const cuda = @import("cuda");
-const lessons = @import("living").learner;
+const lessons = @import("learner.zig");
 const train = @import("cuda_train.zig");
 const engine = @import("cuda_engine.zig");
 const sites_mod = @import("cuda_sites.zig");
@@ -10,7 +10,6 @@ const state = @import("cuda_state.zig");
 
 const Living = living.Io(@import("core"));
 const PocketShards = @import("pocket_shards.zig").Io(@import("core"));
-const pocket_layout = @import("pocket_layout.zig");
 
 pub const Example = lessons.Example;
 pub const Lesson = lessons.Lesson;
@@ -28,15 +27,9 @@ const Host = struct {
     pub const Trainer = train.Trainer;
     pub const max_rows = train.max_rows;
     pub const Ctx = Model;
-    pub const family = pocket_layout.family;
 
     pub fn layers(m: Ctx) usize {
         return m.e.c.layers;
-    }
-
-    /// Where the pocket sits and learns: every MoE layer, all but the last learning.
-    pub fn layout(m: Ctx) @import("living").Layout {
-        return pocket_layout.layout(m.e.c);
     }
 
     pub fn trainer(gpa: std.mem.Allocator, io: std.Io, m: Ctx) !*Trainer {
@@ -116,6 +109,11 @@ const Host = struct {
     pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
         try m.e.stream.synchronize();
         return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
+    }
+
+    /// One layer's pocket, `up` and `down` [neurons, D], rounded in place to the 4-bit values a save writes.
+    pub fn pocketRound(m: Ctx, gpa: std.mem.Allocator, up: []f32, down: []f32) !void {
+        return PocketShards.round(gpa, m.e.c.hidden, up, down);
     }
 };
 

@@ -8,7 +8,6 @@ const teach = @import("slide_lesson.zig");
 const slide_ask = @import("slide_ask.zig");
 const prompts = @import("slide_prompts.zig");
 const side = @import("slide_side.zig");
-const talks = @import("slide_context.zig");
 const chat = @import("chat.zig");
 const Server = @import("server.zig").Server;
 const Cx = errors.Cx;
@@ -35,8 +34,8 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
     const thought = if (last and plan.thinks) plan.checks[0..@min(plan.checks.len, think_leaks)] else plan.checks[0..0];
     var asking: std.ArrayList(side.Asking) = .empty;
     for (plan.held) |h| {
-        try asking.append(a, .{ .question = h.question, .before = try talks.turns(srv, cx, h.context, gone) });
-        if (plan.thinks and h.context.len == 0) try asking.append(a, .{ .question = h.question, .thinking = true });
+        try asking.append(a, .{ .question = h.question });
+        if (plan.thinks) try asking.append(a, .{ .question = h.question, .thinking = true });
     }
     for (plan.probes) |h| try asking.append(a, .{ .question = h.question });
     for (plan.checks) |c| try asking.append(a, .{ .question = c.question, .max = check_tokens });
@@ -50,9 +49,9 @@ pub fn verify(srv: *Server, cx: *Cx, plan: Plan, last: bool, gone: anytype) !Ver
         if (wording.looped(h.question, reply)) return .{ .recalled = recalled, .damage = "it started repeating itself" };
         asked[h.fact] = true;
         const back = brings(plan.facts[h.fact], h, reply);
-        if (!back) log.line("slide: \"{s}\"{s}{s} does not bring its fact back: {s}", .{ h.question, if (h.context.len > 0) " after the conversation " else "", h.context, reply });
+        if (!back) log.line("slide: \"{s}\" does not bring its fact back: {s}", .{ h.question, reply });
         recalled[h.fact] = recalled[h.fact] and back;
-        if (plan.thinks and h.context.len == 0) {
+        if (plan.thinks) {
             recalled[h.fact] = thinkingRecalls(plan.facts[h.fact], h, replies[at]) and recalled[h.fact];
             at += 1;
         }
