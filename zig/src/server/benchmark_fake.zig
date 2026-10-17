@@ -3,8 +3,8 @@ const std = @import("std");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
-/// Bytes written to the client, then a pause before the next write.
-pub const Write = struct { bytes: []const u8, pause_ms: u32 = 0 };
+/// Write bytes, then wait on ``after`` (caller releases before cleanup) and pause.
+pub const Write = struct { bytes: []const u8, pause_ms: u32 = 0, after: ?*std.Io.Event = null };
 
 /// ``METHOD path`` and its replies: the n-th match plays ``replies[min(n, len - 1)]``; ``tunnel`` records bytes after.
 pub const Route = struct { method: []const u8, path: []const u8, replies: []const []const Write, tunnel: bool = false };
@@ -123,6 +123,7 @@ pub const Fake = struct {
         for (route.replies) |w| {
             if (f.stop_flag.load(.acquire)) return;
             if (!writeAll(c, w.bytes)) return;
+            if (w.after) |gate| gate.waitUncancelable(std.testing.io);
             if (w.pause_ms > 0) nap(w.pause_ms);
         }
         while (route.tunnel) {
