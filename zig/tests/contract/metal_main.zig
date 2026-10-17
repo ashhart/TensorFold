@@ -10,6 +10,7 @@ const tile_k = @import("metal_tile.zig");
 const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
+const drama3_k = @import("metal_drama3.zig");
 
 const gemma = @import("metal_gemma4.zig");
 const g = contract.gates;
@@ -117,6 +118,12 @@ pub fn main(init: std.process.Init) !u8 {
         r.* = try rows_k.Row.init(a, device, queue, w);
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
+    }
+    var d3norm: ?drama3_k.Norm = null;
+    defer if (d3norm) |*n| n.deinit();
+    if (wanted(o, drama3_k.spec().name)) {
+        d3norm = try drama3_k.Norm.init(a, device, queue);
+        try kernels.append(a, d3norm.?.kernel());
     }
     var topk: ?topk_k.TopK = null;
     defer if (topk) |*t| t.deinit();

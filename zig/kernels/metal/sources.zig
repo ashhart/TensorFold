@@ -157,3 +157,14 @@ pub const core_contract_controls = @embedFile("core/contract_controls.metal");
 /// Gemma-only rounded weights and fused lane arithmetic; shared sources retain the released bytes.
 pub const gemma4_affine_mm = @embedFile("gemma4/affine_mm.metal");
 pub const gemma4_lane_projection = @embedFile("gemma4/lane_projection.metal");
+
+/// Drama 3's kernels (drama3.metallib is built ahead of time); the kernel contract compiles them from this text.
+pub const drama3 = struct {
+    pub const common = @embedFile("drama3/d3_common.h");
+    pub const dense = @embedFile("drama3/dense.metal");
+    pub const gdn = @embedFile("drama3/gdn.metal");
+    pub const attn = @embedFile("drama3/attn.metal");
+    pub const moe = @embedFile("drama3/moe.metal");
+    pub const sample = @embedFile("drama3/sample.metal");
+    pub const codec = @embedFile("drama3/codec.metal");
+};
