@@ -97,7 +97,6 @@ tf_nemo_router_rows(const __nv_bfloat16* __restrict__ X, const __nv_bfloat16* __
 
 namespace {
 
-constexpr int MAXC = 16;   // experts a lane holds: up to 512 experts
 constexpr int MAXSK = 8;  // router slices topk sums (routerShape takes at most 6)
 
 // The larger of two (value, index) picks: a higher value, or the lower index on a tie (values are never NaN).
@@ -105,10 +104,10 @@ __device__ __forceinline__ bool beats(float v, int i, float bv, int bi) { return
 
 }  // namespace
 
-// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots.
-extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS,
-                                                               int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling, int E,
-                                                               int SK, int TOPK, int NS, int norm) {
+// Sum logits' slices in order; rank sigmoid scores plus bias before adding the shared slots. MAXC: experts a lane holds.
+template <int MAXC>
+__device__ __forceinline__ void nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS, int* __restrict__ IDX,
+                                          float* __restrict__ WT, int R, float scaling, int E, int SK, int TOPK, int NS, int norm) {
     const int64_t r = blockIdx.x;
     const int lane = threadIdx.x;
     float score[MAXC], sel[MAXC];
@@ -168,4 +167,18 @@ extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __res
         IDX[r * NS + k] = id;
         WT[r * NS + k] = w;
     }
+}
+
+// Up to 256 experts and 8 picks a row (Lightning, Super): the released kernel.
+extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk(const float* __restrict__ PART, const float* __restrict__ BIAS,
+                                                               int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling, int E,
+                                                               int SK, int TOPK, int NS, int norm) {
+    nemo_topk<8>(PART, BIAS, IDX, WT, R, scaling, E, SK, TOPK, NS, norm);
+}
+
+// Up to 512 experts and 16 picks a row (Bolt's 496 experts, 9 picks).
+extern "C" __global__ void __launch_bounds__(32) tf_nemo_topk_wide(const float* __restrict__ PART, const float* __restrict__ BIAS,
+                                                                    int* __restrict__ IDX, float* __restrict__ WT, int R, float scaling,
+                                                                    int E, int SK, int TOPK, int NS, int norm) {
+    nemo_topk<16>(PART, BIAS, IDX, WT, R, scaling, E, SK, TOPK, NS, norm);
 }

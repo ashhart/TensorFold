@@ -23,6 +23,7 @@ pub const Fns = struct {
     router: cuda.Function,
     router_rows: cuda.Function,
     topk: cuda.Function,
+    topk_wide: cuda.Function, // past 256 experts or 8 picks
     conv: cuda.Function,
     conv_rows: cuda.Function,
     conv_commit: cuda.Function,
@@ -48,6 +49,7 @@ pub const Fns = struct {
             .router = try m[1].function("tf_nemo_router"),
             .router_rows = try m[1].function("tf_nemo_router_rows"),
             .topk = try m[1].function("tf_nemo_topk"),
+            .topk_wide = try m[1].function("tf_nemo_topk_wide"),
             .conv = try m[2].function("tf_nemo_conv"),
             .conv_rows = try m[2].function("tf_nemo_conv_rows"),
             .conv_commit = try m[2].function("tf_nemo_conv_commit"),
@@ -164,7 +166,7 @@ pub const Glue = struct {
     /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots (`slots` past top-k).
     pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, slots: usize, scaling: f32, norm: bool) !void {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
-        if (e > 512 or top_k > 16 or slots < top_k or slots > top_k + 2) return error.RouterTooWide; // the top-k kernel's MAXC
+        if (e > 512 or top_k > 16 or slots < top_k or slots > top_k + 2) return error.RouterTooWide; // the wide top-k kernel's MAXC
         const shape = routerShape(d);
         if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
         var a: cuda.Args = .{};
@@ -183,7 +185,7 @@ pub const Glue = struct {
         b.add(scaling);
         ints(&b, &.{ e, shape.sk, top_k, slots });
         b.add(@as(c_int, @intFromBool(norm)));
-        try g.go(g.f.topk, .{ rows, 1, 1 }, 32, 0, &b);
+        try g.go(if (e > 256 or top_k > 8) g.f.topk_wide else g.f.topk, .{ rows, 1, 1 }, 32, 0, &b);
     }
 
     /// The Mamba conv of a window: the last window's kept rows replay from RAW, then the window's rows.
