@@ -7,6 +7,7 @@ const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const flashnext = @import("flashnext");
 const family_memory = @import("cuda_family_memory.zig");
+const pool = family_memory.pool;
 const family_options = @import("cuda_options.zig");
 pub const follow = @import("cuda_follow.zig").follow;
 const lfm2 = @import("lfm2.zig");
@@ -45,28 +46,6 @@ const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");
 const modelContext = windows.modelContext;
 const contextWindow = windows.contextWindow;
-
-/// The pool now, read on the thread whose context is current; `problem` names a bad variable.
-fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
-    const unified = (try ctx.attribute(.integrated)) != 0;
-    const card = try ctx.memInfo();
-    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
-    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
-        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
-        return null;
-    };
-    const free = available.available;
-    const total = available.total;
-    const reserve = budget.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
-        return null;
-    };
-    const limit = budget.limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
-        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
-        return null;
-    };
-    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
-}
 
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
 const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
@@ -313,12 +292,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     const before = try pool(a, io, &g.ctx, problem) orelse return null;
     // a family split over hosts holds only its rank's share (GLM-5.3-Flash's TP)
-    const whole = if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
-        return null;
-    } else budget.weightBytes(io, o.dir);
-    const text_weights = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
-    const weights = text_weights + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
+    const weights = try family_memory.weights(F, a, io, o, problem) orelse return null;
     const held0 = cuda.usage(false).device;
     // a family over hosts reads every rank's room after its load, by this budget, and admits by the smallest
     const Probe = struct {

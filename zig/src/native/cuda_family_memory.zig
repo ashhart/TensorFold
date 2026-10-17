@@ -2,11 +2,40 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const api = @import("engine_api");
+const budget = @import("cuda_memory.zig");
+const getenv = @import("cuda_device.zig").getenv;
+const Allocator = std.mem.Allocator;
 
-pub fn weights(comptime F: type, a: std.mem.Allocator, io: std.Io, o: api.Open, comptime fallback: anytype) !u64 {
-    if (@hasDecl(F, "placementWeightBytes")) return F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts);
-    if (@hasDecl(F, "deviceWeightBytes")) return F.deviceWeightBytes(a, io, o.dir);
-    return fallback(io, o.dir);
+/// The pool now, read on the thread whose context is current; `problem` names a bad variable.
+pub fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
+    const unified = (try ctx.attribute(.integrated)) != 0;
+    const card = try ctx.memInfo();
+    const text = if (unified) budget.procText(a, io, "/proc/meminfo") else null;
+    const available = budget.counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
+        return null;
+    };
+    const free = available.available;
+    const total = available.total;
+    const reserve = budget.reserveBytes(getenv("TENSORFOLD_MEMORY_RESERVE_GIB"), total, unified) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ getenv("TENSORFOLD_MEMORY_RESERVE_GIB").?, budget.floor(unified).least });
+        return null;
+    };
+    const limit = budget.limitBytes(getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB").?});
+        return null;
+    };
+    return .{ .free = free, .total = total, .reserve = reserve, .limit = limit, .unified = unified };
+}
+
+/// `F`'s weight bytes on this rank: tensors or files, a split's share, a tower beside; null if tensors are unreadable.
+pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?u64 {
+    const whole = if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
+        return null;
+    } else budget.weightBytes(io, o.dir);
+    const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
+    return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
 }
 
 pub fn room(comptime F: type, ptr: *anyopaque, local: u64) !u64 {
