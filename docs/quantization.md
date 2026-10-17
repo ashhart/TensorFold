@@ -18,7 +18,11 @@ Choose an 8-bit checkpoint made from the original model when you want its 8-bit 
 The table, `--lane-kernels` and the CUDA path below describe the Python engine, frozen at 0.6.6 and available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). The native binary refuses `--lane-kernels`. Its
 Qwen3.8-27B family reads the same affine formats, per module (`zig/src/families/qwen27/affine.zig`), and admits each
-against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zig`).
+against the projection kernels the chip runs (`zig/src/families/qwen27/widths.zig`). Its Nemotron family reads them per
+module on Metal (`zig/src/families/nemotron/config.zig`). Matrices at 4-bit in groups of 64 keep Nemotron's own
+kernels. Every other width runs on the shared row kernels in decode, and in prompt chunks past 128 rows on
+simd_qmm_bits' tiles (dense matrices in groups of 64) and Flash Next's width-general expert gathers (routed experts).
+For Nemotron's MLX affine checkpoints, its CUDA and Intel GPU engines read 4-bit in groups of 64 only.
 
 | Path | Formats |
 | --- | --- |
@@ -52,9 +56,18 @@ In the Python 0.6.6 engine, CUDA tensor-parallel splits retain complete groups a
 admission counts the actual packed precision.
 Changing a checkpoint, precision or kernel implementation also changes the conditions under which cached states remain valid.
 
+## Quantizing like MLX
+
+`tensorfold` quantizes a dense tensor to MLX affine 4-bit (groups of 32, 64 or 128) with MLX's own scheme: float32 arithmetic, the bias at the larger-magnitude edge of a group, a signed scale that puts zero on the grid, round half away from zero, codes from the unrounded scale and bias with bf16 only for storage.
+When the dense source and the conversion scheme match how a checkpoint was made, this reproduces its words, scales and biases exactly.
+`zig build tf-merge-check` builds a check of that: `tf-merge-check --quantizer DENSE SHIPPED MODULE...` quantizes each named dense tensor and compares it with the shipped one, reporting the share of equal scales, biases, codes and whole groups.
+A dense tensor of another shape, size or dtype than the shipped projection, and any non-finite value or stored scale, is refused naming the tensor.
+
 ## Scope and qualification
 
-These additions cover MLX affine safetensors checkpoints for the dense Qwen family.
+In the Python 0.6.6 engine, these additions cover MLX affine safetensors checkpoints for the dense Qwen family. The
+native engine's per-module readers are named under Backend paths above; for Nemotron, TensorFold's oQ4, oQ6 and oQ8 are
+the measured checkpoints.
 GGUF, AWQ, GPTQ, NVFP, MXFP and arbitrary 8-bit MoE expert formats require their own readers and kernels.
 Unsupported formats remain explicit errors.
 
@@ -64,6 +77,33 @@ In the Python 0.6.6 engine, the Metal kernel has a dedicated hardware test in
 [`tests/test_affine_rows_metal.py`](https://github.com/ashhart/TensorFold/blob/v0.6.6/tests/test_affine_rows_metal.py);
 model and GPU tests must run under the machine's existing resource controls.
 No speed or quality improvement is implied by a higher bit width.
+
+## NVIDIA's NVFP4 checkpoints on CUDA
+
+NVIDIA's ModelOpt NVFP4 checkpoints are made for NVIDIA's own math: NVFP4 activations into the NVFP4 layers and FP8
+activations into the FP8 layers, quantized with the input scales stored beside the weights. On CUDA, `--precision`
+chooses the math the native engine runs:
+
+- `checkpoint`: that math. Each FP8 layer's input rows become e4m3 at the layer's stored input scale. Each NVFP4
+  expert's input rows become NVFP4: an e4m3 scale for every 16 values, from their largest magnitude under the stored
+  input scale, and e2m1 values rounded to nearest. Blackwell's FP8 and block-scaled FP4 tensor cores multiply them with
+  fp32 sums, and the outputs are bf16. It needs compute capability 12.x (RTX 50, RTX PRO 6000 Blackwell, GB10).
+- `full`: bf16 activations into every layer, with the weights as stored (W4A16 and W8A16).
+
+Nemotron 3.5 Super VL runs `checkpoint` by default on Blackwell. Nemotron 3.5 Lightning's NVFP4 checkpoint runs `full`
+and refuses `checkpoint` for now. Both modes keep the KV cache in bf16, and the layers the checkpoint stores in bf16
+stay bf16.
+
+Each mode is exact on its own terms: drafted replies equal `"draft": false`, resumed requests equal fresh ones,
+concurrent streams equal their solo runs, and two GPUs give one GPU's tokens. The two modes give different tokens from
+each other. On Super VL on a GB10, `checkpoint` teacher-forced on `full`'s greedy replies to three prompts (768 tokens)
+gave a mean KL(full || checkpoint) of 0.0077 nats a token (0.0036, 0.0137 and 0.0057 by prompt), the same top token
+at 756 of the 768 positions (98.4%), and a mean negative log-likelihood of the fed tokens 0.0058 higher (0.0692
+against 0.0749). `tensorfold kl MODEL --tokens IDS --dump FILE --precision full` writes one precision's logits rows
+and `--against FILE --precision checkpoint` runs the other on the same tokens. On the same GB10, `checkpoint` read a
+cold 8,192-token prompt in 4.41 s against `full`'s 7.96 s (1.81x; 1.82x at 2,048 tokens), and decoded a token in
+52.3 ms against 50.1 ms without drafts: decode reads the same weight bytes either way, and `checkpoint` adds the
+rows' quantization.
 
 ## Native safetensors metadata
 

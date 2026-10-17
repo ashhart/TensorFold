@@ -6,6 +6,7 @@ const tf = @import("tensorfold");
 const lanes = tf.lanes;
 const g = tf.glm_dsa;
 const Allocator = std.mem.Allocator;
+const cache_fit = @import("cache_fit.zig");
 
 pub const Host = struct {
     gpa: Allocator,
@@ -15,6 +16,7 @@ pub const Host = struct {
     wall: lanes.backend.WallClock,
     core: lanes.Engine,
     host: api.LaneHost,
+    limit: u64 = 0, // the configured load limit, for the memory counts
     cache: ?api.prompt_cache.Store = null, // rank 0's kept prompt states (rank 1 holds the same ids)
     warm: mtl.keepalive.Target,
     follower: ?std.Thread = null,
@@ -23,6 +25,12 @@ pub const Host = struct {
         return h.host.engine();
     }
 };
+
+/// The host's memory counts: `cache_fit.hostMemory` under this engine's configured load limit.
+fn readMemory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
+    const h: *Host = @ptrCast(@alignCast(ctx.?));
+    return cache_fit.hostMemory(h.limit, reset_peak);
+}
 
 fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
@@ -46,6 +54,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.gpa = gpa;
     h.e = e;
     h.follower = null;
+    h.limit = limit;
     h.back = try g.backend.Backend.init(gpa, e);
     errdefer h.back.deinit();
     if (e.rank() == 0) try h.back.time(io);
@@ -55,6 +64,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
     h.core = lanes.Engine.init(gpa, &h.cfg, h.back.backend(), h.wall.clock());
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "glm-dsa-zig", .lanes = streams, .context_window = window, .prefill_step = g.gpu.prompt_rows, .greedy_only = true });
+    h.host.memory = .{ .ctx = h, .read = readMemory };
     h.host.explain = .{ .text = words };
     h.cache = null;
     const used = e.device.allocated();
