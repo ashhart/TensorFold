@@ -207,8 +207,13 @@ pub fn agree(
     }
 }
 
+/// Before loading: direct split reaches every rank, so each pair is probed; the ring only passes rows to neighbours.
+pub fn probeStart(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, s: Settings, rank: usize, world: usize) !void {
+    if (s.split and !s.ring) try probeSplit(d, lib, comm, stream, rank, world);
+}
+
 /// Before loading, split's peers: one value each way with each, in rank order (no pair waits on a later one).
-pub fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, rank: usize, world: usize) !void {
+fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, rank: usize, world: usize) !void {
     var dev = try cuda.DeviceBuffer.alloc(d, 8);
     defer dev.free();
     for (0..world) |peer| if (peer != rank) {
@@ -221,7 +226,7 @@ pub fn probeSplit(d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cu
 }
 
 fn unreachablePeer(rank: usize, peer: usize) error{SplitUnreachable} {
-    std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=gather\n", .{ rank, peer });
+    std.debug.print("REFUSE TF_GLM_PREFILL_REDUCE=split: rank {d} cannot exchange with rank {d}; split sends every rank's rows to every other, and a fabric where some ranks reach only their neighbours (a ring of four without a switch) needs TF_GLM_PREFILL_REDUCE=ring or gather\n", .{ rank, peer });
     return error.SplitUnreachable;
 }
 
@@ -294,4 +299,87 @@ test "fingerprints: agreeing ranks pass; the first differing field and rank are 
     try std.testing.expectEqual(Fingerprint.Field.checkpoint, mismatch(&all).?.field);
     all[1] = Fingerprint.of(2, 1, .{}, 8192, false, h0, h0, "/hub/snapshots/423acf37"); // --no-drafts on rank 1 only
     try std.testing.expectEqual(Mismatch{ .field = .mtp, .rank = 1 }, mismatch(&all).?);
+}
+
+/// A world seen from `rank`: a group that sends to or receives from a rank it cannot reach fails at its end.
+const Fabric = struct {
+    var world: usize = 4;
+    var rank: usize = 0;
+    var switched = false; // every pair reaches the other; else a ring without a switch, each rank its two neighbours
+    var failing = false;
+    var posted: usize = 0;
+    var allocated: usize = 0;
+
+    fn reaches(peer: c_int) bool {
+        const p: usize = @intCast(peer);
+        return switched or (p + 1) % world == rank or (rank + 1) % world == p;
+    }
+    fn post(peer: c_int) cuda.nccl.Result {
+        posted += 1;
+        if (!reaches(peer)) failing = true;
+        return 0;
+    }
+    fn start() callconv(.c) cuda.nccl.Result {
+        failing = false;
+        return 0;
+    }
+    fn end() callconv(.c) cuda.nccl.Result {
+        return @intFromBool(failing);
+    }
+    fn send(_: cuda.abi.DevicePtr, _: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        return post(peer);
+    }
+    fn recv(_: cuda.abi.DevicePtr, _: usize, _: cuda.nccl.DataType, peer: c_int, _: cuda.nccl.Comm, _: cuda.abi.Stream) callconv(.c) cuda.nccl.Result {
+        return post(peer);
+    }
+    fn alloc(p: *cuda.abi.DevicePtr, _: usize) callconv(.c) cuda.abi.Result {
+        allocated += 1;
+        p.* = 0x10000;
+        return cuda.abi.success;
+    }
+    fn free(_: cuda.abi.DevicePtr) callconv(.c) cuda.abi.Result {
+        allocated -= 1;
+        return cuda.abi.success;
+    }
+    fn sync(_: cuda.abi.Stream) callconv(.c) cuda.abi.Result {
+        return cuda.abi.success;
+    }
+    /// One rank's start probes on this fabric, with `s`; the sends and receives it posted.
+    fn probe(s: Settings, r: usize, w: usize, all: bool) !usize {
+        var api: cuda.abi.Api = undefined;
+        api.cuMemAlloc_v2 = alloc;
+        api.cuMemFree_v2 = free;
+        api.cuStreamSynchronize = sync;
+        const d: cuda.Driver = .{ .lib = undefined, .api = api };
+        var nccl_api: cuda.nccl.Api = undefined;
+        nccl_api.ncclGroupStart = &start;
+        nccl_api.ncclGroupEnd = &end;
+        nccl_api.ncclSend = &send;
+        nccl_api.ncclRecv = &recv;
+        const lib: cuda.nccl.Library = .{ .lib = undefined, .api = nccl_api };
+        world = w;
+        rank = r;
+        switched = all;
+        posted = 0;
+        const got = probeStart(&d, &lib, null, .{ .d = &d, .handle = null }, s, r, w);
+        try std.testing.expectEqual(@as(usize, 0), allocated); // the probe's buffer is freed, refused or not
+        try got;
+        return posted;
+    }
+};
+
+test "a direct split start on a ring of four without a switch is refused before loading, at every rank" {
+    for (0..4) |r| try std.testing.expectError(error.SplitUnreachable, Fabric.probe(.{}, r, 4, false));
+    // the same start on four ranks behind a switch probes each pair once each way
+    for (0..4) |r| try std.testing.expectEqual(@as(usize, 6), try Fabric.probe(.{}, r, 4, true));
+    // two ranks are each other's neighbours: a direct split starts on a ring of two
+    for (0..2) |r| try std.testing.expectEqual(@as(usize, 2), try Fabric.probe(.{}, r, 2, false));
+}
+
+test "a ring start on four ranks that reach only their neighbours loads without the all-peer probe" {
+    var problem: []const u8 = "";
+    const ring = try Settings.read(&ringed, &problem);
+    for (0..4) |r| try std.testing.expectEqual(@as(usize, 0), try Fabric.probe(ring, r, 4, false));
+    // gather needs no probe either
+    for (0..4) |r| try std.testing.expectEqual(@as(usize, 0), try Fabric.probe(.{ .split = false }, r, 4, false));
 }
