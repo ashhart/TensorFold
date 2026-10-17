@@ -480,11 +480,13 @@ const FakeQueue = struct {
     copies: usize = 0,
     fail_copy: ?usize = null,
     fail_record: bool = false,
+    fail_drain: bool = false,
+    drains: usize = 0,
 
     pub fn copy(q: *FakeQueue, _: u64, _: []const u8) !void {
         q.copies += 1;
-        if (q.fail_copy) |k| if (k == q.copies) return error.CopyFailed;
         q.queued += 1;
+        if (q.fail_copy) |k| if (k == q.copies) return error.CopyFailed;
     }
     pub fn record(q: *FakeQueue) !void {
         if (q.fail_record) return error.RecordFailed;
@@ -495,6 +497,8 @@ const FakeQueue = struct {
         q.covered = 0;
     }
     pub fn drain(q: *FakeQueue) !void {
+        q.drains += 1;
+        if (q.fail_drain) return error.DrainFailed;
         q.queued = 0;
         q.covered = 0;
     }
@@ -502,7 +506,13 @@ const FakeQueue = struct {
 
 test "a pass whose second upload or whose record fails leaves no copy reading the staging when it is reused" {
     const Case = struct { fail_copy: ?usize, fail_record: bool };
-    for ([_]Case{ .{ .fail_copy = 2, .fail_record = false }, .{ .fail_copy = null, .fail_record = true }, .{ .fail_copy = null, .fail_record = false } }) |c| {
+    const cases = [_]Case{
+        .{ .fail_copy = 1, .fail_record = false },
+        .{ .fail_copy = 2, .fail_record = false },
+        .{ .fail_copy = null, .fail_record = true },
+        .{ .fail_copy = null, .fail_record = false },
+    };
+    for (cases) |c| {
         var fq: FakeQueue = .{};
         var g: Staging(*FakeQueue) = .{ .q = &fq };
         // a pass that stages and fences cleanly, then one that fails part way, as `stage()` uploads ids and positions
@@ -523,5 +533,21 @@ test "a pass whose second upload or whose record fails leaves no copy reading th
         // the next pass (or `free`) waits before it writes the bytes: nothing may still be queued
         try g.ready();
         try std.testing.expectEqual(@as(usize, 0), fq.queued);
+        try std.testing.expectEqual(@as(usize, if (failed) 1 else 0), fq.drains);
     }
+}
+
+test "a failed staging drain keeps the upload guard set until a successful retry" {
+    var fq: FakeQueue = .{ .fail_record = true, .fail_drain = true };
+    var g: Staging(*FakeQueue) = .{ .q = &fq };
+    try g.upload(0, "ids");
+    try std.testing.expectError(error.RecordFailed, g.fence());
+    try std.testing.expectError(error.DrainFailed, g.ready());
+    try std.testing.expect(g.open);
+    try std.testing.expectEqual(@as(usize, 1), fq.queued);
+    fq.fail_drain = false;
+    try g.ready();
+    try std.testing.expect(!g.open);
+    try std.testing.expectEqual(@as(usize, 0), fq.queued);
+    try std.testing.expectEqual(@as(usize, 2), fq.drains);
 }
