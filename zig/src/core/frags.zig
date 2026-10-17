@@ -89,6 +89,7 @@ fn matches(device: mtl.Device, queue: mtl.Queue, a: std.mem.Allocator, kernel: [
 }
 
 test "the check passes this GPU's layout and, before M5, fails a transposed operand loaded as a plain one" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();

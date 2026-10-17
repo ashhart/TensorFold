@@ -136,6 +136,7 @@ fn f32of(h: u16) f32 {
 }
 
 test "dense and gathered, each format, against exact sums on the host" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -258,6 +259,7 @@ test "dense and gathered, each format, against exact sums on the host" {
 }
 
 test "a batch of dense products with pitches: each batch's rows of x, the weights and y" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
