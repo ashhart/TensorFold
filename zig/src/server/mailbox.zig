@@ -8,6 +8,7 @@ pub const Mailbox = struct {
     gpa: Allocator,
     mutex: std.Io.Mutex = .init,
     cond: std.Io.Condition = .init,
+    audio: usize = 0,
     tokens: std.ArrayList(u32) = .empty,
     chunks: std.ArrayList(usize) = .empty, // where each round's tokens end
     rows: std.ArrayList(api.LogprobRow) = .empty, // one a token of `tokens`, for requests with logprobs
@@ -37,6 +38,7 @@ pub const Mailbox = struct {
                 m.tokens.appendSlice(m.gpa, t) catch {};
                 m.chunks.append(m.gpa, m.tokens.items.len) catch {};
             },
+            .audio => |n| m.audio = n,
             .finished => |f| {
                 m.finished = true;
                 m.reason = f.reason;

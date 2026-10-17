@@ -76,6 +76,7 @@ test {
     _ = @import("exl3_rect_test.zig");
     _ = checkpoint;
     _ = direct_io;
+    _ = frame_rounds;
     _ = draft_depth;
     _ = @import("copy_index.zig");
     _ = ids_json;
@@ -86,3 +87,5 @@ test {
     _ = @import("nvfp4_fixture_test.zig");
     _ = @import("drafter_release_test.zig");
 }
+
+pub const frame_rounds = @import("frame_rounds.zig");

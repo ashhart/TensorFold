@@ -1,4 +1,5 @@
-//! The CUDA half of the root build: kernel fatbins with each Python extension's nvcc flags, the runtime, Nemotron, the CLI.
+//! The CUDA half of the root build: kernel fatbins with each Python extension's nvcc flags, the runtime, Nemotron, the
+//! CLI.
 
 const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
@@ -41,8 +42,10 @@ const kernels = [_]Kernel{
     .{ .name = "affine8", .flags = &.{"-O3"} }, // ours: MLX affine 2 to 8 bits on lane_gemv tiles of their own width
     .{ .name = "affine_prefill", .flags = &.{"-O3"} }, // ours: qmm_prefill's prompt GEMM over affine8's tiles
     .{ .name = "fp8_experts", .flags = &.{"-O3"} }, // fp8/experts.cu's device code, tensorfold_fp8_experts_v6
-    .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 lane projections, the Metal kernels' order
-    .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } }, // ours: EXLR8 dense matrices by row, the Metal order
+    // ours: EXLR8 lane projections, the Metal kernels' order
+    .{ .name = "exlr8", .flags = &.{ "-O3", "--fmad=false" } },
+    // ours: EXLR8 dense matrices by row, the Metal order
+    .{ .name = "exlr8_dense", .flags = &.{ "-O3", "--fmad=false" } },
     .{ .name = "nvfp4_experts", .flags = &.{"-O3"} }, // nvfp4/experts.cu's device code, the NVFP4 expert kernels
     .{ .name = "rank_sum", .flags = &.{"-O3"} }, // ours: the rank-order sum of a reduce-scatter (rank_scatter.zig)
     .{ .name = "lane_gemv", .flags = &.{"-O3"} }, // ours: qmm_group's arithmetic, a column tile's K slices in one CTA
@@ -93,6 +96,10 @@ const kernels = [_]Kernel{
     .{ .name = "torch_movement", .src = "torch_ops/movement", .flags = torch_ops },
     .{ .name = "torch_nemotron_constants", .src = "torch_ops/nemotron_constants", .flags = torch_ops },
     .{ .name = "roce_gather", .src = "roce_gather", .flags = &.{"-O3"} }, // b12x's one-shot RoCE all-gather, two ranks
+    .{ .name = "drama3_staged_gemv", .flags = glue },
+    .{ .name = "drama3", .flags = &.{"-O3"} },
+    .{ .name = "drama3_fp8", .flags = &.{"-O3"} },
+    .{ .name = "drama3_codec", .flags = &.{"-O3"} },
 };
 
 /// torch.utils.cpp_extension's own nvcc flags (torch 2.13): C++20 and which half/bf16 operators the headers define.
@@ -225,6 +232,9 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     q35.addImport("core", mods.core);
     q35.addImport("qwen35", mods.qwen35);
     b.installArtifact(b.addExecutable(.{ .name = "tf-qwen35-cuda", .root_module = q35 }));
+    const d3_tool = b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/generate.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "core", .module = mods.core }, .{ .name = "drama3", .module = drama3Module(b, target, optimize, cuda, mods.core) } } });
+    const d3_exe = b.addExecutable(.{ .name = "drama3-generate", .root_module = d3_tool });
+    b.step("drama3-generate", "Drama generation and replay controls on CUDA").dependOn(&b.addInstallArtifact(d3_exe, .{}).step);
 }
 
 /// The GLM-5.3-Flash CUDA family over the runtime, the core, the lane core, canon's shares and core/heat.zig.
@@ -265,6 +275,10 @@ fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
 }
 
 /// The CUDA engines a native server opens (native/cuda.zig), over the given runtime and families.
+fn drama3Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
+    return b.createModule(.{ .root_source_file = b.path("zig/src/families/drama3/drama3.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
+}
+
 fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module) struct { api: *std.Build.Module, engines: *std.Build.Module } {
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const mod = b.createModule(.{
@@ -277,6 +291,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "engine_api", .module = api },
             .{ .name = "lanes", .module = lanes },
             .{ .name = "nemotron", .module = nemotron },
+            .{ .name = "drama3", .module = drama3Module(b, target, optimize, cuda, core) },
             .{ .name = "lfm2", .module = lfm2Module(b, target, optimize, cuda, core) },
             .{ .name = "core", .module = core },
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision) },
@@ -317,7 +332,8 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return exe;
 }
 
-/// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any host.
+/// Host unit tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any
+/// host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
@@ -420,8 +436,18 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         run.has_side_effects = true;
         video_step.dependOn(&run.step);
     }
+    const drama3 = drama3Module(b, host, .debug, cuda, mods.core);
+    @import("drama3_host.zig").compile(b, b.step("check-drama-cuda-host", "Compile Drama CUDA GPU entry points without running them"), drama3, "drama_cuda_host");
+
+    b.step("test-drama-owner", "Drama's real Tts and Codec owners with mocked CUDA waits").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drama3, .filters = &.{"drama owner:"} })).step);
+    const drama_run = b.addRunArtifact(b.addTest(.{ .root_module = drama3 }));
+    drama_run.has_side_effects = true;
+    step.dependOn(&drama_run.step);
+    b.step("test-drama-host", "Drama shared config, prompt and WAV host tests").dependOn(&drama_run.step);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
+    @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");
+    @import("drama3_host.zig").metal(b, mods.core, native_modules.api);
     const load_check = b.step("test-bolt-load-host", "Bolt load destination and native-parent retention without a GPU");
     const load_filter = b.option([]const u8, "bolt-load-filter", "Select one load regression");
     const load_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_load_gpu.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nemotron", .module = mods.nemotron } } });
@@ -440,7 +466,6 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("compile-omni-video-host", "Compile actual native CUDA startup and offer for Linux without images or GPU execution").dependOn(&open_object.step);
     const h3_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"), .target = host, .optimize = .debug, .link_libc = true });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_checkpoint })).step);
-
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{

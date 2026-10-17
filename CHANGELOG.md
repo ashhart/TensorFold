@@ -156,6 +156,13 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 - LFM2.5-24B-A2B prompt calls run on the M5's tensor units (projections, experts and attention) at every prompt row, so a resumed prompt equals a fresh one; a GPU without tensor units no longer reaches the tensor attention path (#873). Thanks to @BlivionIaG.
 - GLM-5.3-Flash's sparse prompt attention on Metal reads a row's key list only as far as its last listed key: a row at position p lists its keys in the list's first p + 1 entries, so rows before position 2,050 skip the empty blocks, with the same bits (#898). Thanks to @harrisonfriia.
 
+## Unreleased
+
+- speech: `stream: true` with `response_format: pcm` streams HTTP/1.1 chunks while Drama 3 generates; incremental codec decode bit-identical to the whole decode (oracle-gated)
+- speech: Drama 3 generates 1.66x faster on a GB10 (warm real-time factor 1.087 to 0.655 over the 23 warm items of a 48-request capture), with the audio of every normally finished reply byte for byte the same. The one-row backbone GEMVs stream their weights through a swizzled `cp.async` ring, add-norm, SwiGLU, MoE combine and attention glue are fused or pipelined in the same float order, the tower runs its one-row decode attention as a cluster kernel and samples with a radix select, and the backbone chain launches with programmatic dependent launch when both embedded kernel images carry the `drama_pdl` marker. The tower's one-row projections run on `drama_tower_gemv`, which reproduces cuBLASLt 130101's gemv summation; `Model.init` checks each projection against its actual cuBLASLt plan on probe rows and keeps cuBLASLt for any projection that differs by one bit, or on any other GPU or library.
+- speech: a Drama 3 reply that reaches `max_frames` without an end of speech returns its clipped audio with HTTP 200, as the reference returns its capped replies, instead of a 500 without audio. A whole reply carries `X-Finish-Reason: stop` or `length`; a stream declares the trailer, and only a clipped stream ends with `X-Finish-Reason: length`, a normally finished one with the plain last chunk.
+- Drama 3 loads in about 6 s instead of 53 s on a GB10: weights are read with direct I/O into staging pieces that never span two device allocations, and the codec initializes on its own thread while the backbone loads.
+
 ## 1.0.11
 
 - `--cortheon`'s instruction filter keeps reading past a long word. A word longer than the filter's scan buffer ended the scan early, so an order written after one was never checked; each word now keeps at most 16 bytes, so a long word can no longer end the scan (#829). Thanks to @joeynyc.

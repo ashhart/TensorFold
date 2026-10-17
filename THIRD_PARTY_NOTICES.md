@@ -117,6 +117,12 @@ Flash Next implements transformers' model math under the attribution above. In t
 DeltaNet kernel follows flash-linear-attention's numerics, MIT; its NCCL wrapper follows vLLM's stream convention,
 Apache-2.0, without copying either implementation.
 
+The earlier #927 Drama backbone included a Gated DeltaNet prefill adapted from Flash Linear Attention.
+The merged Drama family uses #939/#956's operators instead. The staged BF16 GEMV candidate in
+`zig/kernels/cuda/drama3_staged_gemv.cu` and the direct-I/O stager in `zig/src/families/drama3/cuda/stager.zig`
+come from plotarmordev's #927 implementation. Their qualification against the merged model is separate from
+#927's earlier native baseline receipts.
+
 The Python engine's GLM CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math,
 Apache-2.0, without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
 from Mia-AiLab without including recipe code.
@@ -284,3 +290,25 @@ TensorFold. What they follow or copy:
 
 - The Level Zero loader and the Intel compute runtime are loaded at run time and are not bundled; `ocloc` compiles the kernels
   at build time and is not distributed.
+
+## Fish Audio Drama 3 on CUDA
+
+`zig/src/families/drama3/`, `zig/kernels/cuda/drama3*.cu` and `drama3*.cuh` implement the model math of
+[SGLang-Omni](https://github.com/sgl-project/sglang-omni)'s `sglang_omni/models/fishaudio_drama3` (revision 416a70c0),
+Apache-2.0, without including its source. The codec they decode with is Fish Audio's modded DAC from
+[Fish Speech](https://github.com/fishaudio/fish-speech) (Fish Audio Community License Agreement v1.0), itself built on
+[descript-audio-codec](https://github.com/descriptinc/descript-audio-codec) (MIT License, Copyright (c) 2023-present,
+Descript); `codec.zig` and `drama3_codec.cu` are separate implementations of its arithmetic and include no Fish Speech
+or descript-audio-codec source. The samplers draw from the Philox stream of SGLang-Omni's Triton sampling kernels.
+`drama3_fp8.cu` is TensorFold's `fp8_experts.cu` with per-row FP8 activation scales, the dynamic activation scheme
+SGLang serves the checkpoint's FP8 experts with. The resampler in `wav.zig` follows torchaudio's `functional.resample`
+(BSD-2-Clause) without including its source.
+`tools/drama3/oracle_prompt.py` is a copy of SGLang-Omni's `prompt.py` at that revision (Apache-2.0). The oracle and
+`tools/drama3/codec_convert.py` import the Fish Speech codec modules from a directory the user supplies
+(`FISHCODEC_DIR`); TensorFold does not distribute them.
+
+TensorFold ships no Drama 3 weights and no codec weights. [fishaudio/drama-3](https://huggingface.co/fishaudio/drama-3)
+and its `codec.pth` are under the Fish Audio Community License Agreement v1.0: research and non-commercial use,
+commercial use below its revenue threshold, and no Hosted Service without a separate license from Fish Audio. Users
+obtain the checkpoint and accept that license themselves; the converted codec file is a derivative of `codec.pth`
+under the same license.

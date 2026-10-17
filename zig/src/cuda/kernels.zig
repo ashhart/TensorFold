@@ -126,3 +126,7 @@ pub const qwen36_mtp: []const u8 = if (available) &Blob("fatbin_qwen36_mtp").byt
 pub const experts3: []const u8 = if (available) &Blob("fatbin_experts3").bytes else &.{};
 pub const experts3_prefill: []const u8 = if (available) &Blob("fatbin_experts3_prefill").bytes else &.{};
 pub const ggml: []const u8 = if (available) &Blob("fatbin_ggml").bytes else &.{};
+pub const drama3: []const u8 = if (available) &Blob("fatbin_drama3").bytes else &.{};
+pub const drama3_fp8: []const u8 = if (available) &Blob("fatbin_drama3_fp8").bytes else &.{};
+pub const drama3_codec: []const u8 = if (available) &Blob("fatbin_drama3_codec").bytes else &.{};
+pub const drama3_staged_gemv: []const u8 = if (available) &Blob("fatbin_drama3_staged_gemv").bytes else &.{};

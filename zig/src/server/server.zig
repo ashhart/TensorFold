@@ -100,6 +100,7 @@ pub const Server = struct {
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
+    speech_inflight: std.atomic.Value(u32) = .init(0),
     arena: std.heap.ArenaAllocator,
     /// Structured output's compiler, opened by the first structured request (Python's grammar.compiler).
     grammars: ?*api.grammar.Compiler = null,
@@ -120,6 +121,10 @@ pub const Server = struct {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        if (!srv.info.text_generation) {
+            if (config.cortheon) return error.CortheonRequiresTextGeneration;
+            return srv;
+        }
         if (config.cortheon) srv.cortheon = try cortheon.State.init(gpa, io, "TensorFold-Cortheon (+https://github.com/ashhart/TensorFold)", config.cortheon_search_key);
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
@@ -394,7 +399,9 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
 }
 
-/// ``needs_user_after_tool``: the template raises "No user query found" when the conversation has no user query, which a conversation whose user turn became tool results no longer has; such templates gain a user turn after a trailing tool message.
+/// ``needs_user_after_tool``: the template raises "No user query found" when the conversation has no user query, which
+/// a conversation whose user turn became tool results no longer has; such templates gain a user turn after a trailing
+/// tool message.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
 }

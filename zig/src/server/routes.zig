@@ -1,4 +1,5 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
+const speech = @import("speech.zig");
 const std = @import("std");
 const json = @import("json");
 const http_conn = @import("http_conn.zig");
@@ -75,6 +76,7 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/imprint/resume")) return imprint.post(srv, conn, a, .where);
     if (std.mem.eql(u8, route, "/v1/imprint/load")) return imprint.post(srv, conn, a, .load);

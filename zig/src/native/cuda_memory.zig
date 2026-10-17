@@ -1,4 +1,5 @@
 //! CUDA memory admission arithmetic, and the host pool read from /proc/meminfo and validated, without a device.
+const cuda = @import("cuda");
 const std = @import("std");
 const gib: f64 = 1 << 30;
 
@@ -152,7 +153,8 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(@as(u32, 5), try admit(5 * g + 1, g, 0, 8, false)); // auto serves what fits
     try std.testing.expectError(error.TooMany, admit(5 * g, g, 0, 8, true)); // a fixed --parallel refuses
     try std.testing.expectError(error.NoStream, admit(g - 1, g, 0, 8, false));
-    try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false)); // one stream on the engine's own buffers
+    // one stream on the engine's own buffers
+    try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false));
     try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
     try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
 }
@@ -206,4 +208,26 @@ test "memory limit refuses an oversized finite value and the rounded u64 boundar
     try std.testing.expectError(error.Invalid, limitBytes("17179869184"));
     try std.testing.expectError(error.Invalid, limitBytes("17179869183.9999995")); // parses to 2^34: 2^64 bytes
     try std.testing.expectEqual(@as(?u64, std.math.maxInt(u64) - 2047), try limitBytes("17179869183.9999980926513671875"));
+}
+
+pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?Pool {
+    const unified = (try ctx.attribute(.integrated)) != 0;
+    const card = try ctx.memInfo();
+    const text = if (unified) procText(a, io, "/proc/meminfo") else null;
+    defer if (text) |bytes| a.free(bytes);
+    const available = counts(unified, .{ .total = card.total, .available = card.free }, text) catch {
+        problem.* = "cannot read or parse /proc/meminfo's MemTotal and MemAvailable; refusing CUDA unified-memory admission";
+        return null;
+    };
+    const reserve_text = if (std.c.getenv("TENSORFOLD_MEMORY_RESERVE_GIB")) |p| std.mem.span(p) else null;
+    const limit_text = if (std.c.getenv("TENSORFOLD_CUDA_MEMORY_LIMIT_GB")) |p| std.mem.span(p) else null;
+    const reserve = reserveBytes(reserve_text, available.total, unified) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_MEMORY_RESERVE_GIB={s}: a number of GiB from {d} to the memory's size", .{ reserve_text orelse "", floor(unified).least });
+        return null;
+    };
+    const limit = limitBytes(limit_text) catch {
+        problem.* = try std.fmt.allocPrint(a, "TENSORFOLD_CUDA_MEMORY_LIMIT_GB={s}: a positive number of GiB whose byte count fits in a 64-bit size", .{limit_text orelse ""});
+        return null;
+    };
+    return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified };
 }

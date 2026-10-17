@@ -1,4 +1,5 @@
-//! GPU test runner for the Zig CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on failure.
+//! GPU test runner for the Zig CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on
+//! failure.
 
 const std = @import("std");
 const cuda = @import("cuda");

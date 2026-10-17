@@ -1,4 +1,5 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
+const openDrama = @import("drama_open.zig").open;
 const std = @import("std");
 const platform = @import("sys");
 const cuda = @import("cuda");
@@ -29,9 +30,10 @@ pub const records = true;
 
 pub const backends: []const []const u8 = &.{"cuda"};
 pub const families: []const api.Family = blk: {
-    var out: [registry.len + 1]api.Family = undefined;
+    var out: [registry.len + 2]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
     out[registry.len] = lfm2.family;
+    out[registry.len + 1] = .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} };
     const final = out;
     break :blk &final;
 };
@@ -194,6 +196,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = why;
         return null;
     }
+    if (std.mem.eql(u8, o.model_type, "fish_omni")) return openDrama(a, gpa, io, o, problem);
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }
@@ -488,7 +491,7 @@ test "the lane core sees a family's prefill_step through the lane backend, so a 
 }
 
 test "every registered family and d1's decision engine are listed for capabilities" {
-    try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
+    try std.testing.expectEqual(@as(usize, registry.len + 2), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
 }
