@@ -313,12 +313,7 @@ fn jsonObject(a: Allocator, v: Value) Error!Value {
         .string => |s| {
             const doc = strip(s);
             if (doc.len == 0) return .{ .object = try json.newObject(a) };
-            const parsed = switch (try json.parseText(a, doc)) {
-                .ok => |p| p,
-                .err => return error.Invalid,
-            };
-            if (parsed == .object) return parsed;
-            return error.Invalid;
+            return try tool_params.parseObject(a, doc) orelse error.Invalid;
         },
         else => return error.Invalid,
     }
@@ -484,6 +479,7 @@ fn gemmaCall(a: Allocator, block: []const u8) Error!?Call {
     if (std.mem.endsWith(u8, block, "}\n")) end -= 1;
     if (end <= i or block[end - 1] != '}') return null;
     const inner = block[i..end];
+    if (try tool_params.parseObject(a, inner)) |arguments| return .{ .name = name, .arguments = arguments };
     var strings: std.ArrayList([]const u8) = .empty;
     var marked: std.ArrayList(u8) = .empty;
     var pos: usize = 0;

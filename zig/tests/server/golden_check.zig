@@ -1,4 +1,4 @@
-//! Frozen server goldens for `zig build test-golden`, with the ten differences that are still known.
+//! Frozen server goldens for `zig build test-golden`, with the thirteen differences that are still known.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
@@ -21,6 +21,10 @@ const known_diffs = [_]Known{
     .{ .group = "tools", .name = "two_tools-stream" },
     .{ .group = "tools", .name = "two_tools-single-stream" },
     .{ .group = "anthropic", .name = "tool-use-stream" },
+    // a backend without a token grammar refuses required and named tool choices, which Python answered unforced
+    .{ .group = "tools", .name = "choice-\"required\"" },
+    .{ .group = "tools", .name = "choice-{\"type\": \"function\", \"function\": {\"name\": \"lookup\"}}" },
+    .{ .group = "anthropic", .name = "tool-result" },
 };
 
 /// Why two request logs differ: their line counts and the first line that does, each cut to 100 bytes.

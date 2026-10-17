@@ -15,8 +15,6 @@ const routes = @import("routes.zig");
 const responses = @import("responses.zig");
 const grammar = @import("grammar.zig");
 const clock = @import("clock.zig");
-const prompt = @import("prompt.zig");
-const tool_specs = @import("tool_specs.zig");
 const tool_grammar = @import("tool_grammar.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
@@ -196,28 +194,19 @@ pub const Server = struct {
         };
     }
 
-    /// The call gate and grammar a request asks for, or its refusal when the engine cannot enforce them.
+    /// A specific engine name, or the server's backend identity when the shared host uses its default name.
+    pub fn backendName(srv: *const Server) []const u8 {
+        return if (std.mem.eql(u8, srv.info.name, "lanes") and srv.config.identity.backend.len > 0) srv.config.identity.backend else srv.info.name;
+    }
+
+    /// The grammar a request asks for, or its refusal when the engine cannot enforce it.
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
-        if (has_tools and required and srv.info.structures) {
+        if (has_tools and required) {
+            if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
-        } else if (has_tools and required) {
-            const form = try srv.callForm(cx);
-            const opener = if (form) |fm| srv.text.tokenId(fm.opener) else null;
-            if (opener == null) return cx.refuse("tool_choice \"required\" or a named function needs a chat template that marks tool calls (<tool_call> or <|tool_call>), and this one does not: send \"auto\"");
-            if (!srv.info.call_gates) return cx.refuse("tool_choice \"required\" or a named function is not supported by this engine yet: send \"auto\"");
-            var names: std.ArrayList([]const u8) = .empty;
-            if (form.?.lead != null) for (tools) |t| try names.append(cx.a, try tool_specs.toolName(cx.a, t));
-            const think_open = if (srv.markers.open.len > 0) blk: {
-                const ids = srv.text.encode(cx.a, srv.markers.open, false) catch |e| switch (e) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Template => &[_]u32{},
-                };
-                break :blk if (ids.len > 0) ids[0] else null;
-            } else srv.text.tokenId("<think>");
-            request.call = .{ .opener = opener.?, .lead = form.?.lead orelse "", .tail = form.?.tail orelse "", .names = names.items, .think_open = think_open, .think_end = srv.text.tokenId(srv.markers.close) };
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
@@ -262,31 +251,6 @@ pub const Server = struct {
             break :blk null;
         };
         return srv.grammars;
-    }
-
-    const Form = struct { opener: []const u8, lead: ?[]const u8, tail: ?[]const u8 };
-
-    /// (opener, lead, tail) of this template's tool calls, read from a rendered probe call.
-    fn callForm(srv: *Server, cx: *Cx) errors.Refused!?Form {
-        const probe = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_0\", \"type\": \"function\", \"function\": {\"name\": \"tfprobe_fn\", \"arguments\": {}}}]}]")).ok;
-        var scratch: Cx = .{ .a = cx.a };
-        const text = if (prompt.renderIds(srv, &scratch, probe, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |_| "";
-        if (std.mem.lastIndexOf(u8, text, "tfprobe_fn")) |at| {
-            var best: ?usize = null;
-            var opener: []const u8 = "";
-            for (reply_text.calls) |c| if (std.mem.lastIndexOf(u8, text[0..at], c[0])) |s| {
-                if (best == null or s > best.? or (s == best.? and std.mem.order(u8, c[0], opener) == .gt)) {
-                    best = s;
-                    opener = c[0];
-                }
-            };
-            if (best) |s| {
-                const end = at + "tfprobe_fn".len;
-                return .{ .opener = opener, .lead = text[s + opener.len .. at], .tail = if (end < text.len) text[end .. end + 1] else "" };
-            }
-        }
-        for (reply_text.calls) |c| if (srv.text.tokenId(c[0]) != null) return .{ .opener = c[0], .lead = null, .tail = null };
-        return null;
     }
 
     /// Counts one finished request for /metrics.
