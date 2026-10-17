@@ -1,4 +1,4 @@
-//! A CUDA family's options from the serve flags it takes: its ranks, images, NVFP4 precision and fp8 caches.
+//! A CUDA family's options from the serve flags it takes: its ranks, images and videos, NVFP4 precision and fp8 caches.
 const std = @import("std");
 const api = @import("engine_api");
 
@@ -14,6 +14,11 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
         if (o.vision) |vo| {
             const own: ?u32 = comptime if (@hasDecl(F, "default_image_tokens")) F.default_image_tokens else null;
             opts.vision = .{ .image_tokens = if (vo.image_tokens_set) vo.image_tokens else own orelse vo.image_tokens, .max_images = vo.max_images };
+            if (comptime @hasField(@typeInfo(@FieldType(F.Options, "vision")).optional.child, "video_tokens")) { // a family that reads videos
+                opts.vision.?.video_tokens = vo.video_tokens;
+                opts.vision.?.max_videos = vo.max_videos;
+                opts.vision.?.max_frames = vo.max_frames;
+            }
         }
     }
     if (o.precision) |p| {

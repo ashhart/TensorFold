@@ -1,6 +1,13 @@
 //! GLM-5.3-Flash on CUDA: the family's parts, ported from the Python family's CUDA path.
 
 pub const experts = @import("cuda_experts.zig");
+pub const exl3 = @import("cuda_exl3.zig");
+pub const vision = @import("cuda_vision.zig");
+pub const mm = @import("cuda_mm.zig");
+pub const vision_config = @import("vision_config.zig");
+pub const image_core = @import("image_core.zig");
+/// An image's bytes to the tower's patches, as the Metal family prepares them (core's decoder).
+pub const image = image_core.For(@import("core").picture);
 pub const glue = @import("cuda_glue.zig");
 pub const kda = @import("cuda_kda.zig");
 pub const b16 = @import("cuda_b16.zig");
@@ -26,6 +33,10 @@ pub const native = @import("cuda_native.zig");
 
 test {
     _ = experts;
+    _ = exl3;
+    _ = vision;
+    _ = mm;
+    _ = image_core;
     _ = glue;
     _ = kda;
     _ = b16;

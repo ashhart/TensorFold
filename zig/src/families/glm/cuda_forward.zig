@@ -17,6 +17,10 @@ const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const state = @import("cuda_state.zig");
+const mm_mod = @import("cuda_mm.zig");
+const prof_mod = @import("cuda_prof.zig");
+const images_mod = @import("cuda_images.zig");
+const exl3 = @import("cuda_exl3.zig");
 const shared = @import("cuda_shared.zig");
 const relay = @import("cuda_relay.zig");
 
@@ -28,11 +32,14 @@ pub const Buffers = state.Buffers;
 /// The modules a forward launches from: our fatbins.
 pub const Modules = struct {
     glue: glue.Kernels,
-    mods: [7]cuda.Module,
+    mods: [9]cuda.Module,
     kda: kda.Kernels,
     lane: cuda.qmmf.Lane, // the NVFP4 linears' decode rows (qlinear)
     prompt: cuda.nvfp4.Prompt, // and their prompt rows
     experts: experts.Kernels,
+    exl3: exl3.Kernels, // an EXL3 checkpoint's routed experts
+    mm: mm_mod.Kernels, // glm_mm: the bf16 linears on tiled weights
+    tiled: bool = false, // the bf16 linears' weights are tiled (Engine.init, TF_GLM_MM unset or 1): glm_mm runs them
     copy_rows: cuda.Function,
     put_slot: cuda.Function,
     pack_dense: cuda.Function,
@@ -44,7 +51,7 @@ pub const Modules = struct {
         var m: Modules = undefined;
         var n: usize = 0;
         errdefer for (m.mods[0..n]) |*x| x.unload();
-        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue }) |*x, image| {
+        for (&m.mods, [_][]const u8{ k.glm_kda, k.glm_ops, k.experts, k.affine4_pack, k.glm_quant, k.qmm_group, k.glm_glue, k.glm_exl3, k.glm_mm }) |*x, image| {
             x.* = try cuda.Module.load(d, image);
             n += 1;
         }
@@ -61,6 +68,9 @@ pub const Modules = struct {
         m.quant = try quant.Kernels.load(m.mods[4]);
         m.q4 = try q4.Kernels.load(m.mods[5], m.mods[3], ctx);
         m.glue = try glue.Kernels.load(m.mods[6]);
+        m.exl3 = try exl3.Kernels.load(m.mods[7]);
+        m.mm = try mm_mod.Kernels.load(m.mods[8]);
+        m.tiled = false;
         return m;
     }
 
@@ -135,7 +145,8 @@ pub const Pieces = struct {
 /// How the ranks' partials meet: every rank in-process copying into the others' slots, or one rank over NCCL.
 pub const Exchange = union(enum) {
     local,
-    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm },
+    // group: the main stream's all-gathers through it (RoCE writes for small ones on two ranks); side streams stay raw
+    nccl: struct { lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, group: ?*const cuda.tp_group.Group = null },
 };
 
 /// One rank of the forward: its weights, its sequence's caches, the window's buffers.
@@ -146,6 +157,9 @@ pub const Rank = struct {
     /// A shared window (Buffers.initShared): each stream's rows in row order; empty: every row on `st`.
     segs: []const Seg = &.{},
 };
+
+/// The engine's image rows and the sequence the forward runs on (they splice into that sequence's rows only).
+pub const ImageRows = struct { v: *images_mod.Images, slot: u32 };
 
 /// One stream's rows of a shared window: rows row0..row0 + rows, on sequence `st` from its position.
 pub const Seg = struct { st: *State, row0: usize, rows: usize };
@@ -160,9 +174,11 @@ pub const Forward = struct {
     pieces: ?*const Pieces = null, // a prompt chunk's exchanges in row pieces on a second stream (null: whole)
     split: bool = true, // TF_GLM_PREFILL_REDUCE=split (the default with send/recv): each rank glues its own rows
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
+    images: ?ImageRows = null, // a prompt pass's image rows over their placeholders' embeddings (its sequence only)
+    prof: ?*prof_mod.Prof = null, // TF_GLM_PROF=1: events between the sections
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue };
+        return .{ .glue = &f.m.glue, .mm = if (f.m.tiled) &f.m.mm else null };
     }
 
     /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
@@ -177,6 +193,7 @@ pub const Forward = struct {
             },
             .nccl => |n| {
                 const r = f.ranks[0];
+                if (n.group) |g| return g.allGather(f.stream, r.b.gathered + r.w.share.rank * bytes, r.b.gathered, bytes);
                 const count = rows * c.hidden;
                 try n.lib.check(n.lib.api.ncclAllGather(r.b.gathered + r.w.share.rank * bytes, r.b.gathered, count, .f32, n.comm, f.stream.handle), "ncclAllGather");
             },
@@ -250,7 +267,7 @@ pub const Forward = struct {
     }
 
     fn moeKernels(f: *const Forward) moe.Kernels {
-        return .{ .set = f.set(), .experts = &f.m.experts, .put_slot = f.m.put_slot };
+        return .{ .set = f.set(), .experts = &f.m.experts, .exl3 = &f.m.exl3, .put_slot = f.m.put_slot, .prof = f.prof };
     }
 
     const Site = enum { mixer, ffn };
@@ -439,11 +456,14 @@ pub const Forward = struct {
         }
         const c = &f.ranks[0].w.config;
         for (f.ranks) |r| try glue.embedB16(f.set(), f.stream, r.b.ids, r.w.embed, r.b.x, R, c.hidden, c.hc);
+        if (f.images) |im| for (f.ranks) |r| try im.v.splice(f.stream, im.slot, r.st.pos, r.st.pos + R, r.b.x, c.hc);
+        if (f.prof) |p| p.mark(f.stream, .embed);
         var cut: [max_pieces][2]usize = undefined;
         const pieces = if (f.pieces) |p| (if (f.ranks[0].b.prefill) ranges(R, p.count, &cut) else 0) else 0;
         // overlap.Overlap.begin: pieced with two pieces or more, and split takes a chunk of one piece too
         if (pieces > 1 or (pieces == 1 and f.splits(R))) try f.pieced(f.pieces.?, R, cut[0..pieces]) else try f.whole(R);
         try f.finish(R);
+        if (f.prof) |p| p.mark(f.stream, .head);
     }
 
     /// The unpieced loop over the layers (and the stream mean): each site's partials whole, then the glue.
@@ -457,15 +477,19 @@ pub const Forward = struct {
                 try f.pre(r, l.attn_hc, l.in_norm, R);
                 if (r.segs.len > 0) try shared.mixer(f, r, l, li, di, R, slot(r, R)) else try f.mixer(r, l, li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), slot(r, R));
             }
+            if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].mixer == .kda) .kda else .mla);
             try f.gather(R);
+            if (f.prof) |p| p.mark(f.stream, .gather_a);
             for (f.ranks) |r| {
                 const l = r.w.layers[j];
                 try f.post(r, R);
                 try f.pre(r, l.ffn_hc, l.post_norm, R);
                 try f.ffn(r, l, R, slot(r, R));
             }
+            if (f.prof) |p| p.mark(f.stream, if (f.ranks[0].w.layers[j].ffn == .dense) .dense else .shared); // MoE: its fill
             try f.gather(R);
             for (f.ranks) |r| try f.post(r, R);
+            if (f.prof) |p| p.mark(f.stream, .gather_b);
             switch (f.ranks[0].w.layers[j].mixer) {
                 .kda => li += 1,
                 .mla => di += 1,
@@ -500,6 +524,8 @@ pub const Forward = struct {
             const m = r.w.mtp.?;
             const b = r.b;
             try glue.embedB16(f.set(), f.stream, b.ids, r.w.embed, b.me, n, D, 1);
+            // the head reads each row's next token: an image's rows one place on
+            if (f.images) |im| try im.v.splice(f.stream, im.slot, r.st.mtp_len + 1, r.st.mtp_len + 1 + n, b.me, 1);
             if (r.st.mtp_len == 0) try f.d.check(f.d.api.cuMemsetD8Async(b.me, 0, D * 2, f.stream.handle), "cuMemsetD8Async"); // position 0's embedding is zeroed
             try glue.rmsnorm(f.set(), f.stream, b.me, D, m.enorm, b.mcat, 2 * D, null, c.eps, n, D);
             try glue.rmsnorm(f.set(), f.stream, b.hin, D, m.hnorm, b.mcat + D * 2, 2 * D, null, c.eps, n, D);

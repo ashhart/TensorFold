@@ -3,10 +3,12 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const engine = @import("cuda_engine.zig");
+const images_mod = @import("cuda_images.zig");
+const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -88,6 +90,12 @@ pub const Link = struct {
         }
     }
 
+    /// `bytes` at `ptr` from rank 0 into every rank's `ptr` (image rows: the follower's buffer is the same size).
+    pub fn rows(l: *Link, ptr: u64, bytes: usize) !void {
+        if (bytes == 0) return;
+        try l.lib.check(l.lib.api.ncclBroadcast(ptr, ptr, bytes, .u8, 0, l.comm, l.stream.handle), "ncclBroadcast");
+    }
+
     /// Other ranks: the next step and its ids (valid until the next receive).
     pub fn receive(l: *Link) !struct { h: Header, ids: []const u32 } {
         try l.bcast(64);
@@ -151,6 +159,16 @@ pub const Leader = struct {
         }
         try x.send(h, &.{});
         try x.e.begin(c);
+    }
+
+    /// The prompt pass's image rows (rank 0 encoded them for the bound slot) to every rank: spans, then the rows.
+    pub fn images(x: Leader, v: *const images_mod.Images) !void {
+        try x.flush();
+        var words: [3 * 64]u32 = undefined;
+        if (v.spans.items.len * 3 > words.len) return error.TooManyImages;
+        for (v.spans.items, 0..) |sp, i| words[3 * i ..][0..3].* = .{ sp.at, sp.n, sp.row };
+        try x.send(.{ .kind = @backingInt(Kind.image) }, words[0 .. 3 * v.spans.items.len]);
+        try x.link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
     }
 
     /// `cancel` (rank 0's), asked before each chunk, decides for every rank; `from` every rank holds; `marks` rank 0's.
@@ -220,7 +238,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
         if (kind != .end and kind != .drop and kind != .shared) try e.bind(h.slot);
         switch (kind) {
-            .begin => try e.begin(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
+            .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
@@ -261,6 +279,11 @@ pub fn follow(e: *Engine, link: *Link) !void {
                 const ids = try e.gpa.dupe(u32, step.ids);
                 defer e.gpa.free(ids);
                 try e.draft(h.flags & 1 != 0, ids, h.depth, &drafts);
+            },
+            .image => {
+                const v = e.images orelse return error.NoVision; // the ranks agreed on --vision (cuda_ranks)
+                try v.take(h.slot, step.ids);
+                try link.rows(v.rows.ptr, v.rowCount() * vcfg.out_hidden * 2);
             },
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
