@@ -1,4 +1,4 @@
-//! A streamed context-window refusal is an error event, and every other refusal is a 400 before the stream opens.
+//! Context-window refusals stay streamed; other refusals preserve their HTTP status before admission.
 const std = @import("std");
 const api = @import("engine_api");
 const server = @import("root.zig");
@@ -295,6 +295,36 @@ test "a stream whose client is gone when it opens gives the preparing count back
     try std.testing.expectEqual(@as(i64, 0), seen.preparing);
 }
 
+test "disconnect at the admitted stream boundary cancels and drains its mailbox" {
+    const Waiting = struct {
+        sink: ?api.Sink = null,
+        submissions: usize = 0,
+        cancellations: usize = 0,
+        fn engine(e: *@This()) api.Engine {
+            return .{ .ctx = e, .vtable = &.{ .info = HiEngine.info, .submit = submit, .cancel = cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+        }
+        fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+            const e: *@This() = @ptrCast(@alignCast(ctx));
+            e.submissions += 1;
+            e.sink = sink;
+        }
+        fn cancel(ctx: *anyopaque, id: api.Id) void {
+            const e: *@This() = @ptrCast(@alignCast(ctx));
+            e.cancellations += 1;
+            const sink = e.sink.?;
+            e.sink = null;
+            sink.event(sink.ctx, id, &.{ .finished = .{ .reason = .stop } });
+        }
+    };
+    var waiting: Waiting = .{};
+    const seen = try sendWith(waiting.engine(), .chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"stream\":true,\"max_tokens\":2}", .{ .gone_at_open = true });
+    try std.testing.expectEqual(@as(usize, 1), waiting.submissions);
+    try std.testing.expectEqual(@as(usize, 1), waiting.cancellations);
+    try std.testing.expect(waiting.sink == null);
+    try std.testing.expect(!seen.opened);
+    try std.testing.expectEqual(@as(i64, 0), seen.preparing);
+}
+
 test "a reply labels a greedy request greedy and a sampled one exact" {
     const greedy = try send(.chat, "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":2,\"temperature\":0}");
     try std.testing.expectEqual(@as(?u16, 200), greedy.status);
@@ -456,4 +486,37 @@ test "unsupported budgets leave zero unset and thinking-disabled requests valid"
         try std.testing.expectEqual(@as(i64, 0), seen.preparing);
     }
     try std.testing.expectEqual(@as(usize, 3), backend.submissions);
+}
+
+test "closed or busy admission is service unavailable across chat, messages and responses" {
+    const ClosedEngine = struct {
+        reason: api.SubmitError = error.Closed,
+        fn engine(e: *@This()) api.Engine {
+            return .{ .ctx = e, .vtable = &.{ .info = HiEngine.info, .submit = submit, .cancel = HiEngine.cancel, .status = HiEngine.status, .memory = HiEngine.memory } };
+        }
+        fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+            return @as(*@This(), @ptrCast(@alignCast(ctx))).reason;
+        }
+    };
+    const cases = [_]struct { route: Route, body: []const u8 }{
+        .{ .route = .chat, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}" },
+        .{ .route = .messages, .body = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":1}" },
+        .{ .route = .responses, .body = "{\"model\":\"test-model\",\"input\":\"x\",\"max_output_tokens\":1}" },
+    };
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    var wrong: usize = 0;
+    var engine: ClosedEngine = .{};
+    for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
+        engine.reason = reason;
+        for (cases) |c| for ([_]bool{ false, true }) |streaming| {
+            const body = if (streaming) try std.mem.concat(arena.allocator(), u8, &.{ c.body[0 .. c.body.len - 1], ",\"stream\":true}" }) else c.body;
+            const seen = try sendWith(engine.engine(), c.route, body, .{});
+            if (seen.status != 503 or seen.opened or seen.preparing != 0) {
+                wrong += 1;
+                std.debug.print("ADMISSION reason={s} route={s} stream={any} status={any} opened={any} events={d} preparing={d}\n", .{ @errorName(reason), @tagName(c.route), streaming, seen.status, seen.opened, seen.events, seen.preparing });
+            }
+        };
+    }
+    try std.testing.expectEqual(@as(usize, 0), wrong);
 }

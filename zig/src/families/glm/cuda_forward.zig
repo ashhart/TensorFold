@@ -18,6 +18,7 @@ const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
 const state = @import("cuda_state.zig");
 const shared = @import("cuda_shared.zig");
+const relay = @import("cuda_relay.zig");
 
 pub const prefill_rows = state.prefill_rows;
 pub const window_rows = state.window_rows;
@@ -158,6 +159,7 @@ pub const Forward = struct {
     kda_wide: bool = true, // TF_GLM_KDA_DECODE_WIDE (the Python family's default): decode windows on KDA's three-kernel chain
     pieces: ?*const Pieces = null, // a prompt chunk's exchanges in row pieces on a second stream (null: whole)
     split: bool = true, // TF_GLM_PREFILL_REDUCE=split (the default with send/recv): each rank glues its own rows
+    ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
 
     pub fn set(f: *const Forward) glue.Set {
         return .{ .glue = &f.m.glue };
@@ -275,11 +277,8 @@ pub const Forward = struct {
     }
 
     /// reduce.shares: [lo, hi) of the rows of a piece of `n` each rank owns: about equal, the first n % world one more.
-    fn share(n: usize, world: usize, rank: usize) [2]usize {
-        const base = n / world;
-        const extra = n % world;
-        const lo = rank * base + @min(rank, extra);
-        return .{ lo, lo + base + @intFromBool(rank < extra) };
+    pub fn share(n: usize, world: usize, rank: usize) [2]usize {
+        return cuda.rank_scatter.share(n, world, rank);
     }
 
     /// Whether piece [lo, lo + n) splits (TF_GLM_PREFILL_REDUCE=split): at least one row for every rank.
@@ -324,13 +323,8 @@ pub const Forward = struct {
                     const me = r.w.share.rank;
                     const mine = share(n, world, me);
                     const own = mine[1] - mine[0];
-                    try x.lib.check(x.lib.api.ncclGroupStart(), "ncclGroupStart");
-                    for (0..world) |peer| if (peer != me) {
-                        const theirs = share(n, world, peer);
-                        try x.lib.check(x.lib.api.ncclSend(r.b.part + (lo + theirs[0]) * D * 4, (theirs[1] - theirs[0]) * D, .f32, @intCast(peer), x.comm, p.side.handle), "ncclSend");
-                        try x.lib.check(x.lib.api.ncclRecv(room(r, lo) + peer * own * D * 4, own * D, .f32, @intCast(peer), x.comm, p.side.handle), "ncclRecv");
-                    };
-                    try x.lib.check(x.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+                    const plan: relay.Relay = .{ .world = world, .rank = me, .n = n };
+                    if (f.ring) try relay.partials(x.lib, x.comm, p.side, plan, room(r, lo), r.b.part, lo, D) else try relay.splitPartials(x.lib, x.comm, p.side, plan, room(r, lo), r.b.part, lo, D);
                     try f.copy(p.side, room(r, lo) + me * own * D * 4, r.b.part + (lo + mine[0]) * D * 4, own * D * 4);
                 },
             }
@@ -401,14 +395,8 @@ pub const Forward = struct {
                     const r = f.ranks[0];
                     const me = r.w.share.rank;
                     const rows_of = if (last) r.b.hidden else r.b.normed;
-                    const mine = share(n, world, me);
-                    try x.lib.check(x.lib.api.ncclGroupStart(), "ncclGroupStart");
-                    for (0..world) |peer| if (peer != me) {
-                        const theirs = share(n, world, peer);
-                        try x.lib.check(x.lib.api.ncclSend(rows_of + (lo + mine[0]) * D * 2, (mine[1] - mine[0]) * D, .bf16, @intCast(peer), x.comm, p.side.handle), "ncclSend");
-                        try x.lib.check(x.lib.api.ncclRecv(rows_of + (lo + theirs[0]) * D * 2, (theirs[1] - theirs[0]) * D, .bf16, @intCast(peer), x.comm, p.side.handle), "ncclRecv");
-                    };
-                    try x.lib.check(x.lib.api.ncclGroupEnd(), "ncclGroupEnd");
+                    const plan: relay.Relay = .{ .world = world, .rank = me, .n = n };
+                    if (f.ring) try relay.glued(x.lib, x.comm, p.side, plan, rows_of, lo, D) else try relay.splitGlued(x.lib, x.comm, p.side, plan, rows_of, lo, D);
                 },
             }
             try p.shared[q].record(p.side);

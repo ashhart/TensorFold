@@ -131,7 +131,13 @@ const Filter = struct {
     const Call = struct { index: i64, server: bool, client: u32 };
 
     fn sink(f: *Filter) chat.Sink {
-        return .{ .ctx = f, .call = call };
+        return .{ .ctx = f, .call = call, .begin = begin };
+    }
+
+    fn begin(ctx: *anyopaque, prompt_len: usize) error{Closed}!void {
+        const f: *Filter = @ptrCast(@alignCast(ctx));
+        const inner = f.inner orelse return;
+        if (inner.begin) |start| try start(inner.ctx, prompt_len);
     }
 
     fn startRound(f: *Filter) void {

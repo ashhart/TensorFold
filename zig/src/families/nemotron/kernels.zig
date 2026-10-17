@@ -93,14 +93,14 @@ pub fn sourceHash() u64 {
 }
 
 pub const Kernels = struct {
-    pipelines: [total]mtl.Pipeline = undefined,
+    pipelines: [total]?mtl.Pipeline = @splat(null), // null: a packed kernel this system could not build (see load)
     rows: ?row.Pipelines = null, // the core's row projections: chips without tensor units, and widths but 4/64
     bits: ?*row.simd_bits.Pipelines = null, // prompt chunks' tiles at widths but 4/64 (the model owns them)
     gathers: []const @import("prefill_w.zig").Gathers = &.{}, // prompt chunks' routed experts at widths but 4/64 (model's)
 
     /// The pipeline of a generated kernel (by its generator key) or a glue kernel (by function name).
     pub fn get(self: *const Kernels, comptime key: []const u8) mtl.Pipeline {
-        return self.pipelines[comptime index(key)];
+        return self.pipelines[comptime index(key)] orelse std.debug.panic("Nemotron kernel {s} did not build here", .{key});
     }
 
     /// A generated kernel whose Metal function name starts with `prefix` (fixture checks look kernels up by name).
@@ -120,7 +120,7 @@ pub const Kernels = struct {
     }
 
     pub fn deinit(self: *Kernels) void {
-        for (&self.pipelines) |p| p.deinit();
+        for (self.pipelines) |p| if (p) |q| q.deinit();
         if (self.rows) |*r| r.deinit();
     }
 };
@@ -144,9 +144,11 @@ const Job = struct {
     device: mtl.Device,
     source: []const u8,
     names: []const [:0]const u8,
-    out: []mtl.Pipeline,
+    out: []?mtl.Pipeline,
     /// The prebuilt metallib for packed sources when the runtime compiler refuses uint4b_format; the loader owns it.
     prebuilt: ?mtl.Library = null,
+    /// A packed kernel this chip never dispatches (Forward.rowCall takes its projections): a failure leaves it null.
+    optional: bool = false,
     failed: bool = false,
 };
 
@@ -184,7 +186,8 @@ fn compile(job: *Job) void {
     });
     defer if (owned) lib.deinit();
     for (job.names, job.out) |name, *p| {
-        p.* = mtl.Pipeline.init(job.device, lib, name, false) catch {
+        const made = if (job.optional) mtl.Pipeline.initOptional(job.device, lib, name, false) else mtl.Pipeline.init(job.device, lib, name, false);
+        p.* = made catch {
             job.failed = true;
             return;
         };
@@ -193,7 +196,6 @@ fn compile(job: *Job) void {
 
 /// Compile every source on worker threads, one library each as MLX does; refused packed kernels use the metallib.
 pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
-    var k = Kernels{};
     var prebuilt: ?mtl.Library = null;
     defer if (prebuilt) |*l| l.deinit();
     if (!tensorInlineOk(device)) {
@@ -201,13 +203,21 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
         prebuilt = mtl.Library.fromBytes(device, sources.packed_metallib) catch |e| return e;
         std.log.info("packed kernels from the prebuilt metallib: this runtime compiler refuses uint4b_format", .{});
     }
+    return loadWith(allocator, device, prebuilt);
+}
+
+/// `load` with the packed kernels' library given; without tensor units a packed kernel that fails to build stays null.
+fn loadWith(allocator: std.mem.Allocator, device: mtl.Device, prebuilt: ?mtl.Library) !Kernels {
+    var k = Kernels{};
+    errdefer k.deinit(); // every pipeline starts null; errors return only before the workers start or after they join
     const jobs = try allocator.alloc(Job, sources.nemotron.all.len + 10);
     defer allocator.free(jobs);
     const names = try allocator.alloc([:0]const u8, sources.nemotron.all.len);
     defer allocator.free(names);
     inline for (sources.nemotron.all, 0..) |kernel, i| {
         names[i] = kernel.function;
-        jobs[i] = .{ .device = device, .source = kernel.source, .names = names[i .. i + 1], .out = k.pipelines[i .. i + 1], .prebuilt = if (usesPacked(kernel.source)) prebuilt else null };
+        const packed_kernel = usesPacked(kernel.source);
+        jobs[i] = .{ .device = device, .source = kernel.source, .names = names[i .. i + 1], .out = k.pipelines[i .. i + 1], .prebuilt = if (packed_kernel) prebuilt else null, .optional = packed_kernel and !device.tensorUnits() };
     }
     var rewritten: [sources.nemotron.all.len]?[]u8 = @splat(null);
     defer for (rewritten) |r| if (r) |text| allocator.free(text);
@@ -252,7 +262,13 @@ pub fn load(allocator: std.mem.Allocator, device: mtl.Device) !Kernels {
     for (&threads) |*t| t.* = std.Thread.spawn(.{}, Worker.run, .{ jobs, &next }) catch null;
     Worker.run(jobs, &next);
     for (threads) |t| if (t) |th| th.join();
-    for (jobs) |j| if (j.failed) return error.KernelCompile;
+    var absent: usize = 0;
+    for (jobs) |j| {
+        if (!j.failed) continue;
+        if (!j.optional) return error.KernelCompile;
+        absent += 1;
+    }
+    if (absent > 0) std.log.warn("{d} packed kernels did not build; this chip takes the row projections instead", .{absent});
     if (!device.tensorUnits()) k.rows = try row.Pipelines.load(device);
     return k;
 }
@@ -358,4 +374,26 @@ test "the prebuilt metallib carries every packed kernel function" {
         const id = try lib.function(kernel.function);
         mtl.objc.release(id);
     }
+}
+
+test "without tensor units the kernels load when the packed ones cannot link, as on macOS 26.3" {
+    const device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    if (device.tensorUnits()) return error.SkipZigTest; // chips that dispatch the packed kernels still fail the load
+    const gpa = std.testing.allocator;
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    // the library loads, then every packed pipeline fails to link, as on macOS 26.3
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(gpa);
+    try text.appendSlice(gpa, "#include <metal_stdlib>\nusing namespace metal;\n[[visible]] void tf_absent_for_test(device uchar* o);\n");
+    for (sources.nemotron.all) |kernel| {
+        if (usesPacked(kernel.source)) try text.print(gpa, "kernel void {s}(device uchar* o [[buffer(0)]]) {{ tf_absent_for_test(o); }}\n", .{kernel.function});
+    }
+    var stubs = try mtl.Library.fromSource(device, text.items, mtl.CompileOptions.mlx());
+    defer stubs.deinit();
+    var k = try loadWith(gpa, device, stubs);
+    defer k.deinit();
+    try std.testing.expect(k.rows != null);
+    for (sources.nemotron.all) |kernel| try std.testing.expectEqual(!usesPacked(kernel.source), k.byPrefix(kernel.function) != null);
 }

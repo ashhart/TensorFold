@@ -264,7 +264,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
             },
             .drop => for (step.ids) |id| e.dropState(id),
             .release => e.release(h.slot),
-            .end => return,
+            .end => return cuda.tp_watch.ended(), // rank 0 ends on purpose: its line closing from here is expected
         }
     }
 }

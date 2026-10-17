@@ -15,6 +15,11 @@ pub const Stream = struct {
         return .{ .d = d, .handle = s };
     }
 
+    /// A stream its caller owns, such as a host framework's (null: the legacy default stream); never deinit it.
+    pub fn borrowed(d: *const Driver, handle: abi.Stream) Stream {
+        return .{ .d = d, .handle = handle };
+    }
+
     pub fn deinit(self: *Stream) void {
         _ = self.d.api.cuStreamDestroy_v2(self.handle);
         self.* = undefined;

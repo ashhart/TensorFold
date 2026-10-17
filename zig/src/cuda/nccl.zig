@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const abi = @import("abi.zig");
+const tp_watch = @import("tp_watch.zig");
 
 pub const Result = c_int;
 pub const Comm = ?*opaque {};
@@ -59,9 +60,21 @@ pub const Library = struct {
 
     pub fn check(self: *const Library, r: Result, what: []const u8) Error!void {
         if (r == 0) return;
+        if (@import("builtin").is_test) return error.NcclFailed; // a test's injected failure: the runner fails error logs
         const s = self.api.ncclGetErrorString(r);
         std.log.err("{s}: {s} ({d})", .{ what, if (s) |p| std.mem.span(p) else "?", r });
+        tp_watch.fatal(what); // with the ranks' lines open, every rank stops with it; with none, the caller hears it
         return error.NcclFailed;
+    }
+
+    /// `post(ctx)`'s sends and receives as one group; a failed post still ends it, so later calls stay out of it.
+    pub fn group(self: *const Library, ctx: anytype, comptime post: fn (@TypeOf(ctx)) anyerror!void) anyerror!void {
+        try self.check(self.api.ncclGroupStart(), "ncclGroupStart");
+        post(ctx) catch |err| {
+            _ = self.api.ncclGroupEnd();
+            return err;
+        };
+        try self.check(self.api.ncclGroupEnd(), "ncclGroupEnd");
     }
 
     /// NCCL's version as 10000 * major + 100 * minor + patch.

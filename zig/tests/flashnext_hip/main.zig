@@ -104,8 +104,9 @@ fn generate(gpa: std.mem.Allocator, io: std.Io, a: Args) !void {
     ) else a.text;
     const prompt = try tok.encode(arena.allocator(), text);
     for (0..a.repeat) |_| {
-        var c = try e.caches(a.capacity);
-        defer c.deinit(gpa);
+        // the pool's slot 0, as a served stream's: the graphs one run records name the buffers every run uses
+        var c = try e.lease(0);
+        defer e.unlease(c);
         const m = e.model_();
         var at: usize = 0;
         var start: usize = 0;

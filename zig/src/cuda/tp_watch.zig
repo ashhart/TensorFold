@@ -125,6 +125,13 @@ pub fn fail(name: []const u8) void {
     send(r);
 }
 
+/// A rank's transport failed: with lines open every rank hears `name` and this one ends now; with none, nothing.
+pub fn fatal(name: []const u8) void {
+    if (line_count == 0) return;
+    fail(name);
+    stop();
+}
+
 /// Ends this process at once: a stream may hold kernels that wait on the gone rank, which a normal exit would join.
 fn stop() noreturn {
     std.c._exit(1);

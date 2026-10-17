@@ -58,6 +58,7 @@ const Rig = struct {
         for (want, tol, 0..) |w, t, i| {
             const g: f64 = if (f32_out) std.mem.bytesToValue(f32, raw[4 * i ..][0..4]) else bf(std.mem.bytesToValue(u16, raw[2 * i ..][0..2]));
             const q = @abs(g - w) / t;
+            try check.expect(std.math.isFinite(q), "{s}: non-finite error at element {d} (got {e}, reference {e}, tolerance {e})", .{ name, i, g, w, t });
             if (!(q <= most)) {
                 most = q;
                 at = i;

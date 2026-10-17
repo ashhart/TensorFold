@@ -17,8 +17,18 @@ zig build test test-golden -Dcpu=apple_m1
 
 `native` writes `zig-out/native/bin/tensorfold-native`.
 The `apple_m1` CPU target keeps the macOS binary compatible with M1 through M5.
-`test` runs host checks; `test-golden` compares the frozen server corpus and records known differences separately.
-Neither host result substitutes for an actual model/device gate.
+`test` runs unit tests; on macOS it also runs available Metal device checks, including GLM MLA and KDA checks.
+Run the full suite on an isolated machine when the local GPU is serving a model.
+`test-golden` compares the frozen server corpus and records known differences separately.
+These results do not substitute for an actual checkpoint/model gate.
+
+For the CUDA host-test subset without the macOS Metal family tests:
+
+```sh
+zig build test-cuda-host
+```
+
+This subset does not replace the complete `test` suite.
 
 Linux release builds use the CUDA backend and qualified GPU kernel assets.
 [Packaging](packaging/README.md) lists the flat fatbin set and optional captured CUDA files required by `dist`.

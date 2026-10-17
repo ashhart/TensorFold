@@ -99,7 +99,58 @@ pub const Shards = struct {
 };
 
 /// One projection a tool works on, with its layout in the shipped checkpoint; `a` and `b` name adapter tensors.
-pub const Job = struct { module: []const u8, a: []const u8 = "", b: []const u8 = "", n: usize, k: usize, group: usize, dtype: st.DType };
+pub const Job = struct {
+    module: []const u8,
+    shipped: ?[]const u8 = null, // the module's name in the shipped checkpoint, when it differs from the dense one
+    a: []const u8 = "",
+    b: []const u8 = "",
+    n: usize,
+    k: usize,
+    group: usize,
+    dtype: st.DType,
+
+    /// The module's name in the shipped checkpoint (and so in OUT).
+    pub fn shippedName(j: Job) []const u8 {
+        return j.shipped orelse j.module;
+    }
+};
+
+/// Module prefix rewrites between a dense source and an MLX conversion: (dense, shipped), tried both ways.
+const prefix_rewrites = [_][2][]const u8{.{ "model.language_model.", "language_model.model." }};
+
+/// One module's name in the dense source and in the shipped checkpoint.
+pub const Names = struct { dense: []const u8, shipped: []const u8 };
+
+/// `module`'s dense and shipped names, in either namespace: the pair both folders hold a weight for, or SHIPPED's.
+pub fn resolve(arena: Allocator, w: *Io.Writer, dense: ?*Shards, shipped: *Shards, module: []const u8) !Names {
+    var cands: std.ArrayList(Names) = .empty;
+    try cands.append(arena, .{ .dense = module, .shipped = module });
+    for (prefix_rewrites) |r| {
+        if (std.mem.startsWith(u8, module, r[0])) try cands.append(arena, .{ .dense = module, .shipped = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[1], module[r[0].len..] }) });
+        if (std.mem.startsWith(u8, module, r[1])) {
+            const other = try std.fmt.allocPrint(arena, "{s}{s}", .{ r[0], module[r[1].len..] });
+            // with a dense base the other spelling is its name; alone, the checkpoint may store the module under it
+            try cands.append(arena, if (dense != null) .{ .dense = other, .shipped = module } else .{ .dense = module, .shipped = other });
+        }
+    }
+    var found: std.ArrayList(Names) = .empty;
+    var list: std.ArrayList(u8) = .empty;
+    for (cands.items) |c| {
+        const in_shipped = (try shipped.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.shipped}))) != null;
+        const d = dense orelse {
+            try list.print(arena, "{s}{s}.weight {s}", .{ if (list.items.len == 0) "" else "; ", c.shipped, if (in_shipped) "found" else "missing" });
+            if (in_shipped) try found.append(arena, c);
+            continue;
+        };
+        const in_dense = (try d.get(try std.fmt.allocPrint(arena, "{s}.weight", .{c.dense}))) != null;
+        try list.print(arena, "{s}dense {s}.weight {s}, shipped {s}.weight {s}", .{ if (list.items.len == 0) "" else "; ", c.dense, if (in_dense) "found" else "missing", c.shipped, if (in_shipped) "found" else "missing" });
+        if (in_dense and in_shipped) try found.append(arena, c);
+    }
+    if (found.items.len == 0 and dense == null) return refuse(w, module, try std.fmt.allocPrint(arena, "not found in the checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
+    if (found.items.len == 0) return refuse(w, module, try std.fmt.allocPrint(arena, "not found in both the dense base and the shipped checkpoint (tried: {s}); a fused projection stores another name", .{list.items}));
+    if (found.items.len > 1) return refuse(w, module, try std.fmt.allocPrint(arena, "ambiguous: more than one name pair resolves (tried: {s})", .{list.items}));
+    return found.items[0];
+}
 
 /// The quantization table of `dir`'s config.json, refused unless it is MLX affine.
 pub fn quantConfig(arena: Allocator, io: Io, w: *Io.Writer, dir: []const u8) !mlx.Config {
@@ -116,6 +167,9 @@ pub const Layout = struct { n: usize, k: usize, group: usize, dtype: st.DType };
 pub fn layoutOf(arena: Allocator, w: *Io.Writer, shipped: *Shards, quant: mlx.Config, module: []const u8) !Layout {
     const leaves = [3][]const u8{ try std.fmt.allocPrint(arena, "{s}.weight", .{module}), try std.fmt.allocPrint(arena, "{s}.scales", .{module}), try std.fmt.allocPrint(arena, "{s}.biases", .{module}) };
     const shard = shipped.shardOf(leaves[0]) orelse return refuse(w, leaves[0], "not in the checkpoint: no such quantized tensor (a fused projection stores another name)");
+    const weight = (try shipped.get(leaves[0])) orelse return refuse(w, leaves[0], "not in the checkpoint: no such tensor");
+    if ((try shipped.get(leaves[1])) == null or (try shipped.get(leaves[2])) == null) return refuse(w, module, "not quantized in the shipped checkpoint: it has no .scales and .biases (norms and embeddings are not merged)");
+    if (weight.rank != 2) return refuse(w, module, try std.fmt.allocPrint(arena, "a rank {d} tensor: stacked (expert) tensors are not merged, only rank-2 quantized linears", .{weight.rank}));
     var t: [3]st.Tensor = undefined;
     for (&t, leaves) |*x, leaf| {
         if (!std.mem.eql(u8, shipped.shardOf(leaf) orelse "", shard)) return refuse(w, leaf, "not in the shard of its weight");
@@ -166,7 +220,7 @@ pub fn quantOf(gpa: Allocator, s: *Shards, j: Job) !lq.Quant {
     const q = try lq.allocQuant(gpa, j.n, j.k, j.group);
     errdefer lq.freeQuant(gpa, q);
     inline for (.{ .{ "weight", q.words }, .{ "scales", q.scales }, .{ "biases", q.biases } }) |leaf| {
-        const t = (try s.get(try std.fmt.bufPrint(&buf, "{s}." ++ leaf[0], .{j.module}))) orelse return error.MissingTensor;
+        const t = (try s.get(try std.fmt.bufPrint(&buf, "{s}." ++ leaf[0], .{j.shippedName()}))) orelse return error.MissingTensor;
         if (t.bytes.len != std.mem.sliceAsBytes(leaf[1]).len) return error.UnexpectedTensor;
         @memcpy(std.mem.sliceAsBytes(leaf[1]), t.bytes);
     }

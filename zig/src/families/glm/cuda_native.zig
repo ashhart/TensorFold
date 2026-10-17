@@ -101,6 +101,16 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         std.log.err("{s}", .{problem});
         return err;
     };
+    // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
+    if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
+    return openRank(gpa, io, ctx, dir, o, p, set) catch |err| {
+        cuda.tp_watch.fail(@errorName(err)); // the other ranks stop with this rank's error
+        return err;
+    };
+}
+
+/// `open` once the ranks' lines are up: NCCL, the engine and the link, then a follower's loop or rank 0's lanes.
+fn openRank(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, o: Options, p: Place, set: ranks.Settings) !Loaded {
     const own = try gpa.create(Owned);
     errdefer gpa.destroy(own);
     own.gpa = gpa;
@@ -128,6 +138,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     if (p.rank != 0) { // a follower never serves: it runs rank 0's steps, then leaves the process
         follow.follow(own.e, &own.link) catch |err| {
             std.log.err("rank {d}: following rank 0 stopped ({s})", .{ p.rank, @errorName(err) });
+            cuda.tp_watch.fail(@errorName(err)); // rank 0 and the others stop with it
             std.process.exit(1);
         };
         std.log.info("rank {d}: rank 0 ended; leaving", .{p.rank});
@@ -190,6 +201,7 @@ pub fn snap_drop(ptr: *anyopaque, saved: *anyopaque) void {
 
 fn close(ptr: *anyopaque) void {
     const own: *Owned = @ptrCast(@alignCast(ptr));
+    cuda.tp_watch.ended(); // the other ranks leave on the end step, so their lines close on purpose from here
     own.lanes.x.end() catch {};
     own.lanes.deinit();
     own.link.deinit();

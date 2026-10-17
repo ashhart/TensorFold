@@ -247,6 +247,8 @@ zig build native -Dcpu=apple_m1 -Dversion=1.0.12
 zig build test test-golden -Dcpu=apple_m1
 ```
 
+On macOS, `test` also runs available Metal device checks. See [CONTRIBUTING.md](CONTRIBUTING.md) for the host-test subset.
+
 The server is `zig-out/native/bin/tensorfold-native`.
 Release archives include the native executable, runtime assets and license notices; [packaging](packaging/README.md) describes the qualified CUDA inputs.
 For cache-aware performance receipts, see [observed cache benchmark evidence](docs/cache-benchmarks.md).
