@@ -123,9 +123,15 @@ test "generic four-bit config and index metadata remain supported outside runtim
 
 test "normal and dump load paths admit before any engine device or pack work and render the human refusal" {
     const source = @embedFile("engine.zig");
-    const entry = std.mem.indexOf(u8, source, "pub fn loadWith(").?;
-    const body = source[entry + std.mem.indexOf(u8, source[entry..], "{").? + 1 ..];
-    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, body, " \t\r\n"), "try load_admission.check(gpa, io, model_dir);"));
+    const plain = std.mem.indexOf(u8, source, "pub fn loadWith(").?;
+    const wraps = std.mem.trimStart(u8, source[plain + std.mem.indexOf(u8, source[plain..], "{").? + 1 ..], " \t\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, wraps, "return loadConfigured(gpa, io, model_dir, dump_dir, speed_up, .{});"));
+    const entry = std.mem.indexOf(u8, source, "pub fn loadConfigured(").?;
+    const body = std.mem.trimStart(u8, source[entry + std.mem.indexOf(u8, source[entry..], "{").? + 1 ..], " \t\r\n");
+    // the window's settings check reads no file and opens no device, and the admission is the next statement
+    try std.testing.expect(std.mem.startsWith(u8, body, "try window.validate("));
+    const after = std.mem.trimStart(u8, body[std.mem.indexOfScalar(u8, body, '\n').?..], " \t\r\n");
+    try std.testing.expect(std.mem.startsWith(u8, after, "try load_admission.check(gpa, io, model_dir);"));
     const native = @embedFile("../../native/metal.zig");
     const open = std.mem.indexOf(u8, native, "fn openFlashNext(").?;
     const mapping = std.mem.indexOfPos(u8, native, open, "tf.flashnext_engine.quantizationProblem(e)");
