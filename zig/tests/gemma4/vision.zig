@@ -107,18 +107,19 @@ pub fn main(init: std.process.Init) !void {
     defer c.deinit();
     const files = try shards.shardFiles(gpa, init.io, args[1]);
     defer shards.freeShardFiles(gpa, files);
-    const geo = (try g.config.Config.read(gpa, init.io, args[1])).geo;
+    const conf = try g.config.Config.read(gpa, init.io, args[1]);
+    const geo = conf.geo;
     if (geo.unified()) try unified.addTensors(&c, device, files) else try vision.addTensors(&c, device, files);
     var mm: affine_mm.Pipes = undefined;
     {
-        const text = try affine_mm.source(device, gpa, .{});
+        const text = try affine_mm.source(device, gpa, .{ .bits = conf.widths.vision.bits, .group = conf.widths.vision.group });
         defer gpa.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
         for (&mm, affine_mm.names) |*p, name| p.* = try mtl.Pipeline.init(device, lib, name, false);
     }
     defer for (mm) |p| p.deinit();
-    const in: Input = if (geo.unified()) .{ .embedder = try unified.Embedder.load(gpa, device, &c, geo.hidden) } else .{ .tower = try vision.Vision.load(gpa, device, &c, mm, geo.hidden) };
+    const in: Input = if (geo.unified()) .{ .embedder = try unified.Embedder.load(gpa, device, &c, geo.hidden, mm, conf.widths.vision) } else .{ .tower = try vision.Vision.load(gpa, device, &c, mm, conf.widths.vision, geo.hidden) };
     defer switch (in) {
         inline else => |v| v.deinit(),
     };

@@ -21,6 +21,7 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("source", type=Path, help="google/gemma-4-12B-it as downloaded (config.json, model*.safetensors)")
     p.add_argument("output", type=Path)
+    p.add_argument("--recipe", help="an mlx-lm mixed recipe (mixed_4_6: v_proj and down_proj at 6 bits in some layers)")
     args = p.parse_args()
     if args.output.exists():
         raise SystemExit(f"{args.output} exists")
@@ -48,7 +49,7 @@ def main() -> None:
         remapped = dict(config, model_type="gemma4", architectures=["Gemma4ForConditionalGeneration"])
         remapped["text_config"] = dict(config["text_config"], model_type="gemma4_text")
         (staged / "config.json").write_text(json.dumps(remapped, indent=2))
-        convert(str(staged), str(args.output), quantize=True, q_bits=4, q_group_size=64)
+        convert(str(staged), str(args.output), quantize=True, q_bits=4, q_group_size=64, quant_predicate=args.recipe)
     out = json.loads((args.output / "config.json").read_text())
     for key in ("model_type", "architectures"):
         out[key] = config[key]
@@ -64,7 +65,9 @@ def main() -> None:
     for name in ("chat_template.jinja", "processor_config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json"):
         if (args.source / name).exists() and not (args.output / name).exists():
             shutil.copy(args.source / name, args.output / name)
-    print(f"wrote {args.output}: {out['model_type']}, quantization {out.get('quantization')}")
+    q = out["quantization"]
+    widths = sorted({(v["bits"], v["group_size"]) for v in q.values() if isinstance(v, dict)} | {(q["bits"], q["group_size"])})
+    print(f"wrote {args.output}: {out['model_type']}, affine (bits, group) {widths}")
 
 
 if __name__ == "__main__":

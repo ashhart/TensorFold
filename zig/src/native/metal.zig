@@ -29,6 +29,9 @@ const affine_widths = blk: {
     break :blk &done;
 };
 
+/// Gemma 4's: MLX affine 2-6 or 8 bits in groups of 64, uniform or per module (oQ packs).
+const gemma4_widths: []const []const u8 = &.{ "mlx-q2g64", "mlx-q3g64", "mlx-q4g64", "mlx-q5g64", "mlx-q6g64", "mlx-q8g64" };
+
 pub const families: []const api.Family = &.{
     .{ .model_type = "fish_omni", .formats = &.{"fp8-block128"} },
     .{ .model_type = "nemotron_h", .formats = affine_widths },
@@ -37,8 +40,8 @@ pub const families: []const api.Family = &.{
     .{ .model_type = "qwen3_5", .formats = affine_widths },
     .{ .model_type = "lfm2_moe", .formats = &.{ "mlx-q4g64", "mlx-q6g64", "mlx-q8g64" } },
     .{ .model_type = "glm_moe_dsa", .formats = &.{"exlr8"} },
-    .{ .model_type = "gemma4", .formats = &.{"mlx-q4g64"} },
-    .{ .model_type = "gemma4_unified", .formats = &.{"mlx-q4g64"} },
+    .{ .model_type = "gemma4", .formats = gemma4_widths },
+    .{ .model_type = "gemma4_unified", .formats = gemma4_widths },
     .{ .model_type = "step5_vl", .formats = &.{"mlx-q2g128"} },
 };
 

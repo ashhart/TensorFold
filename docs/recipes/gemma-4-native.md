@@ -23,9 +23,10 @@ a stream decodes at 150-190 tokens a second (6-7 accepted tokens a round on chat
 
 For the 31B the loader admits its dense geometry exactly: 60 layers, five sliding-window layers (window 1,024, head dim
 256) to each global one (head dim 512, keys reused as values, proportional RoPE), GeGLU, the tied 262,144-token head
-with its logit soft-cap, uniform affine 4-bit in groups of 64. It refuses the 26B-A4B MoE, per-layer inputs, shared KV
-layers and per-module widths, each by name. With `--vision` it also loads the image tower ([images](#images)). The 12B
-(`gemma4_unified`) runs on the same family with its MTP assistant: [Gemma 4 12B, native Metal](gemma-4-12b-native.md).
+with its logit soft-cap, MLX affine weights at the widths [other widths](#other-widths) lists. It refuses the 26B-A4B
+MoE, per-layer inputs and shared KV layers, each by name. With `--vision` it also loads the image tower
+([images](#images)). The 12B (`gemma4_unified`) runs on the same family with its MTP assistant: [Gemma 4 12B, native
+Metal](gemma-4-12b-native.md).
 
 Every linear, the tied head included, runs on the core lane projection (`zig/src/core/lane_projection.zig`) on M5
 tensor units; the rest of a layer is `zig/kernels/metal/gemma4/glue.metal`. The glue ports the Python reference's
@@ -89,7 +90,7 @@ server took 0.07 s (ten idle gaps, none slower).
 | M1 to M4 | Refused: the lane projection needs M5 tensor units. |
 | Images (`--vision`) | PNG and JPEG data URLs, and public HTTPS URLs with `--vision-urls`, below. |
 | Structured output | `response_format` and the `guided_*` fields, drafts on and off, below. |
-| Other Gemma 4 checkpoints, widths | Outside this recipe. |
+| Other widths | MLX affine 2-6 or 8 bits in groups of 64, uniform or per module: [other widths](#other-widths). |
 
 ## Images
 
@@ -118,6 +119,25 @@ processor instead, whose resize differs from PIL's by a level at a few pixels in
 a described image answers token for token as mlx-vlm 0.7.2 does (80 greedy tokens, the same 287-token prompt), with
 drafts on and off; `tools/zig/vision_served.py` passes its 19 checks, concurrent image requests equal their runs
 alone, and text-only prompts keep their bits (the receipts above, unchanged).
+
+## Other widths
+
+The family reads each linear's width from the checkpoint's `quantization` table, as [the 12B
+recipe](gemma-4-12b-native.md#other-widths) describes: 2, 3, 4, 5, 6 or 8 bits in groups of 64, uniform or per module,
+stacks of mixed widths in runs, every other width or mode refused by name. 4-bit groups of 64 keep the reg kernel and
+the fused one-row pipelines: the 4-bit decode, 512-row prompt and 8k and 32k receipts are the same bytes as before
+other widths were read. Other widths run the lane kernel's general unpack, unfused.
+
+[`unigilby/gemma-4-31B-it-qat-oQ8e`](https://huggingface.co/unigilby/gemma-4-31B-it-qat-oQ8e/tree/53dc2af091c166c8cefe5f670e744864f964ad47)
+(`53dc2af0`, oMLX oQ uniform 8-bit from Google's QAT checkpoint, 33.8 GB): decode against gilby's oracle, the four
+prompts x 128 tokens, two equal and two parting at near-ties (24.625 / 24.5, 21.25 / 21.125); `tf-gemma4-lanes`
+plain, copy and DFlash drafts equal at one, four and eight streams, seeded at one and four; images: the tower's rows
+7.6% from fp32 (torch bf16 7.8%), the 8-bit projection included, and `vision_served.py` passes.
+
+Served with DFlash (harness target `gemma4-31b-oq8e-m5`): one stream 40, 63, 52 and 55 tokens a second (prose, code,
+structured, list), four streams 110-180 together; the draft check 50 against 22 undrafted; structured output 18 of 18,
+concurrent 12 of 12. On the four prompts DFlash accepts 1.6-4.1 tokens a round on this pack against 2.0-5.8 on the 4-bit
+one (`tf-gemma4-lanes`), whose unfused path accepts as many as its fused one.
 
 ## Verification
 

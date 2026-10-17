@@ -2,7 +2,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// Each pipeline's constants: D, T, DH, NQ, NK, VK, W, HK, G, CK, S, BLK, SCALE, GELU_C0, GELU_C1 (kernels.zig).
+// Each pipeline's constants: D, T, DH, NQ, NK, VK, W, HK, G, CK, S, BLK, SCALE, GELU_C0, GELU_C1, EB (kernels.zig).
 
 // A row's group sums for the reg lane kernel in tf_lane_sums' order: XS[g * stride + r], none when stride is 0.
 inline void gemma_row_sums(const device bfloat* row, int len, device float* XS, int stride, int r, uint t, uint nt) {
@@ -14,18 +14,36 @@ inline void gemma_row_sums(const device bfloat* row, int len, device float* XS, 
   }
 }
 
-// Embedding rows of the 4-bit table times the bf16 embedding scale: MLX's dequantize, then a bf16 multiply.
+// The table's codes 2b and 2b + 1 of row `id`, EB bits each in MLX's little-endian packing.
+inline uint2 gemma_codes(const device uchar* weight, size_t id, uint b) {
+#if EB == 4
+  const uchar v = weight[id * (D / 2) + b];
+  return uint2(v & 0xf, v >> 4);
+#else
+  const device uchar* row = weight + id * (D * EB / 8);
+  uint2 out;
+  for (uint j = 0; j < 2; j++) {
+    const uint bit = (2 * b + j) * EB, at = bit / 8, sh = bit % 8;
+    uint v = uint(row[at]) >> sh;
+    if (sh + EB > 8) v |= uint(row[at + 1]) << (8 - sh);
+    out[j] = v & ((1u << EB) - 1u);
+  }
+  return out;
+#endif
+}
+
+// Embedding rows of the EB-bit table times the bf16 embedding scale: MLX's dequantize, then a bf16 multiply.
 kernel void gemma_embed(const device uint* ids [[buffer(0)]], const device uchar* weight [[buffer(1)]],
                         const device bfloat* scales [[buffer(2)]], const device bfloat* biases [[buffer(3)]],
                         device bfloat* out [[buffer(4)]], constant float& scale [[buffer(5)]],
                         uint2 pos [[thread_position_in_grid]]) {
   const uint b = pos.x, r = pos.y;
   const size_t id = ids[r];
-  const uchar v = weight[id * (D / 2) + b];
+  const uint2 v = gemma_codes(weight, id, b);
   const size_t g = id * (D / 64) + (2 * b) / 64;
   const float s = float(scales[g]), z = float(biases[g]);
-  out[size_t(r) * D + 2 * b] = bfloat(float(bfloat(s * float(v & 0xf) + z)) * scale);
-  out[size_t(r) * D + 2 * b + 1] = bfloat(float(bfloat(s * float(v >> 4) + z)) * scale);
+  out[size_t(r) * D + 2 * b] = bfloat(float(bfloat(s * float(v.x) + z)) * scale);
+  out[size_t(r) * D + 2 * b + 1] = bfloat(float(bfloat(s * float(v.y) + z)) * scale);
 }
 
 // MLX 0.32's rms_looped (rms_norm.metal, MIT) for bf16, stride-1 w and D wide, its two loops as one; row sums after.
@@ -463,12 +481,12 @@ kernel void gemma_assist_input(const device uint* ids [[buffer(0)]], constant ui
                                uint2 pos [[thread_position_in_grid]]) {
   const uint b = pos.x, r = pos.y;
   const size_t id = metal::min(ids[r * ist.x], ist.y - 1);
-  const uchar v = weight[id * (D / 2) + b];
+  const uint2 v = gemma_codes(weight, id, b);
   const size_t g = id * (D / 64) + (2 * b) / 64;
   const float s = float(scales[g]), z = float(biases[g]);
   device bfloat* row = out + size_t(r) * 2 * D;
-  row[2 * b] = bfloat(float(bfloat(s * float(v & 0xf) + z)) * scale);
-  row[2 * b + 1] = bfloat(float(bfloat(s * float(v >> 4) + z)) * scale);
+  row[2 * b] = bfloat(float(bfloat(s * float(v.x) + z)) * scale);
+  row[2 * b + 1] = bfloat(float(bfloat(s * float(v.y) + z)) * scale);
   row[D + 2 * b] = H[size_t(r) * D + 2 * b];
   row[D + 2 * b + 1] = H[size_t(r) * D + 2 * b + 1];
 }

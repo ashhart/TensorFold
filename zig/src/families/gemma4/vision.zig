@@ -20,18 +20,19 @@ const chunk = 256; // query rows an attention pass scores at once
 const eps: f32 = 1e-6;
 const rope_theta: f32 = 100;
 
-const quant_group = 64; // the projection's quantization group, the language model's
+const Width = @import("widths.zig").Width;
 
 pub const Ref = lane.Ref;
 fn ref(t: ck.Tensor) Ref {
     return .{ .buf = t.buffer, .off = t.offset };
 }
 
-/// The 4-bit projection as affine_mm reads it: words [out_hidden, 1152 / 8], a bf16 scale and bias per group of 64.
-fn projectionFits(w: ck.Tensor, s: ck.Tensor, b: ck.Tensor, out_hidden: usize) bool {
-    if (w.dtype != .u32 or w.rank != 2 or w.shape[0] != out_hidden or w.shape[1] * 8 != width or w.count() != out_hidden * width / 8) return false;
+/// The projection as affine_mm reads it at its config width: words [out_hidden, 1152 * bits / 32], bf16 tables.
+fn projectionFits(w: ck.Tensor, s: ck.Tensor, b: ck.Tensor, q: Width, out_hidden: usize) bool {
+    const words = @as(usize, width) * q.bits / 32;
+    if (w.dtype != .u32 or w.rank != 2 or w.shape[0] != out_hidden or w.shape[1] != words or w.count() != out_hidden * words) return false;
     for ([_]ck.Tensor{ s, b }) |t| {
-        if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != out_hidden or t.shape[1] != width / quant_group or t.count() != out_hidden * width / quant_group) return false;
+        if (t.dtype != .bf16 or t.rank != 2 or t.shape[0] != out_hidden or t.shape[1] != width / q.group or t.count() != out_hidden * width / q.group) return false;
     }
     return true;
 }
@@ -62,7 +63,7 @@ pub const Vision = struct {
     lib: mtl.Library,
     gemm: [3][2][2]mtl.Pipeline, // [bf16 nt, f32 nt, f32 nn][M % 64 == 0][N % 128 == 0]
     glue: [glue_names.len]mtl.Pipeline,
-    mm: affine_mm.Pipes, // the model's: the projection is 4-bit groups of 64 as the language model is
+    mm: affine_mm.Pipes, // the model's at the projection's width
     out_hidden: usize, // the language model's width: the projection's rows
     input_proj: Ref,
     table: Ref,
@@ -89,7 +90,7 @@ pub const Vision = struct {
     cos: mtl.Buffer,
     sin: mtl.Buffer,
 
-    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, mm: affine_mm.Pipes, out_hidden: usize) !*Vision {
+    pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ck.Checkpoint, mm: affine_mm.Pipes, q: Width, out_hidden: usize) !*Vision {
         const v = try gpa.create(Vision);
         errdefer gpa.destroy(v);
         v.gpa = gpa;
@@ -153,11 +154,11 @@ pub const Vision = struct {
         const pw = try c.get(pp ++ "weight");
         const ps = try c.get(pp ++ "scales");
         const pb = try c.get(pp ++ "biases");
-        if (!projectionFits(pw, ps, pb, out_hidden)) {
-            std.log.err("gemma4 vision: {s}* is not u32[{d}, {d}] with bf16[{d}, {d}] scales and biases", .{ pp, out_hidden, width / 8, out_hidden, width / quant_group });
+        if (!projectionFits(pw, ps, pb, q, out_hidden)) {
+            std.log.err("gemma4 vision: {s}* is not u32[{d}, {d}] with bf16[{d}, {d}] scales and biases", .{ pp, out_hidden, @as(usize, width) * q.bits / 32, out_hidden, width / q.group });
             return error.UnexpectedGemmaVisionTensor;
         }
-        v.proj = .{ .w = ref(pw), .s = ref(ps), .b = ref(pb), .n = @intCast(out_hidden), .k = width };
+        v.proj = .{ .w = ref(pw), .s = ref(ps), .b = ref(pb), .n = @intCast(out_hidden), .k = width, .bits = q.bits };
         const P: usize = max_patches;
         const T: usize = image.max_budget;
         const sizes = [_]usize{ P * width * 2, P * width * 2, P * 3 * width * 2, heads * P * head_dim * 4, heads * P * head_dim * 4, heads * P * head_dim * 4, heads * chunk * P * 4, heads * chunk * head_dim * 4, P * width * 2, P * 2 * mlp_inter * 2, P * mlp_inter * 2, T * width * 2, T * width * 2 };
@@ -318,7 +319,7 @@ fn rope(cs: []u16, sn: []u16, gw: u32, P: u32) void {
     };
 }
 
-test "the projection is admitted only as packed u32 words with bf16 scales and biases per group of 64" {
+test "the projection is admitted only as packed u32 words at its width with bf16 scales and biases per group" {
     const T = struct {
         fn of(dtype: ck.DType, rows: usize, cols: usize) ck.Tensor {
             var t: ck.Tensor = .{ .buffer = undefined, .offset = 0, .bytes = rows * cols * dtype.size(), .dtype = dtype, .rank = 2 };
@@ -328,20 +329,24 @@ test "the projection is admitted only as packed u32 words with bf16 scales and b
         }
     };
     const out_hidden = @import("config.zig").dense31b.hidden;
+    const four: Width = .{ .bits = 4, .group = 64 };
     const words = T.of(.u32, out_hidden, width / 8);
-    const scales = T.of(.bf16, out_hidden, width / quant_group);
-    try std.testing.expect(projectionFits(words, scales, scales, out_hidden));
-    const f32s = T.of(.f32, out_hidden, width / quant_group);
-    try std.testing.expect(!projectionFits(words, f32s, scales, out_hidden));
-    try std.testing.expect(!projectionFits(words, scales, f32s, out_hidden));
+    const scales = T.of(.bf16, out_hidden, width / 64);
+    try std.testing.expect(projectionFits(words, scales, scales, four, out_hidden));
+    const f32s = T.of(.f32, out_hidden, width / 64);
+    try std.testing.expect(!projectionFits(words, f32s, scales, four, out_hidden));
+    try std.testing.expect(!projectionFits(words, scales, f32s, four, out_hidden));
     const group32 = T.of(.bf16, out_hidden, width / 32);
-    try std.testing.expect(!projectionFits(words, group32, group32, out_hidden));
+    try std.testing.expect(!projectionFits(words, group32, group32, four, out_hidden));
     var short = scales; // the header's shape, the file's bytes cut short
     short.bytes -= 2;
-    try std.testing.expect(!projectionFits(words, scales, short, out_hidden));
+    try std.testing.expect(!projectionFits(words, scales, short, four, out_hidden));
     var flat = scales;
     flat.rank = 1;
-    try std.testing.expect(!projectionFits(words, flat, scales, out_hidden));
-    try std.testing.expect(!projectionFits(T.of(.u32, out_hidden + 1, width / 8), scales, scales, out_hidden));
-    try std.testing.expect(!projectionFits(T.of(.bf16, out_hidden, width / 8), scales, scales, out_hidden));
+    try std.testing.expect(!projectionFits(words, flat, scales, four, out_hidden));
+    try std.testing.expect(!projectionFits(T.of(.u32, out_hidden + 1, width / 8), scales, scales, four, out_hidden));
+    try std.testing.expect(!projectionFits(T.of(.bf16, out_hidden, width / 8), scales, scales, four, out_hidden));
+    const eight: Width = .{ .bits = 8, .group = 64 };
+    try std.testing.expect(projectionFits(T.of(.u32, out_hidden, width / 4), scales, scales, eight, out_hidden));
+    try std.testing.expect(!projectionFits(words, scales, scales, eight, out_hidden)); // 4-bit words, 8-bit entry
 }

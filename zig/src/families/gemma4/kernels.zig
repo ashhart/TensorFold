@@ -34,8 +34,8 @@ pub const Kind = struct {
     block: usize,
     heads_per_kv: usize,
 
-    /// `q_only`: the projection gemma_qkv_prep reads is q alone (the MTP assistant's layers, which have no k or v).
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, global: bool, q_only: bool) !Kind {
+    /// `q_only`: gemma_qkv_prep reads q alone (the MTP assistant's layers); `embed_bits`: the embedding table's width.
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, global: bool, q_only: bool, embed_bits: u8) !Kind {
         const dh: usize = if (global) cfg.global_dim else cfg.sliding_dim;
         const nk: usize = if (global) geo.global_kv_heads else geo.sliding_kv_heads;
         const shape: [3]usize = if (global) .{ 64, 1, 4 } else .{ 128, 4, 4 };
@@ -56,8 +56,9 @@ pub const Kind = struct {
             \\#define SCALE 1.0f
             \\#define GELU_C0 0.7978845608028654f
             \\#define GELU_C1 0.044715f
+            \\#define EB {d}
             \\{s}
-        , .{ geo.hidden, dh, geo.query_heads, nk, @intFromBool(global), width, nk, geo.query_heads / nk, shape[0], shape[1], shape[2], glue });
+        , .{ geo.hidden, dh, geo.query_heads, nk, @intFromBool(global), width, nk, geo.query_heads / nk, shape[0], shape[1], shape[2], embed_bits, glue });
         defer a.free(text);
         const lib = try mtl.Library.fromSource(device, text, mtl.CompileOptions.mlx());
         defer lib.deinit();
@@ -90,10 +91,10 @@ pub const Kernels = struct {
     sliding: Kind,
     global: Kind,
 
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry) !Kernels {
-        const s = try Kind.init(a, device, geo, false, false);
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, geo: cfg.Geometry, embed_bits: u8) !Kernels {
+        const s = try Kind.init(a, device, geo, false, false, embed_bits);
         errdefer s.deinit();
-        return .{ .sliding = s, .global = try Kind.init(a, device, geo, true, false) };
+        return .{ .sliding = s, .global = try Kind.init(a, device, geo, true, false, embed_bits) };
     }
 
     pub fn kind(k: *const Kernels, global: bool) *const Kind {

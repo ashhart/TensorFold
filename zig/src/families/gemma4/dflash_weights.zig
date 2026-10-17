@@ -204,7 +204,7 @@ pub fn quantized(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Chec
         try parallel(gpa, job, rows);
         row += rows;
     }
-    const lin = try weights.packArrays(gpa, device, owned, geo, words, scales, biases, n, k);
+    const lin = try weights.packArrays(gpa, device, owned, geo, words, scales, biases, .{ .w = undefined, .sb = undefined, .n = n, .k = k });
     return .{ .w = lin.w, .sb = lin.sb, .n = n, .k = k };
 }
 

@@ -61,7 +61,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
 /// The host, or error.Refused once `problem` says why; either error path releases what was made before it.
 fn start(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !*Host {
     const model = g.Model.load(gpa, io, o.dir) catch |err| {
-        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B and 12B in 4-bit groups of 64", .{@errorName(err)});
+        problem.* = try std.fmt.allocPrint(a, "the native Gemma 4 engine cannot load this checkpoint ({s}): it serves Gemma 4 31B and 12B as MLX affine 2-6 or 8 bits in groups of 64, uniform or per module", .{@errorName(err)});
         return error.Refused;
     };
     errdefer model.deinit();
@@ -153,7 +153,7 @@ fn holdResident(h: *Host) !void {
         try list.appendSlice(h.gpa, d.w.owned.items);
         try buffersOf(h.gpa, &list, d);
     }
-    if (m.vision) |v| try list.appendSlice(h.gpa, v.buffers());
+    if (m.vision) |v| try v.appendBuffers(h.gpa, &list);
     h.resident = try Resident.hold(h.gpa, h.io, m.device, m.queue, list.items, "gemma4") orelse return;
     h.warm = (&h.resident.?).target();
 }
