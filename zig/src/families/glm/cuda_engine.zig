@@ -52,7 +52,7 @@ const Seq = struct {
 };
 
 /// One rank's copy of a kept prompt state: the state arena's bytes and the host fields beside them.
-const Snap = struct { buf: cuda.DeviceBuffer, pos: usize, mtp_len: usize, cur: []u1 };
+const Snap = struct { buf: cuda.DeviceBuffer, pos: usize, mtp_len: usize, cur: []u1, bases: [2]usize };
 
 /// Where a prompt pass resumes: a kept state (every rank holds `id`) at `at`, a multiple of the chunk rows.
 pub const Resume = struct { id: u64, at: usize };
@@ -361,14 +361,14 @@ pub const Engine = struct {
         try e.stream.synchronize();
         const cur = try e.gpa.dupe(u1, e.cur.st.cur);
         errdefer e.gpa.free(cur);
-        try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur });
+        try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base } });
     }
 
     /// The live state made kept state `id`'s; a rank without it refuses rather than prefill from another position.
     fn restoreState(e: *Engine, id: u64) !void {
         const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
         try e.copy(e.cur.st.arena.buf.ptr, s.buf.ptr, s.buf.len);
-        try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur);
+        try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
         e.cur.in_head = 0;
         try e.stream.synchronize();
     }
