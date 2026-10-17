@@ -39,6 +39,9 @@ pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack
 pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes else &.{};
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
+pub const glm_exl3: []const u8 = if (available) &Blob("fatbin_glm_exl3").bytes else &.{};
+pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
+pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
 pub const glm_kda: []const u8 = if (available) &Blob("fatbin_glm_kda").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
 pub const torch_topk: []const u8 = if (available) &Blob("fatbin_torch_topk").bytes else &.{};
@@ -56,6 +59,7 @@ pub const ck_lane: []const u8 = if (available) &Blob("fatbin_ck_lane").bytes els
 pub const ck_experts: []const u8 = if (available) &Blob("fatbin_ck_experts").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
+pub const roce_gather: []const u8 = if (available) &Blob("fatbin_roce_gather").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
