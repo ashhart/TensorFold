@@ -7,6 +7,7 @@ pub const prompt = @import("prompt.zig");
 pub const codec = @import("codec.zig");
 pub const wav = @import("wav.zig");
 pub const tts = @import("tts.zig");
+pub const frames = @import("frames.zig");
 
 pub const Engine = engine.Engine;
 pub const Sampling = engine.Sampling;
@@ -16,4 +17,5 @@ test {
     _ = config;
     _ = prompt;
     _ = wav;
+    _ = frames;
 }

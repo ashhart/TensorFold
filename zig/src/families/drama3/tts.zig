@@ -5,6 +5,7 @@ const eng = @import("engine.zig");
 const codec_ = @import("codec.zig");
 const wav = @import("wav.zig");
 const cfg = @import("config.zig");
+const cut = @import("frames.zig");
 
 const W = cfg.frame_width;
 
@@ -143,11 +144,10 @@ pub const Tts = struct {
             }
             try e.download(e.frames_out + made * W * 4, std.mem.sliceAsBytes(host[made .. made + burst]));
             var good = made + burst;
-            for (host[made .. made + burst], made..) |f, i| if (f[0] == e.c.ids.eos) {
+            if (cut.endOfSpeech(host[made .. made + burst], made, e.c.ids.eos)) |end| {
                 eos = true;
-                good = i;
-                break;
-            };
+                good = end;
+            }
             made = good;
             if (decoded == 0 and made > 0) { // the first audio as soon as the first burst is checked
                 try t.flush(0, made, sink);
@@ -160,7 +160,7 @@ pub const Tts = struct {
             if (decoded == 0) first_audio = ms(t0, eng.nowNs(io));
         }
         const t2 = eng.nowNs(io);
-        return .{ .frames = host[0..made], .stats = .{
+        return .{ .frames = try cut.owned(t.gpa, host, made), .stats = .{
             .frames = made,
             .eos = eos,
             .prompt_rows = rows.len,

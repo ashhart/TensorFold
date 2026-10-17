@@ -5,6 +5,7 @@ const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const kern = @import("kernels.zig");
 const fwd = @import("forward.zig");
+const cut = @import("frames.zig");
 
 const H = cfg.hidden;
 const W = cfg.frame_width;
@@ -430,15 +431,14 @@ pub const Engine = struct {
             made += burst;
             try e.get(e.frames_out + checked * W * 4, std.mem.sliceAsBytes(host[checked..made]));
             if (checked == 0) first_ms = ms(t0, nowNs(io));
-            for (host[checked..made], checked..) |f, i| if (f[0] == e.c.ids.eos) {
+            if (cut.endOfSpeech(host[checked..made], checked, e.c.ids.eos)) |end| {
                 eos = true;
-                made = i;
-                break;
-            };
+                made = end;
+            }
             checked = made;
         }
         const t2 = nowNs(io);
-        return .{ .frames = host[0..made], .eos = eos, .prefill_ms = ms(t0, t1), .first_frame_ms = first_ms, .decode_ms = ms(t1, t2) };
+        return .{ .frames = try cut.owned(e.gpa, host, made), .eos = eos, .prefill_ms = ms(t0, t1), .first_frame_ms = first_ms, .decode_ms = ms(t1, t2) };
     }
 
     pub fn download(e: *Engine, src: u64, out: []u8) !void {
