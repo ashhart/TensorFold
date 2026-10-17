@@ -205,6 +205,8 @@ extern "C" __global__ void drama_attention(
     }
 }
 
+// Clusters are sm_90+: older images leave drama_attention_decode out, and the tower runs drama_attention instead.
+#if __CUDA_ARCH__ >= 900
 // drama_attention for the one decode row, its keys scored across a cluster of attention_split CTAs, same arithmetic.
 constexpr int attention_split = 4, attention_keys = 8192, attention_ahead = 6;
 
@@ -326,6 +328,7 @@ extern "C" __global__ void __cluster_dims__(attention_split, 1, 1) __launch_boun
             out[row * qw + head * dim + j + e] = b(f(attended) * f(gated));
         }
 }
+#endif
 
 extern "C" __global__ void drama_silu_mul(const bf16* gate_up, bf16* out, int width, int rows) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
