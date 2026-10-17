@@ -7,6 +7,8 @@ const rows_k = @import("metal_rows.zig");
 const affine_k = @import("metal_affine.zig");
 const topk_k = @import("metal_topk.zig");
 const tile_k = @import("metal_tile.zig");
+const moe_k = @import("metal_q27_moe.zig");
+const route_k = @import("metal_route.zig");
 const limits_k = @import("metal_limits.zig");
 const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
@@ -233,6 +235,24 @@ pub fn main(init: std.process.Init) !u8 {
         ntiles += 1;
     };
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
+    var moes: [3]moe_k.Moe = undefined;
+    var nmoe: usize = 0;
+    defer for (moes[0..nmoe]) |*x| x.deinit();
+    for (std.enums.values(moe_k.Which)) |w| {
+        if (!wanted(o, moe_k.spec(w).name)) continue;
+        moes[nmoe] = try moe_k.Moe.init(a, device, queue, w);
+        nmoe += 1;
+    }
+    for (moes[0..nmoe]) |*x| try kernels.append(a, x.kernel());
+    var routes: [3]route_k.Route = undefined;
+    var nroute: usize = 0;
+    defer for (routes[0..nroute]) |*x| x.deinit();
+    for (std.enums.values(route_k.Which)) |w| {
+        if (!wanted(o, route_k.spec(w).name)) continue;
+        routes[nroute] = try route_k.Route.init(a, device, queue, w);
+        nroute += 1;
+    }
+    for (routes[0..nroute]) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
     if (o.gates) {

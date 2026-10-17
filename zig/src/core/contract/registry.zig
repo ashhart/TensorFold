@@ -518,6 +518,12 @@ pub const metal = [_]M{
     .{ .name = "drama3 codec c_snake", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_dwconv7", .threads = 256, .tg_memory = 0, .reserved = 256 },
     .{ .name = "drama3 codec c_copy", .threads = 256, .tg_memory = 0, .reserved = 256 },
+    .{ .name = "qwen27 moe select q27_moe_select", .threads = 32, .tg_memory = 0, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "qwen27 moe sort q27_moe_sort", .threads = 1024, .tg_memory = 5120, .m1 = 1024, .m2 = 1024 },
+    .{ .name = "qwen27 moe combine q27_moe_combine", .threads = 256, .tg_memory = 0, .m1 = 928, .m2 = 928 },
+    .{ .name = "moe_route logits glm router tf_route_logits", .threads = 256, .tg_memory = 512, .reserved = 256 },
+    .{ .name = "moe_route logits glm indexer gate tf_route_logits", .threads = 256, .tg_memory = 512, .reserved = 256 },
+    .{ .name = "moe_route logits qwen27 35B-A3B router tf_route_logits", .threads = 256, .tg_memory = 512, .reserved = 256 },
 };
 /// Gate 5's planted Metal controls: a launch past M1/M2's compiled limit (#708's class), 36 KiB of threadgroup memory.
 pub const metal_controls = [_]M{

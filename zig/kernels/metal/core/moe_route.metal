@@ -1,4 +1,4 @@
-// A MoE layer's route for 1-16 rows: router logits in the one-row kernel's order, then the top-k and this Mac's expert groups.
+// A MoE route: logits for any rows in the one-row kernel's order, then top-k and this Mac's expert groups to 16 rows.
 #include <metal_stdlib>
 using namespace metal;
 
@@ -9,7 +9,7 @@ constant constexpr int ITERS = TF_K / 32;
 constant constexpr int PER = (TF_E + 31) / 32;
 
 // Logits [rows, E] = x W^T: a 4-expert block (tg.x) for four rows (tg.y); simdgroup s sums k = 32 i + 4 s + tm, lane l taking i = 4 l..4 l + 3, then the eight partials in order.
-[[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
+[[max_total_threads_per_threadgroup(256)]] [[kernel]] void tf_route_logits(const device bfloat* X [[buffer(0)]], const device uint4* RP [[buffer(1)]],
                                 constant int& rows [[buffer(2)]], device TF_OUT_T* OUT [[buffer(3)]],
                                 uint2 tg [[threadgroup_position_in_grid]], uint2 tpos [[thread_position_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]], uint s [[simdgroup_index_in_threadgroup]]) {
