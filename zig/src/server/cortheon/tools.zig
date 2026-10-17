@@ -1,6 +1,6 @@
 //! Cortheon's server-run tools: their specs, which calls are theirs, and each call run into the text the model reads.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const search = @import("search.zig");
 const Seen = @import("seen.zig").Seen;
 const Value = json.Value;

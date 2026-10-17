@@ -1,6 +1,6 @@
 //! Web search for Cortheon: DuckDuckGo's keyless HTML results, or Brave's search API when a key is set.
 const std = @import("std");
-const json = @import("../json.zig");
+const json = @import("json");
 const html = @import("html.zig");
 const Allocator = std.mem.Allocator;
 

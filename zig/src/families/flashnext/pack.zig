@@ -5,6 +5,7 @@ const st = @import("../../core/safetensors.zig");
 const ckpt = @import("../../core/checkpoint.zig");
 const affine = @import("affine.zig");
 const config_mod = @import("config.zig");
+const widths = @import("widths.zig");
 const index_mod = @import("index.zig");
 const pio = @import("pack_io.zig");
 const quant_mlx = @import("../../core/quant/mlx.zig");
@@ -37,7 +38,7 @@ fn qlinear(ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, path: []const u8
 }
 
 fn qlinearAt(ck: *ckpt.Checkpoint, cfg: *const config_mod.Config, path: []const u8) !Q {
-    const spec = (try cfg.quantization(path)) orelse return error.NotQuantized;
+    const spec = (try widths.quantization(cfg, path)) orelse return error.NotQuantized;
     var buf: [320]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{path}));
     const s = try ck.get(try std.fmt.bufPrint(&buf, "{s}.scales", .{path}));
@@ -149,7 +150,7 @@ fn denseRows(gpa: std.mem.Allocator, a: std.mem.Allocator, ck: *ckpt.Checkpoint,
     const w = try ck.get(try std.fmt.allocPrint(a, "{s}.weight", .{stem}));
     if (w.dtype == .bf16 and w.rank == 2) return .{ .bytes = w.bytes, .rows = w.dim(0), .cols = w.dim(1), .owned = false };
     if (w.dtype != .u32 or w.rank != 2) return error.DenseRouterNotBf16;
-    const spec = (try cfg.quantization(stem)) orelse return error.DenseRouterNotBf16;
+    const spec = (try widths.quantization(cfg, stem)) orelse return error.DenseRouterNotBf16;
     const s = try ck.get(try std.fmt.allocPrint(a, "{s}.scales", .{stem}));
     const b = try ck.get(try std.fmt.allocPrint(a, "{s}.biases", .{stem}));
     const we = st.Entry{ .dtype = w.dtype, .rank = w.rank, .shape = w.shape, .begin = 0, .end = w.bytes.len };
@@ -344,7 +345,7 @@ pub fn build(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, out_dir: []c
     const a = arena_state.allocator();
     var cfg = try config_mod.Config.read(gpa, io, model_dir);
     defer cfg.deinit();
-    var strict = try @import("widths.zig").Widths.init(gpa, &cfg);
+    var strict = try widths.Widths.init(gpa, &cfg);
     defer strict.deinit();
     cfg.widths = &strict;
     // the vision tower's tensors stay unread: a rank-five entry must not stop the no-dump build
