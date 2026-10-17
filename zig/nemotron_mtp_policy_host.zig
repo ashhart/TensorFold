@@ -12,6 +12,7 @@ test "mtp policy: actual family facts carry positive caps and confidence into th
     defer a.destroy(e);
     e.* = undefined;
     e.c.latent = 512;
+    e.c.bolt = false;
     var head: nemo.Head = undefined;
     var b: nemo.Lanes = undefined;
     b.e = e;
@@ -46,11 +47,11 @@ const Record = struct {
         try target.backend().vtable.verify(ptr, windows, out);
     }
 };
-const Options = struct { neighbor: bool = false, resumed: bool = false, handoff: bool = false, sampled: bool = false, drafted: bool = true, floor: ?f64 = 0.5, cap: u32 = 8 };
+const Options = struct { neighbor: bool = false, resumed: bool = false, handoff: bool = false, sampled: bool = false, drafted: bool = true, floor: ?f64 = 0.5, cap: u32 = 8, width: u32 = 16 };
 fn run(o: Options) ![]u32 {
     Record.most = 0;
     const costs = [_]lanes.config.Cost{ .{ .width = 1, .ms = 1 }, .{ .width = 16, .ms = 1 } };
-    var cfg = try lanes.Config.init(a, .{ .exact_width = 16, .copy_drafts = false, .mtp = o.drafted, .speculate = true, .speculate_early = false, .drafts = o.cap, .draft_probabilities = true, .draft_confidence = o.floor, .window_costs = &costs, .hidden_rows = true, .batch_rows = 16, .max_streams = 4, .draft_streams = true }, 16, 15);
+    var cfg = try lanes.Config.init(a, .{ .exact_width = o.width, .copy_drafts = false, .mtp = o.drafted, .speculate = true, .speculate_early = false, .drafts = o.cap, .draft_probabilities = true, .draft_confidence = o.floor, .window_costs = &costs, .hidden_rows = true, .batch_rows = o.width, .max_streams = 4, .draft_streams = true }, o.width, o.width - 1);
     defer cfg.deinit(a);
     var target: Fake = .{ .gpa = a };
     defer target.deinit();
@@ -157,4 +158,46 @@ test "mtp policy: explicit cap leaves copy capacity independent and invalid conf
     const counts = try lanes.allocate.allocate(a, &.{1}, &.{&.{ 0, 0, 0 }}, &empty, 0, 4);
     defer a.free(counts);
     try std.testing.expectEqualSlices(u32, &.{3}, counts);
+}
+
+test "mtp policy: no-head models retain the landed shared copy lane" {
+    const e = try a.create(nemo.Engine);
+    defer a.destroy(e);
+    e.* = undefined;
+    e.c.latent = 0;
+    e.c.bolt = true;
+    var b: nemo.Lanes = undefined;
+    b.e = e;
+    b.head = null;
+    b.copy_drafts = true;
+    b.cost_count = 0;
+    b.mtp_ms = 0;
+    b.mtp_drafts = null;
+    b.mtp_confidence = null;
+    const facts = b.facts();
+    try std.testing.expectEqual(@as(u32, 16), facts.exact_width);
+    try std.testing.expect(facts.hidden_rows and facts.max_streams > 1 and facts.copy_drafts);
+    try std.testing.expect(!facts.mtp);
+}
+
+test "mtp policy: only Super widens and Bolt keeps its qualified copy window" {
+    var cfg: nemo.Config = undefined;
+    cfg.latent = 512;
+    cfg.bolt = false;
+    try std.testing.expectEqual(@as(usize, 32), nemo.state.windowRows(cfg));
+    cfg.latent = 0;
+    try std.testing.expectEqual(@as(usize, 16), nemo.state.windowRows(cfg));
+    cfg.latent = 512;
+    cfg.bolt = true;
+    try std.testing.expectEqual(@as(usize, 16), nemo.state.windowRows(cfg));
+}
+
+test "mtp policy: the inherited policy works through 31 drafts and a resumed shared 32 row round" {
+    const plain = try run(.{ .drafted = false });
+    defer a.free(plain);
+    for ([_]bool{ false, true }) |neighbor| for ([_]bool{ false, true }) |resumed| for ([_]bool{ false, true }) |handoff| {
+        const got = try run(.{ .width = 32, .cap = 31, .floor = 0, .neighbor = neighbor, .resumed = resumed, .handoff = handoff });
+        defer a.free(got);
+        try std.testing.expectEqualSlices(u32, plain, got);
+    };
 }

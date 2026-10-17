@@ -19,9 +19,9 @@ pub const chunk_keys = 512; // keys an attention chunk holds, at fixed absolute 
 const shared_rows = cuda.qlinear.Affine4Kernels.max_rows; // rows a shared plan covers (windowRows without a latent MoE)
 const shared_words = 2 * shared_rows + 8 * shared_rows; // the shared expert's members, then (items, counts) a row count
 
-/// A verify window's rows for `c`: max_rows for a latent MoE, else the 16 rows MLX affine-4 decode kernels tile.
+/// Super verifies 32 rows; Bolt copies and non-latent affine models retain their qualified 16-row window.
 pub fn windowRows(c: Config) usize {
-    return if (c.latent > 0) max_rows else cuda.qlinear.Affine4Kernels.max_rows;
+    return if (c.latent > 0 and !c.bolt) max_rows else cuda.qlinear.Affine4Kernels.max_rows;
 }
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.

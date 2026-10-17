@@ -150,12 +150,12 @@ pub const Cuda = struct {
         return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
     }
 
-    /// The facts the round loop reads at setup: windows of the checkpoint's width, one stream a forward, this GPU's costs.
+    /// The checkpoint's verify width, shared target forwards and this GPU's measured costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
         const width = state.windowRows(self.e.c);
         return .{
-            .exact_width = if (drafting) @intCast(width) else 1,
+            .exact_width = @intCast(width),
             .copy_drafts = self.copy_drafts,
             .gpu_tokens = false,
             .mtp = drafting,
@@ -168,9 +168,9 @@ pub const Cuda = struct {
             .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
-            .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
+            .hidden_rows = true, // copy-only models retain the landed shared target forward
             .batch_rows = @intCast(width),
-            .max_streams = if (drafting) engine.max_streams else 1,
+            .max_streams = engine.max_streams,
         };
     }
 
