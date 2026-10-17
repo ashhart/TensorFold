@@ -117,7 +117,7 @@ fn geometry(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void 
     for (o.rows) |r| most = @max(most, r);
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     var truth: std.ArrayList(u32) = .empty;
     var p = try Probe.init(b);
@@ -172,7 +172,7 @@ fn profile(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
     const c = m.config;
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     const kept = 3; // a verify's replayed rows: the last window's kept rows
 
@@ -249,7 +249,7 @@ fn curve(gpa: std.mem.Allocator, arena: std.mem.Allocator, o: Options) !void {
     for (o.rows) |r| most = @max(most, r);
     const m = try nm.Model.load(gpa, io, o.model, true);
     defer m.deinit();
-    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = 2, .batch_rows = @max(most, 16) });
+    const b = try nm.backend.Metal.init(gpa, m, .{ .chunk = 16, .capacity = prompt.len + o.at + most + 128, .drafts = true, .streams = @max(most, 2), .batch_rows = @max(most, 16) });
     defer b.deinit();
     const kept = 3;
     var truth: std.ArrayList(u32) = .empty;

@@ -34,6 +34,7 @@ pub const learned_prompts = @import("learned_prompts.zig");
 pub const Model = model.Model;
 
 test {
+    _ = @import("state.zig");
     _ = @import("train_check.zig");
     _ = @import("model.zig");
     _ = @import("timing.zig");

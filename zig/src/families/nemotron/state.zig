@@ -19,6 +19,11 @@ pub const tree_saves = 64;
 /// Head levels whose best tokens a stream keeps.
 pub const max_levels = 72;
 
+/// Mamba slots for streams: slot 0, two per stream (state and pending forward), a lone round's third, and a spare.
+pub fn poolSlots(streams: usize) usize {
+    return 2 * streams + 3;
+}
+
 /// Mamba states by slot (slot 0: the zero state, never written), and by replay id a stream's last rows' raw inputs.
 pub const Pool = struct {
     conv: [cfg.max_layers]mtl.Buffer = undefined, // [slots, KC-1, CD] bf16, by Mamba index
@@ -54,13 +59,17 @@ pub const Pool = struct {
         var p = Pool{ .layers = c.count(.mamba), .slots = slots, .gpa = gpa };
         const conv_bytes = slots * (c.conv_kernel - 1) * c.convDim() * 2;
         const ssm_bytes = slots * c.mamba_heads * c.mamba_head_dim * c.state * 4;
+        const raw_bytes = streams * 2 * replay_rows * c.convDim() * 2;
+        const dtraw_bytes = streams * 2 * replay_rows * c.mamba_heads * 2;
         for (0..p.layers) |m| {
             p.conv[m] = try device.buffer(conv_bytes, opts);
             p.ssm[m] = try device.buffer(ssm_bytes, opts);
-            p.raw[m] = try device.buffer(streams * 2 * replay_rows * c.convDim() * 2, opts);
-            p.dtraw[m] = try device.buffer(streams * 2 * replay_rows * c.mamba_heads * 2, opts);
-            @memset(p.conv[m].contents()[0 .. conv_bytes / slots], 0);
-            @memset(p.ssm[m].contents()[0 .. ssm_bytes / slots], 0);
+            p.raw[m] = try device.buffer(raw_bytes, opts);
+            p.dtraw[m] = try device.buffer(dtraw_bytes, opts);
+            @memset(p.conv[m].contents()[0..conv_bytes], 0);
+            @memset(p.ssm[m].contents()[0..ssm_bytes], 0);
+            @memset(p.raw[m].contents()[0..raw_bytes], 0);
+            @memset(p.dtraw[m].contents()[0..dtraw_bytes], 0);
         }
         p.tree = try device.buffer(tree_saves * c.mamba_heads * c.mamba_head_dim * c.state * 4, opts);
         var s = slots;
@@ -201,6 +210,12 @@ pub const Cache = struct {
         return s;
     }
 
+    /// Bytes one stream's KV caches and token windows take on its first prompt.
+    pub fn bytes(c: cfg.Config, capacity: usize, head: bool) u64 {
+        const kv: u64 = (c.count(.attention) + @intFromBool(head)) * 2 * c.kv_heads * capacity * c.head_dim * 2;
+        return kv + 3 * max_rows * 4 + 2 * max_levels * 4 * 4;
+    }
+
     /// After a prompt chunk of `rows` rows whose last row's Mamba states went to `slot` (nothing left to replay).
     pub fn advance(self: *Cache, pool: *Pool, rows: usize, slot: u32) void {
         std.debug.assert(self.replay == 0);
@@ -290,7 +305,10 @@ pub const Scratch = struct {
         const chunks = (capacity + 511) / 512;
         const B = struct {
             fn make(d: mtl.Device, bytes: usize) !mtl.Buffer {
-                return d.buffer(@max(bytes, 64), opts);
+                const n = @max(bytes, 64);
+                const b = try d.buffer(n, opts);
+                @memset(b.contents()[0..n], 0);
+                return b;
             }
         };
         return .{
@@ -352,4 +370,35 @@ fn partCols(c: cfg.Config) usize {
     var most: usize = 0;
     for (shapes) |nk| most = @max(most, fwd.splitK(nk[0], nk[1]) * nk[0]);
     return most;
+}
+
+test "Cache.bytes matches the Metal buffers Cache.init allocates" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    var pool = try Pool.init(std.testing.allocator, device, c, 3, 2);
+    defer pool.deinit();
+    for ([_]bool{ false, true }) |head| {
+        var cache = try Cache.init(device, c, 4096, head);
+        defer cache.deinit(&pool);
+        var actual: u64 = cache.windows[0].length() + cache.windows[1].length() + cache.follow.length() + cache.topk.length();
+        for (cache.kv[0..cache.attentions]) |kv| actual += kv.k.length() + kv.v.length();
+        if (cache.mtp) |m| actual += m.k.length() + m.v.length();
+        try std.testing.expectEqual(actual, Cache.bytes(c, 4096, head));
+    }
+}
+
+test "a pool of poolSlots holds every stream's state and pending forward, a lone round's third, and one spare" {
+    var why: cfg.Why = .{};
+    const c = try cfg.parse(std.testing.allocator, cfg.lightning, &why);
+    var device = mtl.Device.init() catch return error.SkipZigTest;
+    defer device.deinit();
+    for ([_]usize{ 1, 2, 4, 8 }) |streams| {
+        var pool = try Pool.init(std.testing.allocator, device, c, poolSlots(streams), streams + 2);
+        defer pool.deinit();
+        for (0..2 * streams + 1) |_| _ = try pool.take();
+        _ = try pool.take();
+        try std.testing.expectError(error.StateSlotsFull, pool.take());
+    }
 }

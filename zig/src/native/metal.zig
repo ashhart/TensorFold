@@ -230,7 +230,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.round = .{ .depth = 8 };
     h.cache = null;
     var why: []const u8 = "";
-    const plan = cache_fit.budget(o.prompt_cache_gib, o.prompt_cache_over_cap, h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), a, &why, "") catch |e| {
+    const later = @as(u64, o.lanes) * nemotron.state.Cache.bytes(h.m.config, h.metal.o.capacity, h.metal.head != null);
+    const plan = cache_fit.budgetBeside(o.prompt_cache_gib, o.prompt_cache_over_cap, h.m.device.maxWorkingSet() -| h.m.device.allocated() -| (8 << 30), later, a, &why, "") catch |e| {
         if (e == error.CacheOverCap) problem.* = why;
         return e;
     };
