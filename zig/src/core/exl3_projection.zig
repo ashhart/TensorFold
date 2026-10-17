@@ -1,5 +1,7 @@
 //! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window.
 const std = @import("std");
+pub const checkpoint = @import("exl3_load.zig");
+pub const load = @import("exl3_metal_load.zig");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const format = @import("exl3_format.zig");
