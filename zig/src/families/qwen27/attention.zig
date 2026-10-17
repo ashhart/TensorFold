@@ -10,7 +10,7 @@ pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u3
 const CachePtrs = extern struct { keys: u64, values: u64 };
 const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32 };
-pub const Limits = struct { rows: u32 = 128, streams: u32 = 8, keys: u32 = 32768, shared_prefix: bool = true };
+pub const Limits = struct { rows: u32 = 128, streams: u32 = 8, keys: u32 = 32768, shared_prefix: bool = true, geometry: planning.Geometry = .{} };
 pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v };
 pub const BindingField = enum { meta, caches, keep_map };
 // Each layer owns immutable descriptors until its command buffer is terminal; arithmetic workspace is shared serially.
@@ -51,11 +51,12 @@ pub const Binding = struct {
             const ks = if (cache.key_stride == 0) cache.capacity * 256 else cache.key_stride;
             const vs = if (cache.value_stride == 0) cache.capacity * 256 else cache.value_stride;
             if (ks < @as(u64, cache.capacity) * 256 or vs < @as(u64, cache.capacity) * 256 or ks > std.math.maxInt(i32) or vs > std.math.maxInt(i32)) return error.AttentionCacheStride;
-            try spanAligned(cache.keys, cacheBytes(cache, true), 16);
-            try spanAligned(cache.values, cacheBytes(cache, false), 16);
-            try disjoint(cache.keys, cacheBytes(cache, true), cache.values, cacheBytes(cache, false));
+            const hk = b.limits.geometry.kv_heads;
+            try spanAligned(cache.keys, cacheBytes(cache, true, hk), 16);
+            try spanAligned(cache.values, cacheBytes(cache, false, hk), 16);
+            try disjoint(cache.keys, cacheBytes(cache, true, hk), cache.values, cacheBytes(cache, false, hk));
             for (caches[0..i]) |prior| {
-                for ([_]bool{ true, false }) |key| for ([_]bool{ true, false }) |prior_key| try disjoint(if (key) cache.keys else cache.values, cacheBytes(cache, key), if (prior_key) prior.keys else prior.values, cacheBytes(prior, prior_key));
+                for ([_]bool{ true, false }) |key| for ([_]bool{ true, false }) |prior_key| try disjoint(if (key) cache.keys else cache.values, cacheBytes(cache, key, hk), if (prior_key) prior.keys else prior.values, cacheBytes(prior, prior_key, hk));
             }
             table[i] = .{ .keys = cache.keys.buffer.gpuAddress() + cache.keys.offset, .values = cache.values.buffer.gpuAddress() + cache.values.offset };
             meta[at + 7] = @intCast(ks);
@@ -111,13 +112,14 @@ pub const Scratch = struct {
     uploaded: ?[32]u8 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
-        const tiles = (limits.rows * 6 + 15) / 16 + limits.streams;
+        const tiles = (limits.rows * limits.geometry.group() + 15) / 16 + limits.streams;
         const chunks = (limits.keys + 511) / 512;
         const rp: usize = tiles * 16;
-        const a: usize = if (limits.shared_prefix) 4 * @as(usize, chunks) * rp else 0;
+        const hk: usize = limits.geometry.kv_heads;
+        const a: usize = if (limits.shared_prefix) hk * @as(usize, chunks) * rp else 0;
         const tail_chunks = if (limits.shared_prefix) 2 else chunks;
-        const b: usize = 4 * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
-        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * 2 * 4, limits.rows * 128 * 4, limits.rows * 4, 4 * rp * 256 * 2, 4 * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * 4 * 256 * 2, limits.rows * 4 * 256 * 2 };
+        const b: usize = hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
+        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * 2 * 4, limits.rows * 128 * 4, limits.rows * 4, hk * rp * 256 * 2, hk * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * hk * 256 * 2, limits.rows * hk * 256 * 2 };
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
         var made: usize = 0;
@@ -141,6 +143,7 @@ pub const Scratch = struct {
     }
     pub fn upload(s: *Scratch, plan: Plan) !void {
         if (plan.rows > s.limits.rows or plan.streams > s.limits.streams or plan.tiles > s.tiles or plan.prefix_chunks > s.chunks or plan.tail_chunks > s.tail_chunks or plan.geometry.shared_prefix != s.limits.shared_prefix) return error.AttentionLimits;
+        if (plan.geometry.heads != s.limits.geometry.heads or plan.geometry.kv_heads != s.limits.geometry.kv_heads) return error.AttentionLimits;
         @memcpy(s.get(.tile_stream).buffer.slice(i32, plan.tile_stream.len), plan.tile_stream);
         @memcpy(s.get(.q_rows).buffer.slice(i32, plan.q_rows.len), plan.q_rows);
         @memcpy(s.get(.nodes).buffer.slice(i32, plan.nodes.len), plan.nodes);
@@ -155,6 +158,7 @@ pub const Scratch = struct {
 };
 fn validLimits(limits: Limits) !void {
     if (limits.rows == 0 or limits.rows > 128 or limits.streams == 0 or limits.streams > 8 or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / 256) return error.AttentionLimits;
+    try limits.geometry.check();
 }
 fn span(r: Ref, bytes: usize) !void {
     try spanAligned(r, bytes, 2);
@@ -173,10 +177,10 @@ fn fingerprint(plan: Plan) [32]u8 {
     hash.final(&digest);
     return digest;
 }
-fn cacheBytes(cache: Cache, key: bool) usize {
+fn cacheBytes(cache: Cache, key: bool, kv_heads: usize) usize {
     const requested = if (key) cache.key_stride else cache.value_stride;
     const stride: usize = if (requested == 0) @as(usize, cache.capacity) * 256 else requested;
-    return (3 * stride + @as(usize, cache.capacity) * 256) * 2;
+    return ((kv_heads - 1) * stride + @as(usize, cache.capacity) * 256) * 2;
 }
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
@@ -188,6 +192,8 @@ pub const Attention = struct {
     prefix: [16]mtl.Pipeline,
     io: [10]mtl.Pipeline,
     prompt: ?[2]mtl.Pipeline = null, // the prompt-row kernels: built on chips with tensor units only
+    /// The head counts the library was built for (Geometry.defines).
+    geometry: planning.Geometry = .{},
     pub fn init(device: mtl.Device, library: mtl.Library, prompt: bool) !Attention {
         var p: [16]mtl.Pipeline = undefined;
         var pn: usize = 0;
@@ -219,35 +225,38 @@ pub const Attention = struct {
         const e = timing.encoder;
 
         if (p.rows == 0 or p.rows > 128 or !std.math.isFinite(p.eps) or p.eps <= 0 or !std.math.isFinite(p.theta) or p.theta <= 0) return error.TargetAttentionShape;
-        try span(p.qg, @as(usize, p.rows) * 12288 * 2);
-        try span(p.key, @as(usize, p.rows) * 1024 * 2);
+        const g = a.geometry;
+        const qb = @as(usize, p.rows) * g.qWidth() * 2;
+        const kb = @as(usize, p.rows) * g.kvWidth() * 2;
+        try span(p.qg, 2 * qb);
+        try span(p.key, kb);
         try span(p.q_gain, 256 * 2);
         try span(p.k_gain, 256 * 2);
-        try span(p.norm_q, @as(usize, p.rows) * 6144 * 2);
-        try span(p.norm_k, @as(usize, p.rows) * 1024 * 2);
-        try span(p.query, @as(usize, p.rows) * 6144 * 2);
-        try span(p.rotated_key, @as(usize, p.rows) * 1024 * 2);
+        try span(p.norm_q, qb);
+        try span(p.norm_k, kb);
+        try span(p.query, qb);
+        try span(p.rotated_key, kb);
         if ((p.h_end > 0 or p.w_end > 0) and p.plane < p.rows) return error.TargetAttentionShape;
         const plane_rows: usize = if (p.h_end > 0 or p.w_end > 0) 2 * @as(usize, p.plane) + p.rows else p.rows;
         try spanAligned(p.positions, plane_rows * 4, 4);
-        const outputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.norm_q, .bytes = @as(usize, p.rows) * 6144 * 2 }, .{ .ref = p.norm_k, .bytes = @as(usize, p.rows) * 1024 * 2 }, .{ .ref = p.query, .bytes = @as(usize, p.rows) * 6144 * 2 }, .{ .ref = p.rotated_key, .bytes = @as(usize, p.rows) * 1024 * 2 } };
-        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = @as(usize, p.rows) * 12288 * 2 }, .{ .ref = p.key, .bytes = @as(usize, p.rows) * 1024 * 2 }, .{ .ref = p.q_gain, .bytes = 512 }, .{ .ref = p.k_gain, .bytes = 512 }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
+        const outputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.norm_q, .bytes = qb }, .{ .ref = p.norm_k, .bytes = kb }, .{ .ref = p.query, .bytes = qb }, .{ .ref = p.rotated_key, .bytes = kb } };
+        const inputs = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = p.qg, .bytes = 2 * qb }, .{ .ref = p.key, .bytes = kb }, .{ .ref = p.q_gain, .bytes = 512 }, .{ .ref = p.k_gain, .bytes = 512 }, .{ .ref = p.positions, .bytes = plane_rows * 4 } };
         for (outputs, 0..) |dst, i| {
             for (inputs) |src| try disjoint(dst.ref, dst.bytes, src.ref, src.bytes);
             for (outputs[0..i]) |prior| try disjoint(dst.ref, dst.bytes, prior.ref, prior.bytes);
         }
         e.setPipeline(a.io[7]);
         bind(e, .{ p.qg, p.q_gain });
-        e.setValue(glue.Head{ .width = 256, .rows = p.rows * 24, .stride = 512, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = 256, .rows = p.rows * g.heads, .stride = 512, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
         e.setBuffer(p.norm_q.buffer, p.norm_q.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * 24, 1, 1), mtl.Size.of(64, 1, 1));
+        e.dispatchGroups(mtl.Size.of(p.rows * g.heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.setPipeline(a.io[7]);
         bind(e, .{ p.key, p.k_gain });
-        e.setValue(glue.Head{ .width = 256, .rows = p.rows * 4, .stride = 256, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
+        e.setValue(glue.Head{ .width = 256, .rows = p.rows * g.kv_heads, .stride = 256, .activation = .bf16, .gain = .bf16, .eps = p.eps }, 2);
         e.setBuffer(p.norm_k.buffer, p.norm_k.offset, 3);
-        e.dispatchGroups(mtl.Size.of(p.rows * 4, 1, 1), mtl.Size.of(64, 1, 1));
+        e.dispatchGroups(mtl.Size.of(p.rows * g.kv_heads, 1, 1), mtl.Size.of(64, 1, 1));
         e.barrier();
-        for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = 24 }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = 4 } }) |r| {
+        for ([_]struct { x: Ref, y: Ref, heads: u32 }{ .{ .x = p.norm_q, .y = p.query, .heads = g.heads }, .{ .x = p.norm_k, .y = p.rotated_key, .heads = g.kv_heads } }) |r| {
             e.setPipeline(a.io[8]);
             bind(e, .{ r.x, p.positions });
             e.setValue(glue.Rope{ .width = 256, .heads = r.heads, .rows = p.rows, .rotary = 64, .activation = .bf16, .theta = @floatCast(p.theta), .h_end = p.h_end, .w_end = p.w_end, .plane = p.plane }, 2);
@@ -265,18 +274,22 @@ pub const Attention = struct {
 
         try scratch.check(plan);
         try binding.check(plan, caches);
-        try spanAligned(q, @as(usize, plan.rows) * 6144 * 2, 16);
-        try span(k, @as(usize, plan.rows) * 1024 * 2);
-        try span(v, @as(usize, plan.rows) * 1024 * 2);
-        try span(out, @as(usize, plan.rows) * 6144 * 2);
+        const g = a.geometry;
+        if (plan.geometry.heads != g.heads or plan.geometry.kv_heads != g.kv_heads) return error.TargetAttentionShape;
+        const qb = @as(usize, plan.rows) * g.qWidth() * 2;
+        const kb = @as(usize, plan.rows) * g.kvWidth() * 2;
+        try spanAligned(q, qb, 16);
+        try span(k, kb);
+        try span(v, kb);
+        try span(out, qb);
         if (raw_gate) |gate| {
-            try span(gate, @as(usize, plan.rows) * 12288 * 2);
-            try disjoint(out, @as(usize, plan.rows) * 6144 * 2, gate, @as(usize, plan.rows) * 12288 * 2);
+            try span(gate, 2 * qb);
+            try disjoint(out, qb, gate, 2 * qb);
         }
-        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = @as(usize, plan.rows) * 6144 * 2 }, .{ .ref = k, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = v, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = out, .bytes = @as(usize, plan.rows) * 6144 * 2 } };
+        const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = qb }, .{ .ref = k, .bytes = kb }, .{ .ref = v, .bytes = kb }, .{ .ref = out, .bytes = qb } };
         for (caches) |cache| for (operands) |operand| {
-            try disjoint(cache.keys, cacheBytes(cache, true), operand.ref, operand.bytes);
-            try disjoint(cache.values, cacheBytes(cache, false), operand.ref, operand.bytes);
+            try disjoint(cache.keys, cacheBytes(cache, true, g.kv_heads), operand.ref, operand.bytes);
+            try disjoint(cache.values, cacheBytes(cache, false, g.kv_heads), operand.ref, operand.bytes);
         };
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
@@ -284,24 +297,24 @@ pub const Attention = struct {
             e.useResource(cache.keys.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
             e.useResource(cache.values.buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         }
-        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16 };
+        const args = PackArgs{ .rows = plan.rows, .packed_rows = plan.tiles * 16, .heads = g.heads, .kv_heads = g.kv_heads, .group = g.group() };
         e.setPipeline(a.io[2]);
         bind(e, .{ k, v, binding.get(.caches), binding.get(.meta), scratch.get(.nodes) });
         e.setValue(args, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, plan.rows), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(256, g.kv_heads, plan.rows), mtl.Size.of(32, 4, 1));
         e.setPipeline(a.io[0]);
         bind(e, .{ q, scratch.get(.q_rows), scratch.get(.qa) });
         e.setValue(args, 3);
-        e.dispatchThreads(mtl.Size.of(256, args.packed_rows, 4), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(256, args.packed_rows, g.kv_heads), mtl.Size.of(32, 4, 1));
         if (prompt and a.prompt != null and plan.geometry.shared_prefix and plan.streams == 1) {
             e.barrier();
             try a.promptRows(e, scratch, binding, plan, out);
             if (raw_gate) |gate| {
                 e.setPipeline(a.io[9]);
                 bind(e, .{ out, gate });
-                e.setValue(glue.Element{ .width = 256, .heads = 24, .rows = plan.rows, .activation = .bf16 }, 2);
+                e.setValue(glue.Element{ .width = 256, .heads = g.heads, .rows = plan.rows, .activation = .bf16 }, 2);
                 e.setBuffer(out.buffer, out.offset, 3);
-                e.dispatchThreads(mtl.Size.of(256, 24, plan.rows), mtl.Size.of(32, 1, 1));
+                e.dispatchThreads(mtl.Size.of(256, g.heads, plan.rows), mtl.Size.of(32, 1, 1));
                 e.barrier();
             }
         } else try a.treeRows(e, scratch, binding, plan, q, out, raw_gate, args);
@@ -321,22 +334,24 @@ pub const Attention = struct {
         e.setBuffer(scratch.get(.poa).buffer, 0, 3);
         e.setBuffer(scratch.get(.pma).buffer, 0, 4);
         e.setBuffer(scratch.get(.pla).buffer, 0, 5);
-        e.dispatchGroups(mtl.Size.of(4, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(32 * 2 * pairs, 1, 1));
+        const g = a.geometry;
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, chunks, (plan.tiles + pairs - 1) / pairs), mtl.Size.of(32 * 2 * pairs, 1, 1));
         e.barrier();
         e.setPipeline(a.prompt.?[1]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla) });
         e.setValue(args, 3);
         e.setBuffer(out.buffer, out.offset, 4);
-        e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(g.kv_heads, plan.rows * g.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
     /// Trees and decoded rows: cached keys by chunk (prefix), the round's own by path (tail), merged and gated.
     fn treeRows(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, plan: Plan, q: Ref, out: Ref, raw_gate: ?Ref, args: PackArgs) !void {
+        const hk = a.geometry.kv_heads;
         if (!plan.fused) {
             e.setPipeline(a.io[1]);
             bind(e, .{ q, scratch.get(.qb) });
             e.setValue(args, 2);
-            e.dispatchThreads(mtl.Size.of(256, 16, 4 * plan.rows), mtl.Size.of(32, 4, 1));
+            e.dispatchThreads(mtl.Size.of(256, 16, hk * plan.rows), mtl.Size.of(32, 4, 1));
         }
         e.barrier();
         const scale: f32 = 0.0625;
@@ -350,7 +365,7 @@ pub const Attention = struct {
             e.setBuffer(scratch.get(.poa).buffer, 0, 5);
             e.setBuffer(scratch.get(.pma).buffer, 0, 6);
             e.setBuffer(scratch.get(.pla).buffer, 0, 7);
-            e.dispatchGroups(mtl.Size.of(4, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
+            e.dispatchGroups(mtl.Size.of(hk, plan.prefix_chunks, (plan.tiles + sg - 1) / sg), mtl.Size.of(64 * sg, 1, 1));
             e.barrier();
         }
         if (!plan.fused) {
@@ -362,13 +377,13 @@ pub const Attention = struct {
                 const r = scratch.get(field);
                 e.setBuffer(r.buffer, 0, i);
             }
-            e.dispatchGroups(mtl.Size.of(4, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
+            e.dispatchGroups(mtl.Size.of(hk, plan.tail_chunks, plan.rows), mtl.Size.of(128, 1, 1));
             e.barrier();
         }
         e.setPipeline(a.io[4]);
         bind(e, .{ scratch.get(.poa), scratch.get(.pma), scratch.get(.pla), scratch.get(.pob), scratch.get(.pmb), scratch.get(.plb), binding.get(.meta), scratch.get(.nodes), out, raw_gate orelse out });
         e.setValue(@as(u32, @intFromBool(raw_gate != null)), 10);
-        e.dispatchGroups(mtl.Size.of(4, plan.rows * 6, 1), mtl.Size.of(32, 1, 1));
+        e.dispatchGroups(mtl.Size.of(hk, plan.rows * a.geometry.group(), 1), mtl.Size.of(32, 1, 1));
         e.barrier();
     }
     pub fn keep(a: *const Attention, e: mtl.ComputeEncoder, scratch: *const Scratch, binding: *const Binding, kept: u32, caches: []const Cache) !void {
@@ -384,12 +399,12 @@ pub const Attention = struct {
         e.setPipeline(a.io[5]);
         bind(e, .{ binding.get(.caches), binding.get(.meta), binding.get(.keep_map), scratch.get(.keep_k), scratch.get(.keep_v) });
         e.setValue(kept, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, kept), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(256, a.geometry.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
         e.setPipeline(a.io[6]);
         bind(e, .{ scratch.get(.keep_k), scratch.get(.keep_v), binding.get(.caches), binding.get(.meta), binding.get(.keep_map) });
         e.setValue(kept, 5);
-        e.dispatchThreads(mtl.Size.of(256, 4, kept), mtl.Size.of(32, 4, 1));
+        e.dispatchThreads(mtl.Size.of(256, a.geometry.kv_heads, kept), mtl.Size.of(32, 4, 1));
         e.barrier();
     }
 };
