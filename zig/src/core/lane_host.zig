@@ -94,6 +94,7 @@ pub const LaneHost = struct {
         prefill_sent: bool = false, // a lone driver's prefilled event went out
         fill_began: bool = false, // its first prompt chunk ran
         submitted: i96 = 0,
+        fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
         began: i96 = 0,
         /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
         fill_on: std.atomic.Value(bool) = .init(false),

@@ -8,6 +8,7 @@ const pool = @import("pool.zig");
 const mirror = @import("mirror.zig");
 const snapshot = @import("snapshot.zig");
 const timing = @import("timing.zig");
+const prompt_fill = @import("prefill.zig");
 const Engine = @import("engine.zig").Engine;
 const be = lanes.backend;
 const Stream = lanes.Stream;
@@ -27,12 +28,16 @@ pub const Backend = struct {
     gpa: std.mem.Allocator,
     sl: *slots_mod.Slots,
     by: std.AutoHashMapUnmanaged(*Stream, u32) = .empty,
+    filling: std.AutoHashMapUnmanaged(*Stream, prompt_fill.State) = .empty,
+    image_owner: ?*Stream = null,
     words: std.ArrayList(u32) = .empty, // the next command's words
     wins: std.ArrayList(slots_mod.Win) = .empty,
     drafts: std.ArrayList(slots_mod.Draft) = .empty,
     costs: ?timing.Costs = null, // a pair's rank 0: its windows and head step as timed (shared forwards priced the same)
 
     pub fn deinit(b: *Backend) void {
+        if (b.image_owner != null) slot_images.end(b.sl);
+        b.filling.deinit(b.gpa);
         b.by.deinit(b.gpa);
         b.words.deinit(b.gpa);
         b.wins.deinit(b.gpa);
@@ -40,7 +45,7 @@ pub const Backend = struct {
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .reports_fill = true } };
     }
 
     /// Windows of up to 16 rows (drafted == plain at every width), the MTP head's chains, every stream in one forward.
@@ -86,7 +91,13 @@ pub const Backend = struct {
     }
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
-        const b = self(ptr);
+        while (!try prefillStep(ptr, s)) {}
+    }
+    fn prefillStep(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        return prompt_fill.step(self(ptr), s);
+    }
+
+    pub fn beginPrompt(b: *Backend, s: *Stream) !prompt_fill.State {
         const e = b.sl.e;
         if (e.followsPeer()) return error.FollowsPeer;
         if (e.ep != null and s.sampling != null and s.sampling.?.temperature > 0) return error.SampledPeerUnsupported;
@@ -96,6 +107,7 @@ pub const Backend = struct {
         const reuse: ?*const snapshot.Snap = if (s.reuse.saved) |saved| @ptrCast(@alignCast(saved)) else null;
         const i = b.sl.pick(reuse) orelse return error.NoFreeSlot;
         try b.by.put(b.gpa, s, i);
+        errdefer release(b, s);
         try pool.reserve(b.sl, i, need(prompt.len, s.max_new), reuse); // pooled: its share (admission checked it fits)
         b.words.clearRetainingCapacity();
         try b.words.appendSlice(b.gpa, &.{ i, @intFromBool(s.drafts) });
@@ -105,9 +117,8 @@ pub const Backend = struct {
         s.cached = 0;
         if (s.images.len > 0) { // the images through the tower first: the chunks inject their rows
             if (e.ep != null) return error.VisionOnPair;
-            try slot_images.encode(b.sl, i, s.images);
+            try @import("prompt_images.zig").prepare(b, s, i);
         }
-        defer if (s.images.len > 0) slot_images.end(b.sl);
         var at: u32 = 0;
         if (s.reuse.saved) |saved| { // a kept state of this prompt's prefix: the pass starts there
             const snap: *snapshot.Snap = @ptrCast(@alignCast(saved));
@@ -124,25 +135,38 @@ pub const Backend = struct {
                 s.reuse_error = if (snap.at >= prompt.len) error.SnapshotNotPrefix else if (snap.stale) error.SnapshotStale else error.SnapshotMissing;
             }
         }
-        var next: usize = 0; // the planned chunk starts: a resumed pass cuts where a fresh one does
-        s.fill_at.store(at, .monotonic); // a restored prefix is done the moment it is restored
-        // The first reply token's draw, keyed at P: the head's one output row is draws row 0, no prompt rule.
-        const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(prompt.len), e.c.vocab);
-        const sampled_prompt = draws.n > 0;
-        while (at < prompt.len) {
-            if (s.isCancelled()) return error.Cancelled; // the core releases the slot
-            while (next < s.chunks.len and s.chunks[next] <= at) next += 1;
-            const end: u32 = if (next < s.chunks.len) s.chunks[next] else @intCast(prompt.len);
-            const n = b.sl.chunkRows(at, end);
-            try b.copyOut(i, at);
-            try mirror.send(e, .chunk, &.{ i, at, n });
-            // Only the prompt's final chunk draws a token (its head runs): its last pass row takes the rule.
-            const chunk_draws: ?*const fwd.Draws = if (sampled_prompt and at + n == prompt.len) &draws else null;
-            try b.sl.chunk(i, at, n, chunk_draws); // the chunk's compute completes here: `at` is landed progress
-            at += n;
-            s.fill_at.store(at, .monotonic); // the dashboard's prefill progress reads this between chunks
-            if (std.mem.indexOfScalar(u32, s.reuse.marks, at) != null) if (s.reuse.hook) |k| k.at(k.ptr, s, at);
+        s.fill_at.store(at, .monotonic);
+        return .{ .stream = s, .slot = i, .at = at };
+    }
+    pub fn decoding(b: *const Backend) bool {
+        return b.by.count() > b.filling.count();
+    }
+    pub fn promptRows(b: *const Backend, at: u32, end: u32) u32 {
+        return b.sl.chunkRows(at, end);
+    }
+    pub fn chunkPrompt(b: *Backend, s: *Stream, i: u32, at: u32, n: u32) !void {
+        const e = b.sl.e;
+        try @import("prompt_images.zig").prepare(b, s, i);
+        try b.copyOut(i, at);
+        try mirror.send(e, .chunk, &.{ i, at, n });
+        const draws = @import("draw_rule.zig").promptDraws(s.sampling, @intCast(s.prompt_len), e.c.vocab);
+        const chunk_draws: ?*const fwd.Draws = if (draws.n > 0 and at + n == s.prompt_len) &draws else null;
+        try b.sl.chunk(i, at, n, chunk_draws);
+    }
+    pub fn encodeImages(b: *Backend, i: u32, images: []const lanes.stream.Image) !void {
+        try slot_images.encode(b.sl, i, images);
+    }
+    pub fn endImages(b: *Backend) void {
+        slot_images.end(b.sl);
+    }
+    pub fn finishPrompt(b: *Backend, s: *Stream) !void {
+        if (b.image_owner == s) {
+            slot_images.end(b.sl);
+            b.image_owner = null;
         }
+    }
+    pub fn abortPrompt(b: *Backend, s: *Stream) void {
+        release(b, s);
     }
 
     fn restore(b: *Backend, i: u32, snap: *const snapshot.Snap) !void {
@@ -385,6 +409,8 @@ pub const Backend = struct {
 
     fn release(ptr: *anyopaque, s: *Stream) void {
         const b = self(ptr);
+        _ = b.filling.remove(s);
+        b.finishPrompt(s) catch {};
         const kv = b.by.fetchRemove(s) orelse return;
         mirror.send(b.sl.e, .release, &.{kv.value}) catch |err| std.log.err("glm: the peer missed a release: {s}", .{@errorName(err)});
         b.sl.release(kv.value);

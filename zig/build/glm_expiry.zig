@@ -44,6 +44,15 @@ pub fn steps(b: *std.Build, test_step: *std.Build.Step, lanes: *std.Build.Module
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "tensorfold", .module = api } },
     }) });
     b.step("check-glm-gather-gpu-host", "Compile the GPU gather equality gate without compiling or running shaders").dependOn(&gpu_check.step);
+    const schedule = b.addTest(.{ .filters = &.{ "glm prefill:", "fill aging:" }, .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/glm_schedule_tests.zig"),
+        .target = b.graph.host,
+        .optimize = .debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "kernel_sources", .module = sources } },
+    }) });
+    if (b.graph.host.result.os.tag == .macos) schedule.root_module.linkSystemLibrary("objc", .{});
+    b.step("test-glm-scheduling-host", "Actual GLM prefill chunks and lane-host decode fairness using a fake engine").dependOn(&b.addRunArtifact(schedule).step);
     const compile = b.addObject(.{ .name = "glm-restore-host", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/src/glm_restore_compile.zig"),
         .target = b.graph.host,

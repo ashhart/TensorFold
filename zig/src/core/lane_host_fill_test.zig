@@ -167,3 +167,7 @@ test "status reads a filling prompt's tokens while its pass runs, and none once 
     seen.engine.status(&status, &.{});
     try std.testing.expect(status.fill_prompt_tokens == null and status.fill_tokens_left == null); // the pass is over
 }
+
+test {
+    _ = @import("lane_host_fill_aging_test.zig");
+}
