@@ -14,6 +14,7 @@ const window_profile = @import("window_profile.zig");
 const tree_accept = @import("tree_accept.zig");
 const resume_tests = @import("resume_tests.zig");
 const prompt_cuts = @import("prompt_cuts.zig");
+const shared_fork = @import("shared_fork.zig");
 const chunk_costs = @import("chunk_costs.zig");
 const grouped_tests = @import("grouped_tests.zig");
 const fp8_tests = @import("fp8_tests.zig");
@@ -24,6 +25,7 @@ const glm_ref_tests = @import("glm_ref_tests.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
+const ck_tests = @import("ck_tests.zig");
 const train_pack = @import("train_pack.zig");
 const exlr8_tests = @import("exlr8_tests.zig");
 const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
@@ -75,6 +77,8 @@ const usage =
     \\  resume MODEL IDS_FILE     prompt states kept at off-grid rows: each resumed pass against a fresh one, byte for byte
     \\  marks MODEL IDS_FILE N PATTERNS   states kept inside chunks against chunks cut at the same rows, byte for byte
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
+    \\  prompt-segments MODEL IDS_FILE   a prompt run as 2 to 4 staggered segments a call equals one uncut pass, byte for byte
+    \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back) against one stream, byte for byte
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
     \\  fp8-lane <dir>            block-FP8 projections against the Python lane matmul's bytes (oracle/fp8_lane.py)
@@ -84,6 +88,7 @@ const usage =
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
+    \\  checkpoint                checkpoint prompt tiles, NVFP4 up rows and share sums byte-equal to the decode path (synthetic FP8 and NVFP4)
     \\  exlr8                     EXLR8 projections: every codebook state, FP64, row windows, the Metal frozen digests
     \\  exlr8-bench DIR [MANIFEST] [LAYER] [SETS]   a real EXLR8 layer: FP64, row windows, then GB/s by stage
     \\  exlr8-dense [DIR]         EXLR8 dense formats: decode bit-equal, FP64, row windows; DIR adds the real matrices
@@ -158,6 +163,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "checkpoint")) return ck_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);
@@ -180,6 +186,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "resume")) return resume_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "marks")) return resume_tests.insideChunks(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "prompt-cuts")) return prompt_cuts.run(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "prompt-segments")) return prompt_cuts.segments(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "shared-fork")) return shared_fork.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "recapture")) return recapture_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "grouped-plan")) return grouped_tests.plan(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "carveout")) {

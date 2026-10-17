@@ -22,6 +22,7 @@ pub const Fns = struct {
     group_rmsnorm: cuda.Function,
     router: cuda.Function,
     router_rows: cuda.Function,
+    router_tiles: cuda.Function,
     topk: cuda.Function,
     conv: cuda.Function,
     conv_rows: cuda.Function,
@@ -47,6 +48,7 @@ pub const Fns = struct {
             .group_rmsnorm = try m[0].function("tf_nemo_group_rmsnorm"),
             .router = try m[1].function("tf_nemo_router"),
             .router_rows = try m[1].function("tf_nemo_router_rows"),
+            .router_tiles = try m[1].function("tf_nemo_router_tiles"),
             .topk = try m[1].function("tf_nemo_topk"),
             .conv = try m[2].function("tf_nemo_conv"),
             .conv_rows = try m[2].function("tf_nemo_conv_rows"),
@@ -88,11 +90,18 @@ pub const AttnSeg = struct { kc: u64, vc: u64, meta: u64, row0: usize, rows: usi
 
 const AttnSegs = extern struct { kc: [max_segs]u64, vc: [max_segs]u64, meta: [max_segs]u64, row0: [max_segs]c_int, n: c_int };
 
-/// The router's K slices and the shared bytes its block stages: 16 rows and 16 experts of one slice, padded a word.
-pub fn routerShape(d: usize) struct { sk: usize, shared: u32 } {
-    const sk = triton.divisor(d / 64, 6);
-    return .{ .sk = sk, .shared = @intCast(2 * 16 * (d / sk / 2 + 1) * 4) };
+/// The router's K slices.
+pub fn routerShape(d: usize) struct { sk: usize } {
+    return .{ .sk = triton.divisor(d / 64, 6) };
 }
+
+/// Shared bytes tf_nemo_router stages: 16 rows and 16 experts of a slice of `per` inputs, padded a word.
+pub fn routerShared(per: usize) u32 {
+    return @intCast(2 * 16 * (per / 2 + 1) * 4);
+}
+
+/// Shared bytes tf_nemo_router_tiles stages: two 32-input steps of 128 rows and 128 experts, a row 20 words.
+pub const tiles_shared: u32 = 2 * 2 * 128 * 20 * 4;
 
 /// Every launch of a window or prompt chunk's glue, on one stream.
 pub const Glue = struct {
@@ -153,22 +162,30 @@ pub const Glue = struct {
         try g.go(g.f.add_moe_norm, .{ rows, 1, 1 }, 1024, 0, &a);
     }
 
+    /// fp32 router logits over `sk` K slices, each one fma chain in input order whichever kernel runs it.
+    pub fn logits(g: Glue, x: u64, w: u64, part: u64, rows: usize, d: usize, e: usize, sk: usize) !void {
+        const per = d / sk;
+        const aligned = (x | w) % 16 == 0;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ x, w, part });
+        ints(&a, &.{ rows, d, e, sk });
+        // decode: a block a (16 experts, slice) stages the rows and its experts
+        if (rows <= 16 and per % 8 == 0 and aligned) {
+            const staged: u32 = @intCast((rows + 16) * (per / 8 + 1) * 16);
+            return g.go(g.f.router_rows, .{ cdiv(e, 16), sk, 1 }, 256, staged, &a);
+        }
+        // prompt: a block a (128 rows, 128 experts, slice); to 32 rows two of tf_nemo_router's 16-row tiles fill more
+        if (rows > 32 and per % 32 == 0 and aligned) return g.go(g.f.router_tiles, .{ cdiv(rows, 128), cdiv(e, 128), sk }, 256, tiles_shared, &a);
+        try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), sk }, 256, routerShared(per), &a);
+    }
+
     /// fp32 router logits over K slices, then each row's top-k and the shared halves' slots.
     pub fn route(g: Glue, x: u64, w: u64, bias: u64, part: u64, ids: u64, wts: u64, rows: usize, d: usize, e: usize, top_k: usize, scaling: f32, norm: bool) !void {
         if (g.tri()) |t| return t.route(x, w, bias, part, ids, wts, rows, d, e, top_k, scaling, norm);
         if (e > 256 or top_k + 2 > 8) return error.RouterTooWide;
         const shape = routerShape(d);
         if (shape.sk > 8) return error.RouterTooWide; // topk's MAXSK
-        var a: cuda.Args = .{};
-        ptrs(&a, &.{ x, w, part });
-        ints(&a, &.{ rows, d, e, shape.sk });
-        // decode: a block a (16 experts, slice) stages the rows and its experts, same bits
-        if (rows <= 16 and d % (8 * shape.sk) == 0 and (x | w) % 16 == 0) {
-            const staged: u32 = @intCast((rows + 16) * (d / shape.sk / 8 + 1) * 16);
-            try g.go(g.f.router_rows, .{ cdiv(e, 16), shape.sk, 1 }, 256, staged, &a);
-        } else {
-            try g.go(g.f.router, .{ cdiv(rows, 16), cdiv(e, 16), shape.sk }, 256, shape.shared, &a);
-        }
+        try g.logits(x, w, part, rows, d, e, shape.sk);
         var b: cuda.Args = .{};
         ptrs(&b, &.{ part, bias, ids, wts });
         b.add(int(rows));
@@ -359,7 +376,7 @@ pub const Glue = struct {
 };
 
 test "the router stages one slice of 16 rows and 16 experts" {
-    const s = routerShape(2688);
-    try std.testing.expectEqual(@as(usize, 6), s.sk);
-    try std.testing.expectEqual(@as(u32, 2 * 16 * 225 * 4), s.shared);
+    const sk = routerShape(2688).sk;
+    try std.testing.expectEqual(@as(usize, 6), sk);
+    try std.testing.expectEqual(@as(u32, 2 * 16 * 225 * 4), routerShared(2688 / sk));
 }
