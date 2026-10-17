@@ -109,6 +109,17 @@ pub const Round = struct {
         e.barrier();
     }
 
+    /// One-row segments kept in place: tf_delta_gdn_pre_step writes each slot's next conv window into its history.
+    pub fn prepareStep(r: Round, e: metal.ComputeEncoder, step: metal.Pipeline) void {
+        e.setPipeline(step);
+        bind(e, .{ r.b.qkv, r.b.a, r.b.b, r.b.history, r.b.conv_weight, r.b.a_log, r.b.dt, r.b.windows, r.b.row_slots }, 0);
+        e.setValue(r.p, 9);
+        bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing }, 10);
+        const wide = r.p.dk == 128 and r.p.dv == 128; // four simdgroups a head (tf_delta_gdn_pre_step4)
+        e.dispatchGroups(.{ .width = 1, .height = 2 * r.p.nk + r.p.nv, .depth = r.p.rows }, .{ .width = if (wide) 128 else 32, .height = 1, .depth = 1 });
+        e.barrier();
+    }
+
     pub fn forward(r: Round, e: metal.ComputeEncoder) void {
         e.setPipeline(r.pipelines.tree);
         bind(e, .{ r.b.query, r.b.key, r.b.value, r.b.decay, r.b.mixing, r.b.state, r.b.parents, r.b.segments }, 0);

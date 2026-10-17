@@ -118,10 +118,12 @@ pub const Pool = struct {
         // Each scan thread reads and writes only its own state words, so a chain that keeps its slots scans in place.
         const in_place = inPlace(plan.host);
         if (in_place) prepared.b.next_state = prepared.b.state;
+        // one row a slot kept in place: its prepare writes the next conv window, so no commit or publication follows
+        const step = step_rounds and in_place and !prompt and oneRowSegments(plan.host);
         try plan.metadata.upload(plan.host);
         var pre = profile.begin(pool.profiler, input_encoder, .gdn_prepare);
         errdefer pre.cancel();
-        prepared.prepare(pre.encoder);
+        if (step) prepared.prepareStep(pre.encoder, pool.kernels.pre_step) else prepared.prepare(pre.encoder);
         try pre.end();
         var scan = profile.begin(pool.profiler, input_encoder, .gdn_scan);
         errdefer scan.cancel();
@@ -132,6 +134,7 @@ pub const Pool = struct {
         errdefer gate.cancel();
         prepared.gate(gate.encoder);
         try gate.end();
+        if (step) return;
         var publication = profile.begin(pool.profiler, input_encoder, .state_publish);
         errdefer publication.cancel();
         const e = publication.encoder;
@@ -291,6 +294,14 @@ pub const Pool = struct {
 
 fn tensorSpan(t: Tensor) gdn.Span {
     return .{ .buffer = t.buffer, .offset = t.offset, .bytes = t.bytes };
+}
+
+/// One-row rounds take tf_delta_gdn_pre_step; off, they run the general prepare, commit and publication (checks).
+pub var step_rounds = true;
+
+fn oneRowSegments(plan: Plan) bool {
+    for (plan.segments) |segment| if (segment.rows != 1) return false;
+    return true;
 }
 
 fn inPlace(plan: Plan) bool {
