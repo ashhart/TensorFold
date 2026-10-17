@@ -156,6 +156,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("glm_cuda", glm_cuda);
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
+    b.installArtifact(@import("dsv41.zig").runner(b, target, optimize, cuda, strip));
+    b.installArtifact(@import("dsv41.zig").tool(b, target, optimize, cuda, strip)); // tf-dsv41: checks and the engine without HTTP
+    b.installArtifact(@import("dsv41.zig").server(b, target, optimize, cuda, build_options)); // tensorfold-dsv41
+    @import("sampling.zig").gpu(b, target, optimize, cuda, @import("dsv41.zig").kernels(b, target, optimize, cuda)); // tf-dsv41-samp: the keyed sampler's device steps
     const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
     @import("kernel_contract.zig").cuda(b, runner_exe, controls);
     nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.tokenizer, build_options, true).root_module.strip = strip;
@@ -222,7 +226,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
-    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
+    _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe, tokenizer, lanes); // json, the family's text side
     if (!install_native) {
         exe.root_module.strip = true;
         return exe;
@@ -251,7 +255,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
     });
-    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    const server_json = @import("server.zig").addTo(b, server_tests, host, .debug, mods.tokenizer, mods.lanes);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
     const server_step = b.step(
@@ -277,7 +281,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
     // the tool-call parser's tests, run beside the server's on Macs: the GLM calls the CUDA port serves
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
-    _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
+    _ = @import("server.zig").addTo(b, parse_tests, host, .debug, mods.tokenizer, mods.lanes);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);

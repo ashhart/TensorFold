@@ -18,6 +18,11 @@ const server_build = @import("zig/build/server.zig");
 const golden_build = @import("zig/build/golden.zig");
 const contract_build = @import("zig/build/kernel_contract.zig");
 const video_build = @import("zig/build/video.zig");
+const tp_build = @import("zig/build/tp.zig");
+const dsv41_build = @import("zig/build/dsv41.zig");
+const sessions_build = @import("zig/build/sessions.zig");
+const kv_build = @import("zig/build/kv.zig");
+const sampling_build = @import("zig/build/sampling.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -204,6 +209,12 @@ pub fn build(b: *std.Build) void {
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
     contract_build.hostTests(b);
+    tp_build.add(b, target, optimize, test_step);
+    sessions_build.add(b, test_step);
+    dsv41_build.add(b, test_step);
+    kv_build.add(b, target, optimize, test_step);
+    sampling_build.add(b, test_step);
+    server_build.add(b, test_step);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
@@ -219,7 +230,8 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = engines }, .{ .name = "checkpoint_cli", .module = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cli.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "native_engines", .module = engines }, exlr8_build.cliImport(b, target, .ReleaseSafe, engine) } }) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
-    _ = server_build.addTo(b, exe.root_module, target, .ReleaseSafe);
+    const lanes = api.import_table.get("lanes").?;
+    _ = server_build.addTo(b, exe.root_module, target, .ReleaseSafe, tokenizer, lanes); // json, the family's text side
     if (test_step == null) {
         exe.root_module.strip = true;
         return exe;
@@ -237,13 +249,13 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } },
     });
-    const server_json = server_build.addTo(b, server_tests, target, .Debug);
+    const server_json = server_build.addTo(b, server_tests, target, .Debug, tokenizer, lanes);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests })).step);
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_json })).step);
     @import("zig/build/cortheon_fuzz.zig").add(b, target, api, tokenizer, template);
     // the parse half's tests, as their own test binary (zig/src/server/tool_parse_test.zig)
     const tool_parse_tests = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = target, .optimize = .Debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template } } }) });
-    _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug);
+    _ = server_build.addTo(b, tool_parse_tests.root_module, target, .Debug, tokenizer, lanes);
     test_step.?.dependOn(&b.addRunArtifact(tool_parse_tests).step);
     // the chat-template engine's tests (zig/src/core/template/tests.zig), which no other test binary reaches
     test_step.?.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/tests.zig"), .target = target, .optimize = .Debug, .link_libc = true }) })).step);

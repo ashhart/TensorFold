@@ -345,8 +345,8 @@ pub const Decision = struct {
     arena: ?std.mem.Allocator = null, // the request's, for what the engine hands back
 };
 
-/// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+/// An opened engine; ``close`` stops its thread and frees its backend; ``halt`` (null: none) a drain's deadline.
+pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque, halt: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null };
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
@@ -559,8 +559,9 @@ pub const LoneHooks = struct {
     resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
 };
 
-/// The lane core served to the HTTP threads (lane_host.zig).
+/// The lane core served to the HTTP threads (lane_host.zig), and a family's opt-in round planner (lane_rounds.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
@@ -590,8 +591,7 @@ pub const keepalive = @import("keepalive.zig");
 pub const originals = @import("originals.zig");
 
 test {
-    _ = @import("lane_host.zig");
-    _ = @import("lane_host_test.zig");
+    _ = @import("lane_host.zig"); // its test block imports lane_host_test.zig and the other lane host tests
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");
