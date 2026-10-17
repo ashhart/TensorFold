@@ -70,8 +70,3 @@ pub fn refusal(fixed: bool, streams: u32, paired: bool, learning: bool) ?[]const
     if (learning) return "Flash Next shared sessions do not keep --learn yet; use --parallel 1 with --learn, or leave --learn out";
     return null;
 }
-
-/// The shared forward's metadata admission uses the engine that owns its buffers.
-pub fn forBackend(b: anytype, windows: []const Window) !Plan {
-    return Plan.init(windows, @intCast(b.e.r.window.capacity));
-}

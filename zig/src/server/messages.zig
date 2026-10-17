@@ -38,7 +38,7 @@ pub const Media = struct {
     }
 };
 
-/// One video part as the template and video path read it: {"type": "video_url", "video_url": {"url"}, "video": null}.
+/// One video part as the template and video path read it: {"type": "video_url", "video_url": {"url": string}}.
 fn videoPart(cx: *Cx, part: Value) errors.Refused!Value {
     const vu = part.get("video_url") orelse return cx.refuse("video_url must contain a non-empty url string");
     const u = if (vu == .object) vu.get("url") else null;
@@ -49,7 +49,6 @@ fn videoPart(cx: *Cx, part: Value) errors.Refused!Value {
     const out = try json.newObject(cx.a);
     try out.put(cx.a, "type", .{ .string = "video_url" });
     try out.put(cx.a, "video_url", .{ .object = inner });
-    try out.put(cx.a, "video", .null); // Qwen's template tests `'video' in item`, GLM's the type; null is no medium
     return .{ .object = out };
 }
 

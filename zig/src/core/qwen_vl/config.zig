@@ -16,7 +16,6 @@ pub const Config = struct {
     image_token: u32,
     vision_start: u32,
     vision_end: u32,
-    video_token: ?u32 = null, // the template's video placeholder; null: the checkpoint reads no video
     min_pixels: u64,
     max_pixels: u64,
     rescale: f64,
@@ -60,7 +59,6 @@ pub const Config = struct {
         inline for (.{ .{ "image_token_id", "image_token" }, .{ "vision_start_token_id", "vision_start" }, .{ "vision_end_token_id", "vision_end" } }) |kv| {
             @field(c, kv[1]) = try positive(doc.object.get(kv[0]));
         }
-        if (doc.object.get("video_token_id")) |v| c.video_token = try positive(v);
         if (vc.object.get("in_channels")) |v| if (try positive(v) != 3) return error.VisionConfig;
         const act = vc.object.get("hidden_act") orelse return error.VisionConfig;
         if (act != .string or !std.mem.eql(u8, act.string, "gelu_pytorch_tanh")) return error.VisionConfig;

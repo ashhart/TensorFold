@@ -89,7 +89,7 @@ pub fn check(verify: Verify, keep: Keep) !void {
         s.m.t.kvmeta = .{ .b = try r.device.buffer(64, fz.opts) };
         s.m.t.ple_ids = .{ .b = try r.device.buffer(1024, fz.opts) };
     }
-    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy, .grammar = .{ .pipe = .{}, .bits = dummy } };
+    var b: Backend = .{ .gpa = a, .e = &e, .primary = &m, .sessions = &sessions, .hidden = dummy };
     // Null widths preserve the recorded 6/32 dispatch. Non-null widths include mixed routed/shared widths.
     for ([_][4]usize{ .{ 4, 64, 4, 64 }, .{ 6, 32, 6, 32 }, .{ 4, 32, 8, 128 } }) |w| {
         m.embed_w = if (w[0] == 6) null else .{ w[0], w[1] };

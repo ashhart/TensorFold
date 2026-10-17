@@ -227,11 +227,9 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
     const int hr = RD / 2;
     const int i = d % hr;
     // as mx.fast.rope: inv_freq = exp2(-(i / half) * log2(base)), fast cos/sin of position * inv_freq
-    // LOG2BASE[1] != 0: YaRN (the frequencies at [3, 35), cos and sin scaled by [2]); else the plain rotary
-    const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
+    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
     const float angle = float(POS[r]) * freq;
-    const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
-    const float c = metal::fast::cos(angle) * ys, s = metal::fast::sin(angle) * ys;
+    const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;
   }
   if (isq) Q[(r * NQ + head) * HD + d] = bfloat(out);

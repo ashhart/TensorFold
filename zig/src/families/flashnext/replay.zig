@@ -20,7 +20,6 @@ pub const engine_widths = @import("engine_widths.zig");
 pub const gdn_step = @import("gdn.zig");
 pub const Tp2 = tpm.Tp2;
 pub const frags = @import("../../core/frags.zig");
-pub const vis_prompt = @import("vis_prompt.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -28,12 +27,7 @@ pub const D = 2560;
 pub const WIDE = 4 * D;
 pub const LAYERS = 48;
 pub const VOCAB = 248320;
-pub const window_config = @import("window_config.zig");
-pub const WindowSettings = window_config.Settings;
-pub const TRAINED = window_config.trained;
-pub const CAP_MAX = window_config.maximum;
-/// The default capacity for callers that do not request a long window.
-pub const CAP = TRAINED;
+pub const CAP = 262144; // keys an attention layer holds in this runner
 pub const PLE_TAIL = 9;
 pub const GROUPS = 8;
 pub const MAXR = 16; // a decode window's rows at most
@@ -54,7 +48,7 @@ pub const Entry = struct { fd: platform.c.fd_t, at: usize, len: usize };
 pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "", text: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
-pub const glue_source =
+const glue_source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\// meta: position of row 0, key capacity, rows
@@ -831,7 +825,6 @@ pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
 }
 
 pub const Run = struct {
-    window: WindowSettings = .{},
     arena: std.mem.Allocator,
     device: mtl.Device,
     queue: mtl.Queue,
@@ -1461,8 +1454,6 @@ test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
     _ = @import("drafts.zig"); // the depth rule's tests
     _ = @import("replay_held_test.zig"); // Run.release and the held list (#732)
-    _ = vis_prompt; // an image prompt's frame, its spans and its cache key
-    _ = @import("grammar.zig"); // structured output: masked rows on the GPU against the host draw
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
@@ -1511,7 +1502,7 @@ pub const Select = struct {
             .select = found[2].?,
             .start = try B.of(r, 16),
             .starts = try B.of(r, CATCH * 256),
-            .sc = try B.of(r, @min(rows_max * (r.window.capacity / 4), @max(SC_WORDS, MAXR * (r.window.capacity / 4))) * 4),
+            .sc = try B.of(r, rows_max * (CAP / 4) * 4),
             .keys = try B.of(r, rows_max * KW * 4),
             .complete = try B.of(r, rows_max * 4),
             .ends = try B.of(r, rows_max * 4),
@@ -1625,7 +1616,7 @@ pub const GSelect = struct {
     pub fn init(r: *Run, pooled: usize) !GSelect {
         var g: GSelect = .{
             .sel = .{ .b = try r.buffer(128 * 4) },
-            .sc = .{ .b = try r.buffer(MAXR * (r.window.capacity / 4) * 4) },
+            .sc = .{ .b = try r.buffer(MAXR * (CAP / 4) * 4) },
             .keys = .{ .b = try r.buffer(MAXR * KW * 4) },
             .pooled_shape = try r.buffer(16),
             .q_shape = undefined,
@@ -1680,7 +1671,7 @@ pub const Layer = struct {
     vals: Buf = undefined,
     raw: Buf = undefined,
     pool: Buf = undefined,
-    pooled: Buf = undefined, // the indexer's pooled block keys [capacity / 4, 128]
+    pooled: Buf = undefined, // the indexer's pooled block keys [CAP / 4, 128]
     pooled_n: usize = 0,
 };
 
@@ -1749,16 +1740,6 @@ pub const Tmp = struct {
     kvmeta: Buf,
     vocab: Buf,
 };
-
-/// The rotary's constants every rotary kernel reads: [log2(base), YaRN on, YaRN's cos and sin scale, 32 frequencies].
-pub fn ropeBuf(r: *Run, log2base: f32, factor: f64) !Buf {
-    const rotary = @import("rotary_config.zig");
-    const b = try r.buffer(rotary.words * 4);
-    @memcpy(b.slice(f32, rotary.words), &rotary.table(log2base, factor, TRAINED));
-    return .{ .b = b };
-}
-
-pub const yarn = @import("rotary_config.zig").yarn;
 
 pub fn f32Buf(r: *Run, v: f32) !Buf {
     const b = try r.buffer(4);
@@ -1848,7 +1829,7 @@ pub const Model = struct {
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
-    cap: usize = TRAINED, // the model's capacity, set at load
+    cap: usize = CAP,
     state: usize = 0, // the DeltaNet buffer pair holding the state
     state_row: usize = 0, // its row
     gpu_seconds: f64 = 0,
@@ -1857,7 +1838,6 @@ pub const Model = struct {
     recs: ?[2]Buf = null, // GPU-side rounds with r.gdn_kept: each window's DeltaNet replay records, by round parity
     rec_slot: usize = 0, // the record this window writes (the other holds the previous window's)
     marks: ?Marks = null, // DeltaNet states at marks inside a prompt chunk, as a chunk ending there would leave them
-    vis: ?*const vis_prompt.VisPrompt = null, // an image prompt's rows and positions while its prompt pass runs
 
     pub fn reset(m: *Model) void {
         m.pos = 0;
@@ -2395,15 +2375,6 @@ pub const copyDrafts = @import("drafts.zig").copyDrafts;
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and
 /// gathered, the decode's row kernels at the chunk's rows, and DeltaNet storing only its last row's state.
 pub const PMAX = 8192; // the prompt buffers' rows; `step` cuts the chunks
-/// A prompt selector's scores: PMAX rows by the trained window's blocks (2 GiB). Past it chunks take fewer rows.
-pub const SC_WORDS: usize = PMAX * (TRAINED / 4);
-
-/// The rows a prompt chunk from `pos` may take (at most `want`): every row scores the blocks before its end.
-pub fn chunkRows(pos: usize, want: usize) usize {
-    var rows = want;
-    while (rows > 64 and rows * ((pos + rows) / 4 + 1) > SC_WORDS) rows /= 2;
-    return rows;
-}
 pub const Prompt = struct {
     r: *Run,
     qmm6: mtl.Pipeline,
@@ -2439,7 +2410,7 @@ pub const Prompt = struct {
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
-    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, pos3: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
+    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
 
     pub fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined; // every field is set below: `undefined` skips the declared defaults
@@ -2552,7 +2523,6 @@ pub const Prompt = struct {
             .pm = try B.of(r, 64),
             .aout = try B.of(r, R * 6144 * 2),
             .pos = try B.of(r, R * 4),
-            .pos3 = try B.of(r, R * 12),
             .nk = try B.of(r, R * 4),
             .zeros = try B.of(r, R * 4),
             .kvmeta = try B.of(r, 16),
@@ -2833,7 +2803,7 @@ pub const Prompt = struct {
                     },
                     13 => {
                         p.bind(p.attn256, &.{ b.q, L3.keys, L3.vals, b.p });
-                        const ap = [4]i32{ @intCast(rows), @intCast(rows), 0, @intCast(m.cap) };
+                        const ap = [4]i32{ @intCast(rows), @intCast(rows), 0, CAP };
                         r.enc.setBytes(std.mem.asBytes(&ap), 4);
                         r.enc.setBuffer(m.t.scale.b, m.t.scale.off, 5);
                         r.enc.setBuffer(b.aout.b, b.aout.off, 6);
@@ -2899,7 +2869,6 @@ pub const Prompt = struct {
             b.pos.b.slice(i32, PMAX)[i] = @intCast(pos + i);
             b.nk.b.slice(i32, PMAX)[i] = @intCast(pos + i + 1);
         }
-        if (m.vis) |v| v.positions(pos, rows, b.pos.b.slice(i32, PMAX), b.pos3.b.slice(i32, 3 * PMAX)); // an image prompt
         const kvm = b.kvmeta.b.slice(u32, 3);
         kvm[0], kvm[1], kvm[2] = .{ @intCast(pos), @intCast(m.cap), @intCast(rows) };
         b.rows.b.slice(i32, 1)[0] = @intCast(rows);
@@ -3003,12 +2972,7 @@ pub const Prompt = struct {
             p.qmm(b.gout, p.out[i], 6144, D, rows, b.branch, 0);
         } else {
             p.qmm(b.mixed, p.proj[i], D, 13952, rows, b.p, 0);
-            if (m.vis != null and s.pos < m.vis.?.frame_end) { // rows up to the last image's end: three positions a row
-                r.enc.setPipeline(m.vis.?.prep);
-                for ([_]Buf{ b.p, b.pos3, L.qn, L.kn, L.iqn, t.eps, t.log2base, b.q, b.kout, b.iq }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
-                r.enc.dispatchThreads(mtl.Size.of(256, 30, rows), mtl.Size.of(256, 1, 1));
-                if (!r.serial) r.enc.barrier();
-            } else try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
+            try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
             p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
             r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
             p.barrier();
@@ -3088,8 +3052,8 @@ pub const Prompt = struct {
             n = 2;
         } else {
             for (0..2) |hd| {
-                ws[n] = .{ .src = bytesOf(L.keys) + (hd * m.cap + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + hd * tpm.KV_HEAD };
-                ws[n + 1] = .{ .src = bytesOf(L.vals) + (hd * m.cap + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD };
+                ws[n] = .{ .src = bytesOf(L.keys) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(L.vals) + (hd * CAP + pr.pos0) * 512, .len = pr.rows0 * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD };
                 n += 2;
             }
             ws[n] = .{ .src = bytesOf(L.raw) + pr.pos0 * 256, .len = pr.rows0 * 256, .dst = slot + 4 * tpm.KV_HEAD };
@@ -3114,8 +3078,8 @@ pub const Prompt = struct {
             p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[1 - pr.a], SO_ROW / 4);
         } else {
             for (0..2) |hd| {
-                p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
-                p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pr.pos0) * 512 }, pr.rows0 * 128);
+                p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
+                p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pr.pos0) * 512 }, pr.rows0 * 128);
             }
             p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pr.pos0 * 256 }, pr.rows0 * 64);
         }
@@ -3141,10 +3105,6 @@ pub const Prompt = struct {
             var ce: [2]variants.Const = undefined;
             const ev = try variants.oneRow(s.p.r, "qa_embed_rows@embed", variants.width(&ce, "BITS", "GS", m.embed_w));
             try s.p.r.callRows("qa_embed_rows@embed", s.rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, ev);
-            if (m.vis) |v| for (v.spans) |sp| if (vis_prompt.VisPrompt.overlap(sp, s.pos, s.rows)) |o| { // the image rows
-                const row = WIDE * 2; // the embedding's row: a copy for each of the four streams
-                s.p.copyWords(.{ .b = v.rows, .off = o[1] * row }, b.h[0].at(o[0] * row), o[2] * row / 4);
-            };
         }
         pub fn wait(_: *Hooks, i: usize) segments.Wait {
             return if (i == 1) .pre else .mixer;
@@ -3286,8 +3246,8 @@ pub const Prompt = struct {
                     try ws.append(gpa, .{ .src = bytesOf(L.so[a]), .len = SO_ROW, .dst = slot + CS_ROW });
                 } else {
                     for (0..2) |hd| {
-                        try ws.append(gpa, .{ .src = bytesOf(L.keys) + (hd * m.cap + pos1) * 512, .len = rows * 512, .dst = slot + hd * tpm.KV_HEAD });
-                        try ws.append(gpa, .{ .src = bytesOf(L.vals) + (hd * m.cap + pos1) * 512, .len = rows * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD });
+                        try ws.append(gpa, .{ .src = bytesOf(L.keys) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + hd * tpm.KV_HEAD });
+                        try ws.append(gpa, .{ .src = bytesOf(L.vals) + (hd * CAP + pos1) * 512, .len = rows * 512, .dst = slot + (2 + hd) * tpm.KV_HEAD });
                     }
                     try ws.append(gpa, .{ .src = bytesOf(L.raw) + pos1 * 256, .len = rows * 256, .dst = slot + 4 * tpm.KV_HEAD });
                 }
@@ -3314,8 +3274,8 @@ pub const Prompt = struct {
                     p.copyWords(.{ .b = w, .off = slot + CS_ROW }, L.so[a], SO_ROW / 4);
                 } else {
                     for (0..2) |hd| {
-                        p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * m.cap + pos1) * 512 }, rows1 * 128);
-                        p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * m.cap + pos1) * 512 }, rows1 * 128);
+                        p.copyWords(.{ .b = w, .off = slot + hd * tpm.KV_HEAD }, .{ .b = L.keys.b, .off = L.keys.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
+                        p.copyWords(.{ .b = w, .off = slot + (2 + hd) * tpm.KV_HEAD }, .{ .b = L.vals.b, .off = L.vals.off + (hd * CAP + pos1) * 512 }, rows1 * 128);
                     }
                     p.copyWords(.{ .b = w, .off = slot + 4 * tpm.KV_HEAD }, .{ .b = L.raw.b, .off = L.raw.off + pos1 * 256 }, rows1 * 64);
                 }
@@ -3340,8 +3300,8 @@ pub const Prompt = struct {
         var n: usize = 0;
         if (mine[1] > 0) {
             for (0..2) |hd| {
-                ws[n] = .{ .src = bytesOf(h.keys) + (hd * m.cap + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + hd * tpm.KV_HEAD };
-                ws[n + 1] = .{ .src = bytesOf(h.vals) + (hd * m.cap + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + (2 + hd) * tpm.KV_HEAD };
+                ws[n] = .{ .src = bytesOf(h.keys) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + hd * tpm.KV_HEAD };
+                ws[n + 1] = .{ .src = bytesOf(h.vals) + (hd * CAP + mine[0]) * 512, .len = mine[1] * 512, .dst = tpm.MTP + (2 + hd) * tpm.KV_HEAD };
                 n += 2;
             }
             ws[n] = .{ .src = bytesOf(h.raw) + mine[0] * 256, .len = mine[1] * 256, .dst = tpm.MTP + 4 * tpm.KV_HEAD };
@@ -3354,8 +3314,8 @@ pub const Prompt = struct {
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);
         for (0..2) |hd| {
-            p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
-            p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * m.cap + theirs[0]) * 512 }, theirs[1] * 128);
+            p.copyWords(.{ .b = w, .off = tpm.MTP + hd * tpm.KV_HEAD }, .{ .b = h.keys.b, .off = h.keys.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
+            p.copyWords(.{ .b = w, .off = tpm.MTP + (2 + hd) * tpm.KV_HEAD }, .{ .b = h.vals.b, .off = h.vals.off + (hd * CAP + theirs[0]) * 512 }, theirs[1] * 128);
         }
         p.copyWords(.{ .b = w, .off = tpm.MTP + 4 * tpm.KV_HEAD }, .{ .b = h.raw.b, .off = h.raw.off + theirs[0] * 256 }, theirs[1] * 64);
         try m.finish(cb);
@@ -3405,17 +3365,4 @@ pub fn jsonInt(v: std.json.Value) i64 {
         .float => |x| @intFromFloat(x),
         else => 0,
     };
-}
-
-test "YaRN x4 frequencies and scale: transformers' table for base 1e7 over the trained 262,144" {
-    const y = yarn(1e7, 4, TRAINED);
-    const want = [_]f32{ 1.0, 0.6042963862419128, 0.36517414450645447, 0.22067339718341827, 0.1333521455526352, 0.08058421313762665, 0.04869675263762474, 0.02942727319896221, 0.017782794311642647, 0.010746078565716743, 0.006493816617876291, 0.003924189601093531, 0.0023713738191872835, 0.0014330126577988267, 0.0008659643353894353, 0.00047423981595784426, 0.00025693507632240653, 0.00013734975073020905, 7.217386882985011e-05, 3.707224823301658e-05, 1.844922371674329e-05, 8.759770025790203e-06, 3.849816039291909e-06, 2.3264301489689387e-06, 1.405853367941745e-06, 8.495520660289912e-07, 5.133812237545499e-07, 3.102344408034696e-07, 1.8747356023141037e-07, 1.1328959459433463e-07, 6.846049416253663e-08, 4.1370427084075345e-08 };
-    for (want, y.freq) |w, g| try std.testing.expectApproxEqRel(w, g, 1e-6);
-    try std.testing.expectApproxEqRel(@as(f32, 1.138629436111989), y.scale, 1e-6);
-}
-
-test "chunk rows shrink only past the trained window" {
-    try std.testing.expectEqual(@as(usize, PMAX), chunkRows(0, PMAX));
-    try std.testing.expectEqual(@as(usize, PMAX), chunkRows(200_000, PMAX));
-    try std.testing.expect(chunkRows(1_000_000, PMAX) <= 2048);
 }

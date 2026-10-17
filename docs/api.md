@@ -284,12 +284,12 @@ starts after the think-end token. A reply cut short by `max_tokens` can remain i
 Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
-Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5, LFM2 MoE and Flash Next shared sessions on Metal have that capability; Qwen27 on Intel also has it.
+Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5 and LFM2 MoE on Metal have that capability; Qwen27 on Intel also has it.
 Qwen3.8-27B applies the grammar to its first draw, each verified row and each branch of its draft proposals.
 Structured requests use its shared lane core, including when the ordinary lone-request serial optimization is enabled.
-CUDA determines support from its loaded backend's mask hook. GLM Metal
-(`glm-zig`, `glm-dsa-zig`) lacks that hook and refuse required/named choices before generation with HTTP 400, for example:
-`backend 'glm-zig' cannot enforce tool_choice "required" or a named function: it has no token grammar support; send "auto" or "none"`.
+CUDA determines support from its loaded backend's mask hook. Flash Next Metal (`flashnext-zig`) and GLM Metal
+(`glm-zig`, `glm-dsa-zig`) lack that hook and refuse required/named choices before generation with HTTP 400, for example:
+`backend 'flashnext-zig' cannot enforce tool_choice "required" or a named function: it has no token grammar support; send "auto" or "none"`.
 The server does not silently turn a required call into `auto`. Installing the grammar library does not add a missing
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 

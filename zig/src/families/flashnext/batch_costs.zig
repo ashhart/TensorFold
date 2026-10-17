@@ -17,22 +17,6 @@ const WARM = 6; // widest windows first
 /// Cache rows a session needs to be timed on: the scratch prompt, then windows of up to MAXR rows past it.
 pub const ROWS = PROMPT + fz.MAXR + 1;
 
-/// Times shared-round costs on the backend's last free session, or leaves them unpriced when it cannot fit.
-pub fn timeCosts(b: anytype) !void {
-    if (std.c.getenv("FZ_BATCH_UNPRICED") != null) {
-        std.log.info("flash next: FZ_BATCH_UNPRICED=1: shared rounds unpriced, nothing timed", .{});
-        return;
-    }
-    const s = &b.sessions[b.sessions.len - 1];
-    if (!fits(s.m.cap)) {
-        std.log.info("flash next: a session holds {d} rows, under the {d} that timing shared rounds takes: shared rounds unpriced", .{ s.m.cap, ROWS });
-        return;
-    }
-    const c = try time(b, s);
-    b.costs = c;
-    std.log.info("flash next: shared forwards {d:.2} {d:.2} {d:.2} {d:.2} {d:.2} ms at 1, 2, 4, 8, 16 rows; a chained draft {d:.2} ms", .{ c.shared[0].ms, c.shared[1].ms, c.shared[3].ms, c.shared[7].ms, c.shared[15].ms, c.step_ms });
-}
-
 /// Whether a session of `cap` rows can be timed on (the chained drafts stay inside the widest window).
 pub fn fits(cap: usize) bool {
     return cap >= ROWS;
@@ -98,7 +82,7 @@ fn windowMs(b: anytype, s: *Session, rows: usize) !f64 {
     const segs = [1]forward.Seg{.{ .s = s, .row0 = 0, .rows = rows }};
     const cb = b.e.r.queue.commandBuffer();
     b.e.r.enc = cb.compute(.serial);
-    try forward.encode(b.e, &segs, rows, t.ids8, null);
+    try forward.encode(b.e, &segs, rows, t.ids8);
     try b.primary.finish(cb);
     return (mtl.clock.seconds() - t0) * 1e3;
 }
@@ -129,11 +113,4 @@ test "timing needs the scratch prompt and the widest window past it" {
     try std.testing.expect(!fits(ROWS - 1));
     try std.testing.expect(fits(ROWS));
     try std.testing.expect(!fits(160)); // --context 128's sessions
-}
-
-pub fn facts(b: anytype) lanes.Model {
-    const c: ?*const Costs = if (b.costs) |*x| x else null;
-    // Timed forwards price shared rounds; each extra draft costs one chained head step.
-    const lone_priced = c != null and std.c.getenv("FZ_LONE_UNPRICED") == null; // not `lone`: that names the lone driver
-    return .{ .exact_width = fz.MAXR, .first_copy_rows = 4, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 8, .streams_exact = true, .hidden_rows = true, .batch_rows = fz.MAXR, .max_streams = @intCast(b.sessions.len), .draft_streams = !b.serial_drafts, .shared_costs = if (c) |x| &x.shared else &.{}, .draft_step_ms = if (c != null and !b.serial_drafts) c.?.step_ms else 0, .window_costs = if (lone_priced) &c.?.shared else &.{}, .mtp_step_ms = if (lone_priced) c.?.step_ms else 0 };
 }
