@@ -184,6 +184,7 @@ test "native Bolt load failure keeps destinations and kernel GPU parents through
     e.ctx = &g.ctx;
     e.load_next = null;
     e.load_has_weights = false;
+    e.tp = null;
     e.stream = .{ .d = d, .handle = @ptrFromInt(2) };
     e.side = .{ .s = .{ .d = d, .handle = @ptrFromInt(3) }, .fork = .{ .d = d, .handle = @ptrFromInt(4) }, .join = .{ .d = d, .handle = @ptrFromInt(5) } };
     e.k.d = d;
@@ -191,6 +192,8 @@ test "native Bolt load failure keeps destinations and kernel GPU parents through
     e.k.ggml = null;
     e.k.triton = null;
     e.k.affine.split = null;
+    e.k.latent = null;
+    e.k.ck = null;
     const module: cuda.Module = .{ .d = d, .handle = @ptrFromInt(6) };
     e.k.emb.mod = module;
     e.k.norms.mod = module;
@@ -287,6 +290,7 @@ fn partialEngine(g: *Gpu) !*nemotron.Engine {
     e.ctx = &g.ctx;
     e.load_next = null;
     e.load_has_weights = false;
+    e.tp = null;
     e.load_pending = null;
     const d = &g.driver;
     e.stream = .{ .d = d, .handle = @ptrFromInt(2) };
@@ -296,6 +300,8 @@ fn partialEngine(g: *Gpu) !*nemotron.Engine {
     e.k.ggml = null;
     e.k.triton = null;
     e.k.affine.split = null;
+    e.k.latent = null;
+    e.k.ck = null;
     const module: cuda.Module = .{ .d = d, .handle = @ptrFromInt(6) };
     e.k.emb.mod = module;
     e.k.norms.mod = module;
