@@ -34,6 +34,8 @@ const modelopt_tests = @import("modelopt_tests.zig");
 const exl3_tests = @import("exl3_tests.zig");
 const exl3_tp2_tests = @import("exl3_tp2_tests.zig");
 const exl3_candidate_tests = @import("exl3_candidate_tests.zig");
+const experts3_tests = @import("experts3_tests.zig");
+const moe_tests = @import("moe_tests.zig");
 const train_pack = @import("train_pack.zig");
 const exlr8_tests = @import("exlr8_tests.zig");
 const exlr8_dense_tests = @import("exlr8_dense_tests.zig");
@@ -137,6 +139,8 @@ const usage =
     \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
+    \\  moe                       softmax routing and SwiGLU experts against host references
+    \\  experts3                  affine-3 packing and outputs against affine-4 and fp64
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
     \\  exlr8                     EXLR8 projections: every codebook state, FP64, row windows, the Metal frozen digests
     \\  exlr8-bench DIR [MANIFEST] [LAYER] [SETS]   a real EXLR8 layer: FP64, row windows, then GB/s by stage
@@ -245,6 +249,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exlr8-bench")) return exlr8_tests.bench(gpu, try arg(rest, 0), if (rest.len > 1) rest[1] else "home", if (rest.len > 2) try std.fmt.parseInt(u16, rest[2], 10) else 40, if (rest.len > 3) try std.fmt.parseInt(usize, rest[3], 10) else 4);

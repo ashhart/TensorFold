@@ -119,3 +119,9 @@ pub fn treeVariant(slots: u32, streams: u32, major: c_int, minor: c_int, sms: c_
     if (slots <= 16) return tree(16, 2, 2, false);
     return tree(32, 2, 1, false);
 }
+
+pub const moe: []const u8 = if (available) &Blob("fatbin_moe").bytes else &.{};
+pub const qwen36_mtp: []const u8 = if (available) &Blob("fatbin_qwen36_mtp").bytes else &.{};
+
+pub const experts3: []const u8 = if (available) &Blob("fatbin_experts3").bytes else &.{};
+pub const experts3_prefill: []const u8 = if (available) &Blob("fatbin_experts3_prefill").bytes else &.{};

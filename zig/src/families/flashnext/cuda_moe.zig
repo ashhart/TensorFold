@@ -14,7 +14,7 @@ const routed_rows: usize = count + 1;
 const tile: usize = 16;
 const block_bytes: usize = 160 * 4;
 
-const pack_symbol: [:0]const u8 = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiii";
+const pack_symbol: [:0]const u8 = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiiiii";
 const plan_symbol: [:0]const u8 = "_ZN10tf_experts11plan_kernelEPKiiiiPiS2_S2_";
 const up_symbol: [:0]const u8 = "_ZN10tf_experts13expert_kernelILi32ELi2ELi2ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
 const down_symbol: [:0]const u8 = "_ZN10tf_experts13expert_kernelILi32ELi1ELi0ELi2ELi4EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
@@ -193,6 +193,8 @@ fn packDownload(gpa: std.mem.Allocator, driver: *cuda.Driver, stream: cuda.Strea
     a.add(cint(k / 8));
     a.add(cint(kg));
     a.add(cint(nb));
+    a.add(cint(1)); // one table, the 0th (pair tables interleave two)
+    a.add(cint(0));
     try cuda.launch.launch(pack_fn, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(e) }, .block = .{ .x = 160 } }, stream, &a);
     const out = try gpa.alloc(u8, out_len);
     errdefer gpa.free(out);

@@ -22,6 +22,10 @@ const kernels = [_]Kernel{
     .{ .name = "route_rows", .flags = glue }, // ours: router logits and softmax top-k rows (cuda/route_rows.zig)
     .{ .name = "flashnext_hc", .flags = glue }, // ours: Flash Next's hyper-connection and n-gram glue
     .{ .name = "flashnext_attn", .flags = glue }, // ours: Flash Next's attention glue and its indexer's pooling and scores
+    .{ .name = "experts3", .flags = &.{"-O3"} }, // ours: 3-bit experts on experts.cu's steps, nibble words from planes
+    .{ .name = "experts3_prefill", .flags = &.{"-O3"} },
+    .{ .name = "moe", .flags = &.{"-O3"} }, // cuda/moe.py: softmax top-k routing with a sigmoid-gated shared expert
+    .{ .name = "qwen36_mtp", .flags = &.{"-O3"} }, // ours: the Qwen3.6 MTP drafter's attention at the target's head width
     .{ .name = "gdn", .flags = &.{ "-O3", "--fmad=false" } }, // cuda/kernels/gdn.py, tensorfold_gdn_v2
     .{ .name = "probe", .flags = &.{"-O3"} },
     .{ .name = "qmm_group", .flags = &.{"-O3"} }, // cuda/kernels/qmm.py, tensorfold_qmm_v5

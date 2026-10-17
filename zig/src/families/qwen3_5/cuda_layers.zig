@@ -24,12 +24,12 @@ pub const Proj = union(enum) {
 
 pub const Delta = struct { qkv: Proj, z: Proj, a: Proj, b: Proj, out: Proj, conv: u64, norm: u64, a_log: u64, dt_bias: u64 };
 pub const Attention = struct { q: Proj, k: Proj, v: Proj, o: Proj, q_norm: u64, k_norm: u64 };
+/// A dense SwiGLU MLP, or routed experts (the shared one last in their tables) behind a router of bf16 rows.
+pub const Mlp = union(enum) { dense: struct { gate: Proj, up: Proj, down: Proj }, moe: struct { router: u64, experts: cuda.experts.Layer } };
 pub const Layer = struct {
     input_norm: u64,
     post_norm: u64,
-    gate: Proj,
-    up: Proj,
-    down: Proj,
+    mlp: Mlp,
     mixer: union(enum) { delta: Delta, attention: Attention },
 };
 

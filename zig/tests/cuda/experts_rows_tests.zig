@@ -9,7 +9,7 @@ const grouped = cuda.grouped;
 const Rows = cuda.experts.RowsExperts;
 
 /// experts_pack.cu's groups of 32 (one block: 160 uint32 words of codes, scales and biases).
-const pack_symbol = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiii";
+const pack_symbol = "_ZN15tf_experts_pack11pack_kernelILi1EEEvPKjPKtS4_Pjiiiiii";
 const block_bytes = 160 * 4;
 const dims = 256;
 const width = 128;
@@ -65,7 +65,7 @@ const Rig = struct {
         const out = try r.zeros(count * (n / 32) * (k / 32) * block_bytes);
         var args: cuda.Args = .{};
         for ([_]u64{ try r.dev(std.mem.sliceAsBytes(words)), try r.dev(std.mem.sliceAsBytes(scales)), try r.dev(std.mem.sliceAsBytes(biases)), out }) |v| args.add(v);
-        for ([_]usize{ n, k / 8, k / 32, n / 32 }) |v| args.add(@as(c_int, @intCast(v)));
+        for ([_]usize{ n, k / 8, k / 32, n / 32, 1, 0 }) |v| args.add(@as(c_int, @intCast(v))); // one table, the 0th
         try cuda.launch.launch(pack, .{ .grid = .{ .x = @intCast(k / 32), .y = @intCast(n / 32), .z = @intCast(count) }, .block = .{ .x = 160 } }, r.s, &args);
         return out;
     }

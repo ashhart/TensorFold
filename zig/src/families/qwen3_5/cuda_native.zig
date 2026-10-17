@@ -8,6 +8,7 @@ const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
 const reuse = @import("cuda_reuse.zig");
+const Mtp = @import("cuda_mtp.zig").Mtp;
 const be = lanes.backend;
 
 pub const model_type = "qwen3_5";
@@ -116,6 +117,28 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     try l.e.setTaps(d.taps());
     try l.timeWindows(d);
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+}
+
+/// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p` (qwen3_5_moe), its ring the window.
+pub fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+    if (bits != 4) return error.DrafterBitsUnsupported;
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
+    const d = try Mtp.init(gpa, io, l.e, dir, l.capacity);
+    errdefer d.deinit();
+    try l.e.setTaps(d.taps());
+    try l.timeWindows(d);
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeMtp, .reserve = reserveMtp };
+}
+
+fn reserveMtp(p: *anyopaque, streams: u32) anyerror!void {
+    const d: *Mtp = @ptrCast(@alignCast(p));
+    try d.reserve(streams);
+}
+
+fn closeMtp(p: *anyopaque) void {
+    const d: *Mtp = @ptrCast(@alignCast(p));
+    d.deinit();
 }
 
 fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
@@ -233,7 +256,7 @@ const Lanes = struct {
     }
 
     /// Each width's forward timed on its own cache, on its third run: graph captured, stall paid, a keep in front.
-    fn timeWindows(self: *Lanes, d: *Draft) !void {
+    fn timeWindows(self: *Lanes, d: anytype) !void {
         var cache = try E.Cache.init(self.gpa, self.e, 64);
         defer cache.deinit(self.gpa);
         const ids: [E.most_window]u32 = @splat(0);

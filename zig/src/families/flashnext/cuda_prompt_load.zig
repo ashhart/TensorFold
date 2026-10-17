@@ -147,6 +147,8 @@ fn packDevice(driver: *cuda.Driver, stream: *cuda.Stream, pack_fn: cuda.Function
     a.add(cint(k / 8));
     a.add(cint(kg));
     a.add(cint(nb));
+    a.add(cint(1)); // one table, the 0th (pair tables interleave two)
+    a.add(cint(0));
     try cuda.launch.launch(pack_fn, .{ .grid = .{ .x = @intCast(kg), .y = @intCast(nb), .z = @intCast(e) }, .block = .{ .x = 160 } }, stream.*, &a);
     try stream.synchronize();
     return out_b;

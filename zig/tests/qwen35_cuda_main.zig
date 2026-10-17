@@ -1,4 +1,4 @@
-//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|vision> ...`: rows to compare; usage below.
+//! `tf-qwen35-cuda <model> <step|window|tree|prompt|mrope|probe|mtp|vision> ...`: rows to compare; usage below.
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
@@ -8,6 +8,8 @@ const vl = core.qwen_vl;
 
 const usage =
     \\usage: tf-qwen35-cuda <model dir> <step|window|tree|prompt|mrope> <ids> <out> [fp8]
+    \\       tf-qwen35-cuda <model dir> probe <ids> <layer>: a routed model's routing and rows at that layer
+    \\       tf-qwen35-cuda <model dir> mtp <ids> <out>: the MTP drafter's tree regressions after a prompt
     \\       tf-qwen35-cuda <model dir> vision <out dir> <tokens> [--bound MEAN WORST] <picture or NAME.f32@HxW>...
     \\vision prepares each picture with core/qwen_vl under a <tokens> budget and runs the CUDA tower twice: <out dir>
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
@@ -55,6 +57,7 @@ pub fn main(init: std.process.Init) !u8 {
     defer ctx.deinit();
     const e = try E.Engine.init(init.gpa, init.io, &ctx, args[1], args.len == 6);
     defer e.deinit();
+    if (std.mem.eql(u8, args[2], "mtp")) return mtpCheck(init.gpa, init.io, e, args[1], ids.items);
     // TF_Q35_PREFILL=N starts the stream after N cycled ids; TF_Q35_BESIDE=N steps an N-token stream beside it
     const prefill = try envCount("TF_Q35_PREFILL");
     const beside = try envCount("TF_Q35_BESIDE");
@@ -129,6 +132,46 @@ pub fn main(init: std.process.Init) !u8 {
             if (n > 1) try cache.keep(e, path[0..kept]);
             at += kept;
         }
+    } else if (std.mem.eql(u8, args[2], "probe")) {
+        // the first id through layers 0..N (N = the out argument): that layer's routing and rows, for a reference
+        const layer = try std.fmt.parseInt(usize, args[4], 10);
+        const all = e.layers;
+        e.layers = all[0 .. layer + 1];
+        e.graphs.clearRetainingCapacity(); // the warm-up captured every layer; this forward captures the cut
+        try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, ids.items[0..1], .logits);
+        e.layers = all;
+        const g = e.g;
+        if (!g.moe()) return error.NotRouted;
+        const count = g.experts + 1;
+        const logits_f = try a.alloc(f32, count);
+        const picks = try a.alloc(i32, g.slots());
+        const wts = try a.alloc(f32, g.slots());
+        var xrow: [8]u16 = undefined;
+        var rrow: [8]u16 = undefined;
+        try e.arena.download(e.routed.logits - e.arena.ptr, std.mem.sliceAsBytes(logits_f));
+        try e.arena.download(e.routed.picks - e.arena.ptr, std.mem.sliceAsBytes(picks));
+        try e.arena.download(e.routed.wts - e.arena.ptr, std.mem.sliceAsBytes(wts));
+        try e.arena.download(e.x - e.arena.ptr, std.mem.sliceAsBytes(&xrow));
+        try e.arena.download(e.r - e.arena.ptr, std.mem.sliceAsBytes(&rrow));
+        std.debug.print("probe layer {d} x[:8]", .{layer});
+        for (xrow) |h| std.debug.print(" {d:.5}", .{@as(f32, @bitCast(@as(u32, h) << 16))});
+        std.debug.print("\nprobe top logits", .{});
+        for (0..10) |_| {
+            var best: usize = 0;
+            for (logits_f[0 .. count - 1], 0..) |v, i| if (v > logits_f[best]) {
+                best = i;
+            };
+            std.debug.print(" ({d}, {d:.5})", .{ best, logits_f[best] });
+            logits_f[best] = -std.math.inf(f32);
+        }
+        std.debug.print(" shared gate {d:.5}\nprobe picks", .{logits_f[count - 1]});
+        for (picks) |pk| std.debug.print(" {d}", .{pk});
+        std.debug.print(" weights", .{});
+        for (wts) |w| std.debug.print(" {d:.5}", .{w});
+        std.debug.print("\nprobe r[:8]", .{});
+        for (rrow) |h| std.debug.print(" {d:.5}", .{@as(f32, @bitCast(@as(u32, h) << 16))});
+        std.debug.print("\n", .{});
+        return 0;
     } else {
         // mrope: chunks through an image prompt's table (text positions, no image rows): prompt's bits
         const table = std.mem.eql(u8, args[2], "mrope");
@@ -193,6 +236,17 @@ const Fwd = struct {
         try f.e.forward(&.{ part, .{ .cache = o, .rows = 1 } }, all[0 .. toks.len + 1], .logits);
     }
 };
+
+/// The MTP drafter's tree regressions (cuda_mtp_check.zig) after a prompt over the ids fills the target's tap ring.
+fn mtpCheck(gpa: std.mem.Allocator, io: std.Io, e: *E.Engine, dir: []const u8, ids: []const u32) !u8 {
+    const d = try q.mtp.Mtp.init(gpa, io, e, dir, 4096);
+    defer d.deinit();
+    try e.setTaps(d.taps());
+    var cache = try E.Cache.init(gpa, e, 4096);
+    defer cache.deinit(gpa);
+    try fill(e, &cache, ids, ids.len);
+    return if (try q.mtp_check.run(gpa, d, cache.tap.?.ptr, ids)) 0 else 1;
+}
 
 fn envCount(name: [:0]const u8) !usize {
     const v = std.c.getenv(name) orelse return 0;

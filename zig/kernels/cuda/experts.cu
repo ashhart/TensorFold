@@ -285,3 +285,7 @@ template __global__ void tf_experts::expert_kernel<32, 2, 2, 2, 4>(const __nv_bf
     int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
 template __global__ void tf_experts::expert_kernel<32, 1, 0, 2, 4>(const __nv_bfloat16*, \
     int, int, const uint4*, int, int, const int*, const int*, const int*, void*, int, float);
+
+// Pair form: gate and up blocks interleaved per group (M = 2), SwiGLU in the epilogue (2) as fp8/nvfp4's up does.
+#define TF_EXPERT_PAIR(EPI) template __global__ void tf_experts::expert_kernel<64, 2, EPI, 2, 4>(const __nv_bfloat16* __restrict__,     int, int, const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float);
+TF_EXPERT_PAIR(2)

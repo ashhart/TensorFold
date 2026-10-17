@@ -155,3 +155,6 @@ __global__ void __launch_bounds__(WM * WN * 32)
     const __nv_bfloat16* __restrict__, int, int, const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float);
 TF_PREFILL(1)
 TF_PREFILL(3)
+
+// Pair form for prompt rows: gate and up interleaved (M = 2) under SwiGLU (epilogue 2).
+template __global__ void tf_experts_prefill::prefill_kernel<64, 2, 2, 2, 2, 4>(const __nv_bfloat16* __restrict__, int, int,     const uint4* __restrict__, int, int, const int* __restrict__, const int* __restrict__, const int* __restrict__, void* __restrict__, int, float);

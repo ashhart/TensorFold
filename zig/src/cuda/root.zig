@@ -106,3 +106,13 @@ test {
     _ = @import("moe_glue.zig");
     _ = @import("dense_rows.zig");
 }
+
+pub const moe = @import("moe.zig");
+test {
+    _ = moe;
+}
+
+pub const experts3 = @import("experts3.zig");
+test {
+    _ = experts3;
+}

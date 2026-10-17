@@ -5,6 +5,7 @@ const core = @import("core");
 const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const caches = @import("cuda_cache.zig");
+const routed = @import("cuda_routed.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -37,6 +38,7 @@ pub const Proj = layers.Proj;
 pub const Delta = layers.Delta;
 pub const Attention = layers.Attention;
 pub const Layer = layers.Layer;
+pub const Mlp = layers.Mlp;
 const Fns = layers.Fns;
 pub const Keeps = layers.Keeps;
 const Kv8 = layers.Kv8;
@@ -63,12 +65,16 @@ pub const Engine = struct {
     g: Geometry,
     geo: Geo,
     stream: cuda.Stream,
-    mods: [10]cuda.Module,
+    mods: [16]cuda.Module,
     kv8: bool, // attention caches as e4m3 rows with a scale each
     fp8: Kv8,
     draws: cuda.sample.Draws,
     affine: cuda.qlinear.Affine4Kernels,
     wide: cuda.qlinear.AffineNKernels, // the tiles of every width but 4, and their packs
+    experts: cuda.experts.Affine4Experts,
+    experts3: cuda.experts3.Affine3Experts,
+    plan: cuda.grouped.Router,
+    moe: cuda.moe.Fns,
     fns: Fns,
     keeps: Keeps,
     /// Every weight and scratch buffer in one allocation: WDDM's launch cost grows with the allocation count.
@@ -113,6 +119,7 @@ pub const Engine = struct {
     pl: u64,
     po: u64,
     logits: u64,
+    routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
     // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
@@ -164,7 +171,7 @@ pub const Engine = struct {
         errdefer e.arena.free();
         try e.arena.fill8(0, null); // touched once now: the driver commits memory on first touch, slowly
         const kk = cuda.kernels;
-        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill, kk.qwen35_kv8 };
+        const images = [_][]const u8{ kk.qmm_group, kk.qmm_prefill, kk.lane_gemv, kk.affine4_pack, kk.qwen35, kk.sample, kk.qwen35_keep, kk.affine8, kk.affine_prefill, kk.qwen35_kv8, kk.experts, kk.experts_prefill, kk.experts_pack, kk.moe, kk.experts3, kk.experts3_prefill };
         var loaded: usize = 0;
         errdefer for (e.mods[0..loaded]) |*m| m.unload();
         for (images, 0..) |img, i| {
@@ -178,6 +185,10 @@ pub const Engine = struct {
         e.wide = try cuda.qlinear.AffineNKernels.resolve(d, e.mods[7], e.mods[8], e.mods[3], sms, gb10);
         errdefer e.wide.deinit();
         e.draws = try cuda.sample.Draws.resolve(e.mods[5]);
+        e.experts = try cuda.experts.Affine4Experts.resolve(e.mods[10], e.mods[11], e.mods[12], sms);
+        e.experts3 = try cuda.experts3.Affine3Experts.resolve(e.mods[14], e.mods[15], sms);
+        e.plan = try cuda.grouped.Router.resolve(e.mods[10]);
+        e.moe = try cuda.moe.Fns.resolve(e.mods[13]);
         inline for (@typeInfo(Fns).@"struct".field_names) |name| @field(e.fns, name) = try e.mods[4].function("tf_q35_" ++ name);
         inline for (@typeInfo(Keeps).@"struct".field_names) |name| @field(e.keeps, name) = try e.mods[6].function("tf_q35k_" ++ name);
         e.fp8 = .{ .rope = try e.mods[9].function("tf_q35_rope8"), .attn_partial = try e.mods[9].function("tf_q35_attn_partial8"), .compact = try e.mods[9].function("tf_q35k_compact8") };
@@ -266,7 +277,7 @@ pub const Engine = struct {
             e: *Engine,
             mode: @TypeOf(mode),
             total: *usize,
-            fn alloc(t: @This(), bytes: usize) !u64 {
+            pub fn alloc(t: @This(), bytes: usize) !u64 {
                 t.total.* += aligned(bytes);
                 return if (t.mode == .measure) 0 else try t.e.alloc(bytes);
             }
@@ -290,6 +301,7 @@ pub const Engine = struct {
         e.pl = try t.alloc(R * g.q_heads * max_chunks * 4);
         e.po = try t.alloc(R * g.q_heads * max_chunks * head_dim * 4);
         e.logits = try t.alloc(most_verify * g.vocab * 2);
+        if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
         return total;
     }
 
@@ -537,11 +549,16 @@ pub const Engine = struct {
                 },
             }
             try e.norm(true, l.post_norm, total);
-            try e.proj(l.gate, e.x, e.gate, total, prompt);
-            try e.proj(l.up, e.x, e.up, total, prompt);
-            const n: c_longlong = @intCast(total * g.intermediate);
-            try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });
-            try e.proj(l.down, e.act, e.r, total, prompt);
+            switch (l.mlp) {
+                .dense => |m| {
+                    try e.proj(m.gate, e.x, e.gate, total, prompt);
+                    try e.proj(m.up, e.x, e.up, total, prompt);
+                    const n: c_longlong = @intCast(total * g.intermediate);
+                    try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });
+                    try e.proj(m.down, e.act, e.r, total, prompt);
+                },
+                .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, prompt and total > most_window),
+            }
             if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
                 try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
             };
@@ -550,6 +567,8 @@ pub const Engine = struct {
         // the head over the kept rows
         try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);
     }
+
+    pub const routedRows = routed.rows;
 
     /// Row `i`'s logits from the newest forward that kept logits.
     pub fn rowLogits(e: *const Engine, i: usize) []const u16 {
