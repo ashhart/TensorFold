@@ -1,11 +1,13 @@
 //! CUDA family registration, device setup, memory admission and the native lane host.
 const std = @import("std");
+const platform = @import("sys");
 const cuda = @import("cuda");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const nemotron = @import("nemotron");
 const lfm2 = @import("lfm2.zig");
 const glm = @import("glm_cuda");
+const qwen35 = @import("qwen35");
 const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
@@ -13,9 +15,10 @@ const snaps = @import("cuda_snaps.zig");
 const nemotron_slide = @import("nemotron_slide.zig");
 const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
+const drafted = @import("cuda_drafted.zig");
 
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native };
 
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
@@ -36,26 +39,9 @@ pub const chip = cuda_device.chip;
 pub const deviceName = cuda_device.deviceName;
 const getenv = cuda_device.getenv;
 const setting = cuda_device.setting;
-
-/// The model's window (config.json's max_position_embeddings, text_config's first), 0 when it names none.
-fn modelContext(a: Allocator, io: std.Io, dir: []const u8) i64 {
-    const path = std.fs.path.join(a, &.{ dir, "config.json" }) catch return 0;
-    const bytes = std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch return 0;
-    const doc = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}) catch return 0;
-    if (doc != .object) return 0;
-    const text = if (doc.object.get("text_config")) |t| (if (t == .object) t else doc) else doc;
-    const limit = text.object.get("max_position_embeddings") orelse doc.object.get("max_position_embeddings") orelse return 0;
-    return if (limit == .integer and limit.integer > 0) limit.integer else 0;
-}
-
-/// Prompt plus reply tokens a request may use: --context (0: the model's window), else the family default within it.
-fn contextWindow(requested: ?i64, native: i64, default: i64) error{ Negative, NoNative, PastNative }!i64 {
-    const r = requested orelse return if (native > 0) @min(default, native) else default;
-    if (r < 0) return error.Negative;
-    if (r == 0) return if (native > 0) native else error.NoNative;
-    if (native > 0 and r > native) return error.PastNative;
-    return r;
-}
+const windows = @import("cuda_window.zig");
+const modelContext = windows.modelContext;
+const contextWindow = windows.contextWindow;
 
 /// The pool now, read on the thread whose context is current; `problem` names a bad variable.
 fn pool(a: Allocator, io: std.Io, ctx: *const cuda.Context, problem: *[]const u8) !?budget.Pool {
@@ -113,6 +99,7 @@ const Host = struct {
     dir: []u8 = &.{}, // the model folder the learner writes its lessons into
     health: ?api.HealthSource = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
+    served: drafted.Served = undefined, // the family's backend, wrapped with --drafter's draft model when given
 
     /// A family's readiness reads host state only: no CUDA binding or blocking device work.
     fn readiness(h: *Host, comptime F: type) void {
@@ -134,6 +121,7 @@ const Host = struct {
         }
         if (h.slide) |s| h.slide_free.?(h.gpa, s);
         h.gpa.free(h.dir);
+        h.served.close(h.gpa);
         h.release(h.family);
         if (h.gpu) |g| {
             g.ctx.deinit();
@@ -157,6 +145,9 @@ const Host = struct {
     fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
+        // a drafter's trees: the planner picks a lone stream's lanes, as deep as it drafts
+        if (facts.head_trees) h.cfg.head_lanes = rows - 1;
+        if (facts.head_trees) h.cfg.head_depth = @max(1, facts.drafts);
         h.clock = .{ .io = io };
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();
@@ -342,6 +333,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         opts.precision = std.meta.stringToEnum(@typeInfo(@TypeOf(opts.precision)).optional.child, @tagName(p)).?;
     }
     if (@hasField(F.Options, "room")) opts.room = .{ .ctx = &probe, .read = Probe.read };
+    if (@hasField(F.Options, "kv8")) opts.kv8 = o.kv8;
     if (weights > before.room(held0)) {
         problem.* = try std.fmt.allocPrint(a, "the checkpoint's {d:.1} GiB of weights do not fit the {d:.1} GiB the CUDA memory budget grants ({d:.1} GiB free less a {d:.1} GiB reserve{s}); free device memory or adjust TENSORFOLD_MEMORY_RESERVE_GIB / TENSORFOLD_CUDA_MEMORY_LIMIT_GB", .{ toGib(weights), toGib(before.room(held0)), toGib(before.free), toGib(before.reserve), if (before.limit != null) ", under TENSORFOLD_CUDA_MEMORY_LIMIT_GB" else "" });
         return null;
@@ -377,20 +369,24 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         problem.* = why;
         return null;
     };
+    var served = try drafted.wrap(F, a, gpa, io, loaded, o, problem) orelse return null;
+    defer if (!opened) served.close(gpa);
     const model = cuda.usage(false).device - held0;
     const after = try pool(a, io, &g.ctx, problem) orelse return null;
-    var room = after.room(model) -| loaded.learn_bytes;
+    const L = @TypeOf(loaded); // a family's Loaded may leave out a learner and a lone driver
+    const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
+    var room = after.room(model) -| learn_bytes;
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
         room = pr.bytes;
         low = try std.fmt.allocPrint(a, " on rank {d}, the smallest room of the ranks", .{pr.rank});
     };
     const free = loaded.free_streams;
-    const streams = budget.admit(room, loaded.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
+    const streams = budget.admit(room, served.stream_bytes, free, o.lanes, o.lanes_fixed) catch |e| {
         problem.* = switch (e) {
             error.NoStream => try std.fmt.allocPrint(a, no_stream, .{
                 window,
-                toGib(loaded.stream_bytes),
+                toGib(served.stream_bytes),
                 toGib(room),
                 toGib(model),
                 toGib(after.reserve),
@@ -398,24 +394,31 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
             }),
             error.TooMany => try std.fmt.allocPrint(a, too_many, .{
                 o.lanes,
-                toGib(loaded.stream_bytes * (o.lanes -| free)),
+                toGib(served.stream_bytes * (o.lanes -| free)),
                 window,
                 toGib(room),
                 low,
-                free + room / loaded.stream_bytes,
+                free + room / served.stream_bytes,
             }),
         };
         return null;
     };
+    served.reserve(streams) catch |e| {
+        problem.* = try std.fmt.allocPrint(a, "the native CUDA engine cannot reserve {d} streams' caches at a {d}-token window ({s}): serve fewer with --parallel, or lower --context", .{ streams, window, @errorName(e) });
+        return null;
+    };
     const h = try gpa.create(Host);
     errdefer gpa.destroy(h);
-    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = loaded.backend, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = loaded.lone };
+    h.* = .{ .gpa = gpa, .gpu = g, .family = loaded.ctx, .release = loaded.deinit, .inner = served.backend, .served = served, .vtable = undefined, .cfg = undefined, .clock = undefined, .core = undefined, .host = undefined, .lone = if (@hasField(L, "lone")) loaded.lone else null };
     h.readiness(F);
-    const held = loaded.stream_bytes * (streams -| free);
-    const cache = if (@hasDecl(F, "snap_save")) budget.cacheBytes(o.prompt_cache_gib, room, held) else 0;
-    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
-        capability,                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (loaded.learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(loaded.learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(loaded.stream_bytes), window, toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
-        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache", .{toGib(cache)}) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
+    const held = served.stream_bytes * (streams -| free);
+    // a family that keeps its states in pinned host memory (snap_host) has a host budget, not the device's room
+    const host_cache = @hasDecl(F, "snap_host");
+    const device_cache = budget.cacheBytes(o.prompt_cache_gib, room, held);
+    const cache = if (!@hasDecl(F, "snap_save")) 0 else if (host_cache) budget.hostCacheBytes(a, io, o.prompt_cache_gib) else device_cache;
+    h.startup = try std.fmt.allocPrint(gpa, "CUDA sm_{d} device {d} ({s}{s}): model {d:.2} GiB{s}; {d} stream{s} at once, {d:.2} GiB each at a {d}-token window{s}, of {d:.1} GiB left after a {d:.1} GiB reserve; prompts in passes of up to {d} rows{s}{s}; {s}", .{
+        capability,                                                                                                                                                        device,                                                                                                       name, if (after.unified) ", memory shared with the host" else "", toGib(model), if (learn_bytes > 0) try std.fmt.allocPrint(a, " and {d:.2} GiB kept for --slide's trainer", .{toGib(learn_bytes)}) else "", streams, if (streams == 1) "" else "s", toGib(served.stream_bytes), window, if (o.kv8) " (fp8 caches)" else "", toGib(room), toGib(after.reserve), F.prompt_rows, if (segments > 1) try std.fmt.allocPrint(a, ", {d} staggered segments a call", .{segments}) else "",
+        if (cache > 0) try std.fmt.allocPrint(a, ", a {d:.1} GiB prompt cache{s}", .{ toGib(cache), if (host_cache) " in host memory" else "" }) else ", no prompt cache", if (kernels) |dir| try std.fmt.allocPrint(a, "glue kernels captured at {s}", .{dir}) else "own glue kernels",
     });
     errdefer gpa.free(h.startup);
     if (@hasDecl(F, "snap_save") and cache > 0) {
@@ -454,7 +457,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         gpa.free(h.dir);
     };
     if (o.record) |dir| {
-        const r = try record.open(gpa, io, dir, taps, loaded.backend);
+        const r = try record.open(gpa, io, dir, taps, served.backend);
         h.recording = r;
         h.inner = r.recorded.backend();
         h.lone = null; // every token through the lane rounds, where the recorder sees it
@@ -462,15 +465,15 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     }
     errdefer if (h.recording) |r| r.free(gpa);
     // the family cuts its own prompt grid from position 0, as `tensorfold run` does: prefill_step 0
-    try h.serve(io, loaded.facts, loaded.rows, .{
+    try h.serve(io, served.facts, loaded.rows, .{
         .lanes = streams,
         .context_window = @intCast(window),
         .startup = h.startup,
         .prompt_cache = h.store != null,
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
-        .logprobs = loaded.backend.vtable.first_row != null,
-        .prompt_logprobs = loaded.backend.vtable.prompt_rows,
-        .structures = loaded.backend.vtable.first_masked != null,
+        .logprobs = served.backend.vtable.first_row != null,
+        .prompt_logprobs = served.backend.vtable.prompt_rows,
+        .structures = served.backend.vtable.first_masked != null,
         .vision = if (@hasField(@TypeOf(loaded), "vision")) vision_offer.offer(loaded.vision) else null,
     }, .{ .ctx = loaded.ctx, .text = F.explain });
     opened = true;
@@ -487,6 +490,7 @@ test {
     _ = lane_backend;
     _ = snaps;
     _ = cuda_device; // the device and variable tests
+    _ = windows;
 }
 
 test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
@@ -501,16 +505,6 @@ test "every registered family and d1's decision engine are listed for capabiliti
     try std.testing.expectEqual(@as(usize, registry.len + 1), families.len);
     try std.testing.expectEqualStrings("nemotron_h", families[0].model_type);
     try std.testing.expectEqualStrings("lfm2_vl", families[registry.len].model_type);
-}
-
-test "context windows: the family default inside the model's, 0 for the model's, never past it" {
-    try std.testing.expectEqual(@as(i64, 16384), try contextWindow(null, 262144, 16384));
-    try std.testing.expectEqual(@as(i64, 4096), try contextWindow(null, 4096, 16384));
-    try std.testing.expectEqual(@as(i64, 262144), try contextWindow(0, 262144, 16384));
-    try std.testing.expectEqual(@as(i64, 65536), try contextWindow(65536, 262144, 16384));
-    try std.testing.expectError(error.PastNative, contextWindow(300000, 262144, 16384));
-    try std.testing.expectError(error.Negative, contextWindow(-5, 262144, 16384));
-    try std.testing.expectError(error.NoNative, contextWindow(0, 0, 16384));
 }
 
 test "a cancel during a long prompt stops it, and the next request's reply is unchanged (#291)" {

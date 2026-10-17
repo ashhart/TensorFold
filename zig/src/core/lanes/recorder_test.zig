@@ -1,5 +1,6 @@
 //! The recorder in front of the fake target: replies unchanged, and each stream's files hold its committed rows.
 const std = @import("std");
+const platform = @import("sys");
 const Config = @import("config.zig").Config;
 const Model = @import("config.zig").Model;
 const Cost = @import("config.zig").Cost;
@@ -22,7 +23,7 @@ const Case = struct {
     restored: u32 = 0,
 };
 
-const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true, chunks: usize = 0, planted: ?[2][]const u8 = null }; // chunks: prefill_step; planted: a link's target and name
+const Mode = struct { mtp: bool = true, pipelined: bool = false, shared: bool = true, chunks: usize = 0, planted: ?[2][]const u8 = null, batched: bool = false, memory_lanes: ?usize = null }; // chunks: prefill_step; planted: a link's target and name
 
 var costs: [16]Cost = undefined;
 
@@ -64,13 +65,13 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
     const dir = try std.fmt.allocPrintSentinel(a, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     var cfg = try Config.init(gpa, model(mode), 16, 15);
     defer cfg.deinit(gpa);
-    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = mode.chunks };
+    var target: fake.Fake = .{ .gpa = gpa, .prefill_chunks = mode.chunks, .memory_lanes = mode.memory_lanes };
     defer target.deinit();
     var recorder = try rec.Recorder.init(gpa, io, dir, &.{ 30, 31 });
     recorder.floor = 0;
     defer recorder.deinit();
-    if (mode.planted) |p| try recorder.space.symLink(io, p[0], p[1], .{});
-    const inner = if (mode.chunks > 0) target.stepped() else target.backend();
+    if (mode.planted) |p| recorder.space.symLink(io, p[0], p[1], .{}) catch |e| return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
+    const inner = if (mode.batched) target.batched() else if (mode.chunks > 0) target.stepped() else target.backend();
     var recorded = try rec.Recorded.init(inner, &recorder);
     var clock: fake.FixedClock = .{};
     var engine = Engine.init(gpa, &cfg, if (record) recorded.backend() else inner, clock.clock());
@@ -96,7 +97,14 @@ fn run(cases: []const Case, mode: Mode, record: bool) ![][]u32 {
         s.deinit(gpa);
         p.deinit();
     };
-    for (streams) |*s| if (mode.chunks > 0) {
+    if (mode.batched) {
+        const ss = try a.alloc(*sm.Stream, streams.len);
+        for (streams, ss) |*s, *p| p.* = s;
+        const errs = try a.alloc(?anyerror, streams.len);
+        engine.addStreams(ss, errs);
+        for (errs) |err| if (err) |e| return e;
+        try std.testing.expectEqual(@as(usize, if (mode.memory_lanes == null) 1 else 0), target.many_passes);
+    } else for (streams) |*s| if (mode.chunks > 0) {
         var first = true;
         while (!try engine.fillStream(s, first)) first = false;
     } else try engine.addStream(s);
@@ -166,6 +174,11 @@ test "shared rounds: each stream's files hold its own rows, batched or not" {
     }
 }
 
+test "batched prompts record each stream's own rows, also after a refused batch falls back to solo" {
+    try expectSame(&.{ .{ .prompt = &p1 }, .{ .prompt = &p2, .sampling = sampled }, .{ .prompt = &long, .drafts = false } }, .{ .batched = true });
+    try expectSame(&.{ .{ .prompt = &p1, .max_new = 1 }, .{ .prompt = &p2, .max_new = 1 } }, .{ .batched = true, .memory_lanes = 1 });
+}
+
 test "a restored prompt's files start at the first row the pass computed" {
     try expectSame(&.{.{ .prompt = &long, .restored = 12 }}, .{});
     try expectSame(&.{ .{ .prompt = &long, .restored = 7, .drafts = false }, .{ .prompt = &p2 } }, .{});
@@ -193,10 +206,11 @@ test "each recorder makes its own new folder: two in one folder, and a link wher
     defer away.cleanup();
     var buf: [64]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
-    const first = try std.fmt.allocPrint(gpa, "{d}-0", .{std.c.getpid()});
+    const first = try std.fmt.allocPrint(gpa, "{d}-0", .{platform.c.getpid()});
     defer gpa.free(first);
     var abuf: [64]u8 = undefined;
-    try tmp.dir.symLink(io, try std.fmt.bufPrint(&abuf, "../{s}", .{away.sub_path}), first, .{ .is_directory = true });
+    tmp.dir.symLink(io, try std.fmt.bufPrint(&abuf, "../{s}", .{away.sub_path}), first, .{ .is_directory = true }) catch |e|
+        return if (e == error.PermissionDenied and @import("builtin").os.tag == .windows) error.SkipZigTest else e; // symlinks need privilege on Windows
     var one = try rec.Recorder.init(gpa, io, dir, &.{1});
     defer one.deinit();
     var two = try rec.Recorder.init(gpa, io, dir, &.{1});
@@ -219,13 +233,13 @@ test "a recorder that finds every name taken gives up once, owning its name" {
     const dir = try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0);
     for (0..3) |k| {
         var nbuf: [32]u8 = undefined;
-        try tmp.dir.createDir(io, try std.fmt.bufPrint(&nbuf, "{d}-{d}", .{ std.c.getpid(), k }), .default_dir);
+        try tmp.dir.createDir(io, try std.fmt.bufPrint(&nbuf, "{d}-{d}", .{ platform.c.getpid(), k }), .default_dir);
     }
     try std.testing.expectError(error.PathAlreadyExists, rec.Recorder.initTries(gpa, io, dir, &.{1}, 3));
     var r = try rec.Recorder.initTries(gpa, io, dir, &.{1}, 4);
     defer r.deinit();
     var nbuf: [32]u8 = undefined;
-    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&nbuf, "{d}-3", .{std.c.getpid()}), r.name);
+    try std.testing.expectEqualStrings(try std.fmt.bufPrint(&nbuf, "{d}-3", .{platform.c.getpid()}), r.name);
 }
 
 test "a stream's files are only ever new ones: links planted in the recorder's folder are not written through" {

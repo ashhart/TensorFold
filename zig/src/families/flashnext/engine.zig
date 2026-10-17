@@ -1,6 +1,7 @@
 //! Flash Next served from the replay engine: one reply at a time, its prompt through prompt chunks (the MTP head's
 //! keys for every prompt row), then GPU-side rounds whose drafts the depth rule sets; tokens leave as rounds are read.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const fz = @import("replay.zig");
@@ -156,8 +157,8 @@ pub const Engine = struct {
         e.copy_long = 6;
         e.segments = true;
         e.mark_taps = true;
-        e.pair_min = tp_settings.pairMin(if (std.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
-        e.call_log = std.c.getenv("FZ_CALL_LOG") != null;
+        e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
+        e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
         e.passed = null;
         e.snap_pool = .{};
         e.handoff_ns = 0;
@@ -182,8 +183,8 @@ pub const Engine = struct {
         r.event = try device.sharedEvent();
         if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
         r.sel = try Select.init(r, MAXR);
-        r.lane_new = std.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
-        if (std.c.getenv("FZ_GDN")) |v| {
+        r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
+        if (platform.c.getenv("FZ_GDN")) |v| {
             r.gdn_pipe = try fz.gdn_step.compile(r, false);
             if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
         }
@@ -216,7 +217,7 @@ pub const Engine = struct {
         };
         e.identity_hash = std.hash.Wyhash.hash(0x6964, identity);
         const owned_pack_dir = if (dump_dir == null) blk: {
-            const home = if (std.c.getenv("HOME")) |v| std.mem.span(v) else "";
+            const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
             const root = try pack_cache.defaultRoot(arena, home);
             break :blk try pack_cache.ensure(gpa, io, model_dir, root, identity, PackBuilder{});
         } else null;
@@ -439,7 +440,7 @@ pub const Engine = struct {
         e.tsel = try GSelect.init(r, 0);
         e.msel = try GSelect.init(r, 0);
         // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in lockstep
-        const tp_path: ?[]const u8 = speed_up orelse if (std.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
+        const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
         if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
         if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
         if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
@@ -511,8 +512,8 @@ pub const Engine = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
-            const t0 = std.c.mach_absolute_time();
-            defer e.handoff_ns = @intCast((std.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
+            const t0 = platform.c.mach_absolute_time();
+            defer e.handoff_ns = @intCast((platform.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
             try follow_mod.send(e, tp, prompt, from, marks, max_tokens, eos, depth, budget);
             if (!try tp.waitAck()) return error.PeerNotResumed;
         };
@@ -529,7 +530,7 @@ pub const Engine = struct {
         var calls: CallLog = .{};
         while (at < prompt.len) {
             if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const t_call = std.c.mach_absolute_time();
+            const t_call = platform.c.mach_absolute_time();
             const g_call = m.gpu_seconds;
             if (r.tp) |tp| { // speed-up mode: the call's rows split across the two Macs, running on past up to MARKS marks
                 const pair_taps = e.mark_taps and m.marks != null;

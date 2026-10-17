@@ -1,5 +1,6 @@
 //! The store on disk: reloads, refusal by name, torn tails, bad ids, the cap, dedup, read-only, emptying.
 const std = @import("std");
+const platform = @import("sys");
 const store = @import("recall_store.zig");
 const rr = @import("recall_record.zig");
 const Store = store.Store;
@@ -120,11 +121,11 @@ test "a torn tail and an id past the vocabulary are cut at reload, and writing g
     }
     var buf: [1100]u8 = undefined;
     const path = try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0) }, 0);
-    const fd = std.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(platform.c.mode_t, 0));
     try std.testing.expect(fd >= 0);
     const torn = [_]u32{ 7, 8, 9 }; // a segment whose mark never landed
-    _ = std.c.write(fd, std.mem.sliceAsBytes(&torn).ptr, 12);
-    _ = std.c.close(fd);
+    _ = platform.c.write(fd, std.mem.sliceAsBytes(&torn).ptr, 12);
+    _ = platform.c.close(fd);
     const b = try ids(80, 7);
     defer gpa.free(b);
     {
@@ -138,9 +139,9 @@ test "a torn tail and an id past the vocabulary are cut at reload, and writing g
     try std.testing.expectEqual(@as(u32, 101 + 81), s.shared.record.held());
     try std.testing.expect(s.shared.record.longest(b[0..40]).len > 0);
     const bad = [_]u32{ 1, 2, vocab + 3, rr.mark };
-    const fd2 = std.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
-    _ = std.c.write(fd2, std.mem.sliceAsBytes(&bad).ptr, 16);
-    _ = std.c.close(fd2);
+    const fd2 = platform.c.open(path, .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(platform.c.mode_t, 0));
+    _ = platform.c.write(fd2, std.mem.sliceAsBytes(&bad).ptr, 16);
+    _ = platform.c.close(fd2);
     const again = try open(&d, identity(5, "m"), .{ .read_only = true });
     defer again.close();
     try std.testing.expectEqual(@as(u32, 182), again.shared.record.held());
@@ -161,7 +162,7 @@ test "past the cap the oldest chunk goes, file and all" {
     try std.testing.expectEqual(@as(u32, 0), s.shared.record.longest(first[0..20]).len);
     var buf: [1100]u8 = undefined;
     const oldest = try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0) }, 0);
-    try std.testing.expect(std.c.access(oldest, 0) != 0);
+    try std.testing.expect(platform.c.access(oldest, 0) != 0);
     try std.testing.expectEqual(@as(u32, rr.max_match), s.shared.record.longest(bulk[0 .. bulk.len - 1]).len);
 }
 
@@ -208,17 +209,17 @@ test "an empty that cannot remove a chunk file says which, keeps nothing in memo
     s.readPrompt(a, 0);
     var buf: [1100]u8 = undefined;
     const stuck = try std.fmt.bufPrintSentinel(&buf, "{s}/{x:0>16}.ids", .{ d.path, @as(u64, 0xff) }, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(stuck, 0o700)); // a directory: no unlink removes it
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(stuck, 0o700)); // a directory: no unlink removes it
     var inner: [1200]u8 = undefined;
     const keep = try std.fmt.bufPrintSentinel(&inner, "{s}/x", .{stuck}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(keep, 0o700));
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(keep, 0o700));
     try std.testing.expectError(error.Unlinked, s.empty());
     try std.testing.expect(std.mem.indexOf(u8, s.why(), "00000000000000ff.ids") != null);
     try std.testing.expect(s.shared.record.held() == 0 and s.added == 0 and s.held == 0 and s.stats().left);
     s.readPrompt(a, 0);
     try std.testing.expectEqual(@as(u64, 0), s.added); // nothing goes in while a file is left
-    _ = std.c.rmdir(keep);
-    _ = std.c.rmdir(stuck);
+    _ = platform.c.rmdir(keep);
+    _ = platform.c.rmdir(stuck);
     try s.empty();
     try std.testing.expect(!s.stats().left);
     s.readPrompt(a, 0);

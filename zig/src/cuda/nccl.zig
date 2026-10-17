@@ -1,6 +1,7 @@
 //! NCCL opened at run time for tensor-parallel ranks: communicators and the collectives the lane engines use.
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 const tp_watch = @import("tp_watch.zig");
 
@@ -22,6 +23,8 @@ pub const Api = struct {
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *R) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
@@ -33,7 +36,7 @@ pub const Api = struct {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
 
     pub fn open() Error!Library {
@@ -41,7 +44,7 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = std.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";

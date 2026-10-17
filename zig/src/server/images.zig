@@ -323,7 +323,7 @@ fn both(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32)
 /// Appends one image's rows, its engine entry and its cache words; `named`: the word before them is its marker's.
 fn placeImage(a: std.mem.Allocator, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), imgs: *std.ArrayList(api.Image), token: u32, img: api.PreparedImage, named: bool) !void {
     if (named) key.items[key.items.len - 1] = image_key.open(img.hash);
-    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens });
+    try imgs.append(a, .{ .pixels = img.pixels, .gh = img.gh, .gw = img.gw, .at = @intCast(ids.items.len), .tokens = img.tokens, .hash = img.hash });
     for (0..img.tokens) |j| {
         try ids.append(a, token);
         try key.append(a, image_key.row(img.hash, j));

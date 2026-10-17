@@ -1,5 +1,6 @@
 //! Flash Next's learned prompt states (--learn): a kept state's file on disk, and the probe keying this build's bits.
 const std = @import("std");
+const platform = @import("sys");
 const ks = @import("kernel_sources");
 const snapshot = @import("snapshot.zig");
 const roles_gen = @import("roles_gen.zig");
@@ -21,24 +22,24 @@ pub fn path(buf: []u8, dir: []const u8, key: u64) ![:0]const u8 {
 pub fn writeFile(st: *const State, file: [:0]const u8) !void {
     var tmp_buf: [1100]u8 = undefined;
     const tmp = try std.fmt.bufPrintSentinel(&tmp_buf, "{s}.part", .{file}, 0);
-    const fd = std.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(tmp, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.SnapshotWrite;
-    errdefer _ = std.c.unlink(tmp);
+    errdefer _ = platform.c.unlink(tmp);
     {
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         const head: Head = .{ .magic = FILE_MAGIC, .layout = @backingInt(st.layout), .at = st.at, .bytes = st.bytes, .hist = st.hist };
         try put(fd, std.mem.asBytes(&head));
         try put(fd, st.buf.contents()[0..st.bytes]);
-        if (std.c.fsync(fd) != 0) return error.SnapshotWrite;
+        if (platform.c.fsync(fd) != 0) return error.SnapshotWrite;
     }
-    if (std.c.rename(tmp, file) != 0) return error.SnapshotWrite;
+    if (platform.c.rename(tmp, file) != 0) return error.SnapshotWrite;
 }
 
 /// `file`'s state after `at` tokens, in a buffer from the engine's pool; another position, layout or size is refused.
 pub fn readFile(e: *Engine, gpa: std.mem.Allocator, at: usize, file: [:0]const u8) !*State {
-    const fd = std.c.open(file, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(file, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.SnapshotRead;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     var head: Head = undefined;
     try get(fd, std.mem.asBytes(&head), 0);
     const layout: u32 = @backingInt(snapshot.layoutOf(e));
@@ -53,7 +54,7 @@ pub fn readFile(e: *Engine, gpa: std.mem.Allocator, at: usize, file: [:0]const u
 fn put(fd: c_int, b: []const u8) !void {
     var done: usize = 0;
     while (done < b.len) {
-        const n = std.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
+        const n = platform.c.write(fd, b.ptr + done, @min(b.len - done, 1 << 30));
         if (n <= 0) return error.SnapshotWrite;
         done += @intCast(n);
     }
@@ -62,7 +63,7 @@ fn put(fd: c_int, b: []const u8) !void {
 fn get(fd: c_int, b: []u8, at: u64) !void {
     var done: usize = 0;
     while (done < b.len) {
-        const n = std.c.pread(fd, b.ptr + done, @min(b.len - done, 1 << 30), @intCast(at + done));
+        const n = platform.c.pread(fd, b.ptr + done, @min(b.len - done, 1 << 30), @intCast(at + done));
         if (n <= 0) return error.SnapshotRead;
         done += @intCast(n);
     }

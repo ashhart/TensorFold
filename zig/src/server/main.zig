@@ -68,7 +68,13 @@ pub fn main(init: std.process.Init) !u8 {
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
     }
-    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "benchmark")) return benchmark.main(init, argv[2..], engines.capabilities(a));
+    if (argv.len >= 2 and std.mem.eql(u8, argv[1], "benchmark")) {
+        // the benchmark runs its serve child under POSIX signals and waits; Windows refuses it by name
+        if (comptime @import("builtin").os.tag == .windows) {
+            std.debug.print("tensorfold benchmark is not supported on Windows yet: run tensorfold serve and a client against it\n", .{});
+            return 2;
+        } else return benchmark.main(init, argv[2..], engines.capabilities(a));
+    }
     if (argv.len < 2 or !std.mem.eql(u8, argv[1], "serve")) {
         std.debug.print("usage: tensorfold-native capabilities --json | models | info MODEL | pull REPO[@REVISION] | slide rollback FOLDER | serve MODEL [flags] | benchmark MODEL [flags]\n", .{});
         return 2;

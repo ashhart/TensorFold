@@ -18,6 +18,7 @@ const server_build = @import("zig/build/server.zig");
 const golden_build = @import("zig/build/golden.zig");
 const contract_build = @import("zig/build/kernel_contract.zig");
 const video_build = @import("zig/build/video.zig");
+const sys_build = @import("zig/build/sys.zig");
 
 comptime {
     const required = std.mem.trim(u8, @embedFile(".zig-version"), "\r\n");
@@ -167,14 +168,14 @@ pub fn build(b: *std.Build) void {
     merge_build.targets(b, target, optimize); // tensorfold merge's tests and tf-merge-check, host only on every OS
     switch (target.result.os.tag) {
         .macos => metalTargets(b, target, optimize, draft_ids, build_options, test_step),
-        .linux => cuda_build.targets(b, target, optimize, draft_ids, build_options),
+        .linux, .windows => cuda_build.targets(b, target, optimize, draft_ids, build_options),
         else => {},
     }
     const xgrammar = grammar_build.option(b);
     dist_build.targets(b, draft_ids, build_options, release_version, xgrammar);
     cuda_build.hostTests(b, draft_ids, build_options, test_step, target.result.os.tag != .macos);
     xpu_build.hostTests(b, test_step);
-    if (target.result.os.tag == .linux) {
+    if (target.result.os.tag == .linux or target.result.os.tag == .windows) {
         // the engine seam's tests (lane_host.zig and its siblings), which the macOS branch runs from its own api module
         const lanes_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
         const api_mod = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes_mod }} });
@@ -208,6 +209,7 @@ pub fn build(b: *std.Build) void {
     b.step("test-learn-warning", "CPU production-log refusal, backoff and recovery test").dependOn(&warning_run.step);
     grammar_build.steps(b, target, xgrammar);
     contract_build.hostTests(b);
+    sys_build.wire(b);
 }
 
 /// `zig build native -Dcpu=apple_m1`: tensorfold-native with the Metal engines for the Python package's bundle (a native M5 build traps on M1-M4).
@@ -561,7 +563,8 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = helpers })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = engine })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = lanes })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
+    // the fake fabric maps its windows with mmap: the Macs' RDMA, not Windows
+    if (target.result.os.tag != .windows) test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = fabric })).step);
     const dashboard = b.createModule(.{ .root_source_file = b.path("zig/src/server/dashboard_test.zig"), .target = target, .optimize = optimize, .link_libc = true });
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = dashboard })).step);
     const kimi_test = b.step("test-k3", "Kimi K3's host-side unit tests (no GPU work)");

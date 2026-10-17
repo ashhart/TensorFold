@@ -1,5 +1,6 @@
 //! A lone greedy stream's rounds with no host wait: the GPU accepts, keeps rows and drafts; the host reads behind it.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const st = @import("state.zig");
@@ -349,7 +350,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     var mtp_known: usize = mtp0 + 1;
     var queued: u64 = 0; // rounds submitted
     var read: u64 = 0; // rounds whose records the host took
-    const log = std.c.getenv("TF_ROUND_LOG") != null;
+    const log = platform.c.getenv("TF_ROUND_LOG") != null;
     var depth = Depth{ .levels = o.depth, .most = o.depth, .fixed = o.fixed };
     var windows: [ring]usize = undefined; // each queued round's verify rows
     var levels = depth.levels; // the levels the last queued head drafts (the next verify's rows - 1)
@@ -502,7 +503,7 @@ pub fn run(gpa: std.mem.Allocator, b: *Metal, s: *lanes.Stream, o: Options, hook
     if (o.level_bench) {
         // every level live (zero bars), each chain alone in its command buffer
         r.o.stop = false;
-        if (std.c.getenv("TF_HEAD_GEOMETRY")) |g| b.head.?.geometry = std.fmt.parseInt(usize, std.mem.span(g), 10) catch 0;
+        if (platform.c.getenv("TF_HEAD_GEOMETRY")) |g| b.head.?.geometry = std.fmt.parseInt(usize, std.mem.span(g), 10) catch 0;
         var med: [2]f64 = undefined;
         for ([_]usize{ 1, @min(8, o.depth) }, 0..) |n, k| {
             var ms: [9]f64 = undefined;

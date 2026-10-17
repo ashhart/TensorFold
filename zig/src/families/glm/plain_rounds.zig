@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's plain rounds in generate: the next round committed before this one's pick is read.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const fwd = @import("forward.zig");
 const Fence = @import("../../core/fence.zig").Fence;
@@ -12,7 +13,7 @@ const Pending = struct { cb: mtl.CommandBuffer, t_enc: u64, committed: u64 };
 
 /// One plain round at `pos`, its token from `from` (null: the ids as set), its pick into `to`; after a round it waits on the fence, not the event.
 fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
-    const t_enc = std.c.mach_absolute_time();
+    const t_enc = platform.c.mach_absolute_time();
     const fence = e.round_fence.?;
     const cb = e.queue.commandBuffer();
     if (from == null and e.ev > 0) cb.waitFor(e.event, e.ev);
@@ -35,7 +36,7 @@ fn plainRound(e: *Engine, x: *fwd.Ctx, from: ?Ref, to: Ref, pos: u32) Pending {
     e.ev += 1;
     b.cb.signal(e.event, e.ev);
     b.cb.commit();
-    e.committed = std.c.mach_absolute_time();
+    e.committed = platform.c.mach_absolute_time();
     return .{ .cb = b.cb, .t_enc = t_enc, .committed = e.committed };
 }
 

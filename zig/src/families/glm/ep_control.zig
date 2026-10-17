@@ -1,5 +1,6 @@
 //! The expert-parallel pair's control protocol over a link's window: identities, requests and stop decisions, each acked.
 const std = @import("std");
+const platform = @import("sys");
 const fabric = @import("fabric");
 const Rdma = fabric.rdma.Rdma;
 
@@ -56,7 +57,7 @@ pub const Command = union(enum) { request: Request, lanes: struct { kind: u32, w
 fn ticks() u64 {
     if (@import("builtin").is_test and @import("builtin").os.tag != .macos)
         return @intCast(@divTrunc(std.Io.Clock.awake.now(std.testing.io).toNanoseconds() * 24, 1000));
-    return std.c.mach_absolute_time(); // 24 MHz on Apple silicon
+    return platform.c.mach_absolute_time(); // 24 MHz on Apple silicon
 }
 
 pub const Control = struct {
@@ -98,8 +99,8 @@ pub const Control = struct {
             if (bounded and ticks() - t0 > c.limit) return error.EpPeerSilent;
             spins += 1;
             if (spins > 100_000) { // a long wait: back off
-                const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
-                _ = std.c.nanosleep(&ts, null);
+                const ts: platform.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+                _ = platform.c.nanosleep(&ts, null);
             } else std.atomic.spinLoopHint();
         }
     }
@@ -297,8 +298,8 @@ test "early cancels: rank 0 waits for rank 1's acks, nothing is overwritten or s
     };
     var e0: ?anyerror = undefined;
     const th = try std.Thread.spawn(.{}, Rank0.run, .{ &p.c[0], &e0 });
-    const ts: std.c.timespec = .{ .sec = 0, .nsec = 200_000_000 }; // rank 1 held back while rank 0 runs ahead
-    _ = std.c.nanosleep(&ts, null);
+    const ts: platform.c.timespec = .{ .sec = 0, .nsec = 200_000_000 }; // rank 1 held back while rank 0 runs ahead
+    _ = platform.c.nanosleep(&ts, null);
     for (prompts, 0..) |pr, i| {
         const r = (try p.c[1].waitRequest()).?;
         try std.testing.expectEqualSlices(u32, &pr, r.prompt);

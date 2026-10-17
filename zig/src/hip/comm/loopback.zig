@@ -1,7 +1,7 @@
 //! Groups of threads joined over 127.0.0.1 for host tests: each rank holds the collective.Link a served rank has.
 
 const std = @import("std");
-const posix = std.posix;
+const posix = @import("sys").posix;
 const collective = @import("../collective.zig");
 const link = @import("link.zig");
 const group = @import("group.zig");

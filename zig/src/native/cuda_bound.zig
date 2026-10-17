@@ -18,6 +18,12 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.prefill_step.?(x.inner.ptr, s);
             }
         }.f else null,
+        .prefill_many = if (v.prefill_many != null) struct {
+            fn f(p: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+                const x = H.bind(p);
+                return x.inner.vtable.prefill_many.?(x.inner.ptr, ss);
+            }
+        }.f else null,
         .first = struct {
             fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
                 const x = H.bind(p);

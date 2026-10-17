@@ -21,7 +21,7 @@ pub fn isDir(io: std.Io, path: []const u8) bool {
 
 /// The checkpoint directory for ``model``, or null with ``problem`` set (no downloads: the cache must hold it).
 pub fn resolve(a: Allocator, io: std.Io, environ: ?*const std.process.Environ.Map, model: []const u8, problem: *[]const u8) !?[]const u8 {
-    const home = if (environ) |e| e.get("HOME") orelse "" else "";
+    const home = if (environ) |e| e.get("HOME") orelse e.get("USERPROFILE") orelse "" else ""; // Windows sets USERPROFILE
     const expanded = if (std.mem.startsWith(u8, model, "~/")) try std.fs.path.join(a, &.{ home, model[2..] }) else model;
     if (isDir(io, expanded)) return expanded;
     if (!isRepoId(model)) {

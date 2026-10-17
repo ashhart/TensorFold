@@ -40,7 +40,7 @@ pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[
         }
     }.f;
     if (get(env, "HF_HUB_CACHE")) |c| return c;
-    const home = get(env, "HOME") orelse "";
+    const home = get(env, "HOME") orelse get(env, "USERPROFILE") orelse ""; // Windows sets USERPROFILE, not HOME
     if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
     return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
 }

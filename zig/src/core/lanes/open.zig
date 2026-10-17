@@ -26,6 +26,29 @@ pub fn add(e: *Engine, s: *Stream) !void {
 /// How a stream's first drafts are sized: the depth rule, or the head's whole reach under node probabilities.
 pub const Reach = enum { rule, head };
 
+/// Streams a backend prefills in one pass at most.
+pub const max_together = 16;
+
+/// `add` for several streams, prompts in one pass when the backend takes them; `errs[i]`: stream i's error, or null.
+pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (errs) |*x| x.* = null;
+    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs);
+    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs);
+    _ = e.arena.reset(.retain_capacity);
+    for (ss) |s| trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) }) catch {};
+    const together = many(e.backend.ptr, ss) catch false; // one stream's refusal is its own: each goes alone
+    if (!together) return addEach(e, ss, errs);
+    for (ss, errs) |s, *x| opened(e, s) catch |err| { // a stream cancelled in the pass gets no first token
+        x.* = err;
+    };
+}
+
+fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (ss, errs) |s, *x| add(e, s) catch |err| {
+        x.* = err;
+    };
+}
+
 /// After the prompt pass: the first token drawn and committed, the first drafts asked; rounds from the next.
 pub fn opened(e: *Engine, s: *Stream) !void {
     return openedWith(e, s, .rule);

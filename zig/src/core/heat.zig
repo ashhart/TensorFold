@@ -1,5 +1,6 @@
 //! Opt-in wait before a prompt chunk when the hottest thermal zone is above a band.
 const std = @import("std");
+const platform = @import("sys");
 
 pub const default_root = "/sys/class/thermal";
 
@@ -129,7 +130,7 @@ fn noteNoZone(root: []const u8) void {
 }
 
 fn envSpan(name: [*:0]const u8) ?[]const u8 {
-    const p = std.c.getenv(name) orelse return null;
+    const p = platform.c.getenv(name) orelse return null;
     const s = std.mem.span(p);
     if (s.len == 0) return null;
     return s;
@@ -194,13 +195,15 @@ test "the chunk runs under the high band, and a hot reading waits until the low 
     try std.testing.expectEqual(@as(u32, 1), stuck.sleeps); // a cancel ends the wait after the pause it came in
 }
 
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
-extern "c" fn unsetenv(name: [*:0]const u8) i32;
+const env = if (@import("builtin").os.tag == .windows) @import("sys").c else struct {
+    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: i32) i32;
+    extern "c" fn unsetenv(name: [*:0]const u8) i32;
+};
 
 fn putEnv(name: [*:0]const u8, value: ?[*:0]const u8) void {
     if (value) |v| {
-        _ = setenv(name, v, 1);
-    } else _ = unsetenv(name);
+        _ = env.setenv(name, v, 1);
+    } else _ = env.unsetenv(name);
 }
 
 test "TF_HEAT_HIGH and TF_HEAT_LOW set the bands together, and TF_HEAT_ROOT the zones' folder" {

@@ -304,17 +304,31 @@ pub const LaneHost = struct {
         h.mutex.unlock(h.io);
     }
 
-    /// Prefills the next queued request into a free lane; false when none waits or no lane is free.
+    /// The next queued request into a free lane (or several, when the backend batches prompts); false when none can go.
     fn admitOne(h: *LaneHost) bool {
+        if (admit.batches(h)) return admit.many(h);
+        const job = switch (h.takeJob()) {
+            .none => return false,
+            .failed => return true,
+            .job => |j| j,
+        };
+        const began = h.setup(job) orelse return true;
+        return h.launch(job, began);
+    }
+
+    pub const Taken = union(enum) { none, failed, job: *Job };
+
+    /// The next queued request a lane is free for, moved to the admitted list (`failed`: it was finished instead).
+    pub fn takeJob(h: *LaneHost) Taken {
         h.lock();
         // a stale device takes no reply: `learn.refuse` ends the queued ones instead
         if (h.stale or h.queued.items.len == 0 or h.admitted.items.len >= @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes)) {
             h.unlock();
-            return false;
+            return .none;
         }
         const at = admit.pick(h) orelse { // a shared cache pool's head waits for room
             h.unlock();
-            return false;
+            return .none;
         };
         const job = h.queued.orderedRemove(at);
         job.seq = h.admissions;
@@ -322,27 +336,51 @@ pub const LaneHost = struct {
         h.admitted.append(h.gpa, job) catch {
             h.unlock();
             h.finish(job, .failed, "out of memory");
-            return true;
+            return .failed;
         };
         h.unlock();
+        return .{ .job = job };
+    }
+
+    /// A taken job's stream, set up to start; null when the job ended instead (dropped or cancelled).
+    pub fn setup(h: *LaneHost, job: *Job) ?i96 {
         const r = job.request;
-        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.cancel(job); // other work came first: it never ran
-        if (!lane_stream.open(h, job)) return true;
-        const began = job.began;
+        if (r.background and r.max_tokens == 0 and h.warm_quiet > 0 and !h.quiet(job)) return h.ended(h.cancel(job)); // other work came first
+        if (!lane_stream.open(h, job)) return null; // the job was finished instead
+        return job.began;
+    }
+
+    fn ended(_: *LaneHost, _: bool) ?i96 {
+        return null;
+    }
+
+    /// Whether a set-up job starts outside a shared prompt pass: a warm pass, or the lone driver's.
+    pub fn startsAlone(h: *LaneHost, job: *Job) bool {
+        return (job.request.max_tokens == 0 and h.info_.warm_turns) or lone.fits(h, job);
+    }
+
+    /// A set-up job into the engine: a warm pass, the lone driver, the fill queue, or its own prompt pass.
+    pub fn launch(h: *LaneHost, job: *Job, began: i96) bool {
+        const r = job.request;
         if (r.max_tokens == 0 and h.info_.warm_turns) return h.warmPass(job, began);
         if (lone.fits(h, job)) return lone.run(h, job, began, false);
         if (h.core.fills()) {
             h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
             return true;
         }
-        h.core.addStream(&job.stream) catch |e| return switch (e) {
+        h.core.addStream(&job.stream) catch |e| return h.failedPass(job, e);
+        h.prefilled(job, began);
+        _ = h.deliver(job);
+        return true;
+    }
+
+    /// A prompt pass that failed: cancelled, no lane memory yet (back to the queue), or the backend's words.
+    pub fn failedPass(h: *LaneHost, job: *Job, e: anyerror) bool {
+        return switch (e) {
             error.Cancelled => h.cancel(job),
             error.LaneMemory => h.requeue(job),
             else => h.drop(job, h.words(e)),
         };
-        h.prefilled(job, began);
-        _ = h.deliver(job);
-        return true;
     }
 
     /// The next filling job's next prompt chunk: the other streams' rounds run between chunks, not after the prompt.

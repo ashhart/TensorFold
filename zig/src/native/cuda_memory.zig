@@ -44,6 +44,14 @@ pub fn meminfo(text: []const u8) ?MemInfo {
     return if (t > 0 and a <= t) .{ .total = t, .available = a } else null;
 }
 
+/// --prompt-cache-gib in pinned host memory (8 GiB unasked), at most half of what /proc/meminfo has available.
+pub fn hostCacheBytes(a: std.mem.Allocator, io: std.Io, asked: ?f64) u64 {
+    const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * (1 << 30)) else 0) else 8 << 30;
+    const text = procText(a, io, "/proc/meminfo") orelse return 0;
+    const m = meminfo(text) orelse return 0;
+    return @min(want, m.available / 2);
+}
+
 /// A /proc file's text, streamed: procfs reports size 0, and a positional read (readFileAlloc) stops there.
 pub fn procText(a: std.mem.Allocator, io: std.Io, path: []const u8) ?[]u8 {
     var file = std.Io.Dir.cwd().openFile(io, path, .{}) catch return null;

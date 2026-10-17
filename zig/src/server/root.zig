@@ -52,6 +52,7 @@ test {
     _ = @import("logprobs_test.zig");
     _ = @import("late_system_test.zig");
     _ = @import("compact_test.zig");
+    _ = @import("request_log.zig");
     _ = @import("completion_prompt_test.zig");
     _ = @import("server_init_test.zig");
     _ = @import("decisions.zig");
@@ -86,17 +87,20 @@ test {
     _ = @import("cortheon/cortheon.zig");
     _ = @import("cortheon/cortheon_test.zig");
     _ = @import("recall_routes.zig");
-    _ = @import("benchmark_suite.zig");
-    _ = @import("benchmark_check.zig");
-    _ = @import("benchmark_receipt_test.zig");
-    _ = @import("benchmark_stop_test.zig");
-    _ = @import("benchmark_sse_test.zig");
-    _ = @import("benchmark_stream_test.zig");
-    _ = @import("benchmark_server_test.zig");
-    _ = @import("benchmark_facts_test.zig");
-    _ = @import("benchmark_upload.zig");
-    _ = @import("benchmark_upload_test.zig");
-    _ = @import("benchmark_args.zig");
-    _ = @import("benchmark_cli_test.zig");
-    _ = @import("benchmark_run_test.zig");
+    // the benchmark command's serve child runs under POSIX signals and waits; Windows refuses the command
+    if (comptime @import("builtin").os.tag != .windows) {
+        _ = @import("benchmark_suite.zig");
+        _ = @import("benchmark_check.zig");
+        _ = @import("benchmark_receipt_test.zig");
+        _ = @import("benchmark_stop_test.zig");
+        _ = @import("benchmark_sse_test.zig");
+        _ = @import("benchmark_stream_test.zig");
+        _ = @import("benchmark_server_test.zig");
+        _ = @import("benchmark_facts_test.zig");
+        _ = @import("benchmark_upload.zig");
+        _ = @import("benchmark_upload_test.zig");
+        _ = @import("benchmark_args.zig");
+        _ = @import("benchmark_cli_test.zig");
+        _ = @import("benchmark_run_test.zig");
+    }
 }

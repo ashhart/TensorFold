@@ -1,5 +1,6 @@
 //! A loopback HTTP fake for the benchmark tests: scripted replies, pauses between writes, recorded requests.
 const std = @import("std");
+const platform = @import("sys");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
@@ -197,23 +198,23 @@ pub const Pty = struct {
         const master = posix_openpt(@bitCast(posix.O{ .ACCMODE = .RDWR, .NOCTTY = true }));
         if (master < 0) return null;
         const name = if (grantpt(master) == 0 and unlockpt(master) == 0) ptsname(master) else null;
-        const term = if (name) |n| std.c.open(n, .{ .ACCMODE = .RDWR, .NOCTTY = true }) else -1;
+        const term = if (name) |n| platform.c.open(n, .{ .ACCMODE = .RDWR, .NOCTTY = true }) else -1;
         if (term < 0) {
-            _ = std.c.close(master);
+            _ = platform.c.close(master);
             return null;
         }
         return .{ .master = master, .term = term };
     }
 
     pub fn close(p: Pty) void {
-        _ = std.c.close(p.term);
-        _ = std.c.close(p.master);
+        _ = platform.c.close(p.term);
+        _ = platform.c.close(p.master);
     }
 };
 
 pub fn nap(ms: u32) void {
     var ts: posix.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast(@as(u64, ms % 1000) * std.time.ns_per_ms) };
-    _ = std.c.nanosleep(&ts, null);
+    _ = platform.c.nanosleep(&ts, null);
 }
 
 /// A response head with ``Connection: close`` and no length, as the native server sends SSE.

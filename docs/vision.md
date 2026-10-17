@@ -258,3 +258,17 @@ Tests cover input validation, bounded fetching, expanded prompt accounting, cach
 Hardware qualification is separate from these tests: each backend and chip needs real image understanding, drafted/serial equality, concurrency, chunked-prefill and memory checks before a release claim.
 Checkpoint metadata must describe the decoder separately from MTP: the `mlp_layer_types` list must match `num_hidden_layers` for Transformers validation. Preserve the separate MTP configuration and weights.
 Image input stays experimental until the hardware matrix is complete, and makes no throughput claim.
+
+## Native CUDA: Qwen3.5/3.8
+
+`tensorfold-native serve <checkpoint> --vision` loads the checkpoint's vision tower beside the language model on the
+Qwen CUDA engine (`families/qwen3_5/cuda_vision.zig`, kernels in `qwen_vision.cu`, its Linears on cuBLASLt). The
+server prepares each image as it does on a Mac: core/picture decodes it and core/qwen_vl resizes and cuts it with the
+checkpoint's processor settings, so an image's patches, grid and cache identity are the same on both backends. The
+tower and the scratch of one 16,384-patch call are allocated at startup and counted as model memory, so the stream
+budget never has to make room for an image. A request's images go through the tower before its prompt; their rows
+replace the `<|image_pad|>` placeholders in the prompt chunks, which rotate at M-RoPE's t, h and w positions
+(interleaved sections 11, 11 and 10), and the reply's rows rotate at their position plus the layout's shift, as
+transformers' `get_rope_index` lays them out. Text-only requests keep their bits. One image holds at most 4,096
+tokens (one tower call); `--vision-image-tokens` bounds a request's images together. JPEG needs libturbojpeg on the
+machine (PNG decodes everywhere); video parts are refused.

@@ -99,7 +99,14 @@ pub const Held = struct {
 };
 
 /// One image of a prompt: tower input (patches [gh * gw, width]) for the `tokens` placeholder rows from `at`.
-pub const Image = struct { pixels: []const f32, gh: u32, gw: u32, at: u32, tokens: u32 };
+pub const Image = struct {
+    pixels: []const f32,
+    gh: u32,
+    gw: u32,
+    at: u32,
+    tokens: u32,
+    hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
+};
 
 pub const Spec = struct {
     id: []const u8,

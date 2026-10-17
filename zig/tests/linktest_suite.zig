@@ -1,5 +1,6 @@
 //! The link measurements over Thunderbolt's two-sided UC: opcodes, ping-pong, bandwidth, integrity, barrier, all-reduce.
 const std = @import("std");
+const platform = @import("sys");
 const fabric = @import("fabric");
 const collective = fabric.collective;
 const vqp = fabric.verbs_qp;
@@ -53,7 +54,7 @@ pub const Ctx = struct {
 pub fn out(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
     const line = std.fmt.bufPrint(&buf, fmt ++ "\n", args) catch return;
-    _ = std.c.write(1, line.ptr, line.len);
+    _ = platform.c.write(1, line.ptr, line.len);
 }
 
 fn us(ns: u64) f64 {

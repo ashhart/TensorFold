@@ -8,6 +8,7 @@ const bench = @import("bench.zig");
 const oracle_tests = @import("oracle_tests.zig");
 const libs_tests = @import("libs_tests.zig");
 const rank_scatter_tests = @import("rank_scatter_tests.zig");
+const roce_gather_tests = @import("roce_gather_tests.zig");
 const sample_tests = @import("sample_tests.zig");
 const glue_tests = @import("glue_tests.zig");
 const window_profile = @import("window_profile.zig");
@@ -23,6 +24,7 @@ const fp8_experts_tests = @import("fp8_experts_tests.zig");
 const nvfp4_experts_tests = @import("nvfp4_experts_tests.zig");
 const quant_ref_tests = @import("quant_ref_tests.zig");
 const glm_ref_tests = @import("glm_ref_tests.zig");
+const affine8_tests = @import("affine8_tests.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
 const modelopt_tests = @import("modelopt_tests.zig");
@@ -40,6 +42,15 @@ const lfm2_vision_tests = @import("lfm2_vision_tests.zig");
 const radio_tests = @import("radio_tests.zig");
 const glm_lanes_tests = @import("glm_lanes_tests.zig");
 const glm_synth = @import("glm_synth.zig");
+const tree_round_tests = @import("tree_round_tests.zig");
+const tree_tests = @import("tree_tests.zig");
+const block_tests = @import("block_tests.zig");
+const act_rows_tests = @import("act_rows_tests.zig");
+const gdn_prep_tests = @import("gdn_prep_tests.zig");
+const qk_rows_tests = @import("qk_rows_tests.zig");
+const window_tests = @import("window_tests.zig");
+const moe_glue_tests = @import("moe_glue_tests.zig");
+const dense_rows_tests = @import("dense_rows_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -55,6 +66,7 @@ const usage =
     \\  cublaslt                  bf16 GEMM through cuBLASLt against an fp64 reference
     \\  nccl                      one-rank NCCL all-reduce and all-gather
     \\  rank-scatter <rank> <n> [id]  rank-order reduce-scatter (NCCL_COMM_ID or an id file) against an all-gather
+    \\  roce-gather <rank>        two ranks (NCCL_COMM_ID): the RoCE all-gather against NCCL's, graph replays, time a call
     \\  rank-sum                  the reduce-scatter's sum kernel alone, 2 to 5 ranks as each rank (one GPU, no NCCL)
     \\  nccl-pair <rank> <world> <idfile>  one rank of a multi-host communicator: send/recv with every peer, all-reduce, all-gather
     \\  gdn-replay <dir>          replay_kernel bits against the Python oracle's fixture
@@ -62,6 +74,10 @@ const usage =
     \\  triton <dir>              a Triton cubin's bits against the Python oracle's fixture
     \\  norms                     RMS norm and the residual step against float64 references (synthetic)
     \\  norm-rows                 bf16-residual and gated norms, token rows against float64 (synthetic)
+    \\  tree-round                tree_round.cu's picks, batched verified trees and commits against core/tree_round
+    \\  act-rows                  SwiGLU, output gates, group sums, DFlash2's dynamic conv against float64 (synthetic)
+    \\  gdn-prep                  Gated DeltaNet conv, norms, g and beta against float64 (synthetic)
+    \\  qk-rows                   QK norm, RoPE and the cache write against float64 references (synthetic)
     \\  sample                    sample.cu's keyed draws against the Metal rule's host references (synthetic rows)
     \\  glue                      Nemotron's glue kernels against their host references at its shapes (synthetic rows)
     \\  lfm2-kernels              LFM2's glue kernels against their host references at d1's shapes (synthetic rows)
@@ -86,12 +102,18 @@ const usage =
     \\  projection-f32            FP32 projection outputs against FP64, rounding and row/reduction invariance
     \\  mxfp8                     MXFP8 strided projections against FP64 and row-count invariance
     \\  quant-ref                 FP8 and NVFP4 projections and experts against float64 references (synthetic)
+    \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
     \\  modelopt                  ModelOpt repack, FP8 and BF16 lane rows and relu^2 NVFP4 experts against fp64
     \\  exlr8                     EXLR8 projections: every codebook state, FP64, row windows, the Metal frozen digests
     \\  exlr8-bench DIR [MANIFEST] [LAYER] [SETS]   a real EXLR8 layer: FP64, row windows, then GB/s by stage
     \\  exlr8-dense [DIR]         EXLR8 dense formats: decode bit-equal, FP64, row windows; DIR adds the real matrices
+    \\  tree                      tree attention (committed keys and paths) against float64 references (synthetic)
+    \\  block                     DFlash block attention over windowed contexts against float64 (synthetic)
+    \\  window                    sliding-window attention against float64 references (synthetic)
+    \\  moe-glue                  sigmoid top-k routing and the weighted combine against float64 references (synthetic)
+    \\  dense-rows                bf16 rows times weight rows (routers, heads) against float64 references (synthetic)
     \\  train-pack MODEL EXAMPLES [COUNT]   training passes holding several sequences against one a pass: differences, time
     \\  kernel-contract           the registered kernels through the contract's gates, each planted control red (needs -Dnvcc)
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
@@ -152,6 +174,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const world = try std.fmt.parseInt(usize, try arg(rest, 1), 10);
         return rank_scatter_tests.run(gpu, rank, world, if (rest.len > 2) rest[2] else null);
     }
+    if (std.mem.eql(u8, cmd, "roce-gather")) return roce_gather_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10));
     if (std.mem.eql(u8, cmd, "rank-sum")) return rank_scatter_tests.sum(gpu);
     if (std.mem.eql(u8, cmd, "nccl-pair")) return libs_tests.ncclPair(gpu, try std.fmt.parseInt(c_int, try arg(rest, 0), 10), try std.fmt.parseInt(c_int, try arg(rest, 1), 10), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "gdn-replay")) return oracle_tests.gdnReplay(gpu, try arg(rest, 0));
@@ -165,6 +188,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "mxfp8")) return mxfp8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "quant-ref")) return quant_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "affine8")) return affine8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8")) return exlr8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "exlr8-dense")) return exlr8_dense_tests.run(gpu, if (rest.len > 0) rest[0] else null);
@@ -172,6 +196,10 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "tree-round")) return tree_round_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "act-rows")) return act_rows_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-prep")) return gdn_prep_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "qk-rows")) return qk_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "pocket"))
@@ -196,6 +224,11 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     }
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "block")) return block_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "window")) return window_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-glue")) return moe_glue_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "dense-rows")) return dense_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "train-pack")) return train_pack.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) try std.fmt.parseInt(usize, rest[2], 10) else 24);
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));

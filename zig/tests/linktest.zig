@@ -1,5 +1,6 @@
 //! Link qualification over the system's verbs; `run` swaps connection details on stdin and stdout and opens no socket.
 const std = @import("std");
+const platform = @import("sys");
 const fabric = @import("fabric");
 const suite = @import("linktest_suite.zig");
 const probe = @import("linktest_probe.zig");
@@ -30,7 +31,7 @@ fn readLine(buf: []u8) ![]const u8 {
     var n: usize = 0;
     while (n < buf.len) {
         var c: [1]u8 = undefined;
-        if (std.c.read(0, &c, 1) != 1) return error.EndOfInput;
+        if (platform.c.read(0, &c, 1) != 1) return error.EndOfInput;
         if (c[0] == '\n') return buf[0..n];
         buf[n] = c[0];
         n += 1;
@@ -61,7 +62,7 @@ fn parseHello(line: []const u8) ![2]vqp.Info {
 /// Exit when stdin closes: the run ends with the session that started it.
 fn tether() void {
     var c: [1]u8 = undefined;
-    while (std.c.read(0, &c, 1) == 1) {}
+    while (platform.c.read(0, &c, 1) == 1) {}
     out("R stdin_closed", .{});
     std.process.exit(4);
 }
@@ -79,7 +80,7 @@ fn mapped(len: usize) ![]align(vl.page) u8 {
 /// Two queue pairs on one device: collectives on one, raw measurements on the other, so their receives never mix.
 fn run(gpa: std.mem.Allocator, v: *const Verbs, a: Args) !void {
     _ = try std.Thread.spawn(.{}, watchdog, .{a.deadline_s});
-    out("PID {d}", .{std.c.getpid()});
+    out("PID {d}", .{platform.c.getpid()});
     var peer: vl.Peer = .{ .ep = try vqp.Endpoint.open(v, a.dev, a.kind, 4095, a.gid) };
     defer peer.ep.close();
     var raw = try peer.ep.sibling(a.kind, 4095);
@@ -138,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
     if (!std.mem.eql(u8, args[1], "run")) std.process.exit(2);
     const a = try parse(args);
     run(init.gpa, &v, a) catch |err| {
-        out("R error what={s} errno={d}", .{ @errorName(err), std.c._errno().* });
+        out("R error what={s} errno={d}", .{ @errorName(err), platform.c._errno().* });
         std.process.exit(1);
     };
 }

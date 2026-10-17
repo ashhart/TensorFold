@@ -2,6 +2,7 @@
 //! recorded variant, every weight the pack's or the checkpoint's. Checks one-row greedy tokens and every row of the
 //! Python engine's drafted windows (with rollback), then times each window size.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const tf = @import("tensorfold");
@@ -46,13 +47,13 @@ const jsonInt = fz.jsonInt;
 
 fn armName(seg_ab: bool, arm: usize) []const u8 {
     if (seg_ab) return if (arm == 1) "segments on " else "segments off";
-    if (std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz")) return if (arm == 1) "fz kernels" else "recorded  ";
+    if (platform.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_AB").?), "fz")) return if (arm == 1) "fz kernels" else "recorded  ";
     return if (arm == 1) "copy on " else "copy off";
 }
 
 /// FZ_PROMPT_N: only the prompt's first n tokens (all when unset).
 fn promptCut() !usize {
-    const v = std.c.getenv("FZ_PROMPT_N") orelse return std.math.maxInt(usize);
+    const v = platform.c.getenv("FZ_PROMPT_N") orelse return std.math.maxInt(usize);
     return std.fmt.parseInt(usize, std.mem.span(v), 10);
 }
 
@@ -124,7 +125,7 @@ pub fn main(init: std.process.Init) !void {
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const device = try mtl.Device.init();
-    if (std.c.getenv("FZ_COMPILE_CHECK") != null) { // every prompt-kernel source and the 6-bit file on this Metal compiler
+    if (platform.c.getenv("FZ_COMPILE_CHECK") != null) { // every prompt-kernel source and the 6-bit file on this Metal compiler
         var failed: usize = 0;
         var files: std.ArrayList(ks.File) = .empty;
         try files.appendSlice(gpa, &ks.prefill);
@@ -149,8 +150,8 @@ pub fn main(init: std.process.Init) !void {
         }
         std.process.exit(if (failed == 0) 0 else 1);
     }
-    if (std.c.getenv("FZ_OPORDER") != null) return @import("flashnext_bench.zig").opOrder(device); // no model loaded
-    if (std.c.getenv("FZ_MMA_PEAK") != null) { // the tensor units' rate on register fragments: 16x32x16 ops a second
+    if (platform.c.getenv("FZ_OPORDER") != null) return @import("flashnext_bench.zig").opOrder(device); // no model loaded
+    if (platform.c.getenv("FZ_MMA_PEAK") != null) { // the tensor units' rate on register fragments: 16x32x16 ops a second
         const alib = try mtl.Library.fromSource(device, try fz.frags.source(device, arena, ks.flashnext_attn), mtl.CompileOptions.mlx());
         const pipe = try mtl.Pipeline.init(device, alib, "tf_mma_peak", false);
         const queue = try device.queue();
@@ -174,9 +175,9 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_ENGINE") != null) { // the served engine: its own load, warm-up and reply, on FZ_REF's prompt
+    if (platform.c.getenv("FZ_ENGINE") != null) { // the served engine: its own load, warm-up and reply, on FZ_REF's prompt
         const fx = @import("tensorfold").flashnext_engine;
-        const rp = std.mem.span(std.c.getenv("FZ_REF") orelse return error.NoRef);
+        const rp = std.mem.span(platform.c.getenv("FZ_REF") orelse return error.NoRef);
         const rf = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}", .{rp}, 0));
         const rj = try std.json.parseFromSliceLeaky(std.json.Value, arena, rf.bytes[0..rf.size], .{});
         const all_items = rj.object.get("prompt").?.array.items;
@@ -184,9 +185,9 @@ pub fn main(init: std.process.Init) !void {
         const toks = try arena.alloc(u32, items.len);
         for (items, 0..) |x, i| toks[i] = @intCast(x.integer);
         const e = try fx.Engine.load(gpa, init.io, args[1], args[2]);
-        if (std.c.getenv("FZ_COPY_MIN")) |v| e.copy_min = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("FZ_COPY_LONG")) |v| e.copy_long = try std.fmt.parseInt(u32, std.mem.span(v), 10);
-        if (std.c.getenv("FZ_ENGINE_WARM") != null) try e.warm();
+        if (platform.c.getenv("FZ_COPY_MIN")) |v| e.copy_min = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (platform.c.getenv("FZ_COPY_LONG")) |v| e.copy_long = try std.fmt.parseInt(u32, std.mem.span(v), 10);
+        if (platform.c.getenv("FZ_ENGINE_WARM") != null) try e.warm();
         const Show = struct {
             got: std.ArrayList(u32) = .empty,
             a: std.mem.Allocator,
@@ -200,11 +201,11 @@ pub fn main(init: std.process.Init) !void {
                 return false;
             }
         };
-        const n_out: usize = if (std.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
+        const n_out: usize = if (platform.c.getenv("FZ_N")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 256;
         var replies: [2][]u32 = undefined;
-        const seg_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "seg");
+        const seg_ab = platform.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_AB").?), "seg");
         var depths: std.ArrayList(?usize) = .empty; // FZ_DEPTHS=3,5,7: each depth's arms in turn (0: the depth rule, p: plain)
-        if (std.c.getenv("FZ_DEPTHS")) |v| {
+        if (platform.c.getenv("FZ_DEPTHS")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             while (it.next()) |d| {
                 if (std.mem.eql(u8, d, "p")) {
@@ -214,9 +215,9 @@ pub fn main(init: std.process.Init) !void {
                 const n = try std.fmt.parseInt(usize, d, 10);
                 try depths.append(arena, if (n == 0) null else n);
             }
-        } else try depths.append(arena, if (std.c.getenv("FZ_DEPTH")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null);
+        } else try depths.append(arena, if (platform.c.getenv("FZ_DEPTH")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else null);
         // FZ_AB=fz (with FZ_LANE=1 FZ_GDN=2): recorded dense and DeltaNet kernels, then core lane, fz_gdn, kept states
-        const fz_ab = std.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(std.c.getenv("FZ_AB").?), "fz");
+        const fz_ab = platform.c.getenv("FZ_AB") != null and std.mem.eql(u8, std.mem.span(platform.c.getenv("FZ_AB").?), "fz");
         const fz_on = .{ e.r.lane_new, e.r.gdn_pipe, e.r.gdn_kept };
         for (depths.items) |depth| for (0..2) |arm| { // copy drafts off, then on (FZ_AB=seg: staggered prompt segments off, then on)
             const plain = depth != null and depth.? == 0; // one token a round: one arm (copies need drafts)
@@ -256,7 +257,7 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("{s}: reply hash {x:0>16}\n", .{ name, std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(sh.got.items)) });
             if (arm == 1) for (res.copy_by_len, 0..) |cl, n| if (cl[0] > 0) std.debug.print("    match {d}: {d} rounds, {d:.2} landed\n", .{ n, cl[0], @as(f64, @floatFromInt(cl[1])) / @as(f64, @floatFromInt(cl[0])) });
         };
-        if (std.c.getenv("FZ_NO_REF") != null) return; // the reply hashes are the check (two Macs against one)
+        if (platform.c.getenv("FZ_NO_REF") != null) return; // the reply hashes are the check (two Macs against one)
         // the reference: the same prompt chunks, then one row a step
         e.hostMode();
         const mm = e.m;
@@ -287,28 +288,28 @@ pub fn main(init: std.process.Init) !void {
     // the replay below reads every expert, embedding and table at 6/32: other widths are the engine's (Engine.load)
     if (!try fz.engine_widths.uniformDir(arena, init.io, args[1])) return error.HarnessNeeds6Bit32;
     var r = Run{ .arena = arena, .device = device, .queue = try device.queue() };
-    r.fused_xsum = std.c.getenv("FZ_FUSED_XSUM") != null;
-    r.serial = std.c.getenv("FZ_SERIAL") != null;
-    r.xnew = std.c.getenv("FZ_XNEW") != null;
-    r.split = std.c.getenv("FZ_SPLIT") != null;
-    r.gdn_step = std.c.getenv("FZ_GDN_STEP") != null;
-    r.hc_mma = std.c.getenv("FZ_HC_MMA") != null;
-    r.hc_up = std.c.getenv("FZ_HCCHECK") != null or if (std.c.getenv("FZ_HC_UP")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
+    r.fused_xsum = platform.c.getenv("FZ_FUSED_XSUM") != null;
+    r.serial = platform.c.getenv("FZ_SERIAL") != null;
+    r.xnew = platform.c.getenv("FZ_XNEW") != null;
+    r.split = platform.c.getenv("FZ_SPLIT") != null;
+    r.gdn_step = platform.c.getenv("FZ_GDN_STEP") != null;
+    r.hc_mma = platform.c.getenv("FZ_HC_MMA") != null;
+    r.hc_up = platform.c.getenv("FZ_HCCHECK") != null or if (platform.c.getenv("FZ_HC_UP")) |v| !std.mem.eql(u8, std.mem.span(v), "0") else false;
     r.event = try device.sharedEvent();
-    r.dense = r.xnew and std.c.getenv("FZ_DENSE") != null;
-    r.dense_target = r.dense and std.c.getenv("FZ_DENSE_TARGET") != null;
-    r.xpack = r.xnew and std.c.getenv("FZ_XPACK") != null;
-    r.grouped = r.xnew and !r.xpack and std.c.getenv("FZ_GROUPED") != null;
-    r.xfused = r.xnew and !r.xpack and !r.grouped and std.c.getenv("FZ_XFUSED") != null;
-    r.xsx = r.xnew and std.c.getenv("FZ_XSX") != null;
-    r.copy = std.c.getenv("FZ_COPY") != null;
-    r.prefetch = !r.serial and std.c.getenv("FZ_PREFETCH") != null;
+    r.dense = r.xnew and platform.c.getenv("FZ_DENSE") != null;
+    r.dense_target = r.dense and platform.c.getenv("FZ_DENSE_TARGET") != null;
+    r.xpack = r.xnew and platform.c.getenv("FZ_XPACK") != null;
+    r.grouped = r.xnew and !r.xpack and platform.c.getenv("FZ_GROUPED") != null;
+    r.xfused = r.xnew and !r.xpack and !r.grouped and platform.c.getenv("FZ_XFUSED") != null;
+    r.xsx = r.xnew and platform.c.getenv("FZ_XSX") != null;
+    r.copy = platform.c.getenv("FZ_COPY") != null;
+    r.prefetch = !r.serial and platform.c.getenv("FZ_PREFETCH") != null;
     const t0 = mtl.clock.seconds();
     try r.compile(args[2]);
     r.sel = try Select.init(&r, MAXR);
-    if (std.c.getenv("FZ_CATCH_CHECK") != null) return catchCheck(&r, arena);
-    r.lane_new = r.xnew and std.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (same bits)
-    if (r.xnew and std.c.getenv("FZ_GDN") != null) r.gdn_pipe = try fz.gdn_step.compile(&r, false);
+    if (platform.c.getenv("FZ_CATCH_CHECK") != null) return catchCheck(&r, arena);
+    r.lane_new = r.xnew and platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (same bits)
+    if (r.xnew and platform.c.getenv("FZ_GDN") != null) r.gdn_pipe = try fz.gdn_step.compile(&r, false);
     const t1 = mtl.clock.seconds();
 
     const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{args[1]}, 0));
@@ -320,8 +321,8 @@ pub fn main(init: std.process.Init) !void {
     while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ args[1], name.* }, 0));
     try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{args[2]}, 0));
 
-    const own_prompt = std.c.getenv("FZ_REF") != null; // another prompt: passes against Python's records are skipped
-    const ref_path = if (std.c.getenv("FZ_REF")) |p| try std.fmt.allocPrintSentinel(arena, "{s}", .{std.mem.span(p)}, 0) else try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{args[2]}, 0);
+    const own_prompt = platform.c.getenv("FZ_REF") != null; // another prompt: passes against Python's records are skipped
+    const ref_path = if (platform.c.getenv("FZ_REF")) |p| try std.fmt.allocPrintSentinel(arena, "{s}", .{std.mem.span(p)}, 0) else try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{args[2]}, 0);
     const ref_file = try mtl.MappedFile.open(ref_path);
     const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
     const ple_ref = ref.object.get("ple").?.object;
@@ -502,15 +503,15 @@ pub fn main(init: std.process.Init) !void {
     const t2 = mtl.clock.seconds();
     std.debug.print("compiled in {d:.2} s, loaded {d:.1} GB in {d:.1} s\n", .{ t1 - t0, @as(f64, @floatFromInt(r.loaded)) / 1e9, t2 - t1 });
 
-    if (std.c.getenv("FZ_DBENCH") != null) { // dense classes and DeltaNet timed by rows (flashnext_bench.zig)
+    if (platform.c.getenv("FZ_DBENCH") != null) { // dense classes and DeltaNet timed by rows (flashnext_bench.zig)
         var toks: [MAXR]u32 = undefined;
         for (0..MAXR) |i| toks[i] = @intCast(ref.object.get("prompt").?.array.items[i].integer);
         return @import("flashnext_bench.zig").run(&r, m, &toks, gpa, arena);
     }
-    if (std.c.getenv("FZ_PROFILE") != null) {
-        if (std.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
+    if (platform.c.getenv("FZ_PROFILE") != null) {
+        if (platform.c.getenv("TF_FLASHNEXT_TP")) |path| r.tp = try fz.Tp2.init(arena, r.device, std.mem.span(path));
         var hcskips: std.ArrayList(u32) = .empty; // FZ_HCSKIP=1,2,4: the profile again under each hc knock-out
-        if (std.c.getenv("FZ_HCSKIP")) |v| {
+        if (platform.c.getenv("FZ_HCSKIP")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             while (it.next()) |x| try hcskips.append(arena, try std.fmt.parseInt(u32, x, 10));
         } else try hcskips.append(arena, 0);
@@ -520,7 +521,7 @@ pub fn main(init: std.process.Init) !void {
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(toks[0..1], &pk);
-        if (std.c.getenv("FZ_PROFILE_AB") != null) { // in-model A/B, interleaved: recorded, core lane, fz_gdn, both
+        if (platform.c.getenv("FZ_PROFILE_AB") != null) { // in-model A/B, interleaved: recorded, core lane, fz_gdn, both
             const gpipe = try fz.gdn_step.compile(&r, false);
             const arms = [_][2]bool{ .{ false, false }, .{ true, false }, .{ false, true }, .{ true, true } };
             for ([_]usize{ 1, 2, 4, 6, 8, 16 }) |rows| {
@@ -537,12 +538,12 @@ pub fn main(init: std.process.Init) !void {
             return;
         }
         var ups: std.ArrayList(bool) = .empty; // FZ_HC_UP=0,1: the profile with the recorded up projection, then fz_hc_up
-        if (std.c.getenv("FZ_HC_UP")) |v| {
+        if (platform.c.getenv("FZ_HC_UP")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             while (it.next()) |x| try ups.append(arena, !std.mem.eql(u8, x, "0"));
         } else try ups.append(arena, false);
         var prow: std.ArrayList(usize) = .empty; // FZ_PROFILE_ROWS=2,3: the windows' widths (default 1, 4, 8)
-        if (std.c.getenv("FZ_PROFILE_ROWS")) |v| {
+        if (platform.c.getenv("FZ_PROFILE_ROWS")) |v| {
             var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
             while (it.next()) |x| try prow.append(arena, try std.fmt.parseInt(usize, x, 10));
         } else try prow.appendSlice(arena, &.{ 1, 4, 8 });
@@ -551,7 +552,7 @@ pub fn main(init: std.process.Init) !void {
             r.hcskip = hs;
             var base: f64 = 0;
             for (names, 0..) |name, c| {
-                const only = std.c.getenv("FZ_PROFILE_ONLY") != null; // every class but this one knocked out
+                const only = platform.c.getenv("FZ_PROFILE_ONLY") != null; // every class but this one knocked out
                 r.skip = if (c == 0) (if (only) 0x1ff else 0) else if (only) 0x1ff & ~(@as(u32, 1) << @intCast(c - 1)) else @as(u32, 1) << @intCast(c - 1);
                 m.gpu_seconds = 0;
                 for (0..20) |_| try m.window(toks[0..rows], &pk);
@@ -573,7 +574,7 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_DUAL") != null) { // two lane groups on two queues: one window, two in a row, two at once
+    if (platform.c.getenv("FZ_DUAL") != null) { // two lane groups on two queues: one window, two in a row, two at once
         const want0 = ref.object.get("tokens").?.array.items;
         const pr = ref.object.get("prompt").?.array.items;
         var pk: [MAXR]u32 = undefined;
@@ -648,7 +649,7 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_HCCHECK") != null) { // fz_hc_up against the recorded up projection: every row's logits and streams, bit for bit
+    if (platform.c.getenv("FZ_HCCHECK") != null) { // fz_hc_up against the recorded up projection: every row's logits and streams, bit for bit
         const want0 = ref.object.get("tokens").?.array.items;
         const pr = ref.object.get("prompt").?.array.items;
         var pk: [MAXR]u32 = undefined;
@@ -687,7 +688,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("hc check: {s}\n", .{if (bad == 0) "bit-identical" else "DIFFERENT"});
         return;
     }
-    if (std.c.getenv("FZ_GCHECK") != null) { // grouped or fused experts against fz_xgu/fz_xdown: every row's logits, bit for bit
+    if (platform.c.getenv("FZ_GCHECK") != null) { // grouped or fused experts against fz_xgu/fz_xdown: every row's logits, bit for bit
         const want0 = ref.object.get("tokens").?.array.items;
         const pr = ref.object.get("prompt").?.array.items;
         var pk: [MAXR]u32 = undefined;
@@ -714,12 +715,12 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_XTIME") != null) { // the experts' share of a window: chain rows against one token repeated
+    if (platform.c.getenv("FZ_XTIME") != null) { // the experts' share of a window: chain rows against one token repeated
         const want0 = ref.object.get("tokens").?.array.items;
         var pk: [MAXR]u32 = undefined;
         m.reset();
         for (0..3) |_| try m.window(&.{@intCast(want0[0].integer)}, &pk);
-        if (std.c.getenv("FZ_GPARTS") != null) for ([_]usize{ 2, 8 }) |rows| {
+        if (platform.c.getenv("FZ_GPARTS") != null) for ([_]usize{ 2, 8 }) |rows| {
             var toks: [MAXR]u32 = undefined;
             for (0..rows) |i| toks[i] = @intCast(want0[i].integer);
             for ([_]u32{ 0, 1, 4, 6 }) |gs| {
@@ -747,21 +748,21 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_PREFILL") != null) { // the prompt path against the exact 8-row windows, then one-row decode
+    if (platform.c.getenv("FZ_PREFILL") != null) { // the prompt path against the exact 8-row windows, then one-row decode
         const all_items = ref.object.get("prompt").?.array.items;
         const pr_items = all_items[0..@min(all_items.len, try promptCut())]; // FZ_PROMPT_N: the prompt's first n tokens
         const toks = try gpa.alloc(u32, pr_items.len);
         defer gpa.free(toks);
         for (pr_items, 0..) |x, i| toks[i] = @intCast(x.integer);
-        if (std.c.getenv("FZ_SATTN_CHECK") != null) { // prompt attention: the decode's kernels vs the tensor units
+        if (platform.c.getenv("FZ_SATTN_CHECK") != null) { // prompt attention: the decode's kernels vs the tensor units
             var pr = try Prompt.init(&r, args[2], r.xnew_header);
-            if (std.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
-            const ab0: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
+            if (platform.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+            const ab0: []const u8 = if (platform.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
             const seg2 = std.mem.eql(u8, ab0, "seg2");
             // seg2: one chunk at a time against staggered segments (core/segments.zig): FZ_SEGS=2 (default) the
             // engine's rule (two segments of at least FZ_SEG_MIN rows), 1 one segment, 3-4 that many of up to a chunk
-            const nseg: usize = if (std.c.getenv("FZ_SEGS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 2;
-            const seg_min: usize = if (std.c.getenv("FZ_SEG_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1;
+            const nseg: usize = if (platform.c.getenv("FZ_SEGS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 2;
+            const seg_min: usize = if (platform.c.getenv("FZ_SEG_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 1;
             if (seg2 and (nseg == 0 or nseg > tf.segments.MAX)) return error.Segments;
             var extra: [3]Prompt = undefined;
             var ps: [4]*Prompt = undefined;
@@ -773,7 +774,7 @@ pub fn main(init: std.process.Init) !void {
             var outs: [2][48]u32 = undefined;
             const logits: [2][]u16 = .{ try gpa.alloc(u16, VOCAB), try gpa.alloc(u16, VOCAB) };
             var best: [2]f64 = .{ 1e9, 1e9 };
-            const ab: []const u8 = if (std.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
+            const ab: []const u8 = if (platform.c.getenv("FZ_AB")) |v| std.mem.span(v) else "attn";
             for (0..2) |arm| { // arm 0 the old kernels, arm 1 the new: FZ_AB attn (default), scan or tiles
                 if (std.mem.eql(u8, ab, "scan")) pr.scan4 = arm == 1 else if (std.mem.eql(u8, ab, "tiles")) pr.tall_tiles = arm == 1 else if (std.mem.eql(u8, ab, "gu")) pr.fused_gu = arm == 1 else if (std.mem.eql(u8, ab, "bm32")) pr.expert_bm = if (arm == 1) 32 else 0 else if (std.mem.eql(u8, ab, "scan8")) pr.scan8 = arm == 1 else if (std.mem.eql(u8, ab, "seg2")) {} else pr.fast_attn = arm == 1;
                 for (0..3) |run| {
@@ -830,7 +831,7 @@ pub fn main(init: std.process.Init) !void {
         const a0 = mtl.clock.seconds();
         var at: usize = 0;
         var last_n: usize = 1;
-        const ref_upto: usize = if (std.c.getenv("FZ_PF_REF")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else toks.len;
+        const ref_upto: usize = if (platform.c.getenv("FZ_PF_REF")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else toks.len;
         while (at < @min(ref_upto, toks.len)) {
             const n: usize = @min(MAXR, toks.len - at);
             try m.window(toks[at .. at + n], &pk);
@@ -865,7 +866,7 @@ pub fn main(init: std.process.Init) !void {
         }
         // the prompt path
         var pr = try Prompt.init(&r, args[2], r.xnew_header);
-        if (std.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
+        if (platform.c.getenv("FZ_STEP")) |v| pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
         m.reset();
         const b0 = mtl.clock.seconds();
         var first: u32 = 0;
@@ -927,7 +928,7 @@ pub fn main(init: std.process.Init) !void {
         pr.skip = 0;
         return;
     }
-    if (std.c.getenv("FZ_QMM6") != null) { // 6-bit tensor-unit projections for prompt chunks: checked and timed
+    if (platform.c.getenv("FZ_QMM6") != null) { // 6-bit tensor-unit projections for prompt chunks: checked and timed
         const lib = try mtl.Library.fromSource(device, try fz.frags.source(device, arena, ks.flashnext_qmm6), mtl.CompileOptions.mlx());
         const qmm_pipe = try mtl.Pipeline.init(device, lib, "tf_qmm6_t_nax", false);
         const off_pipe = try mtl.Pipeline.init(device, lib, "tf_expert_offsets6", false);
@@ -1061,7 +1062,7 @@ pub fn main(init: std.process.Init) !void {
         }
         return;
     }
-    if (std.c.getenv("FZ_OVERLAP") != null) { // how many experts a window's rows share, layer by layer
+    if (platform.c.getenv("FZ_OVERLAP") != null) { // how many experts a window's rows share, layer by layer
         const pr = ref.object.get("prompt").?.array.items;
         const want0 = ref.object.get("tokens").?.array.items;
         r.ar = .{ .b = try r.buffer(64) };
@@ -1148,10 +1149,10 @@ pub fn main(init: std.process.Init) !void {
     var pick: [MAXR]u32 = undefined;
 
     // FZ_LONG: prompts of any length through the prompt chunks (reference and GPU-side rounds alike)
-    const long_mode = std.c.getenv("FZ_LONG") != null;
-    if (std.c.getenv("FZ_PRE1") != null) try m.window(&.{1000}, &pick); // a decode window before the prompt chunks
+    const long_mode = platform.c.getenv("FZ_LONG") != null;
+    if (platform.c.getenv("FZ_PRE1") != null) try m.window(&.{1000}, &pick); // a decode window before the prompt chunks
     var pr_long: ?Prompt = if (long_mode) try Prompt.init(&r, args[2], r.xnew_header) else null;
-    if (pr_long) |*pr| if (std.c.getenv("FZ_STEP")) |v| {
+    if (pr_long) |*pr| if (platform.c.getenv("FZ_STEP")) |v| {
         pr.step = try std.fmt.parseInt(usize, std.mem.span(v), 10);
     };
     const ptoks = try gpa.alloc(u32, prompt.len);
@@ -1190,20 +1191,20 @@ pub fn main(init: std.process.Init) !void {
     const steps: f64 = @floatFromInt(want.len - 1);
     std.debug.print("one-row reference starts {any}\n", .{got.items[0..@min(24, got.items.len)]});
     std.debug.print("one row: {d}/{d} tokens equal to Python's; {d:.1} tok/s ({d:.2} ms a step, GPU {d:.2} ms)\n", .{ same, want.len, steps / (t4 - t3), (t4 - t3) * 1e3 / steps, m.gpu_seconds * 1e3 / steps });
-    if (std.c.getenv("FZ_ONLY1") != null) {
+    if (platform.c.getenv("FZ_ONLY1") != null) {
         if (same < want.len) std.debug.print("first difference at token {d}: got {d}, Python {d}\n", .{ same, got.items[same], want[same].integer });
         return;
     }
 
     // 2. the Python engine's drafted windows, every row's pick, with rollback
     m.reset();
-    if (!long_mode and std.c.getenv("FZ_ONLY17") == null) for (prompt) |tok| {
+    if (!long_mode and platform.c.getenv("FZ_ONLY17") == null) for (prompt) |tok| {
         try m.window(&.{@intCast(tok.integer)}, &pick);
         m.keepRows(&.{@intCast(tok.integer)}, 1);
     };
     var bad: usize = 0;
     var total_rows: usize = 0;
-    const skip_mid = long_mode or std.c.getenv("FZ_ONLY17") != null; // the one-row reference, then GPU-side rounds only
+    const skip_mid = long_mode or platform.c.getenv("FZ_ONLY17") != null; // the one-row reference, then GPU-side rounds only
     const rounds = if (own_prompt or skip_mid) &[_]std.json.Value{} else ref.object.get("rounds").?.array.items;
     for (rounds, 0..) |round, ri| {
         const o = round.object;
@@ -1310,7 +1311,7 @@ pub fn main(init: std.process.Init) !void {
     const adapt_story = [_][3]usize{ .{ 3, 3, 0 }, .{ 0, 7, 9 } };
     const adapt_own = [_][3]usize{ .{ 3, 3, 0 }, .{ 6, 6, 0 }, .{ 0, 7, 9 } };
     const adapt: []const [3]usize = if (own_prompt) &adapt_own else &adapt_story;
-    const copy_min: usize = if (std.c.getenv("FZ_COPY_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 3;
+    const copy_min: usize = if (platform.c.getenv("FZ_COPY_MIN")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else 3;
     var hist: std.ArrayList(u32) = .empty;
     for (prompt) |x| try hist.append(gpa, @intCast(x.integer));
     const n_prompt = hist.items.len;
@@ -1441,7 +1442,7 @@ pub fn main(init: std.process.Init) !void {
     //    N+1 while round N runs and reads the emitted tokens from a ring. Depth 0: the depth rule picks each round's
     //    drafts from the rounds read back so far (the window two rounds behind the one being encoded).
     var depths7: std.ArrayList(usize) = .empty;
-    if (std.c.getenv("FZ_D7")) |v| { // e.g. FZ_D7=6,0
+    if (platform.c.getenv("FZ_D7")) |v| { // e.g. FZ_D7=6,0
         var it = std.mem.tokenizeScalar(u8, std.mem.span(v), ',');
         while (it.next()) |d| try depths7.append(gpa, try std.fmt.parseInt(usize, d, 10));
     } else try depths7.appendSlice(gpa, &.{ 3, 6, 0 });

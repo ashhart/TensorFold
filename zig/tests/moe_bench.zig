@@ -1,5 +1,6 @@
 //! Routed-expert prompt kernels from .metal files compiled at run time: a chunk's skewed top-k routing, chained speed, bits against the first.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 
@@ -16,12 +17,12 @@ const Args = extern struct { rows: i32, n: i32, k: i32, experts: i32 };
 const Kernel = struct { path: []const u8, bm: u32 = 64, entry: []const u8 = "", lib: mtl.Library = undefined, pipe: mtl.Pipeline = undefined, y: mtl.Buffer = undefined, ms: [64]f64 = undefined };
 
 fn envInt(name: [:0]const u8, default: usize) usize {
-    const v = std.c.getenv(name) orelse return default;
+    const v = platform.c.getenv(name) orelse return default;
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch default;
 }
 
 fn envFloat(name: [:0]const u8, default: f64) f64 {
-    const v = std.c.getenv(name) orelse return default;
+    const v = platform.c.getenv(name) orelse return default;
     return std.fmt.parseFloat(f64, std.mem.span(v)) catch default;
 }
 
@@ -37,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("usage: {s}\n", .{usage});
         std.process.exit(2);
     }
-    const down = if (std.c.getenv("MOE_MODE")) |v| std.mem.eql(u8, std.mem.span(v), "down") else false;
+    const down = if (platform.c.getenv("MOE_MODE")) |v| std.mem.eql(u8, std.mem.span(v), "down") else false;
     const T = try std.fmt.parseInt(u32, args[1], 10);
     const E: u32 = @intCast(envInt("MOE_EXPERTS", 288));
     const topk: u32 = @intCast(envInt("MOE_TOPK", 8));
@@ -65,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
         total += w.*;
     }
     const pick = try arena.alloc(u32, n);
-    const exact = std.c.getenv("MOE_EXACT") != null; // pairs dealt round-robin: every expert the same row count
+    const exact = platform.c.getenv("MOE_EXACT") != null; // pairs dealt round-robin: every expert the same row count
     if (exact) for (pick, 0..) |*q, i| {
         q.* = @intCast((i % topk + (i / topk) * topk) % E);
     };

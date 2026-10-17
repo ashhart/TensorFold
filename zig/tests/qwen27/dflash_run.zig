@@ -1,5 +1,6 @@
 //! The draft prototype on real weights: target tokens and final state against ordinary native generation.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const q = @import("qwen27");
 const profile = @import("core").gpu_profile;
@@ -71,7 +72,7 @@ pub fn main(init: std.process.Init) !void {
     try generation.prefill(prompt, chunk);
     const prompt_ns = start.durationTo(std.Io.Clock.awake.now(io)).toNanoseconds();
     var trace = profile.Trace{ .queue = target.queue };
-    const profiled = std.c.getenv("QWEN27_PROFILE") != null;
+    const profiled = platform.c.getenv("QWEN27_PROFILE") != null;
     if (profiled) {
         runner.profile(&trace);
         trace.enabled = true;

@@ -33,7 +33,7 @@ const paths = [_][]const u8{ "librccl.so.1", "librccl.so", "/opt/rocm/lib/librcc
 const sum_op: c_int = 0;
 
 pub const Rccl = struct {
-    lib: std.DynLib,
+    lib: @import("sys").DynLib,
     api: Api,
 
     /// `first` (the policy's `rccl_lib`) is tried before the usual places.
@@ -49,7 +49,7 @@ pub const Rccl = struct {
             n += 1;
         }
         for (candidates[0..n]) |path| {
-            var lib = std.DynLib.open(path) catch continue;
+            var lib = @import("sys").DynLib.open(path) catch continue;
             errdefer lib.close();
             var api: Api = undefined;
             const info = @typeInfo(Api).@"struct";

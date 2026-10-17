@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's dev-time checks on a loaded engine: captures, traces, teacher forcing and knock-out profiles.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -27,9 +28,9 @@ pub fn capture(e: *Engine, prompt: []const u32, path: []const u8) !void {
     fwd.head(&x, b.enc, e.sc.hidden, dump.at(x.dump_at), e.sc.picks, n);
     try e.finish(b.cb, b.enc);
     fwd.flipKda(&x);
-    const file = std.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
-    defer _ = std.c.fclose(file);
-    if (std.c.fwrite(dump.addr(), 1, bytes, file) != bytes) return error.WriteFailed;
+    const file = platform.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
+    defer _ = platform.c.fclose(file);
+    if (platform.c.fwrite(dump.addr(), 1, bytes, file) != bytes) return error.WriteFailed;
     std.debug.print("captured {d} rows ({d} bytes) in {s}\n", .{ n, bytes, path });
 }
 
@@ -47,8 +48,8 @@ pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, 
     @memcpy(Engine.u32s(e.prompt_ids.at(@as(usize, P) * 4), total - P), reply[0 .. total - P]);
     const most = @as(usize, st.max_rows) * c.hidden * 2 * (2 + 4 * @as(usize, c.run)) + @as(usize, st.max_rows) * c.vocab * 2;
     const dump = try e.arena.buffer(most);
-    const file = std.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
-    defer _ = std.c.fclose(file);
+    const file = platform.c.fopen(try std.fmt.allocPrintSentinel(e.gpa, "{s}", .{path}, 0), "wb") orelse return error.OpenFailed;
+    defer _ = platform.c.fclose(file);
     var x = e.ctx();
     var at: u32 = 0;
     var calls: usize = 0;
@@ -62,7 +63,7 @@ pub fn trace(e: *Engine, prompt: []const u32, reply: []const u32, steps: usize, 
         try e.finish(b.cb, b.enc);
         fwd.flipKda(&x);
         const bytes = x.dump_at + @as(usize, n) * c.vocab * 2;
-        if (std.c.fwrite(dump.addr(), 1, bytes, file) != bytes) return error.WriteFailed;
+        if (platform.c.fwrite(dump.addr(), 1, bytes, file) != bytes) return error.WriteFailed;
         at += n;
     }
     std.debug.print("traced {d} calls ({d} prompt rows, {d} steps) in {s}\n", .{ calls, P, total - P, path });
@@ -106,7 +107,7 @@ pub fn profile(e: *Engine, depth: u32, reps: usize, only: bool, parts: bool) !vo
     const c = &e.c;
     const D = c.hidden;
     const d: u32 = if (e.w.mtp == null) 0 else @min(depth, st.max_rows - 1);
-    const wide = if (std.c.getenv("GLM_PROFILE_ROWS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1 else 1; // a copy window's rows, without the MTP head
+    const wide = if (platform.c.getenv("GLM_PROFILE_ROWS")) |v| std.fmt.parseInt(u32, std.mem.span(v), 10) catch 1 else 1; // a copy window's rows, without the MTP head
     const R = if (d == 0) std.math.clamp(wide, 1, st.max_rows) else d + 1;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();

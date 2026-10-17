@@ -1,5 +1,6 @@
 //! One mcdma-rpcd mailbox (protocol 1): the mapped halves, a client's ordered call and a service's request and reply.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const layout = @import("layout.zig");
 const words = @import("words.zig");
@@ -48,32 +49,32 @@ pub const Mailbox = struct {
     fn openShm(name: []const u8) Error!Mailbox {
         var path: [64]u8 = undefined;
         const z = std.mem.printSentinel(&path, "/mcdma-rpc.{s}", .{name}, 0) catch return error.InvalidName;
-        const flags: c_int = @bitCast(std.c.O{ .ACCMODE = .RDWR });
-        const fd = if (builtin.os.tag == .macos) std.c.shm_open(z.ptr, flags, @as(c_uint, 0)) else std.c.shm_open(z.ptr, flags, 0);
+        const flags: c_int = @bitCast(platform.c.O{ .ACCMODE = .RDWR });
+        const fd = if (builtin.os.tag == .macos) platform.c.shm_open(z.ptr, flags, @as(c_uint, 0)) else platform.c.shm_open(z.ptr, flags, 0);
         if (fd < 0) return error.NoMailbox;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         return mapFd(fd);
     }
 
     /// The listen end's mailbox: POSIX shared memory on a Mac, the file /dev/shm/mcdma-rpc.NAME on Linux; MCDMA_RPC_BOX_DIR names a test directory.
     pub fn openListen(name: []const u8) Error!Mailbox {
         if (!layout.validName(name)) return error.InvalidName;
-        const env = std.c.getenv("MCDMA_RPC_BOX_DIR");
+        const env = platform.c.getenv("MCDMA_RPC_BOX_DIR");
         if (env == null and builtin.os.tag == .macos) return openShm(name);
         const dir = if (env) |d| std.mem.span(d) else "/dev/shm";
         var path: [256]u8 = undefined;
         const z = std.mem.printSentinel(&path, "{s}/mcdma-rpc.{s}", .{ dir, name }, 0) catch return error.InvalidName;
-        const fd = std.c.open(z.ptr, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true });
+        const fd = platform.c.open(z.ptr, .{ .ACCMODE = .RDWR, .NOFOLLOW = true, .CLOEXEC = true });
         if (fd < 0) return error.NoMailbox;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         return mapFd(fd);
     }
 
     /// Map a mailbox the daemon created; it must be this user's and owner-only, as the daemons make them.
-    fn mapFd(fd: std.c.fd_t) Error!Mailbox {
-        var st: std.c.Stat = undefined;
-        if (std.c.fstat(fd, &st) != 0) return error.NoMailbox;
-        if (st.uid != std.c.getuid() or st.mode & 0o077 != 0) return error.UnsafeMailbox;
+    fn mapFd(fd: platform.c.fd_t) Error!Mailbox {
+        var st: platform.c.Stat = undefined;
+        if (platform.c.fstat(fd, &st) != 0) return error.NoMailbox;
+        if (st.uid != platform.c.getuid() or st.mode & 0o077 != 0) return error.UnsafeMailbox;
         const size: usize = @intCast(st.size);
         if (size < 2 * layout.segment) return error.BadSizes;
         const mem = std.posix.mmap(null, size, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0) catch return error.NoMailbox;
@@ -210,14 +211,14 @@ pub fn allocFake(req: usize, rep: usize) ![]align(page) u8 {
 }
 
 test "a listen mailbox on this Mac is POSIX shared memory, as MCDMA 2.0.0's Mac listen end makes it" {
-    if (builtin.os.tag != .macos or std.c.getenv("MCDMA_RPC_BOX_DIR") != null) return error.SkipZigTest;
+    if (builtin.os.tag != .macos or platform.c.getenv("MCDMA_RPC_BOX_DIR") != null) return error.SkipZigTest;
     const name = "/mcdma-rpc.tf-zig-shm-test";
-    const flags: c_int = @bitCast(std.c.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true });
-    const fd = std.c.shm_open(name, flags, @as(c_uint, 0o600));
+    const flags: c_int = @bitCast(platform.c.O{ .ACCMODE = .RDWR, .CREAT = true, .EXCL = true });
+    const fd = platform.c.shm_open(name, flags, @as(c_uint, 0o600));
     try std.testing.expect(fd >= 0);
-    defer _ = std.c.shm_unlink(name);
-    defer _ = std.c.close(fd);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.ftruncate(fd, 2 * layout.segment));
+    defer _ = platform.c.shm_unlink(name);
+    defer _ = platform.c.close(fd);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.ftruncate(fd, 2 * layout.segment));
     const mem = try std.posix.mmap(null, 2 * layout.segment, .{ .READ = true, .WRITE = true }, .{ .TYPE = .SHARED }, fd, 0);
     std.mem.writeInt(u64, mem[layout.sizes..][0..8], layout.segment, .little);
     std.mem.writeInt(u64, mem[layout.sizes + 8 ..][0..8], layout.segment, .little);
