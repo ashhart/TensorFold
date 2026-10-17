@@ -238,9 +238,16 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             p.tokens = &.{};
             p.parents = null;
         } else if (p.parents) |parents| {
-            const tree = try accept.sanitizeTree(a, p.tokens, parents, c);
-            p.tokens = tree.tokens;
+            // the held drafts lead the window (placeholders here), so the first kept rows stay held
+            const drafts = try a.alloc(u32, p.count());
+            @memset(drafts[0..p.held], 0);
+            @memcpy(drafts[p.held..], p.tokens);
+            const tree = try accept.sanitizeTree(a, drafts, parents, c);
+            const held = @min(p.held, c);
+            p.held = held;
+            p.tokens = tree.tokens[held..];
             p.parents = tree.parents;
+            if (c < p.branch_from) p.branch_from = 0; // the grafts follow the trunk's drafts: this count keeps none
         } else if (p.held > 0) {
             p.held = c;
         } else p.tokens = p.tokens[0..c];
