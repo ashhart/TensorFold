@@ -4,6 +4,7 @@ pub const prompt = @import("prompt.zig");
 pub const wav = @import("wav.zig");
 pub const common = @import("common.zig");
 pub const shards = @import("shards.zig");
+pub const frames = @import("frames.zig");
 pub const gpu = @import("metal/gpu.zig");
 pub const kernels = @import("metal/kernels.zig");
 pub const weights = @import("metal/weights.zig");
@@ -20,4 +21,5 @@ test {
     _ = prompt;
     _ = wav;
     _ = kernels;
+    _ = frames;
 }

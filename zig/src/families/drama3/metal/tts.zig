@@ -2,6 +2,7 @@
 const std = @import("std");
 const cfg = @import("../config.zig");
 const common = @import("../common.zig");
+const cut = @import("../frames.zig");
 const wav = @import("../wav.zig");
 const gpu = @import("gpu.zig");
 const eng = @import("engine.zig");
@@ -87,11 +88,10 @@ pub const Tts = struct {
             for (0..burst) |_| try e.frameStep(smp, true, null);
             try e.download(e.frames_out + made * W * 4, std.mem.sliceAsBytes(host[made .. made + burst]));
             var good = made + burst;
-            for (host[made .. made + burst], made..) |f, i| if (f[0] == e.c.ids.eos) {
+            if (cut.endOfSpeech(host[made .. made + burst], made, e.c.ids.eos)) |end| {
                 eos = true;
-                good = i;
-                break;
-            };
+                good = end;
+            }
             if (good > made) {
                 try t.flush(made, good, sink);
                 if (made == 0) first_audio = ms(t0, eng.nowNs(io));
@@ -99,7 +99,7 @@ pub const Tts = struct {
             made = good;
         }
         const t2 = eng.nowNs(io);
-        return .{ .frames = host[0..made], .stats = .{
+        return .{ .frames = try cut.owned(t.gpa, host, made), .stats = .{
             .frames = made,
             .eos = eos,
             .prompt_rows = rows.len,
