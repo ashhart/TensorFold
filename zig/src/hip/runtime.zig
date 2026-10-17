@@ -1,10 +1,11 @@
 //! Complete model-free HIP runtime admission; partial symbol tables never escape.
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 pub const Error = error{ DriverUnavailable, MissingSymbol, HipFailed, Invalid };
 
 pub const Runtime = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: abi.Api,
 
     pub fn open() Error!Runtime {
@@ -12,7 +13,7 @@ pub const Runtime = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Runtime {
-        var lib = std.DynLib.open(path) catch return error.DriverUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.DriverUnavailable;
         errdefer lib.close();
         const api = try @import("symbols.zig").resolve(abi.Api, &lib);
         try check(api.hipInit(0));

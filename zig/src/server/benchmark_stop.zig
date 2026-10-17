@@ -1,5 +1,6 @@
 //! Ctrl-C, SIGTERM and SIGHUP during a benchmark: one flag the waits read; a second Ctrl-C exits at once.
 const std = @import("std");
+const platform = @import("sys");
 const posix = std.posix;
 
 var stored: std.atomic.Value(u32) = .init(0);
@@ -17,7 +18,7 @@ fn onSignal(sig: posix.SIG) callconv(.c) void {
         abandon();
         const default: posix.Sigaction = .{ .handler = .{ .handler = posix.SIG.DFL }, .mask = posix.sigemptyset(), .flags = 0 };
         posix.sigaction(.INT, &default, null);
-        _ = std.c.raise(.INT);
+        _ = platform.c.raise(.INT);
     };
 }
 
@@ -87,7 +88,7 @@ pub fn guardedTerminal() posix.fd_t {
 /// What a second Ctrl-C does before the process dies: kill the guarded child and restore the guarded terminal.
 pub fn abandon() void {
     const pid = child.swap(0, .acq_rel);
-    if (pid > 0) _ = std.c.kill(pid, .KILL);
+    if (pid > 0) _ = platform.c.kill(pid, .KILL);
     const fd = tty_fd.swap(-1, .acq_rel);
-    if (fd >= 0) _ = std.c.tcsetattr(fd, .NOW, &tty_saved);
+    if (fd >= 0) _ = platform.c.tcsetattr(fd, .NOW, &tty_saved);
 }

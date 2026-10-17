@@ -38,5 +38,5 @@ pack_kernel(const uint32_t* __restrict__ words, const uint16_t* __restrict__ sca
 } // namespace tf_experts_pack
 
 // Groups of 64 inputs.
-template __global__ void tf_experts_pack::pack_kernel<2>(const uint32_t*, const uint16_t*, const uint16_t*,
-    uint32_t*, int, int, int, int);
+template __global__ void tf_experts_pack::pack_kernel<2>(const uint32_t* __restrict__, const uint16_t* __restrict__, const uint16_t* __restrict__,
+    uint32_t* __restrict__, int, int, int, int);

@@ -1,6 +1,7 @@
 //! The listening socket: SO_REUSEADDR only (never REUSEPORT, so a second server on the port fails), backlog 128.
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("sys");
+const posix = platform.posix;
 const net = std.Io.net;
 const log = @import("log.zig");
 const Threaded = std.Io.Threaded;

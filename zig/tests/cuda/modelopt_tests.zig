@@ -193,22 +193,31 @@ fn lanes(gpu: Gpu, rng: std.Random, p: *const modelopt.Packer, lin: cuda.qlinear
     defer y.free();
     var y2 = try cuda.DeviceBuffer.alloc(gpu.d, m * n * 2);
     defer y2.free();
-    try lin.decode(s, q, .{ .x = dx.ptr }, y.ptr, 16);
+    // slice partials for the lane's split K: GPUs without clusters (before sm_90) reduce through them
+    const lw = switch (q) {
+        .fp8, .bf16 => |v| v,
+        else => unreachable,
+    };
+    var part_bytes: usize = 4;
+    for ([_]usize{ 16, 128, m }) |r| part_bytes = @max(part_bytes, lin.lane.?.partBytes(r, lw));
+    var part = try cuda.DeviceBuffer.alloc(gpu.d, part_bytes);
+    defer part.free();
+    try lin.decode(s, q, .{ .x = dx.ptr, .part = part.ptr }, y.ptr, 16);
     try s.synchronize();
     const wide = try check.download(gpu, y);
     defer a.free(wide);
     for (1..16) |rows| {
         try y2.fill8(0xff, s.handle);
-        try lin.decode(s, q, .{ .x = dx.ptr }, y2.ptr, rows);
+        try lin.decode(s, q, .{ .x = dx.ptr, .part = part.ptr }, y2.ptr, rows);
         try s.synchronize();
         try same(gpu, "decode rows at a narrower width", y2, wide[0 .. rows * n * 2]);
     }
     var worst = [2]f64{ 0, 0 };
-    try lin.prompt(s, q, .{ .x = dx.ptr }, y.ptr, m);
+    try lin.prompt(s, q, .{ .x = dx.ptr, .part = part.ptr }, y.ptr, m);
     try s.synchronize();
     const prompt = try check.download(gpu, y);
     defer a.free(prompt);
-    try lin.prompt(s, q, .{ .x = dx.ptr }, y2.ptr, 128);
+    try lin.prompt(s, q, .{ .x = dx.ptr, .part = part.ptr }, y2.ptr, 128);
     try s.synchronize();
     try same(gpu, "prompt rows in a chunk of 128", y2, prompt[0 .. 128 * n * 2]);
     for (0..m) |r| for (0..n) |c| {
