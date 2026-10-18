@@ -1,6 +1,4 @@
-// y = x R^T, R bf16 [N, K] (no scales): nemotron_h_puzzle's latent projections fc1/fc2_latent_proj and the gate,
-// which are stored in full bf16. Same shape as tf_residual (a simdgroup an output column, 8 rows a pass) but it
-// WRITES y instead of accumulating, so a fresh projection needs no zeroing first. Hand-authored for this PR.
+// y = x R^T for a bf16 R [N, K] (gate, fc1/fc2_latent_proj, lm_head): tf_residual's shape, but it writes y
 #include <metal_stdlib>
 using namespace metal;
 

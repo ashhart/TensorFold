@@ -1,6 +1,4 @@
-"""Teacher-forced NLL and top-token agreement of the native Nemotron engine (Lightning or Bolt) against stock mlx-lm,
-including mlx-lm's own one-row/chunked variation as the floor. Native logits come from tf-nemotron-forward; every native
-pass runs before mlx-lm loads, so a 74B checkpoint is never held twice."""
+"""Native Nemotron teacher-forced NLL and top-1 vs stock mlx-lm; mlx-lm's own row/chunk spread is the floor."""
 from __future__ import annotations
 
 import argparse
