@@ -1,5 +1,4 @@
-//! Attention's products of its input as one concurrent group: wq_a, wkv and, on a cache owner
-//! layer, the compressor's wkv and wgate. All read x only and write separate fields.
+//! Concurrent wq_a/wkv and owner-layer compressor wkv/wgate products read x and write separate outputs.
 const std = @import("std");
 const mtl = @import("metal");
 const exl3 = @import("../../core/exl3_projection.zig");
@@ -11,11 +10,11 @@ pub const Matrices = struct {
     compressor_wkv: ?exl3.Matrix = null,
     compressor_wgate: ?exl3.Matrix = null,
 };
+/// qr/raw: BF16; values: BF16 at ratio 1, otherwise FP32; gates: FP32, matching individual products.
 pub const Outputs = struct { qr: exl3.View, raw: exl3.View, values: exl3.View, gates: exl3.View };
 pub const Dims = struct { hidden: u32, q_lora_rank: u32, head_dim: u32 };
 
-/// Each product gets its own slice of `scratch` (at most `scratch_bytes`), and the outputs keep
-/// the dtypes of the one-by-one products: qr, raw BF16; values BF16 at ratio 1, else FP32; gates FP32.
+/// Each product uses a separate scratch slice; their combined size must fit scratch_bytes.
 pub fn encode(ep: *const exl3.Pipelines, e: mtl.ComputeEncoder, m: Matrices, out: Outputs, x: exl3.View, scratch: exl3.View, scratch_bytes: usize, rows: u32, d: Dims, ratio: u32) !void {
     var jobs: [4]exl3.Job = undefined;
     jobs[0] = .{ .weights = .{ .matrix = m.wq_a }, .x = x, .y = out.qr, .scratch = undefined, .rows = .{ .count = rows, .x_stride = d.hidden, .y_stride = d.q_lora_rank } };
