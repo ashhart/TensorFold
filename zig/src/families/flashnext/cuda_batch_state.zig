@@ -61,6 +61,11 @@ const cubin_hcf_down: [:0]const u8 = "_ZN3hcf10hcf_kernelILi32ELi192ELi2ELi4ELi4
 const cubin_hcf_up: [:0]const u8 = "_ZN3hcf10hcf_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELb0ELb1ELi2EEEvPK13__nv_bfloat16PKfPK5uint4S3_S3_PviiiiiiS5_S5_fiii";
 pub const hcf_down_smem: u32 = 4 * (2 * 32 * 64 + 2 * 192 * 16 + 2 * 2 * 192 * 2 + 2 * 32 * 4 + 2 * 32 * 4) + 32 * 16;
 pub const hcf_up_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4 + 2 * 32 * 4) + 64 * 16;
+/// Prompt rows' experts on factored 64-pair tiles (flashnext_fexp.cu), expert_rows' bits: up with SwiGLU, down to fp32.
+const cubin_fexp_up: [:0]const u8 = "_ZN15tf_fact_experts11fact_kernelILi2ELi2ELi1ELi4ELi2ELi3EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+const cubin_fexp_down: [:0]const u8 = "_ZN15tf_fact_experts11fact_kernelILi1ELi0ELi2ELi2ELi4ELi3EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
+pub const fexp_smem: u32 = 41472;
+pub const fexp_tile: usize = 64;
 pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
@@ -153,6 +158,9 @@ pub const Kernels = struct {
     fact_mod: cuda.Module,
     fact: cuda.Function,
     hcf_mod: cuda.Module,
+    fexp_mod: cuda.Module,
+    fexp_up: cuda.Function,
+    fexp_down: cuda.Function,
     hcf_down: cuda.Function,
     hcf_up: cuda.Function,
     native_lane: cuda.qmmf.Lane,
@@ -185,6 +193,12 @@ pub const Kernels = struct {
         errdefer k.fact_mod.unload();
         k.fact = try k.fact_mod.function(cubin_fact);
         try k.fact.allowDynamicShared(fact_smem);
+        k.fexp_mod = try cuda.Module.load(d, cuda.kernels.flashnext_fexp);
+        errdefer k.fexp_mod.unload();
+        k.fexp_up = try k.fexp_mod.function(cubin_fexp_up);
+        try k.fexp_up.allowDynamicShared(fexp_smem);
+        k.fexp_down = try k.fexp_mod.function(cubin_fexp_down);
+        try k.fexp_down.allowDynamicShared(fexp_smem);
         k.hcf_mod = try cuda.Module.load(d, cuda.kernels.flashnext_hcf);
         errdefer k.hcf_mod.unload();
         k.hcf_down = try k.hcf_mod.function(cubin_hcf_down);
@@ -220,6 +234,7 @@ pub const Kernels = struct {
         k.rows.unload();
         k.experts.unload();
         k.hcf_mod.unload();
+        k.fexp_mod.unload();
         k.fact_mod.unload();
         k.qmm.unload();
     }

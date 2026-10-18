@@ -466,6 +466,11 @@ pub fn Pass(comptime Tri: type) type {
             }
         }
 
+        fn fexp(self: *Self, f: cuda.Function, wn: usize, x: u64, x_stride: usize, slot_n: usize, w: u64, kg: usize, nb: usize, plan: cuda.grouped.Plan, out: u64, n: usize, items: usize) !void {
+            var a = cuda.experts.Affine4Experts.argsOf(x, x_stride, slot_n, w, kg, nb, plan, out, n);
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(items * cdiv(nb, wn)) }, .block = .{ .x = 256 }, .shared = parts.fexp_smem }, self.stream, &a);
+        }
+
         /// Router, each row's ten experts and the shared one, the grouped expert launches: y [rows, 11, dims] fp32.
         pub fn moeBlock(self: *Self, lw: *const Layer) !void {
             return self.moeBlockKeep(lw, .{});
@@ -502,6 +507,14 @@ pub fn Pass(comptime Tri: type) type {
                     const collective = self.m.collective orelse return error.TensorParallelUnavailable;
                     try collective.sum(self.stream, s.y, pairs * dims);
                 }
+                return;
+            }
+            if (n >= 64) {
+                // prompt rows on 64-pair factored tiles, expert_rows' bits
+                try self.k.router.route(self.stream, s.picks, pairs, e, parts.fexp_tile, plan);
+                const items64 = cdiv(pairs, parts.fexp_tile) + e;
+                try self.fexp(self.k.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
+                try self.fexp(self.k.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);
