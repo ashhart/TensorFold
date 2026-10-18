@@ -46,6 +46,7 @@ pub const proj_row = @max(gdn.proj_width, proj_n);
 pub const att_rows = parts.att_rows;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk = parts.default_chunk;
+pub const max_chunk = parts.max_chunk;
 const ratio = wt.index_ratio;
 const top = wt.index_top;
 const idw = wt.index_idw;

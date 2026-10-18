@@ -49,6 +49,8 @@ pub const pocket_stride: usize = 128;
 pub const fused_rows: usize = 1024;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;
+/// The most rows TF_FLASHNEXT_CHUNK may ask for (the largest measured pass; its scratch is about 13 GiB more).
+pub const max_chunk: usize = 16384;
 const ratio = wt.index_ratio;
 const top = wt.index_top;
 const idw = wt.index_idw;

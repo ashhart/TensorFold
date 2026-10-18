@@ -31,8 +31,7 @@ pub fn open(comptime F: type, gpa: std.mem.Allocator, io: std.Io, ctx: *const cu
     if (captured) |kernels| own.set = try F.comparison(gpa, io, driver, ctx, kernels, o.drafts);
     errdefer if (own.set) |*x| x.deinit();
     if (o.tp == 2) {
-        const configured_chunk = F.envUsize("TF_FLASHNEXT_CHUNK", prompt.batch.default_chunk);
-        var id = try ranks.identity(gpa, io, dir, o.context, if (configured_chunk == 0) prompt.batch.default_chunk else configured_chunk);
+        var id = try ranks.identity(gpa, io, dir, o.context, try prompt.chunkRows());
         id.mtp = @intFromBool(o.drafts);
         if (o.vision) |v| {
             try @import("qwen_vision").media.checkLimits(v);
