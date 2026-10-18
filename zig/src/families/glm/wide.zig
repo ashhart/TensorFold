@@ -5,6 +5,7 @@ const sources = @import("kernel_sources");
 const affine = @import("affine.zig");
 const affine_mm = @import("../../core/affine_mm.zig");
 const kernels = @import("kernels.zig");
+pub const gather = @import("gather.zig");
 const Affine = affine.Affine;
 const Ref = affine.Ref;
 
@@ -27,6 +28,7 @@ pub const Pipes = struct {
     glu_sorted: [nw]mtl.Pipeline,
     moe: [nw]mtl.Pipeline, // routed experts by pick at each width and the 8-bit shared expert, one launch
     moe_glu: [nw]mtl.Pipeline, // the same through gate and up, SwiGLU'd
+    gather: [2]mtl.Pipeline, // four gathered rows sharing the sorted row arithmetic
     bf16: mtl.Pipeline, // an unquantized matrix (the MTP head's eh_proj)
     kda_pre: mtl.Pipeline, // kda_rows reading f_b's and g_b's products made apart (any width but 4/64)
     kda_fg: [nw]mtl.Pipeline, // kda_rows making f_b's and g_b's dots of one width (g64) as glm_rows does: .pre's bits
@@ -40,6 +42,7 @@ pub const Pipes = struct {
 
     pub fn deinit(p: *Pipes) void {
         inline for (.{
+            &p.gather,
             &p.rows,
             &p.ids,
             &p.glu_ids,
@@ -97,9 +100,11 @@ pub const glue_math = blk: {
     break :blk "typedef bfloat bfloat16_t;\n" ++ g[a..b];
 };
 
+pub const gather_source = sources.core_row_projection ++ glue_math ++ sources.glm_rows ++ sources.glm_gather;
+
 /// The pipelines built so far: a failed compile releases them all.
 const Made = struct {
-    list: [nw * 8 + 4 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
+    list: [nw * 8 + 6 + 4 * affine_mm.names.len]mtl.Pipeline = undefined,
     n: usize = 0,
     released: usize = 0,
 
@@ -133,7 +138,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
     defer pool.pop();
     var p: Pipes = undefined;
     var h = std.hash.Wyhash.init(0x77);
-    const rows_src = try std.mem.concat(gpa, u8, &.{ sources.core_row_projection, glue_math, sources.glm_rows });
+    const rows_src = try std.mem.concat(gpa, u8, &.{ sources.core_row_projection, glue_math, sources.glm_rows, sources.glm_gather });
     defer gpa.free(rows_src);
     h.update(rows_src);
     {
@@ -150,6 +155,7 @@ fn build(gpa: std.mem.Allocator, device: mtl.Device, kda: []const u8, made: *Mad
             p.moe_glu[i] = try made.add(device, l, "glm_moe_rows_glu" ++ q ++ "_s8");
         }
         p.bf16 = try made.add(device, l, "glm_rows_bf16");
+        for (gather.names, &p.gather) |name, *pipe| pipe.* = try made.add(device, l, name);
     }
     const pre_a = try std.mem.replaceOwned(u8, gpa, kda, pre_f[0], pre_f[1]); // its own instance, under its own name
     defer gpa.free(pre_a);
@@ -435,13 +441,17 @@ pub fn denseMm(p: *const Pipes, e: mtl.ComputeEncoder, q: Affine, io: Io, sums: 
     }
 }
 
-/// A prompt chunk's routed experts: affine_mm gathers at 4/64 (`mm4`) or 2/64 (`mm2`, oQ2's), else sorted row products.
-pub const Routed = enum { mm4, mm2, rows };
+/// Existing tensor gathers keep their dispatch; other supported formats gather with the sorted row arithmetic.
+pub const Routed = enum { mm4, mm2, gather, rows };
 
 pub fn routed(gate: Affine, up: Affine, down: Affine) Routed {
     if (native(gate) and native(up) and native(down)) return .mm4;
-    for ([_]Affine{ gate, up, down }) |q| if (q.more != 0 or q.bits != 2 or q.group != 64) return .rows;
-    return .mm2;
+    const two = for ([_]Affine{ gate, up, down }) |q| {
+        if (q.more != 0 or q.bits != 2 or q.group != 64) break false;
+    } else true;
+    if (two) return .mm2;
+    for ([_]Affine{ gate, up, down }) |q| if (!gather.supported(q)) return .rows;
+    return .gather;
 }
 
 /// f_b/g_b dots: generated (both 4/64), `.fused` (one width, g64, glm_rows's sums inside), else `.pre`: same bits.
@@ -473,7 +483,7 @@ test "a failed compile releases every pipeline built before it; a load counts ea
     defer device.deinit();
     var made: Made = .{};
     try std.testing.expectError(error.KernelCompile, build(gpa, device, "", &made)); // after the row kernels
-    try std.testing.expectEqual(@as(usize, nw * 7 + 1), made.released);
+    try std.testing.expectEqual(@as(usize, nw * 7 + 3), made.released);
     try std.testing.expectEqual(@as(usize, 0), made.n);
     var all: Made = .{};
     var p = try build(gpa, device, comptime kernels.generatedSource("kda_rows"), &all);
@@ -489,7 +499,7 @@ test "glm_rows's SwiGLU compiles glm_glue's sigmoid_fast and bfloat overloads, n
     try std.testing.expect(std.mem.indexOf(u8, sources.glm_rows, "sigmoid_fast(gt)") != null);
 }
 
-test "prompt chunks gather routed experts on affine_mm at 4/64 and 2/64 only; other widths take the sorted row products" {
+test "prompt chunks retain the existing uniform tensor gathers and gather other supported formats" {
     const r: Ref = .{ .buf = undefined };
     const q: Affine = .{ .w = r, .s = r, .b = r, .n = 64, .k = 128, .bits = 2, .group = 64 };
     var four = q;
@@ -500,9 +510,9 @@ test "prompt chunks gather routed experts on affine_mm at 4/64 and 2/64 only; ot
     three.bits = 3;
     var g32 = q;
     g32.group = 32;
-    try std.testing.expectEqual(Routed.rows, routed(q, q, three));
-    try std.testing.expectEqual(Routed.rows, routed(q, q, four));
-    try std.testing.expectEqual(Routed.rows, routed(g32, g32, g32));
+    try std.testing.expectEqual(Routed.gather, routed(q, q, three));
+    try std.testing.expectEqual(Routed.gather, routed(q, q, four));
+    try std.testing.expectEqual(Routed.gather, routed(g32, g32, g32));
 }
 
 test "f_b and g_b of one width (g64) take glm_rows's dots inside kda_rows, two widths the products made apart" {

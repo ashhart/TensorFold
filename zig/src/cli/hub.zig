@@ -14,6 +14,9 @@ const titles = [_]struct { model_type: []const u8, title: []const u8 }{
     .{ .model_type = "qwen4_exp", .title = "Qwen3.8 Flash Next" },
     .{ .model_type = "glm5_next", .title = "GLM-5.3-Flash" },
     .{ .model_type = "qwen3_5", .title = "Qwen3.5-2B or Qwen3.8-27B" },
+    .{ .model_type = "gemma4", .title = "Gemma 4 31B" },
+    .{ .model_type = "gemma4_unified", .title = "Gemma 4 12B" },
+    .{ .model_type = "step5_vl", .title = "Step-5-Preview" },
     .{ .model_type = "lfm2_moe", .title = "LFM2.5-24B-A2B" },
 };
 
@@ -40,7 +43,7 @@ pub fn cacheDir(a: Allocator, env: ?*const std.process.Environ.Map, override: ?[
         }
     }.f;
     if (get(env, "HF_HUB_CACHE")) |c| return c;
-    const home = get(env, "HOME") orelse "";
+    const home = get(env, "HOME") orelse get(env, "USERPROFILE") orelse ""; // Windows sets USERPROFILE, not HOME
     if (get(env, "HF_HOME")) |h| return std.fs.path.join(a, &.{ h, "hub" });
     return std.fs.path.join(a, &.{ home, ".cache", "huggingface", "hub" });
 }
@@ -82,7 +85,7 @@ pub fn cachedSnapshot(a: Allocator, io: std.Io, hub: []const u8, repo: []const u
     while (try it.next(io)) |e| {
         if (e.kind != .directory) continue;
         const snapshot = try std.fs.path.join(a, &.{ snapshots, e.name });
-        if (readSmall(a, io, try std.fs.path.join(a, &.{ snapshot, "config.json" })) == null) continue;
+        if (@import("checkpoint_config").optional(a, io, snapshot) == null) continue;
         const st = std.Io.Dir.cwd().statFile(io, snapshot, .{}) catch continue;
         if (newest_mtime == null or st.mtime.nanoseconds > newest_mtime.?.nanoseconds) {
             newest_mtime = st.mtime;
@@ -106,7 +109,7 @@ pub fn isRepoIdLike(text: []const u8) bool {
 
 /// One integer field from the checkpoint's config.json.
 pub fn configInt(a: Allocator, io: std.Io, dir: []const u8, key: []const u8) ?u64 {
-    const text = readSmall(a, io, pathJoin(a, dir, "config.json") catch return null) orelse return null;
+    const text = @import("checkpoint_config").optional(a, io, dir) orelse return null;
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
@@ -116,7 +119,7 @@ pub fn configInt(a: Allocator, io: std.Io, dir: []const u8, key: []const u8) ?u6
 
 /// config.json's model_type, "unknown" when unreadable.
 pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
-    const text = readSmall(a, io, pathJoin(a, dir, "config.json") catch return "unknown") orelse return "unknown";
+    const text = @import("checkpoint_config").optional(a, io, dir) orelse return "unknown";
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return "unknown";
     defer parsed.deinit();
     if (parsed.value != .object) return "unknown";
@@ -126,7 +129,7 @@ pub fn modelType(a: Allocator, io: std.Io, dir: []const u8) []const u8 {
 
 /// config.json's quantization: bits and group size, when the checkpoint is MLX-affine quantized.
 pub fn quantization(a: Allocator, io: std.Io, dir: []const u8) ?struct { bits: u64, group: u64 } {
-    const text = readSmall(a, io, pathJoin(a, dir, "config.json") catch return null) orelse return null;
+    const text = @import("checkpoint_config").optional(a, io, dir) orelse return null;
     var parsed = std.json.parseFromSlice(std.json.Value, a, text, .{}) catch return null;
     defer parsed.deinit();
     if (parsed.value != .object) return null;
@@ -163,10 +166,6 @@ pub fn isDir(io: std.Io, path: []const u8) bool {
     return true;
 }
 
-fn pathJoin(a: Allocator, base: []const u8, name: []const u8) ![]const u8 {
-    return std.fs.path.join(a, &.{ base, name });
-}
-
 fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
     return std.Io.Dir.cwd().readFileAlloc(io, path, a, .limited(16 << 20)) catch null;
 }
@@ -174,7 +173,8 @@ fn readSmall(a: Allocator, io: std.Io, path: []const u8) ?[]u8 {
 test "family detection matches the registry and refuses unknown types" {
     try std.testing.expectEqualStrings("Nemotron 3.5 Lightning", family("nemotron_h").?.title);
     try std.testing.expectEqualStrings("Qwen3.8 Flash Next", family("qwen4_exp").?.title);
-    try std.testing.expect(family("gemma4") == null);
+    try std.testing.expectEqualStrings("Gemma 4 12B", family("gemma4_unified").?.title);
+    try std.testing.expect(family("gemma3n") == null);
     try std.testing.expect(family("unknown") == null);
 }
 

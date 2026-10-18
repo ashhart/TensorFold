@@ -6,106 +6,24 @@ const nemotron = @import("nemotron");
 const check = @import("check.zig");
 const Gpu = check.Gpu;
 const ref = nemotron.glue_ref;
-const gm = nemotron.glue_math;
 const glue = nemotron.glue;
+const Rig = @import("glue_rig.zig").Rig;
 
 const D = 2688;
 const E = 128;
 const top_k = 6;
 const NS = 8;
 const eps: f32 = 1e-5;
-const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 16 };
-const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
+const ms: ref.Shape = .{ .proj = 10304, .xd = 4096, .cd = 6144, .heads = 64, .dh = 64, .groups = 8, .rmax = 32 };
+pub const at: ref.Attn = .{ .nqkv = 4608, .heads = 32, .kv_heads = 2, .dim = 128, .nch = 80 }; // past chunk_blocks: blocks take several chunks
 
 fn mshape() glue.Shape {
     return .{ .proj = ms.proj, .xd = ms.xd, .cd = ms.cd, .heads = ms.heads, .dh = ms.dh, .groups = ms.groups, .state = 128, .rmax = ms.rmax };
 }
 
-fn ashape() glue.Attn {
+pub fn ashape() glue.Attn {
     return .{ .nqkv = at.nqkv, .heads = at.heads, .kv_heads = at.kv_heads, .dim = at.dim, .nch = at.nch };
 }
-
-const Rig = struct {
-    gpu: Gpu,
-    a: std.mem.Allocator, // host data, freed together at the end
-    s: cuda.Stream,
-    f: glue.Fns,
-    emb: cuda.embed_rows.EmbedRows,
-    norms: cuda.norms.Norms,
-    rng: std.Random,
-    bufs: std.ArrayList(cuda.DeviceBuffer) = .empty,
-    bad: usize = 0,
-    cases: usize = 0,
-    sparsest: f64 = 1, // the smallest share of nonzero elements in any reference: none may be all zeros
-
-    fn g(r: *Rig) glue.Glue {
-        return .{ .set = null, .f = &r.f, .s = r.s, .emb = &r.emb, .norms = &r.norms };
-    }
-
-    /// A device copy of host values, landed before any kernel on the rig's stream reads it.
-    fn dev(r: *Rig, comptime T: type, host: []const T) !u64 {
-        const b = try cuda.DeviceBuffer.fromHost(r.gpu.d, std.mem.sliceAsBytes(host));
-        try r.bufs.append(r.gpu.gpa, b);
-        try r.gpu.ctx.synchronize();
-        return b.ptr;
-    }
-
-    fn zeros(r: *Rig, comptime T: type, n: usize) !u64 {
-        const host = try r.a.alloc(T, n);
-        @memset(std.mem.sliceAsBytes(host), 0);
-        return r.dev(T, host);
-    }
-
-    fn bfs(r: *Rig, n: usize, scale: f32) ![]u16 {
-        const out = try r.a.alloc(u16, n);
-        for (out) |*v| v.* = gm.f32ToBf16((r.rng.float(f32) * 2 - 1) * scale);
-        return out;
-    }
-
-    /// bf16 values of magnitude 2^-8 to 2^8, log-uniform: rows whose sums' order shows in their last bits.
-    fn wides(r: *Rig, n: usize) ![]u16 {
-        const out = try r.a.alloc(u16, n);
-        for (out) |*v| {
-            const sign: f32 = if (r.rng.boolean()) 1 else -1;
-            v.* = gm.f32ToBf16(sign * std.math.exp2(r.rng.float(f32) * 16 - 8));
-        }
-        return out;
-    }
-
-    fn f32s(r: *Rig, n: usize, lo: f32, hi: f32) ![]f32 {
-        const out = try r.a.alloc(f32, n);
-        for (out) |*v| v.* = lo + r.rng.float(f32) * (hi - lo);
-        return out;
-    }
-
-    /// The device bytes at `ptr` against `want`, element for element; a difference names its first element.
-    fn same(r: *Rig, what: []const u8, comptime T: type, ptr: u64, want: []const T) !void {
-        try r.s.synchronize();
-        const got = try r.a.alloc(T, want.len);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(got.ptr, ptr, want.len * @sizeOf(T)), "cuMemcpyDtoH");
-        r.cases += 1;
-        var live: usize = 0;
-        for (want) |w| live += @intFromBool(!std.mem.allEqual(u8, std.mem.asBytes(&w), 0));
-        r.sparsest = @min(r.sparsest, @as(f64, @floatFromInt(live)) / @as(f64, @floatFromInt(want.len)));
-        if (std.mem.eql(u8, std.mem.sliceAsBytes(got), std.mem.sliceAsBytes(want))) return;
-        r.bad += 1;
-        var n: usize = 0;
-        var first: ?usize = null;
-        for (got, want, 0..) |x, y, i| if (!std.mem.eql(u8, std.mem.asBytes(&x), std.mem.asBytes(&y))) {
-            n += 1;
-            if (first == null) first = i;
-        };
-        std.debug.print("DIFFER {s}: {d} of {d} elements, first at {d}: got {any}, want {any}\n", .{ what, n, want.len, first.?, got[first.?], want[first.?] });
-    }
-
-    /// n elements of the device bytes at `ptr`, once the rig's stream is done.
-    fn get(r: *Rig, comptime T: type, ptr: u64, n: usize) ![]T {
-        try r.s.synchronize();
-        const out = try r.a.alloc(T, n);
-        try r.gpu.d.check(r.gpu.d.api.cuMemcpyDtoH_v2(out.ptr, ptr, n * @sizeOf(T)), "cuMemcpyDtoH");
-        return out;
-    }
-};
 
 fn norms(r: *Rig) !void {
     const gl = r.g();
@@ -188,33 +106,58 @@ fn norms(r: *Rig) !void {
 }
 
 fn route(r: *Rig) !void {
-    const sk = glue.routerShape(D).sk;
-    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router)
-    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0);
-    try routeRows(r, sk, 4, 2); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
+    try routeShape(r, D, E, top_k, NS);
+    try routeShape(r, 4096, 496, 9, 9);
+    for ([_]usize{ 32, 33, 300, 4100 }) |rows| try superLogits(r, rows); // 32 rows keep tf_nemo_router
+}
+
+fn routeShape(r: *Rig, d: usize, e: usize, k: usize, ns: usize) !void {
+    const sk = glue.routerShape(d).sk;
+    // every decode window size (tf_nemo_router_rows) and a prompt chunk (tf_nemo_router_tiles)
+    for ([_]usize{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 300 }) |rows| try routeRows(r, sk, rows, 0, d, e, k, ns);
+    try routeRows(r, sk, 4, 2, d, e, k, ns); // a window 4 bytes off 16-byte alignment keeps tf_nemo_router
+}
+
+/// Super's router (8 slices of 4,096, 512 experts) past 32 rows on the tiles: against tf_nemo_router and the host.
+fn superLogits(r: *Rig, rows: usize) !void {
+    const d = 4096;
+    const e = 512;
+    const sk = 8;
+    const x = try r.bfs(2 + rows * d, 1.0);
+    const w = try r.bfs(e * d, 0.05);
+    const wd = try r.dev(u16, w);
+    const tiles = try r.zeros(f32, sk * rows * e);
+    const stock = try r.zeros(f32, sk * rows * e);
+    try r.g().logits(try r.dev(u16, x[2..]), wd, tiles, rows, d, e, sk);
+    try r.g().logits(try r.dev(u16, x) + 4, wd, stock, rows, d, e, sk);
+    try r.same("Super router tiles against tf_nemo_router", f32, tiles, try r.get(f32, stock, sk * rows * e));
+    if (rows > 300) return;
+    const part = try r.a.alloc(f32, sk * rows * e);
+    ref.router(x[2..], w, part, rows, d, e, sk);
+    try r.same("Super router tiles", f32, tiles, part);
 }
 
 /// `rows` rows that start `skew` bf16 values into their buffer, routed and ranked against the host references.
-fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize) !void {
-    const x = try r.bfs(skew + rows * D, 1.0);
-    const w = try r.bfs(E * D, 0.05);
-    const bias = try r.f32s(E, -0.05, 0.05);
-    const part = try r.a.alloc(f32, sk * rows * E);
-    const idx = try r.a.alloc(i32, rows * NS);
-    const wt = try r.a.alloc(f32, rows * NS);
-    ref.router(x[skew..], w, part, rows, D, E, sk);
-    ref.topk(part, bias, idx, wt, rows, 2.5, E, sk, top_k, NS, true);
-    const partd = try r.zeros(f32, sk * rows * E);
-    const idxd = try r.zeros(i32, rows * NS);
-    const wtd = try r.zeros(f32, rows * NS);
+fn routeRows(r: *Rig, sk: usize, rows: usize, skew: usize, d: usize, e: usize, k: usize, ns: usize) !void {
+    const x = try r.bfs(skew + rows * d, 1.0);
+    const w = try r.bfs(e * d, 0.05);
+    const bias = try r.f32s(e, -0.05, 0.05);
+    const part = try r.a.alloc(f32, sk * rows * e);
+    const idx = try r.a.alloc(i32, rows * ns);
+    const wt = try r.a.alloc(f32, rows * ns);
+    ref.router(x[skew..], w, part, rows, d, e, sk);
+    ref.topk(part, bias, idx, wt, rows, 2.5, e, sk, k, ns, true);
+    const partd = try r.zeros(f32, sk * rows * e);
+    const idxd = try r.zeros(i32, rows * ns);
+    const wtd = try r.zeros(f32, rows * ns);
     const xd = try r.dev(u16, x) + @as(u64, 2 * skew);
-    try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, D, E, top_k, 2.5, true);
+    try r.g().route(xd, try r.dev(u16, w), try r.dev(f32, bias), partd, idxd, wtd, rows, d, e, k, ns, 2.5, true);
     try r.same("router partials", f32, partd, part);
     try r.same("top-k ids", i32, idxd, idx);
     try r.same("top-k weights", f32, wtd, wt);
 }
 
-/// Two windows through conv and scan: the second replays three kept rows of the first, at the other parity.
+/// Windows through conv and scan, each replaying kept rows of the last at the other parity (51 steps: two stages).
 fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
     const base = try r.bfs(3 * cd, 1.0);
@@ -240,7 +183,7 @@ fn mamba(r: *Rig, lo: f32, hi: f32) !void {
     const ad = try r.dev(f32, a);
     const dskd = try r.dev(f32, dsk);
     const dtbd = try r.dev(f32, dtb);
-    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 } }) |w| {
+    for ([_][3]usize{ .{ 0, 0, 5 }, .{ 1, 3, 7 }, .{ 0, 7, 16 }, .{ 1, 13, 32 }, .{ 0, 31, 20 } }) |w| {
         const parity = w[0];
         const pk = w[1];
         const rows = w[2];
@@ -415,7 +358,7 @@ const path_runs = [_][2]usize{ .{ 8, 0 }, .{ 8, 1 }, .{ 8, 2 }, .{ 8, 3 }, .{ 8,
 /// Each shape's window run alone (conv, scan) and as one stream of a shared window (Glue.mambaSegs): the same bytes.
 fn mambaPaths(r: *Rig, lo: f32, hi: f32) !void {
     const cd = ms.cd;
-    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 } }; // parity, kept rows, window rows
+    const shapes = [_][3]usize{ .{ 0, 0, 1 }, .{ 1, 0, 2 }, .{ 0, 1, 1 }, .{ 1, 3, 4 }, .{ 0, 7, 6 }, .{ 1, 15, 1 }, .{ 0, 0, 16 }, .{ 1, 8, 8 }, .{ 0, 31, 32 } }; // parity, kept rows, window rows
     const cw = try r.dev(f32, try r.f32s(4 * cd, -0.5, 0.5));
     const cb = try r.dev(f32, try r.f32s(cd, -0.1, 0.1));
     const a = try r.dev(f32, try r.f32s(ms.heads, -2.0, -0.05));
@@ -527,6 +470,36 @@ fn keyed(r: *Rig) !void {
     try r.same("keyed share", f32, probd, prob);
 }
 
+/// The latent router's top-k, both forms (512 experts, 22 picks, 2 shares) against its host twin, ties and -infs too.
+fn latentTopk(r: *Rig, fns: nemotron.latent.Fns) !void {
+    const le = 512;
+    const picks = 22;
+    const shares = 2;
+    const sk = 8;
+    const Case = struct { rows: usize, ties: bool = false, numbers: usize = le, norm: bool = true };
+    for ([_]Case{ .{ .rows = 1 }, .{ .rows = 16, .ties = true }, .{ .rows = 32, .ties = true }, .{ .rows = 300, .norm = false }, .{ .rows = 4, .numbers = 10 } }) |c| {
+        const part = try r.f32s(sk * c.rows * le, -1, 1);
+        if (c.ties) for (part) |*v| {
+            v.* = @round(v.* * 4) / 4; // quarters: many equal logits, so equal scores
+        };
+        const bias = try r.f32s(le, -0.05, 0.05);
+        if (c.ties) @memset(bias, 0);
+        @memset(bias[c.numbers..], -std.math.inf(f32));
+        const idx = try r.a.alloc(i32, c.rows * picks * shares);
+        const wt = try r.a.alloc(f32, c.rows * picks);
+        ref.superTopk(part, bias, idx, wt, c.rows, 2.5, le, sk, picks, shares, c.norm);
+        const partd = try r.dev(f32, part);
+        const biasd = try r.dev(f32, bias);
+        for ([_]bool{ false, true }) |few| {
+            const idxd = try r.zeros(i32, idx.len);
+            const wtd = try r.zeros(f32, wt.len);
+            try fns.picks(r.s, few, partd, biasd, idxd, wtd, c.rows, 2.5, le, sk, picks, shares, c.norm);
+            try r.same("latent top-k ids", i32, idxd, idx);
+            try r.same("latent top-k weights", f32, wtd, wt);
+        }
+    }
+}
+
 /// Every glue kernel on synthetic inputs at Nemotron's shapes, byte-compared with its host reference.
 pub fn run(gpu: Gpu) !void {
     var arena: std.heap.ArenaAllocator = .init(gpu.gpa);
@@ -539,6 +512,8 @@ pub fn run(gpu: Gpu) !void {
         mods[i] = try cuda.Module.load(gpu.d, img);
         loaded += 1;
     }
+    var latent = try nemotron.latent.Fns.load(gpu.d);
+    defer latent.unload();
     var prng = std.Random.DefaultPrng.init(0x5eed_9a7e);
     var r: Rig = .{
         .gpu = gpu,
@@ -566,8 +541,10 @@ pub fn run(gpu: Gpu) !void {
     for ([_][2]usize{ .{ 0, 16 }, .{ 1000, 16 }, .{ 5000, 3 }, .{ 40000, 2 }, .{ 0, 1 }, .{ 40000, 1 } }) |c| try attention(&r, c[0], c[1]);
     try attentionSegs(&r);
     try attentionPaths(&r);
+    try @import("glue_paged_tests.zig").attentionPaged(&r);
     try keyed(&r);
+    try latentTopk(&r, latent);
     try check.expect(r.bad == 0, "glue: {d} of {d} comparisons differ from the host references or the one-stream kernels", .{ r.bad, r.cases });
     try check.expect(r.sparsest > 0, "glue: a host reference is all zeros, so its comparison proves nothing", .{});
-    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, conv, scan, attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
+    check.pass("glue: {d} of {d} comparisons byte-equal to the host references (norms, router, top-k, the latent top-k, conv, scan, attention, paged attention, draw, several streams at once) and the shared-window kernels to the one-stream ones; every reference at least {d:.0}% nonzero", .{ r.cases, r.cases, r.sparsest * 100 });
 }

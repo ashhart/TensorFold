@@ -4,6 +4,8 @@ TensorFold 1.0.12 serves language models from a Zig binary on Apple Silicon and 
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
+Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
+
 ## Mac app
 
 The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
@@ -23,6 +25,8 @@ tensorfold serve "$HOME/models/nemotron-lightning" \
 
 Use a complete local model directory or an existing Hugging Face cache.
 The binary in a release archive is `bin/tensorfold-native`; the [runbook](RUNBOOK.md) covers archive installation and CUDA runtime files.
+
+On Windows with an NVIDIA GPU, build `tensorfold-native.exe` from source as [docs/WINDOWS.md](docs/WINDOWS.md) describes.
 Use `tensorfold-native --help` or `-h`, and `tensorfold-native capabilities --json`, to inspect the installed binary.
 Model weights have separate downloads and licenses.
 
@@ -76,8 +80,8 @@ The platform column names the hardware tested for each model.
 | Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
 | GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
 | GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
-| Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max |
-| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter; images with `--vision` ([image input](docs/vision.md#qwen38-27b)) | Metal on M5 Max and M3 Ultra |
+| Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max; CUDA on RTX 4090 (Windows) |
+| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter; images with `--vision` ([image input](docs/vision.md#qwen38-27b)) | Metal on M5 Max and M3 Ultra; CUDA on RTX 4090 (Windows) |
 | LFM2.5-24B-A2B | MLX affine 4-, 6- or 8-bit, group 64, tied embeddings | Metal on M4 Pro |
 
 Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
@@ -110,6 +114,7 @@ Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x
 The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
 On CUDA the native server runs Nemotron 3.5 Lightning on a GB10, an RTX 3090 and an RTX PRO 6000, and Nemotron 3.5 Super VL with images on one GB10 or two, greedy and sampled, with concurrent requests sharing each round.
 GLM-5.3-Flash also serves across two CUDA ranks, and Liquid AI's d1-3B answers `/v1/systemone` and `/v1/decisions`.
+On Windows ([docs/WINDOWS.md](docs/WINDOWS.md)), the native build also serves the 2B and the 27B on CUDA, the 27B with its DFlash2 drafter drafting trees.
 The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.0 (the A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40; tested on an RTX 3090), and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; FP8 and NVFP4 checkpoints need compute capability 9.0 or newer.
 
 ## Exact decoding
@@ -118,7 +123,12 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next runs one active reply per engine; Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
+Flash Next on Metal uses shared target rounds with an explicit `--parallel N` above one, when that many sessions fit.
+A lone greedy request there uses GPU-side rounds and hands over when a second request arrives.
+`--parallel auto` (the default) and `--parallel 1`, learning and two-Mac serving use the single-reply driver.
+`FZ_BATCH_MTP_SERIAL=1` restores serial MTP drafting on the shared host.
+The [earlier MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) records its own pinned commits.
+Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.
 The 27B's DFlash2 drafter drafts for one stream at a time: a request alone, or the one in the drafter's slot when several share rounds.
 
 ## Models on disk
@@ -245,12 +255,15 @@ zig build native -Dcpu=apple_m1 -Dversion=1.0.12
 zig build test test-golden -Dcpu=apple_m1
 ```
 
+On macOS, `test` also runs available Metal device checks. See [CONTRIBUTING.md](CONTRIBUTING.md) for the host-test subset.
+
 The server is `zig-out/native/bin/tensorfold-native`.
 Release archives include the native executable, runtime assets and license notices; [packaging](packaging/README.md) describes the qualified CUDA inputs.
 For cache-aware performance receipts, see [observed cache benchmark evidence](docs/cache-benchmarks.md).
 The clients retain server usage and output fingerprints, and verify cold/reused states rather than inferring them.
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md) for exactness, precision and performance gates.
+Coding agents should also load [docs/recipes/SKILL.md](docs/recipes/SKILL.md); agents that support skills can install it as `tensorfold-contributor`.
 TensorFold is Apache-2.0; see [LICENSE](LICENSE), [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 ## Contributors

@@ -36,7 +36,7 @@ pub fn saveSlot(r: *Runner, slot: u32, at: u32) !Snap {
     const d = &r.d;
     const bytes = r.snapBytes(at);
     const buf = try d.alloc_(bytes);
-    errdefer d.g.free(buf);
+    errdefer freeAfterQueue(d, buf); // copies into it may be queued
     var o: usize = 0;
     for (&r.model.layers) |*l| {
         if (l.attn) {
@@ -86,8 +86,13 @@ pub fn restoreSlot(r: *Runner, slot: u32, snap: Snap) !void {
 }
 
 pub fn dropSnap(r: *Runner, snap: Snap) void {
-    r.d.sync() catch {};
-    r.d.g.free(snap.buf);
+    freeAfterQueue(&r.d, snap.buf);
+}
+
+/// Frees `p` once the queue has drained; kept (until the device closes) when the queue cannot be waited for.
+pub fn freeAfterQueue(d: *dev.Dev, p: *anyopaque) void {
+    d.sync() catch return;
+    d.g.free(p);
 }
 
 /// Slots whose states are not allocated yet (they take slotBytes on first use).
@@ -99,9 +104,21 @@ pub fn unallocatedSlots(r: *const Runner, slots: u32) u32 {
     return n;
 }
 
-/// `slot`'s states, allocated (zero) on its first use.
+/// `slot`'s states, allocated (zero) on its first use: all of them, or none when an allocation fails.
 pub fn ensure(r: *Runner, slot: u32) !void {
     const d = &r.d;
+    var had: [q.LAYERS]bool = undefined;
+    for (&r.model.layers, &had) |*l, *h| h.* = if (l.attn) l.slot_kc[slot] != null else l.slot_rec[slot] != null;
+    errdefer {
+        for (&r.model.layers, had) |*l, h| {
+            if (h) continue;
+            const c = &l.slot_conv[slot];
+            for ([_]*?*anyopaque{ &l.slot_kc[slot], &l.slot_vc[slot], &l.slot_rec[slot], &l.slot_save[slot], &c[0], &c[1] }) |pp| if (pp.*) |p| {
+                freeAfterQueue(d, p);
+                pp.* = null;
+            };
+        }
+    }
     for (&r.model.layers) |*l| {
         if (l.attn) {
             if (l.slot_kc[slot] != null) continue;

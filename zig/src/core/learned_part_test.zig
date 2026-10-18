@@ -1,22 +1,23 @@
 const std = @import("std");
+const platform = @import("sys");
 const Imprint = @import("prompt_imprint.zig").Imprint;
 const life = @import("learned_fault_test.zig");
 
 fn scratch(buf: []u8, tag: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/tf-learn-part-{s}-{d}", .{ tag, std.c.getpid() });
+    return std.fmt.bufPrint(buf, "/tmp/tf-learn-part-{s}-{d}", .{ tag, platform.c.getpid() });
 }
 fn put(dir: []const u8, name: []const u8, count: usize) !void {
     var buf: [1200]u8 = undefined;
-    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.TestFile;
-    defer _ = std.c.close(fd);
-    if (std.c.ftruncate(fd, @intCast(count)) != 0) return error.TestFile;
+    defer _ = platform.c.close(fd);
+    if (platform.c.ftruncate(fd, @intCast(count)) != 0) return error.TestFile;
 }
 fn exists(dir: []const u8, name: []const u8) bool {
     var buf: [1200]u8 = undefined;
-    const fd = std.c.open(std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return false, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0) catch return false, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return false;
-    _ = std.c.close(fd);
+    _ = platform.c.close(fd);
     return true;
 }
 
@@ -84,6 +85,7 @@ test "orphan temporary pressure cannot evict an older valid learned state" {
 }
 
 test "owned-name links and directories stay untouched and foreign directories are not traversed" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "types");
@@ -95,33 +97,34 @@ test "owned-name links and directories stay untouched and foreign directories ar
     const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/target", .{root}, 0);
     var link_buf: [1200]u8 = undefined;
     const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/00000000000000af.bin.part", .{im.dir}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target, link));
-    defer _ = std.c.unlink(link);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(target, link));
+    defer _ = platform.c.unlink(link);
     var dir_buf: [1200]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&dir_buf, "{s}/index.part", .{im.dir}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
-    defer _ = std.c.rmdir(dir);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(dir, 0o700));
+    defer _ = platform.c.rmdir(dir);
     var foreign_buf: [1200]u8 = undefined;
     const foreign = try std.fmt.bufPrintSentinel(&foreign_buf, "{s}/foreign", .{root}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(foreign, 0o700));
-    defer _ = std.c.rmdir(foreign);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(foreign, 0o700));
+    defer _ = platform.c.rmdir(foreign);
     try put(foreign, "index.part", 3);
     var reopened = try Imprint.open(a, root, 1, 1 << 20);
     defer reopened.deinit();
     var actual: [1200]u8 = undefined;
-    const n = std.c.readlink(link, &actual, actual.len);
+    const n = platform.c.readlink(link, &actual, actual.len);
     try std.testing.expectEqual(@as(isize, @intCast(target.len)), n);
     try std.testing.expectEqualSlices(u8, target, actual[0..@intCast(n)]);
-    const directory = std.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+    const directory = platform.c.open(dir, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
     try std.testing.expect(directory >= 0);
-    _ = std.c.close(directory);
+    _ = platform.c.close(directory);
     try std.testing.expect(exists(root, "target"));
     try std.testing.expect(exists(foreign, "index.part"));
     var marker_buf: [1400]u8 = undefined;
-    _ = std.c.unlink(try std.fmt.bufPrintSentinel(&marker_buf, "{s}/index.part", .{foreign}, 0));
+    _ = platform.c.unlink(try std.fmt.bufPrintSentinel(&marker_buf, "{s}/index.part", .{foreign}, 0));
 }
 
 test "an identity-directory symlink refuses open and preserves foreign payloads" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "identity-link");
@@ -132,18 +135,19 @@ test "an identity-directory symlink refuses open and preserves foreign payloads"
     }
     var target_buf: [1200]u8 = undefined;
     const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}/foreign", .{root}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(target, 0o700));
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(target, 0o700));
     try put(target, "00000000000000af.bin", 7);
     var link_buf: [1200]u8 = undefined;
     const link = try std.fmt.bufPrintSentinel(&link_buf, "{s}/0000000000000001", .{root}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target, link));
-    defer _ = std.c.unlink(link);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(target, link));
+    defer _ = platform.c.unlink(link);
     try std.testing.expectError(error.ImprintRead, Imprint.open(a, root, 1, 1 << 20));
     try std.testing.expect(exists(target, "00000000000000af.bin"));
     try std.testing.expect(!exists(target, "used"));
 }
 
 test "an explicitly configured root alias still cleans only its real identity children" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // symlinks need privilege on Windows
     const a = std.testing.allocator;
     var buf: [128]u8 = undefined;
     const root = try scratch(&buf, "root-target");
@@ -154,11 +158,11 @@ test "an explicitly configured root alias still cleans only its real identity ch
         try put(seeded.dir, "index.part", 4096);
     }
     var alias_buf: [128]u8 = undefined;
-    const alias = try std.fmt.bufPrintSentinel(&alias_buf, "/tmp/tf-learn-root-alias-{d}", .{std.c.getpid()}, 0);
+    const alias = try std.fmt.bufPrintSentinel(&alias_buf, "/tmp/tf-learn-root-alias-{d}", .{platform.c.getpid()}, 0);
     var target_buf: [128]u8 = undefined;
     const target = try std.fmt.bufPrintSentinel(&target_buf, "{s}", .{root}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.symlink(target, alias));
-    defer _ = std.c.unlink(alias);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.symlink(target, alias));
+    defer _ = platform.c.unlink(alias);
     var reopened = try Imprint.open(a, alias, 1, 1 << 20);
     defer reopened.deinit();
     try std.testing.expect(!exists(reopened.dir, "index.part"));

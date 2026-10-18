@@ -2,6 +2,8 @@
 
 const std = @import("std");
 const linux = std.os.linux;
+/// io_uring is Linux's; elsewhere every read runs on its own thread.
+const has_ring = @import("builtin").os.tag == .linux;
 const cuda = @import("cuda");
 const core = @import("core");
 const kern = @import("cuda_kernels.zig");
@@ -42,7 +44,7 @@ pub const Source = struct {
     copied: [slot_count]?cuda.Event = @splat(null), // a page-locked slot's last copy: its next read waits for that, not the stream
     pending: [slot_count]?Pending = @splat(null),
     in_flight: usize = 0,
-    ring: ?linux.IoUring = null, // null where io_uring is unavailable: each read then runs on its own thread
+    ring: if (has_ring) ?linux.IoUring else ?void = null, // null where io_uring is unavailable: each read then runs on its own thread
     jobs: [slot_count]Job = undefined,
     asked: [slot_count]u64 = @splat(0), // the order reads were asked in: copies follow it without a ring
     next: u64 = 0,
@@ -69,7 +71,7 @@ pub const Source = struct {
             s.pinned[made] = h;
             s.slots[made] = @alignCast(h.bytes);
         }
-        s.ring = linux.IoUring.init(slot_count, 0) catch |err| blk: {
+        if (has_ring) s.ring = linux.IoUring.init(slot_count, 0) catch |err| blk: {
             std.log.info("io_uring unavailable ({t}): checkpoint reads run on threads", .{err});
             break :blk null;
         };
@@ -79,7 +81,7 @@ pub const Source = struct {
     /// Waits for reads still in flight, then frees the ring and slots and closes the files.
     pub fn deinit(s: *Source) void {
         while (s.in_flight > 0) s.reap(1) catch break;
-        if (s.ring) |*r| r.deinit() else s.joinAll();
+        if (!has_ring) s.joinAll() else if (s.ring) |*r| r.deinit() else s.joinAll();
         s.freeSlots(slot_count);
         for (s.files.items) |*m| m.file.close();
         s.files.deinit(s.gpa);
@@ -156,7 +158,8 @@ pub const Source = struct {
         const lo = std.mem.alignBackward(u64, p.offset, dio.alignment);
         var q = p;
         q.at = @intCast(p.offset - lo);
-        if (s.ring) |*r| {
+        if (has_ring and s.ring != null) {
+            const r = &s.ring.?;
             _ = try r.read(k, p.file.fd, .{ .buffer = s.slots[k][0..dio.span(p.offset, p.len)] }, lo);
             _ = try r.submit();
         } else {
@@ -192,6 +195,7 @@ pub const Source = struct {
 
     /// Finished reads, copied on; waits for at least `wait` of them.
     fn reap(s: *Source, wait: u32) !void {
+        if (!has_ring) return s.reapThreads(wait);
         const r = if (s.ring) |*ring| ring else return s.reapThreads(wait);
         var cqes: [slot_count]linux.io_uring_cqe = undefined;
         const n = try r.copy_cqes(&cqes, wait);
@@ -212,7 +216,7 @@ pub const Source = struct {
     /// Page-locked slots record their copy event; pageable slots wait for the driver to stage their bytes.
     fn finish(s: *Source, k: usize, p: Pending, got: []u8) !void {
         if (got.len == 0) return;
-        try s.ops.k.d.check(s.ops.k.d.api.cuMemcpyHtoDAsync_v2(p.dst, got.ptr, got.len, s.ops.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(s.ops.k.d, p.dst, got, s.ops.s);
         if (s.copied[k]) |e| return e.record(s.ops.s);
         try s.ops.s.synchronize();
     }

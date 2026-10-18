@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash's loader on synthetic checkpoints: one sparse shard whose header names every tensor at its width.
 const std = @import("std");
+const platform = @import("sys");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
 const quant = @import("quant.zig");
@@ -156,10 +157,10 @@ const Fixture = struct {
         std.mem.writeInt(u64, &len, head.items.len, .little);
         try tmp.dir.writeFile(io, .{ .sub_path = "model-00001.safetensors", .data = try std.mem.concat(f.a, u8, &.{ &len, head.items }) });
         const path = try std.fmt.allocPrintSentinel(f.a, "{s}/model-00001.safetensors", .{dir}, 0);
-        const fd = std.c.open(path, .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(path, .{ .ACCMODE = .WRONLY }, @as(platform.c.mode_t, 0));
         if (fd < 0) return error.TestFile;
-        defer _ = std.c.close(fd);
-        if (std.c.ftruncate(fd, @intCast(8 + head.items.len + at)) != 0) return error.TestFile;
+        defer _ = platform.c.close(fd);
+        if (platform.c.ftruncate(fd, @intCast(8 + head.items.len + at)) != 0) return error.TestFile;
     }
 };
 

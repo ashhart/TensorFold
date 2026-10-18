@@ -1,5 +1,6 @@
 //! Kept states written behind: a block (or a block's worth of a state's own file) a step, only while the engine idles.
 const std = @import("std");
+const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const image = @import("rows_image.zig");
 const chain = @import("rows_chain.zig");
@@ -86,8 +87,8 @@ pub fn drain(r: *Rows, deadline_ns: i128) usize {
 }
 
 pub fn nowNs() i128 {
-    var t: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(std.c.CLOCK.MONOTONIC, &t);
+    var t: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t);
     return @as(i128, t.sec) * std.time.ns_per_s + t.nsec;
 }
 
