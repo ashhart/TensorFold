@@ -192,11 +192,7 @@ kernel void tf_exl3_matmul_hoisted(const device half* x [[buffer(0)]],
   tf_exl3_matmul_impl<true>(x, trellis, sums, a, routes, descriptors, lane, tg, wx, xx);
 }
 
-// The served product: one SIMD group owns two columns (lanes 0-15 and 16-31) and eight rows.
-// A lane decodes the one state of its (k, column) tile position and shuffles it to the lanes
-// that sum that column, so a one-row product runs on eight times the groups of
-// tf_exl3_matmul_impl. Each row and column keeps its products and TwoSum steps in k order:
-// the sums are the same bits.
+// Two columns and eight rows per SIMD group; product/TwoSum order is preserved. See docs/deepseek-execution.md.
 kernel void tf_exl3_matmul_pairs(const device half* x [[buffer(0)]],
                                  const device uchar* trellis [[buffer(1)]],
                                  device float* sums [[buffer(2)]],
@@ -299,9 +295,7 @@ kernel void tf_exl3_state_window_check(const device uint4* inputs [[buffer(0)]],
   outputs[tid] = tf_exl3_mapped_state(tile, (off << 6) | (1u << 11));
 }
 
-// A kept-dense matrix's plain product: the rotated rows times the bf16 weight, accumulated
-// in f32 in the sums region the rotate_out stage reads. Sequential k, one thread an output
-// element — the fp64 reference mirrors this order.
+// Dense BF16 product: sequential k, FP32 sums, one output per thread; the FP64 reference follows this order.
 kernel void tf_exl3_dense(const device half* rotated [[buffer(0)]],
                           const device bfloat* weight [[buffer(1)]],
                           device float* sums [[buffer(2)]],

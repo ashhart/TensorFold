@@ -523,7 +523,7 @@ test "DeepSeek V4.1's DSML calls (a space after the bar) parse like V4's, string
     defer arena.deinit();
     const a = arena.allocator();
     const tools = (try json.parse(a, "[{\"type\":\"function\",\"function\":{\"name\":\"get_weather\"}},{\"type\":\"function\",\"function\":{\"name\":\"search\"}}]")).ok.array;
-    // The assistant turn of the 1017 release's encoding/tests/test_output_1.txt, after its think block, plus a second invoke.
+    // 1017 encoding/tests/test_output_1.txt: assistant text after the think block, plus a second invoke.
     const text = "Checking.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n" ++
         "<｜DSML｜ parameter name=\"location\" string=\"true\">Beijing</｜DSML｜ parameter>\n" ++
         "<｜DSML｜ parameter name=\"unit\" string=\"true\">celsius</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n" ++

@@ -1,6 +1,4 @@
-//! V4.1's lane slots behind the lane core: a stream a slot, greedy draws, drafts off.
-//! One window runs as its slot's own sub-forward, so every row's bits are its solo bits;
-//! a kept prefix shorter than the window rolls back and re-feeds the kept rows.
+//! Per-stream lane slots, solo sub-forwards and greedy draws; kept-window prefixes roll back and re-feed.
 const std = @import("std");
 const ds = @import("model.zig");
 const Pair = @import("tp_pair.zig").Pair;
@@ -233,8 +231,7 @@ pub const Backend = struct {
             const rows = w.rows();
             const kept = path.len;
             if (kept >= rows) continue; // the whole window landed
-            // Roll the slot back to before the window and re-feed the kept prefix:
-            // the lanes receipt holds that re-fed rows are bit-identical to their first pass.
+            // Roll back before the window and re-feed kept rows; the lane receipt checks bitwise replay.
             try b.rollbackSlot(i);
             if (kept == 0) continue;
             var feeds = try b.gpa.alloc(u32, kept);

@@ -159,9 +159,7 @@ fn precedingIndex(layer: u32) u32 {
     return source;
 }
 
-/// wq_a, wkv and (owner layers) the compressor's wkv and wgate as one concurrent product group
-/// (input_group.zig). Returns false, encoding nothing, when a compressor matrix is a kept-dense
-/// repack; the caller then runs the products one by one.
+/// Group input projections; return false without encoding for kept-dense compressor repacks.
 fn groupInputProducts(ep: *const exl3.Pipelines, e: mtl.ComputeEncoder, w: *const weights.Attention, state: *State, work: *Workspace, x: View, scratch: exl3.View, layer: u32, rows: u32, c: config.Text) !bool {
     const ratio = c.compress_ratios[layer];
     var m: input_group.Matrices = .{ .wq_a = w.wq_a, .wkv = w.wkv };
@@ -206,9 +204,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const ring = try state.ring(layer);
     const chunk = work.selection.windowChunk();
     e.barrier();
-    // Outside diagnostics, every product of x runs as one group: wq_a, wkv and an owner layer's
-    // compressor wkv and wgate read only x and write qr, raw, values and gates, which nothing
-    // touches before their own steps below.
+    // Outside diagnostics, group x-only products writing separate qr/raw/values/gates outputs.
     const inputs_done = !diagnostic and try groupInputProducts(ep, e, w, state, work, x, scratch, layer, rows, c);
     if (!inputs_done) try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden_size, c.q_lora_rank, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .qr_projection, qr);
@@ -303,11 +299,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const grouped = work.view(.grouped);
     const group_input = q_width / c.o_groups;
     const group_output = c.o_groups * c.o_lora_rank;
-    // Up to four rows, all eight slices in one indexed product: row 8 t + g is token t's group g,
-    // at the same offsets the per-slice products use, with the same bits. Indexed rows decode
-    // their tiles alone, so from eight rows on the per-slice products, which share each decoded
-    // tile across eight rows, are faster (M5 Max: 4 rows 1.0 vs 1.5 ms, 8 rows 1.9 vs 1.6 ms,
-    // 256 rows 58 vs 17 ms).
+    // Index eight slices for up to four rows; historical crossover measurements: docs/deepseek-execution.md.
     if (c.o_groups != 8) return error.UnsupportedAttentionGroups;
     if (rows <= 4) {
         try exl3.encodeIndexed(ep, e, .{ .descriptors = core(.{ .buffer = w.wo_a_descriptors }), .count = 8, .k = group_input, .n = c.o_lora_rank }, core(q), core(grouped), scratch, .{ .count = @as(usize, rows) * 8, .x_stride = group_input, .y_stride = c.o_lora_rank, .output = .bf16, .routes = .{ .ids = core(.{ .buffer = work.slices }), .repeat = 1 } });

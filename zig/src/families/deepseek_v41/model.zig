@@ -110,9 +110,7 @@ pub const Model = struct {
     valid: bool = true,
     profile: ?*gpu_counters.Recorder = null,
     grouped_prefill: bool = true,
-    /// A concurrent encoder for the forward, so independent product groups overlap; every other
-    /// dispatch is followed by a barrier, which keeps the serial order. TF_DSV41_SERIAL=1 (or an
-    /// installed profiler) selects the serial encoder; both give the same bits.
+    /// Concurrent groups with barriers elsewhere; TF_DSV41_SERIAL=1 or profiling selects serial encoding.
     concurrent: bool = true,
     observer: ?Observer = null,
     tp: ?*tp_moe.Context = null,
@@ -146,7 +144,7 @@ pub const Model = struct {
         const execution_bytes = try std.math.add(usize, workspace_bytes, try std.math.mul(usize, cache_bytes, lanes));
         const rotary_bytes = attention.Pipelines.residentBytes(capacity, c.text_config);
         const needed = try std.math.add(usize, plan.bytes, try std.math.add(usize, execution_bytes, rotary_bytes));
-        // Streamed tables cost host memory (scale columns, row cache), not Metal buffers: the load limit counts it, Metal admission does not.
+        // Host scales/cache count toward the load limit, but not Metal buffer admission.
         const limited = try std.math.add(usize, needed, host_bytes);
         if (o.ram_limit_bytes) |limit| if (limited > limit) {
             std.log.err("the resident payload needs {d} bytes (host {d}); the load limit is {d}", .{ limited, host_bytes, limit });
@@ -308,7 +306,7 @@ pub const Model = struct {
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         const rows: u32 = @intCast(ids.len);
-        // Streamed tables: hash and commit in their own command buffer, read the row IDs back, stage the rows, then run the rest.
+        // Commit hashes separately, read IDs, stage streamed rows, then continue the forward.
         var staged: [2]u32 = .{ 0, 0 };
         if (m.engram_sources) |sources| {
             m.valid = false;
@@ -367,7 +365,7 @@ pub const Model = struct {
             if (layer.engram) |g| {
                 try m.profileSpan(&enc, .engram);
                 const first = index == 1;
-                // Staged rows are the shard's bytes in ascending row order and local IDs point into them: same kernel, same bits.
+                // Local IDs address sorted shard bytes in staging; the gather kernel and row bytes are unchanged.
                 const table: engram.Table, const gather_ids = if (g.table) |t| .{
                     .{ .weight = tensor(t), .scale = tensor(g.scales.?), .rows = @intCast(t.shape[0]) },
                     ws.view(if (first) .engram_ids_0 else .engram_ids_1),
@@ -486,9 +484,7 @@ pub const Model = struct {
             .bf16 => .bf16,
             else => .f16,
         };
-        // The shared expert's merged row decodes alone, while its plain product shares each tile
-        // across rows: merging pays off for one or two rows only (M5 Max per layer: 1 row
-        // 2.81 -> 2.23 ms, 2 rows 4.20 -> 4.03 ms, 4 rows 7.23 -> 7.29 ms).
+        // Merge shared rows only for one or two tokens; historical M5 timings: docs/deepseek-execution.md.
         if (grouped == null and rows <= 2) {
             route.encodeMerged(enc, &p.route, ws.view(.router_logits), tensor(w.bias), ws.view(.route_ids), ws.view(.route_weights), ws.view(.moe_routes), .{ .rows = rows, .bias_dtype = bias_dtype, .merged_stride = 7, .merged_extra = work.shared_expert });
             enc.barrier();
@@ -505,8 +501,7 @@ pub const Model = struct {
             routed_rows.routes = .{ .ids = g.view(.expert_ids) };
             routed_rows.grouped = true;
         }
-        // Routed and shared gate and up all read the normalized rows and write four separate
-        // fields: one group (split only where the projection scratch runs out).
+        // Routed/shared gate/up read normalized rows and write four fields; split groups only for scratch limits.
         const shared_rows = exl3.Rows{ .count = rows, .x_stride = 5120, .y_stride = 2304 };
         var up_jobs = [_]exl3.Job{
             .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[0] }, .count = 384, .k = 5120, .n = 2304 } }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.gate)), .scratch = undefined, .rows = routed_rows },
@@ -533,8 +528,7 @@ pub const Model = struct {
         enc.barrier();
     }
 
-    /// Independent products as concurrent groups: jobs get consecutive slices of the projection
-    /// scratch (their `scratch` is replaced), and a group is flushed before a job would overrun it.
+    /// Assign consecutive scratch slices and flush the group before a job would exceed capacity.
     fn products(m: *Model, enc: mtl.ComputeEncoder, jobs: []exl3.Job) !void {
         const ws = &m.workspace;
         var first: usize = 0;
@@ -557,9 +551,7 @@ pub const Model = struct {
         try exl3.encodeJobs(&m.pipelines.projection, enc, jobs[first..]);
     }
 
-    /// The ungrouped MoE with the shared expert as each token's seventh row: one indexed product per
-    /// projection. Routed rows keep their unmerged positions; shared rows sit below the routed block
-    /// (work.moeSlot), so SwiGLU and combine read the same values as the separate shared path.
+    /// Merge shared experts as seventh rows using work.moeSlot; SwiGLU/combine retain the separate-path values.
     fn moeMerged(m: *Model, enc: mtl.ComputeEncoder, w: *const weights.Moe, rows: u32) !void {
         const ws = &m.workspace;
         const p = &m.pipelines;

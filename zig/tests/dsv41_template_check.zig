@@ -1,6 +1,4 @@
-//! G8 for DeepSeek V4.1 releases without a chat template: a template rendered by the engine's own Jinja
-//! against a release's encoding/tests goldens (test_input_N.json -> test_output_N.txt), as the release's
-//! test_examples_encoding_golden_outputs encodes them (thinking_mode "chat" unless the case names one).
+//! G8 renders release encoding/tests goldens through engine Jinja; default thinking_mode is chat.
 const std = @import("std");
 const template = @import("template");
 
@@ -56,7 +54,7 @@ pub fn main(init: std.process.Init) !u8 {
                 if (call_args.* == .string) call_args.* = std.json.parseFromSliceLeaky(std.json.Value, a, call_args.string, .{}) catch call_args.*;
             }
         }
-        // encode_messages opens the assistant turn after a final user or tool turn; a server asks with add_generation_prompt.
+        // After a final user/tool turn, encode_messages opens the assistant; the server uses add_generation_prompt.
         const items = messages.array.items;
         const last_role = if (items.len > 0 and items[items.len - 1] == .object) (items[items.len - 1].object.get("role") orelse std.json.Value{ .string = "" }).string else "";
         const generation = !std.mem.eql(u8, last_role, "assistant");

@@ -1,7 +1,4 @@
-//! Streamed Engram rows: a table stays in its safetensors shard; each chunk's row IDs are deduplicated,
-//! read with uncached preads on a few threads (or from a bounded row cache) and compacted into staging,
-//! so the unchanged gather kernel sees the same row bytes a resident table would hold.
-//! Misses go through a small `Fetcher` interface; the shard reader (`Pread`) is its only implementation.
+//! Deduplicate and stage uncached Engram rows through Fetcher; contracts: docs/deepseek-execution.md.
 const std = @import("std");
 const paced = @import("../../core/paced_read.zig");
 
@@ -196,9 +193,7 @@ const Window = struct {
     }
 };
 
-/// Where missed rows come from. One `fetch` takes every missed row of a stage call at once (a decode token's
-/// rows in one call), ascending, and writes row i's 256 weight and 8 scale bytes at `slots[i]` of the outputs.
-/// Today's only implementation is `Pread`; a remote holder of the tables would be another.
+/// Fetch all ascending missed IDs into slots: 256 weight bytes and 8 scale bytes per row; implemented by Pread.
 pub const Fetcher = struct {
     ptr: *anyopaque,
     fetch_fn: *const fn (*anyopaque, rows: []const u32, slots: []const u32, out_w: []u8, out_s: []u8) anyerror!Fetched,
@@ -355,8 +350,7 @@ pub const Source = struct {
         return scales + @as(usize, options.cache_rows) * (Cache.entry + 16) + options.max_ids * 12 + options.threads * 2 * paced.alignment;
     }
 
-    /// Distinct rows of `ids` in ascending order land in `out_w`/`out_s`; `local[i]` is ids[i]'s staging row.
-    /// Returns the number of staged rows. Any ID past the table fails the call before a fetch.
+    /// Stage distinct sorted IDs, return their count and fill local indices; reject invalid IDs before fetching.
     pub fn stage(s: *Source, ids: []const u32, out_w: []u8, out_s: []u8, local: []u32) !u32 {
         if (ids.len == 0 or ids.len > s.unique.len or local.len < ids.len) return error.InvalidEngramStage;
         if (out_w.len < ids.len * weight_bytes or out_s.len < ids.len * scale_bytes) return error.InvalidEngramStage;
