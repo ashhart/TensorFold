@@ -11,6 +11,7 @@ const stream = @import("benchmark_stream.zig");
 const server = @import("benchmark_server.zig");
 const model = @import("benchmark_model.zig");
 const host = @import("benchmark_host.zig");
+const manifest = @import("benchmark_manifest.zig");
 const upload = @import("benchmark_upload.zig");
 const check = @import("benchmark_check.zig");
 const stop = @import("benchmark_stop.zig");
@@ -228,8 +229,15 @@ fn show(ctx: *const Context, v: json.Value) !void {
         try say(ctx, "{s:<14} {s:<6} {s:<25} {s:<16} {s}", .{ c.fixture_id, suite.fmtG(&t, c.temperature), rate, ttft, if (c.protocol_complete) "complete" else "custom/incomplete" });
     }
     try say(ctx, "Stream delivery includes transport buffering; it is not an engine token clock.", .{});
-    if (settings.get("managed").? != .bool or !settings.get("managed").?.bool)
-        try say(ctx, "Attached-server hardware and checkpoint revisions are unknown; this result is unranked.", .{});
+    if (settings.get("managed").? != .bool or !settings.get("managed").?.bool) {
+        const source = json.strOr(v.get("hardware").?.get("source"));
+        const version = json.strOr(v.get("runtime").?.get("tensorfold_version"));
+        const pinned = settings.get("rank_count").? != .null and v.get("model").?.get("revision").? != .null;
+        if (std.mem.eql(u8, source, "unavailable") or std.mem.eql(u8, version, "unknown"))
+            try say(ctx, "Attached-server hardware and checkpoint revisions are unknown; this result is unranked.", .{})
+        else if (!pinned)
+            try say(ctx, "The attached server's manifest does not attest a rank count and checkpoint revision; this result is unranked.", .{});
+    }
     if (std.mem.eql(u8, json.strOr(v.get("runtime").?.get("backend")), "rocm"))
         try say(ctx, "This rocm receipt is saved locally; it cannot be published until the board accepts rocm.", .{});
 }
@@ -285,6 +293,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const bench_dir = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "benchmarks" });
     const settings: receipt.Settings = .{ .tokens = @intCast(args.tokens), .repetitions = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .context_tokens = args.context, .managed = args.server == null };
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
+    var rank_count: ?u8 = if (args.server == null) 1 else null;
     var target: stream.Target = undefined;
     var plan: ?server.Plan = null;
     var note: ?[]const u8 = null;
@@ -305,7 +314,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
         if (args.model_id != null) return fail(ctx, "--model-id applies only to an attached server");
         if (args.startup_timeout) |s| if (s > 3600) return fail(ctx, "Startup timeout must be greater than 0 and at most 3600 seconds");
         const dir = try hub.resolve(a, ctx.io, ctx.environ, args.target, &problem) orelse return fail(ctx, problem);
-        const config = model.readConfig(a, ctx.io, dir) orelse return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
+        const config = (model.readConfig(a, ctx.io, dir, &problem) catch |e| {
+            if (e == error.OutOfMemory) return e;
+            return fail(ctx, problem);
+        }) orelse return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
         if (config.value != .object) return fail(ctx, "Checkpoint is incomplete; run tensorfold pull MODEL");
         const kind = model.modelType(config.value) orelse "unknown";
         for (ctx.engines.families) |f| {
@@ -328,7 +340,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             null;
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
-            .model = try model.describe(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label),
+            .model = try model.describeConfig(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label, config),
             .hardware = probe.hardware,
             .runtime = .{ .tensorfold_version = ctx.engines.version, .backend = backend, .python_version = "none", .platform = if (builtin.os.tag == .macos) "macos" else "linux", .driver = probe.driver },
         };
@@ -358,6 +370,17 @@ fn run(ctx: *const Context, args: Args) !u8 {
     try say(ctx, "This generates model replies; use Ctrl-C to cancel. Nothing is uploaded unless you publish.", .{});
     if (note) |n| try say(ctx, "{s}", .{n});
     if (wait) |w| try say(ctx, "{s}", .{w});
+    // the attached server's own facts, read once nothing more can refuse the run
+    if (args.server != null) if (try manifest.fetch(a, ctx.io, target.base, backend)) |got| {
+        facts.hardware = got.hardware;
+        facts.runtime = got.runtime;
+        facts.model.revision = got.revision;
+        facts.model.config_sha256 = got.config_sha256;
+        facts.model.tokenizer_sha256 = got.tokenizer_sha256;
+        facts.model.family = got.family;
+        facts.model.quantization = got.quantization;
+        rank_count = got.rank_count;
+    };
     var managed: ?server.Managed = null;
     if (plan) |p| {
         var tail: []const []const u8 = &.{};
@@ -381,7 +404,9 @@ fn run(ctx: *const Context, args: Args) !u8 {
     if (stop.requested()) |sig| if (sig != .INT) return stop.exitCode(sig);
     var stamp: [32]u8 = undefined;
     const created = receipt.createdAt(std.Io.Clock.real.now(ctx.io).toNanoseconds(), &stamp);
-    const v = try receipt.value(a, &run_id, created, facts.model, facts.runtime, facts.hardware, settings, samples);
+    var recorded = settings;
+    recorded.rank_count = rank_count;
+    const v = try receipt.value(a, &run_id, created, facts.model, facts.runtime, facts.hardware, recorded, samples);
     try show(ctx, v);
     if (!try receipt.save(a, ctx.io, v, dest, nowMs(ctx), &problem)) return fail(ctx, problem);
     try say(ctx, "Receipt saved: {s}", .{dest});
@@ -394,6 +419,10 @@ fn run(ctx: *const Context, args: Args) !u8 {
         const code = try publish(ctx, args, v);
         if (code != 0) return code;
     }
-    for (samples) |s| if (s.status != .ok) return 2;
+    for (samples) |s| if (s.status != .ok) {
+        try say(ctx, "Incomplete attempts remain in the saved receipt (exit 2). " ++
+            "A cell has aggregates only when every repetition succeeds; early EOS is excluded from full-length comparisons.", .{});
+        return 2;
+    };
     return 0;
 }

@@ -1,5 +1,6 @@
 //! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const auth = @import("auth.zig");
@@ -12,7 +13,7 @@ const server_mod = @import("server.zig");
 const routes = @import("routes.zig");
 const recall_routes = @import("recall_routes.zig");
 const Allocator = std.mem.Allocator;
-const posix = std.posix;
+const posix = platform.posix;
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
 /// The signal that asked for the stop (0: none yet), for the shutdown line
@@ -47,7 +48,7 @@ pub fn stopping() bool {
 }
 
 /// The hard limit macOS reads as unlimited.
-const rlim_infinity: u64 = std.c.RLIM.INFINITY;
+const rlim_infinity: u64 = platform.c.RLIM.INFINITY;
 
 /// The targets to try, in order: the hard limit when finite, else the fallbacks 65536 then 10240, first that works; never an unlimited soft limit, since a loop over every descriptor would do absurd work.
 fn fillTargets(max: u64, out: *[2]u64) []const u64 {
@@ -170,6 +171,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .cortheon_search_key = env(s, "BRAVE_SEARCH_API_KEY"),
         .saved_conversations = args.learn_conversations,
         .identity = s.identity,
+        .environ = s.environ,
     };
     const srv = server_mod.Server.init(gpa, io, s.engine, s.text, config, if (store.enabled()) &store else null) catch {
         std.debug.print("tensorfold: the server could not start\n", .{});
@@ -312,6 +314,7 @@ test "the targets are the hard limit, or the fallbacks under an unlimited one" {
 }
 
 test "the raise lifts a low soft limit, and a second raise does nothing" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // no descriptor limits to raise
     const before = try posix.getrlimit(.NOFILE);
     defer posix.setrlimit(.NOFILE, before) catch {};
     if (@as(u64, @intCast(before.max)) <= 256) return error.SkipZigTest;

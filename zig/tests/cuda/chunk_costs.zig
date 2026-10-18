@@ -44,7 +44,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8, widths_text:
         var window: f64 = std.math.inf(f64);
         var chunk: f64 = std.math.inf(f64);
         for (0..reps + 1) |i| {
-            if (r <= nemotron.state.max_rows) {
+            if (r <= nemotron.state.windowRows(e.c)) {
                 try restore(e, saved, prompt.len);
                 _ = try e.step(cont[0], null);
                 try e.stream.synchronize();

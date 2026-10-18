@@ -1,0 +1,22 @@
+[tensorfold] HIP rank 0 of 1: policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots
+[tensorfold] open-file limit raised: soft 1024 -> 524288
+[tensorfold] HIP gfx1151 device 0, rank 0 of 1: model 4.69 GiB; 4 streams at once, 0.55 GiB each at a 16384-token window, of 99.9 GiB left after a 12.2 GiB reserve; prompt cache 1.00 GiB (311 pages, 8 snapshots); prompts in 1024-row chunks
+[tensorfold] serving amd-9b at http://127.0.0.1:8092/v1 (sampling: greedy; drafts: on; context: 16384; loaded in 16.6s)
+[tensorfold] 127.0.0.1 "GET /v1/models HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-7a8f6df863cf4455584a3dde2222f15d prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-4ff54c3a15dc9e4b3bdc1f3e0fcb7ec9 prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] done chatcmpl-36aaf2ab3b83c65d1782b2ff08e5fe68 prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] ended chatcmpl-8358105827d2b8833044e01581848214 reason=client-left prompt=14994 tokens=0 after=1.66s
+[tensorfold] done chatcmpl-cac2f917691f4589a2363a736c4c8561 prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] ended chatcmpl-cf216e1e3c434a0fc2718c543039db71 reason=client-left prompt=14994 tokens=0 after=1.66s
+[tensorfold] done chatcmpl-c26af254854e48bb6877c01de1feb7e0 prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+[tensorfold] ended chatcmpl-0d1189ec54a645a5e1d7eb3e0b876b89 reason=client-left prompt=14994 tokens=0 after=1.66s
+[tensorfold] done chatcmpl-64cd58a3dafe4cff7f1f6b09dd9015f2 prompt=20 cached=0 thinking=False effort=none tokens=32 sha=d2669ada6f62 finish=length rounds=31 accepted=0/0
+[tensorfold] 127.0.0.1 "POST /v1/chat/completions HTTP/1.1" 200 -
+info: backend verify: 186 calls, 25128 us each
+info: graphs: 8 captured (1 ms each), 346 of 354 rounds replayed

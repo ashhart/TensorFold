@@ -42,6 +42,13 @@ const Lane = struct {
     filling: bool = false,
 };
 
+/// Where a lane's caches come from: taken before its prompt goes in, given back once it is released.
+pub const Reserve = struct {
+    ctx: *anyopaque,
+    take: *const fn (ctx: *anyopaque, s: *Stream) anyerror!void,
+    give: *const fn (ctx: *anyopaque, s: *Stream) void,
+};
+
 pub const Fake = struct {
     gpa: Allocator,
     lanes: std.AutoHashMapUnmanaged(*Stream, Lane) = .empty,
@@ -53,14 +60,26 @@ pub const Fake = struct {
     answer_cycles: bool = false,
     prefill_chunks: usize = 0,
     prefill_count: usize = 0,
+    fail_pieces: usize = 0, // the next this many `piece` calls fail with error.Unbound
+    many_passes: usize = 0, // prefill_many calls that took their streams (batched())
+    many_streams: usize = 0, // streams those calls prefilled
     prefill_hook: ?*const fn (ctx: *anyopaque, s: *Stream, chunk: usize) void = null,
     prefill_hook_ctx: ?*anyopaque = null,
+    release_hook: ?*const fn (ctx: *anyopaque, s: *Stream) void = null, // after a stream's release, as a backend ending another
+    release_hook_ctx: ?*anyopaque = null,
     refuse_sampled: bool = false, // prefill refuses a sampled stream with error.SamplingRefused
     ranked: bool = false, // the head gives its held chain back (alternatives)
     memory_lanes: ?usize = null, // prefill past this many live lanes fails with error.LaneMemory (no room yet)
+    reserve: ?Reserve = null, // a new lane's caches come from here first (LaneMemory: no room yet); release gives them back
     fail_round: ?u64 = null, // this round's verify fails with error.GpuFailed, as a round the GPU fails does
     last_rows: usize = 0, // the last verify's rows, for test clocks
     last_sampled: bool = false, // and whether one of its streams drew keyed samples
+    pieces_run: usize = 0, // prompt pieces run (`pieceBackend`)
+    joins: usize = 0, // prompts whose last token joined a round (`joinBackend`)
+    drafts_calls: usize = 0, // `draft` calls, and the most requests one took
+    drafts_most: usize = 0,
+    fail_runs: usize = 0, // the next this many `pieces` calls fail with error.Unbound (`runBackend`)
+    runs: usize = 0, // `pieces` calls that ran
 
     pub fn deinit(x: *Fake) void {
         var it = x.lanes.valueIterator();
@@ -79,9 +98,89 @@ pub const Fake = struct {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .first_masked = firstMasked, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .alternatives = alternatives, .held = heldDrafts, .reports_fill = true } };
     }
 
+    /// The same target taking several prompts in one pass (`prefill_many`).
+    pub fn batched(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_many = prefillMany, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
+    }
+
+    fn prefillMany(ptr: *anyopaque, ss: []const *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.memory_lanes) |n| if (x.lanes.count() + ss.len > n) return false; // not all at once: one at a time instead
+        for (ss, 0..) |s, i| prefill(ptr, s) catch |err| { // none left prefilled, as the contract says
+            for (ss[0 .. i + 1]) |done| if (x.lanes.fetchRemove(done)) |kv| {
+                var l = kv.value;
+                freeLane(x.gpa, &l);
+            };
+            return err;
+        };
+        x.many_passes += 1;
+        x.many_streams += ss.len;
+        return true;
+    }
+
     /// The same target filling its prompt a chunk a call (`prefill_chunks`), as a backend with `prefill_step`.
     pub fn stepped(x: *Fake) be.Backend {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
+    }
+
+    /// The backend with prompts in pieces (begin / piece / finish) beside whole prompts.
+    pub fn pieceBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish } };
+    }
+
+    /// `pieceBackend` whose prompts may leave their last token to the stream's first round (Config.join_tail).
+    pub fn joinBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish, .join = join } };
+    }
+
+    /// `joinBackend` that takes a round's pieces in one call (Config.piece_runs): a piece at a time, or a failure.
+    pub fn runBackend(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish, .join = join, .pieces = pieces } };
+    }
+
+    fn pieces(ptr: *anyopaque, list: []const be.Backend.Piece) anyerror!void {
+        const x = self(ptr);
+        if (x.fail_runs > 0) {
+            x.fail_runs -= 1;
+            return error.Unbound;
+        }
+        x.runs += 1;
+        for (list) |p| try piece(ptr, p.stream, p.start, p.end, p.save);
+    }
+
+    fn join(ptr: *anyopaque, s: *Stream) anyerror!bool {
+        const x = self(ptr);
+        if (x.lane(s).history.items.len + 1 != s.prompt_len) return error.PositionMismatch;
+        x.joins += 1;
+        return true;
+    }
+
+    fn begin(ptr: *anyopaque, s: *Stream) anyerror!be.Backend.Begun {
+        const x = self(ptr);
+        const got = try x.lanes.getOrPut(x.gpa, s);
+        if (got.found_existing) freeLane(x.gpa, got.value_ptr);
+        got.value_ptr.* = .{};
+        return .{};
+    }
+
+    fn piece(ptr: *anyopaque, s: *Stream, start: u64, end: u64, snapshot: bool) anyerror!void {
+        _ = snapshot;
+        const x = self(ptr);
+        if (x.fail_pieces > 0) {
+            x.fail_pieces -= 1;
+            return error.Unbound;
+        }
+        const h = &x.lane(s).history;
+        if (h.items.len != start or end + 1 > s.prompt_len) return error.PositionMismatch;
+        try h.appendSlice(x.gpa, s.prompt()[start..end]);
+        x.pieces_run += 1;
+    }
+
+    fn finish(ptr: *anyopaque, s: *Stream) anyerror!void {
+        const x = self(ptr);
+        const h = &x.lane(s).history;
+        if (h.items.len + 1 != s.prompt_len) return error.PositionMismatch;
+        try h.append(x.gpa, s.prompt()[s.prompt_len - 1]);
     }
 
     fn self(ptr: *anyopaque) *Fake {
@@ -127,7 +226,7 @@ pub const Fake = struct {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
         if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
-        const got = try x.lanes.getOrPut(x.gpa, s);
+        const got = try x.newLane(s);
         if (got.found_existing) freeLane(x.gpa, got.value_ptr);
         got.value_ptr.* = .{};
         const chunks = if (x.prefill_chunks == 0) 1 else x.prefill_chunks;
@@ -145,7 +244,7 @@ pub const Fake = struct {
         const x = self(ptr);
         if (x.refuse_sampled and s.sampling != null) return error.SamplingRefused;
         if (x.memory_lanes) |n| if (!x.lanes.contains(s) and x.lanes.count() >= n) return error.LaneMemory;
-        const got = try x.lanes.getOrPut(x.gpa, s);
+        const got = try x.newLane(s);
         if (got.found_existing and !got.value_ptr.filling) freeLane(x.gpa, got.value_ptr);
         if (!got.found_existing or !got.value_ptr.filling) got.value_ptr.* = .{ .filling = true };
         const l = got.value_ptr;
@@ -158,6 +257,17 @@ pub const Fake = struct {
         l.filling = false;
         try x.fillPrompt(l, s);
         return true;
+    }
+
+    /// The stream's lane, its caches reserved first when it has none yet.
+    fn newLane(x: *Fake, s: *Stream) !std.AutoHashMapUnmanaged(*Stream, Lane).GetOrPutResult {
+        const r = x.reserve orelse return x.lanes.getOrPut(x.gpa, s);
+        if (x.lanes.contains(s)) return x.lanes.getOrPut(x.gpa, s);
+        try r.take(r.ctx, s);
+        return x.lanes.getOrPut(x.gpa, s) catch |e| {
+            r.give(r.ctx, s);
+            return e;
+        };
     }
 
     /// The pass's end: the cache holds the prompt, from a kept state where one was restored.
@@ -295,6 +405,8 @@ pub const Fake = struct {
 
     fn draft(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void {
         const x = self(ptr);
+        x.drafts_calls += 1;
+        x.drafts_most = @max(x.drafts_most, requests.len);
         for (requests) |r| {
             const l = x.lane(r.stream);
             // the head reads the last verify's kept rows (a shared round drafts before its rollback)
@@ -331,7 +443,9 @@ pub const Fake = struct {
         if (x.lanes.fetchRemove(s)) |kv| {
             var l = kv.value;
             freeLane(x.gpa, &l);
+            if (x.reserve) |r| r.give(r.ctx, s);
         }
+        if (x.release_hook) |hook| hook(x.release_hook_ctx.?, s);
     }
 };
 

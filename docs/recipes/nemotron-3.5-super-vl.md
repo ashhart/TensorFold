@@ -25,6 +25,16 @@ The weights take 70.8 GiB of the GB10's memory (73.2 GiB with the image tower an
 16,384-token window the server admits 8 streams at 0.35 GiB each and keeps a prompt cache of about 8 to 10 GiB, and
 about 24 GB of the GB10's memory stays available. Leave the other ranks' variables below unset.
 
+The MTP draft head can use the embedded draft vocabulary's FP8 output rows or the already-resident full output head.
+A stream drafts on the subset while the last 16 tokens of its context, its prompt's tail at first, are all draft ids,
+and on the full head otherwise; other streams do not change its choice. Each head has its own captured graphs and
+its own measured level cost beside the window costs both share, and shared rounds are priced at the full head's.
+The target still verifies proposals with its unchanged full-vocabulary head.
+For CUDA MTP streams, `--mtp-drafts` caps MTP depth (at most 31 for Super) and `--mtp-confidence` sets a
+cumulative-confidence threshold from 0 to 1 instead of the cost-based cutoff. A zero draft cap disables
+drafting. The same controls apply in lone and shared rounds, including resumes and handoff.
+Positive MTP caps leave copied continuations and Recall on their existing row limits.
+
 ## Run on two GB10s
 
 Rank 0 runs the whole model and serves; rank 1 holds only its share of every MoE layer's experts (the MTP layer's
@@ -59,6 +69,11 @@ rank order, so one GB10 and two give the same bits: on the eight release prompts
 sampled and one with thinking) were the same tokens at TP=1 and TP=2. A routed pick carries its share in its pair id,
 so one grouped launch serves every share a rank holds.
 
+Passes of up to a verify window's rows read shared-expert plans built when the buffers load, one per row count;
+longer prompt passes and the other rank's jobs plan the shared expert at their own row count.
+On one GPU those passes run the shared expert on the side stream while the router and routed experts run on the main
+stream: its activations, quantized rows and plan are its own, and events order its input and the final sum.
+
 ## Precision
 
 On Blackwell the engine runs the checkpoint's own math by default (`--precision checkpoint`): e4m3 rows into the FP8
@@ -77,6 +92,18 @@ On one GB10, `checkpoint` teacher-forced on `full`'s greedy 256 tokens after thr
 decodes at about the same speed. The [quantization guide](../quantization.md#nvidias-nvfp4-checkpoints-on-cuda)
 describes both modes. Both ranks of a two-GB10 setup must run the same precision; they check it before loading.
 
+Checkpoint prompt passes of 128 rows or more run the FP8 layers in 128-row tiles (128 columns where K slices meet in
+a cluster) and the NVFP4 experts in blocks of 128 pairs of one expert by 128 columns, their inputs and weights staged
+through shared memory; decode keeps its narrow tiles. The per-row MMA steps, split-K summation order and output
+rounding are unchanged. The prompt up kernel quantizes its relu^2 rows to down's NVFP4 input in its epilogue, the same
+bytes the decode path's bf16 rows and separate quantizer give. On one GPU the prompt down kernel runs both expert width
+shares of a pair and adds them in share order before the bf16 rounding the combine applies, so the combine reads one
+bf16 row a pick instead of two fp32 rows. `tf-cuda-test checkpoint` compares the prompt kernels and the combine after
+them with the decode path byte for byte on synthetic inputs.
+
+Router logits of passes over 32 rows run on 128-row by 128-expert register tiles, each logit still one fma chain over
+its slice in input order; `tf-cuda-test glue` compares them with the untiled router and the host reference.
+
 ## Exactness and speed
 
 Served on GB10s at a 16,384-token window, the eight release prompts at 256 tokens each, every cell held in both
@@ -90,8 +117,7 @@ equal their solo runs, and three-turn chats with regenerate, edit and delete equ
 | Two GB10s | `checkpoint` (default) | 46.8 tok/s (35.9 to 63.6) | 20.2 tok/s | |
 | Two GB10s | `full` | 48.1 tok/s (36.4 to 65.6) | 21.4 tok/s | |
 
-Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time. The MTP layer drafts
-with the target's own output head over the whole vocabulary.
+Four concurrent greedy streams on two GB10s took 6.2 s together against 11.8 s one at a time.
 
 ## Images
 

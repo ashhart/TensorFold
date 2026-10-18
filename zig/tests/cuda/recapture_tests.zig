@@ -38,7 +38,7 @@ pub fn run(gpu: check.Gpu, model: []const u8) !void {
     try e.captureWindows();
     try e.setSampling(null);
     try check.expect(
-        held(e, 0) == nemotron.state.max_rows and held(e, 1) == nemotron.state.max_rows,
+        held(e, 0) == nemotron.state.windowRows(e.c) and held(e, 1) == nemotron.state.windowRows(e.c),
         "windows held: {d} greedy, {d} sampled",
         .{ held(e, 0), held(e, 1) },
     );
