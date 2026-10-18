@@ -27,6 +27,7 @@ const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
 const vit_k = @import("contract_vit_glue.zig");
 const act_round_k = @import("contract_act_round.zig");
+const f32w_k = @import("contract_glm_f32w.zig");
 
 const w4a8_k = @import("contract_w4a8.zig");
 
@@ -468,6 +469,15 @@ pub fn run(gpu: check.Gpu) !void {
     for (&wrows, wrows_k.cfgs) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .f = f, .g = &window_fns, .ctl = mods[5], .arena = .init(a) };
     defer for (&wrows) |*x| x.deinit();
     for (&wrows) |*x| try kernels.append(a, x.kernel());
+    var glm_glue = try cuda.Module.load(gpu.d, kk.glm_glue);
+    defer glm_glue.unload();
+    var f32ws: [6]f32w_k.F32w = undefined;
+    for (std.enums.values(f32w_k.Which), &f32ws) |w, *x| x.* = .init(.{ .gpu = gpu, .s = s }, w, try glm_glue.function(switch (w) {
+        .norm_y, .norm_sums => "tf_glm_rmsnorm_4096_f32w",
+        else => "tf_glm_hc_finish_f32w",
+    }));
+    defer for (&f32ws) |*x| x.deinit();
+    for (&f32ws) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     try @import("contract_dump.zig").run(a, kernels.items);
     const t0 = check.now(gpu.io);

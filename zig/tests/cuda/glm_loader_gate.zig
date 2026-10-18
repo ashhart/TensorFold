@@ -32,6 +32,13 @@ const Plan = struct {
         try p.cuts.append(p.a, .{ .name = name, .lo = 0, .hi = (try p.ck.get(name)).dim(0), .to = to });
     }
 
+    /// A hidden-size norm as the loader keeps it: float32 when stored so (FP4-Local's, D1), else bf16.
+    fn norm(p: *Plan, comptime fmt: []const u8, args: anytype) !void {
+        const name = try std.fmt.allocPrint(p.a, fmt, args);
+        const t = try p.ck.get(name);
+        try p.cuts.append(p.a, .{ .name = name, .lo = 0, .hi = t.dim(0), .to = if (t.dtype == .f32) .f32 else .bf16 });
+    }
+
     fn cols(p: *Plan, comptime fmt: []const u8, args: anytype, lo: usize, hi: usize) !void {
         try p.cuts.append(p.a, .{ .name = try std.fmt.allocPrint(p.a, fmt, args), .cols = true, .lo = lo, .hi = hi });
     }
@@ -54,7 +61,7 @@ fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !Want 
     if (eql(name, "embed")) {
         try p.whole(P ++ "embed_tokens.weight", .{}, .bf16);
     } else if (eql(name, "norm")) {
-        try p.whole(P ++ "norm.weight", .{}, .bf16);
+        try p.norm(P ++ "norm.weight", .{});
     } else if (eql(name, "head")) {
         try p.rows("lm_head.weight", .{}, s.vocab.lo, s.vocab.hi, .bf16);
     } else if (eql(name, "head.codes") or eql(name, "head.scales")) {
@@ -79,11 +86,11 @@ fn plan(p: *Plan, c: *const Config, s: glm.shard.Share, name: []const u8) !Want 
 fn layer(p: *Plan, c: *const Config, s: glm.shard.Share, i: u32, what: []const u8) !Want {
     const L = P ++ "layers.{d}.";
     if (eql(what, "in_norm")) {
-        try p.whole(L ++ "input_layernorm.weight", .{i}, .bf16);
+        try p.norm(L ++ "input_layernorm.weight", .{i});
         return .cut;
     }
     if (eql(what, "post_norm")) {
-        try p.whole(L ++ "post_attention_layernorm.weight", .{i}, .bf16);
+        try p.norm(L ++ "post_attention_layernorm.weight", .{i});
         return .cut;
     }
     inline for (.{ "attn", "ffn" }) |site| {

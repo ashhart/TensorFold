@@ -16,6 +16,7 @@ const exl3 = @import("cuda_exl3.zig");
 const mm_mod = @import("cuda_mm.zig");
 pub const formats = @import("cuda_formats.zig");
 const projection = @import("cuda_proj.zig");
+const glue = @import("cuda_glue.zig");
 
 const Tensor = core.checkpoint.Tensor;
 const prefix = "model.language_model.";
@@ -26,7 +27,7 @@ pub const Hc = struct { fn_w: u64, base: u64, scale: u64 };
 pub const Mixer = union(cfg.Kind) { kda: kda_block.Layer, mla: dsa_block.Layer };
 pub const Ffn = union(enum) { dense: mlp.Layer, moe: moe.Layer };
 
-pub const Layer = struct { index: u32, attn_hc: Hc, ffn_hc: Hc, in_norm: u64, post_norm: u64, mixer: Mixer, ffn: Ffn };
+pub const Layer = struct { index: u32, attn_hc: Hc, ffn_hc: Hc, in_norm: glue.Norm, post_norm: glue.Norm, mixer: Mixer, ffn: Ffn };
 
 /// The MTP head (weights.MTPW): norms, eh_proj, a DSA + MoE layer (NVFP4 experts), shared_head.norm, 4-bit draft head.
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh: u64, norm: u64, layer: Layer, draft: q4.Q4 };
@@ -43,7 +44,7 @@ pub const Weights = struct {
     share: shard.Share,
     embed: u64 = 0, // bf16 [vocab][dims]
     layers: []Layer = &.{},
-    norm: u64 = 0,
+    norm: glue.Norm = .{ .bf16 = 0 },
     head: projection.Proj = .{ .bf16 = 0 }, // [share.vocab][dims]: bf16, or MXFP8 for the lane
     mtp: ?Mtp = null,
     exl3_shx: bool = true, // EXL3: every layer's gate and up share one input rotation (a prompt rotates each row once)
@@ -73,6 +74,12 @@ fn toBf16(v: f32) u16 {
     return @intCast((b + 0x7fff + ((b >> 16) & 1)) >> 16);
 }
 
+/// A float32 narrowed to bf16 by the loader, or null when bf16 does not hold it exactly (NaN stays NaN).
+fn narrow(v: f32) ?u16 {
+    const h = toBf16(v);
+    return if (std.math.isNan(v) or @as(f32, @bitCast(@as(u32, h) << 16)) == v) h else null;
+}
+
 const Loader = struct {
     gpa: std.mem.Allocator,
     d: *const cuda.Driver,
@@ -83,11 +90,22 @@ const Loader = struct {
     ck: *core.Checkpoint,
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
+    last: []const u8 = "", // the tensor `get` read last, named when its values are refused
     recipes: ?*const core.modelopt.Recipes = null, // MIXED_PRECISION's table; null: the tensors decide (NVFP4)
 
     pub fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
-        const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, args);
-        return L.ck.get(name);
+        L.last = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, args);
+        return L.ck.get(L.last);
+    }
+
+    /// Hidden-size norm `fmt` uploaded as `up`: bf16 as stored, or kept float32 (D1) for the _f32w kernels.
+    pub fn norm(L: *Loader, comptime fmt: []const u8, args: anytype, comptime up: []const u8) !glue.Norm {
+        const t = try L.get(fmt, args);
+        const kept = t.dtype == .f32;
+        if (kept and t.numel() != L.w.config.hidden) return error.UnexpectedTensor;
+        try L.whole(t, if (kept) .f32 else .bf16);
+        const w = try L.put(up, args);
+        return if (kept) .{ .f32 = w } else .{ .bf16 = w };
     }
 
     /// The projection `fmt` (a module under the prefix) is stored as `want`, or it is refused by name (formats.of).
@@ -147,7 +165,10 @@ const Loader = struct {
             };
             switch (to) {
                 .f32 => try L.host.appendSlice(L.gpa, std.mem.asBytes(&v)),
-                .bf16 => try L.host.appendSlice(L.gpa, std.mem.asBytes(&toBf16(v))),
+                .bf16 => try L.host.appendSlice(L.gpa, std.mem.asBytes(&(narrow(v) orelse {
+                    std.log.err("{s}: a float32 value bf16 does not hold; only the hidden norms keep float32", .{L.last});
+                    return error.InexactBf16;
+                }))),
                 else => return error.UnexpectedTensor,
             }
         }
@@ -208,9 +229,9 @@ const Loader = struct {
         try L.rows(try L.get("layers.{d}.self_attn.dt_bias", .{i}), h.lo * dk, h.hi * dk, all, .f32);
         const dt = try L.put("layers.{d}.kda.dt_bias", .{i});
         try L.whole(try L.get("layers.{d}.self_attn.o_norm.weight", .{i}), .bf16);
-        const norm = try L.put("layers.{d}.kda.norm", .{i});
+        const o_norm = try L.put("layers.{d}.kda.norm", .{i});
         const o = try formats.cutProj(L, prefix, i, &.{.{ .rel = "self_attn.o_proj", .cols = hr }}, &.{ .bf16, .mxfp8 }, "layers.{d}.kda.o");
-        return .{ .proj = proj, .fb = fb, .gb = gb, .o = o, .conv_w = conv, .a_log = a_log, .dt_bias = dt, .norm_w = norm, .eps = c.eps, .lower = c.lower_bound, .heads = h.len(), .dims = c.hidden };
+        return .{ .proj = proj, .fb = fb, .gb = gb, .o = o, .conv_w = conv, .a_log = a_log, .dt_bias = dt, .norm_w = o_norm, .eps = c.eps, .lower = c.lower_bound, .heads = h.len(), .dims = c.hidden };
     }
 
     /// weights.load's dsa(i) (latent): [q_a | kv_a], norms, q_b by heads, kv_b as wk/wv (AbsorbW), o by cols, indexer.
@@ -499,10 +520,8 @@ const Loader = struct {
 
     fn layer(L: *Loader, i: u32) !Layer {
         const c = &L.w.config;
-        try L.whole(try L.get("layers.{d}.input_layernorm.weight", .{i}), .bf16);
-        const in_norm = try L.put("layers.{d}.in_norm", .{i});
-        try L.whole(try L.get("layers.{d}.post_attention_layernorm.weight", .{i}), .bf16);
-        const post_norm = try L.put("layers.{d}.post_norm", .{i});
+        const in_norm = try L.norm("layers.{d}.input_layernorm.weight", .{i}, "layers.{d}.in_norm");
+        const post_norm = try L.norm("layers.{d}.post_attention_layernorm.weight", .{i}, "layers.{d}.post_norm");
         return .{
             .index = i,
             .attn_hc = try L.hc(i, "attn"),
@@ -539,8 +558,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, stream: c
     }
     try L.whole(try L.get("embed_tokens.weight", .{}), .bf16);
     w.embed = try L.put("embed", .{});
-    try L.whole(try L.get("norm.weight", .{}), .bf16);
-    w.norm = try L.put("norm", .{});
+    w.norm = try L.norm("norm.weight", .{}, "norm");
     const vocab: formats.Part = .{ .rel = "lm_head", .rows = .{ share.vocab.lo, share.vocab.hi } };
     w.head = try formats.cut(&L, &head_ck, &.{"lm_head"}, &.{vocab}, &.{ .bf16, .mxfp8 }, "head", .{});
     if (with_mtp and c.mtp > 0) w.mtp = try @import("cuda_mtp_load.zig").load(&L, &head_ck);
@@ -552,6 +570,12 @@ test "bf16 rounding of fp32 is to nearest even" {
     try std.testing.expectEqual(@as(u16, 0x3f80), toBf16(@bitCast(@as(u32, 0x3f808000)))); // a tie to even (down)
     try std.testing.expectEqual(@as(u16, 0x3f82), toBf16(@bitCast(@as(u32, 0x3f818000)))); // a tie to even (up)
     try std.testing.expectEqual(@as(u16, 0x3f81), toBf16(@bitCast(@as(u32, 0x3f808001))));
+}
+
+test "the loader narrows a float32 to bf16 only when bf16 holds it, unlike FP4-Local's norms" {
+    try std.testing.expectEqual(@as(?u16, 0x3f80), narrow(1.0));
+    try std.testing.expectEqual(@as(?u16, null), narrow(@bitCast(@as(u32, 0x3f808001))));
+    try std.testing.expect(narrow(std.math.nan(f32)) != null);
 }
 
 test {

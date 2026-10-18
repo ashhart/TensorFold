@@ -74,6 +74,13 @@ const Out = struct {
         try o.put(name, .bf16, shape, std.mem.sliceAsBytes(v));
     }
 
+    /// A float32 norm weight 1 + u 2^-9 bf16 does not hold (FP4-Local's, D1), from `g`, not the weights' stream.
+    fn norm32(o: *Out, name: []const u8, g: std.Random) !void {
+        const v = try o.a.alloc(f32, hidden);
+        for (v) |*x| x.* = 1 + g.float(f32) * 0x1p-9;
+        try o.put(name, .f32, &.{hidden}, std.mem.sliceAsBytes(v));
+    }
+
     /// f32 values uniform in [lo, hi).
     fn f32s(o: *Out, name: []const u8, shape: []const usize, lo: f32, hi: f32) !void {
         const v = try o.a.alloc(f32, count(shape));
@@ -182,9 +189,11 @@ fn hc(o: *Out, i: usize) !void {
     }
 }
 
-fn norms(o: *Out, i: usize) !void {
+/// Layer i's norms, ones in bf16; with `g` (local) its post-attention norm float32 as FP4-Local stores it.
+fn norms(o: *Out, i: usize, g: ?std.Random) !void {
     try o.bf16Const(try tensor(o.a, "layers.{d}.input_layernorm.weight", .{i}), &.{hidden}, 1.0);
-    try o.bf16Const(try tensor(o.a, "layers.{d}.post_attention_layernorm.weight", .{i}), &.{hidden}, 1.0);
+    const post = try tensor(o.a, "layers.{d}.post_attention_layernorm.weight", .{i});
+    if (g) |r| try o.norm32(post, r) else try o.bf16Const(post, &.{hidden}, 1.0);
 }
 
 fn kda(o: *Out, i: usize, mx: bool) !void {
@@ -258,22 +267,24 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8, form: Kind) !void {
     const a = arena.allocator();
     var prng = std.Random.DefaultPrng.init(53);
     var o: Out = .{ .a = a, .rng = prng.random() };
+    var g32 = std.Random.DefaultPrng.init(32); // local's float32 norms: the other tensors keep the bytes they had
     const fp8 = form != .nvfp4;
     const mx = form == .local;
+    const g: ?std.Random = if (mx) g32.random() else null;
     try o.bf16(P ++ "embed_tokens.weight", &.{ vocab, hidden }, 1.0);
-    try o.bf16Const(P ++ "norm.weight", &.{hidden}, 1.0);
+    if (g) |r| try o.norm32(P ++ "norm.weight", r) else try o.bf16Const(P ++ "norm.weight", &.{hidden}, 1.0);
     try o.bfOrMx("lm_head", vocab, hidden, mx);
     try kda(&o, 0, mx);
     try hc(&o, 0);
-    try norms(&o, 0);
+    try norms(&o, 0, g);
     try dense(&o, 0, mx);
     try mla(&o, 1, fp8, false);
     try hc(&o, 1);
-    try norms(&o, 1);
+    try norms(&o, 1, g);
     try moe(&o, 1, .nvfp4, fp8, false);
     // the MTP layer: no hyper-connections, the draft head's norms and eh_proj; bf16, or with local FP4-Local's forms
     try mla(&o, layers, false, mx);
-    try norms(&o, layers);
+    try norms(&o, layers, null);
     try moe(&o, layers, if (mx) .w4a16 else .bf16, false, mx);
     for ([_][]const u8{ "enorm", "hnorm", "shared_head.norm" }) |m| try o.bf16Const(try tensor(a, "layers.{d}.{s}.weight", .{ layers, m }), &.{hidden}, 1.0);
     try o.linear(try tensor(a, "layers.{d}.eh_proj.weight", .{layers}), hidden, 2 * hidden);
@@ -309,7 +320,7 @@ pub fn run(gpu: check.Gpu, out_dir: []const u8, form: Kind) !void {
         .nvfp4 => "",
         .fp8pb => ", layer 1's MLA and shared in FP8_PB_WO",
         .local => ", layer 1's MLA and shared in FP8_PB_WO, layer 0's KDA q k v o, dense MLP, lm_head and the MTP layer's " ++
-            "attention, indexer and shared in MXFP8, its experts W4A16_NVFP4",
+            "attention, indexer and shared in MXFP8, its experts W4A16_NVFP4, the post-attention and final norms float32",
     };
     check.pass("glm-synth: {d} tensors, {d} MiB, config {d} layers {d} experts vocabulary {d}{s}, dc.json in {s}", .{ o.list.items.len, bytes >> 20, layers, experts, vocab, forms, out_dir });
 }

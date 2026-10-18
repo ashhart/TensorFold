@@ -13,16 +13,14 @@ const prefix = "model.language_model.";
 pub fn load(L: anytype, head_ck: *core.Checkpoint) !weights.Mtp {
     const c = &L.w.config;
     const i = c.layers;
-    try L.whole(try L.get("layers.{d}.input_layernorm.weight", .{i}), .bf16);
-    const in_norm = try L.put("layers.{d}.in_norm", .{i});
-    try L.whole(try L.get("layers.{d}.post_attention_layernorm.weight", .{i}), .bf16);
-    const post_norm = try L.put("layers.{d}.post_norm", .{i});
+    const in_norm = try L.norm("layers.{d}.input_layernorm.weight", .{i}, "layers.{d}.in_norm");
+    const post_norm = try L.norm("layers.{d}.post_attention_layernorm.weight", .{i}, "layers.{d}.post_norm");
     const none: weights.Hc = .{ .fn_w = 0, .base = 0, .scale = 0 };
     const layer_w: weights.Layer = .{ .index = i, .attn_hc = none, .ffn_hc = none, .in_norm = in_norm, .post_norm = post_norm, .mixer = .{ .mla = try L.dsa(i) }, .ffn = .{ .moe = try L.moeLayer(i) } };
     L.ck.release();
     var out: [4]u64 = undefined;
     for (&out, [_][]const u8{ "enorm.weight", "hnorm.weight", "eh_proj.weight", "shared_head.norm.weight" }, [_][]const u8{ "enorm", "hnorm", "eh", "norm" }) |*p, name, what| {
-        try L.whole(try L.ck.get(try std.fmt.bufPrint(&L.name_buf, prefix ++ "layers.{d}.{s}", .{ i, name })), .bf16);
+        try L.whole(try L.get("layers.{d}.{s}", .{ i, name }), .bf16);
         p.* = try L.put("mtp.{s}", .{what});
     }
     // the draft head: quantize4 of the head's bf16 rows (an MXFP8 head's widened exactly), then make_q4's tiling

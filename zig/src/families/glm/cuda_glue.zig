@@ -7,11 +7,15 @@ const mm_mod = @import("cuda_mm.zig");
 /// What the forward's kernels launch from: our glue's, glm_mm's when tiled, qlinear's lane for FP8 kinds, copy_rows.
 pub const Set = struct { glue: *const Kernels, mm: ?*const mm_mod.Kernels = null, packs: ?*const mm_mod.Packed = null, prompt: bool = false, linear: cuda.qlinear.Linear = .{}, copy_rows: ?cuda.Function = null };
 
+/// A hidden-size norm's weight: bf16, or float32 (FP4-Local's, D1) read as float32 by the _f32w kernels.
+pub const Norm = union(enum) { bf16: u64, f32: u64 };
+
 /// Our glm_glue.cu's functions.
 pub const Kernels = struct {
     rmsnorm_4096: cuda.Function,
     rmsnorm_1536: cuda.Function,
     rmsnorm_512: cuda.Function,
+    rmsnorm_4096_f32w: cuda.Function,
     residual_add: cuda.Function,
     stream_mean: cuda.Function,
     rank_sum: cuda.Function,
@@ -31,6 +35,7 @@ pub const Kernels = struct {
     hc_partial: cuda.Function,
     hc_partial8: cuda.Function,
     hc_finish: cuda.Function,
+    hc_finish_f32w: cuda.Function,
     absorb_q: cuda.Function,
     expand_v: cuda.Function,
     lat_write: cuda.Function,
@@ -110,6 +115,18 @@ pub fn rmsnorm(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, o
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = warps * 32 } }, stream, &a);
 }
 
+/// rmsnorm by a Norm: a float32 weight (the hidden size) through rmsnorm_4096_f32w, rmsnorm_4096's arithmetic.
+pub fn rmsnormBy(set: Set, stream: cuda.Stream, x: u64, x_stride: usize, n: Norm, out: u64, o_stride: usize, xs: ?u64, eps: f32, rows: usize, d: usize) !void {
+    const g = switch (n) {
+        .bf16 => |w| return rmsnorm(set, stream, x, x_stride, w, out, o_stride, xs, eps, rows, d),
+        .f32 => |g| g,
+    };
+    if (d != 4096) return error.NoRmsnormWidth;
+    var a: cuda.Args = .{};
+    inline for (.{ x, i64of(x_stride), g, out, i64of(o_stride), xs orelse @as(u64, 0), eps, @as(c_int, @intFromBool(xs != null)) }) |v| a.add(v);
+    try cuda.launch.launch(set.glue.rmsnorm_4096_f32w, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &a);
+}
+
 fn cdiv(a: usize, b: usize) u32 {
     return @intCast((a + b - 1) / b);
 }
@@ -178,7 +195,7 @@ pub fn hcPartBytes(rows: usize) usize {
 }
 
 /// glue.hc_pre: streams [rows][s d] -> the collapsed RMS-normed row and its 64-sums `xs`; `post`, `comb` (Sinkhorn).
-pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale: u64, norm_w: u64, out: u64, xs: u64, post: u64, comb: u64, part: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize) !void {
+pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale: u64, norm: Norm, out: u64, xs: u64, post: u64, comb: u64, part: u64, eps: f32, hc_eps: f32, iters: usize, rows: usize, d: usize, s: usize) !void {
     if (d != 4096 or s != 4) return error.HcShape;
     var a: cuda.Args = .{};
     inline for (.{ x, fn_w, part, i64of(s * d), @as(c_int, hc_blocks) }) |v| a.add(v);
@@ -189,9 +206,13 @@ pub fn hcPre(set: Set, stream: cuda.Stream, x: u64, fn_w: u64, base: u64, scale:
         a.add(i64of(rows));
         try cuda.launch.launch(set.glue.hc_partial, .{ .grid = .{ .x = cdiv(rows, 4), .y = hc_blocks }, .block = .{ .x = 128 } }, stream, &a);
     }
+    const f, const w = switch (norm) {
+        .bf16 => |p| .{ set.glue.hc_finish, p },
+        .f32 => |p| .{ set.glue.hc_finish_f32w, p },
+    };
     var b: cuda.Args = .{};
-    inline for (.{ x, part, base, scale, norm_w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
-    try cuda.launch.launch(set.glue.hc_finish, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
+    inline for (.{ x, part, base, scale, w, out, xs, post, comb, eps, hc_eps, @as(c_int, hc_blocks), cint(iters) }) |v| b.add(v);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &b);
 }
 
 /// glue.hc_post: branch = bf16(`g`, rank 0 first); xout[s] = bf16(post[s] branch + sum_t comb[t][s] x[t]); x may alias.
