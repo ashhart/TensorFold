@@ -59,7 +59,7 @@ from this source tree. V2 submissions are disabled in this release, including `-
 publication and direct uploads. Local runs and inspection remain available. The lead enables v2 only
 once both the client and receiver have shipped support, including separate rankings.
 
-Thanks to @BlivionIaG and @tovereast for the sampled-stop reports and proposal.
+Thanks to @BlivionIaG and @easthambuilds for the sampled-stop reports and proposal.
 
 ## Publishing
 
