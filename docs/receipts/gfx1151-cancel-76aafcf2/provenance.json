@@ -1,6 +1,7 @@
 {
   "runtime_commit": "5429554e708fdf7a9e0017301a00eb87a4182acd",
   "runtime_patch_sha256": "b0be49e083f035b39843eac0030b405d5293e2528d1e66cb7c03501fb70f7cbf",
+  "test_script_commit": "5429554e708fdf7a9e0017301a00eb87a4182acd",
   "test_script_sha256": "75281063554a729052daf8ff559e1e4d4164a2d5422bf1e1a4eb2b81a467d0d9",
   "hardware": "BOSGAME M5, AMD Ryzen AI MAX+ 395 / Radeon 8060S, gfx1151",
   "toolchain": "Zig 0.17.0, HIP 7.1.52801-9999, Ubuntu clang 21.1.8",

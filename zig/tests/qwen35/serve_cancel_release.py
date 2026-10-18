@@ -1,21 +1,4 @@
-"""A request cancelled in its prompt pass releases its lane within a layer; usage below (--help).
-
-serve_cancel.py measures only the next short request. This one splits the case into what can be told apart:
-
-  alone    a short request on the idle server, best of three (the baseline)
-  release  the client of a long request leaves; seconds from its socket closing until /metrics says no request runs
-  lifetime the server's own `ended ... after=` for that request, arrival to end (with --server-log)
-  after    a short request sent 0.05 s after another long request's client left, as serve_cancel.py sends it
-
-Every trial sends a fresh prompt (a nonce first), so no kept prompt state shortens it. A trial passes when its
-release is within --release-max and its short request within --slack of alone, with the same text as alone.
-The defaults hold the 27B to the 9B's and 35B's footing: a lane released at the next layer edge (about 0.08 s
-of the 27B's 5 s chunk) plus the server's 50 ms disconnect poll, against the 4.6 s the 1.0.12 receipt waited.
-
---baseline-27b prints the receipt's 27B numbers next to these (docs/receipts/gfx1151-qwen-833bbfcb): the next
-short request 6.49 to 6.51 s, alone 1.90 s, the cancelled request ending 5.04 to 5.07 s after it arrived.
-Exit 0 only when every trial passes; the summary line is one JSON object for the receipt.
-"""
+"""A long HIP prompt's disconnect-to-idle and next-request latency gate; see --help and the gfx1151 receipt."""
 
 import argparse
 import http.client
@@ -94,8 +77,7 @@ def wait_running(want_at_least, limit):
 
 
 def long_then_drop(nonce, watch):
-    """The long request, its socket closed --drop-after later: the perf_counter time of the close, and whether
-    /metrics saw it running before then (`watch`; the after trial does not ask, as serve_cancel.py does not)."""
+    """Return socket-close time and whether metrics observed the long request running."""
     text = f"{nonce} " + " ".join(f"item{i % 97}x{(i * 7919) % 1013}" for i in range(args.words))
     sock = socket.create_connection((HOST.hostname, HOST.port))
     payload = body(text, 8).encode()

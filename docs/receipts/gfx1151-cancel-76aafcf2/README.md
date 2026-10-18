@@ -3,6 +3,7 @@
 Measured on 2026-10-18, following the unresolved 27B case in [#994](https://github.com/ashhart/TensorFold/pull/994).
 This is a fresh A/B run on public source `76aafcf274e60a5e31a59ce145b2f71f7b366e9d` and the runtime patch
 in `5429554e708fdf7a9e0017301a00eb87a4182acd`. It is not a full release qualification.
+Subsequent source changes shorten comments/docstrings for the lean rule; runtime and gate execution logic are unchanged.
 
 The single GPU is a BOSGAME M5's Radeon 8060S (`gfx1151`). The checkpoint is
 `TensorFold/Qwen3.8-27B-MLX-4bit` at `70ae7fac63274ff2eac54152031433374cb80f2f`.

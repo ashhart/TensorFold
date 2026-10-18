@@ -333,7 +333,7 @@ pub const Hip = struct {
         return lane;
     }
 
-    /// The cancel a prompt chunk's forward polls after each layer (null: the chunk runs through, asked only between chunks).
+    /// The chunk's layer-cancel hook; null leaves polling between chunks.
     fn cancelOf(s: *lanes.Stream) ?Engine.Cancel {
         const c = s.cancel_check orelse return null;
         return .{ .ctx = c.ptr, .check = c.check };

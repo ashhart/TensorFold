@@ -15,8 +15,7 @@ pub const chunk = 1024;
 /// Rows from which a prompt pass synchronizes and asks its cancel after every layer (fewer: it runs through).
 pub const poll_rows = 512;
 
-/// Whether a pass over `rows` rows on a group of `world` ranks stops at a layer edge when its request is cancelled;
-/// a group never does, its ranks would part on the collective of the next layer.
+/// Single ranks poll layer edges from poll_rows; TP ranks stop together between chunks.
 pub fn pollsLayers(world: usize, rows: usize) bool {
     return world == 1 and rows >= poll_rows;
 }
