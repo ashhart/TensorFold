@@ -85,8 +85,11 @@ curl -N http://127.0.0.1:8080/v1/slide/learn \
 The reply streams server-sent events: `fact` when it finds a fact, `learning` when it starts, `progress` during the
 lesson, and `learned` when it is done. Progress carries `phase`, `at` and `of`; zero `of` means the total is unknown.
 A `progress` event with `heartbeat: true` arrives every five seconds while a long unit is still running. It reports
-that the request remains open, without claiming another unit completed. `"recalled": true` means it answered its held-out questions with the fact, and its
-change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and
+that the request remains open, without claiming another unit completed.
+After the facts finish, `saving` progress continues until `saved` confirms the shard write or `failed` reports its
+error with `phase: "saving"`. `[DONE]` follows that result.
+
+`"recalled": true` means it answered its held-out questions with the fact, and its change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and
 `message` says why, for example that the fact did not come back on its held-out questions or that it disturbed another
 answer. Lesson time depends on the family and device and can take many minutes. The first lesson also keeps the
 folder's original files before opening the stream.

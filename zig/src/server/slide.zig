@@ -108,7 +108,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         id.* = srv.slide.add(fact, source, now(srv));
         out.event("fact", .{ .id = id.*, .text = fact });
     }
-    defer _ = saveAll(srv, a);
+    defer finishLearning(srv, a, &out);
     // facts learned before this server started asked once, so a fact a lesson finds forgotten is one it made forget
     if (recheck.check(srv, &cx, 0, .unjudged, &.{}, gone)) |before| {
         for (before) |r| out.event("recheck", .{ .id = @as(u32, 0), .fact = r.fact.id, .text = r.fact.text, .recalled = r.recalled, .was = r.recalled });
@@ -148,6 +148,14 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
+}
+
+/// Save even after a disconnected client or lesson error, then close a stream only after its save result.
+pub fn finishLearning(srv: *Server, a: Allocator, out: *Out) void {
+    out.stage(0, "saving");
+    if (saveAll(srv, a)) |why| {
+        out.event("failed", .{ .phase = "saving", .message = why });
+    } else out.event("saved", .{ .saved = true });
     out.done();
 }
 
