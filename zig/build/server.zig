@@ -19,5 +19,6 @@ pub fn addTo(
 ) *std.Build.Module {
     const j = json(b, target, optimize);
     m.addImport("json", j);
+    if (m.import_table.get("engine_api")) |api| if (api.import_table.get("lanes")) |lanes| m.addImport("lanes", lanes);
     return j;
 }

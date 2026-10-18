@@ -3,6 +3,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const glue = @import("cuda_glue.zig");
+const mm = @import("cuda_mm.zig");
 
 /// qmm.SPLIT_TARGET, B16_SPLIT_COLS, B16_BK, geometry.MLA_B16_SLICES and MLA_B16_ROWS_FROM.
 pub const split_target = 192;
@@ -55,6 +56,10 @@ pub fn partBytes(m: usize, n: usize, k: usize) usize {
 /// qmm.matmul for a B16 weight: out [m][n] bf16 (fp32 with `wide`) = x . w; 128+ rows sum in registers, else `part`.
 pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u64, out: u64, part: u64, m: usize, n: usize, k: usize, wide: bool) !void {
     if (k % bk != 0) return error.KNotMultipleOf64;
+    if (set.mm) |mk| { // tiled weights, packed or bf16
+        const t: mm.Tiled = if (set.packs) |p| p.tiled(w, n, k) else .{ .w = w, .n = n, .k = k };
+        return mm.matmul(mk, stream, x, x_stride, t, out, part, m, wide);
+    }
     const sk = splitK(n, k);
     var a: cuda.Args = .{};
     a.add(x);

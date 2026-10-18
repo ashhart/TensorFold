@@ -1,5 +1,6 @@
 //! The live status line (connections, decode and prefill tok/s), redrawn in a terminal, and /health's copy of it.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const log = @import("log.zig");
@@ -94,7 +95,7 @@ fn columns() usize {
     if (os == .linux) {
         if (std.os.linux.ioctl(1, std.os.linux.T.IOCGWINSZ, @intFromPtr(&ws)) == 0 and ws.col > 0) return ws.col;
     } else if (os.isDarwin()) {
-        if (std.c.ioctl(1, @bitCast(@as(u32, 0x40087468)), &ws) == 0 and ws.col > 0) return ws.col;
+        if (platform.c.ioctl(1, @bitCast(@as(u32, 0x40087468)), &ws) == 0 and ws.col > 0) return ws.col;
     }
     return 100;
 }

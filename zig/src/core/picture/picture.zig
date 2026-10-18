@@ -1,14 +1,15 @@
-//! Pictures as TensorFold 0.6.6's images.py loaded them: PNG or JPEG bytes to RGB, EXIF-oriented, alpha over white.
+//! Pictures as 0.6.6's images.py loaded them: PNG, JPEG or WebP bytes to RGB, EXIF-oriented, alpha over white.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 pub const png = @import("png.zig");
 pub const jpeg = @import("jpeg.zig");
+pub const webp = @import("webp.zig");
 pub const resample = @import("resample.zig");
 pub const tags = @import("tags.zig");
 pub const identity = @import("identity.zig");
 
-pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, OutOfMemory };
+pub const Error = error{ Invalid, Oversized, Animated, CmykJpeg, NoJpegLibrary, JpegLibraryVersion, NoWebpLibrary, WebpLibraryVersion, OutOfMemory };
 
 /// 0.6.6's ImageLimits for one picture.
 pub const max_side = 8192;
@@ -54,42 +55,44 @@ pub fn sniff(bytes: []const u8) Format {
     return .unknown;
 }
 
-/// PNG or JPEG bytes as 0.6.6 loaded them: decoded, ImageOps.exif_transpose, then any alpha pasted over white.
+/// PNG, JPEG or WebP bytes as 0.6.6 loaded them: decoded, ImageOps.exif_transpose, then any alpha pasted over white.
 pub fn decode(io: std.Io, a: Allocator, bytes: []const u8) Error!Rgb {
     const s = switch (sniff(bytes)) {
         .png => try png.decode(a, bytes),
         .jpeg => try jpeg.decode(io, a, bytes),
-        .webp, .unknown => return error.Invalid,
+        .webp => try webp.decode(io, a, bytes),
+        .unknown => return error.Invalid,
     };
     defer a.free(s.data);
     return finish(a, s);
 }
 
-/// 0.6.6's words for each refusal; WebP has its own because the native engines do not read it.
-pub fn problem(err: Error, bytes: []const u8) []const u8 {
+/// 0.6.6's words for each refusal.
+pub fn problem(err: Error) []const u8 {
     return switch (err) {
         error.Oversized => "image dimensions exceed the decoded pixel limit",
         error.Animated => "animated and multipage images are unsupported; send a single frame",
         error.CmykJpeg => cmyk,
         error.NoJpegLibrary => jpeg.missing,
         error.JpegLibraryVersion => jpeg.wrong_version,
+        error.NoWebpLibrary => webp.missing,
+        error.WebpLibraryVersion => webp.wrong_version,
         error.OutOfMemory => "out of memory decoding the image",
-        error.Invalid => if (sniff(bytes) == .webp)
-            "WebP images are unsupported here; send JPEG or PNG"
-        else
-            "image bytes are invalid or unsupported; use JPEG, PNG or WebP",
+        error.Invalid => "image bytes are invalid or unsupported; use JPEG, PNG or WebP",
     };
 }
 
 /// A CMYK JPEG: 0.6.6 converted it with Pillow's own CMYK formula; this decoder refuses it by name.
 const cmyk = "CMYK JPEG images are unsupported here; send an RGB or grayscale JPEG, or a PNG";
 
-/// The words for the refusals only the decoder knows (JPEG's library, CMYK), for callers that word the rest themselves.
+/// The words for the refusals only the decoder knows (the libraries, CMYK), for callers that word the rest themselves.
 pub fn decoderProblem(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.CmykJpeg => cmyk,
         error.NoJpegLibrary => jpeg.missing,
         error.JpegLibraryVersion => jpeg.wrong_version,
+        error.NoWebpLibrary => webp.missing,
+        error.WebpLibraryVersion => webp.wrong_version,
         else => null,
     };
 }
@@ -127,6 +130,7 @@ pub fn overWhite(c: u8, alpha: u8) u8 {
 test {
     _ = png;
     _ = jpeg;
+    _ = webp;
     _ = resample;
     _ = tags;
     _ = identity;

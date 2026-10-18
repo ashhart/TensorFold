@@ -1,0 +1,17 @@
+{"argv": ["python3", "<RECEIPT_DIR>/record-served.py", "<CHECKOUT>/zig/tests/qwen35/serve_check.py", "<RECEIPT_DIR>/9b-serve-check.jsonl", "http://127.0.0.1:8092", "amd-9b", "64"]}
+ok   greedy: drafted == serial
+ok   greedy: solo == together
+ok   greedy: serial together == serial solo
+ok   greedy: the same twice
+ok   greedy: decoders unchanged by a long prompt
+ok   greedy: long prompt among decoders == alone
+ok   greedy: serial long prompt among decoders == alone
+ok   t0.8: drafted == serial
+ok   t0.8: solo == together
+ok   t0.8: serial together == serial solo
+ok   t0.8: the same twice
+ok   t0.8: decoders unchanged by a long prompt
+ok   t0.8: long prompt among decoders == alone
+ok   t0.8: serial long prompt among decoders == alone
+ok   resumed == fresh (cached {'cached_tokens': 64})
+failed 0

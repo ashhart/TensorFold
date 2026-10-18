@@ -1,6 +1,7 @@
 //! A round's windows (Python `_plan_window`, `_copy_proposal`, `_allocate`): forced, copied or drafted rows.
 const std = @import("std");
 const accept = @import("accept.zig");
+const cut = @import("window_cut.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
@@ -221,25 +222,18 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
             pr.* = try alloc.chainProbabilities(a, &.{e.cfg.copy_rate}, n);
         } else {
             fx.* = 1;
-            pr.* = try nodeChances(e, p.stream, n);
+            const chances = try nodeChances(e, p.stream, n);
+            const controls = @import("mtp_policy.zig").Controls{ .cap = e.cfg.most_drafts, .floor = e.cfg.draft_confidence };
+            pr.* = if (p.kind == .head and e.cfg.draft_confidence != null) chances[0..controls.prefix(chances)] else chances;
         }
     }
-    const counts = try alloc.allocate(a, fixed, probs, &e.cfg.shared_costs, e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
-    for (plans, probs, counts) |*p, chances, c| {
+    const untimed: @import("table.zig").Table = .{};
+    const explicit = e.cfg.draft_confidence != null;
+    const counts = try alloc.allocate(a, fixed, probs, if (explicit) &untimed else &e.cfg.shared_costs, if (explicit) 0 else e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
+    for (plans, counts) |*p, c| {
         if (p.kind == .head) p.stream.granted = c;
-        if (chances.len == 0 or c == chances.len) continue;
-        if (c == 0) {
-            p.kind = .none;
-            p.held = 0;
-            p.tokens = &.{};
-            p.parents = null;
-        } else if (p.parents) |parents| {
-            const tree = try accept.sanitizeTree(a, p.tokens, parents, c);
-            p.tokens = tree.tokens;
-            p.parents = tree.parents;
-        } else if (p.held > 0) {
-            p.held = c;
-        } else p.tokens = p.tokens[0..c];
+        if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
+        try cut.prefix(a, p, c);
     }
     const rows = try a.alloc(Value, plans.len);
     for (rows, plans) |*r, p| {
@@ -264,20 +258,10 @@ fn trimmed(e: *Engine, plans: []Plan, t: trim.Trim) !void {
         if (c.nodes) |nodes| {
             if (p.parents == null or p.held > 0) return error.TrimNodesNeedTree;
             const sub = try trim.select(a, p.tokens, p.parents.?, nodes);
+            try cut.selected(a, p, nodes);
             p.tokens = sub.tokens;
             p.parents = if (accept.isChain(try accept.rowParents(a, 1 + sub.tokens.len, sub.parents))) null else sub.parents;
-        } else if (c.count == 0) {
-            p.kind = .none;
-            p.held = 0;
-            p.tokens = &.{};
-            p.parents = null;
-        } else if (c.count < p.count()) {
-            if (p.parents) |parents| {
-                const tree = try accept.sanitizeTree(a, p.tokens, parents, c.count);
-                p.tokens = tree.tokens;
-                p.parents = tree.parents;
-            } else if (p.held > 0) p.held = c.count else p.tokens = p.tokens[0..c.count];
-        }
+        } else try cut.prefix(a, p, c.count);
         if (p.count() == 0) p.kind = .none;
     }
 }
@@ -291,6 +275,7 @@ pub fn nodeChances(e: *Engine, s: *Stream, n: usize) ![]const f64 {
             if (try chances(e.backend.ptr, s, out)) return out;
         }
     }
+    if (e.cfg.draft_confidence != null) return error.NoDraftProbabilities;
     return alloc.chainProbabilities(a, try e.rule.rates(who(s)), n);
 }
 
@@ -321,8 +306,9 @@ pub fn constrain(e: *Engine, p: *Plan) !void {
     p.tokens = kept;
     if (w.extra.len > 0) p.grammar_from = @intCast(w.rows.len);
     if (p.parents != null) {
+        // the grammar drafts only past a chain's last kept row (Constraint.chain), so its drafts extend that chain
         const parents = try a.alloc(i32, kept.len);
-        for (parents, w.parents[1..]) |*q, r| q.* = r - 1;
+        for (parents, 0..) |*q, i| q.* = if (i + 1 < w.parents.len) w.parents[i + 1] - 1 else @as(i32, @intCast(i)) - 1;
         p.parents = if (accept.isChain(parents)) null else parents;
     }
     if (p.branch_from > 0) {

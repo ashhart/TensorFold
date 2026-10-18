@@ -64,7 +64,7 @@ fn run(queue: mtl.Queue, op: *const attn.Attention, scratch: *attn.Scratch, bind
 }
 
 /// A chain's attention over 16 layers of one command buffer, each with its own cache, timed per layer at a context.
-fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const attn.Attention, rng: *Rng, context: u32, rows: u32) !void {
+fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const attn.Attention, rng: *Rng, context: u32, rows: u32, tree: bool) !void {
     const layers = 16;
     const cap = context + 64;
     const limits = attn.Limits{ .rows = rows, .streams = 1, .keys = cap };
@@ -89,7 +89,7 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
     const out = try buffer(device, rng, rows * 6144 * 2, false);
     defer for ([_]mtl.Buffer{ query, key, value, raw_gate, out }) |b| b.deinit();
     var parents: [max_rows]i32 = undefined;
-    for (parents[0..rows], 0..) |*p, r| p.* = @as(i32, @intCast(r)) - 1;
+    for (parents[0..rows], 0..) |*p, r| p.* = if (tree and r > 1) @intCast(r / 2) else @as(i32, @intCast(r)) - 1; // a tree: row r under r/2
     var plan = try attn.Plan.init(a, &.{.{ .parents = parents[0..rows], .start = context, .capacity = cap }}, .{});
     defer plan.deinit();
     try scratch.upload(plan);
@@ -106,7 +106,9 @@ fn bench(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, op: *const 
         t.* = cb.gpuSeconds() * 1e6 / layers;
     }
     std.mem.sort(f64, &times, {}, std.sort.asc(f64));
-    std.debug.print("attention bench: rows {d} context {d}: {d:.1} us per layer (median of 9; min {d:.1}, max {d:.1})\n", .{ rows, context, times[4], times[0], times[8] });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(out.contents()[0 .. rows * 6144 * 2], &digest, .{});
+    std.debug.print("attention bench: rows {d} context {d} {s}: {d:.1} us per layer (median of 9; min {d:.1}, max {d:.1}) out {x}\n", .{ rows, context, if (tree) "tree" else "chain", times[4], times[0], times[8], digest[0..6] });
 }
 
 /// What every plan runs on: scratch and bindings with and without a shared prefix, caches, inputs and outputs.
@@ -253,6 +255,130 @@ fn wideCases(a: std.mem.Allocator, rng: *Rng, edges: []const u32) !std.ArrayList
     return cases;
 }
 
+/// Caches past 8,192, where a row's key chunk widens from 128 to 512 keys, and past 8,704, the next 512-key edge.
+const boundary_capacity: u32 = 8960;
+const boundary_targets = [_]u32{ 8063, 8064, 8190, 8191, 8192, 8193, 8194, 8703, 8704, 8705 };
+
+/// A window's row inputs by stream and cache position alone: key and value are the cache's own rows there.
+fn boundaryInputs(windows: []const planning.Window, ids: []const u64, caches: []const attn.Cache, query: mtl.Buffer, key: mtl.Buffer, value: mtl.Buffer, gate: mtl.Buffer) void {
+    var node: usize = 0;
+    for (windows, ids, caches) |w, id, cache| for (0..w.parents.len) |row| {
+        const at: usize = w.start + row;
+        var rng = Rng{ .s = ((id + 1) *% 0x9e3779b97f4a7c15) ^ (@as(u64, at) *% 0xbf58476d1ce4e5b9) | 1 };
+        for (query.slice(u16, round_rows * 6144)[node * 6144 ..][0..6144]) |*x| x.* = rng.bf16();
+        for (gate.slice(u16, round_rows * 12288)[node * 12288 ..][0..12288]) |*x| x.* = rng.bf16();
+        for (0..4) |hk| {
+            const from = (hk * cache.capacity + at) * 256;
+            @memcpy(key.slice(u16, round_rows * 1024)[(node * 4 + hk) * 256 ..][0..256], cache.keys.buffer.slice(u16, cache.capacity * 1024)[from..][0..256]);
+            @memcpy(value.slice(u16, round_rows * 1024)[(node * 4 + hk) * 256 ..][0..256], cache.values.buffer.slice(u16, cache.capacity * 1024)[from..][0..256]);
+        }
+        node += 1;
+    };
+}
+
+/// Rows around 8,064, 8,192 and 8,704 equal their one-row steps byte for byte in chains, trees, beside neighbors.
+fn boundary(r: *Rig, device: mtl.Device) !void {
+    var rng = Rng{ .s = 0x5851f42d4c957f2d };
+    var cache_buffers: [4]mtl.Buffer = undefined;
+    var caches: [2]attn.Cache = undefined;
+    for (&caches, 0..) |*cache, i| {
+        const bytes = @as(usize, boundary_capacity) * 4 * 256 * 2;
+        cache_buffers[2 * i] = try buffer(device, &rng, bytes, true);
+        cache_buffers[2 * i + 1] = try buffer(device, &rng, bytes, true);
+        cache.* = .{ .keys = .{ .buffer = cache_buffers[2 * i] }, .values = .{ .buffer = cache_buffers[2 * i + 1] }, .capacity = boundary_capacity };
+    }
+    defer for (cache_buffers) |b| b.deinit();
+    const query = try buffer(device, &rng, round_rows * 6144 * 2, false);
+    const key = try buffer(device, &rng, round_rows * 1024 * 2, false);
+    const value = try buffer(device, &rng, round_rows * 1024 * 2, false);
+    const gate = try buffer(device, &rng, round_rows * 12288 * 2, false);
+    const out = try buffer(device, &rng, round_rows * 6144 * 2, false);
+    defer for ([_]mtl.Buffer{ query, key, value, gate, out }) |b| b.deinit();
+    const row_bytes = 6144 * 2;
+    const modes = [_]planning.Geometry{ .{}, .{ .fuse_chain = false }, .{ .shared_prefix = false } };
+    // each target's one-row step, with and without a shared prefix
+    var steps: [2][boundary_targets.len][row_bytes]u8 = undefined;
+    for ([_]usize{ 0, 2 }, 0..) |mode, m| for (boundary_targets, 0..) |position, t| {
+        const windows = [_]planning.Window{.{ .parents = &.{-1}, .start = position, .capacity = boundary_capacity }};
+        var plan = try attn.Plan.init(r.a, &windows, modes[mode]);
+        defer plan.deinit();
+        boundaryInputs(&windows, &.{0}, caches[0..1], query, key, value, gate);
+        @memset(out.contents()[0..row_bytes], 0);
+        try run(r.queue, r.op, if (mode == 2) r.plain_scratch else r.scratch, if (mode == 2) r.plain_binding else r.binding, plan, caches[0..1], .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, .{ .buffer = gate });
+        try written(out, row_bytes, true);
+        @memcpy(&steps[m][t], out.contents()[0..row_bytes]);
+    };
+    const Shape = struct { start: u32, parents: []const i32 };
+    var long: [round_rows]i32 = undefined;
+    for (&long, 0..) |*p, i| p.* = @as(i32, @intCast(i)) - 1;
+    // chains, and trees whose first rows are a chain, so a target at depth d is row d at start + d
+    const shapes = [_]Shape{
+        .{ .start = 8191, .parents = &.{ -1, 0 } },
+        .{ .start = 8192, .parents = &.{ -1, 0 } },
+        .{ .start = 8190, .parents = &.{ -1, 0, 1, 2, 3 } },
+        .{ .start = 8189, .parents = &.{ -1, 0, 1 } },
+        .{ .start = 8060, .parents = &.{ -1, 0, 1, 2, 3, 4, 5 } },
+        .{ .start = 8190, .parents = &.{ -1, 0, 1, 2, 3, 0, 1, 2, 3, 4 } },
+        .{ .start = 8191, .parents = &.{ -1, 0, 1, 0, 0, 1 } },
+        .{ .start = 8700, .parents = &.{ -1, 0, 1, 2, 3, 4 } },
+        .{ .start = 8701, .parents = &.{ -1, 0, 1, 2, 3, 2, 1 } },
+        .{ .start = 8066, .parents = long[0..128] },
+        .{ .start = 8100, .parents = long[0..100] },
+        .{ .start = 8640, .parents = long[0..80] },
+    };
+    // a neighbor in the other cache, before or after: short row, chains across and below 8192, a tree, past 8704
+    const Neighbor = struct { start: u32, parents: []const i32, before: bool };
+    const neighbors = [_]?Neighbor{ null, .{ .start = 150, .parents = &.{-1}, .before = false }, .{ .start = 8193, .parents = &.{ -1, 0, 1 }, .before = true }, .{ .start = 8000, .parents = long[0..16], .before = false }, .{ .start = 8190, .parents = &.{ -1, 0, 0, 1 }, .before = true }, .{ .start = 8900, .parents = &.{-1}, .before = true } };
+    var plans: usize = 0;
+    var compared: usize = 0;
+    for (modes, 0..) |geometry, mode| for (shapes) |shape| for (neighbors) |neighbor| {
+        var windows: [2]planning.Window = undefined;
+        var ids: [2]u64 = undefined;
+        var count: usize = 0;
+        var own: usize = 0;
+        for ([_]bool{ true, false }) |before| {
+            if (!before) {
+                own = count;
+                windows[count] = .{ .parents = shape.parents, .start = shape.start, .capacity = boundary_capacity };
+                ids[count] = 0;
+                count += 1;
+            }
+            if (neighbor) |nb| if (nb.before == before) {
+                windows[count] = .{ .parents = nb.parents, .start = nb.start, .capacity = boundary_capacity };
+                ids[count] = 1;
+                count += 1;
+            };
+        }
+        var rows: usize = 0;
+        for (windows[0..count]) |w| rows += w.parents.len;
+        if (rows > round_rows) continue;
+        const stream_caches: [2]attn.Cache = if (own == 0) caches else .{ caches[1], caches[0] };
+        var plan = try attn.Plan.init(r.a, windows[0..count], geometry);
+        defer plan.deinit();
+        boundaryInputs(windows[0..count], ids[0..count], stream_caches[0..count], query, key, value, gate);
+        @memset(out.contents()[0 .. rows * row_bytes], 0);
+        try run(r.queue, r.op, if (mode == 2) r.plain_scratch else r.scratch, if (mode == 2) r.plain_binding else r.binding, plan, stream_caches[0..count], .{ .buffer = query }, .{ .buffer = key }, .{ .buffer = value }, .{ .buffer = out }, .{ .buffer = gate });
+        try written(out, rows * row_bytes, true);
+        plans += 1;
+        const first: usize = @intCast(plan.meta[planning.global_words + own * planning.stream_words + 6]);
+        for (shape.parents, 0..) |parent, row| {
+            if (parent != @as(i32, @intCast(row)) - 1) break;
+            const position = shape.start + @as(u32, @intCast(row));
+            const t = std.mem.indexOfScalar(u32, &boundary_targets, position) orelse continue;
+            const got = out.contents()[(first + row) * row_bytes ..][0..row_bytes];
+            if (!std.mem.eql(u8, got, &steps[if (mode == 2) 1 else 0][t])) {
+                std.debug.print("FAIL boundary: position {d}, mode {d}, window from {d} of {d} rows, neighbor {any}\n", .{ position, mode, shape.start, shape.parents.len, neighbor });
+                return error.BoundaryBits;
+            }
+            compared += 1;
+        }
+    };
+    var same: usize = 0;
+    for (steps[0], steps[1]) |a, b| same += @intFromBool(std.mem.eql(u8, &a, &b));
+    std.debug.print("attention_fused: {d} rows at {any} in {d} plans across 8192 (windows, trees, the tail kernel, neighbors, no shared prefix) byte-identical to their one-row steps; {d} of {d} steps equal with and without a shared prefix\n", .{ compared, boundary_targets, plans, same, boundary_targets.len });
+    if (compared != 642 or plans != 201) return error.BoundaryCoverage;
+}
+
 pub fn main(init: std.process.Init) !void {
     const a = init.arena.allocator();
     const pool = mtl.objc.Pool.push();
@@ -272,7 +398,12 @@ pub fn main(init: std.process.Init) !void {
     defer op.deinit();
     if (args.len >= 2 and std.mem.eql(u8, args[1], "--bench")) {
         var brng = Rng{ .s = 0x1234567 };
-        for ([_]u32{ 1, 4, 16, 32 }) |rows| for ([_]u32{ 2048, 16384 }) |context| try bench(a, device, queue, &op, &brng, context, rows);
+        if (args.len >= 4) { // --bench CONTEXTS ROWS [tree]: comma-separated contexts
+            var it = std.mem.tokenizeScalar(u8, args[2], ',');
+            while (it.next()) |c| try bench(a, device, queue, &op, &brng, try std.fmt.parseInt(u32, c, 10), try std.fmt.parseInt(u32, args[3], 10), args.len >= 5);
+            return;
+        }
+        for ([_]u32{ 1, 4, 16, 32 }) |rows| for ([_]u32{ 2048, 16384 }) |context| try bench(a, device, queue, &op, &brng, context, rows, false);
         return;
     }
     const limits = attn.Limits{ .rows = round_rows, .streams = 8, .keys = capacity };
@@ -342,4 +473,5 @@ pub fn main(init: std.process.Init) !void {
     const wide_totals = try check(&rig, wide.items, true);
     std.debug.print("attention_fused: {d} plans of 5 to 8 streams, {d} chains byte-identical through the fused prefix kernel and the tail kernel, {d} bytes, sha256 {s}\n", .{ wide_totals.plans, wide_totals.chains, wide_totals.bytes, std.fmt.bytesToHex(wide_totals.sum, .lower) });
     std.debug.print("attention_fused: the same {d} plans of 5 to 8 streams without a shared prefix, sha256 {s}\n", .{ wide_totals.plans, std.fmt.bytesToHex(wide_totals.plain_sum, .lower) });
+    try boundary(&rig, device);
 }
