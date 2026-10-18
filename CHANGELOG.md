@@ -4,6 +4,9 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.1
 
+- Flash Next on Metal uses precise exp2, sine and cosine for rotary preparation and index pooling, including M-RoPE (#986, #1005). Thanks to @BobClawblaw, @cwschroeder and @sethforprivacy, retaining the original YaRN attribution.
+- GLM-5.3-Flash NVFP4 loads and serves the whole checkpoint on two GB10s at TP=2 in a contributed regression run on shipped 1.1.0: 302.1 seconds to load, one token hash per prompt across three runs, and a passphrase found in 199,307 tokens. Scored prompts and more than two ranks were not covered (#1040). Thanks to @Bizuayeu.
+
 - Qwen3.8-27B on Metal keeps its Neural Engine prompt share off by default on M5. Its fp16 prompt rows can change replies, so the default follows the no-quality-tradeoffs rule. `TF_ANE_COLUMNS=N` opts in; M1 to M4 already use the GPU alone. The load receipt reports requested and loaded columns, fp16 program-weight bytes and exact-output qualification.
 
 - Source builds report the release version. A source build of 1.1.0 reported 1.0.12 because its package manifest still carried the older version.
