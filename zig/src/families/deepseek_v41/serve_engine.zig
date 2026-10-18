@@ -20,7 +20,7 @@ const Allocator = std.mem.Allocator;
 const sched_host = @import("sched_host.zig");
 
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"} }};
+pub const families: []const api.Family = &.{.{ .model_type = "deepseek_v41", .formats = &.{"exl3"}, .raw_text = false }};
 
 pub fn chip(_: Allocator) ?[]const u8 {
     return null;
