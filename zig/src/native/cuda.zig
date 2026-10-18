@@ -85,12 +85,10 @@ pub const Host = struct {
     fn readiness(h: *Host, comptime F: type) void {
         if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
     }
-
     fn halt(ctx: *anyopaque, reason: []const u8) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.halt(reason);
     }
-
     pub fn close(p: *anyopaque) void {
         @import("cuda_host_close.zig").close(@as(*Host, @ptrCast(@alignCast(p))));
     }
@@ -102,7 +100,6 @@ pub const Host = struct {
         };
         return h;
     }
-
     fn initThread(ctx: *anyopaque) !void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         if (h.gpu) |g| {
@@ -110,7 +107,6 @@ pub const Host = struct {
             bound = &g.ctx;
         }
     }
-
     /// The round loop and the lane host over the family's backend, its thread started.
     pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
@@ -190,7 +186,6 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     problem.* = try std.fmt.allocPrint(a, "the native CUDA engine has no backend for {s} checkpoints yet", .{o.model_type});
     return null;
 }
-
 /// The admit's refusals: no stream fits, or --parallel asks for more than the budget holds.
 const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token window takes {d:.2} GiB, " ++
     "and {d:.2} GiB is left after the model's {d:.2} GiB and the {d:.1} GiB reserve{s}; " ++
@@ -571,12 +566,15 @@ test "a cancel during a long prompt stops it, and the next request's reply is un
     }
     try std.testing.expectEqual(@as(usize, 40), restored.tokens.items.len);
 }
+
 test "family readiness reaches production lane admission without binding CUDA" {
     try @import("cuda_health_test.zig").check(Host, Host.readiness, Host.serve);
 }
+
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
 }
+
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
@@ -594,6 +592,7 @@ test "Learner ownership: direct Nemotron trainer destruction drains before its f
 test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
     try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }
+
 test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
     try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

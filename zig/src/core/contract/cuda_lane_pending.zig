@@ -1,0 +1,29 @@
+//! Restored CUDA lane launches retain pending 13.0 resources; measured 13.2 usage is selected separately.
+const CudaRecord = @import("registry.zig").CudaRecord;
+const none = @import("registry.zig").none;
+pub const records = [_]CudaRecord{
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_1", .symbol = "tf_q35_gdn_slots_1", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_2", .symbol = "tf_q35_gdn_slots_2", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_4", .symbol = "tf_q35_gdn_slots_4", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_8", .symbol = "tf_q35_gdn_slots_8", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_16", .symbol = "tf_q35_gdn_slots_16", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_chain", .symbol = "tf_q35_gdn_chain", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_rope", .symbol = "tf_q35_rope", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial", .symbol = "tf_q35_attn_partial", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_merge", .symbol = "tf_q35_attn_merge", .image = "qwen35", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_rope8", .symbol = "tf_q35_rope8", .image = "qwen35_kv8", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8", .symbol = "tf_q35_attn_partial8", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_apply", .symbol = "tf_q35k_apply", .image = "qwen35_keep", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_compact", .symbol = "tf_q35k_compact", .image = "qwen35_keep", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35k_compact8", .symbol = "tf_q35k_compact8", .image = "qwen35_kv8", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_gather_rows", .symbol = "tf_q35d_gather_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_pre", .symbol = "tf_q35_gdn_pre", .image = "qwen35", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_conv_commit", .symbol = "tf_q35_conv_commit", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_tap", .symbol = "tf_q35_tap", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_conv", .symbol = "tf_q35k_conv", .image = "qwen35_keep", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_dyn_conv_batch", .symbol = "tf_q35d_dyn_conv_batch", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_norm_rope_batch", .symbol = "tf_q35d_norm_rope_batch", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_mask_rows", .symbol = "tf_q35d_mask_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_partial", .symbol = "tf_q35d_attn_partial", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_merge", .symbol = "tf_q35d_attn_merge", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+};
