@@ -16,7 +16,7 @@ pub const max_window = 4;
 /// Shortest span the attention walk covers; spans double from here (a row's bits do not depend on the span).
 pub const min_span = 128;
 
-/// A window's per-row Mamba states: slot r (r * stride bytes into `buf`) holds every layer's state after row r - 1.
+/// A window's Mamba states: slot r >= 1 (r * stride bytes into `buf`) holds every layer's state after row r - 1.
 pub const Snaps = struct { buf: hip.DeviceBuffer, stride: usize };
 
 /// One stream's rows of a round: its tokens from its kept length, and where each row's Mamba state goes.
@@ -160,7 +160,7 @@ fn mambaRows(
     var at: usize = 0;
     for (rows) |r| {
         const n = r.tokens.len;
-        try mamba.body(
+        try mamba.window(
             o,
             d,
             act,

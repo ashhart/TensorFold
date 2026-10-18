@@ -150,7 +150,7 @@ pub fn run(
         const next = if (last) m.norm_f else m.blocks[i + 1].norm;
         const dst = if (last) out else normed;
         const y = switch (b.mixer) {
-            .mamba => |w| try mamba.mixer(o, d, m.act, w, ctx.stream.states[slot], normed, rows, null),
+            .mamba => |w| try mamba.mixer(o, d, m.act, w, ctx.stream.states[slot], normed, rows),
             .attention => |w| try attention(
                 o,
                 m.act,

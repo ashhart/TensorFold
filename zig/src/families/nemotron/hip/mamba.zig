@@ -18,7 +18,7 @@ pub const State = struct {
     ssm: u64,
 };
 
-/// A window's per-row states: slot r of `buf` (r * stride in, at `offset`) holds this layer's state after row r - 1.
+/// Slot r >= 1 of `buf` (r * stride in, at `offset`) holds this layer's state after row r - 1; slot 0 is not written.
 pub const Snap = struct { buf: hip.DeviceBuffer, offset: usize, stride: usize };
 
 /// Bytes of a State's conv tail on this rank.
@@ -40,11 +40,10 @@ pub fn mixer(
     s: State,
     x: Tensor,
     rows: usize,
-    snap: ?Snap,
 ) Error!Tensor {
     const proj = try o.project(x, w.in_proj, rows, false);
     const normed: Tensor = .{ .ptr = try o.arena.take(rows * d.inner() * act.size()), .kind = act };
-    try body(o, d, act, w, s, proj, rows, snap, normed);
+    try body(o, d, act, w, s, proj, rows, normed);
     // y in act, or fp32 when w.out_proj.partial (under tp: this rank's share, which the caller sums)
     return o.project(normed, w.out_proj, rows, w.out_proj.partial);
 }
@@ -58,13 +57,54 @@ pub fn body(
     s: State,
     proj: Tensor,
     rows: usize,
+    normed: Tensor,
+) Error!void {
+    const sc = try scratch(o, d, act, rows);
+    try o.mambaMixer(
+        proj,
+        .{ .conv = s.conv, .ssm = s.ssm },
+        sc,
+        normed.ptr,
+        weightsOf(w),
+        rows,
+        shapeOf(d),
+        limitsOf(d),
+    );
+}
+
+/// `body`'s bits over a window's rows in two launches, each row's state but the last into its slot of `snap`.
+pub fn window(
+    o: hip.ops.Ops,
+    d: model.Dims,
+    act: model.Kind,
+    w: model.Mamba,
+    s: State,
+    proj: Tensor,
+    rows: usize,
     snap: ?Snap,
     normed: Tensor,
 ) Error!void {
-    const xc = try o.arena.take(rows * d.convDim() * act.size());
-    const dt = try o.arena.of(f32, rows * d.mamba_heads);
-    const y = try o.arena.take(rows * d.inner() * act.size());
-    const weights: hip.ops.mamba.Weights = .{
+    const sc = try scratch(o, d, act, rows);
+    const at: ?hip.ops.mamba.Snap = if (snap) |sn| .{
+        .conv = sn.buf.base() + sn.offset,
+        .ssm = sn.buf.base() + sn.offset + convBytes(d, act),
+        .stride = sn.stride,
+    } else null;
+    const st: hip.ops.mamba.State = .{ .conv = s.conv, .ssm = s.ssm };
+    try o.mambaWindow(proj, st, sc, normed.ptr, weightsOf(w), rows, shapeOf(d), limitsOf(d), at);
+}
+
+/// The mixer's scratch for `rows`: the conv's output, dt and the scan's y.
+fn scratch(o: hip.ops.Ops, d: model.Dims, act: model.Kind, rows: usize) Error!hip.ops.mamba.Scratch {
+    return .{
+        .xc = try o.arena.take(rows * d.convDim() * act.size()),
+        .dt = try o.arena.of(f32, rows * d.mamba_heads),
+        .y = try o.arena.take(rows * d.inner() * act.size()),
+    };
+}
+
+fn weightsOf(w: model.Mamba) hip.ops.mamba.Weights {
+    return .{
         .conv_w = w.conv_w,
         .conv_b = w.conv_b,
         .dt_bias = w.dt_bias,
@@ -72,49 +112,20 @@ pub fn body(
         .d = w.d,
         .gnorm = w.gnorm,
     };
-    const shape: hip.ops.mamba.Shape = .{
+}
+
+fn shapeOf(d: model.Dims) hip.ops.mamba.Shape {
+    return .{
         .heads = d.mamba_heads,
         .dh = d.mamba_head_dim,
         .groups = d.groups,
         .state = d.state,
         .conv_kernel = d.conv_kernel,
     };
-    const lim: hip.ops.mamba.Limits = .{ .dt_min = d.dt_min, .dt_max = d.dt_max, .eps = d.eps };
-    const sn = snap orelse {
-        try o.mambaMixer(
-            proj,
-            .{ .conv = s.conv, .ssm = s.ssm },
-            .{ .xc = xc, .dt = dt, .y = y },
-            normed.ptr,
-            weights,
-            rows,
-            shape,
-            lim,
-        );
-        return;
-    };
-    // one row at a time, the state copied out after each: the recurrence is sequential, so the bits are the same
-    const each = convBytes(d, act) + ssmBytes(d);
-    try hip.raw.copy(sn.buf, sn.offset, s.conv, each, o.stream);
-    for (0..rows) |r| {
-        const src: Tensor = .{ .ptr = proj.ptr + r * d.projDim() * act.size(), .kind = act };
-        const sc: hip.ops.mamba.Scratch = .{
-            .xc = xc + r * d.convDim() * act.size(),
-            .dt = dt + r * d.mamba_heads * 4,
-            .y = y + r * d.inner() * act.size(),
-        };
-        try o.mambaMixer(
-            src,
-            .{ .conv = s.conv, .ssm = s.ssm },
-            sc,
-            normed.ptr + r * d.inner() * act.size(),
-            weights,
-            1,
-            shape,
-            lim,
-        );
-        try hip.raw.copy(sn.buf, sn.offset + (r + 1) * sn.stride, s.conv, each, o.stream);
-    }
+}
+
+fn limitsOf(d: model.Dims) hip.ops.mamba.Limits {
+    return .{ .dt_min = d.dt_min, .dt_max = d.dt_max, .eps = d.eps };
 }
 
 test "a State's bytes are the plan's" {

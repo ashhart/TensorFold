@@ -242,7 +242,8 @@ pub const Hip = struct {
     /// The last verify's first `rows` rows kept: the Mamba states back to the row's when fewer than all.
     pub fn keepRows(h: *Hip, l: *Lane, rows: usize) !void {
         const n = (l.pending orelse return).rows;
-        if (rows > n) return error.PositionMismatch;
+        // the pending row is always kept: the window snapshots no state before it
+        if (rows == 0 or rows > n) return error.PositionMismatch;
         try h.tp.send(.keep, &.{&.{ l.id, @intCast(rows) }});
         if (rows < n) try hip.raw.copy(
             l.s.mem,

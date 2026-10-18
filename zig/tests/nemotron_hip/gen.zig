@@ -258,7 +258,7 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
             const h = try e.round(&.{.{ .s = &s, .tokens = tail, .snaps = sn }}, null);
             o = e.ops(&e.arena);
             try readBack(e, gpa, try e.roundLogits(o, h, k), if (mode == 2) snapped else once);
-            if (mode == 2 and k >= 2) {
+            if (mode == 2 and k >= 3) {
                 // roll back to the state after k - 2 rows and run the last two rows one at a time
                 try hip.raw.copy(s.mem, 0, snaps.base() + (k - 2) * state_bytes, state_bytes, e.stream.handle);
                 s.len = base + k - 2;
@@ -289,7 +289,7 @@ pub fn window(gpa: std.mem.Allocator, io: std.Io, args: []const [:0]const u8) !v
         .{ a.g.rank, a.g.world, k, if (first == null) "the same bits" else "DIFFERENT", first, worst },
     );
     const snap_same = std.mem.eql(f32, snapped, once);
-    const back_same = k < 2 or std.mem.eql(f32, back, each[(k - 2) * v ..][0 .. 2 * v]);
+    const back_same = k < 3 or std.mem.eql(f32, back, each[(k - 2) * v ..][0 .. 2 * v]);
     std.debug.print(
         "snapshots: the snapshotted window {s} the plain one; rows after a rollback {s} the single steps\n",
         .{ if (snap_same) "equals" else "DIFFERS from", if (back_same) "equal" else "DIFFER from" },
