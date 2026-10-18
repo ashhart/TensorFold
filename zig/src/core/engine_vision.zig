@@ -69,6 +69,7 @@ pub const VideoOffer = struct {
     /// The tokens around each group's image tokens; the group's time follows as text.
     group_open: u32,
     group_close: u32,
+    time_first: ?u32 = null, // Qwen video groups place the timestamp before the rows marked by this token
     /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
     markers: []const u32 = &.{},
     /// Video tokens one request may hold in all, videos, and frames sampled a video.

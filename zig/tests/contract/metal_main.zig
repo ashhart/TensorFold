@@ -12,6 +12,7 @@ const h3_k = @import("metal_h3.zig");
 const h3_topk = @import("metal_h3_topk.zig");
 const drama3_k = @import("metal_drama3.zig");
 
+const flash = @import("metal_flashnext.zig");
 const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
@@ -137,6 +138,15 @@ pub fn main(init: std.process.Init) !u8 {
         try rows_list.append(a, r);
         try kernels.append(a, r.kernel());
     }
+    var flash_list: [2]flash.Probe = undefined;
+    var flash_made: usize = 0;
+    defer for (flash_list[0..flash_made]) |*probe| probe.deinit();
+    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| {
+        if (!wanted(o, tf.flashnext_vision_contract.spec(contract.spec, w).name)) continue;
+        flash_list[flash_made] = try flash.Probe.init(a, device, queue, w);
+        flash_made += 1;
+        try kernels.append(a, flash_list[flash_made - 1].kernel());
+    }
     var d3norm: ?drama3_k.Norm = null;
     defer if (d3norm) |*n| n.deinit();
     if (wanted(o, drama3_k.spec().name)) {
@@ -185,7 +195,10 @@ pub fn main(init: std.process.Init) !u8 {
     for (tiles[0..ntiles]) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = std.Io.Clock.awake.now(init.io);
-    if (o.gates) try g.runAll(a, kernels.items, o.seed, &t);
+    if (o.gates) {
+        try g.runAll(a, kernels.items, o.seed, &t);
+        for (flash_list[0..flash_made]) |*probe| try probe.rowCountInvariant();
+    }
     const t1 = std.Io.Clock.awake.now(init.io);
     var lim: usize = 0;
     if (o.limits) {

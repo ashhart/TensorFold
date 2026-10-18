@@ -610,8 +610,8 @@ test {
     _ = paging;
 }
 
-/// The live Metal collector's list: the serving declarations, then the 27B's register-slot DeltaNet pipelines.
-pub const all_metal = metal ++ @import("delta_slots_records.zig").records;
+/// The Metal collector keeps measured slots and the restored vision declarations.
+pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @import("flashnext_pending.zig").records;
 
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;

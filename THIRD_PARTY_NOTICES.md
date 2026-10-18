@@ -26,6 +26,12 @@ Copyright 2026 The Qwen Team and The HuggingFace Inc. team, Apache License 2.0.
 See [the license text](LICENSES/Apache-2.0.txt). The same helpers appear in mlx-vlm's
 `models/qwen4_exp/language.py`, MIT License, Copyright © 2025 Prince Canuma.
 
+The native engine's image and video input for Flash Next follows transformers' `get_rope_index` positions in
+`models/qwen4_exp/modeling_qwen4_exp.py` (`zig/src/families/flashnext/vis_prompt.zig`) and its Qwen3-VL video
+processor and processor in `models/qwen3_vl/` (frame sampling, `smart_resize`, pair times and the prompt layout;
+`zig/src/core/qwen_vl/video.zig`, `zig/src/server/images.zig`). Copyright 2025 and 2026 The Qwen Team and The
+HuggingFace Inc. team, Apache License 2.0; see [the license text](LICENSES/Apache-2.0.txt).
+
 ## GLM-5.3-Flash on Apple Silicon
 
 The native GLM-5.3-Flash engine (`zig/src/families/glm/`) runs the Python `glm5_next` family's decode kernels.

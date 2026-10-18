@@ -20,6 +20,7 @@ pub const engine_widths = @import("engine_widths.zig");
 pub const gdn_step = @import("gdn.zig");
 pub const Tp2 = tpm.Tp2;
 pub const frags = @import("../../core/frags.zig");
+pub const vis_prompt = @import("vis_prompt.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
@@ -48,7 +49,7 @@ pub const Entry = struct { fd: platform.c.fd_t, at: usize, len: usize };
 pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "", text: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
-const glue_source =
+pub const glue_source =
     \\#include <metal_stdlib>
     \\using namespace metal;
     \\// meta: position of row 0, key capacity, rows
@@ -1454,6 +1455,8 @@ test {
     _ = tpm; // tp.zig's tests: the window layout and the host service's wraps
     _ = @import("drafts.zig"); // the depth rule's tests
     _ = @import("replay_held_test.zig"); // Run.release and the held list (#732)
+    _ = vis_prompt; // an image prompt's frame, its spans and its cache key
+    _ = @import("grammar.zig"); // structured output: masked rows on the GPU against the host draw
 }
 
 test "catch-up slots: every layer's dispatch reads its own first block after the later layers' writes" {
@@ -1838,6 +1841,7 @@ pub const Model = struct {
     recs: ?[2]Buf = null, // GPU-side rounds with r.gdn_kept: each window's DeltaNet replay records, by round parity
     rec_slot: usize = 0, // the record this window writes (the other holds the previous window's)
     marks: ?Marks = null, // DeltaNet states at marks inside a prompt chunk, as a chunk ending there would leave them
+    vis: ?*const vis_prompt.VisPrompt = null, // an image prompt's rows and positions while its prompt pass runs
 
     pub fn reset(m: *Model) void {
         m.pos = 0;
@@ -2410,7 +2414,7 @@ pub const Prompt = struct {
     proj: [LAYERS][3]Buf,
     out: [LAYERS][3]Buf,
     ple_kv: [3]Buf,
-    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
+    b: struct { ids: Buf, pids: Buf, h: [2]Buf, ssp: Buf, normed: Buf, dn: Buf, hact: Buf, inj_a: Buf, inj_m: Buf, up: Buf, mixed: Buf, p: Buf, gout: Buf, branch: Buf, cso: Buf, q: Buf, kout: Buf, iq: Buf, po: Buf, pm: Buf, aout: Buf, pos: Buf, pos3: Buf, nk: Buf, zeros: Buf, kvmeta: Buf, lg: Buf, pick: Buf, wts: Buf, cnt: Buf, off: Buf, cur: Buf, row_of: Buf, xs: Buf, g: Buf, u: Buf, a: Buf, ds: Buf, sg: Buf, su: Buf, sa: Buf, ydown: Buf, emb: Buf, kvp: Buf, gated: Buf, hout: Buf, cin: Buf, rows: Buf, part: Buf, qn: Buf, kn: Buf, v: Buf, gg: Buf, beta: Buf, ys: Buf, mids: Buf, n_add: Buf },
 
     pub fn init(r: *Run, dir: []const u8, header: []const u8) !Prompt {
         var p: Prompt = undefined; // every field is set below: `undefined` skips the declared defaults
@@ -2523,6 +2527,7 @@ pub const Prompt = struct {
             .pm = try B.of(r, 64),
             .aout = try B.of(r, R * 6144 * 2),
             .pos = try B.of(r, R * 4),
+            .pos3 = try B.of(r, R * 12),
             .nk = try B.of(r, R * 4),
             .zeros = try B.of(r, R * 4),
             .kvmeta = try B.of(r, 16),
@@ -2869,6 +2874,7 @@ pub const Prompt = struct {
             b.pos.b.slice(i32, PMAX)[i] = @intCast(pos + i);
             b.nk.b.slice(i32, PMAX)[i] = @intCast(pos + i + 1);
         }
+        if (m.vis) |v| v.positions(pos, rows, b.pos.b.slice(i32, PMAX), b.pos3.b.slice(i32, 3 * PMAX)); // an image prompt
         const kvm = b.kvmeta.b.slice(u32, 3);
         kvm[0], kvm[1], kvm[2] = .{ @intCast(pos), @intCast(m.cap), @intCast(rows) };
         b.rows.b.slice(i32, 1)[0] = @intCast(rows);
@@ -2972,7 +2978,12 @@ pub const Prompt = struct {
             p.qmm(b.gout, p.out[i], 6144, D, rows, b.branch, 0);
         } else {
             p.qmm(b.mixed, p.proj[i], D, 13952, rows, b.p, 0);
-            try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
+            if (m.vis != null and s.pos < m.vis.?.frame_end) { // rows up to the last image's end: three positions a row
+                r.enc.setPipeline(m.vis.?.prep);
+                for ([_]Buf{ b.p, b.pos3, L.qn, L.kn, L.iqn, t.eps, t.log2base, b.q, b.kout, b.iq }, 0..) |bb, j| r.enc.setBuffer(bb.b, bb.off, j);
+                r.enc.dispatchThreads(mtl.Size.of(256, 30, rows), mtl.Size.of(256, 1, 1));
+                if (!r.serial) r.enc.barrier();
+            } else try r.callRows("q4_attn_prep@att", rows, &.{ b.p, b.pos, L.qn, L.kn, L.iqn, t.eps, t.log2base }, &.{ b.q, b.kout, b.iq }, null);
             p.bind(r.kv_pipe, &.{ b.kout, b.p, L.keys, L.vals, L.raw, b.kvmeta });
             r.enc.dispatchThreads(mtl.Size.of(512 * rows, 1, 1), mtl.Size.of(256, 1, 1));
             p.barrier();
@@ -3105,6 +3116,10 @@ pub const Prompt = struct {
             var ce: [2]variants.Const = undefined;
             const ev = try variants.oneRow(s.p.r, "qa_embed_rows@embed", variants.width(&ce, "BITS", "GS", m.embed_w));
             try s.p.r.callRows("qa_embed_rows@embed", s.rows, &.{ b.ids, m.embed[0], m.embed[1], m.embed[2] }, &.{b.h[0]}, ev);
+            if (m.vis) |v| for (v.spans) |sp| if (vis_prompt.VisPrompt.overlap(sp, s.pos, s.rows)) |o| { // the image rows
+                const row = WIDE * 2; // the embedding's row: a copy for each of the four streams
+                s.p.copyWords(.{ .b = v.rows, .off = o[1] * row }, b.h[0].at(o[0] * row), o[2] * row / 4);
+            };
         }
         pub fn wait(_: *Hooks, i: usize) segments.Wait {
             return if (i == 1) .pre else .mixer;

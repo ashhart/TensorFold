@@ -160,7 +160,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
     if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl")) {
-        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Gemma 4 and Step-5 only, not {s} checkpoints", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4 and Step-5 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
@@ -371,8 +371,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     if (tf.flashnext_batch_meta.shared(o.lanes_fixed, o.lanes, paired, o.learn != null)) {
         var why: []const u8 = "";
         const shared: ?api.Opened = shared: {
-            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
-                problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
+            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.vision, a, &why) catch |err| {
+                problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap or why.len > 0) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
                 return null;
             };
             break :shared opened;
@@ -383,8 +383,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const learn: ?flashnext.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations } else null;
-    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, learn, a, &why) catch |e| {
-        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, learn, o.vision, a, &why) catch |e| {
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair or why.len > 0) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };
