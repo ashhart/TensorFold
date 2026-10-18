@@ -42,14 +42,43 @@ def nll(logits, ids):
     return total / (len(ids)-1)
 
 
+def log_softmax(z):
+    z = z.astype(np.float64)
+    top = z.max(-1, keepdims=True)
+    return z - (np.log(np.exp(z - top).sum(-1, keepdims=True)) + top)
+
+
 def compare(actual, reference):
-    squared, max_abs = 0.0, 0.0
+    squared, max_abs, kl = 0.0, 0.0, []
     for at in range(0, len(actual), 32):
         delta = actual[at:at+32] - reference[at:at+32]
         max_abs = max(max_abs, float(np.abs(delta).max()))
         squared += float(np.sum(delta * delta, dtype=np.float64))
+        ref, act = log_softmax(reference[at:at+32]), log_softmax(actual[at:at+32])
+        kl.extend((np.exp(ref) * (ref - act)).sum(-1).tolist())  # KL(reference || actual) a position, in nats
+    kl = np.maximum(np.array(kl), 0.0)
     return dict(top1_agreement=float(np.mean(actual.argmax(-1) == reference.argmax(-1))),
-                max_abs=max_abs, rms=float(np.sqrt(squared / actual.size)), finite=bool(np.isfinite(actual).all()))
+                max_abs=max_abs, rms=float(np.sqrt(squared / actual.size)), finite=bool(np.isfinite(actual).all()),
+                kl_mean=float(kl.mean()), kl_p99=float(np.quantile(kl, 0.99)), kl_max=float(kl.max()))
+
+
+def sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while block := f.read(1 << 24):
+            h.update(block)
+    return h.hexdigest()
+
+
+def pins(model, weights):
+    """The checkpoint and engine the numbers belong to: config, index and (with --hash-weights) every shard."""
+
+    git = lambda *a: subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True).stdout.strip()
+    shards = sorted(model.glob("*.safetensors"))
+    return dict(model=str(model), config_sha256=sha256(model / "config.json"),
+                index_sha256=sha256(model / "model.safetensors.index.json"),
+                shards={p.name: (sha256(p) if weights else p.stat().st_size) for p in shards},
+                engine_commit=git("rev-parse", "HEAD"), engine_dirty=bool(git("status", "--porcelain", "--", "zig")))
 
 
 def main():
@@ -58,6 +87,7 @@ def main():
     p.add_argument("output", type=Path)
     p.add_argument("--native", type=Path, default=ROOT / "zig-out/bin/tf-nemotron-forward")
     p.add_argument("--long", type=int, default=2048, help="tokens of the long code fixture (0: skip it)")
+    p.add_argument("--hash-weights", action="store_true", help="pin every shard by sha256 (else by size)")
     args = p.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     vocab = json.loads((args.model / "config.json").read_text()).get("vocab_size", 131072)
@@ -81,7 +111,8 @@ def main():
         subprocess.run([args.native, args.model, args.output / (name + ".npy"), args.output / (name + ".bin")], check=True)
 
     model, _ = load(str(args.model))
-    report = dict(mlx=importlib.metadata.version("mlx"), mlx_lm=importlib.metadata.version("mlx-lm"), fixtures=[])
+    report = dict(mlx=importlib.metadata.version("mlx"), mlx_lm=importlib.metadata.version("mlx-lm"),
+                  pins=pins(args.model, args.hash_weights), fixtures=[])
     for name, ids in cases:
         words = np.fromfile(args.output / (name + ".bin"), np.uint16)
         native = (words.astype(np.uint32) << 16).view(np.float32).reshape(len(ids), vocab)

@@ -10,19 +10,21 @@ inline bfloat tf_max_bf16(bfloat x, bfloat y) {
   return x > y ? x : y;
 }
 
-// One combined output: fp32 products (g2_Multiply), then col_reduce_small's order with k lanes (row + 0, in order).
+// fp32 products (g2_Multiply), then col_reduce_small's order: lane j < 8 sums picks j, j + 8, ..; lanes add in order.
 template <typename WP>
 inline void tf_moe_combine_at(const device bfloat* Y, WP W, int k, int cols, uint3 at, device bfloat* OUT) {
   const int c = int(at.x), row = int(at.y);
   if (c >= cols) return;
   const device bfloat* y = Y + long(row) * k * cols;
   W += long(row) * k;
-  float prod = static_cast<float>(y[c]) * W[0];
-  float total = prod + 0.0f;
-  for (int e = 1; e < k; ++e) {
-    prod = static_cast<float>(y[long(e) * cols + c]) * W[e];
-    const float v = prod + 0.0f;
-    total = v + total;
+  float total = 0.0f;
+  for (int j = 0; j < min(k, 8); ++j) {
+    float lane = 0.0f;
+    for (int e = j; e < k; e += 8) {
+      const float prod = static_cast<float>(y[long(e) * cols + c]) * W[e];
+      lane = prod + lane;
+    }
+    total = j == 0 ? lane : lane + total;
   }
   OUT[long(row) * cols + c] = static_cast<bfloat>(total);
 }

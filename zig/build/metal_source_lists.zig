@@ -3,10 +3,7 @@ pub const kernels = [_][]const u8{
     "zig/kernels/metal/runtime_tests.metal",
     "zig/kernels/metal/nemotron_expert_up.metal",
     "zig/kernels/metal/nemotron_expert_down.metal",
-    "zig/kernels/metal/nemotron/route_bolt.metal", // hand-authored; also validates its MSL at build time
-    "zig/kernels/metal/nemotron/dense_bf16.metal",
     "zig/kernels/metal/nemotron/add_norm_moe_xs.metal", // for the hand-authored <4096,512,1> (add_norm_moe_xs_bolt) instantiation
-    "zig/kernels/metal/nemotron/combine_latent.metal",
 };
 
 /// Generated Nemotron kernels, also compiled under fast math as a control.
