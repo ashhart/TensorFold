@@ -11,6 +11,7 @@ const scan_k = @import("contract_scan.zig");
 const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const add_rms_k = @import("contract_add_rms.zig");
+const window_k = @import("contract_window.zig");
 
 const g = core.contract.gates;
 
@@ -95,6 +96,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&add_rms, std.enums.values(add_rms_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&add_rms) |*m| m.deinit();
     for (&add_rms) |*m| try kernels.append(a, m.kernel());
+    var convs: [2]window_k.ConvWindow = undefined;
+    for (&convs, std.enums.values(window_k.Part)) |*m, p| m.init(a, &r, s, &l, p);
+    defer for (&convs) |*m| m.deinit();
+    for (&convs) |*m| try kernels.append(a, m.kernel());
+    var snaps: [2]window_k.ScanWindow = undefined;
+    for (&snaps, std.enums.values(scan_k.Part)) |*m, p| m.init(a, &r, s, &l, p);
+    defer for (&snaps) |*m| m.deinit();
+    for (&snaps) |*m| try kernels.append(a, m.kernel());
     var streams: [stream_k.cases.len]stream_k.Stream = undefined;
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();

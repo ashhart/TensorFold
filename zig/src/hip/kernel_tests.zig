@@ -35,4 +35,5 @@ test {
     _ = @import("kernel_tests/nemotron/attention.zig");
     _ = @import("kernel_tests/nemotron/fixture.zig");
     _ = @import("kernel_tests/nemotron/fused.zig");
+    _ = @import("kernel_tests/nemotron/window.zig");
 }

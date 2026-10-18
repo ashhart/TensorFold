@@ -27,6 +27,8 @@ pub const Fns = struct {
     dt: Function,
     scan: Function,
     gnorm: Function,
+    conv_window: Function,
+    scan_snap: Function,
 
     pub fn load(m: Module) Error!Fns {
         return .{
@@ -34,6 +36,8 @@ pub const Fns = struct {
             .dt = try m.function("tf_mamba_dt"),
             .scan = try m.function("tf_mamba_scan"),
             .gnorm = try m.function("tf_mamba_gnorm"),
+            .conv_window = try m.function("tf_mamba_conv_window"),
+            .scan_snap = try m.function("tf_mamba_scan_snap"),
         };
     }
 };
@@ -167,4 +171,85 @@ pub fn tf_mamba_gnorm(
     try a.add(gs);
     try a.add(eps);
     try l.go(l.mamba.gnorm, dim(rows, @divExact(xd, gs), 1), dim(128, 1, 1), 0, s, &a);
+}
+
+/// recurrence/mamba.hip's MambaWindow: a window's rows over one stream's state, each row's state into a snapshot slot.
+pub const Window = extern struct {
+    p: u64,
+    kind: c_int,
+    conv: u64,
+    ssm: u64,
+    xc: u64,
+    dt: u64,
+    y: u64,
+    cw: u64,
+    cb: u64,
+    dt_bias: u64,
+    a_log: u64,
+    dsk: u64,
+    snap_conv: u64 = 0,
+    snap_ssm: u64 = 0,
+    stride: i64 = 0,
+    rows: c_int,
+    proj: c_int,
+    xd: c_int,
+    cd: c_int,
+    heads: c_int,
+    dh: c_int,
+    groups: c_int,
+    lo: f32,
+    hi: f32,
+};
+
+/// The group norm after a window's scan: its weights, its rows' output, the group width and eps.
+pub const Norm = struct { gw: u64, out: u64, gs: c_int, eps: f32 };
+
+/// The conv and dt in one launch, the scan (each state but the last kept), the group norm: the four kernels' bits.
+pub fn tf_mamba_window(l: *const Launcher, w: Window, n: Norm, s: S) Error!void {
+    if (w.rows < 1 or w.heads < 1 or w.groups < 1 or @rem(w.heads, w.groups) != 0) return invalid("mamba window");
+    if (w.dh < 1 or @rem(w.dh, scan_rows) != 0) return invalid("mamba window");
+    if (w.xd != w.heads * w.dh or w.cd != w.xd + 2 * w.groups * state or w.proj < w.xd + w.cd + w.heads)
+        return invalid("mamba window");
+    if ((w.snap_ssm != 0) != (w.snap_conv != 0) or @rem(w.stride, 16) != 0) return invalid("mamba window");
+    var a: Args = .{};
+    try a.add(w);
+    try l.go(l.mamba.conv_window, dim(cdiv(w.cd, 256) + cdiv(w.rows * w.heads, 256), 1, 1), dim(256, 1, 1), 0, s, &a);
+    if (w.snap_ssm != 0 and w.rows > 1) {
+        var b: Args = .{};
+        try b.add(w);
+        try l.go(l.mamba.scan_snap, dim(w.heads, @divExact(w.dh, scan_rows), 1), dim(scan_rows * 4, 1, 1), 0, s, &b);
+    } else {
+        // one row keeps no state but its last, which is the state's own
+        try tf_mamba_scan(
+            l,
+            @ptrFromInt(w.p),
+            @ptrFromInt(w.xc),
+            w.kind,
+            @ptrFromInt(w.dt),
+            @ptrFromInt(w.ssm),
+            @ptrFromInt(w.a_log),
+            @ptrFromInt(w.dsk),
+            @ptrFromInt(w.y),
+            w.rows,
+            w.proj,
+            w.xd,
+            w.cd,
+            w.heads,
+            w.dh,
+            w.groups,
+            s,
+        );
+    }
+    try tf_mamba_gnorm(
+        l,
+        @ptrFromInt(w.y),
+        w.kind,
+        @ptrFromInt(n.gw),
+        @ptrFromInt(n.out),
+        w.rows,
+        w.xd,
+        n.gs,
+        n.eps,
+        s,
+    );
 }

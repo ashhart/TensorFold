@@ -99,6 +99,7 @@ pub const Ops = struct {
     pub const mambaScan = mamba.mambaScan;
     pub const mambaGroupNorm = mamba.mambaGroupNorm;
     pub const mambaMixer = mamba.mambaMixer;
+    pub const mambaWindow = mamba.mambaWindow;
 };
 
 test "dtype numberings of the three kernel families" {

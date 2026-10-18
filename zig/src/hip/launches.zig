@@ -346,6 +346,7 @@ pub const Launcher = struct {
     pub const tf_mamba_dt = mamba.tf_mamba_dt;
     pub const tf_mamba_scan = mamba.tf_mamba_scan;
     pub const tf_mamba_gnorm = mamba.tf_mamba_gnorm;
+    pub const tf_mamba_window = mamba.tf_mamba_window;
 
     /// Launches on `s`; the counting stream runs nothing.
     pub fn go(l: *const Launcher, f: Function, grid: Dim3, block: Dim3, shared: u32, s: S, args: *Args) Error!void {

@@ -243,6 +243,34 @@ const own_records = [_]Record{
             .{ .vgprs = 44, .sgprs = 40, .lds = 32772, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    .{
+        .launch = .{
+            .name = "mamba tf_mamba_conv_window",
+            .symbol = "tf_mamba_conv_window",
+            .image = "mamba",
+            .threads = 256,
+        },
+        .usage = .{
+            .{ .vgprs = 32, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 38, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 37, .sgprs = 42, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 37, .sgprs = 44, .lds = 0, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{
+            .name = "mamba tf_mamba_scan_snap",
+            .symbol = "tf_mamba_scan_snap",
+            .image = "mamba",
+            .threads = 128,
+        },
+        .usage = .{
+            .{ .vgprs = 137, .sgprs = 50, .lds = 20544, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 136, .sgprs = 50, .lds = 20544, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 135, .sgprs = 51, .lds = 20544, .private = 0, .bound = 128, .wave = 32 },
+            .{ .vgprs = 131, .sgprs = 52, .lds = 20544, .private = 0, .bound = 128, .wave = 32 },
+        },
+    },
 };
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;

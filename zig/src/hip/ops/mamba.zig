@@ -148,6 +148,54 @@ pub fn mambaGroupNorm(o: Ops, y: Tensor, out: u64, w: Weights, rows: usize, s: S
     );
 }
 
+/// Where a window keeps each row's state: slot 0's conv tail and SSM state of this layer, and the bytes between slots.
+pub const Snap = struct { conv: u64, ssm: u64, stride: usize };
+
+/// `mambaMixer`'s bits in three launches; slot r + 1 of `snap` takes the state after row r, but the last row's.
+pub fn mambaWindow(
+    o: Ops,
+    src: Tensor,
+    st: State,
+    sc: Scratch,
+    out: u64,
+    w: Weights,
+    rows: usize,
+    s: Shape,
+    lim: Limits,
+    snap: ?Snap,
+) Error!void {
+    try s.check();
+    if (rows == 0) return;
+    if (src.kind == .f32 or s.xd() % s.groups != 0) return error.BadShape;
+    const sn: Snap = snap orelse .{ .conv = 0, .ssm = 0, .stride = 0 };
+    try o.l.tf_mamba_window(.{
+        .p = src.ptr,
+        .kind = @backingInt(src.kind),
+        .conv = st.conv,
+        .ssm = st.ssm,
+        .xc = sc.xc,
+        .dt = sc.dt,
+        .y = sc.y,
+        .cw = w.conv_w,
+        .cb = w.conv_b,
+        .dt_bias = w.dt_bias,
+        .a_log = w.a_log,
+        .dsk = w.d,
+        .snap_conv = sn.conv,
+        .snap_ssm = sn.ssm,
+        .stride = @intCast(sn.stride),
+        .rows = int(rows),
+        .proj = int(s.proj()),
+        .xd = int(s.xd()),
+        .cd = int(s.cd()),
+        .heads = int(s.heads),
+        .dh = int(s.dh),
+        .groups = int(s.groups),
+        .lo = lim.dt_min,
+        .hi = lim.dt_max,
+    }, .{ .gw = w.gnorm, .out = out, .gs = int(s.xd() / s.groups), .eps = lim.eps }, o.stream);
+}
+
 /// The whole mixer over `rows` of in_proj output `src` into `out`, both states advanced in place.
 pub fn mambaMixer(
     o: Ops,
