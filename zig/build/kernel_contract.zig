@@ -15,6 +15,12 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     step.dependOn(family);
+    const zstd = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/contract/fatbin_zstd.zig"),
+        .target = b.graph.host,
+    }) }));
+    b.step("test-fatbin-zstd-host", "Bounded compressed-image reader and encoded expansion controls").dependOn(&zstd.step);
+    step.dependOn(&zstd.step);
     const delta = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/delta_slots_contract_test.zig"),
         .target = b.graph.host,

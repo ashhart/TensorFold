@@ -362,7 +362,7 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, a, .limited(1 << 28));
         defer a.free(bytes);
         const imgs = try contract.cubin.images(a, bytes);
-        defer a.free(imgs);
+        defer contract.cubin.freeImages(a, imgs);
         var red: usize = 0;
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);

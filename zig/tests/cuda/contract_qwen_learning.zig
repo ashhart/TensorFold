@@ -44,7 +44,7 @@ pub fn offline(gpu: check.Gpu, dir: []const u8) !usize {
         var report: std.ArrayList(u8) = .empty;
         defer report.deinit(gpu.gpa);
         const images = try core.contract.cubin.images(gpu.gpa, bytes);
-        defer gpu.gpa.free(images);
+        defer core.contract.cubin.freeImages(gpu.gpa, images);
         for (core.contract.limits.sms, 0..) |target, i| {
             const img = for (images) |entry| {
                 if (entry.sm == target.sm) break entry;
