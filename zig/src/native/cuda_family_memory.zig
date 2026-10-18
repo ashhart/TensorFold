@@ -43,7 +43,10 @@ pub fn weights(comptime F: type, a: Allocator, io: std.Io, o: api.Open, problem:
     const whole = if (@hasDecl(F, "tensorWeightBytes")) F.tensorWeightBytes(a, io, o.dir, o.vision != null) catch |err| {
         problem.* = try std.fmt.allocPrint(a, "cannot read checkpoint tensor sizes ({s})", .{@errorName(err)});
         return null;
-    } else budget.weightBytes(io, o.dir);
+    } else budget.weightBytes(a, io, o.dir) catch |err| {
+        problem.* = try std.fmt.allocPrint(a, "cannot estimate checkpoint weight files ({s}); refusing CUDA admission", .{@errorName(err)});
+        return null;
+    };
     const text = if (@hasDecl(F, "placementWeightBytes")) try F.placementWeightBytes(a, io, o.dir, o.tp, o.rank, o.drafts) else if (@hasDecl(F, "weightShare")) F.weightShare(a, io, o.dir, whole) else whole;
     return text + try @import("cuda_vision_offer.zig").weightBytes(F, a, io, o);
 }
@@ -81,4 +84,21 @@ test "rank room is agreed before stream admission and preserves a single-rank fa
 
 test {
     _ = @import("cuda_family_memory_test.zig");
+}
+
+test "weight-files admission: an unreadable named shard refuses before family loading" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"x":"missing.safetensors"}}
+    });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var problem: []const u8 = "";
+    const got = try weights(struct {}, a, io, .{ .dir = dir, .model_type = "test" }, &problem);
+    defer if (problem.len > 0) a.free(problem);
+    try std.testing.expectEqual(@as(?u64, null), got);
+    try std.testing.expect(std.mem.indexOf(u8, problem, "refusing CUDA admission") != null);
 }
