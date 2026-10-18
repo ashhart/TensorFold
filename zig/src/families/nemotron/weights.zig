@@ -110,6 +110,7 @@ pub const Weights = struct {
     layers: [cfg.max_layers]Layer = undefined,
     norm_f: Tensor,
     head: Linear,
+    head_dense: ?Dense = null, // a full-precision bf16 lm_head (no .scales; Bolt), read in place by dense_bf16
     mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     linears: std.StringHashMapUnmanaged(Linear) = .empty, // by the Python module path ("fused.qkv.5" for q/k/v)
@@ -453,7 +454,13 @@ pub const Builder = struct {
                 .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}, ws) },
             };
         }
-        w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
+        if (b.ck.has("lm_head.scales")) {
+            w.head = try b.linear("lm_head", .{}, &.{try b.quantized("lm_head", .{}, &.{ c.vocab, c.hidden }, c.head_width)});
+        } else {
+            // MLX quantizes a module only where {path}.scales exists: an unquantized lm_head stays bf16 (Bolt's does)
+            w.head_dense = try b.dense("lm_head.weight", .{}, c.vocab, c.hidden);
+            w.head = .{ .n = c.vocab, .k = c.hidden };
+        }
         if (draft_ids) |ids| {
             if (b.ck.has("mtp.layers.0.eh_proj.weight")) w.mtp = try b.mtpHead(ids);
         }
