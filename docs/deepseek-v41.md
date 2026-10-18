@@ -127,9 +127,28 @@ width. Attention and routing run on both ranks. This partition does not halve th
 memory required on either Mac. The GPU and model comparisons must establish whether
 its bytes match the single-rank path and whether the communication pays off.
 
-Use the existing [speed-up link settings](n-link-speed-up.md), with rank 0 on one Mac
-and rank 1 on the other, one peer per rank, and the same MCDMA library build. On both
-Macs, pass the respective settings file alongside the streamed-Engram options:
+For MCDMA, use the existing [speed-up link settings](n-link-speed-up.md), with rank 0
+on one Mac and rank 1 on the other, one peer per rank, and the same library build.
+Alternatively, select TCP explicitly:
+
+```json
+{"transport":"tcp","rank":0,"host":"192.0.2.10","port":19750,"session":"my-ds41-test"}
+```
+
+Rank 0 binds the stated numeric address. Rank 1 uses the same address, port and
+session, with `"rank":1`. Scoped IPv6 is supported, with the scope naming the local
+interface on each Mac. The port and the next port carry ordered window writes and
+completion acknowledgements respectively. Wildcard addresses are refused. Use a
+trusted private link: the session check prevents accidental pairing, but supplies
+neither authentication nor encryption. TCP uses ordinary sockets and does not open
+an RDMA device. Its latency and bandwidth must be measured separately from MCDMA.
+
+The CPU-only `zig build tf-tcp-probe -Dcpu=apple_m3` target builds a link check. Run
+`tf-tcp-probe RANK HOST PORT SESSION ROUNDS` on both Macs before loading a model.
+It checks peer payloads and reports exchange times for 64 bytes, 4 KiB, one routed
+MoE row and 256 rows. Those times are transport measurements, not inference speed.
+
+On both Macs, pass the respective settings file alongside the streamed-Engram options:
 
 ```sh
 GLM_LOAD_LIMIT_GB=220 tensorfold-native serve <pack> \

@@ -13,6 +13,8 @@ pub const LinkKind = enum {
     cx5,
     /// CUDA to CUDA through NCCL on the hosts' ConnectX-7.
     nccl,
+    /// Ordered CPU window writes over ordinary TCP sockets.
+    tcp,
 };
 
 /// What a window may be used for by peers, as an MR's access flags.

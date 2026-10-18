@@ -164,7 +164,7 @@ pub const Link = struct {
         for (0..l.ep.size()) |i| {
             if (i == l.ep.rank() or k == out.len) continue;
             const kind = l.ep.link(@intCast(i));
-            out[k] = .{ .id = @intCast(i), .up = true, .kind = if (kind == .cx5) .cx5 else if (kind == .nccl) .cx7 else .tb5, .gbps = 80 };
+            out[k] = .{ .id = @intCast(i), .up = true, .kind = if (kind == .tcp) .tcp else if (kind == .cx5) .cx5 else if (kind == .nccl) .cx7 else .tb5, .gbps = if (kind == .tcp) 0 else 80 };
             k += 1;
         }
         return k;

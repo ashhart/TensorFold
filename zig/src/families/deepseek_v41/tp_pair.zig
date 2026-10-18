@@ -24,7 +24,7 @@ pub const Pair = struct {
         p.model = model;
         p.failed = .init(false);
         p.output = &.{};
-        p.transport = try Transport.initWithControl(gpa, json, model.workspace.plan.rows, wire.BYTES);
+        p.transport = try Transport.initWithFailure(gpa, json, model.workspace.plan.rows, wire.BYTES, &p.failed);
         errdefer p.transport.deinit();
         p.moe = try Context.init(gpa, model.device, &model.weights, @intCast(p.transport.channel.myRank()), model.workspace.plan.rows, p.transport.exchange());
         errdefer p.moe.deinit();

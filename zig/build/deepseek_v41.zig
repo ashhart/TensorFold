@@ -41,10 +41,20 @@ pub fn checks(
     }) });
     const tp_host = b.addTest(.{
         .root_module = engine,
-        .filters = &.{ "TP history", "TP output row", "TP exchanges", "TP control" },
+        .filters = &.{ "TP history", "TP output row", "TP exchanges", "TP control", "TP TCP" },
     });
-    b.step("test-deepseek-v41-tp-host", "Two-rank row layout, history and message validation")
-        .dependOn(&b.addRunArtifact(tp_host).step);
+    const tp_step = b.step("test-deepseek-v41-tp-host", "Two-rank row layout, history and message validation");
+    tp_step.dependOn(&b.addRunArtifact(tp_host).step);
+    const tcp_host = b.addTest(.{ .root_module = engine.import_table.get("fabric").?, .filters = &.{"TP TCP"} });
+    tp_step.dependOn(&b.addRunArtifact(tcp_host).step);
+    const tcp_probe = b.addExecutable(.{ .name = "tf-tcp-probe", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tcp_probe.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+        .imports = &.{.{ .name = "fabric", .module = engine.import_table.get("fabric").? }},
+    }) });
+    b.step("tf-tcp-probe", "Build the CPU-only two-rank TCP qualification tool").dependOn(&b.addInstallArtifact(tcp_probe, .{}).step);
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
     device_step.dependOn(&b.addRunArtifact(device).step);
     const reference = b.addTest(.{
