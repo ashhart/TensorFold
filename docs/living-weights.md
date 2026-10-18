@@ -82,12 +82,17 @@ curl -N http://127.0.0.1:8080/v1/slide/learn \
   -d '{"text": "I like blue."}'
 ```
 
-The reply streams progress as server-sent events: `fact` when it finds a fact in your text, `learning` when it starts on
-it, and `learned` when it is done. `"recalled": true` means it answered its held-out questions with the fact, and its
+The reply streams server-sent events: `fact` when it finds a fact, `learning` when it starts, `progress` during the
+lesson, and `learned` when it is done. Progress carries `phase`, `at` and `of`; zero `of` means the total is unknown.
+A `progress` event with `heartbeat: true` arrives every five seconds while a long unit is still running. It reports
+that the request remains open, without claiming another unit completed. `"recalled": true` means it answered its held-out questions with the fact, and its
 change is kept. `false` means none of it is kept: the lesson is taken out whole before anything is written, and
 `message` says why, for example that the fact did not come back on its held-out questions or that it disturbed another
-answer. A fact takes 1.5 to 3 minutes. The folder's first lesson starts by keeping its original files, which adds a
-few seconds on a Mac.
+answer. Lesson time depends on the family and device and can take many minutes. The first lesson also keeps the
+folder's original files before opening the stream.
+
+New lessons use conversation checks only where the learner reads full conversation prompts through taps. Bounded
+readers use standalone held-out questions. Saved graph entries retain their recorded conversation checks.
 
 A body may also carry `"questions": [...]` (at most 16 of up to 300 bytes each; anything but an array of strings is a
 400). Each fact's lesson takes them ahead of the questions the model writes, and the model answers each knowing the
@@ -366,8 +371,8 @@ Living Weights is experimental. Measured on Nemotron 3.5 Lightning (MLX 4-bit) o
 - **Long documents about one subject are the weak spot.** From a 21-fact company handbook it kept about half the facts
   and answered 6 of 16 questions, and with ten facts about the company kept, its answers about things the handbook does
   not say got worse, most with thinking on. Teach a few facts per subject, and always teach a copy.
-- **Time.** A fact takes about 1.5 to 2.5 minutes on an M5 Ultra or M3 Ultra and 2.5 to 3 minutes on a GB10, a good
-  part of it the model writing its own lesson. A document takes that per fact.
+- **Time.** Each fact needs its own generated lesson and checks. The first lesson also writes the keep prompts and
+  personal bank. Independent cold prompts share the serving lanes; time still depends on the model and device.
 - **Memory.** On a Mac the trainer works on the model's own weights. On a GB10, `--slide` keeps about 26 GiB for its
   trainer, which is ready a few seconds after the server starts.
 - **Undo.** On an M3 Ultra, the snapshot of Nemotron 3.5 Lightning (7 files, 18.5 GB) took 5.3 s as clones, a new

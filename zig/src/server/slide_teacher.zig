@@ -6,6 +6,7 @@ const log = @import("log.zig");
 const prompts = @import("slide_prompts.zig");
 const slide_ask = @import("slide_ask.zig");
 const slide_think = @import("slide_think.zig");
+const side = @import("slide_side.zig");
 const slide_language = @import("slide_language.zig");
 const errors = @import("errors.zig");
 const Server = @import("server.zig").Server;
@@ -143,10 +144,25 @@ pub fn keepExamples(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, 
     const ta = teacher.arena.allocator();
     const n = prompts.keep_prompts.len;
     const out = try ta.alloc(api.Example, if (thinking) 2 * n else n);
-    for (prompts.keep_prompts, 0..) |p, i| {
-        const reply = try ask(srv, cx, null, p, keep_tokens, gone);
+    const qs = try cx.a.alloc(side.Asking, n);
+    for (prompts.keep_prompts, qs) |p, *q| q.* = .{ .question = p, .max = keep_tokens };
+    const replies = try side.askAll(srv, cx, qs, gone);
+    for (prompts.keep_prompts, replies, 0..) |p, reply, i| {
         out[i] = try example(srv, cx, ta, null, p, reply.content, ending(reply, end));
-        if (thinking) out[n + i] = try thinkingSteady(srv, cx, ta, p, gone) orelse out[i];
+    }
+    if (thinking) {
+        const Job = struct {
+            srv: *Server,
+            a: Allocator,
+            ta: Allocator,
+            gone: @TypeOf(gone),
+            out: []api.Example,
+            pub fn run(j: *const @This(), i: usize) !void {
+                var jcx: Cx = .{ .a = j.a };
+                j.out[n + i] = try thinkingSteady(j.srv, &jcx, j.ta, prompts.keep_prompts[i], j.gone) orelse j.out[i];
+            }
+        };
+        try side.each(n, &Job{ .srv = srv, .a = cx.a, .ta = ta, .gone = gone, .out = out });
     }
     teacher.keep = out;
     return out;
@@ -159,8 +175,10 @@ pub fn bankAnswers(srv: *Server, cx: *Cx, teacher: *Teacher, end: []const u32, g
     if (teacher.bank) |b| return b;
     const ta = teacher.arena.allocator();
     const out = try ta.alloc(Banked, prompts.personal_bank.len);
-    for (prompts.personal_bank, out) |q, *o| {
-        const reply = try ask(srv, cx, null, q, check_tokens, gone);
+    const qs = try cx.a.alloc(side.Asking, prompts.personal_bank.len);
+    for (prompts.personal_bank, qs) |p, *q| q.* = .{ .question = p, .max = check_tokens };
+    const replies = try side.askAll(srv, cx, qs, gone);
+    for (prompts.personal_bank, replies, out) |q, reply, *o| {
         o.* = .{ .question = q, .before = try ta.dupe(u8, reply.content), .ex = try example(srv, cx, ta, null, q, reply.content, ending(reply, end)) };
     }
     teacher.bank = out;

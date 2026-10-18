@@ -67,6 +67,7 @@ test {
     _ = @import("systemone_test.zig");
     _ = @import("slide_context_test.zig");
     _ = @import("slide_stream_test.zig");
+    _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
     _ = @import("slide_key.zig");
