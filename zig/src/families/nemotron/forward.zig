@@ -230,7 +230,7 @@ pub const Forward = struct {
         std.debug.assert(rows >= 1 and rows <= s.rows);
         self.embed(e, rows, ids, ids_off, s.h);
         self.rms(e, rows, s.h, 0, d, self.w.norms[0], s.x, 0, d);
-        self.xsum(e, "xsum_2688", d, s.x, 0, s.xs, rows);
+        self.xsumHidden(e, s.x, 0, s.xs, rows);
         const t = layers.Tables.of(segs);
         var deepest: usize = 0;
         for (segs) |g| if (g.parents) |pp| {
@@ -270,8 +270,10 @@ pub const Forward = struct {
                 .none => {},
                 .last => {
                     const off = (at + g.rows - 1) * d * 2;
-                    self.xsum(e, "xsum_2688", d, s.x, off, s.hx, 1);
-                    self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
+                    if (self.w.head_dense) |hd| self.denseHead(e, hd, off, 1) else {
+                        self.xsumHidden(e, s.x, off, s.hx, 1);
+                        self.coop(e, "head", self.w.head, s.x, off, s.hx, s.logits, 1);
+                    }
                     if (g.mask_row) |r| self.masks.?.encode(e, s.logits, 0, self.c.vocab, r, 1);
                     self.pick(e, 1, self.c.vocab, null, g.draw, out, put);
                     put += 4;
@@ -281,7 +283,7 @@ pub const Forward = struct {
             at += g.rows;
         }
         if (head != .all) return;
-        self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
+        if (self.w.head_dense) |hd| self.denseHead(e, hd, 0, at) else self.coop(e, "head", self.w.head, s.x, 0, s.xs, s.logits, at);
         at = 0;
         for (segs) |g| {
             if (g.mask_row) |r| self.masks.?.encode(e, s.logits, at * self.c.vocab * 2, self.c.vocab, r, g.rows);
@@ -388,7 +390,7 @@ pub const Forward = struct {
     /// Residual add of `delta` into h, the next input norm (`next`), and its 64-group sums into xs.
     pub fn norm(self: Forward, e: *Enc, delta: Buffer, next: anytype, rows: usize, eps: f32) void {
         const s = self.s;
-        e.pipe(self.k.get("add_norm_xs"));
+        e.pipe(if (self.c.bolt) self.k.get("add_norm_xs_bolt") else self.k.get("add_norm_xs"));
         e.buf(s.h, 0, 0);
         e.buf(delta, 0, 1);
         e.buf(next.buffer, next.offset, 2);
@@ -397,7 +399,23 @@ pub const Forward = struct {
         e.buf(s.h, 0, 5);
         e.buf(s.x, 0, 6);
         e.buf(s.xs, 0, 7);
-        e.run(.{ 896 * mp(rows), 1, 1 }, .{ 896, 1, 1 });
+        const t: usize = if (self.c.bolt) 512 else 896; // the threadgroup the instantiation bakes (D / T whole)
+        e.run(.{ t * mp(rows), 1, 1 }, .{ t, 1, 1 });
+    }
+
+    /// The hidden rows' 64-group sums at the model's hidden width (Lightning 2688, Bolt 4096).
+    pub fn xsumHidden(self: Forward, e: *Enc, x: Buffer, x_off: usize, xs: Buffer, rows: usize) void {
+        if (self.c.hidden == 4096) self.xsum(e, "xsum_4096", 4096, x, x_off, xs, rows) else self.xsum(e, "xsum_2688", self.c.hidden, x, x_off, xs, rows);
+    }
+
+    /// logits = x . lm_head^T for a full-precision bf16 LM head (Bolt keeps lm_head unquantized).
+    fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, rows: usize) void {
+        e.pipe(self.k.get("dense_bf16"));
+        e.buf(self.s.x, x_off, 0);
+        e.buf(hd.w, hd.off, 1);
+        e.buf(self.s.logits, 0, 2);
+        e.bytes([3]u32{ @intCast(rows), @intCast(hd.n), @intCast(hd.k) }, 3);
+        e.run(.{ 32 * hd.n, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
     }
 
     /// u32 rows of `src` from `src_off` into `dst` at `dst_off` (window ids into a shared round's ids).

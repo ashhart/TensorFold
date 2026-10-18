@@ -81,7 +81,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     const dims = [2]i32{ @intCast(t.virtual), st.replay_rows };
     const ra = f.round;
 
-    e.pipe(f.k.get("tf_tree_conv"));
+    e.pipe(if (c.bolt) f.k.get("tf_tree_conv_bolt") else f.k.get("tf_tree_conv"));
     e.buf(s.proj, 0, 0);
     e.buf(f.pool.conv[index], 0, 1);
     e.buf(m.conv_w, 0, 2);
@@ -99,7 +99,7 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
     e.buf(f.pool.conv[index], 0, 10);
     e.run(.{ c.convDim(), if (ra) |r| r.virtual else t.virtual, 1 }, .{ 256, 1, 1 });
 
-    e.pipe(f.k.get("tf_tree_scan"));
+    e.pipe(if (c.bolt) f.k.get("tf_tree_scan_bolt") else f.k.get("tf_tree_scan"));
     e.buf(s.proj, 0, 0);
     e.buf(s.xbc, 0, 1);
     e.buf(f.pool.ssm[index], 0, 2);
@@ -138,6 +138,16 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
 }
 
 fn groupNorm(f: Forward, rows: usize) mtl.Pipeline {
+    if (f.c.bolt) return switch (Forward.mp(rows)) {
+        16 => f.k.get("group_norm_xs_bolt_16"),
+        32 => f.k.get("group_norm_xs_bolt_32"),
+        48 => f.k.get("group_norm_xs_bolt_48"),
+        64 => f.k.get("group_norm_xs_bolt_64"),
+        80 => f.k.get("group_norm_xs_bolt_80"),
+        96 => f.k.get("group_norm_xs_bolt_96"),
+        112 => f.k.get("group_norm_xs_bolt_112"),
+        else => f.k.get("group_norm_xs_bolt_128"),
+    };
     return switch (Forward.mp(rows)) {
         16 => f.k.get("group_norm_xs_16"),
         32 => f.k.get("group_norm_xs_32"),
