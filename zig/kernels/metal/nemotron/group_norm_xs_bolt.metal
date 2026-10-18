@@ -1,6 +1,4 @@
-// nemotron_h_puzzle (Bolt): the Mamba gated group norm and its 64-group sums, as group_norm_xs_<MP>.metal but at
-// Bolt's mamba inner width XD = 128 heads x 64 = 8192 in 8 groups of GS = 1024. Hand-authored for this PR (the
-// generated files bake XD = 4096, GS = 512 and one MP each); one template, one instantiation per padded row count.
+// nemotron_h_puzzle (Bolt): group_norm_xs at mamba inner XD 8192 in groups of GS 1024, one MP each (hand-authored)
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;
