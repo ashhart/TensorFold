@@ -229,6 +229,81 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.run(.{ 896 * Forward.mp(rows), 1, 1 }, .{ 896, 1, 1 });
 }
 
+/// nemotron_h_puzzle (Bolt): the routed experts run in the moe_latent_size latent, mirroring cuda_latent.zig run().
+/// The normed input projects into the latent (into), the routed experts run up/down in the latent on the runtime-dim
+/// row kernels (reading each layer's own expert count and width), each pick projects back to hidden (out), then
+/// add_norm combines the picks by weight with the shared expert (kept in hidden) and the residual. The shared expert
+/// is the Lightning path unchanged. Reuses dense_bf16 (gate/into/out), route_bolt (sigmoid + bias top-k, runtime
+/// NE/K) and add_norm_moe_xs_bolt (<4096, 512, 9>); the per-pick out-projection is valid because out is linear, so
+/// projecting each pick then combining by weight equals combining in the latent then projecting once.
+/// TODO(kernels): the shared expert's up_relu2 and the model's mamba kernels still need Bolt-dim variants to RUN;
+/// this wires the dataflow and the new MoE kernels. Verified by a kernel-contract test at synthetic shapes.
+pub fn bolt_moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32) void {
+    const c = f.c;
+    const s = f.s;
+    const pairs = rows * c.top_k;
+    const E: u32 = @intCast(m.gate.shape[0]); // this layer's own routed-expert count (per-layer in the Puzzle)
+    const K: u32 = @intCast(c.top_k);
+    const hidden: u32 = @intCast(c.hidden);
+    const latent: u32 = @intCast(c.latent);
+
+    // router logits = x . gate^T (gate bf16 [E, hidden], full precision)
+    e.pipe(f.k.get("dense_bf16"));
+    e.buf(s.x, 0, 0);
+    e.buf(m.gate.buffer, m.gate.offset, 1);
+    e.buf(s.logits_e, 0, 2);
+    e.bytes([3]u32{ @intCast(rows), E, hidden }, 3);
+    e.run(.{ 32 * E, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
+
+    // sigmoid + e_score_correction_bias top-k (uniform K), weights normalised and scaled
+    e.pipe(f.k.get("route_bolt"));
+    e.buf(s.logits_e, 0, 0);
+    e.buf(m.gate_bias.buffer, m.gate_bias.offset, 1);
+    e.bytes(c.routed_scaling, 2);
+    e.buf(s.idx, 0, 3);
+    e.buf(s.wt, 0, 4);
+    e.bytes(E, 5);
+    e.bytes(K, 6);
+    e.run(.{ 32 * rows, 1, 1 }, .{ 32, 1, 1 });
+
+    // the shared expert runs in hidden, as in the Lightning path
+    upRelu2(f, e, m.shared_up, rows);
+    f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
+
+    // into: hidden -> latent, then the routed experts up/down in the latent (runtime-dim row kernels)
+    e.pipe(f.k.get("dense_bf16"));
+    e.buf(s.x, 0, 0);
+    e.buf(m.into.?.w, m.into.?.off, 1);
+    e.buf(s.x_lat, 0, 2);
+    e.bytes([3]u32{ @intCast(rows), latent, hidden }, 3);
+    e.run(.{ 32 * latent, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
+
+    f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat, s.idx, s.act);
+    f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat);
+
+    // out: each pick's latent output back to hidden (per-pick; combined by weight in add_norm below)
+    e.pipe(f.k.get("dense_bf16"));
+    e.buf(s.ey_lat, 0, 0);
+    e.buf(m.out.?.w, m.out.?.off, 1);
+    e.buf(s.ey, 0, 2);
+    e.bytes([3]u32{ @intCast(pairs), hidden, latent }, 3);
+    e.run(.{ 32 * hidden, (pairs + 7) / 8, 1 }, .{ 256, 1, 1 });
+
+    // combine the picks by weight + shared + residual, then the next input norm and its sums (top-k 9 baked)
+    e.pipe(f.k.get("add_norm_moe_xs_bolt"));
+    e.buf(s.h, 0, 0);
+    e.buf(s.ey, 0, 1);
+    e.buf(s.wt, 0, 2);
+    e.buf(s.sh, 0, 3);
+    e.buf(next.buffer, next.offset, 4);
+    e.bytes(eps, 5);
+    e.bytes(Forward.mdims(rows), 6);
+    e.buf(s.h, 0, 7);
+    e.buf(s.x, 0, 8);
+    e.buf(s.xs, 0, 9);
+    e.run(.{ 512 * Forward.mp(rows), 1, 1 }, .{ 512, 1, 1 });
+}
+
 /// y [rows, D] += x [rows, width] times a projection's bf16 residual [D, width], its weight beyond its 4-bit codes.
 pub fn rest(f: Forward, e: *Enc, r: Buffer, x: Buffer, y: Buffer, rows: usize, width: usize) void {
     e.pipe(f.k.get("tf_residual"));
