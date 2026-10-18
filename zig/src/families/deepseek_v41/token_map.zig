@@ -1,10 +1,4 @@
-//! The Engram token map, built at pull or load from the original release's tokenizer and
-//! inference config — the Python tool's algorithm, byte for byte, no Python step for users.
-//!
-//! Algorithm attribution: DeepSeek-V4.1-Flash inference/engram.py, DeepSeek AI, MIT license
-//! (revision 2cba9e42aa026125f3ed06c6d98c1db82f7ca027). The key derivation mirrors the
-//! release's Rust normalizer chain (NFKC, NFD, StripAccents, Lowercase, whitespace replaces,
-//! strip — which composes to NFKD, mark-strip, lowercase) and numpy's PCG64 draw.
+//! Engram token-map builder; provenance, layout and normalization limits: docs/engram-token-map.md.
 const std = @import("std");
 const tok = @import("tokenizer");
 const unicode = tok.unicode;
@@ -13,8 +7,7 @@ const nfkd_data = tok.nfkd_data;
 const magic = "DSENGR01";
 const source = "https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/2cba9e42aa026125f3ed06c6d98c1db82f7ca027/inference/engram.py";
 
-/// Build the map: `tokenizer_path` and `config_path` from the original release,
-/// `output_path` beside the checkpoint where Model.open reads it.
+/// Build from the original tokenizer/config and write beside the checkpoint for Model.open.
 pub fn build(a: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, config_path: []const u8, output_path: []const u8) !void {
     const tokenizer_bytes = try std.Io.Dir.cwd().readFileAlloc(io, tokenizer_path, a, .limited(64 << 20));
     const config_bytes = try std.Io.Dir.cwd().readFileAlloc(io, config_path, a, .limited(16 << 20));
@@ -23,8 +16,7 @@ pub fn build(a: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, confi
     var outer = try std.json.parseFromSliceLeaky(std.json.Value, a, config_bytes, .{});
     const config = if (outer == .object and outer.object.get("text_config") != null) outer.object.get("text_config").? else outer;
 
-    // The release's compressed_map: decode each id, fall back to the raw token when the
-    // decoder emits U+FFFD, normalize, dedupe keys first-seen.
+    // Decode IDs, use raw tokens for U+FFFD, normalize, then deduplicate in first-seen order.
     var key_arena = std.heap.ArenaAllocator.init(a);
     defer key_arena.deinit();
     const ka = key_arena.allocator();
@@ -59,8 +51,7 @@ pub fn build(a: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, confi
     const compressed = keys.count();
     const bound: u64 = @max(1, ((@as(u64, 1) << 63) - 1) / compressed / 2);
 
-    // Per layer: 24 prime buckets (never repeated across layers), offsets into the table,
-    // and the multipliers drawn from numpy's PCG64 seeded with 10007 * layer.
+    // Each layer gets 24 globally unique prime buckets and PCG64 multipliers seeded with 10007 * layer.
     var seen: std.AutoHashMapUnmanaged(u64, void) = .empty;
     defer seen.deinit(a);
     const layer_ids_v = try arrayField(config, "engram_layer_ids");
@@ -217,12 +208,7 @@ fn isPrime(n: u64) bool {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// The release's key normalizer. The Rust chain NFKC, NFD, StripAccents, Lowercase,
-// Replace([ \t\r\n]+ -> " "), Replace(^ $ -> U+E000), Strip, Replace(U+E000 -> " ")
-// composes to: NFKD, strip Mn/Me, lowercase, the replaces, the strip (NFD(NFKC(x)) is NFKD(x),
-// and the strip's inner NFKD is idempotent).
-// ---------------------------------------------------------------------------
+// Normalization stages and the unresolved Hangul qualification are documented in docs/engram-token-map.md.
 
 const sentinel: u21 = 0xE000;
 
@@ -348,9 +334,7 @@ fn lowerOf(cp: u21) ?[]const u21 {
     return null;
 }
 
-// ---------------------------------------------------------------------------
-// numpy's Generator.integers draw: SeedSequence -> PCG64 -> Lemire's bounded integers.
-// ---------------------------------------------------------------------------
+// NumPy integer draws: SeedSequence, PCG64, then Lemire bounded integers.
 
 const Pcg64 = struct {
     state: u128,
@@ -358,8 +342,7 @@ const Pcg64 = struct {
 
     const multiplier: u128 = 0x2360ED051FC65DA44385DF649FCCF645;
 
-    /// pcg64_srandom_r: state = 0; one step; state += initstate; one step.
-    /// The seed words come from SeedSequence; inc = (initseq << 1) | 1 (mod 2^128).
+    /// SeedSequence words initialize pcg64_srandom_r; see docs/engram-token-map.md.
     fn init(seed: u64) Pcg64 {
         const w = seedSequenceWords(seed);
         const initstate: u128 = (@as(u128, w[0]) << 64) | @as(u128, w[1]);
@@ -391,10 +374,7 @@ const Pcg64 = struct {
     }
 };
 
-/// SeedSequence(seed).generate_state(4, uint64): the entropy word is hashed into a
-/// 4-word pool (numpy's hashmix/mix scheme), then eight output words are drawn by
-/// cycling the pool through a second hash, paired little-endian. Verified against
-/// numpy 2.5.3's SeedSequence for the two seeds this map uses.
+/// SeedSequence(seed).generate_state(4, uint64); reference and construction in docs/engram-token-map.md.
 fn seedSequenceWords(seed: u64) [4]u64 {
     const entropy = [1]u32{@truncate(seed)};
     var mixer = [4]u32{ 0, 0, 0, 0 };
