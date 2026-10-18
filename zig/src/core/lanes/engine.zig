@@ -348,13 +348,14 @@ pub const Engine = struct {
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
                 var kept_recall: u64 = 0;
                 var recall_rows: u64 = 0;
-                if (p.branch_from > 0) {
+                if (p.branch_from > 0 and p.branch_from < rows) {
                     s.branch_rows += rows - p.branch_from;
                     for (@as(usize, p.branch_from)..rows) |r| recall_rows += @intFromBool(p.recallRow(r));
                     for (path[1..]) |r| if (r >= p.branch_from) {
                         if (p.recallRow(r)) kept_recall += 1 else kept_branch += 1;
                     };
                     s.branch_accepted += kept_branch + kept_recall;
+                    if (p.context_copy) if (s.proposer) |pr| pr.observe(@intCast(rows - p.branch_from), @intCast(kept_branch));
                 }
                 if (p.tried) {
                     // grafting nothing is the context's miss; rows Recall grafted count for Recall alone

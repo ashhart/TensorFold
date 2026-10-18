@@ -10,14 +10,14 @@ pub fn target(b: *std.Build, t: std.Build.ResolvedTarget, o: std.builtin.Optimiz
 
 pub fn host(b: *std.Build, cuda: *std.Build.Module, qwen: *std.Build.Module, draft_ids: *std.Build.Module, comptime runtime: anytype, comptime family: anytype, comptime n: usize) void {
     const t = b.graph.host;
-    const pin = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/t58_serving_test.zig"), .target = t, .optimize = .debug }) }));
+    const pin = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/dense_serving_test.zig"), .target = t, .optimize = .debug }) }));
     b.step("test-qwen-serving-host", "Landed CUDA kernels and dense serving launch pins").dependOn(&pin.step);
-    b.step("test-qwen-pocket-host", "Dense device publication and checked reads under CUDA failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{"Trainer admission:"} })).step);
+    b.step("test-qwen-pocket-host", "Dense device publication and checked reads under CUDA failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = qwen, .filters = &.{ "dense pocket:", "dense media:", "dense save:" } })).step);
     const placeholder = b.addWriteFiles().add("fake-driver-only.fatbin", "FAKE DRIVER ONLY, NEVER A DEVICE IMAGE");
     const images: [n]?std.Build.LazyPath = @splat(placeholder);
     const fake_cuda = runtime(b, t, .debug, &images);
     const fake = family(b, t, .debug, fake_cuda, draft_ids);
-    const constructors = b.addRunArtifact(b.addTest(.{ .root_module = fake.qwen35, .filters = &.{"Save recovery: dense constructor"} }));
+    const constructors = b.addRunArtifact(b.addTest(.{ .root_module = fake.qwen35, .filters = &.{"dense constructor:"} }));
     b.step("test-dense-constructors-host", "Actual dense constructor ownership and completion failures").dependOn(&constructors.step);
     _ = cuda;
 }

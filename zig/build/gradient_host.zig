@@ -12,5 +12,5 @@ pub fn add(b: *std.Build) void {
     _ = files.addCopyFile(b.path("zig/tests/fixtures/pocket-serving-approved.tsv"), "approved.tsv");
     const root = files.addCopyFile(b.path("zig/tests/gradient_serving_pin.zig"), "main.zig");
     const test_ = b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = root, .target = b.graph.host, .optimize = .debug }) });
-    b.step("test-gradient-serving", "Pin Quantized adjoints: sources and the explicit Learning persistence: learning extensions").dependOn(&b.addRunArtifact(test_).step);
+    b.step("test-gradient-serving", "Pin the serving kernels' sources and the explicit learning extensions").dependOn(&b.addRunArtifact(test_).step);
 }

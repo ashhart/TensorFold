@@ -98,6 +98,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     runner.addImport("core", mods.core);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
+    runner.addImport("qwen35", mods.qwen35);
     runner.addImport("flashnext", flashnextModule(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision));
     runner.addImport("lfm2", lfm2Module(b, target, optimize, cuda, mods.core));
     runner.addImport("radio", mods.radio);
@@ -244,8 +245,29 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     b.step("test-nemotron-restored-head-host", "Actual Nemotron cache restore, bind and captured draft dispatch without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"restored head:"} })).step);
     b.step("test-nemotron-subset-head-host", "Actual subset-head ownership and row gathering without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"subset head:"} })).step);
     step.dependOn(&mtp_run.step);
-    b.step("test-gradient-host", "Gradient bounds through real wrappers with recorded CUDA launches").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"Quantized adjoints:"} })).step);
+    b.step("test-gradient-host", "Gradient bounds through real wrappers with recorded CUDA launches").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"train launch bounds:"} })).step);
     @import("living_dense.zig").host(b, cuda, mods.qwen35, draft_ids, runtime, family, kernels.len);
+    const decode_host = b.createModule(.{ .root_source_file = b.path("zig/qwen35_decode_host.zig"), .target = host, .optimize = .debug, .imports = &.{.{ .name = "core", .module = mods.core }} });
+    b.step("test-qwen35-decode-records-host", "Optimized Qwen decode launch records on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = decode_host })).step);
+    b.step("test-shared-lane-regressions-host", "Every shared lane regression without device libraries").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.lanes })).step);
+    b.step("test-qwen35-draft-trees-host", "Grown trees through the actual shared draft frame and wrapper").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } }), .filters = &.{"Qwen CUDA contracts:"} })).step);
+    const copies = b.createModule(.{ .root_source_file = b.path("zig/qwen35_copies_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "lanes", .module = mods.lanes }, .{ .name = "qwen35", .module = mods.qwen35 } } });
+    const copies_run = b.addRunArtifact(b.addTest(.{ .root_module = copies, .filters = &.{"Suffix copies:"} }));
+    copies_run.has_side_effects = true;
+    b.step("test-qwen35-copies-host", "CUDA family copy facts and shared lane equality, no GPU or shaders").dependOn(&copies_run.step);
+    const rounds = b.createModule(.{ .root_source_file = b.path("zig/qwen35_rounds_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    const rounds_run = b.addRunArtifact(b.addTest(.{ .root_module = rounds, .filters = &.{"Verify width calibration:"} }));
+    rounds_run.has_side_effects = true;
+    b.step("test-qwen35-rounds-host", "CUDA 64-row metadata and shared register-slot plans without devices").dependOn(&rounds_run.step);
+    const shared = b.createModule(.{ .root_source_file = b.path("zig/qwen35_shared_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    const shared_run = b.addRunArtifact(b.addTest(.{ .root_module = shared, .filters = &.{"Shared verification:"} }));
+    shared_run.has_side_effects = true;
+    b.step("test-qwen35-shared-host", "Shared CUDA slots and rollback without device execution").dependOn(&shared_run.step);
+    const draft_frame = b.createModule(.{ .root_source_file = b.path("zig/qwen35_draft_frame_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "core", .module = mods.core }, .{ .name = "lanes", .module = mods.lanes } } });
+    b.step("test-qwen35-frame-invalidation-host", "A failed shared frame invalidates held tokens and grown trees").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames: the real hold adapter"} })).step);
+    const frame_run = b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames:"} }));
+    frame_run.has_side_effects = true;
+    b.step("test-qwen35-draft-frame-host", "Batched CUDA drafter frame bookkeeping and lane equality without devices").dependOn(&frame_run.step);
     const exl3_host = b.step("test-exl3-cuda-host", "EXL3 loader and CUDA host regressions without a GPU");
     const exl3_compile = b.addObject(.{ .name = "exl3_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/exl3_compile.zig"),
@@ -328,6 +350,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
     const check_mods = family(b, cuda_target, .debug, check_cuda, draft_ids);
+    const rounds_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "qwen35", .module = check_mods.qwen35 }, .{ .name = "core", .module = check_mods.core } } });
+    const rounds_compile = b.addObject(.{ .name = "qwen35-rounds-checker-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_rounds_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "tool", .module = rounds_tool }} }) });
+    _ = rounds_compile.getEmittedBin();
+    b.step("compile-qwen35-rounds-host", "Compile the real CUDA 64-row checker for Linux, no images or execution").dependOn(&rounds_compile.step);
     const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/bolt_compile.zig"),
         .target = cuda_target,

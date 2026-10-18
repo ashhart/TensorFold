@@ -48,3 +48,7 @@ test "a compiler's records: its own set, else the newest below it, else 13.0's" 
         try std.testing.expectEqual(topk.usage[0], usageFor(topk, c[0])[0]);
     }
 }
+
+test {
+    _ = @import("pending_132_test.zig");
+}

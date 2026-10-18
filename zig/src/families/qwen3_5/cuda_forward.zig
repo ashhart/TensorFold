@@ -42,23 +42,23 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         switch (l.mixer) {
             .delta => |m| {
                 const layer: c_int = @intCast(di);
-                try e.proj(m.qkv, e.x, e.qkv, total, prompt);
-                try e.proj(m.z, e.x, e.z, total, prompt);
-                try e.proj(m.a, e.x, e.a, total, prompt);
-                try e.proj(m.b, e.x, e.b, total, prompt);
+                try e.projAgain(m.qkv, e.x, e.qkv, total, prompt);
+                try e.projAgain(m.z, e.x, e.z, total, prompt);
+                try e.projAgain(m.a, e.x, e.a, total, prompt);
+                try e.projAgain(m.b, e.x, e.b, total, prompt);
                 if (e.learning) |k| try k.delta(i, e.qkv, e.z, e.b, e.a, total);
                 try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
                 try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
-                try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, t_par, layer, e.y, t_params });
+                try e.deltaScan(record, shape.slots, nseg, layer);
                 try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params });
                 try e.proj(m.out, e.mix, e.r, total, prompt);
                 di += 1;
             },
             .attention => |m| {
                 const aw = g.attnWidth();
-                try e.proj(m.q, e.x, e.qraw, total, prompt);
-                try e.proj(m.k, e.x, e.kraw, total, prompt);
-                try e.proj(m.v, e.x, e.vraw, total, prompt);
+                try e.projAgain(m.q, e.x, e.qraw, total, prompt);
+                try e.projAgain(m.k, e.x, e.kraw, total, prompt);
+                try e.projAgain(m.v, e.x, e.vraw, total, prompt);
                 if (e.learning) |k| try k.attention(i, e.qraw, e.kraw, e.vraw, total);
                 try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
                 try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
@@ -75,8 +75,8 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
         if (e.learning) |k| try k.post(i, e.h, e.x, total);
         switch (l.mlp) {
             .dense => |m| {
-                try e.proj(m.gate, e.x, e.gate, total, prompt);
-                try e.proj(m.up, e.x, e.up, total, prompt);
+                try e.projAgain(m.gate, e.x, e.gate, total, prompt);
+                try e.projAgain(m.up, e.x, e.up, total, prompt);
                 if (e.learning) |k| try k.mlp(i, e.gate, e.up, total);
                 const n: c_longlong = @intCast(total * g.intermediate);
                 try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });

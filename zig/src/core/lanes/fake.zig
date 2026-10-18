@@ -371,7 +371,7 @@ pub const Fake = struct {
             try l.rows.appendSlice(x.gpa, l.held.items[0..w.held]);
             try l.rows.appendSlice(x.gpa, w.tokens);
             @memcpy(o.drafts, l.rows.items[1..]);
-            const parents = try accept.rowParents(x.gpa, l.rows.items.len, w.parents);
+            const parents = if (w.parents) |ps| try x.gpa.dupe(i32, ps) else try accept.rowParents(x.gpa, l.rows.items.len, null);
             defer x.gpa.free(parents);
             for (0..l.rows.items.len) |r| {
                 // each row reads the cache and its own path from the pending row

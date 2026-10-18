@@ -6,7 +6,7 @@ const Observer = struct {
     graph: *Graph,
     id: u32 = 0,
     pub fn accepted(o: *@This()) void {
-        o.id = o.graph.add("accepted lesson", "Save recovery:", 1);
+        o.id = o.graph.add("accepted lesson", "save fixture", 1);
         o.graph.mark(o.id, .learned);
         o.graph.saving(null);
     }
@@ -17,7 +17,7 @@ const Observer = struct {
         try std.testing.expect(o.graph.saved.state == .failed);
     }
 };
-test "Save recovery: actual graph save errors retain learned commitments matching the live generic learner" {
+test "save graph: actual graph save errors retain learned commitments matching the live generic learner" {
     var graph = Graph.init(std.testing.allocator, std.testing.io, null);
     defer graph.deinit();
     var observer: Observer = .{ .graph = &graph };

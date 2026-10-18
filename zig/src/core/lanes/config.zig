@@ -40,6 +40,8 @@ pub const Model = struct {
     join_drafts: bool = false, // with join_tail: a round's joined prompts' first drafts in one call (Engine.finishStreams)
     replay_runs: bool = false, // a round's finals go to the backend together first (Backend.finals)
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
+    context_copies: bool = false, // a lone head window shares its agreeing copy path and appends the rest
+    copy_match: i64 = 8, // matching history tokens a copy needs
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
 };
 
@@ -81,6 +83,7 @@ pub const Config = struct {
     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
+    context_copies: bool = false, // Model.context_copies, within the existing verification width
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
     lone_copies: bool = true, // Model.lone_copies
@@ -119,6 +122,8 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .context_copies = m.context_copies and m.copy_drafts,
+            .enter_match = @max(1, m.copy_match),
             .lone_copies = m.lone_copies,
             .family_width = width,
             .max_copy = max_copy,

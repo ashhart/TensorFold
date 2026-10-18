@@ -553,6 +553,15 @@ extern "C" __global__ void __launch_bounds__(1024) tf_logprob_rows(const __nv_bf
     tf_logprob::logprob_row(L + static_cast<size_t>(row) * V, V, PICK[row], k, rank != 0, OUT + static_cast<size_t>(row) * tf_logprob::LP_WORDS);
 }
 
+extern "C" __global__ void __launch_bounds__(256) tf_topk_slices(const __nv_bfloat16* L, unsigned V, unsigned k, unsigned slices, float* PV,
+                                                                 unsigned* PI) {
+    tf_logprob::topk_slice(L, V, k, slices, PV, PI);
+}
+
+extern "C" __global__ void __launch_bounds__(256) tf_topk_merge(const float* PV, const unsigned* PI, unsigned n, unsigned k, unsigned* OUT) {
+    tf_logprob::topk_merge(PV, PI, n, k, OUT + static_cast<size_t>(blockIdx.x) * tf_logprob::LP_WORDS);
+}
+
 // Structured output: row r's disallowed tokens become -inf before its draw; W words a row, t at bit t % 32 of t / 32.
 extern "C" __global__ void __launch_bounds__(256) tf_grammar_mask(__nv_bfloat16* L, unsigned V, const unsigned* BITS, unsigned W) {
     const unsigned row = blockIdx.x;

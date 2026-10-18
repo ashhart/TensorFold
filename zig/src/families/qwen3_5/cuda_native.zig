@@ -73,7 +73,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
         .backend = l.backend(),
-        .facts = .{ .exact_width = @intCast(e.window_rows), .hidden_rows = true, .batch_rows = @intCast(e.verify_rows), .max_streams = E.max_segs, .streams_exact = true },
+        .facts = laneFacts(@intCast(e.window_rows), @intCast(e.verify_rows)),
         .rows = @intCast(e.window_rows),
         .stream_bytes = e.streamBytes(o.context),
         .ctx = l,
@@ -87,6 +87,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
 pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
     const l: *Lanes = @ptrCast(@alignCast(p));
     return .{ .e = l.e, .dir = dir, .lay = slide.layout(l.e.g.hidden, l.e.g.layers, l.e.g.intermediate, 0) catch unreachable };
+}
+
+/// The CUDA hybrids use the shared lane planner for five-token context copies, alone and without a draft model.
+pub fn laneFacts(window: u32, verify: u32) lanes.Model {
+    return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true };
 }
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
@@ -104,8 +109,8 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     }
     // the shared rounds' shapes, a row of 1 to `streams` streams, captured now: a new graph's first run stalls too
     var parts: [E.max_segs]E.Part = undefined;
-    var ids: [E.max_segs]u32 = @splat(0);
-    var picks: [E.max_segs]E.Draw = undefined;
+    var ids: [@max(E.max_segs, E.most_window)]u32 = @splat(0);
+    var picks: [@max(E.max_segs, E.most_window)]E.Draw = undefined;
     for (0..@min(streams, E.max_segs)) |n| {
         parts[n] = .{ .cache = l.pool.items[n], .rows = 1 };
         picks[n] = .{ .rule = null, .position = 1 };
@@ -439,7 +444,7 @@ const Lanes = struct {
         defer @import("cuda_draft.zig").timing("keep", self.io, t0);
         for (windows, paths) |w, path| {
             const cache = try self.cacheOf(w.stream);
-            if (cache.last == null) continue; // a one-row window (or one kept already): nothing to roll back
+            if (cache.last == null) continue; // already kept: nothing to roll back
             try cache.keep(self.e, path);
         }
     }

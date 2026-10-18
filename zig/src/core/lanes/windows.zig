@@ -27,6 +27,7 @@ pub const Plan = struct {
     forced: []const u32 = &.{},
     parents: ?[]const i32 = null, // a tree's drafts' parents
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
+    context_copy: bool = false, // branch_from names a copied continuation appended to the head
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
     masks: []const u32 = &.{}, // structured output: the rows' allowed-token bits (constrain)
@@ -70,7 +71,8 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
     } else {
         var copy: Copy = .{};
         if (copied) |c| copy = c else if (s.drafts) copy = try copyProposal(e, s);
-        if (copy.tokens.len > 0) {
+        const extend = e.alone and e.cfg.context_copies and !copy.recalled and queued != null and queued.?.count > 0;
+        if (copy.tokens.len > 0 and !extend) {
             p.kind = .copy;
             p.recalled = copy.recalled;
             p.tokens = try a.dupe(u32, copy.tokens);
@@ -92,9 +94,10 @@ pub fn plan(e: *Engine, s: *Stream, copied: ?Copy) !Plan {
                 }
             }
             if (p.count() > 0) p.kind = .head;
+            if (extend and copy.tokens.len > 0) try @import("context_copy.zig").extend(e, &p, copy.tokens);
         }
     }
-    if (e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
+    if (!p.context_copy and e.cfg.fill_lanes > 0 and s.drafts and p.kind != .forced and (p.parents == null or p.lanes != null)) try fillLanes(e, s, &p);
     try trail.event(e, &.{ f("ev", trail.str("plan")), f("stream", trail.str(s.id)), f("kind", trail.str(@tagName(p.kind))), f("n", trail.int(p.count())), f("tree", .{ .bool = p.parents != null }) });
     return p;
 }
@@ -176,8 +179,9 @@ pub fn copyProposal(e: *Engine, s: *Stream) !Copy {
     if (s.proposer) |p| if (!e.alone or e.cfg.lone_copies) {
         // a priced proposer's drafts are as it gives them, its none too: no width, length or match gate, no Recall
         if (p.vtable.priced) return .{ .tokens = p.propose(s.context.items, @min(@as(i64, e.cfg.max_copy), s.draftRoom() - 1)) catch &.{} };
-        const copied = p.propose(s.context.items, most) catch &.{};
-        if (copied.len >= 2 and p.lastMatch() >= e.cfg.enter_match) return .{ .tokens = copied };
+        const copied = p.proposeAfter(s.context.items, &.{}, most) catch &.{};
+        const least: usize = if (e.alone and e.cfg.context_copies) 1 else 2;
+        if (copied.len >= least and p.lastMatch() >= e.cfg.enter_match) return .{ .tokens = copied };
     };
     const r = s.recall orelse return .{};
     if (most < 2) return .{};

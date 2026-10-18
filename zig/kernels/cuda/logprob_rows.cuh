@@ -142,4 +142,100 @@ __device__ void logprob_row(const __nv_bfloat16* L, unsigned V, unsigned pick, u
     }
 }
 
+// A row's k best alone, in two stages: TOPK_SLICE entries a block, then a block over the slices' k best.
+constexpr unsigned TOPK_TG = 256;
+constexpr unsigned TOPK_SLICE = 4096;
+
+// The best of v[0..n) after (pv, pi), ids from `id` or base + i: logprob_row's order, reduced by a fixed tree.
+__device__ void topk_best(const float* v, const unsigned* id, unsigned base, unsigned n, float pv, unsigned pi, float& out_v, unsigned& out_i) {
+    __shared__ float part_v[TOPK_TG / 32];
+    __shared__ unsigned part_i[TOPK_TG / 32];
+    const unsigned t = threadIdx.x, lane = t & 31u, warp = t >> 5;
+    float bv = -INFINITY;
+    unsigned bi = 0xFFFFFFFFu;
+    for (unsigned j = t; j < n; j += TOPK_TG) {
+        const float x = v[j];
+        const unsigned i = id ? id[j] : base + j;
+        if ((x < pv || (x == pv && i > pi)) && better(x, i, bv, bi)) {
+            bv = x;
+            bi = i;
+        }
+    }
+#pragma unroll
+    for (int off = 16; off > 0; off >>= 1) {
+        const float v2 = __shfl_down_sync(FULL, bv, off);
+        const unsigned i2 = __shfl_down_sync(FULL, bi, off);
+        if (better(v2, i2, bv, bi)) {
+            bv = v2;
+            bi = i2;
+        }
+    }
+    if (lane == 0) {
+        part_v[warp] = bv;
+        part_i[warp] = bi;
+    }
+    __syncthreads();
+    if (warp == 0) {
+        bv = lane < TOPK_TG / 32 ? part_v[lane] : -INFINITY;
+        bi = lane < TOPK_TG / 32 ? part_i[lane] : 0xFFFFFFFFu;
+#pragma unroll
+        for (int off = 16; off > 0; off >>= 1) {
+            const float v2 = __shfl_down_sync(FULL, bv, off);
+            const unsigned i2 = __shfl_down_sync(FULL, bi, off);
+            if (better(v2, i2, bv, bi)) {
+                bv = v2;
+                bi = i2;
+            }
+        }
+        if (lane == 0) {
+            part_v[0] = bv;
+            part_i[0] = bi;
+        }
+    }
+    __syncthreads();
+    out_v = part_v[0];
+    out_i = part_i[0];
+    __syncthreads();
+}
+
+// Stage one: block (slice, row) writes its slice's k best to PV/PI[row][slice][0..k).
+__device__ void topk_slice(const __nv_bfloat16* L, unsigned V, unsigned k, unsigned slices, float* PV, unsigned* PI) {
+    __shared__ float sv[TOPK_SLICE];
+    const unsigned row = blockIdx.y, base = blockIdx.x * TOPK_SLICE;
+    const unsigned n = V - base < TOPK_SLICE ? V - base : TOPK_SLICE;
+    const __nv_bfloat16* x = L + static_cast<size_t>(row) * V + base;
+    for (unsigned j = threadIdx.x; j < n; j += TOPK_TG) sv[j] = __bfloat162float(x[j]);
+    __syncthreads();
+    const size_t at = (static_cast<size_t>(row) * slices + blockIdx.x) * k;
+    float pv = INFINITY;
+    unsigned pi = 0;
+    for (unsigned r = 0; r < k; ++r) {
+        topk_best(sv, nullptr, base, n, pv, pi, pv, pi);
+        if (threadIdx.x == 0) {
+            PV[at + r] = pv;
+            PI[at + r] = pi;
+        }
+    }
+}
+
+// Stage two: row blockIdx.x's k best of its slices' candidates, in logprob_row's words (no normalizer, pick or rank).
+__device__ void topk_merge(const float* PV, const unsigned* PI, unsigned n, unsigned k, unsigned* out) {
+    const float* v = PV + static_cast<size_t>(blockIdx.x) * n;
+    const unsigned* id = PI + static_cast<size_t>(blockIdx.x) * n;
+    float pv = INFINITY;
+    unsigned pi = 0;
+    for (unsigned r = 0; r < k; ++r) {
+        topk_best(v, id, 0, n, pv, pi, pv, pi);
+        if (threadIdx.x == 0) {
+            out[2 + r] = pi;
+            out[2 + LP_TOP + r] = __float_as_uint(pv);
+        }
+    }
+    if (threadIdx.x == 0) {
+        out[0] = 0;
+        out[1] = 0;
+        out[2 + 2 * LP_TOP] = 0;
+    }
+}
+
 }  // namespace tf_logprob

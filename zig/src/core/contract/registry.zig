@@ -337,7 +337,7 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "latent tf_super_topk_few", .usage = .{ .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 38, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 }, .{ .regs = 32, .static = 4352, .bound = 1024 } } },
         .{ .name = "ck tf_ck4_up_relu2_few", .usage = .{ .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 19, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 }, .{ .regs = 124, .static = 0, .bound = 128 } } },
         .{ .name = "mamba tf_nemo_scan", .usage = .{ .{ .regs = 138, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 144, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 }, .{ .regs = 118, .static = 41088, .bound = 128 } } },
-    } ++ @import("paging_pending.zig").cuda_132 ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132 ++ @import("qwen_served_records.zig").cuda_132) },
+    } ++ learning.cuda_132 ++ @import("paging_pending.zig").cuda_132 ++ @import("nemotron_prompt_records.zig").cuda_132 ++ @import("glm_cuda_records.zig").cuda_132 ++ @import("qwen_served_records.zig").cuda_132) },
     .{ .release = .{ .major = 13, .minor = 3 }, .usage = &.{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
     } },
@@ -361,10 +361,10 @@ pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
 /// A record's usage on every SM for images built by `release` (null: an image that names no compiler, cuda's).
 pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     var u = r.usage;
+    const rel = release orelse return u;
     if (for (u) |v| {
         if (v.regs > 0) break false;
-    } else true) return u;
-    const rel = release orelse return u;
+    } else true) u = @import("pending_132.zig").lookup(r.launch.name, rel) orelse return u;
     for (cuda_sets) |s| {
         if (newer(s.release, rel)) break;
         for (s.usage) |o| if (std.mem.eql(u8, o.name, r.launch.name)) {
@@ -373,6 +373,34 @@ pub fn usageFor(r: CudaRecord, release: ?limits.Nvcc) [limits.sms.len]U {
     }
     return u;
 }
+
+/// Pending Qwen launch records must be measured before passing the physical resource gate.
+pub const cuda_pending = [_]CudaRecord{
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_1", .symbol = "tf_q35_gdn_slots_1", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_2", .symbol = "tf_q35_gdn_slots_2", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_4", .symbol = "tf_q35_gdn_slots_4", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_8", .symbol = "tf_q35_gdn_slots_8", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_slots_16", .symbol = "tf_q35_gdn_slots_16", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_chain", .symbol = "tf_q35_gdn_chain", .image = "qwen35", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_rope", .symbol = "tf_q35_rope", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_partial", .symbol = "tf_q35_attn_partial", .image = "qwen35", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_attn_merge", .symbol = "tf_q35_attn_merge", .image = "qwen35", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_rope8", .symbol = "tf_q35_rope8", .image = "qwen35_kv8", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35_attn_partial8", .symbol = "tf_q35_attn_partial8", .image = "qwen35_kv8", .threads = 1024 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_apply", .symbol = "tf_q35k_apply", .image = "qwen35_keep", .threads = 128 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_compact", .symbol = "tf_q35k_compact", .image = "qwen35_keep", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_kv8 tf_q35k_compact8", .symbol = "tf_q35k_compact8", .image = "qwen35_kv8", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_gather_rows", .symbol = "tf_q35d_gather_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_gdn_pre", .symbol = "tf_q35_gdn_pre", .image = "qwen35", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_conv_commit", .symbol = "tf_q35_conv_commit", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35 tf_q35_tap", .symbol = "tf_q35_tap", .image = "qwen35", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_keep tf_q35k_conv", .symbol = "tf_q35k_conv", .image = "qwen35_keep", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_dyn_conv_batch", .symbol = "tf_q35d_dyn_conv_batch", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_norm_rope_batch", .symbol = "tf_q35d_norm_rope_batch", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_mask_rows", .symbol = "tf_q35d_mask_rows", .image = "qwen35_draft", .threads = 256 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_partial", .symbol = "tf_q35d_attn_partial", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+    .{ .launch = .{ .name = "qwen35_draft tf_q35d_attn_merge", .symbol = "tf_q35d_attn_merge", .image = "qwen35_draft", .threads = 32 }, .usage = none },
+};
 
 /// Gate 5's planted CUDA controls: a launch past its __launch_bounds__, one needing more registers than a block has.
 pub const cuda_controls = [_]CudaRecord{
@@ -585,22 +613,17 @@ test {
 /// The live Metal collector's list: the serving declarations, then the 27B's register-slot DeltaNet pipelines.
 pub const all_metal = metal ++ @import("delta_slots_records.zig").records;
 
-test "Quantized adjoints: every new gradient launch stays unqualified without compiler receipts" {
-    try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);
-    for (gradient_pending) |record| try std.testing.expect(try checkCuda(std.testing.allocator, &.{record}, true) > 0);
+const learning = @import("registry_learning.zig");
+pub const gradient_pending = learning.gradient_pending;
+pub const qwen_learning_pending = learning.qwen_learning_pending;
+pub const all_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records;
+test {
+    _ = learning;
 }
 
-pub const gradient_pending = @import("gradient_pending.zig").records;
-pub const refreshed_cuda = blk: {
-    var records = cuda;
-    for (&records) |*record| {
-        if (std.mem.eql(u8, record.launch.symbol, "fn_attn_prep") or
-            std.mem.eql(u8, record.launch.symbol, "fn_qsa_pool")) record.usage = none;
+test "pending CUDA records cannot pass a compiled resource check" {
+    for (cuda_pending) |r| {
+        try std.testing.expectEqual(none, r.usage);
+        try std.testing.expectEqual(limits.sms.len, try checkCuda(std.testing.allocator, &.{r}, true));
     }
-    break :blk records;
-};
-pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
-pub const all_cuda = refreshed_cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records;
-test {
-    _ = @import("qwen_learning_pending.zig");
 }

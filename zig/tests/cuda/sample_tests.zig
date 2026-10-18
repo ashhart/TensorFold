@@ -158,3 +158,147 @@ pub fn draws(gpu: Gpu) !void {
     try check.expect(worst < 1e-3, "sample: a pick's share is {e} off its f64 value", .{worst});
     check.pass("sample: {d} draws equal the Metal rule's host references", .{total});
 }
+
+/// topkRows' two stages against tf_logprob_rows: the same k ids and logits, word for word, on every row kind and width.
+pub fn topk(gpu: Gpu) !void {
+    const gpa = gpu.gpa;
+    var m = try cuda.Module.load(gpu.d, cuda.kernels.sample);
+    defer m.unload();
+    const d = try cuda.sample.Draws.resolve(m);
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    const n_rows = 7;
+    const lp_words = 3 + 2 * 20;
+    const widths = [_]usize{ 248320, 131072, 4097, 4096, 100, 10 };
+    const ks = [_]u8{ 1, 16, 20 };
+    const most = widths[0];
+    const host = try gpa.alloc(u16, n_rows * most);
+    defer gpa.free(host);
+    const wide = try gpa.alloc(f32, n_rows * most);
+    defer gpa.free(wide);
+    var logits = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * most * 2);
+    defer logits.free();
+    var picks = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * 4);
+    defer picks.free();
+    try picks.fill8(0, null);
+    var parts = try cuda.DeviceBuffer.alloc(gpu.d, cuda.sample.Draws.topkPartsBytes(most, 20, n_rows));
+    defer parts.free();
+    var want_dev = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * lp_words * 4);
+    defer want_dev.free();
+    var got_dev = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * lp_words * 4);
+    defer got_dev.free();
+    var cases: usize = 0;
+    var differ: usize = 0;
+    for (widths) |n| for (std.enums.values(Kind), 0..) |kind, ki| for ([_]bool{ false, true }) |odd| {
+        for (0..n_rows) |r| {
+            const row = host[r * n ..][0..n];
+            fill(kind, ki * 37 + r + n, row, wide[r * n ..][0..n]);
+            // -inf and NaN entries: tf_logprob_rows never takes a NaN, and takes -inf only past every finite entry
+            if (odd) for (row, 0..) |*h, i| {
+                if (i % 5 == 1) h.* = 0xFF80 else if (i % 13 == 3) h.* = 0x7FC0;
+            };
+        }
+        try logits.uploadAsync(0, std.mem.sliceAsBytes(host[0 .. n_rows * n]), stream.handle);
+        for (ks) |k| {
+            try d.logprobRows(stream, logits.ptr, n, picks.ptr, k, false, want_dev.ptr, n_rows);
+            try d.topkRows(stream, logits.ptr, n, k, parts.ptr, got_dev.ptr, n_rows);
+            try stream.synchronize();
+            var want: [n_rows * lp_words]u32 = undefined;
+            var got: [n_rows * lp_words]u32 = undefined;
+            try want_dev.download(0, std.mem.sliceAsBytes(&want));
+            try got_dev.download(0, std.mem.sliceAsBytes(&got));
+            for (0..n_rows) |r| {
+                const w = want[r * lp_words ..][0..lp_words];
+                const g = got[r * lp_words ..][0..lp_words];
+                cases += 1;
+                if (!std.mem.eql(u32, w[2..][0..k], g[2..][0..k]) or !std.mem.eql(u32, w[22..][0..k], g[22..][0..k])) {
+                    differ += 1;
+                    std.debug.print("DIFFER {s}{s} width {d} k {d} row {d}: first ids {d} / {d}\n", .{ @tagName(kind), if (odd) " inf+nan" else "", n, k, r, w[2], g[2] });
+                }
+            }
+        }
+    };
+    std.debug.print("RESULT topk: {d} rows, {d} differ from tf_logprob_rows\n", .{ cases, differ });
+    try check.expect(differ == 0, "topk: {d} of {d} rows differ", .{ differ, cases });
+    check.pass("topk: {d} rows equal tf_logprob_rows' k best", .{cases});
+}
+
+/// qwen35.cu's two-stage greedy argmax against the host rule: the highest logit, ties to the lower id, no NaN or -inf.
+pub fn q35Argmax(gpu: Gpu) !void {
+    const gpa = gpu.gpa;
+    var m = try cuda.Module.load(gpu.d, cuda.kernels.qwen35);
+    defer m.unload();
+    const slices_fn = try m.function("tf_q35_argmax_slices");
+    const merge_fn = try m.function("tf_q35_argmax_merge");
+    var stream = try cuda.Stream.init(gpu.d, true);
+    defer stream.deinit();
+    const n_rows = 12;
+    const widths = [_]usize{ 248320, 151936, 4097, 4096, 100 };
+    const host = try gpa.alloc(u16, n_rows * widths[0]);
+    defer gpa.free(host);
+    const wide = try gpa.alloc(f32, n_rows * widths[0]);
+    defer gpa.free(wide);
+    var logits = try cuda.DeviceBuffer.alloc(gpu.d, host.len * 2);
+    defer logits.free();
+    var parts = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * ((widths[0] + 4095) / 4096) * 8);
+    defer parts.free();
+    var toks = try cuda.DeviceBuffer.alloc(gpu.d, n_rows * 4);
+    defer toks.free();
+    var cases: usize = 0;
+    var differ: usize = 0;
+    for (widths) |n| for (std.enums.values(Kind), 0..) |kind, ki| for (0..3) |variant| {
+        for (0..n_rows) |r| {
+            const row = host[r * n ..][0..n];
+            fill(kind, ki * 53 + r + n + variant, row, wide[r * n ..][0..n]);
+            for (row, 0..) |*h, i| switch (variant) {
+                1 => if (i % 7 == 2) {
+                    h.* = 0x7FC0; // NaN
+                } else if (i % 11 == 5) {
+                    h.* = 0xFF80; // -inf
+                },
+                2 => if (r == 3) {
+                    h.* = 0xFF80; // a row of -inf: no token, 0x7fffffff
+                } else if (i == n - 1) {
+                    h.* = 0x7F80; // +inf at the last id
+                },
+                else => {},
+            };
+        }
+        try logits.uploadAsync(0, std.mem.sliceAsBytes(host[0 .. n_rows * n]), stream.handle);
+        const slices: usize = (n + 4095) / 4096;
+        var a: cuda.Args = .{};
+        a.add(logits.ptr);
+        a.add(@as(c_int, @intCast(n)));
+        a.add(parts.ptr);
+        a.add(parts.ptr + n_rows * slices * 4);
+        try cuda.launch.launch(slices_fn, .{ .grid = .{ .x = @intCast(slices), .y = n_rows }, .block = .{ .x = 256 } }, stream, &a);
+        var b: cuda.Args = .{};
+        b.add(parts.ptr);
+        b.add(parts.ptr + n_rows * slices * 4);
+        b.add(@as(c_int, @intCast(slices)));
+        b.add(toks.ptr);
+        try cuda.launch.launch(merge_fn, .{ .grid = .{ .x = n_rows }, .block = .{ .x = 32 } }, stream, &b);
+        try stream.synchronize();
+        var got: [n_rows]u32 = undefined;
+        try toks.download(0, std.mem.sliceAsBytes(&got));
+        for (0..n_rows) |r| {
+            var best: f32 = -std.math.inf(f32);
+            var want: u32 = 0x7fffffff;
+            for (host[r * n ..][0..n], 0..) |h, i| {
+                const v = widen(h);
+                if (v > best) {
+                    best = v;
+                    want = @intCast(i);
+                }
+            }
+            cases += 1;
+            if (got[r] != want) {
+                differ += 1;
+                std.debug.print("DIFFER {s} variant {d} width {d} row {d}: gpu {d} host {d}\n", .{ @tagName(kind), variant, n, r, got[r], want });
+            }
+        }
+    };
+    std.debug.print("RESULT q35-argmax: {d} rows, {d} differ from the host rule\n", .{ cases, differ });
+    try check.expect(differ == 0, "q35-argmax: {d} of {d} rows differ", .{ differ, cases });
+    check.pass("q35-argmax: {d} rows equal the host rule's greedy token", .{cases});
+}

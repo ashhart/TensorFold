@@ -2,6 +2,7 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const core = @import("core");
+const Round = @import("cuda_round.zig");
 const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const caches = @import("cuda_cache.zig");
@@ -19,11 +20,15 @@ const head_dim = geometry.head_dim;
 /// Rows of one forward at most: a prompt chunk, or a shared round's windows.
 pub const max_rows = 128;
 /// Streams' windows in one forward at most.
-pub const max_segs = 32;
+pub const max_segs = Round.max_segs;
 /// Rows of a verify forward at most: each row's logits are kept and drawn.
-pub const most_verify = 32;
+pub const most_verify = Round.most_verify;
+/// tf_q35_argmax_slices' blocks a row (ARGMAX_SLICE entries each).
+fn argmaxSlices(vocab: usize) usize {
+    return (vocab + 4095) / 4096;
+}
 /// A window's rows at most (exact: one-row steps' bits; qwen35.cuh's MAXW, the rows a stream's log holds).
-pub const most_window = 16;
+pub const most_window = Round.most_window;
 /// Partial attention chunks a row at most (qwen35.cuh's MAXCH): each row's chunk width grows with its own keys.
 const max_chunks = 64;
 
@@ -127,6 +132,7 @@ pub const Engine = struct {
     po: u64,
     logits: u64,
     routed: routed.Scratch = .{}, // qwen3_5_moe's routed rows
+    amax: u64, // the argmax slices' bests: most_verify rows of argmaxSlices(vocab) (f32, i32)
     // per-forward tables (ids, segments, rows' segment, parent and ancestors, the draws' rules) staged in pinned memory
     tables: DeviceBuffer,
     staged: cuda.HostBuffer,
@@ -141,18 +147,18 @@ pub const Engine = struct {
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
 
-    pub const ids_at = 0;
-    pub const segs_at = max_rows * 4;
-    pub const rowseg_at = segs_at + max_segs * @sizeOf(Seg);
-    pub const rowpar_at = rowseg_at + max_rows * 4;
-    pub const rowanc_at = rowpar_at + max_rows * 4;
-    const rules_at = rowanc_at + max_rows * 4;
-    const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
-    const tokens_at = meta_at + most_verify * 4;
-    pub const params_at = tokens_at + most_verify * 4; // two unused words, the rows, the windows, record
-    pub const src_at = params_at + 8 * 4; // an image chunk's rows' feature rows
-    pub const mpos_at = src_at + max_rows * 4; // and their t, h and w positions, max_rows apart (qwen35.cuh's MAXR)
-    const tables_len = mpos_at + 3 * max_rows * 4;
+    pub const ids_at = Round.ids_at;
+    pub const segs_at = Round.segs_at;
+    pub const rowseg_at = Round.rowseg_at;
+    pub const rowpar_at = Round.rowpar_at;
+    pub const rowanc_at = Round.rowanc_at;
+    const rules_at = Round.rules_at;
+    const meta_at = Round.meta_at;
+    const tokens_at = Round.tokens_at;
+    pub const params_at = Round.params_at;
+    pub const src_at = Round.src_at;
+    pub const mpos_at = Round.mpos_at;
+    const tables_len = Round.bytes;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
@@ -262,7 +268,7 @@ pub const Engine = struct {
 
     /// A stream's device bytes at a `cap`-token window: recurrences, convolution tails, keys and values, taps, log.
     pub fn streamBytes(e: *const Engine, cap: usize) usize {
-        return e.g.stateBytes() + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + e.g.logBytes(most_window);
+        return 2 * e.g.stateBytes() + e.g.kvBytes(cap, e.kv8) + e.tapBytes() + e.g.logBytes(most_window);
     }
 
     /// A stream's tap ring: tap_rows rows of the tapped layers' residuals.
@@ -318,6 +324,7 @@ pub const Engine = struct {
         e.po = try t.alloc(R * g.q_heads * max_chunks * head_dim * 4);
         e.logits = try t.alloc(most_verify * g.vocab * 2);
         if (g.moe()) e.routed = try routed.Scratch.carve(t, g, R);
+        e.amax = try t.alloc(most_verify * argmaxSlices(g.vocab) * 8);
         return total;
     }
 
@@ -335,13 +342,21 @@ pub const Engine = struct {
 
     /// `proj` with group sums `xs` and device counts `params` (0: all real); prompts past 16 rows take a prompt GEMM.
     pub fn projSums(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64) !void {
+        return e.project(l, x, xs, out, rows, prompt, params, true);
+    }
+
+    pub fn projAgain(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
+        return e.project(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at, false);
+    }
+
+    fn project(e: *Engine, l: Proj, x: u64, xs: u64, out: u64, rows: usize, prompt: bool, params: u64, sums: bool) !void {
         const n_out = l.outputs();
         const k = l.inputs();
         if (prompt and rows > 16) return switch (l) {
             .a4 => |q| e.affine.prompt(e.stream, x, q, out, rows),
             .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
         };
-        try e.run(e.fns.sums, .{ rows, 1, 1 }, .{ 32, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
+        if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
         var at: usize = 0;
         while (at < rows) : (at += 16) {
             const n = @min(16, rows - at);
@@ -361,39 +376,29 @@ pub const Engine = struct {
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
 
+    /// Logits rows first..first + n's greedy tokens into toks: the highest logit, ties to the lower id.
+    fn argmax(e: *Engine, first: usize, n: usize, toks: u64) !void {
+        if (n == 0) return;
+        const slices = argmaxSlices(e.g.vocab);
+        const pv = e.amax;
+        const pi = e.amax + n * slices * 4;
+        try e.run(e.fns.argmax_slices, .{ slices, n, 1 }, .{ 256, 1, 1 }, .{ e.logits + first * e.g.vocab * 2, @as(c_int, @intCast(e.g.vocab)), pv, pi });
+        try e.run(e.fns.argmax_merge, .{ n, 1, 1 }, .{ 32, 1, 1 }, .{ pv, pi, @as(c_int, @intCast(slices)), toks + first * 4 });
+    }
+
     pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
+        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at, e.xs });
     }
 
-    /// A chain row's rowanc: its index in its window, as a prompt chunk's rows outnumber the bits.
-    const chain_row: u32 = 1 << 31;
-
-    /// The row tables of `parts`: each row's segment, parent row (-1: a window's first) and ancestors-and-self bits.
-    fn rowTables(st: []u8, parts: []const Part) !void {
-        const rowseg = std.mem.bytesAsSlice(c_int, st[rowseg_at..][0 .. max_rows * 4]);
-        const rowpar = std.mem.bytesAsSlice(c_int, st[rowpar_at..][0 .. max_rows * 4]);
-        const rowanc = std.mem.bytesAsSlice(u32, st[rowanc_at..][0 .. max_rows * 4]);
-        var row0: usize = 0;
-        for (parts, 0..) |p, i| {
-            if (p.parents) |ps| if (ps.len != p.rows or p.rows > most_window or ps[0] != -1) return error.InvalidQwenParents;
-            for (0..p.rows) |r| {
-                const parent: i32 = if (p.parents) |ps| ps[r] else if (r == 0) -1 else @intCast(r - 1);
-                if (parent >= @as(i32, @intCast(r)) or parent < -1) return error.InvalidQwenParents;
-                rowseg[row0 + r] = @intCast(i);
-                rowpar[row0 + r] = if (parent < 0) -1 else @intCast(row0 + @as(usize, @intCast(parent)));
-                rowanc[row0 + r] = if (p.parents == null) chain_row | @as(u32, @intCast(r)) else (@as(u32, 1) << @intCast(r)) | (if (parent < 0) 0 else rowanc[row0 + @as(usize, @intCast(parent))]);
-            }
-            row0 += p.rows;
-        }
-    }
-
-    /// One forward over `parts`' windows, `ids` in order; `keep` names the kept rows; an unkept verify is kept first.
-    pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+    /// Refuse the whole frame before settling any prior window or launching work.
+    pub fn admit(e: *const Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
         const g = e.g;
         var total: usize = 0;
-        for (parts) |p| {
-            try p.cache.settle(e);
-            if (p.rows == 0 or p.cache.len + p.rows > p.cache.cap) return error.QwenContextFull;
+        if (parts.len == 0 or parts.len > max_segs) return error.InvalidQwenSegments;
+        for (parts, 0..) |p, index| {
+            for (parts[0..index]) |prior| if (prior.cache == p.cache) return error.InvalidQwenSegments;
+            if (p.rows == 0 or p.cache.len > p.cache.cap or p.rows > p.cache.cap - p.cache.len) return error.QwenContextFull;
+            if (p.rows > max_rows - total) return error.InvalidQwenSegments;
             total += p.rows;
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
@@ -405,6 +410,14 @@ pub const Engine = struct {
         for (ids) |id| if (id >= g.vocab) return error.InvalidQwenToken;
         for (parts) |p| if (p.parents != null and !record) return error.InvalidQwenParents;
         for (parts) |p| if (p.images != null and record) return error.InvalidQwenImages;
+    }
+
+    /// One forward over `parts`' windows, with every input admitted before an unkept verify is settled.
+    pub fn forward(e: *Engine, parts: []const Part, ids: []const u32, keep: Keep) !void {
+        try e.admit(parts, ids, keep);
+        const g = e.g;
+        const total = ids.len;
+        const record = keep != .last;
         const heads: usize = if (record) total else 1;
         // the prompt GEMM only for prompt chunks: a window's rows keep the bits of one-row steps
         const prompt = !record;
@@ -412,7 +425,8 @@ pub const Engine = struct {
         const st = e.staged.bytes;
         @memcpy(std.mem.bytesAsSlice(u32, st[ids_at..][0 .. total * 4]), ids);
         const segs = std.mem.bytesAsSlice(Seg, st[segs_at..][0 .. parts.len * @sizeOf(Seg)]);
-        try rowTables(st, parts);
+        const slot_peak = try Round.build(st, parts, record);
+        for (parts) |p| try p.cache.settle(e);
         var row0: usize = 0;
         for (parts, 0..) |p, i| {
             segs[i] = p.cache.seg(e, p.cache.len, row0, p.rows);
@@ -450,7 +464,7 @@ pub const Engine = struct {
         const lone = total == 1 and parts.len == 1;
         const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
         const windows: usize = if (lone) 1 else max_segs;
-        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0 };
+        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0, .slots = @intCast(Round.variant(slot_peak)) };
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);
@@ -480,20 +494,21 @@ pub const Engine = struct {
             }
             try gop.value_ptr.launchOn(e.stream);
         }
-        for (parts) |p| {
-            p.cache.last = if (record and p.rows > 1) .{ .start = p.cache.len, .rows = p.rows } else null;
-            p.cache.len += p.rows;
-            p.cache.written = p.cache.len;
-        }
+        for (parts) |p| p.cache.advanced(p.rows, record);
         switch (keep) {
             .draws => |pk| {
                 const toks = e.tables.ptr + tokens_at;
+                var greedy: usize = 0; // the run of greedy rows ending at i, argmaxed together
                 for (pk, 0..) |p, i| {
-                    const row = e.logits + i * g.vocab * 2;
-                    if (p.rule != null) {
-                        try e.draws.draw(e.stream, row, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, 0, toks + i * 4, 1, null, null);
-                    } else try e.run(e.fns.argmax, .{ 1, 1, 1 }, .{ 1024, 1, 1 }, .{ row, @as(c_int, @intCast(g.vocab)), toks + i * 4 });
+                    if (p.rule == null) {
+                        greedy += 1;
+                        continue;
+                    }
+                    try e.argmax(i - greedy, greedy, toks);
+                    greedy = 0;
+                    try e.draws.draw(e.stream, e.logits + i * g.vocab * 2, g.vocab, e.tables.ptr + rules_at + i * @sizeOf(cuda.sample.Rule), e.tables.ptr + meta_at + i * 4, 0, toks + i * 4, 1, null, null);
                 }
+                try e.argmax(pk.len - greedy, greedy, toks);
                 try e.d.check(e.d.api.cuMemcpyDtoHAsync_v2(e.host_logits.bytes.ptr, toks, total * 4, e.stream.handle), "cuMemcpyDtoHAsync");
                 try e.stream.synchronize();
                 @memcpy(e.tokens[0..total], e.host_logits.slice(u32)[0..total]);
@@ -514,11 +529,26 @@ pub const Engine = struct {
         record: bool,
         prompt: bool,
         taps: bool,
+        slots: u8,
 
         fn key(s: Shape) u32 {
-            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18;
+            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19;
         }
     };
+
+    /// The same scan selected by body, exposed for host launch-contract fixtures.
+    pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
+        const scan = if (!record) e.fns.gdn_chain else switch (slot_count) {
+            1 => e.fns.gdn_slots_1,
+            2 => e.fns.gdn_slots_2,
+            4 => e.fns.gdn_slots_4,
+            8 => e.fns.gdn_slots_8,
+            16 => e.fns.gdn_slots_16,
+            else => return error.InvalidGdnSlots,
+        };
+        const input = e.tables.ptr + @as(usize, if (record) Round.steps_at else rowpar_at);
+        try e.run(scan, .{ 1, geometry.dk / 4, e.g.v_heads * segments }, .{ 32, 4, 1 }, .{ e.geo, e.q, e.k, e.v, e.g_, e.beta, e.tables.ptr + segs_at, input, layer, e.y, e.tables.ptr + params_at });
+    }
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
     pub const body = @import("cuda_forward.zig").body;
