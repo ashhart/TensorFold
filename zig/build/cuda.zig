@@ -237,6 +237,13 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
+    const flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/build/cuda_release_flags.zig"),
+        .target = b.graph.host,
+    }) }));
+    b.step("test-cuda-release-flags-host", "All CUDA image flags omit private source line data").dependOn(&flags.step);
+    step.dependOn(&flags.step);
+    @import("cuda_release_paths.zig").tests(b, step);
     const host = b.graph.host;
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
@@ -515,12 +522,14 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
 pub const release_sms = "80,86,120,121";
 
 /// Validate the complete named input set, including images unused by today's server, and each file's release targets.
-pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
+pub fn checkDistFatbins(b: *std.Build, dir: []const u8, privacy_tool: *std.Build.Step.Compile) *std.Build.Step {
     const tool = b.addExecutable(.{ .name = "check-fatbins", .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = b.graph.host }) });
     const check = b.addRunArtifact(tool);
     check.addArg(release_sms);
     for (kernels) |k| check.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) })));
-    return &check.step;
+    const privacy = @import("cuda_release_paths.zig").directory(b, privacy_tool, b.graph.cwdRelativePath(dir));
+    privacy.dependOn(&check.step);
+    return privacy;
 }
 
 /// Explicit model diagnostics; these tools do not qualify a checkpoint merely by compiling.
