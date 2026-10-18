@@ -141,6 +141,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
         else
             continue;
         contract_images.dependOn(&b.addInstallFile(file, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
+        if (std.mem.eql(u8, k.name, "dsv41_x3ld")) @import("contract_symbols.zig").check(b, file, sms, contract_images);
     }
     const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
     b.step("compile-config-server", "Compile the actual CUDA server config entry point without installing or running").dependOn(&server_exe.step);

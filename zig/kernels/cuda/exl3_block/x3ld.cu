@@ -131,7 +131,7 @@ __device__ __forceinline__ void ld_tiles(const uint32_t* __restrict__ T, int NTI
 
 // Program (u, n block, (mat * SK + split) * MT + member tile): grouped_kernel<CB, NT, 4, *, LO, HI>'s work item.
 template <int CB, int NT, int PD, int LO, int HI, int PROBE>
-__global__ void __launch_bounds__(W * 32, NT == 8 ? 3 : 4) ld_kernel(
+__device__ __forceinline__ void ld_body(
     const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
     const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
     const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
@@ -226,13 +226,31 @@ __global__ void __launch_bounds__(W * 32, NT == 8 ? 3 : 4) ld_kernel(
     }
 }
 
+template <int CB, int NT, int PD, int LO, int HI, int PROBE>
+__global__ void __launch_bounds__(W * 32, NT == 8 ? 3 : 4) ld_kernel(
+    const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
+    const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
+    const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
+    float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
+    ld_body<CB, NT, PD, LO, HI, PROBE>(X0, X1, TP0, TP1, K2_0, K2_1, uids, ucount, members, Z, K, N, P, SK, maxm, slots);
+}
+
+// A strong entry for the required shape, retained independently of implicit template emission.
+template <>
+__global__ void __launch_bounds__(W * 32, 3) ld_kernel<2, 8, 1, 8, 8, 0>(
+    const half* __restrict__ X0, const half* __restrict__ X1, const int64_t* __restrict__ TP0,
+    const int64_t* __restrict__ TP1, const int* __restrict__ K2_0, const int* __restrict__ K2_1,
+    const int* __restrict__ uids, const int* __restrict__ ucount, const int* __restrict__ members,
+    float* __restrict__ Z, int K, int N, int P, int SK, int maxm, int slots) {
+    ld_body<2, 8, 1, 8, 8, 0>(X0, X1, TP0, TP1, K2_0, K2_1, uids, ucount, members, Z, K, N, P, SK, maxm, slots);
+}
+
 }  // namespace dsv41_x3ld
 
 // The instantiations dsv41_x3ld_grouped_cuda dispatches: mul1, (nt, pd) x probe x the (lo, hi) ranges.
 #define DSV41_X3LD_INST(NT, PD, LO, HI, PROBE) template __global__ void dsv41_x3ld::ld_kernel<2, NT, PD, LO, HI, PROBE>( \
     const half*, const half*, const int64_t*, const int64_t*, const int*, const int*, const int*, const int*, \
     const int*, float*, int, int, int, int, int, int);
-DSV41_X3LD_INST(8, 1, 8, 8, 0)
 DSV41_X3LD_INST(8, 1, 2, 10, 0)
 DSV41_X3LD_INST(8, 1, 2, 12, 0)
 DSV41_X3LD_INST(8, 2, 8, 8, 0)
