@@ -3,9 +3,15 @@
 const std = @import("std");
 const rt = @import("rt.zig");
 
-extern "c" fn open(path: [*:0]const u8, flags: c_int, ...) c_int;
-extern "c" fn pread(fd: c_int, buf: [*]u8, n: usize, off: i64) isize;
-extern "c" fn close(fd: c_int) c_int;
+const platform = @import("sys");
+const pread = platform.c.pread;
+const close = platform.c.close;
+
+/// `path` opened to read (the only mode the loader asks for, as flags 0).
+fn open(path: [*:0]const u8, flags: c_int) c_int {
+    _ = flags;
+    return platform.c.open(path, .{}, @as(platform.c.mode_t, 0));
+}
 
 const chunk_bytes: usize = 64 << 20;
 

@@ -86,7 +86,7 @@ pub const Profiler = struct {
     const others = 96;
 
     fn pick(self: *Profiler, p: mtl.Pipeline) void {
-        for (self.kernels.pipelines, 0..) |q, i| if (q.id == p.id) {
+        for (self.kernels.pipelines, 0..) |q, i| if (q != null and q.?.id == p.id) {
             self.current = i;
             return;
         };

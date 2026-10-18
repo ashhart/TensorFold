@@ -1,0 +1,594 @@
+//! Own copy sources through completion. Failed disposal moves them to context/stream quarantine.
+const custody_sync = @import("copy_source_sync.zig");
+const std = @import("std");
+const builtin = @import("builtin");
+const abi = @import("abi.zig");
+const Driver = @import("driver.zig").Driver;
+const memory = @import("memory.zig");
+const streams = @import("stream.zig");
+const budget = @import("copy_source_budget.zig");
+const durable = std.heap.page_allocator;
+const capture_scope = @import("copy_source_capture.zig");
+threadlocal var current_context: abi.Context = null;
+var mutex: custody_sync.Mutex = .{};
+var changed: custody_sync.Condition = .{};
+var head: ?*Node = null;
+var next_ticket: u64 = 1;
+/// Tests only: called under the lock each time keepDriver is about to wait on a busy owner.
+pub var on_close_wait: ?*const fn () void = null;
+/// Completed temporary stages kept for the next upload in their driver and context (none in tests unless one sets it).
+pub const SpareLimits = struct { count: usize = 64, bytes: usize = 64 << 20 };
+var spare_limits: SpareLimits = if (builtin.is_test) .{ .count = 0, .bytes = 0 } else .{};
+var spares: ?*Node = null;
+var spare_count: usize = 0;
+var spare_bytes: usize = 0;
+const Node = struct {
+    charge: usize = @sizeOf(Node),
+    next: ?*Node = null,
+    work_next: ?*Node = null,
+    busy: bool = false,
+    ticket: u64 = 0,
+    driver: usize = 0,
+    context: abi.Context = null,
+    stream: abi.Stream = null,
+    failed: bool = false,
+    reusable: bool = false, // a temporary upload's stage: completion returns it to the spares
+    data: union(enum) {
+        none,
+        cpu: []align(16) u8,
+        pinned: struct {
+            bytes: []align(16) u8,
+            free: @FieldType(abi.Api, "cuMemFreeHost"),
+            event: ?abi.Event,
+            destroy: ?@FieldType(abi.Api, "cuEventDestroy_v2"),
+            query: ?@FieldType(abi.Api, "cuEventQuery"),
+        },
+    } = .none,
+    fn releaseData(n: *Node) void {
+        const a = durable;
+        switch (n.data) {
+            .none => {},
+            .cpu => |bytes| a.free(bytes),
+            .pinned => |p| {
+                if (p.destroy) |drop| _ = drop(p.event.?);
+                _ = p.free(p.bytes.ptr);
+                memory.releaseRetainedHost(p.bytes.len);
+            },
+        }
+    }
+    fn destroy(n: *Node) void {
+        const charge = n.charge;
+        durable.destroy(n);
+        budget.release(charge, 1);
+    }
+    fn release(n: *Node) void {
+        n.releaseData();
+        n.destroy();
+    }
+};
+fn newNode() !*Node {
+    try budget.acquire(@sizeOf(Node), 1);
+    errdefer budget.release(@sizeOf(Node), 1);
+    const n = try durable.create(Node);
+    n.* = .{};
+    return n;
+}
+fn lock() void {
+    mutex.lock();
+}
+fn unlock() void {
+    mutex.unlock();
+}
+pub fn setCurrent(context: abi.Context) void {
+    current_context = context;
+}
+pub fn current() abi.Context {
+    return current_context;
+}
+fn cutoff() u64 {
+    lock();
+    defer unlock();
+    return next_ticket;
+}
+fn publish(n: *Node) void {
+    lock();
+    defer unlock();
+    n.ticket = next_ticket;
+    next_ticket +%= 1;
+    n.next = head;
+    head = n;
+}
+// Busy owners stay registered until every CUDA callback has returned.
+fn releaseTracked(n: *Node) void {
+    if (keepSpare(n)) return;
+    n.releaseData();
+    lock();
+    var at = &head;
+    while (at.* != n) at = &at.*.?.next;
+    at.* = n.next;
+    changed.broadcast();
+    unlock();
+    n.destroy();
+}
+/// A completed temporary stage into the spares, its buffer and event kept and its charge still held; false if full.
+fn keepSpare(n: *Node) bool {
+    if (!n.reusable or n.data != .pinned or n.data.pinned.event == null) return false;
+    const len = n.data.pinned.bytes.len;
+    lock();
+    defer unlock();
+    if (n.failed or spare_count >= spare_limits.count or len > spare_limits.bytes - spare_bytes) return false;
+    var at = &head;
+    while (at.* != n) at = &at.*.?.next;
+    at.* = n.next;
+    n.next = spares;
+    n.busy = false;
+    spares = n;
+    spare_count += 1;
+    spare_bytes += len;
+    changed.broadcast();
+    return true;
+}
+/// The smallest spare of `d` in this thread's context that holds `need` bytes, out of the spares.
+fn takeSpare(d: *const Driver, need: usize) ?*Node {
+    lock();
+    defer unlock();
+    var best: ?*?*Node = null;
+    var at = &spares;
+    while (at.*) |n| : (at = &n.next) {
+        if (n.driver != @intFromPtr(d) or n.context != current_context or n.data.pinned.bytes.len < need) continue;
+        if (best == null or n.data.pinned.bytes.len < best.?.*.?.data.pinned.bytes.len) best = at;
+    }
+    const slot = best orelse return null;
+    const n = slot.*.?;
+    slot.* = n.next;
+    n.next = null;
+    spare_count -= 1;
+    spare_bytes -= n.data.pinned.bytes.len;
+    return n;
+}
+/// Frees the spares of `d` in `context`: a context's end calls it before the context goes.
+pub fn dropSpares(d: *const Driver, context: abi.Context) void {
+    dropMatching(d, context, false);
+}
+fn dropMatching(d: *const Driver, context: abi.Context, all: bool) void {
+    lock();
+    const out = unlinkSpares(d, context, all);
+    unlock();
+    releaseList(out);
+}
+/// The spares of `d` (in `context` unless `all`) out of the list, the lock held; the caller frees them unlocked.
+fn unlinkSpares(d: *const Driver, context: abi.Context, all: bool) ?*Node {
+    var out: ?*Node = null;
+    var at = &spares;
+    while (at.*) |n| {
+        if (n.driver != @intFromPtr(d) or (!all and n.context != context)) {
+            at = &n.next;
+            continue;
+        }
+        at.* = n.next;
+        spare_count -= 1;
+        spare_bytes -= n.data.pinned.bytes.len;
+        n.next = out;
+        out = n;
+    }
+    return out;
+}
+fn releaseList(list: ?*Node) void {
+    var out = list;
+    while (out) |n| {
+        out = n.next;
+        n.release();
+    }
+}
+pub fn spareCount() usize {
+    lock();
+    defer unlock();
+    return spare_count;
+}
+pub fn setSparesForTest(value: SpareLimits) void {
+    if (!builtin.is_test) @compileError("test only");
+    lock();
+    defer unlock();
+    std.debug.assert(spare_count == 0);
+    spare_limits = value;
+}
+fn completed(d: *const Driver, context: abi.Context, stream: abi.Stream, all: bool, before: u64) void {
+    var released: ?*Node = null;
+    lock();
+    var at = head;
+    while (at) |n| {
+        if (!n.busy and n.driver == @intFromPtr(d) and n.context == context and (all or n.stream == stream) and n.ticket < before) {
+            n.busy = true;
+            n.work_next = released;
+            released = n;
+        }
+        at = n.next;
+    }
+    unlock();
+    while (released) |n| {
+        released = n.work_next;
+        releaseTracked(n);
+    }
+}
+fn hasRetained(d: *const Driver, context: abi.Context) bool {
+    lock();
+    defer unlock();
+    var at = head;
+    while (at) |n| {
+        if (n.driver == @intFromPtr(d) and n.context == context and n.failed) return true;
+        at = n.next;
+    }
+    return false;
+}
+pub fn captureBegin(stream: streams.Stream, mode: abi.CaptureMode) !void {
+    try capture_scope.begin(stream, current_context, mode);
+}
+pub fn captureEnd(stream: streams.Stream) void {
+    capture_scope.end(stream, current_context);
+}
+pub fn keepDriver(d: *const Driver) bool {
+    lock();
+    defer unlock();
+    while (true) {
+        // spares are complete, so they go first; a reaper close waits on may park one, so look again after each wait
+        if (unlinkSpares(d, null, true)) |out| {
+            unlock();
+            releaseList(out);
+            lock();
+            continue;
+        }
+        var kept = false;
+        var busy = false;
+        var at = head;
+        while (at) |n| {
+            if (n.driver == @intFromPtr(d)) {
+                kept = true;
+                busy = busy or n.busy;
+            }
+            at = n.next;
+        }
+        if (!busy) return kept;
+        if (comptime builtin.is_test) if (on_close_wait) |hook| hook(); // the close fixture's signal: close is waiting
+        changed.wait(&mutex);
+    }
+}
+/// A pinned buffer no wait proved free: quarantine counts it and frees it after a later wait on its stream succeeds.
+pub fn retainPinned(d: *const Driver, host: memory.HostBuffer, stream: streams.Stream) void {
+    const n = newNode() catch {
+        std.log.warn("copy source: {d} pinned bytes stay allocated: no quarantine node for them", .{host.bytes.len});
+        return;
+    };
+    budget.charge(host.bytes.len);
+    n.* = .{ .charge = n.charge + host.bytes.len, .failed = true, .driver = @intFromPtr(d), .context = current_context, .stream = stream.handle, .data = .{ .pinned = .{
+        .bytes = host.bytes,
+        .free = d.api.cuMemFreeHost,
+        .event = null,
+        .destroy = null,
+        .query = null,
+    } } };
+    publish(n);
+}
+pub fn retained() usize {
+    lock();
+    defer unlock();
+    var n: usize = 0;
+    var at = head;
+    while (at) |p| {
+        n += 1;
+        at = p.next;
+    }
+    return n;
+}
+pub fn synchronizeStream(d: *const Driver, stream: abi.Stream) @import("driver.zig").Error!void {
+    const before = cutoff();
+    const context = current_context;
+    d.check(d.api.cuStreamSynchronize(stream), "cuStreamSynchronize") catch |e| {
+        failed(d, context, stream, false, before);
+        return e;
+    };
+    completed(d, context, stream, false, before);
+}
+pub fn synchronizeContext(d: *const Driver) @import("driver.zig").Error!void {
+    const before = cutoff();
+    const context = current_context;
+    d.check(d.api.cuCtxSynchronize(), "cuCtxSynchronize") catch |e| {
+        failed(d, context, null, true, before);
+        return e;
+    };
+    completed(d, context, null, true, before);
+}
+pub fn streamDone(d: *const Driver, stream: abi.Stream) @import("driver.zig").Error!bool {
+    const before = cutoff();
+    const context = current_context;
+    d.check(d.api.cuStreamQuery(stream), "cuStreamQuery") catch |e| switch (e) {
+        error.NotReady => return false,
+        else => return e,
+    };
+    completed(d, context, stream, false, before);
+    return true;
+}
+/// The allocator argument is a compatibility hint; escaped custody never borrows it.
+pub fn synchronousCopy(d: *const Driver, dst: u64, bytes: []const u8, gpa: std.mem.Allocator) @import("driver.zig").Error!void {
+    if (capture_scope.active(d, current_context)) return error.UnownedCaptureSource;
+    var at: usize = 0;
+    while (at < bytes.len) {
+        const n = @min(bytes.len - at, 64 << 20);
+        try syncChunk(d, std.math.add(u64, dst, at) catch return error.Invalid, bytes[at..][0..n], gpa);
+        at += n;
+    }
+}
+fn syncChunk(d: *const Driver, dst: u64, bytes: []const u8, _: std.mem.Allocator) @import("driver.zig").Error!void {
+    if (bytes.len == 0) return;
+    if (hasRetained(d, current_context)) try synchronizeContext(d);
+    const n = try newNode();
+    var transferred = false;
+    defer if (!transferred) n.release();
+    try budget.acquire(bytes.len, 0);
+    n.charge += bytes.len;
+    const owned = try durable.alignedAlloc(u8, .@"16", bytes.len);
+    n.driver = @intFromPtr(d);
+    n.context = current_context;
+    n.data = .{ .cpu = owned };
+    @memcpy(owned, bytes);
+    const result = d.api.cuMemcpyHtoD_v2(dst, owned.ptr, owned.len);
+    synchronizeStream(d, null) catch |e| {
+        transferred = true;
+        n.failed = true;
+        publish(n);
+        return e;
+    };
+    try d.check(result, "cuMemcpyHtoD");
+}
+
+/// Reusable pinned storage. take waits before mutation; close waits before release; deinit quarantines on failure.
+pub const Stage = struct {
+    // Compatibility hint only: custody storage always uses the durable core allocator.
+    gpa: std.mem.Allocator = std.heap.page_allocator,
+    buf: ?memory.HostBuffer = null,
+    ev: ?streams.Event = null,
+    pending: bool = false,
+    stream: ?streams.Stream = null,
+    context: abi.Context = null,
+    event_valid: bool = false,
+    used: usize = 0,
+    holder: ?*Node = null,
+    reusable: bool = false,
+    /// A different current context leaves the saved owner pending for retry or quarantine.
+    pub fn wait(s: *Stage) !void {
+        if (!s.pending) return;
+        if (s.context != current_context) return error.StageBusy;
+        if (s.event_valid) try s.ev.?.synchronize() else try s.stream.?.synchronize();
+        s.pending = false;
+        s.event_valid = false;
+    }
+    pub fn take(s: *Stage, d: *const Driver, bytes: usize) ![]u8 {
+        try s.wait();
+        if (s.holder == null) {
+            s.holder = try newNode();
+        }
+        if (s.buf == null or s.buf.?.bytes.len < bytes) {
+            if (s.buf) |*b| {
+                const len = b.bytes.len;
+                b.free();
+                budget.release(len, 0);
+                s.holder.?.charge -= len;
+            }
+            s.buf = null;
+            const len = @max(bytes, 4096);
+            try budget.acquire(len, 0);
+            errdefer budget.release(len, 0);
+            s.buf = try memory.HostBuffer.alloc(d, len);
+            s.holder.?.charge += len;
+        }
+        s.used = bytes;
+        return s.buf.?.bytes[0..bytes];
+    }
+    pub fn issued(s: *Stage, d: *const Driver, stream: streams.Stream) !void {
+        if (s.holder == null) return error.StageUnprepared;
+        if (s.pending and s.context != current_context) return error.StageBusy;
+        s.stream = stream;
+        s.context = current_context;
+        s.pending = true;
+        s.event_valid = false;
+        if (s.ev == null) s.ev = try streams.Event.init(d, false);
+        try s.ev.?.record(stream);
+        s.event_valid = true;
+    }
+    pub fn begin(s: *Stage, stream: streams.Stream) !void {
+        if (s.buf == null or s.holder == null) return error.StageUnprepared;
+        if (s.pending and (s.stream.?.d != stream.d or s.stream.?.handle != stream.handle or s.context != current_context)) try s.wait();
+        s.stream = stream;
+        s.context = current_context;
+        s.pending = true;
+        s.event_valid = false;
+    }
+    pub fn copyRangeTo(s: *Stage, destination: memory.DeviceBuffer, offset: usize, from: usize, len: usize, stream: streams.Stream) !void {
+        if (s.buf == null or from > s.used or len > s.used - from) return error.Invalid;
+        if (len == 0) return;
+        try s.begin(stream);
+        const dst = try destination.at(offset);
+        if (len > destination.len - offset) return error.Invalid;
+        try destination.d.check(destination.d.api.cuMemcpyHtoDAsync_v2(dst, s.buf.?.bytes[from..].ptr, len, stream.handle), "cuMemcpyHtoDAsync");
+        try s.issued(destination.d, stream);
+    }
+    pub fn copyTo(s: *Stage, destination: memory.DeviceBuffer, offset: usize, stream: streams.Stream) !void {
+        try s.copyRangeTo(destination, offset, 0, s.used, stream);
+    }
+    pub fn close(s: *Stage) !void {
+        try s.wait();
+        if (s.ev) |*e| e.deinit();
+        if (s.buf) |*b| b.free();
+        if (s.holder) |n| n.release();
+        s.* = .{};
+    }
+    pub fn abandon(s: *Stage) void {
+        s.retire(false);
+    }
+    fn retire(s: *Stage, bad: bool) void {
+        if (!s.pending) {
+            s.close() catch unreachable;
+            return;
+        }
+        const n = s.holder.?;
+        const b = s.buf.?;
+        n.* = .{ .charge = n.charge, .failed = bad, .reusable = s.reusable, .driver = @intFromPtr(s.stream.?.d), .context = s.context, .stream = s.stream.?.handle, .data = .{ .pinned = .{
+            .bytes = b.bytes,
+            .free = b.d.api.cuMemFreeHost,
+            .event = if (s.ev) |e| e.handle else null,
+            .destroy = if (s.ev) |e| e.d.api.cuEventDestroy_v2 else null,
+            .query = if (s.event_valid) s.ev.?.d.api.cuEventQuery else null,
+        } } };
+        publish(n);
+        s.* = .{};
+    }
+    pub fn deinit(s: *Stage) void {
+        s.close() catch s.retire(true);
+    }
+};
+/// Stable pinned storage. Graph owners keep it until graph disposal and mark each replay before release.
+pub const Buffer = struct {
+    d: *const Driver,
+    bytes: []align(16) u8,
+    stage: Stage,
+    pub fn alloc(d: *const Driver, len: usize) !Buffer {
+        return allocKind(d, len, false);
+    }
+    pub fn allocMapped(d: *const Driver, len: usize) !Buffer {
+        return allocKind(d, len, true);
+    }
+    fn allocKind(d: *const Driver, len: usize, mapped: bool) !Buffer {
+        var s: Stage = .{};
+        errdefer s.deinit();
+        s.holder = try newNode();
+        try budget.acquire(len, 0);
+        errdefer budget.release(len, 0);
+        s.buf = if (mapped) try memory.HostBuffer.allocMapped(d, len) else try memory.HostBuffer.alloc(d, len);
+        s.holder.?.charge += len;
+        s.used = len;
+        return .{ .d = d, .bytes = s.buf.?.bytes, .stage = s };
+    }
+    pub fn slice(b: Buffer, comptime T: type) []T {
+        return std.mem.bytesAsSlice(T, b.bytes[0 .. b.bytes.len / @sizeOf(T) * @sizeOf(T)]);
+    }
+    pub fn device(b: Buffer) !abi.DevicePtr {
+        return b.stage.buf.?.device();
+    }
+    pub fn wait(b: *Buffer) !void {
+        try b.stage.wait();
+    }
+    pub fn mark(b: *Buffer, stream: streams.Stream) !void {
+        try b.stage.begin(stream);
+    }
+    pub fn copyTo(b: *Buffer, destination: memory.DeviceBuffer, offset: usize, bytes: []const u8, stream: streams.Stream) !void {
+        const start = @intFromPtr(bytes.ptr);
+        const base = @intFromPtr(b.bytes.ptr);
+        if (start < base or start - base > b.bytes.len or bytes.len > b.bytes.len - (start - base)) return error.Invalid;
+        try b.stage.copyRangeTo(destination, offset, start - base, bytes.len, stream);
+    }
+    pub fn free(b: *Buffer) void {
+        b.stage.deinit();
+        b.* = undefined;
+    }
+};
+
+/// Temporary inputs transfer ownership to quarantine immediately; stream completion releases the private copy.
+pub fn enqueue(d: *const Driver, dst: u64, bytes: []const u8, stream: streams.Stream) @import("driver.zig").Error!void {
+    var at: usize = 0;
+    while (at < bytes.len) {
+        const n = @min(bytes.len - at, 64 << 20);
+        try asyncChunk(d, std.math.add(u64, dst, at) catch return error.Invalid, bytes[at..][0..n], stream);
+        at += n;
+        if (at < bytes.len) try stream.synchronize();
+    }
+}
+fn asyncChunk(d: *const Driver, dst: u64, bytes: []const u8, stream: streams.Stream) @import("driver.zig").Error!void {
+    if (bytes.len == 0) return;
+    if (capture_scope.active(d, current_context)) return error.UnownedCaptureSource;
+    reap(d);
+    if (hasRetained(d, current_context)) try synchronizeContext(d);
+    if (takeSpare(d, bytes.len)) |n| return reissue(n, d, dst, bytes, stream);
+    var s: Stage = .{};
+    defer s.deinit();
+    const room = if (spare_limits.count == 0) bytes.len else std.math.ceilPowerOfTwo(usize, bytes.len) catch bytes.len;
+    const buf = s.take(d, room) catch |e| retry: {
+        if (e != error.CopySourceLimit or spareCount() == 0) return e;
+        dropSpares(d, current_context); // a spare's bytes count against the bound: free them, then try once more
+        break :retry try s.take(d, room);
+    };
+    @memcpy(buf[0..bytes.len], bytes);
+    s.copyRangeTo(.{ .d = d, .ptr = dst, .len = bytes.len }, 0, 0, bytes.len, stream) catch |e| {
+        if (s.pending) s.retire(true);
+        return e;
+    };
+    s.reusable = true;
+    s.abandon();
+}
+/// A spare's buffer and event for another copy, tracked again until completion; a failed call quarantines it.
+fn reissue(n: *Node, d: *const Driver, dst: u64, bytes: []const u8, stream: streams.Stream) @import("driver.zig").Error!void {
+    const p = &n.data.pinned;
+    @memcpy(p.bytes[0..bytes.len], bytes);
+    n.stream = stream.handle;
+    p.query = null;
+    errdefer {
+        n.failed = true;
+        publish(n);
+    }
+    try d.check(d.api.cuMemcpyHtoDAsync_v2(dst, p.bytes.ptr, bytes.len, stream.handle), "cuMemcpyHtoDAsync");
+    try d.check(d.api.cuEventRecord(p.event.?, stream.handle), "cuEventRecord");
+    p.query = d.api.cuEventQuery;
+    publish(n);
+}
+fn failed(d: *const Driver, context: abi.Context, stream: abi.Stream, all: bool, before: u64) void {
+    lock();
+    defer unlock();
+    var at = head;
+    while (at) |n| {
+        if (n.driver == @intFromPtr(d) and n.context == context and (all or n.stream == stream) and n.ticket < before)
+            n.failed = true;
+        at = n.next;
+    }
+}
+fn reap(d: *const Driver) void {
+    var pending: ?*Node = null;
+    lock();
+    var at = head;
+    while (at) |n| {
+        if (!n.busy and n.driver == @intFromPtr(d) and n.context == current_context and n.data == .pinned and n.data.pinned.query != null) {
+            n.busy = true;
+            n.work_next = pending;
+            pending = n;
+        }
+        at = n.next;
+    }
+    unlock();
+    while (pending) |n| {
+        pending = n.work_next;
+        const p = n.data.pinned;
+        const result = p.query.?(p.event.?);
+        if (result == 0) releaseTracked(n) else {
+            lock();
+            if (result != abi.error_not_ready) n.failed = true;
+            n.busy = false;
+            changed.broadcast();
+            unlock();
+        }
+    }
+}
+
+test {
+    _ = @import("copy_source_test.zig");
+    _ = @import("copy_source_context_test.zig");
+    _ = @import("copy_source_limits_test.zig");
+    _ = @import("copy_source_capture_test.zig");
+    _ = @import("copy_source_spare_test.zig");
+}
+
+test "driver close waits through reaper query, event destruction and host release" {
+    try @import("copy_source_race_test.zig").run(reap, false);
+}
+test "driver close waits through completion release callbacks" {
+    try @import("copy_source_race_test.zig").run(reap, true);
+}
+test "driver close frees the spare a reaper parks while close waits on it" {
+    try @import("copy_source_close_test.zig").run(reap);
+}

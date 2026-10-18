@@ -44,6 +44,7 @@ def main() -> int:
     folder = Path(args.images)
     pngs = sorted(folder.glob("*.png"))
     jpgs = sorted(folder.glob("*.jpg"))
+    webps = sorted(folder.glob("*.webp"))  # a lossless WebP named as a PNG holds its pixels: the same reply
     first, second = pngs[0], pngs[1]
     url_a = data_url(first.read_bytes(), "image/png")
     url_b = data_url(second.read_bytes(), "image/png")
@@ -137,8 +138,8 @@ def main() -> int:
     webp = b"RIFF\x24\x00\x00\x00WEBPVP8 \x18\x00\x00\x00" + bytes(24)
     gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00!\xf9\x04\x00\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;"
     refusals = [
-        ("WebP, by name", [user(image_part(data_url(webp, "image/webp")), text("hi"))], "WebP"),
-        ("GIF", [user(image_part(data_url(gif, "image/gif")), text("hi"))], "not PNG or JPEG"),
+        ("a WebP that decodes as nothing", [user(image_part(data_url(webp, "image/webp")), text("hi"))], "could not be decoded"),
+        ("GIF", [user(image_part(data_url(gif, "image/gif")), text("hi"))], "not PNG, JPEG or WebP"),
         ("an image in an assistant message", [user(text("hi")), {"role": "assistant", "content": [image_part(url_a)]}, user(text("ok"))], "user and tool messages only"),
         ("too many images", [user(*[image_part(url_a)] * 5, text("hi"))], "at most"),
         ("a remote URL without --vision-urls", [user(image_part("https://example.com/cat.png"), text("hi"))], "--vision-urls"),
@@ -156,6 +157,14 @@ def main() -> int:
         check("a JPEG answers", code == 200, f"HTTP {code}")
         code, r = ask([user(image_part(url_a, "low"), text("Describe it."))])
         check("detail low answers", code == 200, f"HTTP {code}")
+    for w in webps:
+        code, r = ask([user(image_part(data_url(w.read_bytes(), "image/webp")), text("Describe it."))])
+        twin = folder / (w.stem + ".png")
+        if twin.is_file():
+            code_p, rp = ask([user(image_part(data_url(twin.read_bytes(), "image/png")), text("Describe it."))])
+            check(f"a lossless WebP ({w.name}) answers as its PNG", code == 200 and code_p == 200 and reply(r) == reply(rp), repr(reply(r)[:60]))
+        else:
+            check(f"a WebP ({w.name}) answers", code == 200 and bool(reply(r)), f"HTTP {code}")
     print("PASS" if failures == 0 else f"FAIL: {failures}")
     return 0 if failures == 0 else 1
 

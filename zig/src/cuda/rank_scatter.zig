@@ -53,20 +53,35 @@ pub const RankScatter = struct {
     ) !void {
         const mine = share(rows, world, rank);
         const n = (mine[1] - mine[0]) * width;
-        try lib.check(lib.api.ncclGroupStart(), "ncclGroupStart");
-        for (0..world) |peer| {
-            if (peer == rank) continue;
-            const theirs = share(rows, world, peer);
-            const count = (theirs[1] - theirs[0]) * width;
-            const send = partial + theirs[0] * width * 4;
-            const slot = scratch + peer * n * 4;
-            const to: c_int = @intCast(peer);
-            if (count > 0) try lib.check(lib.api.ncclSend(send, count, .f32, to, comm, s.handle), "ncclSend");
-            if (n > 0) try lib.check(lib.api.ncclRecv(slot, n, .f32, to, comm, s.handle), "ncclRecv");
-        }
-        try lib.check(lib.api.ncclGroupEnd(), "ncclGroupEnd");
+        try lib.group(Posts{ .lib = lib, .comm = comm, .world = world, .rank = rank, .s = s, .partial = partial, .rows = rows, .width = width, .scratch = scratch }, Posts.post);
         if (n > 0) try k.rankSum(s, scratch, partial + mine[0] * width * 4, world, rank, n, out);
     }
+
+    /// `run`'s sends and receives, which `Library.group` puts in one group (a failed post still ends it).
+    const Posts = struct {
+        lib: *const nccl.Library,
+        comm: nccl.Comm,
+        world: usize,
+        rank: usize,
+        s: Stream,
+        partial: u64,
+        rows: usize,
+        width: usize,
+        scratch: u64,
+
+        fn post(t: Posts) anyerror!void {
+            const mine = share(t.rows, t.world, t.rank);
+            const n = (mine[1] - mine[0]) * t.width;
+            for (0..t.world) |peer| {
+                if (peer == t.rank) continue;
+                const theirs = share(t.rows, t.world, peer);
+                const count = (theirs[1] - theirs[0]) * t.width;
+                const to: c_int = @intCast(peer);
+                if (count > 0) try t.lib.check(t.lib.api.ncclSend(t.partial + theirs[0] * t.width * 4, count, .f32, to, t.comm, t.s.handle), "ncclSend");
+                if (n > 0) try t.lib.check(t.lib.api.ncclRecv(t.scratch + peer * n * 4, n, .f32, to, t.comm, t.s.handle), "ncclRecv");
+            }
+        }
+    };
 
     /// out[i]: the ranks' terms added rank 0 first, `peers`' slot r (n apart) for every rank but `rank`, `own` for it.
     pub fn rankSum(

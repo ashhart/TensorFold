@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const cuda = @import("cuda");
+const exl3 = @import("cuda_exl3.zig");
 const weights = @import("cuda_weights.zig");
 const kda = @import("cuda_kda.zig");
 const b16 = @import("cuda_b16.zig");
@@ -20,6 +21,8 @@ pub const prefill_rows = 2048;
 pub const window_rows = 8;
 /// The context the buffers' dense attention partials reach (Buffers' min(capacity, 2560)).
 pub const dense_reach = 2560;
+/// Index-key and gate rows a DSA cache holds (a ring): pool_keys reads only from the current pool's first row on.
+pub const index_ring = 2 * prefill_rows;
 
 /// Sub-allocations of one device allocation, 256-byte aligned like the driver's own.
 const Arena = struct {
@@ -46,7 +49,7 @@ fn arena(d: *const cuda.Driver, sizes: []const usize, out: []u64) !Arena {
 }
 
 /// A rank's B16 matmul shapes ([n, k]) whose split-K partials the buffers hold.
-fn b16Shapes(w: *const weights.Weights) [10][2]usize {
+fn b16Shapes(w: *const weights.Weights) [12][2]usize {
     const c = &w.config;
     const s = &w.share;
     const n = s.kda.len() * c.kda_dim;
@@ -56,6 +59,8 @@ fn b16Shapes(w: *const weights.Weights) [10][2]usize {
         .{ c.q_lora + c.kv_lora, c.hidden }, .{ s.mla.len() * c.nope, c.q_lora },  .{ c.i_dim + c.i_heads, c.hidden },
         .{ c.i_heads * c.i_dim, c.q_lora },  .{ c.hidden, s.mla.len() * c.v_dim }, .{ 2 * s.shared.len(), c.hidden },
         .{ c.hidden, 2 * c.hidden }, // the MTP head's eh_proj
+        if (c.exl3) .{ 2 * s.dense.len(), c.hidden } else .{ c.hidden, 2 * c.hidden }, // bf16 dense layers: [gate | up]
+        if (c.exl3) .{ c.hidden, s.dense.len() } else .{ c.hidden, 2 * c.hidden }, // and down
     };
 }
 
@@ -123,6 +128,7 @@ pub const Buffers = struct {
         var mm: usize = 4;
         // windows under rows_from rows keep their K slices apart (a prompt's tail chunk on the prefill buffers too)
         for (b16Shapes(w)) |sh_| mm = @max(mm, b16.partBytes(@min(rows, b16.rows_from - 1), sh_[0], sh_[1]));
+        const x3: [4]usize = if (c.exl3) exl3.scratchBytes(rows, D, ew, prefill, w.exl3_shx) else @splat(4);
         const hist_len = if (pairs > cuda.grouped.small) (pairs + cuda.grouped.small - 1) / cuda.grouped.small * (count + 1) else 1;
         const sizes = [_]usize{
             rows * 4,     rows * S * D * 2, rows * D * 2,           rows * (D / 64) * 4,
@@ -160,10 +166,11 @@ pub const Buffers = struct {
             rows * (D / 64) * 4,  (if (prefill) 1 else rows) * s.vocab.len() * 2,
             rows * D * 2, rows * D * 2, rows * 2 * D * 2, rows * D * 2, // hin, me, mcat, mx
             rows * D * 4, // part: this rank's fp32 partial rows a split exchange sends from
+            x3[0], x3[1], x3[2], x3[3], // EXL3 experts: 8-slot picks, rotated inputs, a decode window's partials
         };
         var p: [sizes.len]u64 = undefined;
         const a = try arena(d, &sizes, &p);
-        return .{
+        var out: Buffers = .{
             .arena = a,
             .rows = rows,
             .prefill = prefill,
@@ -201,7 +208,7 @@ pub const Buffers = struct {
                 .mm_part = p[42],
                 .at = p[43],
             },
-            .dense = .{ .tmp = p[44], .gu = p[45], .act = p[46], .xs_act = p[47] },
+            .dense = .{ .tmp = p[44], .gu = p[45], .act = p[46], .xs_act = p[47], .mm_part = p[42] },
             .moe = .{ .mlog = p[48], .router_part = p[26], .pick = p[49], .wts = p[50], .plan = .{ .members = p[51], .items = p[52], .counts = p[53], .rank = p[54], .hist = p[55] }, .eact = p[56], .ey = p[57], .sgu = p[58], .sact = p[59], .sxs = p[60], .sy = p[61], .mm_part = p[42] },
             .hidden = p[62],
             .fnormed = p[63],
@@ -213,6 +220,8 @@ pub const Buffers = struct {
             .mx = p[69],
             .part = p[70],
         };
+        out.moe.x3 = .{ .picks = p[71], .xg = p[72], .xu = p[73], .z = p[74] };
+        return out;
     }
 
     pub fn deinit(b: *Buffers) void {
@@ -248,6 +257,11 @@ pub const State = struct {
     rec_layer: usize,
     proj_layer: usize,
     proj_row: usize,
+    ring_rows: usize, // index rows each ring holds: min(capacity, index_ring)
+    ring_row: usize, // bytes of one index row
+    rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
+    base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
+    mtp_base: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, capacity: usize) !State {
         const c = &w.config;
@@ -265,7 +279,8 @@ pub const State = struct {
         defer sizes.deinit(gpa);
         try sizes.appendSlice(gpa, &.{ 4, nk * 3 * 3 * n * 2, 2 * nk * s.kda.len() * kda.dk * kda.dv * 4, nk * window_rows * kw * 2 });
         try sizes.appendSlice(gpa, &.{ nk * window_rows * n * 4, nk * window_rows * n * 2, nk * window_rows * n * 4, nk * window_rows * s.kda.len() * 4 });
-        for (0..nd + 1) |_| try sizes.appendSlice(gpa, &.{ capacity * c.kv_lora * 2, capacity * c.i_dim * 2, capacity * c.i_dim * 2, pk_rows * c.i_dim * 2 });
+        const ring_rows = @min(capacity, index_ring);
+        for (0..nd + 1) |_| try sizes.appendSlice(gpa, &.{ capacity * c.kv_lora * 2, ring_rows * c.i_dim * 2, ring_rows * c.i_dim * 2, pk_rows * c.i_dim * 2 });
         try sizes.append(gpa, 4); // the MTP head's position
         const p = try gpa.alloc(u64, sizes.items.len);
         defer gpa.free(p);
@@ -275,14 +290,18 @@ pub const State = struct {
         errdefer gpa.free(cur);
         @memset(cur, 0);
         const caches = try gpa.alloc(dsa_block.Caches, nd);
+        errdefer gpa.free(caches);
         for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
-        return .{ .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
+        const rings = try gpa.alloc(u64, 2 * (nd + 1));
+        for (0..nd + 1) |j| rings[2 * j ..][0..2].* = .{ p[9 + 4 * j], p[10 + 4 * j] };
+        return .{ .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
     }
 
     pub fn deinit(st: *State) void {
         st.arena.buf.free();
         st.gpa.free(st.cur);
         st.gpa.free(st.caches);
+        st.gpa.free(st.rings);
         st.* = undefined;
     }
 
@@ -293,13 +312,15 @@ pub const State = struct {
         try d.check(d.api.cuMemsetD8Async(st.rec, 0, 2 * st.kda_layers * st.rec_layer, stream.handle), "cuMemsetD8Async");
         @memset(st.cur, 0);
         st.pending = 0;
+        st.setBases(0, 0);
         try st.setPos(stream, 0);
         try st.setMtpLen(stream, 0);
     }
 
     /// Host side of a state just copied back (a kept prompt state): position, MTP rows, KDA parity, nothing pending.
-    pub fn restoreHost(st: *State, stream: cuda.Stream, pos: usize, mtp_len: usize, cur: []const u1) !void {
+    pub fn restoreHost(st: *State, stream: cuda.Stream, pos: usize, mtp_len: usize, cur: []const u1, bases: [2]usize) !void {
         @memcpy(st.cur, cur);
+        st.setBases(bases[0], bases[1]);
         st.pending = 0;
         st.prompt = false;
         try st.setPos(stream, pos);
@@ -317,6 +338,47 @@ pub const State = struct {
         st.pos = pos;
         const v: i32 = @intCast(pos);
         try st.arena.buf.d.check(st.arena.buf.d.api.cuMemsetD32Async(st.pos_dev, @bitCast(v), 1, stream.handle), "cuMemsetD32Async");
+    }
+
+    /// Before a pass of `rows` rows at pos: within capacity, and the index rings holding them (rebased if not).
+    pub fn ready(st: *State, stream: cuda.Stream, rows: usize) !void {
+        if (st.pos + rows > st.capacity) return error.PastCapacity;
+        if (st.pos + rows > st.base + st.ring_rows) try st.rebase(stream, false);
+    }
+
+    /// Before the MTP head's pass of `n` rows at mtp_len, likewise for its caches.
+    pub fn readyMtp(st: *State, stream: cuda.Stream, n: usize) !void {
+        if (st.mtp_len + n > st.capacity) return error.PastCapacity;
+        if (st.mtp_len + n > st.mtp_base + st.ring_rows) try st.rebase(stream, true);
+    }
+
+    /// Rebase at the earliest pool a rollback may revisit; MTP retains a whole verify window before its cursor.
+    fn rebase(st: *State, stream: cuda.Stream, mtp: bool) !void {
+        const at = if (mtp) st.mtp_len else st.pos;
+        const old = if (mtp) st.mtp_base else st.base;
+        const floor = if (mtp) at -| window_rows else at;
+        const nb = floor / sparse.pool * sparse.pool;
+        const keep = (at - nb) * st.ring_row;
+        const d = st.arena.buf.d;
+        const first: usize = if (mtp) st.caches.len else 0;
+        const last: usize = if (mtp) st.caches.len + 1 else st.caches.len;
+        if (keep > 0) for (st.rings[2 * first .. 2 * last]) |r| {
+            try d.check(d.api.cuMemcpyDtoDAsync_v2(r, r + (nb - old) * st.ring_row, keep, stream.handle), "cuMemcpyDtoDAsync");
+        };
+        if (mtp) st.setBases(st.base, nb) else st.setBases(nb, st.mtp_base);
+    }
+
+    /// The caches' ik and ig pointers for ring bases `main` and `mtp` (position p's row at pointer + p rows).
+    fn setBases(st: *State, main: usize, mtp: usize) void {
+        st.base = main;
+        st.mtp_base = mtp;
+        for (st.caches, 0..) |*c, j| {
+            c.ik = st.rings[2 * j] -% main * st.ring_row;
+            c.ig = st.rings[2 * j + 1] -% main * st.ring_row;
+        }
+        const j = st.caches.len;
+        st.mtp_caches.ik = st.rings[2 * j] -% mtp * st.ring_row;
+        st.mtp_caches.ig = st.rings[2 * j + 1] -% mtp * st.ring_row;
     }
 
     pub fn recAt(st: *const State, copy: u1, li: usize) u64 {

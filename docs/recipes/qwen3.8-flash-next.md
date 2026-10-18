@@ -2,7 +2,8 @@
 
 The `qwen4_exp` family has Gated DeltaNet, sparse attention, MoE, hyper-connections and hashed n-gram
 embeddings. The native engine's supported Metal checkpoint uses MLX affine 6-bit weights in groups of 32
-and includes an MTP head. The native engine refuses the 4-bit/group-32 checkpoint at load.
+and includes an MTP head. On a Mac the native engine refuses the 4-bit/group-32 checkpoint at load; on CUDA it serves
+that one ([Flash Next on CUDA](flash-next-cuda.md)).
 
 ```bash
 tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP
@@ -10,8 +11,8 @@ tensorfold serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP --name bench --tempe
 ```
 
 For native serving, see the [Metal runbook](../../RUNBOOK.md#flash-next-and-paired-metal-serving).
-Native Flash Next has no CUDA backend yet; its port is tracked in
-[#472](https://github.com/ashhart/TensorFold/issues/472).
+Native Flash Next on CUDA serves the MLX 4-bit group-32 checkpoint on the built-in kernels: see
+[Flash Next on CUDA](flash-next-cuda.md) ([#472](https://github.com/ashhart/TensorFold/issues/472)).
 
 The sections below describe the Python 0.6.6 engine, available at the
 [`v0.6.6` tag](https://github.com/ashhart/TensorFold/tree/v0.6.6). Their flags, variables and paths are that engine's,
@@ -70,6 +71,75 @@ path, resolved matmul route and GPU identity; changing arithmetic requires a fre
 
 Load-time shared-forward checks compare each stream with its own call. A failed check limits forwards
 to one stream, while successful checks allow the lane engine to combine requests.
+
+## Native Metal shared sessions
+
+The native 6-bit MTP engine uses shared target rounds with an explicit `--parallel N` above one; `--parallel auto`, the default, keeps the single-reply driver, whose lone decode is 1.0.12's (a lone request in a shared session decoded 7% slower on an M3 Ultra). Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions, eight here:
+
+```bash
+tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP \
+  --context 16384 --temperature 0 --parallel 8
+```
+
+Each request holds its own recurrent state, attention cache, n-gram history and MTP cache. The scheduler packs
+up to 16 target rows, including draft rows, into one layer loop. Projections and experts process those rows
+together; recurrence, convolution and attention read each request's own state. Every stream's MTP drafts share one command buffer; `FZ_BATCH_MTP_SERIAL=1` restores serial drafting.
+New requests join between rounds, and cancelling a request releases its slot for another request.
+
+An explicit count that does not fit is refused, as below. Explicit `--parallel 1`, `--learn`, and the two-Mac path retain their supported driver. Shared sessions run on one Mac; `--parallel N` above one with `--speed-up` or `--learn` is refused. Use `--parallel 1` for the two-Mac link.
+
+The ceiling is 70% of RAM, or `FLASHNEXT_LOAD_LIMIT_GB` (GB, up to the GPU's recommended working set). It covers the
+server's whole footprint: the model, the sessions and the prompt cache. Left out, `--prompt-cache-gib` takes what the
+sessions leave under it; a given budget must fit under the same ceiling, and only `--prompt-cache-over-cap` lets it
+pass.
+
+Additional slots allocate caches for the selected context. Startup reserves their metadata and the prompt-cache
+budget, then checks the physical footprint before accepting requests. A fixed slot count that does not fit is
+refused; lower the count, context or prompt-cache budget. `--prompt-cache-over-cap` overrides only the prompt-cache
+budget. Shared sessions draw sampled tokens with the same GPU sampler as the single-Mac `--parallel 1` path.
+Each packed window uses its own seed, sampling settings and absolute token positions. The two-Mac path remains
+greedy only. The model gate below must verify sampled token parity across routes, drafting and batch composition.
+
+The shared host's residency set includes the engine, session caches and metadata, shared hidden rows and later
+prompt snapshots. Residency uses the same validated load limit as the host, with a 2 GiB margin inside it for
+growing buffers. The default stays at 70% of RAM; `FLASHNEXT_LOAD_LIMIT_GB` can raise or lower that ceiling, capped
+by RAM and the GPU working set. A refused set leaves the server running without it, and `--prompt-cache-over-cap`
+does not raise the residency ceiling. `FLASHNEXT_NO_RESIDENCY=1` disables the set. With a prompt cache, warm turns
+keep the end of a reply as the single-request host does. Idle latency and throughput need fresh measurements.
+
+The checkpoint gate compares shared replies with fresh legacy replies, with drafting off and on, then checks
+prompt admission, cancellation, slot reuse and a restored prefix while another request remains active:
+
+```bash
+zig build tf-flashnext-batch
+zig-out/bin/tf-flashnext-batch --sampling-only
+python tools/zig/flashnext_batch_prompts.py MODEL_DIR /tmp/flashnext-prompts
+FZ_N=128 zig-out/bin/tf-flashnext-batch MODEL_DIR /tmp/flashnext-prompts/*.json
+FZ_SAMPLE=1 FZ_N=128 zig-out/bin/tf-flashnext-batch MODEL_DIR /tmp/flashnext-prompts/*.json
+```
+
+These device gates require exclusive GPU use. `--sampling-only` uses synthetic logits and checks distinct seeds,
+positions and row offsets against the shared GPU-rule reference, including untouched greedy and spare rows.
+`FZ_SAMPLE=1` repeats the model gate with fixed seeds per prompt. Compilation alone does not pass either gate.
+For a served comparison with identical requests and settings:
+
+```bash
+zig build native
+python tools/zig/flashnext_batch_serve.py zig-out/native/bin/tensorfold-native \
+  MODEL_DIR /tmp/flashnext-prompts /tmp/flashnext-served \
+  --parallel 1,4 --context 16384 --require-shared-rounds
+```
+
+The served gate starts one server at a time on loopback port 52417. `default` omits `--parallel`; `auto` passes
+it explicitly. Each block uses the same context and requests, including thinking on and off. It compares response
+bodies, token counts and native token fingerprints with the serial reference and records wall time and peak
+running and waiting requests. `--require-shared-rounds` also requires multi-stream GPU forwards in the batch log
+during those requests. Running requests alone do not prove shared rounds. The default and `auto` serve on the
+single-reply driver, so that gate fails for them; an explicit count that falls back to one session fails it too.
+
+End-to-end time includes prompts. The shared-round check enables `FZ_BATCH_LOG`, so its times include logging;
+omit that option for a separate timing run. Repeat into a fresh output directory with `--context 65536` or another
+context that fits the checkpoint. The checkpoint gate separately checks prompt admission, cancellation and reuse.
 
 ## CUDA
 
@@ -431,8 +501,9 @@ TBD [release-0.3.5].
 
 ## Image input on CUDA
 
-Image input is the Python engine's. @shantanugoel added it for Flash Next in
-[#146](https://github.com/ashhart/TensorFold/pull/146), and the native binary refuses `--vision`.
-Use `--vision` on one CUDA GPU with `--parallel` of at least two. Image requests always prefill fresh; text prefix
-caching remains available. See the [image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3
-sidecar conversion and verification.
+@shantanugoel added image input to the Python engine's Flash Next in
+[#146](https://github.com/ashhart/TensorFold/pull/146). There, use `--vision` on one CUDA GPU with `--parallel` of at
+least two. Image requests always prefill fresh; text prefix caching remains available. See the
+[image recipe](flash-next-vision.md) for tower weights, memory admission, EXL3 sidecar conversion and verification.
+The native binary's CUDA engine takes `--vision` too, experimental, through the Qwen-VL tower that Qwen's CUDA family
+runs (see [Flash Next on CUDA](flash-next-cuda.md)).

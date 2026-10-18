@@ -29,7 +29,7 @@ pub const Window = struct {
     taps: u32,
 
     pub fn init(gpa: std.mem.Allocator, start: u32, parents: []const i32, taps: u32, capacity: u32) !Window {
-        if (parents.len == 0 or parents.len > 128 or taps < 1 or taps > 16 or start > capacity) return error.BadWindow;
+        if (parents.len == 0 or parents.len > @import("gpu_frame.zig").max_rows or taps < 1 or taps > 16 or start > capacity) return error.BadWindow;
         if (parents[0] != -1) return error.BadParents;
         const own = try gpa.dupe(i32, parents);
         errdefer gpa.free(own);
@@ -41,10 +41,10 @@ pub const Window = struct {
             if (row > 0 and (parent < 0 or parent >= row)) return error.BadParents;
             depths[row] = if (parent < 0) 0 else depths[@intCast(parent)] + 1;
             if (@as(u64, start) + depths[row] >= capacity) return error.ContextFull;
-            var path: [128]u32 = undefined;
+            var path: [16]u32 = undefined; // a row's last `taps` ancestors are all the conv reads
             var at: i32 = @intCast(row);
             var n: usize = 0;
-            while (at >= 0) {
+            while (at >= 0 and n < taps) {
                 path[n] = @intCast(at);
                 n += 1;
                 at = parents[@intCast(at)];

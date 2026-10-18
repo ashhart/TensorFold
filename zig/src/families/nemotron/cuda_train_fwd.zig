@@ -63,7 +63,7 @@ pub fn mixer(f: *const fwd.Forward, w: *const fwd.Walk, i: usize, spans: []const
                 try o.fill32(b.p_meta, @intCast(sp.skip), 4);
                 try f.glue.kvWrite(qkv, kc, vc, b.p_meta, sp.rows, f.ashape());
                 try o.torch().copyRows(qkv, c.qkvDim() * 2, q, qd * 2, qd * 2, sp.rows);
-                try o.prefillAttention(q, kc, vc, b.att + @as(u64, sp.at) * qd * 2, sp.skip, sp.rows, c.heads, c.kv_heads, scale);
+                try o.prefillAttention(q, kc, vc, b.att + @as(u64, sp.at) * qd * 2, sp.skip, sp.rows, c.heads, c.kv_heads, scale, 0, 0); // the trainer's own rows
                 if (pf.prime) {
                     try o.copy(pf.store.keysAt(sp.slot, w.aj, false), kc, sp.rows * kvd);
                     try o.copy(pf.store.keysAt(sp.slot, w.aj, true), vc, sp.rows * kvd);
@@ -76,7 +76,7 @@ pub fn mixer(f: *const fwd.Forward, w: *const fwd.Walk, i: usize, spans: []const
 
 fn mshape(f: *const fwd.Forward) @import("cuda_glue.zig").Shape {
     const c = f.c;
-    return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.max_rows };
+    return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.windowRows(c) };
 }
 
 /// The MoE block (cuda_forward.zig's experts and sharedRest), the pocket's open neurons scaled row by row.
@@ -86,7 +86,7 @@ pub fn experts(f: *const fwd.Forward, m: weights.MoE, rows: usize, scale: Scale,
     const o = f.ops;
     const ex = m.experts;
     const pairs = rows * c.slots();
-    try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+    try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
     const tile = cuda.experts.promptTile(ex.format);
     try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
     const items = kern.maxItems(pairs, ex.experts, tile);

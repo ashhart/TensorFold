@@ -16,6 +16,7 @@ pub const cost_rule = @import("cost_rule.zig");
 pub const gpu_rule = @import("gpu_rule.zig");
 pub const gpu_full = @import("gpu_full.zig");
 pub const depth = @import("depth.zig");
+pub const mtp_policy = @import("mtp_policy.zig");
 pub const trim = @import("trim.zig");
 pub const config = @import("config.zig");
 pub const stream = @import("stream.zig");
@@ -43,10 +44,16 @@ pub const Trim = trim.Trim;
 test {
     std.testing.refAllDecls(@This());
     _ = @import("engine_test.zig");
+    _ = @import("handover_test.zig");
+    _ = @import("open_first_test.zig");
     _ = @import("recorder_test.zig");
     _ = @import("gpu_full_test.zig");
     _ = @import("drafted_test.zig");
+    _ = @import("drafted_grammar_test.zig");
+    _ = @import("windows_grammar_test.zig");
     _ = @import("pricing_test.zig");
+    _ = @import("fill_test.zig");
+    _ = @import("fill_trim_test.zig");
 }
 
 pub const learned_disk = @import("learned_disk.zig");

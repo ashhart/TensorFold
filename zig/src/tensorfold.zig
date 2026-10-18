@@ -9,6 +9,8 @@ pub const qwen27 = @import("families/qwen27/qwen27.zig");
 /// Qwen-VL image input: backend-neutral parts, and the tower on Metal.
 pub const qwen_vl = @import("core/qwen_vl/qwen_vl.zig");
 pub const qwen_vl_tower = @import("core/qwen_vl/metal.zig");
+/// Qwen-Image-2.1's transformer on Metal: a denoiser driven by tf-qwen-image, outside the lane engine.
+pub const qwen_image = @import("families/qwen_image/qwen_image.zig");
 pub const checkpoint = @import("core/checkpoint_metal.zig");
 pub const shard_edit = @import("core/shard_edit.zig");
 pub const lora_merge = @import("core/lora_merge_dir.zig");
@@ -30,12 +32,21 @@ pub const glm_dsa = @import("families/glm_dsa/glm_dsa.zig");
 pub const nemotron = @import("families/nemotron/nemotron.zig");
 pub const flashnext_replay = @import("families/flashnext/replay.zig");
 pub const flashnext_rows = @import("families/flashnext/rows_load.zig");
+pub const flashnext_sample = @import("families/flashnext/host_sample.zig");
+pub const flashnext_batch_sample = @import("families/flashnext/batch_sample.zig");
 pub const flashnext_engine = @import("families/flashnext/engine.zig");
 pub const flashnext_snapshot = @import("families/flashnext/snapshot.zig");
+pub const flashnext_session = @import("families/flashnext/session.zig");
+pub const flashnext_batch_forward = @import("families/flashnext/batch_forward.zig");
+pub const flashnext_backend = @import("families/flashnext/backend.zig");
+pub const flashnext_slots = @import("families/flashnext/slots.zig");
+pub const flashnext_batch_meta = @import("families/flashnext/batch_meta.zig");
 pub const flashnext_learned = @import("families/flashnext/learned.zig");
 pub const flashnext_think_check = @import("families/flashnext/think_check.zig");
 pub const glm = @import("families/glm/glm.zig");
 pub const qwen35 = @import("families/qwen3_5/qwen3_5.zig");
+pub const gemma4 = @import("families/gemma4/gemma4.zig");
+pub const step5 = @import("families/step5/step5.zig");
 pub const lfm2_moe = @import("families/lfm2_moe/lfm2_moe.zig");
 pub const flashnext_pack = @import("families/flashnext/pack.zig");
 
@@ -60,11 +71,17 @@ test {
     _ = @import("families/flashnext/dense.zig"); // The core projection adapter keeps format, cuts and tiles.
     _ = @import("families/flashnext/marks.zig"); // a call's marks
     _ = @import("families/flashnext/think.zig"); // a thinking budget's close on the host
+    _ = @import("families/flashnext/backend.zig"); // shared-session family tests
+    _ = @import("families/flashnext/lone_stream.zig"); // the first commit can relocate the prompt
+    _ = @import("families/flashnext/slots.zig"); // sized shared sessions: the list, a stream's session, when it grows
+    _ = @import("families/flashnext/batch_costs.zig"); // the shared rounds' timing needs a session that holds it
     _ = @import("families/flashnext/think_check.zig"); // and in the verdict kernels (Metal)
     _ = @import("families/flashnext/sample.zig"); // a sampled window's draws on the GPU (Metal)
     _ = @import("families/glm/glm.zig");
     _ = @import("families/qwen3_5/config.zig");
+    _ = @import("families/gemma4/gemma4.zig");
     _ = @import("families/qwen3_5/backend.zig");
+    _ = @import("families/step5/step5.zig");
     _ = @import("families/lfm2_moe/config.zig");
     _ = @import("families/lfm2_moe/backend.zig");
     _ = @import("families/lfm2_moe/state.zig");
@@ -94,3 +111,5 @@ pub const bf16_topk = @import("bf16_topk");
 pub const bf16_topk_gpu = @import("bf16_topk_gpu");
 
 pub const tree_commit_gpu = @import("tree_commit_gpu");
+
+pub const tree_slots = @import("core/tree_slots.zig");
