@@ -44,6 +44,10 @@ pub const Model = struct {
 
         m.config = try cfg.Config.read(allocator, io, dir);
         try cfg.checkShapes(m.config);
+        cfg.checkDevice(m.config, m.device.tensorUnits()) catch |e| {
+            std.log.err("Nemotron 3.5 Bolt runs on Apple GPUs without tensor units (M1 to M4); its M5 lane kernels are not built yet", .{});
+            return e;
+        };
         if (m.config.dt_min != 0 or !std.math.isInf(m.config.dt_max)) return error.UnsupportedTimeStepLimit;
 
         // compile the kernels while the weights load

@@ -47,6 +47,26 @@ test "a negative moe_latent_size is refused before it is cast to a width" {
     try std.testing.expectError(error.BadConfig, parse(a, text, &why));
 }
 
+test "a top-k above any one layer's expert count is refused, though the largest layer holds enough" {
+    const a = std.testing.allocator;
+    const small = "\"moe_intermediate_size\": 2048, \"n_routed_experts\": 240, \"num_experts_per_tok\": 9";
+    const text = try std.mem.replaceOwned(u8, a, bolt, small, "\"moe_intermediate_size\": 2048, \"n_routed_experts\": 8, \"num_experts_per_tok\": 9");
+    defer a.free(text);
+    try std.testing.expect(!std.mem.eql(u8, text, bolt));
+    var why: Why = .{};
+    try std.testing.expectError(error.BadConfig, parse(a, text, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why.text(), "layer 1 picks 9 of its 8 experts") != null);
+}
+
+test "Bolt is refused on a tensor-unit chip before loading; Lightning is not" {
+    var why: Why = .{};
+    const c = try parse(std.testing.allocator, bolt, &why);
+    try std.testing.expectError(error.BoltNeedsRowKernels, cfg.checkDevice(c, true));
+    try cfg.checkDevice(c, false);
+    const l = try parse(std.testing.allocator, cfg.lightning, &why);
+    try cfg.checkDevice(l, true);
+}
+
 test "the Bolt checkpoint's own config.json, when it is on this machine" {
     const io = std.testing.io;
     const dir = "/storage/models/nemotron-bolt-74b-24gb";
