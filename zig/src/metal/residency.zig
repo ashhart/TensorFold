@@ -21,7 +21,7 @@ pub const ResidencySet = struct {
     /// The share of RAM, in percent, a process's sets may wire: the rest stays with macOS and other processes.
     pub const share_percent = 70;
     /// Kept back inside that share for buffers that grow with long prompts.
-    pub const margin: u64 = 2 << 30;
+    pub const margin: u64 = @import("sys").memory_policy.margin;
 
     /// Whether a set holding `held` bytes may take `added` more, the margin inside the share of `ram` (null: never).
     pub fn fits(held: u64, added: u64, ram: ?u64) bool {

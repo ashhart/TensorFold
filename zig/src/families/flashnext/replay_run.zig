@@ -108,9 +108,27 @@ pub const Run = struct {
     pool_abs_pipe: mtl.Pipeline = undefined,
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
+    load_limit: u64 = 0,
+
+    pub fn allocate(r: *Run, n: usize) !mtl.Buffer {
+        return r.allocateOptions(n, opts);
+    }
+
+    pub fn checkGrowth(r: *const Run, n: usize) !void {
+        if (r.load_limit != 0 and !@import("flashnext_memory").growingFits(r.device.allocated(), n, r.load_limit)) {
+            std.log.warn("flash next: {d} more buffer bytes would cross the load ceiling and runtime reserve", .{n});
+            return error.FlashNextMemoryShortfall;
+        }
+    }
+
+    pub fn allocateOptions(r: *Run, n: usize, options: usize) !mtl.Buffer {
+        try r.checkGrowth(n);
+        return r.device.buffer(n, options);
+    }
+
     pub fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
-        const b = try r.device.buffer(n, opts);
+        const b = try r.allocate(n);
         errdefer b.deinit();
         @memset(b.contents()[0..n], 0);
         try r.keep(b);
@@ -162,7 +180,7 @@ pub const Run = struct {
 
     pub fn load(r: *Run, name: []const u8) !Buf {
         const e = try r.entry(name);
-        const b = try r.device.buffer(@max(e.len, 64), opts);
+        const b = try r.allocate(@max(e.len, 64));
         errdefer b.deinit();
         try readAll(e.fd, b.contents()[0..e.len], e.at);
         r.loaded += e.len;
@@ -181,7 +199,7 @@ pub const Run = struct {
         var name: [160]u8 = undefined;
         const fmt = "language_model.model.layers.1.ple.ple_embedding.ngram_embedding.{s}{d}.{s}";
         for (first..first + count) |s| total += (try r.entry(try std.fmt.bufPrint(&name, fmt, .{ r.ngram, s, suffix }))).len;
-        const b = try r.device.buffer(total, opts);
+        const b = try r.allocate(total);
         errdefer b.deinit();
         var at: usize = 0;
         for (first..first + count) |s| {

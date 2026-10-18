@@ -26,6 +26,9 @@ pub const Buffer = struct {
     pub fn deinit(_: Buffer) void {}
 };
 pub const Device = struct {
+    pub fn allocated(_: Device) u64 {
+        return 0;
+    }
     pub fn buffer(_: Device, n: usize, _: usize) !Buffer {
         const data = try allocator.alignedAlloc(u8, .fromByteUnits(256), n);
         @memset(data, 0);

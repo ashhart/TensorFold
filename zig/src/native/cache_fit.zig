@@ -40,7 +40,7 @@ pub const Ceiling = struct { bytes: u64, default: u64, asked: bool = false, capp
 pub fn ceiling(total: u64, most: u64, text: ?[]const u8) error{BadLoadLimit}!Ceiling {
     const default = total / 100 * SHARE_PERCENT;
     const t = std.mem.trim(u8, text orelse "", " \t");
-    if (t.len == 0) return .{ .bytes = default, .default = default };
+    if (t.len == 0) return .{ .bytes = @min(total, @min(most, default)), .default = default };
     const gb = std.fmt.parseFloat(f64, t) catch return error.BadLoadLimit;
     if (!std.math.isFinite(gb) or gb <= 0) return error.BadLoadLimit;
     const top: f64 = @floatFromInt(@min(total, most));

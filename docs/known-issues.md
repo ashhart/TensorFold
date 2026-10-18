@@ -53,3 +53,5 @@ release fixes it, and the release notes say which one.
   own, so an order split across a line break is not seen whole, and a page written to steer the model could still
   make it put conversation text into the path of a URL it fetches. [docs/cortheon.md](cortheon.md) says what leaves the
   machine.
+
+Qwen3.8-27B cold prefill at 64K tokens on RTX 50-series GPUs (sm_120) measures about 2% slower than 1.1.0; 32K and shorter prompts, and GB10, are at parity or faster.

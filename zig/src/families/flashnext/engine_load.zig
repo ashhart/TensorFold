@@ -45,6 +45,36 @@ pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]
 pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, window: fz.WindowSettings) !*Engine {
     try window.validate(speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null);
     try load_admission.check(gpa, io, model_dir);
+    const memory = @import("flashnext_memory");
+    const weights = try memory.weightBytes(@import("core").checkpoint_host, gpa, io, model_dir);
+    const inventory = try memory.weights_plan.read(@import("core").checkpoint_host.Checkpoint, @import("core").quant.mlx, gpa, io, model_dir);
+    const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
+    const route = try @import("pack_route.zig").plan(gpa, io, model_dir, dump_dir, home);
+    defer route.deinit(gpa);
+    const paired = speed_up != null or platform.c.getenv("TF_FLASHNEXT_TP") != null;
+    const requested = try std.math.add(u64, window.startup_extra, if (paired) fz.Tp2.startupBytes() else 0);
+    const pool = mtl.objc.Pool.push();
+    defer pool.pop();
+    const device = try mtl.Device.init();
+    errdefer device.deinit();
+    const existing = device.allocated();
+    const extra = try std.math.add(u64, requested, existing);
+    const startup = try memory.budgetLive(weights, window.capacity, inventory, extra, existing);
+    const ram = std.process.totalSystemMemory() catch null;
+    const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
+    const load_limit = memory.admitPhase(device, weights, window.capacity, ram, limit_text, extra, inventory, existing, route.needs_build) catch |err| {
+        if (err == error.FlashNextMemoryShortfall) {
+            const need = startup.forPhase(route.needs_build);
+            const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
+            const gib: f64 = 1 << 30;
+            std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, both prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
+        }
+        return err;
+    };
+    // Pack construction has no engine buffers or numerical pipelines live beside its host work.
+    const built_dir = if (route.needs_build) try pack_cache.ensure(gpa, io, model_dir, route.root.?, route.identity, PackBuilder{}) else null;
+    defer if (built_dir) |dir| gpa.free(dir);
+    const pack_dir = route.dir orelse built_dir.?;
     const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
     errdefer gpa.destroy(e);
     e.gpa = gpa;
@@ -56,7 +86,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
     e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
     e.passed = null;
-    e.snap_pool = .{};
+    e.snap_pool = .{ .load_limit = load_limit };
     e.handoff_ns = 0;
     e.peer_drops = .empty;
     e.peer_kept = .empty;
@@ -66,11 +96,9 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     e.arena_state = std.heap.ArenaAllocator.init(gpa);
     errdefer e.arena_state.deinit();
     const arena = e.arena_state.allocator();
-    const pool = mtl.objc.Pool.push();
-    defer pool.pop();
-    const device = try mtl.Device.init();
+
     const r = try arena.create(Run);
-    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window };
+    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window, .load_limit = load_limit };
     r.fused_xsum = true;
     r.serial = true;
     r.xnew = true;
@@ -91,34 +119,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
     var fit = files.keyIterator();
     while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-    // A pack from another checkpoint is refused, and every mapping unmaps once the identity text exists.
-    const identity = blk: {
-        var maps: std.ArrayList(mtl.MappedFile) = .empty;
-        errdefer for (maps.items) |*m| m.deinit();
-        var mapped_shards: std.ArrayList(pack_io.MappedShard) = .empty;
-        var sit = files.keyIterator();
-        while (sit.next()) |name| {
-            const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-            try maps.append(arena, shard);
-            try mapped_shards.append(arena, .{ .name = name.*, .size = shard.size, .bytes = shard.bytes[0..shard.size] });
-        }
-        const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
-        try maps.append(arena, index_mapped);
-        const config_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/config.json", .{model_dir}, 0));
-        try maps.append(arena, config_mapped);
-        const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], config_mapped.bytes[0..config_mapped.size], mapped_shards.items);
-        for (maps.items) |*m| m.deinit();
-        maps.clearRetainingCapacity();
-        break :blk id;
-    };
+    const identity = route.identity;
     e.identity_hash = std.hash.Wyhash.hash(0x6964, identity);
-    const owned_pack_dir = if (dump_dir == null) blk: {
-        const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
-        const root = try pack_cache.defaultRoot(arena, home);
-        break :blk try pack_cache.ensure(gpa, io, model_dir, root, identity, PackBuilder{});
-    } else null;
-    defer if (owned_pack_dir) |dir| gpa.free(dir);
-    const pack_dir = dump_dir orelse owned_pack_dir.?;
     const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{pack_dir}, 0);
     {
         const pack_file = try mtl.MappedFile.open(pack_path);

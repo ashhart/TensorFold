@@ -69,7 +69,7 @@ pub const Session = struct {
     }
 
     pub fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
-        const b = try e.r.device.buffer(@max(size, 64), fz.opts);
+        const b = try e.r.allocate(@max(size, 64));
         errdefer b.deinit();
         try s.owned.append(gpa, b);
         if (s.follow) |f| f.join(f.ctx, b);

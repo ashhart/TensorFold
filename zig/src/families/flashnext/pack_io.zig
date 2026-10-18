@@ -249,6 +249,20 @@ pub fn checkSource(gpa: std.mem.Allocator, io: Io, pack_path: []const u8, model_
     if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
 }
 
+/// Validate a supplied pack's existing identity policy using only its unpopulated mapping and header.
+pub fn checkIdentityPath(gpa: std.mem.Allocator, io: Io, path: []const u8, identity: []const u8) !void {
+    var mapped = try mapFile(io, path);
+    defer mapped.map.destroy(io);
+    defer mapped.file.close(io);
+    const hl = try headerLen(mapped.map.memory);
+    const recorded = recordedSource(gpa, mapped.map.memory[8..][0..hl]) catch |err| switch (err) {
+        error.PackHasNoSource => return, // the existing supplied-pack warning is emitted by the actual loader
+        else => return err,
+    };
+    defer gpa.free(recorded);
+    if (!std.mem.eql(u8, recorded, identity)) return error.PackSourceMismatch;
+}
+
 /// The same identity refusal for pack bytes already mapped, with `name` labelling an unmarked pack.
 pub fn checkSourceMapped(gpa: std.mem.Allocator, pack_bytes: []const u8, identity: []const u8, name: []const u8) !void {
     if (pack_bytes.len < 8) return error.BadSafetensors;

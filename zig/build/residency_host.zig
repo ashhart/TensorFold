@@ -12,6 +12,7 @@ pub fn steps(b: *std.Build) void {
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     sources.addAnonymousImport("nemotron_packed_metallib", .{ .root_source_file = b.addWriteFiles().add("residency-empty.zig", "pub const bytes = \"\";\n") });
     const owners = b.createModule(.{ .root_source_file = b.path("zig/residency_owner_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = recording }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "kernel_sources", .module = sources } } });
+    b.step("test-flashnext-vision-memory-host", "Guarded tower startup and image/video output factories without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = owners, .filters = &.{"Flash Next vision memory:"} })).step);
     _ = @import("qwen27.zig").engineModules(b, b.graph.host, recording, sources, owners);
     owners.addImport("living", b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = b.graph.host }));
     b.step("test-metal-residency-owners-host", "Actual family allocations against the recorded residency inventory").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = owners, .filters = &.{"residency owner"} })).step);

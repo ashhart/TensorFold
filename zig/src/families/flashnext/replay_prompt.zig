@@ -137,72 +137,16 @@ pub const Prompt = struct {
     }
 
     /// A prompt's own buffers for chunks of up to PMAX rows (each staggered segment has its own set).
-    pub fn buffers(r: *Run) !@FieldType(Prompt, "b") {
-        const B = struct {
-            fn of(rr: *Run, n: usize) !Buf {
-                return .{ .b = try rr.buffer(n) };
-            }
-        };
-        const R = PMAX;
-        return .{
-            .ids = try B.of(r, R * 4),
-            .pids = try B.of(r, R * 16 * 4),
-            .h = .{ try B.of(r, R * WIDE * 2), try B.of(r, R * WIDE * 2) },
-            .ssp = try B.of(r, R * 10 * 4 * 4),
-            .normed = try B.of(r, R * WIDE * 2),
-            .dn = try B.of(r, R * 324 * 2),
-            .hact = try B.of(r, R * 320 * 2),
-            .inj_a = try B.of(r, R * 4 * 2),
-            .inj_m = try B.of(r, R * 4 * 2),
-            .up = try B.of(r, R * WIDE * 2),
-            .mixed = try B.of(r, R * D * 2),
-            .p = try B.of(r, R * 16480 * 2),
-            .gout = try B.of(r, R * 6144 * 2),
-            .branch = try B.of(r, R * D * 2),
-            .cso = try B.of(r, CS_ROW),
-            .q = try B.of(r, R * 24 * 256 * 2),
-            .kout = try B.of(r, R * 2 * 256 * 2),
-            .iq = try B.of(r, R * 4 * 128 * 2),
-            .po = try B.of(r, 64),
-            .pm = try B.of(r, 64),
-            .aout = try B.of(r, R * 6144 * 2),
-            .pos = try B.of(r, R * 4),
-            .pos3 = try B.of(r, R * 12),
-            .nk = try B.of(r, R * 4),
-            .zeros = try B.of(r, R * 4),
-            .kvmeta = try B.of(r, 16),
-            .lg = try B.of(r, R * 513 * 4),
-            .pick = try B.of(r, R * 10 * 4),
-            .wts = try B.of(r, R * 10 * 4),
-            .cnt = try B.of(r, 512 * 4),
-            .off = try B.of(r, 513 * 4),
-            .cur = try B.of(r, 512 * 4),
-            .row_of = try B.of(r, R * 10 * 4),
-            .xs = try B.of(r, R * 10 * D * 2),
-            .g = try B.of(r, R * 10 * 640 * 2),
-            .u = try B.of(r, R * 10 * 640 * 2),
-            .a = try B.of(r, R * 10 * 640 * 2),
-            .ds = try B.of(r, R * 10 * D * 2),
-            .sg = try B.of(r, R * 640 * 2),
-            .su = try B.of(r, R * 640 * 2),
-            .sa = try B.of(r, R * 640 * 2),
-            .ydown = try B.of(r, R * 11 * D * 2),
-            .emb = try B.of(r, R * D * 2),
-            .kvp = try B.of(r, R * 12800 * 2),
-            .gated = try B.of(r, R * WIDE * 2),
-            .hout = try B.of(r, R * WIDE * 2),
-            .cin = try B.of(r, (PLE_TAIL + R) * WIDE * 2),
-            .rows = try B.of(r, 16),
-            .part = try B.of(r, 8 * R * 324 * 4),
-            .qn = try B.of(r, R * 16 * 128 * 4),
-            .kn = try B.of(r, R * 16 * 128 * 4),
-            .v = try B.of(r, R * 48 * 128 * 4),
-            .gg = try B.of(r, R * 48 * 4),
-            .beta = try B.of(r, R * 48 * 4),
-            .ys = try B.of(r, R * 6144 * 4),
-            .mids = try B.of(r, R * 4),
-            .n_add = try B.of(r, 16),
-        };
+    pub fn buffers(r: anytype) !@FieldType(Prompt, "b") {
+        const sizes = @import("flashnext_memory").prompt.sizes;
+        var out: @FieldType(Prompt, "b") = undefined;
+        inline for (@typeInfo(@TypeOf(out)).@"struct".field_names) |name| {
+            const n = @field(sizes, name);
+            if (comptime std.mem.eql(u8, name, "h")) {
+                inline for (0..2) |i| @field(out, name)[i] = .{ .b = try r.buffer(n[i]) };
+            } else @field(out, name) = .{ .b = try r.buffer(n) };
+        }
+        return out;
     }
 
     pub fn barrier(p: *Prompt) void {

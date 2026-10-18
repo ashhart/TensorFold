@@ -23,13 +23,22 @@ pub fn ready(gpa: std.mem.Allocator, io: Io, dir: []const u8, identity: []const 
     return true;
 }
 
-pub fn ensure(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root: []const u8, identity: []const u8, builder: anytype) ![]u8 {
+/// A lookup never creates a cache root, lock, output directory or weight pack.
+pub fn lookup(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root: []const u8, identity: []const u8) !?[]u8 {
     const legacy = try std.fs.path.join(gpa, &.{ model_dir, "zig-pack" });
     defer gpa.free(legacy);
-    if (try ready(gpa, io, legacy, identity)) return gpa.dupe(u8, legacy);
+    if (try ready(gpa, io, legacy, identity)) return try gpa.dupe(u8, legacy);
     const dir = try directory(gpa, cache_root, identity);
     errdefer gpa.free(dir);
     if (try ready(gpa, io, dir, identity)) return dir;
+    gpa.free(dir);
+    return null;
+}
+
+pub fn ensure(gpa: std.mem.Allocator, io: Io, model_dir: []const u8, cache_root: []const u8, identity: []const u8, builder: anytype) ![]u8 {
+    if (try lookup(gpa, io, model_dir, cache_root, identity)) |dir| return dir;
+    const dir = try directory(gpa, cache_root, identity);
+    errdefer gpa.free(dir);
     try Io.Dir.cwd().createDirPath(io, cache_root);
     const lock_path = try std.fmt.allocPrint(gpa, "{s}.lock", .{dir});
     defer gpa.free(lock_path);

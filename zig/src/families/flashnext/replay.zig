@@ -23,8 +23,8 @@ pub const vis_prompt = @import("vis_prompt.zig");
 
 pub const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
-pub const D = 2560;
-pub const WIDE = 4 * D;
+pub const D = @import("flashnext_memory").prompt.D;
+pub const WIDE = @import("flashnext_memory").prompt.WIDE;
 pub const LAYERS = 48;
 pub const VOCAB = 248320;
 pub const window_config = @import("window_config.zig");
@@ -33,11 +33,11 @@ pub const TRAINED = window_config.trained;
 pub const CAP_MAX = window_config.maximum;
 /// The default capacity for callers that do not request a long window.
 pub const CAP = TRAINED;
-pub const PLE_TAIL = 9;
+pub const PLE_TAIL = @import("flashnext_memory").prompt.PLE_TAIL;
 pub const GROUPS = 8;
 pub const MAXR = 16; // a decode window's rows at most
 const HEAD_TILES = VOCAB / 32; // the vocabulary head's 32-column tiles
-pub const CS_ROW = 3 * WIDE * 2; // a DeltaNet conv state row (bytes)
+pub const CS_ROW = @import("flashnext_memory").prompt.CS_ROW; // a DeltaNet conv state row (bytes)
 pub const SO_ROW = 48 * 128 * 128 * 4; // a DeltaNet recurrent state row (bytes)
 
 pub const Buf = struct {
@@ -126,7 +126,7 @@ pub const DepthRule = @import("drafts.zig").DepthRule; // drafts a round from re
 pub const copyDrafts = @import("drafts.zig").copyDrafts;
 
 /// Prompt chunks of up to PMAX rows: projections on the 6-bit tensor-unit kernels, experts sorted by expert and...
-pub const PMAX = 8192; // the prompt buffers' rows; `step` cuts the chunks
+pub const PMAX = @import("flashnext_memory").prompt.PMAX; // the prompt buffers' rows; `step` cuts the chunks
 /// A prompt selector's scores: PMAX rows by the trained window's blocks (2 GiB). Past it chunks take fewer rows.
 pub const SC_WORDS: usize = PMAX * (TRAINED / 4);
 
@@ -158,3 +158,5 @@ test "chunk rows shrink only past the trained window" {
     try std.testing.expectEqual(@as(usize, PMAX), chunkRows(200_000, PMAX));
     try std.testing.expect(chunkRows(1_000_000, PMAX) <= 2048);
 }
+
+pub const vision_memory = @import("vision_memory.zig");

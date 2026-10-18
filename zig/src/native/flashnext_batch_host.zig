@@ -61,7 +61,19 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const capacity: usize = @intCast(@min(@as(i64, @intCast(settings.capacity)), window + fx.MARGIN));
-    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, null, settings);
+    const tiers = slotContexts(gpa, capacity) catch |err| {
+        std.log.err("flash next: FLASHNEXT_SLOT_CONTEXTS is not a list of sessions: token counts of 1024 or more, CONTEXTxN for N alike, at most {d} sessions past the engine's own", .{tf.flashnext_replay.MAXR - 1});
+        return err;
+    };
+    defer if (tiers) |t| gpa.free(t);
+    var budget_settings = try @import("flashnext_memory").withCache(settings, cache_gib);
+    var more: u64 = 0;
+    if (tiers) |ts| {
+        for (ts) |c| more = try std.math.add(u64, more, Session.bytes(c));
+    } else if (streams_fixed and streams > 1) more = try std.math.mul(u64, streams - 1, Session.bytes(capacity));
+    if (more > 0) budget_settings.startup_extra = try std.math.add(u64, budget_settings.startup_extra, try std.math.add(u64, more, Session.overhead(settings.capacity) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2));
+    budget_settings = try images.budgetSettings(io, dir, vision, std.c.getenv("TF_FLASHNEXT_TP") != null, a, why, budget_settings);
+    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, null, budget_settings);
     errdefer eng.deinit();
     if (eng.r.tp != null) return error.BatchSpeedUpUnsupported;
     try eng.warm();
@@ -69,14 +81,9 @@ pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump:
     errdefer if (vis) |v| v.deinit();
     const ready = fit.footprint() orelse return error.NoMemoryReading;
     const total = fit.ram() orelse return error.NoMemoryReading;
-    const cap = try ceiling(total, eng.r.device.maxWorkingSet());
+    const cap = @min(eng.r.load_limit, try ceiling(total, eng.r.device.maxWorkingSet()));
     var plan = try fit.budgetUnder(cap, cache_gib, over, 0, a, why, "");
     const sizing = budgets.reserve(cap, ready, fit.MARGIN, plan.budget_bytes, cache_gib != null, over);
-    const tiers = slotContexts(gpa, capacity) catch |err| {
-        std.log.err("flash next: FLASHNEXT_SLOT_CONTEXTS is not a list of sessions: token counts of 1024 or more, CONTEXTxN for N alike, at most {d} sessions past the engine's own", .{tf.flashnext_replay.MAXR - 1});
-        return err;
-    };
-    defer if (tiers) |t| gpa.free(t);
     const overhead = Session.overhead(eng.r.window.capacity) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
     const available = sizing.sessions;
     if (available < overhead) {
