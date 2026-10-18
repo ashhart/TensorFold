@@ -225,7 +225,8 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const host = b.graph.host;
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
-    @import("h3_host.zig").targets(b, cuda, step);
+    // H3's library opens its checkpoint with mmap: not Windows
+    if (host.result.os.tag != .windows) @import("h3_host.zig").targets(b, cuda, step);
     const mods = family(b, host, .debug, cuda, draft_ids);
     @import("qwen_contract.zig").host(b, mods.core, step);
     const mtp_policy = b.createModule(.{ .root_source_file = b.path("zig/nemotron_mtp_policy_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "lanes", .module = mods.lanes } } });

@@ -1,6 +1,5 @@
 //! MiniMax H3 / FastH3's transformer blocks over the CUDA runtime in the checkpoint's bf16; the host owns the rest.
 const std = @import("std");
-const platform = @import("sys");
 const cuda = @import("cuda");
 const weights = @import("cuda_weights.zig");
 pub const geometry = @import("cuda_geometry.zig");
@@ -27,8 +26,8 @@ pub const stages = [_][]const u8{ "norms", "q k v gate", "heads", "routing", "at
 const attention_shared = 3 * slot_tile * head_dim * 2;
 
 pub fn seconds() f64 {
-    var ts: platform.c.timespec = undefined;
-    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts) != 0) return 0;
+    var ts: std.c.timespec = undefined;
+    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(f64, @floatFromInt(ts.sec)) + @as(f64, @floatFromInt(ts.nsec)) * 1e-9;
 }
 
