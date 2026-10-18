@@ -5,6 +5,7 @@ const common = @import("common.zig");
 const basic = @import("basic.zig");
 const ordering = @import("ordering.zig");
 const overlap = @import("overlap.zig");
+const route_bolt = @import("route_bolt.zig");
 
 pub fn main() !void {
     const pool = mtl.objc.Pool.push();
@@ -19,6 +20,7 @@ pub fn main() !void {
         .{ "concurrent dispatch with barriers", ordering.concurrentBarriers },
         .{ "indirect command buffer replay with new arguments", ordering.icbReplay },
         .{ "shared-event host/GPU overlap", overlap.eventOverlap },
+        .{ "nemotron_h_puzzle route_bolt: last slice kept at NE=240, weights vs reference", route_bolt.routeBolt },
     };
     var failed: usize = 0;
     inline for (tests) |t| {
