@@ -22,6 +22,7 @@ pub const Plan = struct { members: u64, items: u64, counts: u64, rank: u64, hist
 /// experts.cu's plan instances (cuobjdump -symbols of the experts fatbin).
 pub const symbols = struct {
     pub const plan = "_ZN10tf_experts11plan_kernelEPKiiiiPiS2_S2_";
+    pub const plan_rows = "_ZN10tf_experts9plan_rowsEPKiiiiPiS2_S2_S1_i";
     pub const rank = "_ZN10tf_experts9plan_rankEPKiiiPiS2_";
     pub const offsets = "_ZN10tf_experts12plan_offsetsEiiiPiS0_S0_";
     pub const scatter = "_ZN10tf_experts12plan_scatterEPKiiiS1_S1_Pi";
@@ -29,17 +30,29 @@ pub const symbols = struct {
 
 pub const Router = struct {
     plan_small: Function,
+    plan_rows: Function,
     plan_rank: Function,
     plan_offsets: Function,
     plan_scatter: Function,
 
     /// The plan kernels from a loaded experts module (kernels.experts).
     pub fn resolve(mod: Module) !Router {
-        return .{ .plan_small = try mod.function(symbols.plan), .plan_rank = try mod.function(symbols.rank), .plan_offsets = try mod.function(symbols.offsets), .plan_scatter = try mod.function(symbols.scatter) };
+        return .{ .plan_small = try mod.function(symbols.plan), .plan_rows = try mod.function(symbols.plan_rows), .plan_rank = try mod.function(symbols.rank), .plan_offsets = try mod.function(symbols.offsets), .plan_scatter = try mod.function(symbols.scatter) };
     }
 
     fn go(f: Function, s: Stream, grid: usize, block: u32, a: *launch_.Args) !void {
         try launch_.launch(f, .{ .grid = .{ .x = @intCast(grid), .y = 1, .z = 1 }, .block = .{ .x = block } }, s, a);
+    }
+
+    /// route over the first `rows.*` rows' pairs (`per` a row; `rows` a device int, 0: all); wide plans take all.
+    pub fn routeRows(r: Router, s: Stream, picks: u64, pairs: usize, count: usize, tile: usize, p: Plan, rows: u64, per: usize) !void {
+        if (rows == 0 or pairs > small) return r.route(s, picks, pairs, count, tile, p);
+        var a: launch_.Args = .{};
+        a.add(picks);
+        for ([_]usize{ pairs, count, tile }) |v| a.add(@as(c_int, @intCast(v)));
+        for ([_]u64{ p.members, p.items, p.counts, rows }) |v| a.add(v);
+        a.add(@as(c_int, @intCast(per)));
+        return go(r.plan_rows, s, 1, 1024, &a);
     }
 
     /// experts.route: `pairs` int32 expert ids at `picks` grouped into items of at most `tile` pairs (16 decode).

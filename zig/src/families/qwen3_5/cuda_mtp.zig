@@ -287,7 +287,7 @@ pub const Mtp = struct {
         }
         try d.proj(w.o, d.att, d.r, rows);
         try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-        try e.routedRows(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows, rows > most_window);
+        try e.routedRows(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows, rows > most_window, 0);
         try d.norm(d.h, d.r, w.norm, d.x, rows);
         if (pass == .ring) try e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(kw)), p0, cap });
     }

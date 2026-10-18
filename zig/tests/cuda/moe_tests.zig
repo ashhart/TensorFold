@@ -17,7 +17,7 @@ fn rbf(x: f32) f32 {
     return bf16f(f32bf16(x));
 }
 
-fn randBf16(r: std.Random, scale: f32) u16 {
+pub fn randBf16(r: std.Random, scale: f32) u16 {
     return f32bf16((r.float(f32) * 2.0 - 1.0) * scale);
 }
 
@@ -50,7 +50,7 @@ fn router(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
     defer dw.free();
     var dl = try cuda.DeviceBuffer.alloc(gpu.d, rows * count * 4);
     defer dl.free();
-    try f.route(s, dx.ptr, dims, rows, dw.ptr, dl.ptr, dims, count);
+    try f.route(s, dx.ptr, dims, rows, dw.ptr, dl.ptr, dims, count, 0);
     try s.synchronize();
     const got = try check.download(gpu, dl);
     defer a.free(got);
@@ -107,7 +107,7 @@ fn topk(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
     defer dp.free();
     var dw = try cuda.DeviceBuffer.alloc(gpu.d, rows * slots * 4);
     defer dw.free();
-    try f.pick(s, dl.ptr, dp.ptr, dw.ptr, rows, experts, top_k);
+    try f.pick(s, dl.ptr, dp.ptr, dw.ptr, rows, experts, top_k, 0);
     try s.synchronize();
     const got_ids = try check.download(gpu, dp);
     defer a.free(got_ids);
@@ -148,7 +148,7 @@ fn combine(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
     defer dw.free();
     var dout = try cuda.DeviceBuffer.alloc(gpu.d, rows * dims * 2);
     defer dout.free();
-    try f.combine(s, dy.ptr, true, dw.ptr, dout.ptr, rows, slots, dims);
+    try f.combine(s, dy.ptr, true, dw.ptr, dout.ptr, rows, slots, dims, 0);
     try s.synchronize();
     const got = try check.download(gpu, dout);
     defer a.free(got);
@@ -157,9 +157,9 @@ fn combine(gpu: Gpu, f: cuda.moe.Fns, s: cuda.Stream, r: std.Random) !void {
 }
 
 /// Random affine-4 experts (words, scales, biases) as the checkpoint stores them.
-const Table = struct { words: []u32, scales: []u16, biases: []u16, count: usize, n: usize, k: usize };
+pub const Table = struct { words: []u32, scales: []u16, biases: []u16, count: usize, n: usize, k: usize };
 
-fn table(a: std.mem.Allocator, r: std.Random, count: usize, n: usize, k: usize) !Table {
+pub fn table(a: std.mem.Allocator, r: std.Random, count: usize, n: usize, k: usize) !Table {
     const t: Table = .{ .words = try a.alloc(u32, count * n * k / 8), .scales = try a.alloc(u16, count * n * k / 64), .biases = try a.alloc(u16, count * n * k / 64), .count = count, .n = n, .k = k };
     for (t.words) |*w| w.* = r.int(u32);
     for (t.scales) |*v| v.* = f32bf16(0.02 + r.float(f32) * 0.03);
@@ -306,4 +306,5 @@ pub fn run(gpu: Gpu) !void {
     try topk(gpu, f, s, r);
     try combine(gpu, f, s, r);
     try pairExperts(gpu, s, r);
+    try @import("moe_live_tests.zig").run(gpu);
 }

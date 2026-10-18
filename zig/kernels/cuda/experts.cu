@@ -228,6 +228,34 @@ __global__ void __launch_bounds__(PLAN_THREADS)
   }
 }
 
+// plan_kernel over the first *rows rows' pairs (per a row): a captured bucket's padding rows get no items.
+__global__ void __launch_bounds__(PLAN_THREADS)
+    plan_rows(const int* __restrict__ picks, int P, int E, int T, int* __restrict__ members,
+              int* __restrict__ items, int* __restrict__ counts, const int* __restrict__ rows, int per) {
+  P = min(P, *rows * per);
+  __shared__ int pk[PSMALL];
+  __shared__ int cnt[EMAX];
+  __shared__ int off[EMAX];
+  const int tid = threadIdx.x;
+  for (int e = tid; e < EMAX; e += PLAN_THREADS) cnt[e] = 0;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = picks[p];
+    pk[p] = e;
+    atomicAdd(&cnt[e], 1);
+  }
+  __syncthreads();
+  const int o = place_items(tid < E ? cnt[tid] : 0, E, T, items, counts);
+  if (tid < E) off[tid] = o;
+  __syncthreads();
+  for (int p = tid; p < P; p += PLAN_THREADS) {
+    const int e = pk[p];
+    int rank = 0;
+    for (int q = 0; q < p; ++q) rank += pk[q] == e;
+    members[off[e] + rank] = p;
+  }
+}
+
 __global__ void __launch_bounds__(PLAN_THREADS)
     plan_rank(const int* __restrict__ picks, int P, int E, int* __restrict__ rank, int* __restrict__ hist) {
   __shared__ int cnt[EMAX];

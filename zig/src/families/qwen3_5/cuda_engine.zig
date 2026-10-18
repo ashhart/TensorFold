@@ -557,7 +557,7 @@ pub const Engine = struct {
                     try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });
                     try e.proj(m.down, e.act, e.r, total, prompt);
                 },
-                .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, prompt and total > most_window),
+                .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, prompt and total > most_window, t_params),
             }
             if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
                 try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
