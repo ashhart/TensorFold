@@ -7,7 +7,7 @@ struct Match { uint rows, vocab, budget, eos_count; };
 struct Result {
   uint status, stop, nonfinite, consumed_count, emitted_count, matched_count;
   uint bonus_emitted, pending_valid, pending_token, reserved;
-  uint path[16], tokens[16];
+  uint path[64], tokens[64];
 };
 kernel void tf_round_bf16_argmax(const device ushort* logits [[buffer(0)]],
                                  device Pick* picks [[buffer(1)]],
@@ -60,7 +60,7 @@ kernel void tf_tree_round_match(const device uint* tokens [[buffer(0)]],
   out.pending_valid = 0;
   out.pending_token = 0;
   out.reserved = 0;
-  for (uint i = 0; i < 16; i++) { out.path[i] = 0; out.tokens[i] = 0; }
+  for (uint i = 0; i < 64; i++) { out.path[i] = 0; out.tokens[i] = 0; }
   for (uint row = 0; row < p.rows; row++) {
     if (tokens[row] >= p.vocab || (row == 0 ? parents[row] != -1 : parents[row] < 0 || parents[row] >= int(row))) {
       out.status = 2; out.stop = 3; return;

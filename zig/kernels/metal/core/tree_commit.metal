@@ -1,7 +1,7 @@
 // Accepted metadata and activation movement copy only authoritative verified-path indices and BF16 bits.
 #include <metal_stdlib>
 using namespace metal;
-struct TfCommitResult { uint status, stop, nonfinite, consumed_count, emitted_count, matched_count, bonus_emitted, pending_valid, pending_token, reserved; uint path[16]; uint tokens[16]; };
+struct TfCommitResult { uint status, stop, nonfinite, consumed_count, emitted_count, matched_count, bonus_emitted, pending_valid, pending_token, reserved; uint path[64]; uint tokens[64]; };
 struct TfCommitMeta { uint rows, slot; };
 struct TfCommitTaps { uint rows, width, capacity, planes; };
 struct TfCommitHead { uint rows, width, stride; };

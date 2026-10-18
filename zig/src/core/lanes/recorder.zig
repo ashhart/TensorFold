@@ -1,5 +1,6 @@
 //! Drafter training data from serving: each committed row's token, position and tapped features, files per stream.
 const std = @import("std");
+const platform = @import("sys");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const be = @import("backend.zig");
@@ -44,7 +45,7 @@ pub const Recorder = struct {
         defer root.close(io);
         var k: u32 = 0;
         while (true) : (k += 1) {
-            const name = try std.fmt.allocPrint(gpa, "{d}-{d}", .{ std.c.getpid(), k });
+            const name = try std.fmt.allocPrint(gpa, "{d}-{d}", .{ platform.c.getpid(), k });
             errdefer gpa.free(name);
             root.createDir(io, name, .default_dir) catch |e| switch (e) {
                 error.PathAlreadyExists => {
@@ -122,7 +123,7 @@ pub const Recorder = struct {
         for (exts, &files) |ext, *f| {
             const path = try std.fmt.allocPrint(r.gpa, "{s}{s}", .{ base, ext });
             defer r.gpa.free(path);
-            f.* = try r.space.createFile(r.io, path, .{ .exclusive = true });
+            f.* = try r.createNew(path);
             made += 1;
         }
         r.streams.putAssumeCapacity(s, .{ .base = base, .files = files });
@@ -194,9 +195,17 @@ pub const Recorder = struct {
         try r.create(try std.fmt.allocPrint(a, "{s}.json", .{o.base}), text.written());
     }
 
+    /// A new file at `path`, never through a link there: Windows' exclusive create follows a dangling one.
+    fn createNew(r: *Recorder, path: []const u8) !Io.File {
+        if (comptime @import("builtin").os.tag == .windows) {
+            if (r.space.statFile(r.io, path, .{ .follow_symlinks = false })) |_| return error.PathAlreadyExists else |_| {}
+        }
+        return r.space.createFile(r.io, path, .{ .exclusive = true });
+    }
+
     /// A new file in the recorder's folder with these bytes; one already there is an error, never overwritten.
     fn create(r: *Recorder, path: []const u8, bytes: []const u8) !void {
-        const f = try r.space.createFile(r.io, path, .{ .exclusive = true });
+        const f = try r.createNew(path);
         defer f.close(r.io);
         try f.writeStreamingAll(r.io, bytes);
     }
@@ -229,7 +238,7 @@ pub const Recorded = struct {
 
     pub fn backend(x: *Recorded) be.Backend {
         const v = x.inner.vtable;
-        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
+        x.table = .{ .prefill = prefill, .prefill_step = if (v.prefill_step != null) prefillStep else null, .prefill_many = if (v.prefill_many != null) prefillMany else null, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .unspeculate = if (v.unspeculate != null) unspeculate else null, .probabilities = if (v.probabilities != null) probabilities else null, .tree = if (v.tree != null) tree else null, .alternatives = if (v.alternatives != null) alternatives else null, .prepare_features = if (v.prepare_features != null) prepareFeatures else null, .features = features, .first_row = if (v.first_row != null) firstRow else null, .first_masked = if (v.first_masked != null) firstMasked else null, .held = if (v.held != null) held else null, .prompt_rows = v.prompt_rows, .release = release };
         return .{ .ptr = x, .vtable = &x.table };
     }
 
@@ -246,6 +255,12 @@ pub const Recorded = struct {
         const done = try x.inner.vtable.prefill_step.?(x.inner.ptr, s);
         if (done) x.recorder.prompt(x.inner, s);
         return done;
+    }
+    fn prefillMany(p: *anyopaque, ss: []const *Stream) anyerror!bool {
+        const x = of(p);
+        if (!try x.inner.vtable.prefill_many.?(x.inner.ptr, ss)) return false;
+        for (ss) |s| x.recorder.prompt(x.inner, s); // each prompt's rows, as after its own prefill
+        return true;
     }
     fn first(p: *anyopaque, s: *Stream, position: u64) anyerror!u64 {
         return of(p).inner.first(s, position);

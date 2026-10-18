@@ -2,6 +2,7 @@
 const std = @import("std");
 const api = @import("engine_api");
 const errors = @import("errors.zig");
+const json = @import("json");
 const images = @import("images.zig");
 const media_fetch = @import("media_fetch.zig");
 const Cx = errors.Cx;
@@ -213,4 +214,31 @@ test "group times as Python's f\"{t:.1f} seconds\"" {
             try seconds(&buf, c[0]),
         );
     }
+}
+
+fn noPrepare(_: *anyopaque, _: std.mem.Allocator, _: []const u8, _: u32) anyerror!api.PreparedImage {
+    return error.Unused;
+}
+
+fn noVideo(_: *anyopaque, _: std.mem.Allocator, _: api.VideoSource, _: u32, _: u32) anyerror!api.PreparedVideo {
+    return error.Unused;
+}
+
+test "a request's videos are limited by the engine's offer, not by a constant" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var cx: Cx = .{ .a = a };
+    var dummy: u8 = 0;
+    const offer: api.VideoOffer = .{ .prepare = noVideo, .video_token = 8, .group_open = 6, .group_close = 7, .video_tokens = 64, .max_videos = 1, .max_frames = 256 };
+    const v: api.Vision = .{ .ctx = &dummy, .prepare = noPrepare, .image_token = 9, .image_tokens = 64, .max_images = 4, .video = offer };
+    const two = switch (try json.parseText(a,
+        \\[{"role": "user", "content": [{"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}},
+        \\  {"type": "video_url", "video_url": {"url": "data:video/mp4;base64,YQ=="}}]}]
+    )) {
+        .ok => |m| m,
+        .err => return error.TestUnexpectedResult,
+    };
+    try std.testing.expectError(error.Refused, images.expand(v, null, images.MarkText.text(), &cx, two, &[_]u32{ 8, 8 }, 0));
+    try std.testing.expectEqualStrings("a request supports at most 1 videos", cx.message);
 }

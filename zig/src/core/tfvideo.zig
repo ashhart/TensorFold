@@ -30,6 +30,8 @@ const Fns = struct {
 /// Beside the server (zig-out/native/lib, where `zig build video` installs it), then the loader's own search path.
 const names: []const [:0]const u8 = if (builtin.os.tag == .macos)
     &.{ "@executable_path/../lib/libtfvideo.dylib", "libtfvideo.dylib" }
+else if (builtin.os.tag == .windows)
+    &.{"tfvideo.dll"}
 else
     &.{"libtfvideo.so"};
 
@@ -44,7 +46,7 @@ fn load() ?Fns {
     if (lib_failed) return null;
     lib_failed = true;
     var dl = for (names) |name| {
-        break std.DynLib.open(name) catch continue;
+        break @import("sys").DynLib.open(name) catch continue;
     } else return null;
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";

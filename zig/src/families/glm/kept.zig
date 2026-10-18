@@ -20,6 +20,12 @@ pub const Expire = struct {
     f: *const fn (ctx: *anyopaque, saved: *anyopaque) void,
 };
 
+/// The prompt cache's answer for eviction: whether a lookup still borrows a state's restore.
+pub const Borrowed = struct {
+    ctx: *anyopaque,
+    f: *const fn (ctx: *anyopaque, saved: *anyopaque) bool,
+};
+
 /// Keep slot `i`'s prompt state at `at` tokens (its pass stands there) as snapshot `id` (0: the next); `home`: resident.
 pub fn save(sl: *Slots, i: u32, at: u32, id: u32, home: bool) !*snapshot.Snap {
     const slot = try sl.slotAt(i);

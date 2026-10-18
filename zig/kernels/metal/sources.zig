@@ -5,6 +5,14 @@ pub const nemotron = @import("nemotron/kernels.zig");
 
 pub const qwen35 = @import("qwen3_5/kernels.zig");
 pub const qwen35_layout = @embedFile("qwen3_5/layout.metal");
+/// Gemma 4 dense decode glue around the core lane projections (families/gemma4/kernels.zig).
+pub const gemma4_glue = @embedFile("gemma4/glue.metal");
+/// Gemma 4 decode glue as the reg lane kernel's prologues and epilogue (families/gemma4/weights.zig).
+pub const gemma4_fused = @embedFile("gemma4/fused.metal");
+/// Gemma 4 prompt attention on the tensor units (families/gemma4/kernels.zig).
+pub const gemma4_prompt_attention = @embedFile("gemma4/prompt_attention.metal");
+/// Gemma 4's image tower: gemm_nax and its glue (families/gemma4/vision.zig).
+pub const gemma4_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("gemma4/vision.metal");
 
 /// LFM2-MoE: embedding, norms, the short conv, attention, the route and the experts' glue.
 pub const lfm2 = @embedFile("lfm2/lfm2.metal");
@@ -96,12 +104,15 @@ pub const glm = @import("glm/kernels.zig");
 pub const glm_glue = @embedFile("glm_glue.metal");
 /// Its products at the widths the generated kernels do not read, after core_row_projection (glm/wide.zig).
 pub const glm_rows = @embedFile("glm_rows.metal");
+pub const glm_gather = @embedFile("glm_gather.metal");
 /// GLM-5.3-Flash's latent attention for rows that read every key: 64 heads as one matrix on the tensor units.
 pub const glm_attn = @embedFile("glm_attn.metal");
 /// GLM-5.3-Flash's image tower: the prefill GEMM template's projections and attention products, then its own steps.
 pub const glm_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("glm_vision.metal");
 /// The Qwen-VL image tower (core/qwen_vl): the prefill GEMM template's products, then its own steps.
 pub const core_qwen_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("core/qwen_vision.metal");
+/// Qwen-Image-2.1's transformer: the prefill attention template, then its own steps (projections: core_qwen_vision).
+pub const qwen_image = @embedFile("prefill/attention_nax.metal") ++ @embedFile("qwen_image.metal");
 /// A prompt chunk's KDA layer in three passes, appended to the generated kda_rows source (its helpers).
 pub const glm_kda_prompt = @embedFile("glm_kda_prompt.metal");
 /// GLM-5.3-Flash speed-up mode's exchange kernels (families/glm/ep.zig).
@@ -130,10 +141,33 @@ pub const core_lane_order = @embedFile("core/lane_order.metal");
 /// Lane rows attending a shared context through an explicit mask (core/shared_attention.zig).
 pub const core_shared_attention = @embedFile("core/shared_attention.metal");
 /// The core DeltaNet kernels (core/deltanet_kernels.zig).
-pub const core_deltanet = @embedFile("core/deltanet.metal");
+pub const core_deltanet = @embedFile("core/deltanet.metal") ++ "\n" ++ @embedFile("core/deltanet_slots.metal");
 /// 4-bit projections on simdgroup-matrix tiles before the M5 (core/simd_qmm.zig).
 pub const core_simd_qmm = @embedFile("core/simd_qmm.metal");
 /// 2- to 8-bit projections on the same tiles, rows written at a stride (core/simd_qmm_bits.zig).
 pub const core_simd_qmm_bits = @embedFile("core/simd_qmm_bits.metal");
+/// Step-5's glue at StepFun's rounding points: embed, norms, q/k rotation, gate, SwiGLU, residual adds.
+pub const step5_glue = @embedFile("step5/glue.metal");
+/// Step-5's sparse indexer (summaries, scores, top-k) and its sliding, sparse and dense attention.
+pub const step5_sparse = @embedFile("step5/sparse.metal");
+/// Step-5's prompt attention on the tensor units (a KV group's 16 heads one operand; nax.h inlined at load).
+pub const step5_attend_nax = @embedFile("step5/attend_nax.metal");
+/// Step-5's image tower (perception encoder, downsampler convs, projector) on gemm_nax's tensor-unit GEMMs.
+pub const step5_vision = @embedFile("prefill/gemm_nax.metal") ++ @embedFile("step5/vision.metal");
 /// The kernel contract's planted controls: one kernel breaking each gate (zig/tests/contract/).
 pub const core_contract_controls = @embedFile("core/contract_controls.metal");
+
+/// Gemma-only rounded weights and fused lane arithmetic; shared sources retain the released bytes.
+pub const gemma4_affine_mm = @embedFile("gemma4/affine_mm.metal");
+pub const gemma4_lane_projection = @embedFile("gemma4/lane_projection.metal");
+
+/// Drama 3's kernels (drama3.metallib is built ahead of time); the kernel contract compiles them from this text.
+pub const drama3 = struct {
+    pub const common = @embedFile("drama3/d3_common.h");
+    pub const dense = @embedFile("drama3/dense.metal");
+    pub const gdn = @embedFile("drama3/gdn.metal");
+    pub const attn = @embedFile("drama3/attn.metal");
+    pub const moe = @embedFile("drama3/moe.metal");
+    pub const sample = @embedFile("drama3/sample.metal");
+    pub const codec = @embedFile("drama3/codec.metal");
+};

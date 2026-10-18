@@ -49,7 +49,7 @@ pub fn summarize(cpu: ?[]const u8, memory: ?u64, gpus: []const Gpu, mlx: bool) H
         };
     } else if (gpus.len > 0) {
         memory_type = for (gpus) |g| {
-            if (!std.mem.eql(u8, g.name, "NVIDIA GB10")) break "dedicated";
+            if (!std.mem.eql(u8, g.name, "NVIDIA GB10") and !std.mem.startsWith(u8, g.name, "NVIDIA RTX Spark")) break "dedicated";
         } else "unified";
     }
     const complete = cpu != null and memory != null and gpus.len > 0 and for (gpus) |g| {
@@ -68,7 +68,7 @@ pub fn modelName(a: Allocator, text: []const u8) ?[]const u8 {
         words.appendSlice(a, w) catch return null;
     }
     const name = dropClock(words.items);
-    if (name.len > 120) return null;
+    if (name.len > 120 or std.mem.eql(u8, name, "NVIDIA NPU")) return null;
     if (appleChip(name)) return name;
     for ([_][]const u8{ "Intel", "AMD", "NVIDIA", "Tesla", "Quadro", "GeForce", "ARM", "Ampere", "Qualcomm" }) |prefix| {
         if (!std.mem.startsWith(u8, name, prefix)) continue;

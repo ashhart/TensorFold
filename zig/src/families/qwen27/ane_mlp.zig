@@ -6,7 +6,7 @@ const cp = @import("core").checkpoint_metal;
 const Lane = @import("core").segments.Lane;
 const Config = @import("config.zig").Config;
 
-/// Program rows: a prompt chunk of up to 128 rows, zero past its last (rows never depend on each other).
+/// Program rows: 128 rows of a prompt pass a call, zero past its last (rows never depend on each other).
 pub const width = 128;
 
 pub const Share = struct {
@@ -14,10 +14,12 @@ pub const Share = struct {
     /// Intermediate columns [0, columns) of every layer's MLP run on the Neural Engine; the GPU computes the rest.
     columns: u32,
     programs: []ane.Program,
+    /// A layer's request for each 128-row slice of a prompt pass: [layer][slice], each on its slice's surfaces.
     requests: []ane.Request,
-    input: ane.Surface,
-    output: ane.Surface,
-    /// The down projection's fp32 partial sums over the GPU's columns, [128][hidden].
+    slices: u32,
+    inputs: []ane.Surface,
+    outputs: []ane.Surface,
+    /// The down projection's fp32 partial sums over the GPU's columns, [slices * 128][hidden].
     partial: mtl.Buffer,
     event: mtl.SharedEvent,
     queue: mtl.Queue,
@@ -36,29 +38,41 @@ pub const Share = struct {
     }
 
     /// Every layer's program from the affine rows (w = q * scale + bias, rounded once to fp16), columns [0, c).
-    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32) !*Share {
-        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate) return error.BadAneShare;
+    pub fn init(a: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, checkpoint: *const cp.Checkpoint, c: Config, columns: u32, slices: u32) !*Share {
+        if (columns == 0 or columns % 64 != 0 or columns > c.intermediate or slices == 0 or slices > 16) return error.BadAneShare;
         const s = try a.create(Share);
         errdefer a.destroy(s);
         const programs = try a.alloc(ane.Program, c.layers);
         errdefer a.free(programs);
-        const requests = try a.alloc(ane.Request, c.layers);
+        const requests = try a.alloc(ane.Request, c.layers * slices);
         errdefer a.free(requests);
-        const partial = try device.buffer(width * c.hidden * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+        const partial = try device.buffer(slices * width * c.hidden * 4, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
         errdefer partial.deinit();
         const event = try device.sharedEvent();
         errdefer event.deinit();
-        const input = try ane.Surface.init(device, c.hidden * width * 2);
-        errdefer input.deinit();
-        const output = try ane.Surface.init(device, c.hidden * width * 2);
-        errdefer output.deinit();
-        s.* = .{ .allocator = a, .columns = columns, .programs = programs, .requests = requests, .input = input, .output = output, .partial = partial, .event = event, .queue = queue };
+        const inputs = try a.alloc(ane.Surface, slices);
+        errdefer a.free(inputs);
+        const outputs = try a.alloc(ane.Surface, slices);
+        errdefer a.free(outputs);
+        var made: usize = 0;
+        errdefer for (0..made) |i| {
+            inputs[i].deinit();
+            outputs[i].deinit();
+        };
+        while (made < slices) : (made += 1) {
+            inputs[made] = try ane.Surface.init(device, c.hidden * width * 2);
+            outputs[made] = ane.Surface.init(device, c.hidden * width * 2) catch |err| {
+                inputs[made].deinit();
+                return err;
+            };
+        }
+        s.* = .{ .allocator = a, .columns = columns, .programs = programs, .requests = requests, .slices = slices, .inputs = inputs, .outputs = outputs, .partial = partial, .event = event, .queue = queue };
         // layers build on 8 threads: dequantizing dominates once the compiler's cache holds the programs
         var b = Build{ .a = a, .s = s, .checkpoint = checkpoint, .c = c, .ready = try a.alloc(bool, c.layers) };
         defer a.free(b.ready);
         @memset(b.ready, false);
         errdefer for (b.ready, 0..) |ok, layer| if (ok) {
-            requests[layer].deinit();
+            for (requests[layer * slices ..][0..slices]) |r| r.deinit();
             programs[layer].deinit();
         };
         var threads: [8]std.Thread = undefined;
@@ -84,8 +98,12 @@ pub const Share = struct {
         for (s.programs) |p| p.deinit();
         s.allocator.free(s.requests);
         s.allocator.free(s.programs);
-        s.input.deinit();
-        s.output.deinit();
+        for (s.inputs, s.outputs) |i, o| {
+            i.deinit();
+            o.deinit();
+        }
+        s.allocator.free(s.inputs);
+        s.allocator.free(s.outputs);
         s.partial.deinit();
         s.event.deinit();
         for (s.committed.items) |cb| mtl.objc.release(cb.id);
@@ -93,11 +111,16 @@ pub const Share = struct {
         s.allocator.destroy(s);
     }
 
-    /// Queues `layer`'s program; the GPU signals [0] once inputs are written and waits for [1] before the partial.
-    pub fn next(s: *Share, layer: usize) [2]u64 {
+    /// A prompt pass's rows the share takes at most: its slices of 128.
+    pub fn capacity(s: *const Share) u32 {
+        return s.slices * width;
+    }
+
+    /// Queue the layer on each used slice; GPU signals input readiness and waits for the ANE output.
+    pub fn next(s: *Share, layer: usize, used: u32) [2]u64 {
         const t = s.calls;
         s.calls += 1;
-        s.ring[t % s.ring.len].store(@intCast(layer), .release);
+        s.ring[t % s.ring.len].store(@intCast(layer | (@as(usize, used) << 16)), .release);
         return .{ 2 * t + 1, 2 * t + 2 };
     }
 
@@ -144,8 +167,9 @@ pub const Share = struct {
             while (s.event.value() < 2 * t + 1) : (spins += 1) {
                 if (spins < 2_000_000) std.atomic.spinLoopHint() else if (s.event.wait(2 * t + 1, 100)) break else if (s.stop.load(.acquire)) return;
             }
-            const layer = s.ring[t % s.ring.len].load(.acquire);
-            s.requests[layer].run() catch s.failed.store(true, .release);
+            const entry = s.ring[t % s.ring.len].load(.acquire);
+            const layer = entry & 0xFFFF;
+            for (s.requests[layer * s.slices ..][0..@min(entry >> 16, s.slices)]) |r| r.run() catch s.failed.store(true, .release);
             s.event.set(2 * t + 2);
         }
     }
@@ -181,7 +205,9 @@ const Build = struct {
             try dequant(&rows, b.checkpoint, layer, "up_proj", columns, h, w1[columns * h ..]);
             try dequant(&rows, b.checkpoint, layer, "down_proj", h, columns, weights.values(1, h * columns));
             b.s.programs[layer] = try ane.Program.init(mil, weights.bytes);
-            b.s.requests[layer] = b.s.programs[layer].request(b.s.input, b.s.output) catch |err| {
+            const own = b.s.requests[layer * b.s.slices ..][0..b.s.slices];
+            for (own, b.s.inputs, b.s.outputs, 0..) |*r, i, o, made| r.* = b.s.programs[layer].request(i, o) catch |err| {
+                for (own[0..made]) |x| x.deinit();
                 b.s.programs[layer].deinit();
                 return err;
             };

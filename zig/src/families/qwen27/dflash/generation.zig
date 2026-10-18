@@ -7,7 +7,9 @@ const gpuFailed = @import("../decode_round.zig").gpuFailed;
 const Round = @import("../round_plan.zig").Round;
 const Draft = @import("runtime_model.zig").Model;
 pub const Proposer = struct { ptr: *anyopaque, call: *const fn (*anyopaque, u32, u32) anyerror!@import("selector.zig").Tree };
-pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, matched: usize, min_rows: u32 = 0 };
+pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, matched: usize, min_rows: u32 = 0, extended: u32 = 0, extension_landed: u32 = 0 };
+/// What the context says follows `path` (the pending token first), at most `max` tokens; borrowed until the next call.
+pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32 };
 pub const Generation = struct {
     allocator: std.mem.Allocator,
     runner: *Runner,
@@ -18,6 +20,7 @@ pub const Generation = struct {
     matcher: @import("round_gpu.zig").Matcher,
     commit: @import("core").tree_commit_gpu.Ops,
     keep: ?mtl.CommandBuffer = null, // the last round's cache and state commit, running behind the drafter
+    pending: ?u32 = null, // runRound's next token as the last accept picked it; anything else that moves the target clears it
     pub fn init(a: std.mem.Allocator, runner: *Runner, draft: *Draft) !Generation {
         if (runner.model != draft.backend.target or runner.model.config.hidden != draft.graph.config.hidden or runner.model.config.layers != draft.graph.config.target_layers) return error.TargetBinding;
         runner.capture_taps = true;
@@ -43,6 +46,21 @@ pub const Generation = struct {
         g.taps.deinit();
     }
     fn absorb(g: *Generation, path: []const u32) !void {
+        try g.absorbRows(path);
+        if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+    }
+    /// A prompt pass's rows into the drafter, 128 a call (its frame's); the target's pass may be longer.
+    fn absorbChunk(g: *Generation, rows: usize) !void {
+        var path: [128]u32 = undefined;
+        var first: usize = 0;
+        while (first < rows) : (first += path.len) {
+            const n = @min(path.len, rows - first);
+            for (path[0..n], 0..) |*index, i| index.* = @intCast(first + i);
+            try g.absorbRows(path[0..n]);
+        }
+        if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
+    }
+    fn absorbRows(g: *Generation, path: []const u32) !void {
         std.debug.assert(g.keep == null);
         @memcpy(g.kept.slice(u32, path.len), path);
         const cb = g.runner.model.queue.commandBuffer();
@@ -53,39 +71,43 @@ pub const Generation = struct {
         cb.wait();
         if (gpuFailed(cb, "a draft taps gather")) return error.DraftTapGpuFailure;
         try g.draft.absorb(.{ .buf = g.taps }, @intCast(path.len));
-        if (g.draft.committed_end != g.runner.offsets[0]) return error.BadDraftPosition;
     }
     pub fn advance(g: *Generation, token: u32) !void {
+        g.pending = null;
         std.debug.assert(g.keep == null);
         try (TargetSession.Session{ .runner = g.runner }).step(token);
         try g.absorb(&.{0});
     }
     pub fn promptChunk(g: *Generation, ids: []const u32, last: bool) !void {
+        g.pending = null;
         std.debug.assert(g.keep == null);
-        if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > 128) return error.BadDraftContext;
+        if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
         try (TargetSession.Session{ .runner = g.runner }).promptChunk(ids, last);
-        var path: [128]u32 = undefined;
-        for (path[0..ids.len], 0..) |*index, i| index.* = @intCast(i);
-        try g.absorb(path[0..ids.len]);
+        try g.absorbChunk(ids.len);
     }
     /// `promptChunk` with decoded rows' arithmetic (an earlier reply's tokens).
     pub fn decodeChunk(g: *Generation, ids: []const u32, last: bool) !void {
+        g.pending = null;
         std.debug.assert(g.keep == null);
-        if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > 128) return error.BadDraftContext;
+        if (g.runner.failed or g.draft.backend.failed or g.draft.committed_end != g.runner.offsets[0] or ids.len == 0 or ids.len > g.runner.model.frame.capacity) return error.BadDraftContext;
         try (TargetSession.Session{ .runner = g.runner }).decodeChunk(ids, last);
-        var path: [128]u32 = undefined;
-        for (path[0..ids.len], 0..) |*index, i| index.* = @intCast(i);
-        try g.absorb(path[0..ids.len]);
+        try g.absorbChunk(ids.len);
     }
     pub fn prefill(g: *Generation, ids: []const u32, chunk: usize) !void {
+        g.pending = null;
         std.debug.assert(g.keep == null);
-        if (g.runner.failed or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > 128) return error.BadDraftContext;
+        if (g.runner.failed or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != 0 or g.runner.offsets[0] != 0 or chunk == 0 or chunk > g.runner.model.frame.capacity) return error.BadDraftContext;
         var first: usize = 0;
         while (first < ids.len) {
-            const count = @min(ids.len - first, chunk);
+            const count = @min(ids.len - first, g.runner.promptRows(@intCast(chunk)));
             try g.promptChunk(ids[first..][0..count], first + count == ids.len);
             first += count;
         }
+    }
+    /// Ends a pending keep and forgets the picked token, before anything but runRound uses the slot.
+    pub fn settle(g: *Generation) !void {
+        g.pending = null;
+        return g.finishKeep();
     }
     /// A round's keep runs behind the drafter; it ends before the next verify and before a run returns.
     fn finishKeep(g: *Generation) !void {
@@ -148,11 +170,12 @@ pub const Generation = struct {
         if (count == 0 or count > 16 or eos.len > 16) return error.BadDraftOptions;
         return g.runImpl(count, false, nodes, eos, already_delivered);
     }
-    pub fn runRound(g: *Generation, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool) !Result {
+    /// `extend`: a copy from the context shares the tree's agreeing nodes and adds up to `extra` rows past them.
+    pub fn runRound(g: *Generation, remaining: u32, nodes: usize, eos: []const u32, already_delivered: bool, extend: ?Extender, extra: u32) !Result {
         if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != g.runner.offsets[0] or g.draft.committed_end == 0 or nodes == 0 or nodes > 15 or eos.len > 16) return error.BadDraftOptions;
         for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;
         if (remaining == 0) return .{ .tokens = try g.allocator.alloc(u32, 0), .rounds = 0, .verified = 0, .matched = 0 };
-        const pending = try (TargetSession.Session{ .runner = g.runner }).greedy();
+        const pending = g.pending orelse try (TargetSession.Session{ .runner = g.runner }).greedy();
         if (!already_delivered) {
             const tokens = try g.allocator.alloc(u32, 1);
             tokens[0] = pending;
@@ -164,22 +187,45 @@ pub const Generation = struct {
         const offered: u32 = @intCast(@min(nodes, available - 1));
         var tree = if (g.proposer) |proposer| try proposer.call(proposer.ptr, pending, offered) else try g.draft.propose(pending, offered);
         defer tree.deinit();
-        const parents = try tree.verifyParents(g.allocator);
+        const drafted = try tree.verifyParents(g.allocator);
+        defer g.allocator.free(drafted);
+        // a copy from the root shares the tree's nodes while they agree, and its rest hangs below the last shared one
+        const room = @min(extra, @as(u32, @intCast(@import("core").tree_round.max_rows - drafted.len)), available - 1 - @as(u32, @intCast(tree.tokens.len)));
+        const copy: []const u32 = if (extend) |x| (if (room > 0) try x.call(x.ptr, &.{pending}, room + @as(u32, @intCast(tree.tokens.len))) else &.{}) else &.{};
+        var last: i32 = 0;
+        var shared: usize = 0;
+        follow: for (copy) |token| {
+            for (drafted[1..], tree.tokens, 1..) |parent, drafted_token, row| if (parent == last and drafted_token == token) {
+                last = @intCast(row);
+                shared += 1;
+                continue :follow;
+            };
+            break;
+        }
+        const copied = copy[shared..@min(copy.len, shared + room)];
+        const parents = try g.allocator.alloc(i32, drafted.len + copied.len);
         defer g.allocator.free(parents);
-        const ids = try g.allocator.alloc(u32, tree.tokens.len + 1);
+        @memcpy(parents[0..drafted.len], drafted);
+        for (parents[drafted.len..], drafted.len..) |*p, row| p.* = if (row == drafted.len) last else @intCast(row - 1);
+        const ids = try g.allocator.alloc(u32, parents.len);
         defer g.allocator.free(ids);
         ids[0] = pending;
-        @memcpy(ids[1..], tree.tokens);
+        @memcpy(ids[1..drafted.len], tree.tokens);
+        @memcpy(ids[drafted.len..], copied);
         var round = try Round.init(g.allocator, &.{.{ .slot = 0, .start = g.runner.offsets[0], .capacity = g.runner.capacity, .ids = ids, .parents = parents }}, @intCast(g.runner.model.config.conv_kernel), g.runner.slots, @intCast(g.runner.model.config.vocab));
         defer round.deinit();
         errdefer g.finishKeep() catch {};
+        try g.finishKeep();
         try g.runner.verifyHead(&round, .all);
         const accepted = try g.accept(&round, ids, parents, remaining, eos);
-        try g.finishKeep();
-        if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(16, remaining)) return error.EmptyAcceptedDraft;
-        return .{ .tokens = try g.allocator.dupe(u32, accepted.tokens), .rounds = 1, .verified = ids.len, .matched = accepted.matched, .min_rows = @intCast(ids.len) };
+        g.pending = accepted.pending;
+        if (accepted.path.len == 0 or accepted.tokens.len == 0 or accepted.tokens.len > @min(@import("core").tree_round.max_rows, remaining)) return error.EmptyAcceptedDraft;
+        var landed: u32 = 0;
+        for (accepted.path) |row| landed += @intFromBool(row >= drafted.len);
+        return .{ .tokens = try g.allocator.dupe(u32, accepted.tokens), .rounds = 1, .verified = ids.len, .matched = accepted.matched, .min_rows = @intCast(ids.len), .extended = @intCast(copied.len), .extension_landed = landed };
     }
     fn runImpl(g: *Generation, count: usize, force_length: bool, nodes: usize, eos_override: ?[]const u32, already_delivered: bool) !Result {
+        g.pending = null;
         if (g.runner.failed or g.runner.active != null or g.runner.offsets[0] == 0 or g.draft.backend.failed or g.draft.backend.frame.active or g.draft.backend.transaction != null or g.draft.committed_end != g.runner.offsets[0] or g.draft.committed_end == 0 or nodes == 0 or nodes > 15 or count > 65536) return error.BadDraftOptions;
         const eos: []const u32 = if (force_length) &.{} else eos_override orelse g.runner.model.config.eos[0..g.runner.model.config.eos_count];
         for (eos) |token| if (token >= g.runner.model.config.vocab) return error.BadDraftOptions;

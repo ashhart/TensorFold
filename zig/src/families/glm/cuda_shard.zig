@@ -35,7 +35,7 @@ pub const Share = struct {
             .kda = try span(c.kda_heads, 1, rank, world),
             .mla = try span(c.mla_heads, 1, rank, world),
             .dense = try span(c.dense_inter, unit, rank, world),
-            .moe = try span(c.moe_inter, unit, rank, world),
+            .moe = try span(c.moe_inter, if (c.exl3) 128 else unit, rank, world), // EXL3 tiles and rotations: 128
             .shared = try span(c.shared_inter, unit, rank, world),
             .vocab = try span(c.vocab, c.head_unit, rank, world),
         };

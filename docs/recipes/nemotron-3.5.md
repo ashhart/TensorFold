@@ -51,9 +51,10 @@ cuts, so cold and resumed prompts use the same chunks; templates without markers
 
 ## CUDA
 
-This section describes the Python 0.6.6 engine's CUDA family; its `--tp`, `--rank`, `--master`, `--mtp-drafts` and
-`--prefill-fp8` flags are that engine's, and the native binary refuses them. The native CUDA build serves Nemotron on
-one GPU, from the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests sharing each round; see the
+This section describes the Python 0.6.6 engine's CUDA family; its `--tp`, `--rank`, `--master` and `--prefill-fp8`
+flags are that engine's, and the native binary refuses them. The native CUDA build serves Nemotron on one GPU, from
+the MLX 4-bit checkpoint or NVIDIA's NVFP4 export, with concurrent requests sharing each round, and its own
+`--mtp-drafts` (at most 15 for this model) and `--mtp-confidence` set MTP drafts in lone and shared rounds; see the
 [native CUDA runbook](../../RUNBOOK.md#linux-and-cuda).
 
 CUDA reads this model's MLX 4-bit checkpoint only; NVFP4 and EXL3 exports of it are not read yet. Its prompt matmuls
@@ -80,6 +81,11 @@ Requests take turns. The engine retains prompt and reply states for prefix reuse
 uses a separate serial engine. The default requested context is 16,384 tokens, subject to startup
 memory admission; `--context` sets an explicit window. Inspect the reported capacity before sending
 long requests. Both backends use the same public draft list below.
+
+## Native Omni video
+
+The maintained CUDA Bolt family shares RADIO with image input. See the [video recipe](nemotron-omni-video.md)
+for checkpoint requirements, request parts, limits and qualification status.
 
 ## Draft vocabulary provenance
 
@@ -213,3 +219,16 @@ tokens a reply, greedy, two alternated rounds, `tools/bench_concurrent.py --alon
 Every concurrent reply equaled its solo run and every solo run equaled `"draft": false` (832 replies checked a
 binary). One stream decodes the same as before: 505 and 347 tok/s on the two decode prompts. A 64-row cap alone,
 measured on the way, gave most of the 32-session gain and a quarter of the 64-session one.
+
+## Stream memory on CUDA
+
+The native CUDA engine keeps one sequence of its own at the full `--context` window, as before; its captured graphs
+and the lone stream's fast path read it. Every other stream takes its key and value rows from one pool of 512-row
+pages (`zig/src/core/kv_pool.zig`), which the engine fills from the room its own sequence and the weights leave:
+each further stream's fixed part (Mamba states, window scratch, its page table: 64 MiB), the prompt cache's snapshot
+slots (48 MiB each, made at load) and its copied rows come first, then pages, never more than every stream could hold
+at once. A request reserves `ceil((prompt + max_tokens + 16) / 512)` pages when it is admitted: a 2,048-token prompt
+with 4,096 reply tokens takes 13 pages (45.5 MiB) instead of a whole window. A request whose pages do not fit waits
+until a stream ends. The attention kernels read the pages through a table at a fixed device address, so the graphs
+keep their addresses. The startup line shows the pool. `TF_KV_PAGES=0` gives every stream a window again;
+`TF_KV_PAGES=all` puts every stream on pages (for checks).
