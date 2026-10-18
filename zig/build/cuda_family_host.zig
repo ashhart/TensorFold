@@ -37,6 +37,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const cost_run1 = b.addRunArtifact(b.addTest(.{ .root_module = cache, .filters = &.{"window cost cache:"} }));
     b.step("test-qwen35-cost-cache-host", "Real width-loop cache misses and hits without a GPU").dependOn(&cost_run1.step);
     step.dependOn(&cost_run1.step);
+    const verify_contract = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_verify_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
+    b.step("test-qwen35-verify-contract-host", "Wider affine verify contracts, FP64 and exact gate controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verify_contract })).step);
+    const verify = b.createModule(.{ .root_source_file = b.path("zig/qwen35_verify_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } } });
+    b.step("test-qwen35-verify-host", "Actual verify matmul launches, row buckets and weight-pass counts without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = verify })).step);
     const live = b.createModule(.{ .root_source_file = b.path("zig/qwen35_live_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } } });
     const live_run = b.addRunArtifact(b.addTest(.{ .root_module = live }));
     live_run.has_side_effects = true;

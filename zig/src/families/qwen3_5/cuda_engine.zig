@@ -339,7 +339,7 @@ pub const Engine = struct {
         try cuda.launch.launch(f, cfg, e.stream, &a);
     }
 
-    /// out (rows, n) = x (rows, k) through `l`: 16-row decode tiles (a row's bits batch-independent) or a prompt GEMM.
+    /// out (rows, n) = x (rows, k) through `l`: row tiles with batch-independent bits or a prompt GEMM.
     pub fn proj(e: *Engine, l: Proj, x: u64, out: u64, rows: usize, prompt: bool) !void {
         return e.projSums(l, x, e.xs, out, rows, prompt, e.tables.ptr + params_at);
     }
@@ -361,14 +361,18 @@ pub const Engine = struct {
             .an => |q| e.wide.prompt(e.stream, x, q, out, rows),
         };
         if (sums) try e.run(e.fns.sums, .{ rows, (k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, xs, @as(c_int, @intCast(k)), params });
+        const tile: usize = switch (l) {
+            .a4 => e.affine.verifyRows(),
+            .an => 16,
+        };
         var at: usize = 0;
-        while (at < rows) : (at += 16) {
-            const n = @min(16, rows - at);
+        while (at < rows) : (at += tile) {
+            const n = @min(tile, rows - at);
             const xa = x + at * k * 2;
             const sa = xs + at * (k / 64) * 4;
             const oa = out + at * n_out * 2;
             switch (l) {
-                .a4 => |q| try e.affine.decode(e.stream, xa, sa, q, oa, n),
+                .a4 => |q| try e.affine.verify(e.stream, xa, sa, q, oa, n),
                 .an => |q| try e.wide.decode(e.stream, xa, sa, q, oa, n),
             }
         }

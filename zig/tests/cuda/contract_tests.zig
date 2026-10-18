@@ -131,13 +131,19 @@ pub fn run(gpu: check.Gpu) !void {
     defer for (&mm) |*m| m.deinit();
     for (&mm) |*m| {
         const k = m.kernel() orelse {
-            std.debug.print("N/A  cuda qmm_group (cluster tile): needs sm_90 or newer, this GPU is sm_{d}\n", .{cap});
+            std.debug.print("N/A  {s}: cluster path needs sm_90 or newer, this GPU is sm_{d}\n", .{ mm_k.spec(m.kind).name, cap });
             continue;
         };
         if (cap < 90 and (m.kind == .lane_gemv or m.kind == .lane_gemv_split))
             std.debug.print("N/A  {s} replacement bits: cluster baseline needs sm_90; gate 3 uses the float64 bound\n", .{k.spec.name});
         try kernels.append(a, k);
     }
+    var verify_controls: [2]mm_k.Mm = undefined;
+    for ([_]mm_k.Kind{ .verify32_bits, .verify32_fp64 }, &verify_controls) |kind, *m| {
+        m.* = .{ .rig = .{ .gpu = gpu, .s = s }, .kind = kind, .sm = cap, .affine4 = &affine4, .truncate_verify = true };
+    }
+    defer for (&verify_controls) |*m| m.deinit();
+    for (&verify_controls) |*m| if (m.kernel()) |k| try kernels.append(a, k);
     var mx = [_]mx_k.Product{
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane, .clusters = true },
         .{ .rig = .{ .gpu = gpu, .s = s }, .lane = &lane_reduce, .clusters = false },
