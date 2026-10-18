@@ -8,6 +8,7 @@ const receipt = @import("benchmark_receipt.zig");
 const fake = @import("benchmark_fake.zig");
 const check = @import("benchmark_check.zig");
 const suite = @import("benchmark_suite.zig");
+const manifest = @import("benchmark_manifest.zig");
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const families = [_]api.Family{.{ .model_type = "qwen3_5", .formats = &.{} }};
@@ -60,6 +61,65 @@ test "a cached repo takes its revision from the snapshot directory; a drafter re
     try std.testing.expectEqualStrings("example/draft", m.drafter_repo_id.?);
     try std.testing.expect((try model.describe(a, std.testing.io, "example/model", dir, false, &.{}, dir)).drafter_repo_id == null);
     try std.testing.expect((try model.describe(a, std.testing.io, "example/model", dir, false, &.{}, null)).family == null);
+}
+
+test "a server's manifest names the checkpoint a managed run records: the snapshot's revision and the same hashes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try fake.tmpPath(a, &tmp);
+    const dir = try checkpoint(a, root, &.{ "models--example--model", "snapshots", revision }, config);
+    const managed = try model.describe(a, std.testing.io, "example/model", dir, false, &families, null);
+    var env: std.process.Environ.Map = .init(a);
+    const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", "rocm", dir);
+    const attached = (try manifest.parse(a, try json.stringify(a, doc, .{}), "rocm")).?;
+    try std.testing.expectEqualStrings(managed.revision.?, attached.revision.?);
+    try std.testing.expectEqualStrings(managed.config_sha256.?, attached.config_sha256.?);
+    try std.testing.expectEqualStrings(managed.tokenizer_sha256.?, attached.tokenizer_sha256.?);
+    // the GPU facts a managed run records on this host, cores included, are the ones the server attests
+    const probe = host.detect(a, std.testing.io, &env, "rocm");
+    try std.testing.expectEqual(probe.hardware.gpus.len, attached.hardware.gpus.len);
+    for (probe.hardware.gpus, attached.hardware.gpus) |want, got| {
+        try std.testing.expectEqualStrings(want.name, got.name);
+        try std.testing.expectEqual(want.memory_bytes, got.memory_bytes);
+        try std.testing.expectEqual(want.cores, got.cores);
+    }
+}
+
+test "the attested revision: the loaded snapshot's; the environment's only where the directory names none; never a disagreeing one" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const other = "fedcba9876543210fedcba9876543210fedcba98";
+    const snapshot = "/cache/models--example--model/snapshots/" ++ revision;
+    var env: std.process.Environ.Map = .init(a);
+    try std.testing.expectEqualStrings(revision, manifest.attestedRevision(&env, snapshot).?);
+    try std.testing.expect(manifest.attestedRevision(&env, "/models/private-checkpoint") == null and manifest.attestedRevision(&env, "") == null);
+    try std.testing.expect(manifest.attestedRevision(&env, "/cache/snapshots/main") == null);
+    try env.put("TF_CHECKPOINT_REVISION", revision);
+    try std.testing.expectEqualStrings(revision, manifest.attestedRevision(&env, snapshot).?);
+    try env.put("TF_CHECKPOINT_REVISION", other);
+    try std.testing.expect(manifest.attestedRevision(&env, snapshot) == null);
+    try std.testing.expectEqualStrings(other, manifest.attestedRevision(&env, "/models/private-checkpoint").?);
+    try std.testing.expectEqualStrings(other, manifest.attestedRevision(&env, "").?);
+    try std.testing.expectEqualStrings(revision, model.snapshotRevision(snapshot).?);
+    for ([_][]const u8{ "/cache/snapshots/" ++ "0123456789ABCDEF0123456789abcdef01234567", "/cache/snapshots/0123", "/cache/other/" ++ revision, revision }) |no|
+        try std.testing.expect(model.snapshotRevision(no) == null);
+}
+
+test "a manifest's GPU cores reach the attached receipt; cores past the board's range refuse the manifest" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const body =
+        \\{"schema_version":1,"runtime":{"tensorfold_version":"1.1.1","backend":"rocm","python_version":"none","platform":"linux"},"model":{},"hardware":{"cpu_model":"AMD RYZEN AI MAX+ 395 with Radeon 8060S","system_memory_bytes":134217728000,"memory_type":"unified","gpus":[{"name":"AMD Radeon 8060S Graphics","memory_bytes":128849018880,"cores":40}],"gpu_count":1,"source":"detected"}}
+    ;
+    const facts = (try manifest.parse(a, body, "rocm")).?;
+    try std.testing.expectEqual(@as(?u64, 40), facts.hardware.gpus[0].cores);
+    const too_many = try std.mem.replaceOwned(u8, a, body, "\"cores\":40", "\"cores\":100001");
+    try std.testing.expect((try manifest.parse(a, too_many, "rocm")) == null);
 }
 
 test "a known drafter is named only for a target of its family and shape" {
@@ -245,6 +305,23 @@ test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no d
         return error.TestUnexpectedResult;
     }
     try std.testing.expect(v.get("runtime").?.get("dependencies").?.object.count() == 0);
+    // what the board validates in the CPU, GPU and checkpoint fields passes its publish rules; only the backend waits
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try checkpoint(a, try fake.tmpPath(a, &tmp), &.{ "snapshots", revision }, config);
+    const checkpoint_facts = try model.describe(a, std.testing.io, "example-org/test-model", dir, false, &families, null);
+    try std.testing.expect(checkpoint_facts.revision != null and checkpoint_facts.config_sha256 != null and checkpoint_facts.tokenizer_sha256 != null);
+    const settings: receipt.Settings = .{ .tokens = 2, .repetitions = 1, .temperatures = &.{0}, .serial = false, .context_tokens = null, .managed = true, .rank_count = 1 };
+    const rocm_receipt = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", checkpoint_facts, runtime, probe.hardware, settings, &.{sample});
+    try std.testing.expect(!check.receipt(rocm_receipt, .publish, 1767225600000, &why));
+    try std.testing.expectEqualStrings(check.rocm_local, why);
+    var board_backend = runtime;
+    board_backend.backend = "cuda";
+    const same_facts = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", checkpoint_facts, board_backend, probe.hardware, settings, &.{sample});
+    if (!check.receipt(same_facts, .publish, 1767225600000, &why)) {
+        std.debug.print("rocm identity failed the publish rules: {s}\n", .{why});
+        return error.TestUnexpectedResult;
+    }
 }
 
 test "rocm GPUs: discrete cards are dedicated, visible-device indices select, and missing rocminfo leaves the GPUs unknown" {

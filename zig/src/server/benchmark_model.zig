@@ -37,9 +37,7 @@ pub fn describe(a: Allocator, io: std.Io, target: []const u8, dir: []const u8, l
 pub fn describeConfig(a: Allocator, io: std.Io, target: []const u8, dir: []const u8, local_dir: bool, families: []const api.Family, drafter: ?[]const u8, config: ?Config) !Model {
     const repo: ?[]const u8 = if (!local_dir and check.repoId(target)) target else null;
     var out: Model = .{ .repo_id = repo, .local = repo == null };
-    const name = std.fs.path.basename(dir);
-    const parent = std.fs.path.basename(std.fs.path.dirname(dir) orelse "");
-    if (repo != null and std.mem.eql(u8, parent, "snapshots") and (name.len == 40 or name.len == 64) and lowerHex(name)) out.revision = name;
+    if (repo != null) out.revision = snapshotRevision(dir);
     if (config) |c| out.config_sha256 = try hexDigest(a, c.bytes);
     const value: Value = if (config) |c| c.value else .null;
     if (modelType(value)) |kind| for (families) |f| {
@@ -72,6 +70,15 @@ pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
         if (st.kind == .file) total +|= st.size;
     }
     return total;
+}
+
+/// The commit a Hugging Face cache snapshot directory is named for (``.../snapshots/<40 or 64 lowercase hex>``), else null.
+/// A managed run's receipt and a server's manifest both take the checkpoint revision from here.
+pub fn snapshotRevision(dir: []const u8) ?[]const u8 {
+    const name = std.fs.path.basename(dir);
+    const parent = std.fs.path.basename(std.fs.path.dirname(dir) orelse "");
+    if (std.mem.eql(u8, parent, "snapshots") and (name.len == 40 or name.len == 64) and lowerHex(name)) return name;
+    return null;
 }
 
 /// An attached server's facts: only the public ID it was asked for.

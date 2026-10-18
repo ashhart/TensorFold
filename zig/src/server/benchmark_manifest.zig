@@ -141,7 +141,13 @@ fn hardwareOf(a: Allocator, v: Value) ?receipt.Hardware {
             if (n < 0) return null;
             break :blk @as(?u64, @intCast(n));
         } else null;
-        slot.* = .{ .name = name, .memory_bytes = mem };
+        const cores = if (g.get("cores")) |c| blk: {
+            if (c == .null) break :blk null;
+            const n = c.int64() orelse return null;
+            if (n < 0 or n > 100000) return null;
+            break :blk @as(?u64, @intCast(n));
+        } else null;
+        slot.* = .{ .name = name, .memory_bytes = mem, .cores = cores };
     }
     const count = v.get("gpu_count") orelse return null;
     if (count != .null) {
@@ -181,6 +187,15 @@ fn revisionFromEnv(env: *const std.process.Environ.Map) ?[]const u8 {
     return raw;
 }
 
+/// The revision a server attests: its snapshot directory's name, as a managed run records it. ``TF_CHECKPOINT_REVISION``
+/// stands in only for a directory that names none; one that disagrees with the loaded snapshot leaves the revision out.
+pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const u8) ?[]const u8 {
+    const told = revisionFromEnv(env);
+    const loaded = (if (model_dir.len > 0) model_facts.snapshotRevision(model_dir) else null) orelse return told;
+    if (told) |t| if (!std.mem.eql(u8, t, loaded)) return null;
+    return loaded;
+}
+
 /// The document a running server can attest. Hardware is this process's own probe.
 pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, version: []const u8, backend: []const u8, model_dir: []const u8) !Value {
     const probe = host.detect(a, io, env, backend);
@@ -195,7 +210,7 @@ pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.M
     if (probe.driver) |d| try runtime.put(a, "driver", .{ .string = d });
     try top.put(a, "runtime", .{ .object = runtime });
     const model = try json.newObject(a);
-    if (revisionFromEnv(env)) |rev| try model.put(a, "revision", .{ .string = rev });
+    if (attestedRevision(env, model_dir)) |rev| try model.put(a, "revision", .{ .string = rev });
     if (model_dir.len > 0) {
         if (fileSha(a, io, try std.fs.path.join(a, &.{ model_dir, "config.json" }))) |h| try model.put(a, "config_sha256", .{ .string = h });
         if (model_facts.tokenizerHash(a, io, model_dir)) |h| try model.put(a, "tokenizer_sha256", .{ .string = h });
@@ -211,7 +226,7 @@ pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.M
         const one = try json.newObject(a);
         try one.put(a, "name", .{ .string = g.name });
         if (g.memory_bytes) |n| try one.put(a, "memory_bytes", try json.intValue(a, n)) else try one.put(a, "memory_bytes", .null);
-        try one.put(a, "cores", .null);
+        if (g.cores) |n| try one.put(a, "cores", try json.intValue(a, n)) else try one.put(a, "cores", .null);
         slot.* = .{ .object = one };
     }
     try hardware.put(a, "gpus", .{ .array = gpus });
