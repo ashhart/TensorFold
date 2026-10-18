@@ -1,5 +1,6 @@
 //! slide.learn end to end over a scripted model: a lesson given up between two kept ones leaves the later one's checks.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const model_text = @import("model_text.zig");
@@ -194,30 +195,32 @@ const Model = struct {
 
 /// One POST /v1/slide/learn through the router, its whole event stream read.
 fn learnOne(srv: *Server, text: []const u8) !void {
-    var pair: [2]std.c.fd_t = undefined;
-    if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
-    defer _ = std.c.close(pair[0]);
-    defer _ = std.c.close(pair[1]);
+    var pair: [2]platform.posix.socket_t = undefined;
+    if (platform.windows) {
+        try platform.posix.socketpair(&pair);
+    } else if (platform.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketPair;
+    defer _ = platform.posix.system.close(pair[0]);
+    defer _ = platform.posix.system.close(pair[1]);
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
     const body = try std.fmt.allocPrint(a, "{{\"text\": \"{s}\"}}", .{text});
     const head = try std.fmt.allocPrint(a, "POST /v1/slide/learn HTTP/1.1\r\nHost: t\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
-    _ = std.c.write(pair[0], head.ptr, head.len);
+    _ = platform.posix.system.write(pair[0], head.ptr, head.len);
     var conn = try Conn.init(testing.allocator, pair[1], "test");
     defer conn.deinit();
     conn.timeouts = .{ .idle_ms = 5000, .read_ms = 5000, .write_ms = 5000 };
     if (try conn.readRequest(a, false) != .ready) return error.BadRequest;
     const Drain = struct {
-        fn run(fd: std.c.fd_t) void {
+        fn run(fd: platform.posix.socket_t) void {
             var buf: [4096]u8 = undefined;
-            while (std.c.read(fd, &buf, buf.len) > 0) {}
+            while (platform.posix.system.read(fd, &buf, buf.len) > 0) {}
         }
     };
     const drain = try std.Thread.spawn(.{}, Drain.run, .{pair[0]});
     routes.dispatch(srv, &conn, a);
-    _ = std.c.shutdown(pair[1], std.posix.SHUT.WR);
-    _ = std.c.shutdown(pair[0], std.posix.SHUT.WR);
+    _ = platform.posix.system.shutdown(pair[1], platform.posix.SHUT.WR);
+    _ = platform.posix.system.shutdown(pair[0], platform.posix.SHUT.WR);
     drain.join();
 }
 
