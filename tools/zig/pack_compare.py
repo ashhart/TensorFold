@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import struct
 import sys
 from pathlib import Path
@@ -9,6 +10,8 @@ from pathlib import Path
 import numpy as np
 
 PACKS = ("pack.safetensors", "pack_mlx.safetensors", "pack_mtp_mlx.safetensors")
+WIDTHS = {"BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2, "F16": 2, "BF16": 2,
+          "U32": 4, "I32": 4, "F32": 4, "U64": 8, "I64": 8, "F64": 8}
 
 
 def load_header(path: Path) -> tuple[dict, int]:
@@ -20,9 +23,25 @@ def load_header(path: Path) -> tuple[dict, int]:
 
 def read_tensor(path: Path, base: int, entry: dict) -> np.ndarray:
     start, end = entry["data_offsets"]
+    shape = entry["shape"]
+    if type(start) is not int or type(end) is not int or start < 0 or end < start:
+        raise ValueError("invalid tensor byte range")
+    if not isinstance(shape, list) or any(type(n) is not int or n < 0 for n in shape):
+        raise ValueError("invalid tensor shape")
+    width = WIDTHS.get(entry["dtype"])
+    if width is None:
+        raise ValueError("unsupported tensor dtype")
+    expected = math.prod(shape) * width
+    if end - start != expected:
+        raise ValueError(f"tensor byte range has {end - start} bytes, shape and dtype require {expected}")
+    if base + end > path.stat().st_size:
+        raise ValueError("tensor byte range extends beyond the file")
     with path.open("rb") as f:
         f.seek(base + start)
-        return np.frombuffer(f.read(end - start), dtype=np.uint8)
+        raw = f.read(expected)
+    if len(raw) != expected:
+        raise ValueError(f"short tensor read: expected {expected} bytes, read {len(raw)}")
+    return np.frombuffer(raw, dtype=np.uint8)
 
 
 def as_float(raw: np.ndarray, dtype: str, count: int) -> np.ndarray:
@@ -68,11 +87,14 @@ def main() -> int:
                 clean = False
                 differ += 1
                 continue
-            a = read_tensor(built_path, built_base, mine)
-            b = read_tensor(reference_path, reference_base, theirs)
-            if a.shape != b.shape:  # padded tails from a shorter file
-                n = min(a.size, b.size)
-                a, b = a[:n], b[:n]
+            try:
+                a = read_tensor(built_path, built_base, mine)
+                b = read_tensor(reference_path, reference_base, theirs)
+            except ValueError as err:
+                print(f"{pack} {name}: INVALID {err}")
+                clean = False
+                differ += 1
+                continue
             diff = np.flatnonzero(a != b)
             if diff.size == 0 and a.size == b.size:
                 identical += 1

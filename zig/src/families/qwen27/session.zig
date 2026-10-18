@@ -13,7 +13,7 @@ pub const Session = struct {
         defer s.runner.model.kernels.prompt = false;
         var first: usize = 0;
         while (first < ids.len) {
-            const end = @min(ids.len, first + chunk);
+            const end = @min(ids.len, first + s.runner.promptRows(@intCast(chunk)));
             try s.feed(ids[first..end], if (end == ids.len) .last else .none);
             first = end;
         }

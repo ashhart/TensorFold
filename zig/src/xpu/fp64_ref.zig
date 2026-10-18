@@ -3,6 +3,7 @@ const std = @import("std");
 const core = @import("core");
 const q = @import("qwen27.zig");
 const fwd = @import("forward.zig");
+const fp64_gdn = @import("fp64_gdn.zig");
 const ze = q.ze;
 const Dev = q.Dev;
 const Acts = q.Acts;
@@ -28,6 +29,9 @@ var runner: *q.Runner = undefined;
 pub fn arm(r: *q.Runner) void {
     runner = r;
     fwd.gemm_probe = probe;
+    fwd.gdn_probe = fp64_gdn.probe;
+    std.debug.print("| mixer | layer | output | path | values | rel L2 | rel L2 vs bf16(FP64) | rel L2, last 64 rows | " ++
+        "max abs / rms | worst head rel L2 | ≤ 1 bf16 ulp |\n|---|---|---|---|---|---|---|---|---|---|---|\n", .{});
     std.debug.print("| checkpoint | layer | projection | path | outputs | max abs | max abs / rms | rel L2 | " ++
         "rel L2 vs fp16(FP64) | worst column rel L2 (column) | max ulp | 0 ulp | ≤ 1 ulp |\n" ++
         "|---|---|---|---|---|---|---|---|---|---|---|---|---|\n", .{});
@@ -35,6 +39,7 @@ pub fn arm(r: *q.Runner) void {
 
 pub fn disarm() void {
     fwd.gemm_probe = null;
+    fwd.gdn_probe = null;
 }
 
 const Stats = struct {
@@ -507,7 +512,7 @@ fn headTops(h: []const f16, T: usize) ![]Top {
     return tops;
 }
 
-/// The FP64 forward's top tokens, kept in XPU_FIDELITY_CACHE (a file) when set: they do not depend on the kernels.
+/// The reference's top tokens (int4 GEMMs as fp16(FP64), the rest the device's), kept in XPU_FIDELITY_CACHE when set.
 fn referenceTops(r: *q.Runner, ids: []const u32) ![]Top {
     const T = ids.len;
     const path = if (std.c.getenv("XPU_FIDELITY_CACHE")) |v| v else null;
@@ -557,7 +562,7 @@ pub fn fidelity(r: *q.Runner, ids: []const u32) !void {
         for (logits, 0..) |v, c| push(&dec[i], @intCast(c), v);
         if (dec[i].t1 != r.last) return error.DecodeArgmaxMismatch;
     }
-    std.debug.print("fidelity: {d} positions, FP64 forward {d:.0} s, decode {d:.0} s\n", .{ T, t1 - t0, q.now() - t1 });
+    std.debug.print("fidelity: {d} positions, reference forward (FP64 GEMMs) {d:.0} s, decode {d:.0} s\n", .{ T, t1 - t0, q.now() - t1 });
     var min_margin: f64 = std.math.inf(f64);
     for (ref) |t| min_margin = @min(min_margin, t.v1 - t.v2);
     std.debug.print("fidelity: smallest FP64 margin {e:.2}\n", .{min_margin});

@@ -73,7 +73,7 @@ chat fields that shape the prompt (`tools`, `reasoning_effort`, `chat_template_k
 request, images and videos expanded. `/detokenize` takes `tokens` and returns `prompt`.
 In the Python 0.6.6 engine, `--vision` lets supported Qwen3.5/3.8 dense checkpoints accept `image_url` content parts
 alongside text in user messages and in tool results (`role: "tool"`), such as an agent's screenshots. The native
-server reads images for GLM-5.3-Flash and Qwen3.8-27B on Metal, with data URLs, and public HTTPS URLs under
+server reads images for GLM-5.3-Flash, Qwen3.8-27B and Gemma 4 31B on Metal, with data URLs, and public HTTPS URLs under
 `--vision-urls` ([image input](vision.md#the-native-server)); for GLM-5.3-Flash it also takes `video_url` parts in
 user messages ([video](vision.md#video-on-the-native-server)).
 See [image input](vision.md) for data URLs, public image URLs, limits and cache behavior.
@@ -232,7 +232,7 @@ additional calls omitted from the response. Otherwise both servers stream each Q
 delta with the call's id and name, then its arguments in pieces; a call the streamer can't follow arrives whole at
 the end.
 
-With `tool_choice: "required"`, or a function named in `tool_choice`, the reply's answer (after any think block
+On the Python 0.6.6 server, with `tool_choice: "required"`, or a function named in `tool_choice`, the reply's answer (after any think block
 or thought channel) opens a call to an offered tool. The server replaces the first answer token that isn't
 whitespace with the tool-call opener (`<tool_call>`, or Gemma 4's `<|tool_call>`) and the template's text before a
 tool name, then holds the name to the offered tools: a token that leaves them is replaced by the rest of the first
@@ -264,16 +264,34 @@ macOS arm64, Linux x86_64 and Linux aarch64; from source, `zig build grammar -Dx
 v0.2.8 checkout (`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar`) into
 `zig-out/native/lib` on macOS and `zig-out/lib` on Linux. The server looks in `../lib` beside its binary, then beside
 it, then on the loader's path, and loads it at the first structured request; without it, everything else serves and a
-structured request gets HTTP 400. Nemotron (Metal and CUDA) and Qwen3.5-2B (Metal) enforce it; other native engines
-answer a structured request with HTTP 400. Drafting stays on: the drafts the head holds on the GPU come back to the host
-before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key, closing markup),
-and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies are the same.
+structured request gets HTTP 400. The native engines listed below expose token grammar support; other engines
+refuse structured requests. Drafting stays on: the drafts the head holds on the GPU come
+back to the host before each verify, the grammar cuts the ones it rejects and drafts the text it forces itself (a key,
+closing markup), and each row's logits are masked before its draw, so drafted, `"draft": false` and concurrent replies
+are the same.
 
-On the native server, `tool_choice: "required"` and a named function are a grammar too, on the engines above: the answer
-is one or more calls in the chat template's own markup (`<tool_call>`, with Qwen3-Coder XML parameters as Nemotron and
-Qwen3.5 write them, or a JSON object), each call to an offered tool (the named one only) with its arguments inside the
-tool's parameter schema; blank lines may come between calls, prose may not. `parallel_tool_calls: false` allows exactly
-one call. With thinking on, the grammar starts after the think end.
+On the native server, `/v1/chat/completions` and `/v1/responses` enforce `tool_choice: "required"` and a named
+function with the engine's token grammar. Chat uses `{"type":"function","function":{"name":"lookup"}}`;
+Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are allowed; an unknown name or a required
+call with no tools gets HTTP 400. `auto` remains optional, and `none` hides the tools.
+
+The constrained answer contains one or more complete calls and no prose outside them. Arguments follow the offered
+parameter schema. Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
+`<|tool_call>call:NAME{...}<tool_call|>` with JSON arguments, which the tool parser accepts. An unrecognized template
+uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
+whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
+starts after the think-end token. A reply cut short by `max_tokens` can remain incomplete and ends as `length`.
+Drafting stays enabled and uses the same grammar masks as plain decoding.
+
+This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
+Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5 and LFM2 MoE on Metal have that capability; Qwen27 on Intel also has it.
+Qwen3.8-27B applies the grammar to its first draw, each verified row and each branch of its draft proposals.
+Structured requests use its shared lane core, including when the ordinary lone-request serial optimization is enabled.
+CUDA determines support from its loaded backend's mask hook. Flash Next Metal (`flashnext-zig`) and GLM Metal
+(`glm-zig`, `glm-dsa-zig`) lack that hook and refuse required/named choices before generation with HTTP 400, for example:
+`backend 'flashnext-zig' cannot enforce tool_choice "required" or a named function: it has no token grammar support; send "auto" or "none"`.
+The server does not silently turn a required call into `auto`. Installing the grammar library does not add a missing
+backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),

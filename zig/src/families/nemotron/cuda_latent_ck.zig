@@ -10,7 +10,7 @@ const Precision = @import("config.zig").Precision;
 
 /// Whether the checkpoint's math runs: as asked, else by default for a latent ModelOpt checkpoint on Blackwell.
 pub fn wanted(ctx: *const cuda.Context, c: Config, asked: ?Precision) !bool {
-    const built = c.format == .modelopt and c.latent > 0;
+    const built = c.format == .modelopt and c.latent > 0 and !c.bolt;
     const major: u32 = @intCast(try ctx.attribute(.compute_capability_major));
     const p = asked orelse return built and major >= kern.ck_major;
     if (p == .full) return false;
@@ -49,26 +49,54 @@ pub fn rowsAt(c: Config, rows: usize, base: u64) Rows {
     return .{ .lat = base, .hid = base + s[0], .act = base + s[0] + s[1], .sact = base + s[0] + s[1] + s[2] };
 }
 
-/// One share set's expert rows into `out` (fp32), as latent.partials lays them out: routed pairs, then shared rows.
-pub fn partials(o: kern.Ops, t: Tables, plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+/// Plan items' pairs for a pass of `rows` token rows: the prompt kernels' from cuda.ck.prompt_tokens rows, else 16.
+fn tile(rows: usize) usize {
+    return if (rows >= cuda.ck.prompt_tokens) cuda.ck.prompt_tile else 16;
+}
+
+/// Whether a pass's down kernels sum each pair's shares to bf16: prompt passes on one GPU, which holds every share.
+pub fn summed(c: Config, rows: usize) bool {
+    return rows >= cuda.ck.prompt_tokens and c.world == 1;
+}
+
+/// The routed pairs' rows into `out` (fp32 a share, or summed); prompt passes' up writes down's NVFP4 rows itself.
+pub fn routed(o: kern.Ops, r: Layer, plan: kern.Plan, act: u64, ck4: u64, picks: u64, lat: u64, rows: usize, own: usize, c: Config, out: u64) !void {
     const q = if (o.k.ck) |*x| x else return error.CheckpointMathNotLoaded;
     if (ck4 == 0) return error.NoCheckpointRows;
     const at = rowsAt(c, @import("cuda_state.zig").pass_rows, ck4);
     const pairs = rows * c.top_k * own;
-    const r = t.routed;
+    const t = tile(rows);
     try q.quant4(o.s, lat, c.latent, rows, c.latent, r.up_act, at.lat);
-    try o.plan(picks, pairs, r.experts, 16, plan);
-    const items = kern.maxItems(pairs, r.experts, 16);
+    try o.plan(picks, pairs, r.experts, t, plan);
+    const items = kern.maxItems(pairs, r.experts, t);
+    if (t == cuda.ck.prompt_tile) {
+        try q.promptUp(o.s, r, at.lat, rows, c.top_k * own, plan, pairs, at.act, items);
+        if (summed(c, rows)) return q.promptSum(o.s, r, at.act, pairs, plan, out, items, own);
+        return q.promptDown(o.s, r, at.act, pairs, plan, out, items);
+    }
     try q.up(o.s, r, at.lat, rows, c.top_k * own, plan, act, items);
     try q.quant4(o.s, act, r.width, pairs, r.width, r.down_act, at.act);
-    try q.down(o.s, r, at.act, pairs, plan, out, items);
-    const h = t.shared;
+    try q.down(o.s, r, at.act, pairs, rows, plan, out, items);
+}
+
+/// The shared expert's (row, share) rows into `out` (fp32 a share, or summed), on `shared_plan` where set.
+pub fn shared(o: kern.Ops, h: Layer, plan: kern.Plan, shared_plan: ?kern.Plan, sact: u64, sids: u64, ck4: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    const q = if (o.k.ck) |*x| x else return error.CheckpointMathNotLoaded;
+    if (ck4 == 0) return error.NoCheckpointRows;
+    const at = rowsAt(c, @import("cuda_state.zig").pass_rows, ck4);
     try q.quant4(o.s, hidden, c.hidden, rows, c.hidden, h.up_act, at.hid);
-    try o.plan(sids, rows * own, own, 16, plan);
-    const sh_items = kern.maxItems(rows * own, own, 16);
-    try q.up(o.s, h, at.hid, rows, own, plan, sact, sh_items);
+    const t = tile(rows);
+    const sp = shared_plan orelse plan;
+    if (shared_plan == null) try o.plan(sids, rows * own, own, t, sp);
+    const sh_items = kern.maxItems(rows * own, own, t);
+    if (t == cuda.ck.prompt_tile) {
+        try q.promptUp(o.s, h, at.hid, rows, own, sp, rows * own, at.sact, sh_items);
+        if (summed(c, rows)) return q.promptSum(o.s, h, at.sact, rows * own, sp, out, sh_items, own);
+        return q.promptDown(o.s, h, at.sact, rows * own, sp, out, sh_items);
+    }
+    try q.up(o.s, h, at.hid, rows, own, sp, sact, sh_items);
     try q.quant4(o.s, sact, h.width, rows * own, h.width, h.down_act, at.sact);
-    try q.down(o.s, h, at.sact, rows * own, plan, out + @as(u64, pairs) * c.latent * 4, sh_items);
+    try q.down(o.s, h, at.sact, rows * own, rows, sp, out, sh_items);
 }
 
 test "a pass's NVFP4 rows" {

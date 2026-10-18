@@ -28,6 +28,7 @@ pub const Layer = struct {
 pub const Weights = struct {
     memory: cuda.DeviceBuffer,
     patch: u64, // [hidden, 3 * patch * patch], no bias
+    video_patch: u64, // [hidden, video_temporal * 3 * patch * patch] (0 without a video projection)
     table: u64, // the position table [side * side, hidden]
     cls: u64, // [prefix, hidden]: cls tokens, then registers
     final: u64, // vision_final_layernorm (unset without an MTP layer: Config.final_norm)
@@ -51,15 +52,19 @@ pub const Weights = struct {
         var p: Planner = .{ .gpa = gpa, .files = files.items, .c = c };
         defer p.pieces.deinit(gpa);
         const layers = try gpa.alloc(Layer, c.layers);
-        errdefer gpa.free(layers);
+        var local = true;
+        errdefer if (local) gpa.free(layers);
         var w: Weights = undefined;
         w.layers = layers;
         try p.plan(&w);
         var memory = try cuda.DeviceBuffer.alloc(d, p.bytes);
-        errdefer memory.free();
-        for (p.pieces.items) |piece| try upload(gpa, memory, piece);
+        errdefer if (local) memory.free();
         w.memory = memory;
         w.bytes = p.bytes;
+        const owner = try gpa.create(Failed);
+        owner.* = .{ .gpa = gpa, .w = w };
+        local = false;
+        w = try transfer(owner, p.pieces.items);
         shift(&w, memory.ptr);
         for (w.layers) |*l| shift(l, memory.ptr);
         return w;
@@ -106,6 +111,7 @@ const Planner = struct {
         const h = c.hidden;
         var buf: [160]u8 = undefined;
         w.patch = try p.take(tower ++ "patch_generator.embedder.weight", &.{ h, c.patchWidth() }, false);
+        w.video_patch = if (c.video_temporal > 0) try p.take(tower ++ "patch_generator.video_embedder.weight", &.{ h, c.videoWidth() }, false) else 0;
         w.table = try p.take(tower ++ "patch_generator.pos_embed", &.{ 1, c.side * c.side, h }, false);
         w.cls = try p.take(tower ++ "patch_generator.cls_token.token", &.{ c.prefix, h }, false);
         for (w.layers, 0..) |*l, i| {
@@ -232,3 +238,139 @@ test "a layer's tensors are known; a layer scale is not" {
     try std.testing.expect(Planner.known(tower ++ "blocks.31.mlp.fc2.bias"));
     try std.testing.expect(!Planner.known(tower ++ "blocks.3.ls1.gamma"));
 }
+
+const Failed = struct {
+    gpa: Allocator,
+    w: Weights,
+    next: ?*Failed = null,
+    fn close(f: *Failed) !void {
+        try f.w.memory.d.synchronize();
+        f.w.deinit(f.gpa);
+        f.gpa.destroy(f);
+    }
+};
+var failed: ?*Failed = null;
+var failed_mutex: std.atomic.Mutex = .unlocked;
+fn keep(f: *Failed) void {
+    while (!failed_mutex.tryLock()) std.Thread.yield() catch {};
+    defer failed_mutex.unlock();
+    f.next = failed;
+    failed = f;
+}
+fn transfer(owner: *Failed, pieces: []const Piece) !Weights {
+    for (pieces) |piece| upload(owner.gpa, owner.w.memory, piece) catch |err| {
+        owner.close() catch {
+            keep(owner);
+            return error.LoadRetained;
+        };
+        return err;
+    };
+    const out = owner.w;
+    owner.gpa.destroy(owner);
+    return out;
+}
+var recovery: std.atomic.Mutex = .unlocked;
+pub fn recover(d: *const cuda.Driver) usize {
+    // A detached transaction remains a pending owner at every parent/admission boundary.
+    if (!recovery.tryLock()) return 1;
+    defer recovery.unlock();
+    while (!failed_mutex.tryLock()) std.Thread.yield() catch {};
+    var at = failed;
+    failed = null;
+    failed_mutex.unlock();
+    if (comptime @import("builtin").is_test) if (Testing.detached) |hook| {
+        Testing.detached = null;
+        hook();
+    };
+    while (at) |f| {
+        at = f.next;
+        f.next = null;
+        if (f.w.memory.d == d) {
+            f.close() catch {
+                keep(f);
+            };
+        } else keep(f);
+    }
+    while (!failed_mutex.tryLock()) std.Thread.yield() catch {};
+    defer failed_mutex.unlock();
+    var n: usize = 0;
+    at = failed;
+    while (at) |f| {
+        if (f.w.memory.d == d) n += 1;
+        at = f.next;
+    }
+    return n;
+}
+
+test "RADIO planned upload retains its device destination when recovery fails" {
+    const F = struct {
+        var pending = false;
+        var fail = true;
+        var frees: usize = 0;
+        var unsafe: usize = 0;
+        fn alloc(out: *u64, _: usize) callconv(.c) c_int {
+            out.* = 256;
+            return 0;
+        }
+        fn free(_: u64) callconv(.c) c_int {
+            if (pending) unsafe += 1;
+            frees += 1;
+            return 0;
+        }
+        fn copy(_: u64, _: ?*const anyopaque, _: usize) callconv(.c) c_int {
+            pending = true;
+            return 0;
+        }
+        fn sync() callconv(.c) c_int {
+            if (fail) return cuda.abi.error_not_ready;
+            pending = false;
+            return 0;
+        }
+        fn stream(_: cuda.abi.Stream) callconv(.c) c_int {
+            return sync();
+        }
+    };
+    F.pending = false;
+    F.fail = true;
+    F.frees = 0;
+    F.unsafe = 0;
+    var d: cuda.Driver = undefined;
+    d.api.cuMemAlloc_v2 = F.alloc;
+    d.api.cuMemFree_v2 = F.free;
+    d.api.cuMemcpyHtoD_v2 = F.copy;
+    d.api.cuCtxSynchronize = F.sync;
+    d.api.cuStreamSynchronize = F.stream;
+    cuda.copy_source.setCurrent(@ptrFromInt(1));
+    const owner = try std.testing.allocator.create(Failed);
+    owner.gpa = std.testing.allocator;
+    owner.next = null;
+    owner.w = undefined;
+    owner.w.memory = try cuda.DeviceBuffer.alloc(&d, 4);
+    owner.w.layers = try std.testing.allocator.alloc(Layer, 0);
+    try std.testing.expectError(error.LoadRetained, transfer(owner, &.{.{ .dst = 0, .bytes = &.{ 1, 2, 3, 4 } }}));
+    try std.testing.expectEqual(@as(usize, 1), recover(&d));
+    try std.testing.expect(F.pending);
+    try std.testing.expectEqual(@as(usize, 0), F.frees);
+    F.fail = false;
+    try std.testing.expectEqual(@as(usize, 0), recover(&d));
+    try std.testing.expectEqual(@as(usize, 1), F.frees);
+    try std.testing.expectEqual(@as(usize, 0), F.unsafe);
+}
+
+pub const Testing = if (@import("builtin").is_test) struct {
+    pub fn empty() bool {
+        while (!failed_mutex.tryLock()) std.Thread.yield() catch {};
+        defer failed_mutex.unlock();
+        return failed == null;
+    }
+    pub var detached: ?*const fn () void = null;
+    pub fn tiny(gpa: Allocator, d: *const cuda.Driver) !void {
+        const f = try gpa.create(Failed);
+        f.gpa = gpa;
+        f.next = null;
+        f.w = undefined;
+        f.w.memory = try cuda.DeviceBuffer.alloc(d, 4);
+        f.w.layers = try gpa.alloc(Layer, 0);
+        keep(f);
+    }
+} else struct {};

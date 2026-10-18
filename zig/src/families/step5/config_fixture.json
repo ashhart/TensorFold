@@ -1,0 +1,11 @@
+{"text_config": {"hidden_size": 4096, "num_hidden_layers": 4, "vocab_size": 128896, "rms_norm_eps": 1e-05,
+ "num_attention_heads": 64, "num_attention_groups": 4, "head_dim": 192, "intermediate_size": 13824,
+ "moe_intermediate_size": 1536, "share_expert_dim": 1536, "moe_num_experts": 352, "moe_top_k": 8,
+ "moe_router_scaling_factor": 3.0, "sliding_window": 512, "max_position_embeddings": 1048576,
+ "norm_expert_weight": true, "eos_token_id": [1, 2], "moe_layer_list": [3],
+ "sparse_config": {"enabled": true, "region_block_size": 8, "topk": 512, "proxy_dim": 256, "sparse_indexer_rope_dim": 32,
+  "sparse_indexer_num_heads": 16, "num_provider_groups": 4},
+ "layer_types": ["sliding_attention", "sliding_attention", "sliding_attention", "full_attention"],
+ "partial_rotary_factors": [1.0, 1.0, 1.0, 0.3333333333333333],
+ "rope_theta": [10000.0, 10000.0, 10000.0, 10000000.0],
+ "swiglu_limits": [7.0, 7.0, 7.0, 7.0], "swiglu_limits_shared": [7.0, 7.0, 7.0, 7.0]}}

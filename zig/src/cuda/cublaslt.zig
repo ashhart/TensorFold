@@ -1,6 +1,7 @@
 //! cuBLASLt opened at run time: descriptors, layouts, heuristics and matmul, with fp32 compute only (no TF32 or fast modes).
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 
 pub const Status = c_int;
@@ -60,12 +61,13 @@ pub const Api = struct {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
 
-    /// The CUDA 13 soname first, then the unversioned link name.
+    /// The CUDA 13 soname first, then the unversioned link name; on Windows the toolkit's DLL.
     pub fn open() Error!Library {
-        for ([_][]const u8{ "libcublasLt.so.13", "libcublasLt.so" }) |path| {
+        const names: []const []const u8 = if (@import("builtin").os.tag == .windows) &.{"cublasLt64_13.dll"} else &.{ "libcublasLt.so.13", "libcublasLt.so" };
+        for (names) |path| {
             return openPath(path) catch |e| switch (e) {
                 error.LibraryUnavailable => continue,
                 else => return e,
@@ -75,7 +77,7 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = std.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";

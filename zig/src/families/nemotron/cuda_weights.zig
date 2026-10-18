@@ -7,7 +7,7 @@ const Config = @import("config.zig").Config;
 const Kind = @import("config.zig").Kind;
 const kern = @import("cuda_kernels.zig");
 const draft_ids = @import("draft_ids.zig");
-const Source = @import("cuda_source.zig").Source;
+pub const Source = @import("cuda_source.zig").Source;
 const host4 = core.affine4_host;
 const modelopt = @import("cuda_modelopt.zig");
 const latent = @import("cuda_latent.zig");
@@ -29,7 +29,10 @@ pub const Attention = struct { qkv: QLinear, o: QLinear, o_rest: u64 = 0, adapte
 /// The pocket kernels' neurons (config's pocket): input weights and outputs, [n, D] fp32 each, from the 4-bit codes.
 pub const Pocket = kern.Pocket;
 /// The shared expert's down projection rest in two halves (experts E and E + 1); its learned change reads both.
-pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null, latent: ?latent.Latent = null };
+pub const MoE = struct { router: u64, bias: u64, experts: Experts, rest: [2]u64 = .{ 0, 0 }, adapter: ?Adapter = null, pocket: ?Pocket = null, latent: ?latent.Latent = null, bolt: ?BoltLatent = null };
+
+/// LatentMoE's parts (Bolt): latent-width projections around the routed `experts`; `shared` reads full-width rows.
+pub const BoltLatent = struct { fc1: QLinear, fc2: QLinear, shared: Experts };
 pub const Block = struct { kind: Kind, norm: u64, mamba: Mamba = undefined, attn: Attention = undefined, moe: MoE = undefined };
 pub const Mtp = struct { enorm: u64, hnorm: u64, eh_proj: QLinear, attn_norm: u64, attn: Attention, moe_norm: u64, moe: MoE, final_norm: u64 };
 
@@ -55,6 +58,7 @@ pub const Weights = struct {
     draft_head: ?QLinear = null,
     draft_ids: u64 = 0,
     draft_count: usize = 0,
+    draft_coverage: ?draft_ids.Coverage = null, // the draft ids as a set where the draft head and the whole head both draft
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     named: std.ArrayList(Named) = .empty,
 
@@ -64,6 +68,7 @@ pub const Weights = struct {
         w.buffers.deinit(w.gpa);
         w.named.deinit(w.gpa);
         w.gpa.free(w.blocks);
+        if (w.draft_coverage) |*c| c.deinit(w.gpa);
         w.* = undefined;
     }
 };
@@ -79,9 +84,13 @@ pub const Loader = struct {
     learned: usize = 0, // projections loaded from a lesson's bf16
 
     pub fn alloc(L: *Loader, name: []const u8, bytes: usize) !u64 {
+        try L.w.buffers.ensureUnusedCapacity(L.gpa, 1);
+        try L.w.named.ensureUnusedCapacity(L.gpa, 1);
+        const owned_name = try L.gpa.dupe(u8, name);
+        errdefer L.gpa.free(owned_name);
         const b = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
-        try L.w.buffers.append(L.gpa, b);
-        try L.w.named.append(L.gpa, .{ .name = try L.gpa.dupe(u8, name), .ptr = b.ptr, .len = bytes });
+        L.w.buffers.appendAssumeCapacity(b);
+        L.w.named.appendAssumeCapacity(.{ .name = owned_name, .ptr = b.ptr, .len = bytes });
         return b.ptr;
     }
 
@@ -90,8 +99,9 @@ pub const Loader = struct {
         if (L.scratch.len < bytes) {
             try L.src.flush();
             try L.ops.s.synchronize();
+            const next = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
             L.scratch.free();
-            L.scratch = try cuda.DeviceBuffer.alloc(L.ops.k.d, bytes);
+            L.scratch = next;
         }
         return L.scratch.ptr;
     }
@@ -345,7 +355,7 @@ pub const Loader = struct {
         return ptr;
     }
 
-    fn mamba(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Mamba {
+    pub fn mamba(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Mamba {
         var a: [128]u8 = undefined;
         var b: [128]u8 = undefined;
         var m: Mamba = undefined;
@@ -376,7 +386,7 @@ pub const Loader = struct {
         return m;
     }
 
-    fn attention(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Attention {
+    pub fn attention(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8) !Attention {
         var a: [128]u8 = undefined;
         var q: [128]u8 = undefined;
         var k: [128]u8 = undefined;
@@ -387,7 +397,7 @@ pub const Loader = struct {
         return att;
     }
 
-    fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
+    pub fn moe(L: *Loader, ck: *core.Checkpoint, name: []const u8, pre: []const u8, c: Config) !MoE {
         if (c.format == .modelopt) return modelopt.moe(L, ck, name, pre, c);
         var a: [128]u8 = undefined;
         var b: [128]u8 = undefined;
@@ -415,7 +425,7 @@ fn firstRows(t: [3]Tensor, rows: usize) [3]Tensor {
     return out;
 }
 
-fn join(buf: *[128]u8, a: []const u8, b: []const u8) ![]const u8 {
+pub fn join(buf: *[128]u8, a: []const u8, b: []const u8) ![]const u8 {
     return std.fmt.bufPrint(buf, "{s}{s}", .{ a, b });
 }
 
@@ -440,69 +450,11 @@ pub fn made(dtype: core.checkpoint.DType, d0: usize, d1: usize, bytes: []const u
     return t;
 }
 
-/// weights.load: the model folder's checkpoint (and its MTP head when `with_mtp`) on the GPU, leftovers refused.
-pub fn load(gpa: std.mem.Allocator, io: std.Io, ops: kern.Ops, dir: []const u8, c: Config, with_mtp: bool) !Weights {
-    if (c.format == .mlx) try c.fourOnly("CUDA");
-    var w: Weights = .{ .gpa = gpa, .config = c };
-    errdefer w.deinit();
-    var src = try Source.init(gpa, ops);
-    defer src.deinit();
-    var L: Loader = .{ .gpa = gpa, .ops = ops, .w = &w, .src = &src, .scratch = try cuda.DeviceBuffer.alloc(ops.k.d, 1 << 20) };
-    defer {
-        src.flush() catch {};
-        ops.s.synchronize() catch {};
-        L.scratch.free();
-        L.host.deinit(gpa);
-        for (L.held.items) |h| gpa.free(h);
-        L.held.deinit(gpa);
-    }
-    if (c.latent > 0) try latent.checkHeld(c);
-    var ck = try core.Checkpoint.openModel(gpa, io, dir);
-    defer ck.close();
-    try src.add(&ck);
-    const pre = c.prefix();
-    w.blocks = try gpa.alloc(Block, c.layers);
-    for (c.kinds[0..c.layers], 0..) |kind, i| {
-        var nm: [128]u8 = undefined;
-        var nb: [128]u8 = undefined;
-        var pb: [128]u8 = undefined;
-        const name = try std.fmt.bufPrint(&nm, "blocks.{d}", .{i});
-        const norm = try ck.expect(try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.norm.weight", .{ pre, i }), .bf16, &.{c.hidden});
-        var b: Block = .{ .kind = kind, .norm = try L.raw(try join(&nb, name, ".norm"), norm) };
-        const mixer = try std.fmt.bufPrint(&pb, "{s}backbone.layers.{d}.mixer.", .{ pre, i });
-        switch (kind) {
-            .mamba => b.mamba = try L.mamba(&ck, try join(&nb, name, ".mamba"), mixer),
-            .attention => b.attn = try L.attention(&ck, try join(&nb, name, ".attn"), mixer),
-            .moe => b.moe = if (c.latent > 0) try latent.load(&L, &ck, try join(&nb, name, ".moe"), mixer, c, @intCast(i)) else try L.moe(&ck, try join(&nb, name, ".moe"), mixer, c),
-        }
-        w.blocks[i] = b;
-    }
-    if (c.format == .modelopt) w.embed = try modelopt.embed(&L, &ck, c) else {
-        const emb = try ck.get("backbone.embeddings.weight");
-        w.embed = .{
-            .w = try L.raw("embed.weight", emb),
-            .s = try L.raw("embed.scales", try ck.get("backbone.embeddings.scales")),
-            .b = try L.raw("embed.biases", try ck.get("backbone.embeddings.biases")),
-            .n = emb.dim(0),
-            .k = emb.dim(1) * 8,
-        };
-    }
-    var tail: [96]u8 = undefined;
-    w.norm_f = try L.raw("norm_f", try ck.expect(try std.fmt.bufPrint(&tail, "{s}backbone.norm_f.weight", .{pre}), .bf16, &.{c.hidden}));
-    w.head = try L.dense(&ck, "head", &.{try std.fmt.bufPrint(&tail, "{s}lm_head", .{pre})});
-    // a ModelOpt checkpoint keeps its MTP head in its own shards
-    if (c.format == .modelopt) if (!with_mtp) try ck.skip(try std.fmt.bufPrint(&tail, "{s}mtp.", .{pre})) else if (c.latent > 0) try latent.mtp(&L, &ck, c) else try modelopt.mtp(&L, &ck, c);
-    // the picture tower and its projector load with the image path (an omni checkpoint's other parts)
-    if (c.omni) for ([_][]const u8{ "vision_model.", "mlp1.", "vision_projector." }) |part| try ck.skip(part);
-    if (ck.unused() != 0) return error.UnusedCheckpointTensors;
-    if (L.learned > 0) std.log.info("{d} output projections carry what lessons taught this model", .{L.learned});
-    if (with_mtp and c.format == .mlx) try loadMtp(gpa, io, &L, &ck, dir, c);
-    try src.flush();
-    try ops.s.synchronize();
-    return w;
-}
+/// The partial owner is returned to the engine if recovery cannot prove completion.
+pub const load = @import("cuda_load.zig").load;
+pub const PendingLoad = @import("cuda_load.zig").Pending;
 
-fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoint, dir: []const u8, c: Config) !void {
+pub fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoint, dir: []const u8, c: Config) !void {
     var ck: core.Checkpoint = .{ .gpa = gpa, .io = io };
     defer ck.close();
     try ck.add(dir, mtp_file);
@@ -528,16 +480,26 @@ fn loadMtp(gpa: std.mem.Allocator, io: std.Io, L: *Loader, main: *core.Checkpoin
     var at: usize = 0;
     for (&parts) |*t| {
         const row = t.bytes.len / t.dim(0);
-        const whole = try gpa.alloc(u8, t.bytes.len);
-        defer gpa.free(whole);
-        try L.src.read(whole, t.bytes);
-        for (ids, 0..) |id, r| @memcpy(host[at + r * row ..][0..row], whole[id * row ..][0..row]);
+        try gatherRows(L, t.*, ids, host[at..]);
         t.shape[0] = ids.len;
         t.bytes = host[at..][0 .. ids.len * row];
         at += ids.len * row;
     }
     L.w.draft_head = .{ .affine4 = try L.tile("draft_head", &.{parts}) };
     try draftIds(L, ids);
+}
+
+/// Rows `ids` of `t` (a row its first dimension's), in `ids`' order, into `host`: the whole tensor read once.
+pub fn gatherRows(L: anytype, t: Tensor, ids: []const u32, host: []u8) !void {
+    if (t.rank == 0 or t.dim(0) == 0 or t.bytes.len % t.dim(0) != 0) return error.UnexpectedTensor;
+    const row = t.bytes.len / t.dim(0);
+    const need = std.math.mul(usize, ids.len, row) catch return error.UnexpectedTensor;
+    if (row == 0 or need > host.len) return error.UnexpectedTensor;
+    for (ids) |id| if (id >= t.dim(0)) return error.DraftIdPastVocabulary;
+    const whole = try L.gpa.alloc(u8, t.bytes.len);
+    defer L.gpa.free(whole);
+    try L.src.read(whole, t.bytes);
+    for (ids, 0..) |id, r| @memcpy(host[r * row ..][0..row], whole[id * row ..][0..row]);
 }
 
 /// The vocabulary ids the draft head's rows are, on the GPU.

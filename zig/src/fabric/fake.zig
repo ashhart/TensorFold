@@ -53,7 +53,8 @@ pub const Cluster = struct {
             .prng = .init(0x7f4a),
         };
         for (c.windows, c.access, c.endpoints, 0..) |*w, *a, *e, i| {
-            w.* = try std.posix.mmap(null, window_bytes, .{ .READ = true, .WRITE = true }, .{ .TYPE = .PRIVATE, .ANONYMOUS = true }, -1, 0);
+            w.* = try std.heap.page_allocator.alignedAlloc(u8, .fromByteUnits(rdma.page), window_bytes);
+            @memset(w.*, 0); // as an anonymous map comes
             a.* = .{};
             e.* = .{ .cluster = c, .me = @intCast(i) };
         }
@@ -67,7 +68,7 @@ pub const Cluster = struct {
     }
 
     pub fn deinit(c: *Cluster) void {
-        for (c.windows) |w| std.posix.munmap(w);
+        for (c.windows) |w| std.heap.page_allocator.free(w);
         for (c.queues) |*q| {
             for (q.items) |op| if (op.kind == .write) c.gpa.free(op.bytes);
             q.deinit(c.gpa);

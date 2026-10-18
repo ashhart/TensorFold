@@ -1,5 +1,6 @@
 //! Checkpoint reads that skip the page cache and pace on the memory the kernel can give: a load never outruns reclaim.
 const std = @import("std");
+const platform = @import("sys");
 
 /// Offsets, lengths and buffers of uncached reads align to the VM page (F_NOCACHE only skips the cache for aligned reads).
 pub const alignment = 16384;
@@ -59,7 +60,7 @@ fn pageBytes() u64 {
 fn sysctl(comptime name: [:0]const u8) ?u64 {
     var v: u64 = 0;
     var len: usize = @sizeOf(u64);
-    if (std.c.sysctlbyname(name, &v, &len, null, 0) != 0) return null;
+    if (platform.c.sysctlbyname(name, &v, &len, null, 0) != 0) return null;
     return switch (len) {
         8 => v,
         4 => @as(u32, @truncate(v)),
@@ -97,13 +98,13 @@ const Mac = struct {
     }
 
     fn pause(_: Mac, ms: u32) void {
-        const ts: std.c.timespec = .{ .sec = 0, .nsec = @intCast(@as(u64, ms) * std.time.ns_per_ms) };
-        _ = std.c.nanosleep(&ts, null);
+        const ts: platform.c.timespec = .{ .sec = 0, .nsec = @intCast(@as(u64, ms) * std.time.ns_per_ms) };
+        _ = platform.c.nanosleep(&ts, null);
     }
 };
 
 /// `dest.len` bytes at `at` of `fd` (F_NOCACHE) through page-aligned reads into `buf`, each once there is room for it.
-pub fn read(fd: std.c.fd_t, dest: []u8, at: u64, buf: Stage, short: *Memory) !void {
+pub fn read(fd: platform.c.fd_t, dest: []u8, at: u64, buf: Stage, short: *Memory) !void {
     const want = floor();
     var done: usize = 0;
     while (done < dest.len) {
@@ -115,7 +116,7 @@ pub fn read(fd: std.c.fd_t, dest: []u8, at: u64, buf: Stage, short: *Memory) !vo
         const span = std.mem.alignForward(usize, skip + take, alignment);
         var got: usize = 0;
         while (got < skip + take) { // a read past the file's end comes back short once the bytes asked for are in
-            const n = std.c.pread(fd, buf.ptr + got, span - got, @intCast(lo + got));
+            const n = platform.c.pread(fd, buf.ptr + got, span - got, @intCast(lo + got));
             if (n <= 0) return error.ShortRead;
             got += @intCast(n);
         }
@@ -172,17 +173,17 @@ test "this Mac's counters: free and reclaimable pages within its RAM" {
 test "aligned spans copy the bytes asked for, at any offset and length" {
     const gpa = std.testing.allocator;
     var name_buf: [64]u8 = undefined;
-    const name = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-paced-read-{d}", .{std.c.getpid()}, 0);
-    const fd = std.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(std.c.mode_t, 0o600));
+    const name = try std.fmt.bufPrintSentinel(&name_buf, "/tmp/tf-paced-read-{d}", .{platform.c.getpid()}, 0);
+    const fd = platform.c.open(name, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, @as(platform.c.mode_t, 0o600));
     try std.testing.expect(fd >= 0);
     defer {
-        _ = std.c.close(fd);
-        _ = std.c.unlink(name);
+        _ = platform.c.close(fd);
+        _ = platform.c.unlink(name);
     }
     const data = try gpa.alloc(u8, 3 * alignment + 777);
     defer gpa.free(data);
     for (data, 0..) |*b, i| b.* = @truncate(i *% 131 +% 7);
-    try std.testing.expectEqual(@as(isize, @intCast(data.len)), std.c.write(fd, data.ptr, data.len));
+    try std.testing.expectEqual(@as(isize, @intCast(data.len)), platform.c.write(fd, data.ptr, data.len));
     const buf = try stage(gpa, 2 * alignment);
     defer gpa.free(buf);
     var short: Memory = undefined;

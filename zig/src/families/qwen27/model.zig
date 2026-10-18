@@ -1,5 +1,6 @@
 //! A native text model keeps immutable checkpoint bytes and prepared affine layouts under one owner.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const core = @import("core");
 const cfg = @import("config.zig");
@@ -68,14 +69,14 @@ pub const Model = struct {
         errdefer m.kernels.deinit();
         m.glue = try glue.Kernels.init(m.device);
         errdefer m.glue.deinit();
-        m.frame = try Frame.init(m.device, c, rows);
+        m.frame = try Frame.init(m.device, c, @max(rows, promptRows()));
         errdefer m.frame.deinit();
         m.ane = null;
-        const columns = if (std.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
+        const columns = if (platform.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
         const share = columns > 0 and m.device.tensorUnits() and mtl.ane.available() and m.weights.uniformMlp();
         const fits = if (share_fits) |f| !share or f(ane_mlp.Share.bytes(c, columns)) else true;
         if (!fits) std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{ane_mlp.Share.bytes(c, columns) >> 20});
-        if (share and fits) m.ane = ane_mlp.Share.init(a, m.device, m.queue, &m.checkpoint, c, columns) catch |err| blk: {
+        if (share and fits) m.ane = ane_mlp.Share.init(a, m.device, m.queue, &m.checkpoint, c, columns, (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width) catch |err| blk: {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
@@ -95,6 +96,14 @@ pub const Model = struct {
         m.allocator.destroy(m);
     }
 };
+
+/// A prompt pass's rows: 512 (TF_PROMPT_ROWS takes another multiple of 16 up to the frame's 2048).
+pub fn promptRows() u32 {
+    const default = 512;
+    const v = std.c.getenv("TF_PROMPT_ROWS") orelse return default;
+    const n = std.fmt.parseInt(u32, std.mem.span(v), 10) catch return default;
+    return if (n >= 16 and n <= @import("gpu_frame.zig").max_rows and n % 16 == 0) n else default;
+}
 
 /// The qualified shape and layer schedule; per-module widths are admitted by widths.admit once the chip is known.
 pub fn supported(c: cfg.Config) !void {
