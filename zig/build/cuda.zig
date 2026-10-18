@@ -389,6 +389,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         load_check.dependOn(&check.step);
     }
 
+    b.step("test-cuda-readiness-host", "Real native readiness and synchronous startup preparation without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"family readiness reaches"} })).step);
     b.step("test-runtime-api", "Optional planner, prompt piece, proposer and halt API tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
     b.step("test-api-boundaries", "Runtime thread initialization failure regression").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Failure boundaries:"} })).step);
     b.step("test-review-api", "Ownership rollback: ownership and final batching regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Ownership rollback:"} })).step);

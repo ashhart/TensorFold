@@ -3,6 +3,9 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const startup = b.createModule(.{ .root_source_file = b.path("zig/cuda_startup_costs_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = mods.lanes }} });
+    b.step("test-cuda-startup-costs-host", "Eager measured CUDA costs and transactional failure controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = startup })).step);
+
     const mtp_policy = b.createModule(.{ .root_source_file = b.path("zig/nemotron_mtp_policy_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "lanes", .module = mods.lanes } } });
     const mtp_run = b.addRunArtifact(b.addTest(.{ .root_module = mtp_policy, .filters = &.{"mtp policy:"} }));
     b.step("test-nemotron-mtp-policy-host", "Nemotron controls through shared rounds, resumes and handoff without a GPU").dependOn(&mtp_run.step);

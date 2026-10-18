@@ -96,6 +96,7 @@ const WarmProbe = struct {
     calls: [65]usize = @splat(0),
     costs: [64]bool = @splat(false),
     failed: bool = false,
+    failed_at: usize = 0,
     pub fn forward(p: *WarmProbe, parts: []const Part, ids: []const u32, keep: q.engine.Keep) !void {
         try std.testing.expectEqual(@as(usize, 1), parts.len);
         const c = parts[0].cache;
@@ -105,7 +106,7 @@ const WarmProbe = struct {
         for (ids) |id| try std.testing.expectEqual(@as(u32, 0), id);
         c.advanced = true;
         p.calls[ids.len] += 1;
-        if (p.failed) return error.PlantedWarmFailure;
+        if (p.failed or p.failed_at == ids.len) return error.PlantedWarmFailure;
     }
     pub fn setCost(p: *WarmProbe, rows: u32, _: f64) void {
         p.costs[rows - 1] = true;
@@ -147,6 +148,38 @@ test "shared warmups count actual passes without replacing any width measurement
     const shape = Shape.init(1, 1, true, true, 1);
     seen.mark(shape);
     try q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen);
+    var calls: usize = 0;
+    for (probe.calls) |n| calls += n;
+    try std.testing.expectEqual(@as(usize, 73), calls);
     try std.testing.expectEqual(@as(usize, 2), probe.calls[1]);
+    try std.testing.expect(!cache.advanced);
     for (probe.costs) |measured| try std.testing.expect(measured);
+}
+
+test "a failed width sweep publishes no partial measured table" {
+    var probe: WarmProbe = .{ .failed_at = 17 };
+    var cache: WarmProbe.Cache = .{};
+    var seen: q.native.warm.Seen = .{};
+    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen));
+    for (probe.costs) |measured| try std.testing.expect(!measured);
+}
+
+test "deferred calibration: context 32 measures every width through real target admission" {
+    var costs: [64]q.native.warm.Test.Cost = undefined;
+    try q.native.warm.Test.measure(32, &costs);
+}
+test "deferred calibration: context 64 reuses the reserved cache at the boundary" {
+    var costs: [64]q.native.warm.Test.Cost = undefined;
+    try q.native.warm.Test.measure(64, &costs);
+}
+
+test "deferred calibration: a late failure frees temporary storage and publishes no partial costs" {
+    try q.native.warm.Test.failure();
+}
+
+test "target reserve: context 32 reaches eager preparation through real admission" {
+    try q.native.reservation.Test.check(32);
+}
+test "target reserve: context 64 reaches eager preparation at the capacity boundary" {
+    try q.native.reservation.Test.check(64);
 }

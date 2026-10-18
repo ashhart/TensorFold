@@ -1,10 +1,11 @@
-//! The Qwen3.5 hybrids' CUDA lane backend (native/cuda.zig's registry): 16-row windows, every stream in one forward.
+//! The Qwen hybrids' CUDA lane backend, with live windows and reserved streams.
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
 pub const warm = @import("cuda_warm.zig");
+pub const reservation = @import("cuda_reserve.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
@@ -97,51 +98,19 @@ pub fn laneFacts(window: u32, verify: u32) lanes.Model {
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
-    try l.pool.ensureTotalCapacity(l.gpa, streams);
-    while (l.pool.items.len < streams) {
-        const cache = try l.gpa.create(E.Cache);
-        errdefer l.gpa.destroy(cache);
-        cache.* = try E.Cache.init(l.gpa, l.e, l.capacity);
-        errdefer cache.deinit(l.gpa);
-        // a row through it: kernels have to have referenced a buffer once before the driver's stall is behind it
-        try l.e.forward(&.{.{ .cache = cache, .rows = 1 }}, &.{0}, .last);
-        try cache.reset(l.e);
-        l.pool.appendAssumeCapacity(cache);
-    }
-    // Warm each shared launch shape once; every cache above is still allocated and touched separately.
-    var parts: [E.max_segs]E.Part = undefined;
-    var ids: [@max(E.max_segs, E.most_window)]u32 = @splat(0);
-    var picks: [@max(E.max_segs, E.most_window)]E.Draw = undefined;
-    for (0..@min(streams, E.max_segs)) |n| {
-        parts[n] = .{ .cache = l.pool.items[n], .rows = 1 };
-        picks[n] = .{ .rule = null, .position = 1 };
-        const shape = E.Engine.Shape.init(n + 1, n + 1, true, l.e.n_taps > 0, 1);
-        if (l.warmed.contains(shape)) continue;
-        try l.e.forward(parts[0 .. n + 1], ids[0 .. n + 1], .{ .draws = picks[0 .. n + 1] });
-        for (l.pool.items[0 .. n + 1]) |cache| try cache.reset(l.e);
-        l.warmed.mark(shape);
-    }
-    // with a drafter: a lone stream's windows of the pending token and its drafts, chains and trees
-    if (l.e.n_taps > 0) for (2..l.e.window_rows + 1) |rows| {
-        const shape = E.Engine.Shape.init(rows, 1, true, true, 1);
-        if (l.warmed.contains(shape)) continue;
-        for (picks[0..rows]) |*pk| pk.* = .{ .rule = null, .position = 1 };
-        try l.e.forward(&.{.{ .cache = l.pool.items[0], .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
-        try l.pool.items[0].reset(l.e);
-        l.warmed.mark(shape);
-    };
+    try reservation.target(E.Cache, E.Part, l, streams);
 }
 
 /// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
-pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void } {
+pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void, prepare: struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } } {
     if (bits != 4) return error.DrafterBitsUnsupported;
     const l: *Lanes = @ptrCast(@alignCast(p));
     if (l.caches.count() != 0 or l.pool.items.len != 0) return error.TapsAfterStreams;
     const d = try Draft.init(gpa, io, l.e, dir);
     errdefer d.deinit();
     try l.e.setTaps(d.taps());
-    try l.timeWindows(d);
-    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter };
+    l.calibration = d;
+    return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) l.e.streamBytes(l.e.window_rows) else 0 } };
 }
 
 /// The MTP layer beside the checkpoint in `dir` as the drafter over engine `p` (qwen3_5_moe), its ring the window.
@@ -164,6 +133,18 @@ fn reserveMtp(p: *anyopaque, streams: u32) anyerror!void {
 fn closeMtp(p: *anyopaque) void {
     const d: *Mtp = @ptrCast(@alignCast(p));
     d.deinit();
+}
+
+fn calibrateDrafter(p: *anyopaque) !lanes.drafter.Facts {
+    const l: *Lanes = @ptrCast(@alignCast(p));
+    const d = l.calibration orelse return error.MissingCalibrationDrafter;
+    if (d.n_costs == 0) {
+        if (l.pool.items.len == 0) return error.MissingReservedQwenCache;
+        try warm.prepare(l.gpa, l.io, l.e, d, l.pool.items[0], &l.warmed);
+    }
+    if (d.n_costs != l.e.window_rows) return error.IncompleteWindowMeasurements;
+    l.calibration = null;
+    return d.drafter().facts();
 }
 
 fn reserveDrafter(p: *anyopaque, streams: u32) anyerror!void {
@@ -245,6 +226,7 @@ const Lanes = struct {
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
     warmed: warm.Seen = .{},
+    calibration: ?*Draft = null,
 
     fn deinit(self: *Lanes) void {
         var it = self.caches.valueIterator();

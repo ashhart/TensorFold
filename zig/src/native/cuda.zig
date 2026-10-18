@@ -75,7 +75,7 @@ pub const Host = struct {
     follow_fn: ?*const fn (*anyopaque) anyerror!void = null,
     health: ?api.HealthSource = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
-    served: drafted.Served = undefined, // the family's backend, wrapped with --drafter's draft model when given
+    served: drafted.Served = .{ .backend = undefined, .facts = .{}, .stream_bytes = 0 }, // the family's backend, wrapped with --drafter's draft model when given
     fn followFamily(p: *anyopaque) anyerror!void {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| try g.ctx.makeCurrent();
@@ -111,6 +111,7 @@ pub const Host = struct {
     pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
         errdefer h.cfg.deinit(h.gpa);
+        if (h.served.prepare != null) try @import("cuda_startup_costs.zig").open(h, &bound);
         // a drafter's trees: the planner picks a lone stream's lanes, as deep as it drafts
         if (facts.head_trees) h.cfg.head_lanes = rows - 1;
         if (facts.head_trees) h.cfg.head_depth = @max(1, facts.drafts);
@@ -338,7 +339,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     const learn_bytes: usize = if (@hasField(L, "learn_bytes")) loaded.learn_bytes else 0;
     const host_cache = try kv_pages.placeHost(F, a, loaded, o, after.room(model), @intCast(window), served.stream_bytes, problem) orelse return null;
     const host_budget = if (host_cache and @hasDecl(F, "snap_save")) budget.hostCacheBytes(a, io, o.prompt_cache_gib) else 0;
-    var room = try kv_pages.startupRoom(F, a, loaded, o, after.room(model), host_budget, problem) orelse return null;
+    var room = try @import("cuda_startup_costs.zig").room(a, served.prepare, try kv_pages.startupRoom(F, a, loaded, o, after.room(model), host_budget, problem) orelse return null, problem) orelse return null;
     var low: []const u8 = ""; // names the rank whose room bounds the streams, when it is not this one
     if (@hasField(@TypeOf(loaded), "peer_room")) if (loaded.peer_room) |pr| if (pr.bytes < room) {
         room = pr.bytes;

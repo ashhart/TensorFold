@@ -137,7 +137,7 @@ pub const Draft = struct {
         return d.c.taps[0..d.c.n_taps];
     }
 
-    /// The target's window of `rows` rows takes `ms` (told by cuda_native.zig before the facts are read).
+    /// The target's measured window cost, published after the complete reset-cache width sweep.
     pub fn setCost(d: *Draft, rows: u32, ms: f64) void {
         if (platform.c.getenv("TF_TIMING") != null) std.debug.print("[timing] window {d} rows {d:.2} ms (a hold level {d:.2})\n", .{ rows, ms, d.step_ms });
         if (d.n_costs < d.costs.len) {
