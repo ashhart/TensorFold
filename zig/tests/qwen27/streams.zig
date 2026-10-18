@@ -51,7 +51,7 @@ pub fn main(init: std.process.Init) !void {
         i += 1;
         if (std.mem.eql(u8, arg, "--model")) dir = args[i] else if (std.mem.eql(u8, arg, "--streams")) streams = try std.fmt.parseInt(u32, args[i], 10) else if (std.mem.eql(u8, arg, "--tokens")) count = try std.fmt.parseInt(usize, args[i], 10) else if (std.mem.eql(u8, arg, "--context")) context = try std.fmt.parseInt(u32, args[i], 10) else return error.UnknownFlag;
     }
-    if (streams < 2 or streams > 8 or count < 8) return error.BadOptions;
+    if (streams < 2 or streams > q.attention_plan.max_streams or count < 8) return error.BadOptions;
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const model = try q.model.Model.load(init.gpa, io, dir orelse return error.MissingModel, 128, null);
@@ -61,7 +61,7 @@ pub fn main(init: std.process.Init) !void {
     // prompts of unequal lengths, past one 128-row chunk for most
     const prompts = try a.alloc([]u32, streams);
     for (prompts, 0..) |*p, k| {
-        p.* = try a.alloc(u32, 61 + 47 * k);
+        p.* = try a.alloc(u32, 61 + 47 * (k % 8));
         for (p.*, 0..) |*t, j| t.* = @intCast((j * 7919 + k * 104729 + 13) % 150000 + 1000);
     }
 
@@ -85,16 +85,18 @@ pub fn main(init: std.process.Init) !void {
     @memset(at, 0);
     var rounds: usize = 0;
     var compared: usize = 0;
-    var ids: [8][16]u32 = undefined;
-    var inputs: [8]q.round_plan.Input = undefined;
+    const most = q.attention_plan.max_streams;
+    const widest = @max(1, @min(5, 128 / streams)); // a shared round fits the frame's 128 rows
+    var ids: [most][16]u32 = undefined;
+    var inputs: [most]q.round_plan.Input = undefined;
     while (true) : (rounds += 1) {
         var n: usize = 0;
-        var slots: [8]u32 = undefined;
-        var wrong: [8]bool = undefined;
+        var slots: [most]u32 = undefined;
+        var wrong: [most]bool = undefined;
         for (0..streams) |k| {
             const ref = refs[k];
             if (at[k] + 1 >= count) continue;
-            const width = @min(1 + (rounds + k) % 5, count - at[k] - 1);
+            const width = @min(1 + (rounds + k) % widest, count - at[k] - 1);
             for (0..width) |r| ids[n][r] = ref.tokens[at[k] + r];
             wrong[n] = width > 1 and (rounds + k) % 2 == 1;
             if (wrong[n]) ids[n][width - 1] = (ids[n][width - 1] + 1) % vocab;
@@ -106,8 +108,8 @@ pub fn main(init: std.process.Init) !void {
         var round = try Round.init(init.gpa, inputs[0..n], @intCast(model.config.conv_kernel), shared.slots, vocab);
         defer round.deinit();
         try shared.verifyHead(&round, .all);
-        var paths: [8][]const u32 = undefined;
-        var path_rows: [8][16]u32 = undefined;
+        var paths: [most][]const u32 = undefined;
+        var path_rows: [most][16]u32 = undefined;
         for (0..n) |w| {
             const k = slots[w];
             const width = inputs[w].ids.len;
@@ -126,7 +128,7 @@ pub fn main(init: std.process.Init) !void {
         try shared.keep(&round, paths[0..n]);
         for (0..n) |w| if (shared.offsets[slots[w]] != prompts[slots[w]].len + at[slots[w]]) return error.OffsetDrift;
     }
-    std.debug.print("shared: {d} rounds, {d} logits rows equal the streams alone (windows of 1 to 5 rows, wrong last drafts dropped)\n", .{ rounds, compared });
+    std.debug.print("shared: {d} rounds, {d} logits rows equal the streams alone (windows of 1 to {d} rows, wrong last drafts dropped)\n", .{ rounds, compared, widest });
 }
 
 fn fail(comptime fmt: []const u8, args: anytype) error{Mismatch} {

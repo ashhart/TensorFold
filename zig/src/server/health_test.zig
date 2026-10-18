@@ -1,4 +1,4 @@
-//! /health: the open body's keys in order with the identity the builder reads, and the keyed body over a socket.
+//! /health: the open body's keys in order with the builder's identity; the keyed body and the manifest by socket.
 const std = @import("std");
 const api = @import("engine_api");
 const auth = @import("auth.zig");
@@ -8,7 +8,7 @@ const listener = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server = @import("server.zig");
 const status_routes = @import("status_routes.zig");
-const posix = std.posix;
+const posix = @import("sys").posix;
 const Threaded = std.Io.Threaded;
 const Allocator = std.mem.Allocator;
 
@@ -17,6 +17,7 @@ const earlier = [_][]const u8{ "status", "model", "model_ids", "max_batch_size",
 
 /// Four lanes, some memory, nothing running.
 const Idle = struct {
+    healthy: bool = true,
     fn engine(e: *Idle) api.Engine {
         return .{ .ctx = e, .vtable = &.{
             .info = info,
@@ -37,8 +38,8 @@ const Idle = struct {
 
     fn cancel(_: *anyopaque, _: api.Id) void {}
 
-    fn status(_: *anyopaque, out: *api.Status, _: []u32) void {
-        out.* = .{};
+    fn status(ctx: *anyopaque, out: *api.Status, _: []u32) void {
+        out.* = .{ .healthy = @as(*Idle, @ptrCast(@alignCast(ctx))).healthy };
     }
 
     fn memory(_: *anyopaque, _: bool) ?api.Memory {
@@ -264,4 +265,90 @@ test "with keys configured, /health sends only its status, with and without a va
     // the gate is on and the key is valid: a gated route refuses the request without it and serves it with it
     try std.testing.expect(std.mem.startsWith(u8, try exchange(a, port, models_open), "HTTP/1.1 401 "));
     try std.testing.expect(std.mem.startsWith(u8, try exchange(a, port, models_keyed), "HTTP/1.1 200 "));
+}
+
+test "unavailable health is minimal HTTP 503 with keys enabled or disabled and with or without a valid key" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(std.testing.allocator, &.{key}, "", null, false, &problem);
+    defer keys.deinit();
+    for ([_]bool{ false, true }) |keyed| {
+        var engine: Idle = .{ .healthy = false };
+        var text: Bytes = .{};
+        const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{
+            .served_name = "private-model",
+            .model_ids = &.{"private-model"},
+            .identity = .{ .version = "9.8.7", .backend = "test", .device = "private-device" },
+        }, if (keyed) &keys else null);
+        defer srv.deinit();
+        const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+        defer lis.close();
+        var stop: std.atomic.Value(bool) = .init(false);
+        const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+        defer quiesce(srv, &stop, accept);
+        for ([_][]const u8{ health_open, health_keyed }) |request| {
+            const reply = try exchange(a, lis.port(), request);
+            try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 503 "));
+            try std.testing.expectEqualStrings("{\"status\": \"unavailable\"}", try bodyOf(reply));
+        }
+    }
+}
+
+const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
+
+/// The manifest a server with `environ` sends over a socket, parsed back as a client reads it.
+fn manifestServed(a: Allocator, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
+    return manifestWithBackend(a, environ, "cuda");
+}
+
+fn manifestWithBackend(a: Allocator, environ: ?*const std.process.Environ.Map, backend: []const u8) !std.json.ObjectMap {
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    var identity = build_identity.of(WithGpu, a, "9.8.7", 1);
+    identity.backend = backend;
+    const config: server.Config = .{ .served_name = "m", .model_ids = &.{"m"}, .identity = identity, .environ = environ };
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), config, null);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    const reply = try exchange(a, lis.port(), manifest_get);
+    try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 "));
+    const doc = try std.json.parseFromSliceLeaky(std.json.Value, a, try bodyOf(reply), .{});
+    return doc.object;
+}
+
+test "the manifest names the rank count and revision from the server's environment, and nothing it was not given" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    try env.put("TF_NEMOTRON_WORLD", "2");
+    try env.put("TF_CHECKPOINT_REVISION", "0123456789abcdef0123456789abcdef01234567");
+    const o = try manifestServed(a, &env);
+    try std.testing.expectEqual(@as(i64, 1), o.get("schema_version").?.integer);
+    try std.testing.expectEqual(@as(i64, 2), o.get("rank_count").?.integer);
+    try std.testing.expectEqualStrings("9.8.7", o.get("runtime").?.object.get("tensorfold_version").?.string);
+    try std.testing.expectEqualStrings("cuda", o.get("runtime").?.object.get("backend").?.string);
+    const rev = o.get("model").?.object.get("revision").?.string;
+    try std.testing.expectEqualStrings("0123456789abcdef0123456789abcdef01234567", rev);
+    try env.put("TF_NEMOTRON_WORLD", "3"); // a count the board does not rank, and a revision that names no commit
+    try env.put("TF_CHECKPOINT_REVISION", "main");
+    const odd = try manifestServed(a, &env);
+    try std.testing.expect(odd.get("rank_count") == null);
+    try std.testing.expect(odd.get("model").?.object.get("revision") == null);
+    const bare = try manifestServed(a, null);
+    try std.testing.expect(bare.get("rank_count") == null);
+    try std.testing.expect(bare.get("model").?.object.get("revision") == null);
+}
+
+test "benchmark manifest: an unknown server backend is never attested as CUDA" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const o = try manifestWithBackend(arena.allocator(), null, "");
+    try std.testing.expectEqualStrings("", o.get("runtime").?.object.get("backend").?.string);
 }

@@ -15,10 +15,10 @@ pub fn plan(a: Allocator, images: []const Image, from: u32) ![]Span {
     var end: u32 = 0;
     for (images, 0..) |img, i| {
         if (img.at < end or img.tokens == 0) return error.ImageSpans; // in order, apart, each with rows
-        end = img.at + img.tokens;
+        end = std.math.add(u32, img.at, img.tokens) catch return error.ImageSpans;
         if (end <= from) continue; // a restored prefix holds these rows' states already
         try out.append(a, .{ .at = img.at, .n = img.tokens, .row = row, .image = @intCast(i) });
-        row += img.tokens;
+        row = std.math.add(u32, row, img.tokens) catch return error.ImageSpans;
     }
     return out.toOwnedSlice(a);
 }
@@ -38,7 +38,10 @@ pub const Rows = struct {
     limit: u32,
 
     pub fn init(d: *const cuda.Driver, limit: u32, hidden: usize) !Rows {
-        return .{ .d = d, .buf = try cuda.DeviceBuffer.alloc(d, @as(usize, limit) * hidden * 2), .hidden = hidden, .limit = limit };
+        if (limit == 0 or hidden == 0) return error.ImageRows;
+        const elements = std.math.mul(usize, limit, hidden) catch return error.ImageRows;
+        const row_bytes = std.math.mul(usize, elements, 2) catch return error.ImageRows;
+        return .{ .d = d, .buf = try cuda.DeviceBuffer.alloc(d, row_bytes), .hidden = hidden, .limit = limit };
     }
 
     pub fn deinit(r: *Rows) void {
@@ -71,7 +74,14 @@ pub const Rows = struct {
 pub fn cut(sp: Span, lo: u32, hi: u32) ?[3]u32 {
     const from = @max(lo, sp.at);
     const to = @min(hi, sp.at + sp.n);
-    return if (from < to) .{ from, sp.row + from - sp.at, to - from } else null;
+    return if (from < to) .{ from, sp.row + (from - sp.at), to - from } else null; // the offset first: no u32 overflow
+}
+
+test "a cut near the top of the u32 range takes its offset before adding the buffer row" {
+    const sp: Span = .{ .at = 0xffffff00, .n = 128, .row = 256, .image = 0 };
+    try std.testing.expectEqual([3]u32{ 0xffffff00, 256, 0x40 }, cut(sp, 0xffffff00, 0xffffff40).?);
+    try std.testing.expectEqual([3]u32{ 0xffffff40, 320, 0x40 }, cut(sp, 0xffffff40, 0xffffffff).?);
+    try std.testing.expect(cut(sp, 0xffffff80, 0xffffffff) == null);
 }
 
 test "a pass from a restored point plans only the images that end past it, rows back to back" {

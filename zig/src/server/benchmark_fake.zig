@@ -1,10 +1,11 @@
 //! A loopback HTTP fake for the benchmark tests: scripted replies, pauses between writes, recorded requests.
 const std = @import("std");
+const platform = @import("sys");
 const posix = std.posix;
 const Allocator = std.mem.Allocator;
 
-/// Bytes written to the client, then a pause before the next write.
-pub const Write = struct { bytes: []const u8, pause_ms: u32 = 0 };
+/// Write bytes, then wait on ``after`` (caller releases before cleanup) and pause.
+pub const Write = struct { bytes: []const u8, pause_ms: u32 = 0, after: ?*std.Io.Event = null };
 
 /// ``METHOD path`` and its replies: the n-th match plays ``replies[min(n, len - 1)]``; ``tunnel`` records bytes after.
 pub const Route = struct { method: []const u8, path: []const u8, replies: []const []const Write, tunnel: bool = false };
@@ -123,6 +124,7 @@ pub const Fake = struct {
         for (route.replies) |w| {
             if (f.stop_flag.load(.acquire)) return;
             if (!writeAll(c, w.bytes)) return;
+            if (w.after) |gate| gate.waitUncancelable(std.testing.io);
             if (w.pause_ms > 0) nap(w.pause_ms);
         }
         while (route.tunnel) {
@@ -197,23 +199,23 @@ pub const Pty = struct {
         const master = posix_openpt(@bitCast(posix.O{ .ACCMODE = .RDWR, .NOCTTY = true }));
         if (master < 0) return null;
         const name = if (grantpt(master) == 0 and unlockpt(master) == 0) ptsname(master) else null;
-        const term = if (name) |n| std.c.open(n, .{ .ACCMODE = .RDWR, .NOCTTY = true }) else -1;
+        const term = if (name) |n| platform.c.open(n, .{ .ACCMODE = .RDWR, .NOCTTY = true }) else -1;
         if (term < 0) {
-            _ = std.c.close(master);
+            _ = platform.c.close(master);
             return null;
         }
         return .{ .master = master, .term = term };
     }
 
     pub fn close(p: Pty) void {
-        _ = std.c.close(p.term);
-        _ = std.c.close(p.master);
+        _ = platform.c.close(p.term);
+        _ = platform.c.close(p.master);
     }
 };
 
 pub fn nap(ms: u32) void {
     var ts: posix.timespec = .{ .sec = @intCast(ms / 1000), .nsec = @intCast(@as(u64, ms % 1000) * std.time.ns_per_ms) };
-    _ = std.c.nanosleep(&ts, null);
+    _ = platform.c.nanosleep(&ts, null);
 }
 
 /// A response head with ``Connection: close`` and no length, as the native server sends SSE.

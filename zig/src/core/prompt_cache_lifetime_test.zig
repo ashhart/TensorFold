@@ -83,3 +83,64 @@ test "budget pressure refuses a keep rather than evicting an outstanding lookup"
     f.sum = fresh(other[0..4]);
     try std.testing.expect(s.keep(&other, 4, null, &.{}, &.{}));
 }
+
+test "GLM expiry: a failed restore reports whether the state was already expired on arrival" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    const Log = struct {
+        calls: usize = 0,
+        legacy: usize = 0,
+        last: pc.RestoreDetails = undefined,
+        fn old(ctx: *anyopaque, _: u32, _: anyerror) void {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            l.legacy += 1;
+        }
+        fn record(ctx: *anyopaque, report: pc.RestoreDetails) void {
+            const l: *@This() = @ptrCast(@alignCast(ctx));
+            l.calls += 1;
+            l.last = report;
+        }
+    };
+    var log: Log = .{};
+    s.restore_log = .{ .ctx = &log, .write = Log.old, .details = Log.record };
+    for ([_]bool{ false, true }, 0..) |expired, i| {
+        _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+        const entry = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+        const saved = entry.saved;
+        if (expired) s.expired(saved);
+        s.resumedWithReason(entry, &prompt, error.SnapshotStale);
+        // The final release can destroy entry; inspect the captured report and store instead.
+        try std.testing.expectEqual(i + 1, log.calls);
+        try std.testing.expectEqual(@as(u64, i + 1), s.counts.failed);
+        try std.testing.expectEqual(expired, log.last.expired);
+        try std.testing.expectEqual(@as(u32, 4), log.last.kept);
+        try std.testing.expectEqual(prompt.len, log.last.prompt);
+        try std.testing.expectEqual(error.SnapshotStale, log.last.err);
+        try std.testing.expect(!s.borrowed(saved));
+    }
+    try std.testing.expectEqual(@as(usize, 0), log.legacy);
+}
+
+test "GLM expiry: actual store borrow query lasts until the last release and excludes expired states" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var f: Fake = .{ .gpa = a };
+    var s = pc.Store.init(a, f.snapshots(), .{ .min_prompt = 0 }, 1000);
+    defer s.deinit();
+    _ = f.pass(&s, &prompt, try s.begin(arena.allocator(), &prompt, 4, &.{}, &.{}, null, &.{}));
+    const first = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    const second = (try s.lookup(arena.allocator(), &prompt, 4, &.{}, &.{}, &.{})).entry.?;
+    const saved = first.saved;
+    try std.testing.expect(first == second and s.borrowed(saved));
+    s.release(first);
+    try std.testing.expect(s.borrowed(saved));
+    s.expired(saved);
+    try std.testing.expect(!s.borrowed(saved));
+    s.collectExpired();
+    try std.testing.expectEqual(@as(u32, 1), second.borrowers);
+    s.release(second);
+    try std.testing.expect(!s.borrowed(saved));
+}

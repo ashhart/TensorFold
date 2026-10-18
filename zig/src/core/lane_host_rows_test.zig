@@ -1,5 +1,6 @@
 //! A lane host's kept states on disk: written while idle, finished on a stop, read back by the next host, asked about.
 const std = @import("std");
+const platform = @import("sys");
 const lanes = @import("lanes");
 const api = @import("engine_api.zig");
 const pc = @import("prompt_cache.zig");
@@ -67,7 +68,7 @@ const Box = struct {
         defer b.mutex.unlock(std.testing.io);
         switch (e.*) {
             .prefilled => |c| b.cached = c,
-            .logprobs, .prompt_logprobs => {},
+            .logprobs, .prompt_logprobs, .audio => {},
             .tokens => |t| b.tokens.appendSlice(std.testing.allocator, t) catch {},
             .finished => |f| b.done = f.reason,
         }
@@ -114,7 +115,7 @@ fn prompt(n: usize) [700]u32 {
 
 test "a host writes its kept states while idle and on its stop; the next host resumes from disk, its reply unchanged" {
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-rows-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-host-rows-{d}", .{platform.c.getpid()});
     defer rmTree(root);
     const S = struct {
         var first: [706]u32 = undefined; // turn one's prompt and its reply

@@ -56,7 +56,8 @@ fn round(h: *LaneHost, rd: Rounds) bool {
     var refused: std.ArrayList(struct { job: *Job, why: []const u8 }) = .empty;
     defer refused.deinit(h.gpa);
     h.lock();
-    if (h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes) {
+    // a stale device takes no reply (`learn.refuse` ends the queued ones), as in the default loop
+    if (!h.stale and h.queued.items.len > 0 and h.admitted.items.len < h.info_.lanes) {
         rd.vtable.begin_admit(rd.ctx);
         var free = h.info_.lanes - h.admitted.items.len;
         var i: usize = 0;
