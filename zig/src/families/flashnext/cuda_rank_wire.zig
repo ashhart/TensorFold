@@ -1,6 +1,7 @@
 //! Bounded Linux TCP control channel. Tensor bytes travel over NCCL; this channel owns command order and peer EOF.
 const std = @import("std");
 const builtin = @import("builtin");
+const platform = @import("sys");
 const p = std.posix;
 const net = std.Io.net;
 
@@ -43,8 +44,8 @@ pub const Header = struct {
 };
 
 pub fn now() u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0) return 0;
+    var ts: platform.c.timespec = undefined;
+    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts) != 0 or ts.sec < 0) return 0;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_ms * 1000 + @as(u64, @intCast(ts.nsec));
 }
 
@@ -53,8 +54,8 @@ pub fn deadline(ms: u64) u64 {
 }
 
 pub fn pause() void {
-    const ts: std.c.timespec = .{ .sec = 0, .nsec = 50_000 };
-    _ = std.c.nanosleep(&ts, null);
+    const ts: platform.c.timespec = .{ .sec = 0, .nsec = 50_000 };
+    _ = platform.c.nanosleep(&ts, null);
 }
 
 fn wait(fd: p.socket_t, events: i16, until: ?u64) !void {
@@ -131,6 +132,7 @@ pub const Link = struct {
     }
 
     pub fn send(l: Link, bytes: []const u8, until: u64) !void {
+        if (builtin.os.tag != .linux) return error.RankPlatform;
         var at: usize = 0;
         while (at < bytes.len) {
             if (now() >= until) return error.RankTimeout;
@@ -148,6 +150,7 @@ pub const Link = struct {
     }
 
     pub fn receive(l: Link, bytes: []u8, until: ?u64) !void {
+        if (builtin.os.tag != .linux) return error.RankPlatform;
         var at: usize = 0;
         while (at < bytes.len) {
             if (until) |end| if (now() >= end) return error.RankTimeout;
@@ -179,6 +182,7 @@ pub const Link = struct {
 
     /// A non-consuming EOF check while a GPU collective progresses. A future control frame stays queued.
     pub fn checkPeer(l: Link) !void {
+        if (builtin.os.tag != .linux) return error.RankPlatform;
         var byte: u8 = 0;
         const rc = std.c.recv(l.fd, &byte, 1, p.MSG.PEEK | p.MSG.DONTWAIT);
         if (rc == 0) return error.RankDisconnected;

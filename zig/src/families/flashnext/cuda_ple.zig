@@ -388,7 +388,7 @@ pub const Ngram = struct {
             const file = findOpen(g.files.items, path) orelse file: {
                 var o = try Open.load(gpa, io, path);
                 errdefer o.close(gpa);
-                std.posix.madvise(o.file.map.memory.ptr, o.file.map.memory.len, std.posix.MADV.RANDOM) catch {};
+                if (@import("builtin").os.tag != .windows) std.posix.madvise(o.file.map.memory.ptr, o.file.map.memory.len, std.posix.MADV.RANDOM) catch {};
                 try g.files.append(gpa, o);
                 break :file &g.files.items[g.files.items.len - 1];
             };

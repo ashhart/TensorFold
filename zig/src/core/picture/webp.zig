@@ -66,7 +66,7 @@ fn find(io: std.Io, a: Allocator) Loaded {
 
 /// One candidate: null when it does not load or lacks a function; `.wrong` when its version is not the pin.
 fn open(path: []const u8) ?Loaded {
-    var dl = std.DynLib.open(path) catch return null;
+    var dl = @import("sys").DynLib.open(path) catch return null;
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
