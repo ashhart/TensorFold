@@ -109,6 +109,24 @@ pub const Run = struct {
     ngram: []const u8 = "shard_", // how the checkpoint spells its n-gram table shards (index.ngramSpelling)
 
     load_limit: u64 = 0,
+    objects: @import("owned.zig").Owner(mtl) = .{},
+    files: std.ArrayList(c_int) = .empty,
+    maps: std.ArrayList(mtl.MappedFile) = .empty,
+    rows_cleanup: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque) void } = null,
+    closed: bool = false,
+
+    pub const deinit = @import("run_cleanup.zig").drop;
+
+    pub fn ownResource(r: *Run, value: anytype) !@TypeOf(value) {
+        return r.objects.keep(r.arena, value);
+    }
+
+    pub fn mapFile(r: *Run, path: [:0]const u8) !mtl.MappedFile {
+        const file = try mtl.MappedFile.open(path);
+        errdefer file.deinit();
+        try r.maps.append(r.arena, file);
+        return file;
+    }
 
     pub fn allocate(r: *Run, n: usize) !mtl.Buffer {
         return r.allocateOptions(n, opts);
@@ -155,6 +173,10 @@ pub const Run = struct {
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
         const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
+        r.files.append(r.arena, fd) catch |err| {
+            _ = platform.c.close(fd);
+            return err;
+        };
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
         const n = std.mem.readInt(u64, &head, .little);

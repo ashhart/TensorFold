@@ -204,3 +204,35 @@ test "Flash Next vision memory: both native entries budget metadata before loadi
     try std.testing.expect(std.mem.indexOf(u8, source, "eng.r.device.buffer(") == null);
     try std.testing.expect(std.mem.indexOf(u8, source, "Tower.loadWith(") != null);
 }
+
+test "Flash Next cleanup: actual constructor prefix unwinds a later guard refusal and retries on the same device" {
+    const Prefix = @import("src/families/flashnext/load_prefix.zig");
+    var record: mtl.Record = .{ .gpa = a };
+    defer record.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const Work = struct {
+        fn construct(_: void, run: anytype) !void {
+            _ = try run.buffer(64);
+            _ = try run.buffer(64);
+            _ = try run.buffer(128);
+        }
+    };
+    var run = fz.Run{ .arena = arena.allocator(), .device = record.device(), .queue = record.queue(), .load_limit = @import("flashnext_memory").margin + 192 };
+    try std.testing.expectError(error.FlashNextMemoryShortfall, Prefix.build(void, &run, {}, Work.construct));
+    try std.testing.expectEqual(@as(usize, 2), record.allocations.items.len);
+    try std.testing.expectEqual(@as(usize, 1), record.waits);
+    try std.testing.expectEqual(@as(usize, 1), record.queue_releases);
+    try record.allFreed();
+    run.deinit();
+    try std.testing.expectEqual(@as(usize, 1), record.queue_releases);
+    var retry = fz.Run{ .arena = arena.allocator(), .device = record.device(), .queue = record.queue(), .load_limit = @import("flashnext_memory").margin + 256 };
+    try Prefix.build(void, &retry, {}, Work.construct);
+    retry.deinit();
+    try record.allFreed();
+    try std.testing.expectEqual(@as(usize, 2), record.queue_releases);
+}
+
+test {
+    _ = @import("src/families/flashnext/owned_test.zig");
+}

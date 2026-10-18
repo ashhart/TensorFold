@@ -99,12 +99,35 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
 
     const r = try arena.create(Run);
     r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window, .load_limit = load_limit };
+    return @import("load_prefix.zig").build(*Engine, r, Construction{
+        .e = e,
+        .io = io,
+        .model_dir = model_dir,
+        .dump_dir = dump_dir,
+        .speed_up = speed_up,
+        .identity = route.identity,
+        .pack_dir = pack_dir,
+    }, finishLoad);
+}
+
+const Construction = struct { e: *Engine, io: Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8, identity: []const u8, pack_dir: []const u8 };
+
+fn finishLoad(context: Construction, r: *Run) !*Engine {
+    const e = context.e;
+    const arena = r.arena;
+    const device = r.device;
+    const io = context.io;
+    const model_dir = context.model_dir;
+    const dump_dir = context.dump_dir;
+    const speed_up = context.speed_up;
+    const identity = context.identity;
+    const pack_dir = context.pack_dir;
     r.fused_xsum = true;
     r.serial = true;
     r.xnew = true;
     r.dense = true;
     r.hc_up = true;
-    r.event = try device.sharedEvent();
+    r.event = try r.ownResource(try device.sharedEvent());
     if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
     r.sel = try Select.init(r, MAXR);
     r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
@@ -112,14 +135,14 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
         r.gdn_pipe = try fz.gdn_step.compile(r, false);
         if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
     }
-    const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
+    const index_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
+
     const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{});
     var files: std.StringHashMapUnmanaged(void) = .empty;
     var wit = index.object.get("weight_map").?.object.iterator();
     while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
     var fit = files.keyIterator();
     while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-    const identity = route.identity;
     e.identity_hash = std.hash.Wyhash.hash(0x6964, identity);
     const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{pack_dir}, 0);
     {
@@ -134,7 +157,8 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     var attention_scale: f64 = undefined;
     var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
     if (dump_dir) |d| {
-        const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
+        const ref_file = try r.mapFile(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
+
         const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
         const ple_ref = ref.object.get("ple").?.object;
         ple_values = .{

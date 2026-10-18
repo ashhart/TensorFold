@@ -14,8 +14,8 @@ pub const RECORD = 2 * replay.MAXR * 48 * 128 * 2 + replay.MAXR * 48 * 4 * 4;
 /// with the previous window's kept rows replayed into it.
 pub fn compile(r: *Run, kept: bool) !mtl.Pipeline {
     const text = try std.mem.concat(r.arena, u8, &.{ r.xnew_header, if (kept) "#define FZ_GDN_REPLAY 1\n" else "#define FZ_GDN_REPLAY 0\n", ks.flashnext_gdn });
-    const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
-    return mtl.Pipeline.init(r.device, lib, "fz_gdn", false);
+    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
+    return r.ownResource(try mtl.Pipeline.init(r.device, lib, "fz_gdn", false));
 }
 
 /// The step over value heads [h0, h0 + heads) for the rows `ins`' rows buffer holds; inputs and outputs as q4_gdn's.

@@ -73,6 +73,8 @@ pub const Record = struct {
     active: bool = false,
     attached: bool = false,
     commits: usize = 0,
+    waits: usize = 0,
+    queue_releases: usize = 0,
     uses: usize = 0,
     copies: usize = 0,
     bad: usize = 0,
@@ -194,6 +196,9 @@ pub const ResidencySet = struct {
 
 pub const Queue = struct {
     record: *Record,
+    pub fn deinit(q: Queue) void {
+        q.record.queue_releases += 1;
+    }
     pub fn commandBuffer(q: Queue) CommandBuffer {
         return .{ .record = q.record };
     }
@@ -223,7 +228,9 @@ pub const CommandBuffer = struct {
     pub fn commit(c: CommandBuffer) void {
         c.record.commits += 1;
     }
-    pub fn wait(_: CommandBuffer) void {}
+    pub fn wait(c: CommandBuffer) void {
+        c.record.waits += 1;
+    }
     pub fn failure(_: CommandBuffer) ?[]const u8 {
         return null;
     }

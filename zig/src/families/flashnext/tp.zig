@@ -1,11 +1,10 @@
-//! Speed-up mode for Flash Next: two Macs with the whole model each, half the work each, over MCDMA. Decode: each rank computes every routed and the shared expert for its half of the window's rows (`ownRows`) and those rows' MoE branch with one Mac's sums; after each target layer's experts the GPU posts a sequence; the host sends the branch rows (bf16) to the peer, and the next layer's combine waits for the flag the peer's message sets, then updates every row's streams (one Mac's bits). DeltaNet layers split their heads: each rank's out-projection partial (fp32), exchanged and added in rank order. Prefill: a chunk's rows split across the two Macs (replay.zig `chunkPair`); the host sends each layer's handoff into the peer's slot for that layer and signals the layer's flag, which the peer's GPU waits for.
+//! Flash Next paired serving: split work, exchange exact partials, and own the endpoint until GPU aliases are gone.
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
 const fabric = @import("fabric");
 const host_wait = @import("tp_host_wait.zig");
 const tp_seq = @import("tp_seq.zig");
-
 const D = 2560;
 const WIDE = 4 * D;
 const MAXR = 16;
@@ -14,11 +13,9 @@ const PMAX = 8192;
 pub const CS_ROW = 3 * WIDE * 2;
 pub const SO_ROW = 48 * 128 * 128 * 4;
 const PAGE = 16384;
-
 fn pages(n: usize) usize {
     return (n + PAGE - 1) / PAGE * PAGE;
 }
-
 /// The window, the same on both ranks: decode slots (alternating by sequence parity), then a slot a layer for prefill handoffs, the n-gram tail, the last row's streams and first token, the MTP head's keys; flags; the sync words.
 const SLOT = MAXR * 11 * D * 2; // one layer's expert outputs at the widest window (bf16): 55 pages
 pub const DN_SLOT = pages(CS_ROW + SO_ROW); // a DeltaNet layer: conv state row, then recurrent state row
@@ -41,15 +38,12 @@ const REQ_TOKENS = 262144; // a served request's prompt tokens at most (the engi
 const REQ = RECVA + 2 * PAGE; // served: rank 0's request for rank 1 (a 64-byte head, then the prompt)
 pub const MARK = REQ + pages(64 + 4 * REQ_TOKENS); // a mark a pair chunk passed: its DeltaNet states (a DN_SLOT a layer), then its n-gram tail
 const WINDOW = MARK + 36 * DN_SLOT + pages(9 * WIDE * 2);
-
 fn sendX(slot: u32) usize {
     return SENDX + (slot % 2) * (PAGE + SLOT) + PAGE;
 }
-
 fn sendR(slot: u32) usize {
     return SENDR + (slot % 2) * (PAGE + PART) + PAGE;
 }
-
 fn sendA(slot: u32) usize {
     return SENDA + (slot % 2) * 2 * PAGE + PAGE;
 }
@@ -66,26 +60,21 @@ pub const MARK_FLAG = FLAGS + 512; // a passed mark's states have landed in MARK
 pub const MARK_READY = MARK_FLAG + 8; // the receiver's MARK is free for that sequence
 const GPU = 1024;
 const GAVE_UP = 2048;
-
 /// The GPU posts (sequence << 5) | rows in one 32-bit word, so posted sequences wrap at 2^27.
 const SEQ_BITS = 27;
-
 /// Whether post word `w` has reached sequence `seq`, modulo 2^27 (the GPU is never 2^26 sequences ahead).
 fn postReached(w: u32, seq: u32) bool {
     return ((w >> 5) -% seq) & ((1 << SEQ_BITS) - 1) < 1 << (SEQ_BITS - 1);
 }
-
 /// Whether wrapping counter `a` has reached `b` (host sequences and flag values; never 2^31 apart).
 fn reached(a: u32, b: u32) bool {
     return @as(i32, @bitCast(a -% b)) >= 0;
 }
-
 /// The receiving window's slot for layer i's prefill handoff (attention layers are i % 4 == 3).
 pub fn layerSlot(i: usize) usize {
     const att = i / 4; // attention layers before i (3, 7, ... below it)
     return PREFILL + (i - att) * DN_SLOT + att * ATT_SLOT;
 }
-
 test "control words are distinct and inside the flag page" {
     var words: [LAYERS + 12]usize = undefined;
     var n: usize = 0;
@@ -102,7 +91,6 @@ test "control words are distinct and inside the flag page" {
         for (words[0..i]) |o| try std.testing.expect(o != w);
     }
 }
-
 test "prefill slots tile the region without overlap" {
     var end: usize = PREFILL;
     for (0..LAYERS) |i| {
@@ -111,17 +99,15 @@ test "prefill slots tile the region without overlap" {
     }
     try std.testing.expectEqual(TAIL, end);
 }
-
 pub const Settings = settings.Settings;
 const settings = @import("tp_settings.zig");
-
 const source = @import("tp_source.zig").source;
-
 pub const Write = @import("tp_job.zig").Write;
 const Job = @import("tp_job.zig").Job;
 const JOBS = 1024;
-
 pub const Tp2 = struct {
+    owned: @import("owned.zig").Owner(mtl) = .{},
+    allocator: ?std.mem.Allocator = null,
     rank: u32,
     peer: u32,
     ep: *fabric.mcdma.Endpoint,
@@ -158,12 +144,10 @@ pub const Tp2 = struct {
     held_ns: u64 = 0,
     held_max: u64 = 0,
     held_kind: [4][2]u64 = @splat(.{ 0, 0 }), // by job kind: total ticks, jobs
-
     /// Metal aliases the endpoint window; count it once beside staging, tiny buffers and the host queue.
     pub fn startupBytes() usize {
         return WINDOW + (32 << 20) + 32 + @sizeOf(Tp2) + JOBS * @sizeOf(Job);
     }
-
     /// Connect to the peer named in the settings file and start the host's service thread.
     pub fn init(gpa: std.mem.Allocator, device: mtl.Device, settings_path: []const u8) !*Tp2 {
         const f = try mtl.MappedFile.open(try gpa.dupeSentinel(u8, settings_path, 0));
@@ -171,30 +155,37 @@ pub const Tp2 = struct {
         if (s.rank > 1 or s.links.len != 1) return error.TpTwoRanksOneLink;
         const lib = try gpa.dupeSentinel(u8, s.library, 0);
         const ep = try fabric.mcdma.Endpoint.create(gpa, lib, .{ .rank = s.rank, .ranks = 2, .window_bytes = WINDOW, .staging_bytes = 32 << 20, .links = s.links, .timeout_ns = 60 * std.time.ns_per_s, .connect_timeout_ns = 300 * std.time.ns_per_s });
+        errdefer ep.deinit();
+        var owned: @import("owned.zig").Owner(mtl) = .{};
+        errdefer owned.deinit();
         const rd = ep.rdma();
         const win = rd.window(); // zeroed by the endpoint before it connected: a fast peer's first words may be here already
         const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
-        const lib_m = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+        const lib_m = try owned.keep(gpa, try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx()));
         const t = try gpa.create(Tp2);
+        errdefer gpa.destroy(t);
         t.* = .{
+            .allocator = gpa,
             .rank = s.rank,
             .peer = 1 - s.rank,
             .ep = ep,
             .rd = rd,
             .win = win,
-            .wbuf = try device.bufferNoCopy(win.ptr, win.len, opts),
-            .post = try mtl.Pipeline.init(device, lib_m, "tp_post", false),
-            .wait = try mtl.Pipeline.init(device, lib_m, "tp_wait", false),
-            .branch_pipe = try mtl.Pipeline.init(device, lib_m, "tp_branch", false),
-            .argmax_pipe = try mtl.Pipeline.init(device, lib_m, "tp_argmax_part", false),
-            .pick_pipe = try mtl.Pipeline.init(device, lib_m, "tp_pick", false),
-            .merge_pipe = try mtl.Pipeline.init(device, lib_m, "tp_merge", false),
-            .plain_pipe = try mtl.Pipeline.init(device, lib_m, "tp_plain", false),
-            .one = try device.buffer(16, opts),
-            .pick_tmp = try device.buffer(16, opts),
-            .ids_pipe = try mtl.Pipeline.init(device, lib_m, "tp_ids", false),
+            .wbuf = try owned.keep(gpa, try device.bufferNoCopy(win.ptr, win.len, opts)),
+            .post = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_post", false)),
+            .wait = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_wait", false)),
+            .branch_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_branch", false)),
+            .argmax_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_argmax_part", false)),
+            .pick_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_pick", false)),
+            .merge_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_merge", false)),
+            .plain_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_plain", false)),
+            .one = try owned.keep(gpa, try device.buffer(16, opts)),
+            .pick_tmp = try owned.keep(gpa, try device.buffer(16, opts)),
+            .ids_pipe = try owned.keep(gpa, try mtl.Pipeline.init(device, lib_m, "tp_ids", false)),
             .jobs = try gpa.alloc(Job, JOBS),
         };
+        t.owned = owned;
+        errdefer gpa.free(t.jobs);
         t.one.slice(i32, 1)[0] = 1;
         t.trace = platform.c.getenv("TF_TP_TRACE") != null;
         t.local = platform.c.getenv("TF_TP_LOCAL") != null;
@@ -206,26 +197,31 @@ pub const Tp2 = struct {
         std.log.info("TP=2 rank {d} connected", .{t.rank});
         return t;
     }
-
     /// Stop the host's service thread and close the link; every GPU use of the window has ended.
     pub fn deinit(t: *Tp2) void {
+        t.stopService();
+        t.owned.deinit();
+        t.ep.deinit();
+        if (t.allocator) |a| {
+            a.free(t.jobs);
+            a.destroy(t);
+        }
+    }
+    pub fn stopService(t: *Tp2) void {
         t.rd.flush() catch {}; // what this rank sent (rank 0's last request) is out before the link closes
         t.stop.store(true, .release);
         if (t.thread) |th| th.join();
-        t.ep.deinit();
+        t.thread = null;
     }
-
     /// The window rows whose experts (every routed slot and the shared one) and MoE branch this rank computes, [lo, hi):
     /// rank 0 the first half, rounded up, rank 1 the rest.
     pub fn ownRows(t: *const Tp2, rows: usize) [2]usize {
         return tp_seq.ownRows(t.rank, rows);
     }
-
     /// GPU waits that gave up (a peer that never answered); nonzero means the run is invalid.
     pub fn gaveUp(t: *const Tp2) u32 {
         return @atomicLoad(u32, t.word32(SYNC + GAVE_UP * 4), .acquire);
     }
-
     /// A new sequence with its job queued for the service thread.
     fn queue(t: *Tp2, job: Job) u32 {
         t.seq +%= 1;
@@ -233,7 +229,6 @@ pub const Tp2 = struct {
         t.queued.store(t.seq, .release);
         return t.seq;
     }
-
     fn encodePost(t: *Tp2, enc: mtl.ComputeEncoder, seq: u32, rows_buf: mtl.Buffer, rows_off: usize) void {
         enc.setPipeline(t.post);
         enc.setBuffer(t.wbuf, SYNC, 0);
@@ -241,7 +236,6 @@ pub const Tp2 = struct {
         enc.setBuffer(rows_buf, rows_off, 2);
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
-
     /// On the serial encoder: the GPU waits until the window's 32-bit word at `off` reaches `value`.
     pub fn waitWord(t: *Tp2, enc: mtl.ComputeEncoder, off: usize, value: u32) void {
         enc.setPipeline(t.wait);
@@ -250,7 +244,6 @@ pub const Tp2 = struct {
         enc.setBuffer(t.wbuf, SYNC, 2);
         enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
     }
-
     /// After a target layer's experts for this rank's rows (`ownRows`), on the serial encoder: their MoE branch (bf16)
     /// into the send buffer; `combine` posts it and updates every row.
     pub fn exchange(t: *Tp2, enc: mtl.ComputeEncoder, y: anytype, wts: anytype, lg: anytype, rows: usize) void {
@@ -267,7 +260,6 @@ pub const Tp2 = struct {
             enc.dispatchThreads(mtl.Size.of(D, own[1] - own[0], 1), mtl.Size.of(256, 1, 1));
         }
     }
-
     /// The last exchange posted, and its MoE branches into the streams (q4_hc_norm_grouped's job): this rank's rows
     /// from its send buffer at once, the peer's once they land.
     pub fn combine(t: *Tp2, enc: mtl.ComputeEncoder, h: anytype, inj: anytype, out: anytype, ssp: anytype, rows_buf: anytype, rows: usize) void {
@@ -288,7 +280,6 @@ pub const Tp2 = struct {
         enc.setBuffer(t.wbuf, FLAG, 10);
         enc.dispatchThreads(mtl.Size.of(D, rows, 1), mtl.Size.of(256, 1, 1));
     }
-
     /// The head's picks from this rank's vocab columns [lo, lo + n) of `logits` (rows x vocab, bf16) and the peer's: each half's argmax, swapped, merged (the larger value, the lower index on a tie: one Mac's argmax exactly).
     pub fn argmax(t: *Tp2, enc: mtl.ComputeEncoder, logits: anytype, vocab: usize, lo: usize, n: usize, picks: anytype, rows_buf: anytype, rows: usize) void {
         const m = t.seqs.pick();

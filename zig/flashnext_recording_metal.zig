@@ -47,6 +47,7 @@ pub const CompileOptions = struct {
     }
 };
 pub const Library = struct {
+    id: usize = 0,
     text: []const u8,
     pub fn fromSource(_: Device, text: []const u8, _: CompileOptions) !Library {
         return .{ .text = text };
@@ -54,6 +55,7 @@ pub const Library = struct {
     pub fn deinit(_: Library) void {}
 };
 pub const Pipeline = struct {
+    id: usize = 0,
     name: []const u8 = "noop",
     text: []const u8 = "",
     pub fn init(_: Device, lib: Library, name: []const u8, _: bool) !Pipeline {
@@ -117,6 +119,7 @@ pub const ComputeEncoder = struct {
     pub fn end(_: ComputeEncoder) void {}
 };
 pub const Queue = struct {
+    pub fn deinit(_: @This()) void {}
     pub fn commandBuffer(_: Queue) CommandBuffer {
         return .{};
     }
@@ -150,8 +153,13 @@ pub const BlitEncoder = struct {
 pub const ResidencySet = struct {
     pub const Follow = struct { ctx: *anyopaque, join: *const fn (*anyopaque, Buffer) void, leave: *const fn (*anyopaque, Buffer) void };
 };
-pub const SharedEvent = struct {};
+pub const SharedEvent = struct {
+    id: usize = 0,
+    pub fn deinit(_: @This()) void {}
+};
 pub const objc = struct {
+    pub const Id = usize;
+    pub fn release(_: Id) void {}
     pub const Pool = struct {
         pub fn push() @This() {
             return .{};

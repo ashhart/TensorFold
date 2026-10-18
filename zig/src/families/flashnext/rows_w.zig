@@ -24,6 +24,12 @@ pub const Pipes = struct {
     four: ?mtl.Pipeline = null,
     sums: ?mtl.Pipeline = null,
     mma: ?mtl.Pipeline = null,
+    pub fn deinit(p: Pipes) void {
+        p.rows.deinit();
+        if (p.four) |v| v.deinit();
+        if (p.sums) |v| v.deinit();
+        if (p.mma) |v| v.deinit();
+    }
 };
 
 pub const Cache = std.AutoHashMapUnmanaged(Spec, Pipes);
@@ -75,8 +81,10 @@ pub fn source(a: std.mem.Allocator, s: Spec) ![]const u8 {
 pub fn pipes(a: std.mem.Allocator, device: mtl.Device, cache: *Cache, s: Spec) !Pipes {
     if (cache.get(s)) |p| return p;
     const lib = try mtl.Library.fromSource(device, try source(a, s), mtl.CompileOptions.mlx());
+    defer lib.deinit();
     const four = s.bits == 4 and s.group == 32;
     var p: Pipes = .{ .rows = try mtl.Pipeline.init(device, lib, if (four) "q4_qmv_rows" else "qa_qmv_rows", false) };
+    errdefer p.deinit();
     if (!four) p.four = try mtl.Pipeline.init(device, lib, "qa_qmv_rows4", false);
     if (!four and s.k % (32 * vpt(s.bits)) == 0) {
         p.sums = try mtl.Pipeline.init(device, lib, "qa_row_block_sums", false);
@@ -216,6 +224,14 @@ pub const Shared = struct {
     hc: @import("rows_hc.zig").Cache = .empty,
     hc_tiles: bool = true, // 4/32 hyper-connections take their 8-row tiles (off when the load check finds them inexact)
     sums: [2]Buf,
+
+    pub fn deinit(ctx: *anyopaque) void {
+        const sh: *Shared = @ptrCast(@alignCast(ctx));
+        var rows = sh.cache.valueIterator();
+        while (rows.next()) |p| p.deinit();
+        var hc = sh.hc.valueIterator();
+        while (hc.next()) |p| p.deinit();
+    }
 
     /// Rows a launch takes at most (the MTP head's fc_hidden runs four streams of a 16-row window).
     pub const max_rows = 64;

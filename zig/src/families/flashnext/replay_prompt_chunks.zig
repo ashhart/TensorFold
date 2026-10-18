@@ -174,7 +174,7 @@ pub fn chunkMarked(ps: []const *Prompt, m: *Model, gpa: std.mem.Allocator, token
         for (tokens[at - @min(at, 2) .. at]) |tok| hist = .{ hist[1], tok };
         try ps[k].prep(m, gpa, tokens[at .. at + rows], m.pos + at, hist);
         queues[k] = if (k == 0) r.queue else ps[k].seg_queue orelse blk: {
-            const q = try r.device.queue();
+            const q = try r.ownResource(try r.device.queue());
             ps[k].seg_queue = q;
             break :blk q;
         };

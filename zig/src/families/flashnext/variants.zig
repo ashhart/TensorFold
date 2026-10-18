@@ -36,10 +36,10 @@ pub fn patched(r: *Run, v: *Variant, consts: []const Const) !*Variant {
     if (r.variants.get(key.items)) |hit| return hit;
     var text = try Run.variantText(r.arena, v);
     for (consts) |c| text = try constant(r.arena, text, c.name, c.value);
-    const lib = try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx());
+    const lib = try r.ownResource(try mtl.Library.fromSource(r.device, text, mtl.CompileOptions.mlx()));
     const nv = try r.arena.create(Variant);
     nv.* = v.*;
-    nv.pipe = try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{v.name}, 0), false);
+    nv.pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, try std.fmt.allocPrintSentinel(r.arena, "{s}", .{v.name}, 0), false));
     nv.text = text;
     try r.variants.put(r.arena, key.items, nv);
     return nv;
