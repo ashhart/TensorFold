@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Cluster checkpoint headers use the core safetensors parser and validate tensor ranges against the actual file length.
+
 - HTTP serving closes unfinished replies, reports token staging allocation failures, releases SSE frame storage after each write, and shares one public address policy between media and web fetches.
 
 - Mac source build instructions name full Xcode and its Metal Toolchain component, and the build example uses the package manifest's version (#1049). Thanks to @akol1.
