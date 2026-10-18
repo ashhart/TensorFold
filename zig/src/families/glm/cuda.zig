@@ -26,6 +26,8 @@ pub const quant = @import("cuda_quant.zig");
 pub const q4 = @import("cuda_q4.zig");
 pub const ranks = @import("cuda_ranks.zig");
 pub const sampler = @import("cuda_sampler.zig");
+pub const prompt_sink = @import("cuda_prompt_sink.zig");
+pub const prompt_logprobs = @import("cuda_prompt_logprobs.zig");
 pub const engine = @import("cuda_engine.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
@@ -56,6 +58,7 @@ test {
     _ = q4;
     _ = ranks;
     _ = sampler;
+    _ = prompt_logprobs;
     _ = engine;
     _ = follow;
     _ = lanes;

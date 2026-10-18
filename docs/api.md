@@ -148,7 +148,8 @@ sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 thro
 the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
 and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
 the Responses route and the request modes above return HTTP 400 when probabilities are requested.
-Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine
+and on GLM-5.3-Flash's CUDA engine.
 `choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
 (a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,

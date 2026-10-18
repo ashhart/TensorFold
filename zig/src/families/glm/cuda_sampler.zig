@@ -29,6 +29,7 @@ pub const Sampler = struct {
     d: *const cuda.Driver,
     module: cuda.Module,
     tf_draw: cuda.Function,
+    tf_logprob_rows: cuda.Function,
     vocab: usize,
     rows: usize,
     full: cuda.DeviceBuffer, // bf16 [rows][vocab]: every rank's columns in place
@@ -41,6 +42,7 @@ pub const Sampler = struct {
         var m = try cuda.Module.load(d, cuda.kernels.sample);
         errdefer m.unload();
         const f = try m.function("tf_draw");
+        const lp = try m.function("tf_logprob_rows");
         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
         errdefer full.free();
         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
@@ -50,7 +52,7 @@ pub const Sampler = struct {
         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
         errdefer tok.free();
         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        return .{ .d = d, .module = m, .tf_draw = f, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
     }
 
     pub fn deinit(s: *Sampler) void {
@@ -66,14 +68,7 @@ pub const Sampler = struct {
     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
         std.debug.assert(rows <= s.rows and out.len >= rows and first >= 1);
         const V = s.vocab;
-        for (mine) |l| {
-            const span = spans[l.rank];
-            for (0..rows) |row| try s.copy(stream, s.full.ptr + (row * V + span.lo) * 2, l.logits + row * span.len() * 2, span.len() * 2);
-        }
-        switch (exchange) {
-            .local => {},
-            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = s.full.ptr, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
-        }
+        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
         try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
@@ -88,6 +83,31 @@ pub const Sampler = struct {
         try cuda.launch.launch(s.tf_draw, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
         try stream.synchronize();
         try s.tok.download(0, std.mem.sliceAsBytes(out[0..rows]));
+    }
+
+    /// `rows` rows of `mine` made whole in `full` (bf16 [rows][vocab]) on every rank, each column from its rank.
+    pub fn gather(s: *const Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, full: u64) !void {
+        const V = s.vocab;
+        for (mine) |l| {
+            const span = spans[l.rank];
+            for (0..rows) |row| try s.copy(stream, full + (row * V + span.lo) * 2, l.logits + row * span.len() * 2, span.len() * 2);
+        }
+        switch (exchange) {
+            .local => {},
+            .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
+        }
+    }
+
+    /// sample.cu's logprob words of `rows` whole rows at `full`: each row's pick in `picks`, its `k` best, its rank.
+    pub fn logprobRows(s: *const Sampler, stream: cuda.Stream, full: u64, rows: usize, picks: u64, k: u8, out: u64) !void {
+        var args: cuda.Args = .{};
+        args.add(full);
+        args.add(@as(u32, @intCast(s.vocab)));
+        args.add(picks);
+        args.add(@as(u32, k));
+        args.add(@as(u32, 1)); // the rank too: vLLM's prompt_logprobs give it
+        args.add(out);
+        try cuda.launch.launch(s.tf_logprob_rows, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 1024 } }, stream, &args);
     }
 
     /// The whole rows a draw read (bf16 [rows][vocab]), for checks against the host rule.

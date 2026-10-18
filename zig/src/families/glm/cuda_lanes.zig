@@ -6,6 +6,7 @@ const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
 
 const be = lanes.backend;
 
@@ -66,6 +67,7 @@ pub const Lanes = struct {
         .draft = draftFn,
         .probabilities = chancesFn,
         .release = releaseFn,
+        .prompt_rows = true,
     };
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
@@ -159,6 +161,10 @@ pub const Lanes = struct {
         const self = of(ptr);
         const from = try self.opening(s);
         try self.images(s, from);
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        try sink.prepare();
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
         const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
         self.lanes.getPtr(s).?.first = self.take(first);
     }
@@ -166,7 +172,7 @@ pub const Lanes = struct {
     fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
         const self = of(ptr);
         if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
-        for (ss) |s| if (s.images.len > 0 or s.reuse.saved != null or s.prompt_len > engine.prompt_rows) return false;
+        for (ss) |s| if (!canBatch(s)) return false;
         var opened: usize = 0;
         errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
         var parts: [engine.max_together]engine.Prompt = undefined;
@@ -203,6 +209,10 @@ pub const Lanes = struct {
         if (going != null) try self.x.bind(l.slot);
         const at = going orelse if (from) |r| r.at else 0;
         errdefer l.fill = null;
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        try sink.prepare();
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
         if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
             l.first = self.take(first);
             l.fill = null;
@@ -225,7 +235,8 @@ pub const Lanes = struct {
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
         s.cached = 0;
-        return self.resumeFrom(s, ids.len);
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -235,6 +246,7 @@ pub const Lanes = struct {
         try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
         try self.x.images(v);
     }
+    const Sink = @import("cuda_prompt_sink.zig").Sink;
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
         return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
@@ -464,4 +476,9 @@ test "a failed lane insertion leaves no entry, and a retry takes slot zero" {
     try std.testing.expectEqual(@as(usize, 0), self.lanes.count());
     fail.fail_index = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(u32, 0), (try self.claim(&stream)).slot);
+}
+
+/// Eligibility for the maintained fresh-prompt batching path.
+pub fn canBatch(s: anytype) bool {
+    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
 }

@@ -9,6 +9,7 @@ const weights = @import("cuda_weights.zig");
 const fw = @import("cuda_forward.zig");
 const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
@@ -83,6 +84,10 @@ pub const Engine = struct {
     next_snap: u64 = 1, // rank 0: the next id
     announce: u64 = 0, // rank 0: a state kept at this chunk's mark, for the other ranks to copy at its gate
     dropped: std.ArrayList(u32) = .empty, // rank 0: ids dropped since the other ranks last heard (cuda_follow)
+    prompt_logprobs: ?prompt_lp.Want = null, // a prompt pass's rows asked for (every rank runs the head on them)
+    prompt_bufs: ?prompt_lp.Buffers = null, // their head passes' buffers, made at the first pass that asks
+    prompt_tried: bool = false, // that pass came: without buffers after it, the passes take the window's
+    prompt_out: prompt_lp.Output, // a head pass's logprob words, then its picks, host-mapped (rank 0 reads them)
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -131,7 +136,7 @@ pub const Engine = struct {
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
@@ -183,6 +188,8 @@ pub const Engine = struct {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
         };
+        e.prompt_out = try prompt_lp.Output.init(d);
+        errdefer e.prompt_out.free();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
         errdefer e.shared_buf.free();
         errdefer @import("cuda_load_owner.zig").drain(stream, d);
@@ -201,6 +208,8 @@ pub const Engine = struct {
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
         e.freeProfs();
+        if (e.prompt_bufs) |*b| b.free();
+        e.prompt_out.free();
         e.smp.deinit();
         e.pairs.free();
         if (e.bs) |*b| b.deinit();
@@ -319,6 +328,7 @@ pub const Engine = struct {
         try e.gate(cancel);
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
+        if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         const last = start + rows == len;
         var first: ?u32 = null;
@@ -411,7 +421,7 @@ pub const Engine = struct {
     }
 
     /// The ranks' maximum of `v` (an all-reduce on the engine's stream).
-    fn shared(e: *Engine, v: f64) !f64 {
+    pub fn shared(e: *Engine, v: f64) !f64 {
         var x = v;
         try e.shared_buf.uploadAsync(0, std.mem.asBytes(&x), e.stream.handle);
         try e.lib.check(e.lib.api.ncclAllReduce(e.shared_buf.ptr, e.shared_buf.ptr, 1, .f64, .max, e.comm, e.stream.handle), "ncclAllReduce");
@@ -578,12 +588,6 @@ pub const Engine = struct {
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
     fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
-    }
-
-    fn heatRoot() []const u8 {
-        const p = std.c.getenv("TF_HEAT_ROOT") orelse return heat.default_root;
-        const s = std.mem.span(p);
-        return if (s.len == 0) heat.default_root else s;
     }
 
     pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {

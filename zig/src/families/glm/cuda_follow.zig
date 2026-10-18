@@ -17,7 +17,7 @@ pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt
+    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs (the head on each row)
     a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none)
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
@@ -129,6 +129,11 @@ pub const Leader = struct {
         try x.link.send(x.e.m.glue.put_words, hh, ids);
     }
 
+    /// A prompt step's flags: 1 when its rows go through the head (the other ranks join each pass's broadcasts).
+    fn rows(x: Leader) u32 {
+        return @intFromBool(x.e.prompt_logprobs != null);
+    }
+
     /// The stream's sequence for the steps that follow (each step names it, so the other ranks bind it too).
     pub fn bind(x: Leader, slot: u32) !void {
         try x.e.bind(slot);
@@ -180,7 +185,7 @@ pub const Leader = struct {
     /// `cancel` (rank 0's), asked before each chunk, decides for every rank; `from` every rank holds; `marks` rank 0's.
     pub fn prefill(x: Leader, ids: []const u32, from: ?engine.Resume, cancel: ?engine.Cancel, marks: ?engine.Marks) !u32 {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.prefill), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0 }, ids);
+        try x.send(.{ .kind = @backingInt(Kind.prefill), .flags = x.rows(), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0 }, ids);
         return x.e.prefill(ids, from, cancel, marks);
     }
 
@@ -189,7 +194,7 @@ pub const Leader = struct {
         if (start >= ids.len) return error.BadChunk;
         try x.flush();
         const part = ids[start..@min(ids.len, start + engine.prompt_rows + 1)];
-        try x.send(.{ .kind = @backingInt(Kind.chunk), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
+        try x.send(.{ .kind = @backingInt(Kind.chunk), .flags = x.rows(), .a = if (from) |r| r.id else 0, .seed = if (from) |r| r.at else 0, .depth = @intCast(start), .top_k = @intCast(ids.len) }, part);
         return x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
     }
 
@@ -252,6 +257,12 @@ pub const Leader = struct {
     }
 };
 
+/// A prompt step whose rows go through the head (Leader.rows): this rank's columns join each pass's broadcasts.
+fn promptRows(h: Header) bool {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    return (kind == .prefill or kind == .chunk) and h.flags & 1 != 0;
+}
+
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
@@ -261,6 +272,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
         if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many) try e.bind(h.slot);
+        e.prompt_logprobs = if (promptRows(h)) .{} else null;
         switch (kind) {
             .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
@@ -394,4 +406,11 @@ test "a link whose host allocation fails frees its device buffer" {
     try std.testing.expectError(error.OutOfMemory, Link.init(failing.allocator(), &d, &lib, null, .{ .d = &d, .handle = null }, 128));
     try std.testing.expectEqual(@as(usize, 1), Mock.frees);
     try std.testing.expectEqual(before, cuda.usage(false).device);
+}
+test "flag 1 asks for prompt rows on prefill and chunk steps only (begin's is sampling, draft's from the prompt)" {
+    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048, .top_k = 4000 }));
+    try std.testing.expect(promptRows(.{ .kind = @backingInt(Kind.prefill), .flags = 1 }));
+    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.chunk), .depth = 2048, .top_k = 4000 }));
+    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.begin), .flags = 1, .seed = 7 }));
+    try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.draft), .flags = 1, .depth = 3 }));
 }

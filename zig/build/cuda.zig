@@ -471,10 +471,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
     run.has_side_effects = true;
     b.step("test-modelopt-host", "Actual Nemotron scratch and CUDA launch records without GPU execution").dependOn(&run.step);
-    // the GLM-5.3-Flash CUDA family's host side
     const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
     @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
     @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
+    @import("glm_contracts.zig").tests(b, glm, mods.lanes, cuda);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
