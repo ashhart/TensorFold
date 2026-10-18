@@ -4,7 +4,6 @@ const hip = @import("hip");
 const model = @import("model.zig");
 const pages = @import("pages.zig");
 const mamba = @import("mamba.zig");
-const moe = @import("moe.zig");
 const forward = @import("forward.zig");
 
 const Ops = hip.ops.Ops;
@@ -214,7 +213,11 @@ pub fn forwardRound(
                 normed,
                 total,
             ),
-            .moe => |w| try moe.layer(o, d, m.act, w, normed, total),
+            .moe => |w| {
+                try forward.moeResidual(o, m, d, w, normed, total, x, next, dst);
+                if (trace) |t| t.layer(t.ctx, i, x, total) catch return error.BadShape;
+                continue;
+            },
         };
         try hip.reduce.residualNorm(o, m.tp, x, y, next, dst, total, d.hidden, d.eps);
         if (trace) |t| t.layer(t.ctx, i, x, total) catch return error.BadShape;

@@ -93,6 +93,26 @@ pub fn attention(
     return o.project(flat, w.o, rows, w.o.partial);
 }
 
+/// The MoE block and the residual with the next norm: on one rank the experts' sum goes into the residual's launch.
+pub fn moeResidual(
+    o: Ops,
+    m: *const model.Model,
+    d: model.Dims,
+    w: model.Moe,
+    normed: Tensor,
+    rows: usize,
+    x: Tensor,
+    next: u64,
+    dst: Tensor,
+) Error!void {
+    if (d.world == 1) {
+        const r = try moe.expertRows(o, d, w, normed, rows);
+        return o.residualMoeRms(x, r, next, dst, rows, d.hidden, d.eps);
+    }
+    const y = try moe.layer(o, d, w, normed, rows);
+    try hip.reduce.residualNorm(o, m.tp, x, y, next, dst, rows, d.hidden, d.eps);
+}
+
 /// Each block's place among its kind: attention layers' pool slots and Mamba layers' states.
 pub fn slots(c: *const config.Config, out: []usize) []const usize {
     var counts: [3]usize = @splat(0);
@@ -140,7 +160,11 @@ pub fn run(
                 normed,
                 rows,
             ),
-            .moe => |w| try moe.layer(o, d, m.act, w, normed, rows),
+            .moe => |w| {
+                try moeResidual(o, m, d, w, normed, rows, x, next, dst);
+                if (ctx.trace) |t| t.layer(t.ctx, i, x, rows) catch return error.BadShape;
+                continue;
+            },
         };
         try hip.reduce.residualNorm(o, m.tp, x, y, next, dst, rows, d.hidden, d.eps);
         try traceLayer(ctx.trace, i, x, rows);
@@ -172,8 +196,7 @@ pub fn draft(o: Ops, m: *const model.Model, where: Where, ids: u64, hidden: Tens
     try o.rms(x, h.attn_norm, normed, rows, d.hidden, d.eps);
     const y = try attention(o, m.act, d, h.attn, where, normed, rows);
     try hip.reduce.residualNorm(o, null, x, y, h.moe_norm, normed, rows, d.hidden, d.eps);
-    const z = try moe.layer(o, d, m.act, h.moe, normed, rows);
-    try hip.reduce.residualNorm(o, null, x, z, h.final_norm, normed, rows, d.hidden, d.eps);
+    try moeResidual(o, m, d, h.moe, normed, rows, x, h.final_norm, normed);
     return .{ .logits = try o.project(normed, h.draft, rows, false), .normed = normed };
 }
 

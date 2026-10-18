@@ -10,27 +10,30 @@ pub const Error = hip.ops.Error;
 pub const ready = true;
 
 /// layer: x (rows, hidden) act normed rows, any streams' rows together -> y (rows, hidden).
-pub fn layer(o: hip.ops.Ops, d: model.Dims, act: model.Kind, w: model.Moe, x: Tensor, rows: usize) Error!Tensor {
-    _ = act;
+pub fn layer(o: hip.ops.Ops, d: model.Dims, w: model.Moe, x: Tensor, rows: usize) Error!Tensor {
     // y in act on one rank; fp32 when d.world > 1 (this rank's experts' share, which the caller sums)
-    return hip.moe_nemotron.run(
-        o,
-        .{
-            .router = w.router,
-            .bias = w.bias,
-            .fc1 = w.fc1,
-            .fc2 = w.fc2,
-            .shared_up = w.shared_up,
-            .shared_down = w.shared_down,
-            .experts = d.experts,
-            .first = d.first_expert,
-            .own = d.rank_experts,
-            .top_k = d.top_k,
-            .scaling = d.routed_scaling,
-            .norm = d.norm_topk,
-            .share = d.world > 1,
-        },
-        x,
-        rows,
-    );
+    return hip.moe_nemotron.run(o, layerOf(d, w), x, rows);
+}
+
+/// One rank's layer before its sum: each row's experts' rows and weights, and the shared expert's row.
+pub fn expertRows(o: hip.ops.Ops, d: model.Dims, w: model.Moe, x: Tensor, rows: usize) Error!hip.ops.Ops.MoeRows {
+    return hip.moe_nemotron.expertRows(o, layerOf(d, w), x, rows);
+}
+
+fn layerOf(d: model.Dims, w: model.Moe) hip.moe_nemotron.Layer {
+    return .{
+        .router = w.router,
+        .bias = w.bias,
+        .fc1 = w.fc1,
+        .fc2 = w.fc2,
+        .shared_up = w.shared_up,
+        .shared_down = w.shared_down,
+        .experts = d.experts,
+        .first = d.first_expert,
+        .own = d.rank_experts,
+        .top_k = d.top_k,
+        .scaling = d.routed_scaling,
+        .norm = d.norm_topk,
+        .share = d.world > 1,
+    };
 }
