@@ -16,6 +16,23 @@ const Allocator = std.mem.Allocator;
 const gpa = std.testing.allocator;
 const io = std.testing.io;
 
+test "a text-only Flash Next server refuses image parts before prompt rendering" {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var cx: errors.Cx = .{ .a = arena.allocator() };
+    const messages = (try json.parse(cx.a,
+        \\[{"role":"user","content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA=="}}]}]
+    )).ok;
+    const normalize = @import("messages.zig").normalizeWith;
+    try std.testing.expectError(error.Refused, normalize(&cx, messages, "system", false, .{}));
+    try std.testing.expectEqual(errors.Kind.request, cx.kind);
+    try std.testing.expectEqual(@as(u16, 400), cx.status());
+    try std.testing.expectEqualStrings(
+        "this server accepts text parts only; image, audio and video inputs are unsupported",
+        cx.message,
+    );
+}
+
 test "rewind boundary follows the latest actual user and stops before content" {
     var eng: Eng = .{ .window = 256, .cache = true };
     var text: Text = .{};
@@ -441,6 +458,7 @@ test "an incremental request summarizes only the new middle and a user edit is t
 const Watch = struct {
     eng: *Eng,
     opened: bool = false,
+    admitted_at_open: usize = 0,
     saw: bool = false,
 
     fn out(w: *Watch) openai.Out {
@@ -449,6 +467,7 @@ const Watch = struct {
 
     fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
         const w: *Watch = @ptrCast(@alignCast(ctx));
+        w.admitted_at_open = w.eng.prompts.items.len;
         w.opened = true;
         w.eng.opened = true;
     }
@@ -469,7 +488,7 @@ const Watch = struct {
     }
 };
 
-test "a stream compacts before it opens" {
+test "a stream compacts and admits its final request before it opens" {
     var eng: Eng = .{ .window = 2000 };
     var text: Text = .{};
     defer freePrompts(&eng);
@@ -486,6 +505,7 @@ test "a stream compacts before it opens" {
     openai.run(srv, a, watch.out(), .{ .conn = &conn }, true, raw);
     try std.testing.expect(watch.opened);
     try std.testing.expect(watch.saw);
-    try std.testing.expect(eng.early >= 1);
-    try std.testing.expect(eng.late >= 1);
+    try std.testing.expect(watch.admitted_at_open >= 2); // compaction and the final reply both admitted
+    try std.testing.expectEqual(watch.admitted_at_open, eng.early);
+    try std.testing.expectEqual(@as(usize, 0), eng.late);
 }

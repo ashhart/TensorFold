@@ -4,7 +4,11 @@ const mtl = @import("metal");
 const Config = @import("config.zig").Config;
 const Ref = @import("projection.zig").Ref;
 
-pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes };
+pub const Field = enum { ids, dims, positions, hidden, residual, input, sums, mixed, mixer_out, output, z, a, b, query, key, value, norm_query, norm_key, q_gate, gate, up, activated, act_sums, logits, drawn, eps, parents, windows, row_slots, segments, keeps, kept_rows, rotated_key, takes, slot_steps };
+
+/// A prompt pass's rows at most (a chain); rounds with trees and every logits row stay within `logit_rows`.
+pub const max_rows = 2048;
+pub const logit_rows = 128;
 
 pub const Frame = struct {
     buffers: [std.enums.values(Field).len]mtl.Buffer,
@@ -12,7 +16,7 @@ pub const Frame = struct {
     config: Config,
 
     pub fn init(device: mtl.Device, config: Config, capacity: u32) !Frame {
-        if (capacity == 0 or capacity > 128) return error.BadFrameRows;
+        if (capacity == 0 or capacity > max_rows) return error.BadFrameRows;
         const mp = 16 * ((capacity + 15) / 16);
         const widths = [_]usize{
             capacity * 4,                                                                       8 * 4,                                                                                                                                  3 * capacity * 4,
@@ -22,11 +26,11 @@ pub const Frame = struct {
             capacity * config.v_heads * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
             capacity * config.kvDim() * 2,                                                      capacity * config.heads * config.head_dim * 2,                                                                                          capacity * config.kvDim() * 2,
             capacity * config.qDim() * 2,                                                       capacity * config.intermediate * 2,                                                                                                     capacity * config.intermediate * 2,
-            capacity * config.intermediate * 2,                                                 mp * config.intermediate / 64 * 4,                                                                                                      capacity * config.vocab * 2,
+            capacity * config.intermediate * 2,                                                 mp * config.intermediate / 64 * 4,                                                                                                      @min(capacity, logit_rows) * config.vocab * 2,
             capacity * 4,                                                                       4,                                                                                                                                      capacity * 4,
-            capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           64 * 16,
-            64 * 16,                                                                            capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
-            capacity * 4,
+            capacity * config.conv_kernel * 4,                                                  capacity * 4,                                                                                                                           capacity * 16,
+            capacity * 16,                                                                      capacity * 4,                                                                                                                           capacity * config.kvDim() * 2,
+            capacity * 4,                                                                       capacity * @sizeOf(@import("core").tree_slots.Step),
         };
         comptime std.debug.assert(widths.len == std.enums.values(Field).len);
         var buffers: [widths.len]mtl.Buffer = undefined;

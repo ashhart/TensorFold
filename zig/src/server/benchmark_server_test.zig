@@ -1,5 +1,6 @@
 //! The serve child's life with a shell stand-in: ready, exit, timeout, stubborn child, lock, Ctrl-C.
 const std = @import("std");
+const platform = @import("sys");
 const cli = @import("cli.zig");
 const server = @import("benchmark_server.zig");
 const stop = @import("benchmark_stop.zig");
@@ -326,7 +327,7 @@ test "a second Ctrl-C kills the running serve child before the benchmark exits" 
     var waited: u32 = 0;
     while (!gone(m.pid) and waited < 2000) : (waited += 10) {
         var status: c_int = 0;
-        _ = std.c.waitpid(m.pid, &status, std.c.W.NOHANG);
+        _ = platform.c.waitpid(m.pid, &status, platform.c.W.NOHANG);
         fake.nap(10);
     }
     try std.testing.expect(waited < 2000);
@@ -356,7 +357,7 @@ test "a lock path that is a symlink to an existing file, or a FIFO, is refused a
     try std.testing.expectEqualStrings("Could not create the benchmark lock; check the TensorFold directory permissions", problem);
 }
 
-extern "c" fn mkfifo(path: [*:0]const u8, mode: std.c.mode_t) c_int;
+extern "c" fn mkfifo(path: [*:0]const u8, mode: platform.c.mode_t) c_int;
 
 const Racer = struct {
     bench: []const u8,
@@ -449,7 +450,7 @@ test "an exited child is seen without being reaped, and once stopped it is relea
     var waited: u32 = 0;
     while (!server.ended(quick.id.?) and waited < 2000) : (waited += 10) fake.nap(10);
     var status: c_int = 0;
-    try std.testing.expectEqual(quick.id.?, std.c.waitpid(quick.id.?, &status, std.c.W.NOHANG));
+    try std.testing.expectEqual(quick.id.?, platform.c.waitpid(quick.id.?, &status, platform.c.W.NOHANG));
     const routes = try healthy(a, "{\"ok\": true}", ".tensorfold-benchmark");
     const f = try fake.Fake.start(std.testing.allocator, &routes);
     defer f.stop();
@@ -461,10 +462,10 @@ test "an exited child is seen without being reaped, and once stopped it is relea
     try std.testing.expectEqual(@as(posix.pid_t, 0), stop.guardedChild());
     const other = try std.process.spawn(io, .{ .argv = &.{ "/bin/sh", "-c", "exec sleep 30" }, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
     defer {
-        _ = std.c.kill(other.id.?, .KILL);
-        _ = std.c.waitpid(other.id.?, &status, 0);
+        _ = platform.c.kill(other.id.?, .KILL);
+        _ = platform.c.waitpid(other.id.?, &status, 0);
     }
     stop.abandon();
     fake.nap(100);
-    try std.testing.expectEqual(@as(posix.pid_t, 0), std.c.waitpid(other.id.?, &status, std.c.W.NOHANG));
+    try std.testing.expectEqual(@as(posix.pid_t, 0), platform.c.waitpid(other.id.?, &status, platform.c.W.NOHANG));
 }

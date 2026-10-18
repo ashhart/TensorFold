@@ -17,12 +17,31 @@ pub const Context = struct {
         try d.check(d.api.cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
         errdefer _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
         try d.check(d.api.cuCtxSetCurrent(ctx), "cuCtxSetCurrent");
+        @import("copy_source.zig").setCurrent(ctx);
+        return .{ .d = d, .device = dev, .handle = ctx };
+    }
+
+    /// For a library in a host's process: the current device's primary context (device 0's if none), or error.Invalid.
+    pub fn shared(d: *const Driver) Error!Context {
+        var current: abi.Context = null;
+        try d.check(d.api.cuCtxGetCurrent(&current), "cuCtxGetCurrent");
+        if (current == null) return init(d, 0);
+        var dev: abi.Device = 0;
+        try d.check(d.api.cuCtxGetDevice(&dev), "cuCtxGetDevice");
+        var ctx: abi.Context = null;
+        try d.check(d.api.cuDevicePrimaryCtxRetain(&ctx, dev), "cuDevicePrimaryCtxRetain");
+        if (ctx != current) {
+            _ = d.api.cuDevicePrimaryCtxRelease_v2(dev);
+            return error.Invalid;
+        }
+        @import("copy_source.zig").setCurrent(ctx); // the host made it current: copy sources are tagged with it
         return .{ .d = d, .device = dev, .handle = ctx };
     }
 
     /// Waits for all work, then drops this retain; resources made in it must be released first.
     pub fn deinit(self: *Context) void {
-        _ = self.d.api.cuCtxSynchronize();
+        self.d.synchronize() catch {};
+        @import("copy_source.zig").dropSpares(self.d, self.handle); // their pinned bytes go with the context
         _ = self.d.api.cuDevicePrimaryCtxRelease_v2(self.device);
         self.* = undefined;
     }
@@ -30,10 +49,11 @@ pub const Context = struct {
     /// Makes the context current on another thread before it calls the driver.
     pub fn makeCurrent(self: *const Context) Error!void {
         try self.d.check(self.d.api.cuCtxSetCurrent(self.handle), "cuCtxSetCurrent");
+        @import("copy_source.zig").setCurrent(self.handle);
     }
 
     pub fn synchronize(self: *const Context) Error!void {
-        try self.d.check(self.d.api.cuCtxSynchronize(), "cuCtxSynchronize");
+        try self.d.synchronize();
     }
 
     pub fn attribute(self: *const Context, a: abi.DeviceAttribute) Error!c_int {

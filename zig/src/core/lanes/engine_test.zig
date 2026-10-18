@@ -11,7 +11,7 @@ const win = @import("windows.zig");
 
 const gpa = std.testing.allocator;
 
-const Case = struct {
+pub const Case = struct {
     prompt: []const u32,
     max_new: u32 = 40,
     sampling: ?Sampling = null,
@@ -87,10 +87,15 @@ const Classes = struct {
     fn freeFn(_: *anyopaque) void {}
 };
 
-fn model() !Config {
+pub fn model() !Config {
+    return modelWith(true);
+}
+
+/// The test family drafting with its head (`mtp`) or by copies alone, when drafted streams step pipelined.
+pub fn modelWith(mtp: bool) !Config {
     var costs: [16]@import("config.zig").Cost = undefined;
     for (&costs, 1..) |*c, w| c.* = .{ .width = @intCast(w), .ms = 5.0 + 0.8 * @as(f64, @floatFromInt(w)) };
-    return Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
+    return Config.init(gpa, .{ .exact_width = 16, .gpu_tokens = true, .mtp = mtp, .speculate = true, .speculate_early = false, .drafts = 4, .window_costs = &costs, .mtp_step_ms = 0.5, .hidden_rows = true, .batch_rows = 32, .max_streams = 8, .draft_streams = true }, 16, 15);
 }
 
 /// Every case's emitted tokens, the cases admitted together and stepped until done.
@@ -203,8 +208,8 @@ fn freeGuard(runs: []GuardOut) void {
     gpa.free(runs);
 }
 
-const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
-const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
+pub const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
+pub const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
 
 test "drafted rounds commit the one-token decode, greedy and sampled" {
     for ([_]?Sampling{ null, .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 } }) |s| {
@@ -580,4 +585,8 @@ test "a round's finished prompts get their first drafts in one call (Python's _w
     try std.testing.expectEqual(@as(usize, 3), m1);
     try std.testing.expectEqual(@as(usize, 4), c0);
     try std.testing.expectEqual(@as(usize, 1), m0);
+}
+
+test {
+    _ = @import("engine_sweep_test.zig");
 }

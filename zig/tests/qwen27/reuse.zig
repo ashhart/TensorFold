@@ -1,5 +1,6 @@
 //! Qwen27 prompt reuse through the served host against fresh prompt passes: each prompt's state and reply, bit for bit.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const q = @import("tensorfold").qwen27;
 const api = @import("engine_api");
@@ -20,7 +21,7 @@ const Box = struct {
         defer b.mutex.unlock(b.io);
         switch (value.*) {
             .prefilled => |n| b.cached = n,
-            .logprobs, .prompt_logprobs => {},
+            .logprobs, .prompt_logprobs, .audio => {},
             .tokens => |got| b.tokens.appendSlice(b.a, got) catch {},
             .finished => |f| {
                 b.done = f.reason;
@@ -90,7 +91,7 @@ const Run = struct {
 
 /// Drafted requests on the lane core, by the served host's rule: TF_QWEN27_LANES, else a chip without tensor units.
 fn lanesMode(h: *host.Host) bool {
-    if (std.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
+    if (platform.c.getenv("TF_QWEN27_LANES")) |v| return std.mem.eql(u8, std.mem.span(v), "1");
     return !h.model.device.tensorUnits();
 }
 

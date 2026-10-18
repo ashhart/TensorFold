@@ -60,7 +60,8 @@ def entry(h: str, k: dict, nospec: set[str], cache: Path | None, out: Path) -> d
         "global_scratch": md.get("global_scratch_size", 0), "global_align": md.get("global_scratch_align", 1),
         "profile_scratch": md.get("profile_scratch_size", 0), "pdl": bool(md.get("launch_pdl", False)),
         "params": [{"name": n, "type": sig[n], "div16": n in div16, "nospec": n in nospec} for n in runtime],
-        "consts": {n: const(v) for n, v in k["constexprs"].items() if n not in runtime},
+        # a None argument Triton folded into the kernel (an unused pointer) leaves nothing to match
+        "consts": {n: const(v) for n, v in k["constexprs"].items() if n not in runtime and v is not None},
     }
 
 
@@ -69,14 +70,15 @@ def main() -> int:
     ap.add_argument("--manifest", action="append", required=True,
                     help="a manifest.json or a Recorder's launches.json (repeatable)")
     ap.add_argument("--cache", action="append", help="each capture's Triton cache as seen here, in --manifest order")
-    ap.add_argument("--jit", help="the capture's jit.json; without it no parameter is marked do_not_specialize")
+    ap.add_argument("--jit", action="append",
+                    help="a capture's jit.json (repeatable, merged); without one no parameter is do_not_specialize")
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
     docs = [json.loads(Path(m).read_text()) for m in a.manifest]
     caches = a.cache or [d.get("cache") for d in docs]
     if len(caches) != len(docs):
         raise SystemExit("--cache is given once per --manifest, or not at all")
-    jit = json.loads(Path(a.jit).read_text()) if a.jit else None
+    jit = {f: v for j in a.jit for f, v in json.loads(Path(j).read_text()).items()} if a.jit else None
     out = Path(a.out)
     (out / "cubins").mkdir(parents=True, exist_ok=True)
     kernels, seen = [], set()

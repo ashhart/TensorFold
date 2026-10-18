@@ -193,6 +193,8 @@ pub const Caches = struct {
 /// Streams' caches by slot, made once and kept: a slot's buffers never change, so the graphs naming them stay valid.
 pub const Pool = struct {
     slots: std.ArrayList(?Caches) = .empty,
+    /// Each slot's buffers as made (zeros: none yet), leased or not: caches made elsewhere never take a slot's graphs.
+    made: std.ArrayList([3]u64) = .empty,
 
     /// Slot `slot`'s caches, fresh (`maker.caches(cap)` makes them the first time); a failed reset keeps them there.
     pub fn lease(
@@ -205,10 +207,12 @@ pub const Pool = struct {
         maker: anytype,
     ) !Caches {
         while (p.slots.items.len <= slot) try p.slots.append(gpa, null);
+        while (p.made.items.len <= slot) try p.made.append(gpa, .{ 0, 0, 0 });
         const held = &p.slots.items[slot];
         if (held.* == null) {
             held.* = try maker.caches(cap);
             held.*.?.id = slot;
+            p.made.items[slot] = buffersOf(&held.*.?);
         }
         try s.synchronize();
         try held.*.?.reset(eos);
@@ -222,9 +226,20 @@ pub const Pool = struct {
         p.slots.items[c.id] = c;
     }
 
+    /// Whether `c` holds the buffers its slot was made with, the ones a graph keyed by that slot names.
+    pub fn holds(p: *const Pool, c: *const Caches) bool {
+        if (c.id >= p.made.items.len) return false;
+        return std.mem.eql(u64, &p.made.items[c.id], &buffersOf(c));
+    }
+
+    fn buffersOf(c: *const Caches) [3]u64 {
+        return .{ c.mem.base(), c.window.base(), c.cin.base() };
+    }
+
     pub fn deinit(p: *Pool, gpa: std.mem.Allocator) void {
         for (p.slots.items) |*c| if (c.*) |*x| x.deinit(gpa);
         p.slots.deinit(gpa);
+        p.made.deinit(gpa);
     }
 };
 

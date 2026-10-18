@@ -1,5 +1,6 @@
 //! LFM2 conv state, windows and keyed draws behind the existing lane engine's backend interface.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const c = @import("config.zig");
@@ -69,11 +70,11 @@ pub const Metal = struct {
         for (&self.costs, 1..) |*cost, w| {
             var best: f64 = std.math.floatMax(f64);
             for (0..3) |_| {
-                var t0: std.c.timespec = undefined;
-                var t1: std.c.timespec = undefined;
-                _ = std.c.clock_gettime(.MONOTONIC, &t0);
+                var t0: platform.c.timespec = undefined;
+                var t1: platform.c.timespec = undefined;
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t0);
                 try fwd.run(self.model, &self.scratch, &.{.{ .cache = &cache, .rows = w }}, ids[0..w], true, .all);
-                _ = std.c.clock_gettime(.MONOTONIC, &t1);
+                _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &t1);
                 cache.len = base;
                 const ms = @as(f64, @floatFromInt(t1.sec - t0.sec)) * 1e3 + @as(f64, @floatFromInt(t1.nsec - t0.nsec)) / 1e6;
                 best = @min(best, ms);

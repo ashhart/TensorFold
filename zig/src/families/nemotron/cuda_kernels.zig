@@ -8,7 +8,7 @@ const glue = @import("cuda_glue.zig");
 
 /// Mangled names of the instantiations the copies in zig/kernels/cuda export (cuobjdump -symbols of each fatbin).
 const sym = struct {
-    const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiif";
+    const pattn = "_ZN20tf_prefill_attention12pattn_kernelILi128ELi8ELi8ELi8EEEvPK13__nv_bfloat16S3_S3_PS1_iiiiifPKix";
     const scan_rows = "_ZN12tf_scan_rows11scan_kernelILb0EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
     const scan_snaps = "_ZN12tf_scan_rows11scan_kernelILb1EEEvPK13__nv_bfloat16S3_PfPKfS6_S6_PS1_iiiiiiiiffNS_5SnapsE";
 };
@@ -61,6 +61,9 @@ pub const Kernels = struct {
     pocket_in: [2]cuda.Function, // the pocket's two halves a block row a row, then tiled for a prompt chunk's rows
     pocket_out: [2]cuda.Function,
     add_row: cuda.Function,
+    latent_sum: cuda.Function, // LatentMoE: a row's routed latent outputs weighted and summed (Bolt)
+    add_bf16: cuda.Function,
+    splice_rows: cuda.Function, // an image prompt's rows take the vision tower's features (Bolt)
     draws: cuda.sample.Draws, // sample.cu: the keyed draws and logprob rows
     grammar_mask: cuda.Function, // structured output: disallowed tokens -inf before the draw
     torch: torch_ops.Functions,
@@ -68,6 +71,7 @@ pub const Kernels = struct {
     modelopt: ?Modelopt = null, // loaded by loadModelopt for a ModelOpt checkpoint, else never
     latent: ?@import("cuda_latent.zig").Fns = null, // a latent MoE's glue (loadLatent), else never
     ck: ?cuda.ck.Ck = null, // the checkpoint's own math (loadCk): FP8 rows and NVFP4 experts, sm_120 on
+    ggml: ?cuda.ggml.Kernels = null, // loaded by loadGgml for a checkpoint with ggml blocks (Bolt's IQ2_XXS and Q8_0)
     gb10: bool,
     discrete: bool, // the card has its own memory: checkpoint bytes reach it through page-locked slots
 
@@ -95,6 +99,9 @@ pub const Kernels = struct {
         k.pocket_in = .{ try k.mods[7].function("tf_pocket_in"), try k.mods[7].function("tf_pocket_in_rows") };
         k.pocket_out = .{ try k.mods[7].function("tf_pocket_out"), try k.mods[7].function("tf_pocket_out_rows") };
         k.add_row = try k.mods[7].function("tf_add_row");
+        k.latent_sum = try k.mods[7].function("tf_latent_sum");
+        k.add_bf16 = try k.mods[7].function("tf_add_bf16");
+        k.splice_rows = try k.mods[7].function("tf_splice_rows");
         k.torch = try torch_ops.Functions.resolve(k.mods[8..14]);
         k.draws = try cuda.sample.Draws.resolve(k.mods[14]);
         k.glue = try glue.Fns.resolve(k.mods[16..21]);
@@ -106,6 +113,7 @@ pub const Kernels = struct {
         k.modelopt = null;
         k.latent = null;
         k.ck = null;
+        k.ggml = null;
         k.triton = if (triton_dir) |dir| try cuda.aot.Set.load(gpa, io, d, ctx.device, dir) else null;
         errdefer if (k.triton) |*t| t.deinit();
         k.train = try train_ops.Kernels.load(d);
@@ -132,6 +140,7 @@ pub const Kernels = struct {
             m.experts.unload();
             m.pack.unload();
         }
+        if (k.ggml) |*g| g.unload();
         k.affine.deinit();
         k.train.deinit();
         if (k.triton) |*t| t.deinit();
@@ -166,19 +175,26 @@ pub const Kernels = struct {
         errdefer experts.unload();
         k.modelopt = .{ .lane = lane, .gemm = gemm, .experts = experts, .pack = try cuda.modelopt.Packer.load(k.d) };
     }
+
+    /// The ggml block kernels (IQ2_XXS experts, IQ2_XXS and Q8_0 projections, their repack) Bolt's export needs.
+    pub fn loadGgml(k: *Kernels, ctx: *const cuda.Context) !void {
+        if (k.ggml != null) return;
+        _ = ctx;
+        k.ggml = try cuda.ggml.Kernels.load(k.d);
+    }
 };
 
 /// The checkpoint's own math needs this major capability: the block-scaled FP4 mma (sm_120a, sm_121a).
 pub const ck_major: u32 = 12;
 
-/// FP8 and NVFP4 paths stop below this full capability: decode's split-K sums meet in a thread-block cluster.
-pub const modelopt_min: u32 = 90;
+/// FP8 and NVFP4 paths stop below this full capability: they decode to bf16 for mma.sync.
+pub const modelopt_min: u32 = 80;
 
 /// Why a ModelOpt checkpoint cannot load at `capability` (10 * major + minor), or null when it may.
 pub fn modeloptRefusal(capability: u32) ?[]const u8 {
     if (capability >= modelopt_min) return null;
-    return "FP8 and NVFP4 weights meet their split-K sums in a thread-block cluster: " ++
-        "a ModelOpt checkpoint needs compute capability 9.0 or newer";
+    return "FP8 and NVFP4 weights decode to bf16 for mma.sync: " ++
+        "a ModelOpt checkpoint needs compute capability 8.0 or newer";
 }
 
 /// qmm.split_k (cuda/qlinear.zig).
@@ -199,6 +215,7 @@ fn u(x: usize) u32 {
 pub const Ops = struct {
     k: *const Kernels,
     s: cuda.Stream,
+    part: u64 = 0, // the lane matmul's slice partials where it reduces them (no clusters below sm_90)
     ck8: u64 = 0, // the e4m3 rows an FP8 projection reads in the checkpoint's math (its buffers' ck8)
 
     fn go(o: Ops, f: cuda.Function, grid: [3]usize, block: u32, shared: u32, args: *cuda.Args) !void {
@@ -238,17 +255,49 @@ pub const Ops = struct {
     /// Every projection format the kernels loaded (cuda/qlinear.zig).
     pub fn linear(o: Ops) cuda.qlinear.Linear {
         const m = if (o.k.modelopt) |*x| x else null;
-        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8 };
+        return .{ .affine4 = &o.k.affine, .lane = if (m) |x| &x.lane else null, .nvfp4_prompt = if (m) |x| &x.gemm else null, .ck = if (o.k.ck) |*x| x else null, .ck_rows = o.ck8, .ggml = if (o.k.ggml) |*g| g else null };
     }
 
     /// Every grouped-expert format the kernels loaded (cuda/experts.zig).
     pub fn grouped(o: Ops) cuda.experts.Grouped {
-        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null };
+        return .{ .affine4 = &o.k.experts, .nvfp4 = if (o.k.modelopt) |*x| &x.experts else null, .iq2xxs = if (o.k.ggml) |*g| g else null };
+    }
+
+    /// LatentMoE: z[r] = sum_k wt[r, k] y[r * k_slots + k], rows of `l` bf16 from fp32 pair rows (tf_latent_sum).
+    pub fn latentSum(o: Ops, y: u64, wt: u64, z: u64, rows: usize, k_slots: usize, l: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(y);
+        a.add(wt);
+        a.add(z);
+        a.add(int(k_slots));
+        a.add(int(l));
+        try o.go(o.k.latent_sum, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// Rows of h whose src (i32, one a row) names a feature row take that row of `features` ([*, d] bf16).
+    pub fn spliceRows(o: Ops, h: u64, features: u64, src: u64, rows: usize, d: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(h);
+        a.add(features);
+        a.add(src);
+        a.add(int(d));
+        try o.go(o.k.splice_rows, .{ rows, 1, 1 }, 256, 0, &a);
+    }
+
+    /// out = a + b, n bf16 values (b bf16, or fp32 when `b_f32`).
+    pub fn addBf16(o: Ops, out: u64, a_: u64, b: u64, b_f32: bool, n: usize) !void {
+        var a: cuda.Args = .{};
+        a.add(out);
+        a.add(a_);
+        a.add(b);
+        a.add(@as(c_int, @intFromBool(b_f32)));
+        a.add(int(n));
+        try o.go(o.k.add_bf16, .{ (n + 255) / 256, 1, 1 }, 256, 0, &a);
     }
 
     /// Decode rows of a projection on this stream (the affine-4 paths' bits unchanged); xs: x's 64-group sums.
     pub fn dense(o: Ops, x: u64, xs: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs }, out, rows);
+        return o.linear().decode(o.s, q, .{ .x = x, .sums = xs, .part = o.part }, out, rows);
     }
 
     pub fn gemvSplit(o: Ops, x: u64, xs: u64, q: Affine4, out: u64, rows: usize, sk: usize, sp: Split) !void {
@@ -265,7 +314,7 @@ pub const Ops = struct {
 
     /// Prompt rows of a projection on this stream, by its format's prompt GEMM.
     pub fn prefillDense(o: Ops, x: u64, q: QLinear, out: u64, rows: usize) !void {
-        return o.linear().prompt(o.s, q, .{ .x = x }, out, rows);
+        return o.linear().prompt(o.s, q, .{ .x = x, .part = o.part }, out, rows);
     }
 
     /// nemotron_ops' rest: y (bf16, or fp32 when `y_f32`) += r x at rows `i * row_mul + row_add` for i < rows.
@@ -353,12 +402,14 @@ pub const Ops = struct {
     }
 
     /// prefill_attention (head dim 128): q (rows, heads, 128) at positions p0.. against caches filled through them.
-    pub fn prefillAttention(o: Ops, q: u64, kc: u64, vc: u64, out: u64, p0: usize, rows: usize, heads: usize, kv_heads: usize, scale: f32) !void {
+    pub fn prefillAttention(o: Ops, q: u64, kc: u64, vc: u64, out: u64, p0: usize, rows: usize, heads: usize, kv_heads: usize, scale: f32, pt: u64, ps: u64) !void {
         const g = heads / kv_heads;
         var a: cuda.Args = .{};
         for ([_]u64{ q, kc, vc, out }) |v| a.add(v);
         for ([_]usize{ p0, rows, heads, kv_heads, g }) |v| a.add(int(v));
         a.add(scale);
+        a.add(pt); // the stream's page table (0: contiguous rows), then the elements between pages
+        a.add(@as(i64, @intCast(ps)));
         try o.go(o.k.pattn, .{ (rows + 15) / 16, kv_heads * (g / 8), 1 }, 256, pattn_smem, &a);
     }
 
@@ -391,7 +442,7 @@ pub const Ops = struct {
 
     pub fn upload(o: Ops, dst: u64, bytes: []const u8) !void {
         if (bytes.len == 0) return;
-        try o.k.d.check(o.k.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, o.s.handle), "cuMemcpyHtoDAsync");
+        try cuda.copy_source.enqueue(o.k.d, dst, bytes, o.s);
     }
 
     pub fn download(o: Ops, dst: []u8, src: u64) !void {
@@ -413,7 +464,7 @@ test "items follow the Python shapes" {
     try std.testing.expectEqual(@as(usize, 8), maxItems(8, 130, 16));
 }
 
-test "ModelOpt's floor refuses every card below sm_90, the Ampere ones included, and admits sm_90 up" {
-    for ([_]u32{ 75, 80, 86, 89 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
-    for ([_]u32{ 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
+test "ModelOpt's floor refuses every card below sm_80 and admits Ampere up, the cards without clusters included" {
+    for ([_]u32{ 70, 75 }) |c| try std.testing.expect(modeloptRefusal(c) != null);
+    for ([_]u32{ 80, 86, 89, 90, 100, 120, 121 }) |c| try std.testing.expect(modeloptRefusal(c) == null);
 }

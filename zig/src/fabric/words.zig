@@ -1,5 +1,6 @@
 //! Ordered mailbox words: MCDMA's libmcdma-rpc (ABI 1, rpc/mcdma_rpc.h) by dlopen, or its same rules in Zig.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const layout = @import("layout.zig");
 
@@ -30,20 +31,20 @@ pub fn load(w: *const u64) u64 {
 
 /// CLOCK_MONOTONIC in nanoseconds, the clock libmcdma-rpc waits on.
 pub fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
 /// Sleep about `ns` nanoseconds (the library's short step between polls).
 pub fn pause(ns: u64) void {
-    const ts: std.c.timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
-    _ = std.c.nanosleep(&ts, null);
+    const ts: platform.c.timespec = .{ .sec = @intCast(ns / std.time.ns_per_s), .nsec = @intCast(ns % std.time.ns_per_s) };
+    _ = platform.c.nanosleep(&ts, null);
 }
 
 pub fn checkedNowNs() error{ClockUnavailable}!u64 {
-    var ts: std.c.timespec = undefined;
-    if (std.c.clock_gettime(.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) return error.ClockUnavailable;
+    var ts: platform.c.timespec = undefined;
+    if (platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts) != 0 or ts.sec < 0 or ts.nsec < 0 or ts.nsec >= std.time.ns_per_s) return error.ClockUnavailable;
     return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
 }
 
@@ -81,7 +82,7 @@ else
 
 /// libmcdma-rpc opened at run time; the three Metal functions are optional, as the header says.
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     abi_fn: AbiFn,
     wait_word: WaitFn,
     store_word: StoreFn,
@@ -92,7 +93,7 @@ pub const Library = struct {
     /// Open `path`, else MCDMA_RPC_LIBRARY, else the install prefix; refuse any ABI but 1.
     pub fn open(path: ?[:0]const u8) Error!Library {
         if (path) |p| return openPath(p);
-        if (std.c.getenv("MCDMA_RPC_LIBRARY")) |env| {
+        if (platform.c.getenv("MCDMA_RPC_LIBRARY")) |env| {
             const p = std.mem.span(env);
             if (p.len > 0) return openPath(p);
         }
@@ -104,7 +105,7 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: [:0]const u8) Error!Library {
-        var lib = std.DynLib.openZ(path.ptr) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.openZ(path.ptr) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var l: Library = .{
             .lib = lib,

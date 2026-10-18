@@ -53,7 +53,7 @@ const Refit = struct { slot: usize, neuron: usize };
 
 /// Whether environment variable `name` is set to `value`.
 fn set(name: [*:0]const u8, value: []const u8) bool {
-    const v = std.c.getenv(name) orelse return false;
+    const v = @import("sys").c.getenv(name) orelse return false;
     return std.mem.eql(u8, std.mem.span(v), value);
 }
 
@@ -138,7 +138,7 @@ pub fn Pocket(comptime T: type) type {
         forgot: forgetting.Kept = .{}, // what the last delete changed, until a save writes it or it is put back
 
         pub fn init(gpa: std.mem.Allocator) Self {
-            const asked: Mode = if (std.c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
+            const asked: Mode = if (@import("sys").c.getenv("TF_SLIDE_POCKET_KEY")) |v| std.meta.stringToEnum(Mode, std.mem.span(v)) orelse .auto else .auto;
             return .{ .gpa = gpa, .mode = asked, .strict = !set("TF_SLIDE_POCKET_LEADS", "off"), .keeping = !set("TF_SLIDE_POCKET_KEEPS", "off"), .valuing = set("TF_SLIDE_POCKET_VALUES", "on"), .silencing = set("TF_SLIDE_POCKET_SAME", "silent"), .worst = set("TF_SLIDE_POCKET_REPLAY", "worst"), .joining = set("TF_SLIDE_POCKET_GROUP", "joint") };
         }
 
@@ -363,7 +363,7 @@ pub fn Pocket(comptime T: type) type {
             const d = c.hidden;
             const n = p.slots();
             const m = p.labels.items.len;
-            if (std.c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
+            if (@import("sys").c.getenv("TF_SLIDE_POCKET_DUMP")) |dir| pocket_dump.write(p, std.mem.span(dir), p.learned_before, d) catch |e| std.log.warn("slide pocket: the read rows were not written: {t}", .{e});
             const kinds = try p.gpa.alloc(Kind, 3 * m);
             defer p.gpa.free(kinds);
             for (p.labels.items, 0..) |l, i| for (0..3) |k| {
