@@ -29,14 +29,21 @@ pub fn packCodes(out: []u8, codes: []const u8, n: usize, k: usize) void {
     };
 }
 
-/// Block scales [ceil(n/128), k/128] as the kernel's tiles [npad/64][k/64][64] of fp32, rows past n one (from_rows).
+/// Block scales [ceil(n/128), ceil(k/128)] as kernel tiles [npad/64][k/64][64] of fp32, rows past n one (from_rows).
 pub fn packScales(out: []f32, scale_inv: []const f32, n: usize, k: usize) void {
+    packScalesAt(out, scale_inv, n, k, 0, 0, n, k);
+}
+
+/// packScales of rows [row0, row0+n) and inputs [k0, k0+k) of a rows x cols matrix, from the whole's block scales.
+pub fn packScalesAt(out: []f32, scale_inv: []const f32, rows: usize, cols: usize, row0: usize, k0: usize, n: usize, k: usize) void {
     const npad = padded(n);
     const kg = k / group;
-    std.debug.assert(out.len == npad * kg and scale_inv.len == ((n + block - 1) / block) * (k / block));
+    const kb = (cols + block - 1) / block;
+    std.debug.assert(out.len == npad * kg and scale_inv.len == ((rows + block - 1) / block) * kb);
+    std.debug.assert(row0 + n <= rows and k0 + k <= cols and k0 % group == 0 and k % group == 0);
     for (0..npad / 64) |t| for (0..kg) |g| for (0..64) |c| {
         const row = t * 64 + c;
-        out[(t * kg + g) * 64 + c] = if (row < n) scale_inv[(row / block) * (k / block) + g * group / block] else 1.0;
+        out[(t * kg + g) * 64 + c] = if (row < n) scale_inv[((row0 + row) / block) * kb + (k0 + g * group) / block] else 1.0;
     };
 }
 
@@ -76,4 +83,31 @@ test "scale tiles: each 64-input group takes its 128 x 128 block's scale, padded
     try std.testing.expectEqual(@as(f32, 2), out[(0 * 4 + 3) * 64 + 5]); // row 5, group 3 -> block (0, 1)
     try std.testing.expectEqual(@as(f32, 3), out[(2 * 4 + 0) * 64 + 1]); // row 129 -> block (1, 0)
     try std.testing.expectEqual(@as(f32, 1), out[(2 * 4 + 1) * 64 + 2]); // row 130: padding
+}
+
+/// packScalesAt of a share equals the share's range of the whole matrix's packScales, its padded rows one.
+fn expectShare(rows: usize, cols: usize, row0: usize, k0: usize, n: usize, k: usize) !void {
+    const gpa = std.testing.allocator;
+    const inv = try gpa.alloc(f32, ((rows + block - 1) / block) * ((cols + block - 1) / block));
+    defer gpa.free(inv);
+    for (inv, 0..) |*s, i| s.* = @floatFromInt(i + 2);
+    const whole = try gpa.alloc(f32, padded(rows) * (cols / group));
+    defer gpa.free(whole);
+    packScales(whole, inv, rows, cols);
+    const share = try gpa.alloc(f32, padded(n) * (k / group));
+    defer gpa.free(share);
+    packScalesAt(share, inv, rows, cols, row0, k0, n, k);
+    for (0..padded(n)) |r| for (0..k / group) |g| {
+        const at = (r / 64 * (k / group) + g) * 64 + r % 64;
+        const row = row0 + r;
+        const want = if (r < n) whole[(row / 64 * (cols / group) + k0 / group + g) * 64 + row % 64] else 1.0;
+        try std.testing.expectEqual(want, share[at]);
+    };
+}
+
+test "a rank's scale tiles are the whole matrix's from its origins, inside a block too (TP=3 of 2,048)" {
+    for ([_][2]usize{ .{ 0, 704 }, .{ 704, 704 }, .{ 1408, 640 } }) |s| {
+        try expectShare(2048, 4096, s[0], 0, s[1], 4096); // the shared gate/up's output rows
+        try expectShare(4096, 2048, 0, s[0], 4096, s[1]); // the shared down's inputs
+    }
 }
