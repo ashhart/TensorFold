@@ -1,0 +1,7 @@
+{
+  "zig": "0.17.0\n",
+  "hipcc": "HIP version: 7.1.52801-9999\nUbuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n",
+  "clang": "Ubuntu clang version 21.1.8 (6ubuntu1)\nTarget: x86_64-pc-linux-gnu\nThread model: posix\nInstalledDir: /usr/lib/llvm-21/bin\n",
+  "kernel": "7.0.0-38-generic",
+  "cpu": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S"
+}

@@ -1,0 +1,21 @@
+{
+  "runtime_commit": "5429554e708fdf7a9e0017301a00eb87a4182acd",
+  "runtime_patch_sha256": "b0be49e083f035b39843eac0030b405d5293e2528d1e66cb7c03501fb70f7cbf",
+  "test_script_sha256": "75281063554a729052daf8ff559e1e4d4164a2d5422bf1e1a4eb2b81a467d0d9",
+  "hardware": "BOSGAME M5, AMD Ryzen AI MAX+ 395 / Radeon 8060S, gfx1151",
+  "toolchain": "Zig 0.17.0, HIP 7.1.52801-9999, Ubuntu clang 21.1.8",
+  "cpu_positive": {
+    "build_steps_passed": 292,
+    "build_steps_total": 292,
+    "newly_reported_tests_passed": 126,
+    "newly_reported_tests_skipped": 2,
+    "cached_results_reused": true,
+    "qwen_hip_family": "32 passed, 1 skipped"
+  },
+  "cpu_negative": "Both intended cancellation regressions failed; remaining negative-build work was stopped after those failures were captured. This was not a completed full-suite run.",
+  "broader_http": {
+    "printed_ok": 15,
+    "exercised_and_passed": 13,
+    "draft_comparisons_unexercised": 2
+  }
+}
