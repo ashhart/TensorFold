@@ -345,7 +345,7 @@ test "DeepSeek-V4.1 over HTTP: whole and streamed replies, reasoning, DSML calls
 }
 
 test "DeepSeek-V4.1 over HTTP with the release tokenizer (TF_DSV41_MODEL)" {
-    const dir = testing.environ.getPosix("TF_DSV41_MODEL") orelse return error.SkipZigTest;
+    const dir = @import("sys").getenv("TF_DSV41_MODEL") orelse return error.SkipZigTest;
     const gpa = testing.allocator;
     const io = testing.io;
     const tok = try serve_mod.tokenizer.Tokenizer.load(gpa, io, dir);
