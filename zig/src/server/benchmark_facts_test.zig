@@ -89,6 +89,24 @@ test "a server's manifest names the checkpoint a managed run records: the snapsh
     }
 }
 
+test "a HIP or Metal server's manifest names the receipt's backend, so an attached rocm or mlx run reads it" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: std.process.Environ.Map = .init(a);
+    for ([_][2][]const u8{ .{ "hip", "rocm" }, .{ "metal", "mlx" }, .{ "cuda", "cuda" } }) |pair| {
+        try std.testing.expectEqualStrings(pair[1], manifest.receiptBackend(pair[0]));
+        const doc = try manifest.serveDocument(a, std.testing.io, &env, "9.8.7", pair[0], "");
+        try std.testing.expectEqualStrings(pair[1], doc.get("runtime").?.get("backend").?.string);
+        const facts = (try manifest.parse(a, try json.stringify(a, doc, .{}), pair[1])).?;
+        try std.testing.expectEqualStrings(pair[1], facts.runtime.backend);
+        // the probe runs for the receipt's backend: on a rocm server it is rocminfo, as a managed rocm run reads it
+        const probe = host.detect(a, std.testing.io, &env, pair[1]);
+        try std.testing.expectEqual(probe.hardware.gpus.len, facts.hardware.gpus.len);
+    }
+    try std.testing.expectEqualStrings("", manifest.receiptBackend(""));
+}
+
 test "the attested revision: the loaded snapshot's; the environment's only where the directory names none; never a disagreeing one" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();

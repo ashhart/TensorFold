@@ -196,8 +196,16 @@ pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const 
     return loaded;
 }
 
-/// The document a running server can attest. Hardware is this process's own probe.
-pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, version: []const u8, backend: []const u8, model_dir: []const u8) !Value {
+/// The receipt's name for an engine backend: the HIP engine's runs are ``rocm`` and Metal's ``mlx``, as the board names them.
+pub fn receiptBackend(engine: []const u8) []const u8 {
+    if (std.mem.eql(u8, engine, "hip")) return "rocm";
+    if (std.mem.eql(u8, engine, "metal")) return "mlx";
+    return engine;
+}
+
+/// The document a running server can attest, under the receipt's backend name. Hardware is this process's own probe.
+pub fn serveDocument(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, version: []const u8, engine: []const u8, model_dir: []const u8) !Value {
+    const backend = receiptBackend(engine);
     const probe = host.detect(a, io, env, backend);
     const top = try json.newObject(a);
     try top.put(a, "schema_version", try json.intValue(a, @as(u8, 1)));
