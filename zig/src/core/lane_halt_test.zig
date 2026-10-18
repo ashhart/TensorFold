@@ -9,6 +9,16 @@ const Event = api.Event;
 const Request = api.Request;
 
 test "halt (a stop's drain deadline): the rounds end at a round boundary, every request queued or running fails with the reason" {
+    try haltCase(null);
+}
+
+test "halt fails submit3 while the planner is parked: release precedes stop" {
+    var released = false;
+    try std.testing.expectError(error.Busy, haltCase(&released));
+    try std.testing.expect(released);
+}
+
+fn haltCase(release_at_stop: ?*bool) !void {
     const gpa = std.testing.allocator;
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
@@ -17,12 +27,15 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
     var clock: lanes.fake.FixedClock = .{};
     var core = lanes.Engine.init(gpa, &cfg, target.pieceBackend(), clock.clock());
     defer core.deinit();
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 0 });
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 2 });
     // one prompt prefilling at a time (the next waits queued), 3 rows a round
     const Plan = struct {
         const Seq = struct { key: usize, n: u64, done: u64 = 0, decoding: bool = false };
         seqs: std.ArrayList(Seq) = .empty,
         rounds: u32 = 0,
+        filling: std.Io.Event = .unset,
+        continue_round: std.Io.Event = .unset,
         fn self(ctx: *anyopaque) *@This() {
             return @ptrCast(@alignCast(ctx));
         }
@@ -45,6 +58,10 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
                     const end = @min(x.done + 3, x.n - 1);
                     try pieces.append(gpa, .{ .key = x.key, .start = x.done, .end = end, .save = false });
                     x.done = end;
+                    if (x.n == 600 and x.done == 60) {
+                        p.filling.set(std.testing.io);
+                        p.continue_round.waitUncancelable(std.testing.io);
+                    }
                 }
                 if (x.done == x.n - 1) {
                     try finals.append(gpa, x.key);
@@ -67,6 +84,7 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
     host.rounds = .{ .ctx = &pl, .vtable = &.{ .begin_admit = Plan.beginAdmit, .admit = Plan.admit, .admitted = Plan.admitted, .arm = Plan.arm, .began = Plan.began, .plan = Plan.plan, .left = Plan.left, .after = Plan.after } };
     const Box = struct {
         mutex: std.Io.Mutex = .init,
+        changed: std.Io.Condition = .init,
         tokens: std.ArrayList(u32) = .empty,
         done: ?Reason = null,
         message: []const u8 = "",
@@ -86,11 +104,12 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
                 },
                 else => {},
             }
+            b.changed.broadcast(std.testing.io);
         }
-        fn count(b: *@This()) usize {
+        fn waitTokens(b: *@This(), n: usize) void {
             b.mutex.lockUncancelable(std.testing.io);
             defer b.mutex.unlock(std.testing.io);
-            return b.tokens.items.len;
+            while (b.tokens.items.len < n) b.changed.waitUncancelable(std.testing.io, &b.mutex);
         }
     };
     var long_prompt: [600]u32 = undefined;
@@ -104,12 +123,47 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
     const r3: Request = .{ .prompt = &p1, .max_tokens = 8 };
     const e = host.engine();
     try host.start();
+    defer {
+        if (release_at_stop) |released| {
+            released.* = pl.continue_round.isSet();
+            pl.continue_round.set(std.testing.io); // rescue a regressed fixture after recording its missing release
+        }
+        host.stop();
+    }
+    errdefer pl.continue_round.set(std.testing.io);
     try e.submit(1, &r1, .{ .ctx = &boxes[0], .event = Box.event });
-    while (boxes[0].count() < 4) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    boxes[0].waitTokens(4);
     try e.submit(2, &r2, .{ .ctx = &boxes[1], .event = Box.event });
-    try e.submit(3, &r3, .{ .ctx = &boxes[2], .event = Box.event });
-    while (boxes[0].count() < 20) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
-    host.halt("server restarting: retry shortly");
+    if (release_at_stop != null) {
+        pl.filling.waitUncancelable(std.testing.io);
+        host.gpa = failing.allocator();
+    }
+    e.submit(3, &r3, .{ .ctx = &boxes[2], .event = Box.event }) catch |err| {
+        if (release_at_stop != null) {
+            host.gpa = gpa;
+            try std.testing.expect(failing.has_induced_failure);
+        }
+        return err;
+    };
+    if (release_at_stop != null) host.gpa = gpa;
+    // The controller may run arbitrarily late: the long prompt waits at an explicit partial-fill event.
+    pl.filling.waitUncancelable(std.testing.io);
+    const halter = try std.Thread.spawn(.{}, LaneHost.halt, .{ &host, "server restarting: retry shortly" });
+    // Observe the real request under the host's lock before allowing the in-flight round to finish.
+    host.mutex.lockUncancelable(std.testing.io);
+    while (host.halt_reason == null) host.wake.waitUncancelable(std.testing.io, &host.mutex);
+    const admitted = host.admitted.items.len;
+    const queued = host.queued.items.len;
+    host.mutex.unlock(std.testing.io);
+    const partial = for (pl.seqs.items) |x| {
+        if (x.n == long_prompt.len) break !x.decoding and x.done == 60;
+    } else false;
+    pl.continue_round.set(std.testing.io);
+    halter.join();
+    try std.testing.expect(partial);
+    try std.testing.expectEqual(@as(usize, 2), admitted);
+    try std.testing.expectEqual(@as(usize, 1), queued);
+    try std.testing.expect(boxes[0].tokens.items.len >= 20);
     const rounds = pl.rounds;
     for (&boxes) |*b| {
         try std.testing.expectEqual(@as(?Reason, .failed), b.done);
@@ -129,9 +183,8 @@ test "halt (a stop's drain deadline): the rounds end at a round boundary, every 
     try std.testing.expectEqual(@as(usize, 0), boxes[2].tokens.items.len);
     try std.testing.expectEqual(@as(usize, 0), pl.seqs.items.len);
     // nothing runs after it; the stop that follows (a close) finds the thread gone
-    std.Io.sleep(std.testing.io, .fromMilliseconds(20), .awake) catch {};
+    try std.testing.expect(host.thread == null);
     try std.testing.expectEqual(rounds, pl.rounds);
-    host.stop();
 }
 
 test "halt fails a request still filling its prompt with the reason and frees its lane; a decoding one fails too" {
