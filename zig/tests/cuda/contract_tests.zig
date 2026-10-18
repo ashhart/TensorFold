@@ -24,6 +24,7 @@ const ck_k = @import("contract_ck.zig");
 const scan_k = @import("contract_scan.zig");
 const lane8_k = @import("contract_ck_lane.zig");
 const latent_k = @import("contract_latent.zig");
+const act_round_k = @import("contract_act_round.zig");
 
 const round_k = @import("contract_tree_round.zig");
 
@@ -268,6 +269,10 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(act_k.Which), &acts) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &act_rows, .arena = .init(a) };
     defer for (&acts) |*x| x.deinit();
     for (&acts) |*x| try kernels.append(a, x.kernel());
+    var act_rounds: [act_round_k.entries.len]act_round_k.Act = undefined;
+    for (act_round_k.entries, &act_rounds) |e, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .entry = e, .act = &act_rows, .ctl = if (e.keep != null) try mods[5].function("tf_ctl_act_round") else null };
+    defer for (&act_rounds) |*x| x.deinit();
+    for (&act_rounds) |*x| try kernels.append(a, x.kernel());
     var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
     defer gdn_prep.unload();
     var gdns: [9]gdn_k.Gdn = undefined;

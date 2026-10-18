@@ -63,6 +63,17 @@ extern "C" __global__ void tf_ctl_half_dot(const __nv_bfloat16* X, int K, float*
     if (lane == 0) Y[row] = __half2float(s);
 }
 
+// Gate 3: act_rows.cu's MLX activations keeping only the rounding points in `keep`; the exact check must go red.
+#include "act_round.cuh"
+
+extern "C" __global__ void __launch_bounds__(256) tf_ctl_act_round(const __nv_bfloat16* gate, long long g_ld,
+                                                                    const __nv_bfloat16* up, long long u_ld,
+                                                                    __nv_bfloat16* out, float* xs, int n, int geglu,
+                                                                    int keep) {
+    if (geglu) tf_act_round::rows<true>(gate, g_ld, up, u_ld, out, xs, n, keep);
+    else tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, keep);
+}
+
 // Gate 5: bounded to 256 threads a block, which the registry says its launcher gives 512.
 extern "C" __global__ void __launch_bounds__(256) tf_ctl_bounded(const float* X, float* Y) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;

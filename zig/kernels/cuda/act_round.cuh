@@ -1,0 +1,95 @@
+// MLX's bf16-op-by-op activations (act_rows.cu's tf_geglu_rows, tf_swiglu_rows_round); `keep`: the rounding points.
+
+#pragma once
+
+#include <cuda_bf16.h>
+#include <stdint.h>
+
+namespace tf_act_round {
+
+// mlx_lm's gelu_approx(x) * up as MLX's bf16 ops (Metal gemma4/glue.metal's gemma_geglu): its rounding points.
+enum : int { CUBE = 1, CUBE_SCALED = 2, INNER = 4, INNER_SCALED = 8, TANH = 16, ONE_PLUS = 32, GELU = 64 };
+constexpr int GEGLU_ALL = 127;
+// tf_draft_swiglu's bf16 steps (Metal core/draft_ops.metal, gemma4's DFlash drafter): its rounding points.
+enum : int { EXP = 1, DENOM = 2, RECIP = 4, SIGMOID = 8, SILU = 16 };
+constexpr int SWIGLU_ALL = 31;
+
+__device__ __forceinline__ float bf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
+
+// v rounded to bf16 where `keep` holds the point p (a constant in the served kernels, so the test folds away).
+__device__ __forceinline__ float point(float v, int keep, int p) { return (keep & p) != 0 ? bf(v) : v; }
+
+// 0.5 x (1 + tanh(c0 (x + c1 x^3))) up, each step rounded to bf16 (x^3 exact in fp32 for a bf16 x; c0, c1 as bf16).
+__device__ __forceinline__ float geglu(float x, float up, int keep) {
+    const float c0 = bf(0.7978845608028654f), c1 = bf(0.044715f);
+    const float cube = point(__fmul_rn(__fmul_rn(x, x), x), keep, CUBE);
+    const float inner = point(__fadd_rn(x, point(__fmul_rn(c1, cube), keep, CUBE_SCALED)), keep, INNER);
+    const float th = point(tanhf(point(__fmul_rn(c0, inner), keep, INNER_SCALED)), keep, TANH);
+    const float half_x = bf(__fmul_rn(0.5f, x)); // exact for a bf16 x: no point to drop
+    const float gl = point(__fmul_rn(half_x, point(__fadd_rn(1.f, th), keep, ONE_PLUS)), keep, GELU);
+    return __fmul_rn(gl, up);
+}
+
+// silu(g) up as sigmoid from exp(|g|): 1 / (1 + e) for g < 0, else 1 - that; each step rounded to bf16.
+__device__ __forceinline__ float swiglu(float g, float up, int keep) {
+    const float e = point(expf(fabsf(g)), keep, EXP);
+    const float inv = point(__fdiv_rn(1.f, point(__fadd_rn(1.f, e), keep, DENOM)), keep, RECIP);
+    const float sig = g < 0.f ? inv : point(__fsub_rn(1.f, inv), keep, SIGMOID);
+    return __fmul_rn(point(__fmul_rn(g, sig), keep, SILU), up);
+}
+
+__device__ __forceinline__ void unpack8(const uint4& u, float* f) {
+    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        const float2 t = __bfloat1622float2(h[i]);
+        f[2 * i] = t.x;
+        f[2 * i + 1] = t.y;
+    }
+}
+
+__device__ __forceinline__ uint4 pack8(const float* f) {
+    uint4 u;
+    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
+#pragma unroll
+    for (int i = 0; i < 4; ++i) h[i] = __floats2bfloat162_rn(f[2 * i], f[2 * i + 1]);
+    return u;
+}
+
+// act_rows.cu's group_sum8: a thread's 8 stored values in order, then the group's 8 lanes in a fixed tree.
+__device__ __forceinline__ float group_sum8(const uint4& packed, bool live) {
+    float f[8];
+    unpack8(packed, f);
+    float s = 0.f;
+    if (live)
+#pragma unroll
+        for (int i = 0; i < 8; ++i) s = __fadd_rn(s, f[i]);
+    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 4));
+    s = __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 2));
+    return __fadd_rn(s, __shfl_xor_sync(0xFFFFFFFFu, s, 1));
+}
+
+// out[r, i] = bf16(act(gate[r * g_ld + i], up[r * u_ld + i])) for i < n (n % 64 == 0), GEGLU or not; xs its sums.
+template <bool GEGLU>
+__device__ __forceinline__ void rows(const __nv_bfloat16* __restrict__ gate, long long g_ld,
+                                     const __nv_bfloat16* __restrict__ up, long long u_ld, __nv_bfloat16* __restrict__ out,
+                                     float* __restrict__ xs, int n, int keep) {
+    const int64_t r = blockIdx.x;
+    const int c = blockIdx.y * blockDim.x + threadIdx.x; // 8 values
+    const bool live = 8 * c < n;
+    float g[8], u[8], o[8];
+    if (live) {
+        unpack8(*reinterpret_cast<const uint4*>(gate + r * g_ld + 8 * c), g);
+        unpack8(*reinterpret_cast<const uint4*>(up + r * u_ld + 8 * c), u);
+    }
+#pragma unroll
+    for (int i = 0; i < 8; ++i) o[i] = live ? (GEGLU ? geglu(g[i], u[i], keep) : swiglu(g[i], u[i], keep)) : 0.f;
+    const uint4 op = pack8(o);
+    if (live) *reinterpret_cast<uint4*>(out + r * n + 8 * c) = op;
+    if (xs != nullptr) {
+        const float s = group_sum8(op, live);
+        if (live && (c & 7) == 0) xs[r * (n / 64) + c / 8] = s;
+    }
+}
+
+}  // namespace tf_act_round
