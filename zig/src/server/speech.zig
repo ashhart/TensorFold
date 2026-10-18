@@ -1,5 +1,6 @@
 //! POST /v1/audio/speech: WAV or raw PCM whole, or raw PCM chunks with stream; only complete synthesis is audio.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -277,10 +278,10 @@ fn startStream(c: *Conn, sample_rate: u32) error{Closed}!void {
     if (c.close) c.addHeader("Connection", "close") catch return error.Closed;
     // each chunk leaves at once rather than waiting on the client's acknowledgement of the last (no effect off TCP)
     const one: c_int = 1;
-    _ = std.c.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &one, @sizeOf(c_int));
+    if (platform.windows) platform.posix.setsockopt(c.fd, platform.posix.IPPROTO.TCP, platform.posix.TCP.NODELAY, std.mem.asBytes(&one)) catch {} else _ = std.c.setsockopt(c.fd, std.posix.IPPROTO.TCP, std.posix.TCP.NODELAY, &one, @sizeOf(c_int));
     // a blocking write into a full socket returns after the stall limit, so writeAll's poll can end a stalled stream
-    const stall: std.posix.timeval = .{ .sec = @divTrunc(c.timeouts.write_ms, 1000), .usec = @rem(c.timeouts.write_ms, 1000) * 1000 };
-    std.posix.setsockopt(c.fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&stall)) catch {};
+    const stall: platform.posix.timeval = .{ .sec = @divTrunc(c.timeouts.write_ms, 1000), .usec = @rem(c.timeouts.write_ms, 1000) * 1000 };
+    platform.posix.setsockopt(c.fd, platform.posix.SOL.SOCKET, platform.posix.SO.SNDTIMEO, std.mem.asBytes(&stall)) catch {};
     try c.finish("");
     c.response_complete = false;
 }

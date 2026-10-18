@@ -45,7 +45,7 @@ test {
     _ = @import("chunk_plan.zig");
     _ = @import("status_routes.zig");
     _ = @import("speech.zig");
-    _ = @import("speech_stream_test.zig");
+    if (comptime @import("builtin").os.tag != .windows) _ = @import("speech_stream_test.zig"); // over a Unix socket pair
     _ = @import("drama_prompt.zig");
     _ = @import("health_test.zig");
     _ = @import("memory_routes.zig");
@@ -130,11 +130,11 @@ test {
         _ = @import("benchmark_early_test.zig");
         _ = @import("benchmark_publication_test.zig");
         _ = @import("benchmark_chat_only_test.zig");
+        _ = @import("benchmark_config_test.zig");
     }
 }
 
 test {
-    _ = @import("benchmark_config_test.zig");
     _ = @import("slide_retention_test.zig");
 }
 
