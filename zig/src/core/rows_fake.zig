@@ -27,6 +27,7 @@ pub const Fake = struct {
     restored_ok: bool = true, // every restore so far equalled the image a fresh pass gives
     live: usize = 0,
     blanks: usize = 0,
+    slots: ?usize = null, // a family whose states each take one of so many slots (Nemotron CUDA's): past them, none
 
     pub fn snapshots(f: *Fake) pc.Snapshots {
         return .{ .ptr = f, .vtable = &.{ .bytes = bytesFn, .save = saveFn, .restore = restoreFn, .drop = dropFn, .rows = &.{ .parts = partsFn, .gather = gatherFn, .blank = blankFn, .scatter = scatterFn } } };
@@ -98,6 +99,7 @@ pub const Fake = struct {
     fn saveFn(ptr: *anyopaque, _: ?*anyopaque, at: u32) anyerror!pc.Saved {
         const f = of(ptr);
         if (at != f.at) return error.NotAtMark;
+        if (f.slots) |n| if (f.live >= n) return error.NoSnapshotSlot;
         const k = try f.gpa.create(Kept);
         errdefer f.gpa.destroy(k);
         k.* = .{ .at = at, .img = try f.gpa.alloc(u8, imageBytes(at)) };
@@ -135,6 +137,7 @@ pub const Fake = struct {
     }
     fn blankFn(ptr: *anyopaque, at: u32) anyerror!pc.Saved {
         const f = of(ptr);
+        if (f.slots) |n| if (f.live >= n) return error.NoSnapshotSlot;
         const k = try f.gpa.create(Kept);
         errdefer f.gpa.destroy(k);
         k.* = .{ .at = at, .img = try f.gpa.alloc(u8, imageBytes(at)) };

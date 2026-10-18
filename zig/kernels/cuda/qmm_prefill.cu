@@ -149,5 +149,5 @@ __global__ void __launch_bounds__(WM * WN * 32) prefill_kernel(
 
 // The instantiation prefill_matmul launches (tile 0: 128x128 on 2x4 warps, 3 stages), bf16 out.
 template __global__ void tf_qmm_prefill::prefill_kernel<64, 128, 128, 2, 4, 3, false>(
-    const __nv_bfloat16*, const uint32_t*, const __nv_bfloat16*, const __nv_bfloat16*, void*, int, int, int,
+    const __nv_bfloat16* __restrict__, const uint32_t* __restrict__, const __nv_bfloat16* __restrict__, const __nv_bfloat16* __restrict__, void* __restrict__, int, int, int,
     int, int, int);

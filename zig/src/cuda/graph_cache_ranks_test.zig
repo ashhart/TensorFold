@@ -53,9 +53,7 @@ const Board = struct {
     }
 
     fn now() u64 {
-        var ts: std.c.timespec = undefined;
-        _ = std.c.clock_gettime(.MONOTONIC, &ts);
-        return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+        return @intCast(std.Io.Clock.awake.now(std.testing.io).toNanoseconds());
     }
 };
 

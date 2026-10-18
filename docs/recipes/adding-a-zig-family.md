@@ -38,7 +38,7 @@ Some of the host side already lives in core, but so far each piece serves one fa
 - staggered segments (`zig/src/core/segments.zig`, and `zig/src/cuda/segments.zig` on CUDA) serve Flash Next on Metal and Nemotron
   on CUDA;
 - every host returns the HTTP contract in `zig/src/core/engine_api.zig`, and `zig/src/core/lane_host.zig` serves Nemotron on Metal
-  and CUDA. Flash Next has its own host and serves one reply at a time.
+  and CUDA, and Flash Next on CUDA. Flash Next on Metal has its own host and serves one reply at a time.
 
 The GPU side is barely shared yet, and that costs time. In the GLM-5.3 port each extra row in a window cost about
 4.4 ms of GPU time, against about 2.3 ms for the row's own experts. Row kernels read every replicated weight again for
@@ -71,11 +71,11 @@ lane kernels go in, check against the engine's own plain output (step 4).
 
 | Piece | Shared now | Family copies or gaps |
 | --- | --- | --- |
-| Lane kernels | `zig/kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `zig/src/core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `zig/kernels/metal/decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels |
+| Lane kernels | `zig/kernels/metal/ops/qmv.metal` (affine 4-, 6- and 8-bit row matmuls, MLX's arithmetic) and `zig/src/core/frags.zig` (the prompt layout on M1-M4) | Flash Next: `zig/kernels/metal/decode/fn_lane.metal` (6-bit, groups of 32, tensor ops, up to 16 rows). Kimi K3: MXFP4 experts and bf16 projections. Nemotron: generated per-shape kernels. On CUDA, `zig/kernels/cuda/experts_rows.cu` runs affine 4-bit group-32 experts over a window's rows with the decode kernel's sums, and `route_rows.cu` the router logits and softmax top-k (Flash Next) |
 | GPU-side rounds | the host loop, depth rule and copy proposer in `zig/src/core/lanes`, used by Nemotron | Flash Next: its own host loop, plus `fz_accept`, the ring and event chaining (`zig/src/families/flashnext/replay.zig`). Nemotron on Metal: `zig/src/families/nemotron/gpu_round.zig` for a lone stream. Kimi K3: none |
 | Several Macs | the MCDMA fabric (`zig/src/fabric`) | Flash Next: `zig/src/families/flashnext/tp.zig` splits rows and holds the whole model on each Mac. Kimi K3: `zig/src/families/kimi_k3/parallel.zig` is a split plan with no link yet |
 | Prompt path | segments; the prompt cache, used by Flash Next, GLM, Nemotron and the Qwen3.8-27B | per-family prompt kernels and snapshots |
-| Serving | `engine_api` for every host; `lane_host` for Nemotron | Flash Next: its own host, one reply at a time |
+| Serving | `engine_api` for every host; `lane_host` for Nemotron, and for Flash Next on CUDA | Flash Next on Metal: its own host, one reply at a time |
 
 **The order.**
 1. GLM-5.3 builds the core pieces first:
@@ -193,6 +193,12 @@ On M5 tensor units. Chips before M5 need their own path.
 17. **A Metal keepalive** for any model that holds a large residency set. That's a one-thread command buffer every
     250-500 ms, on its own queue, inside the engine process. Without it macOS unwires the set after 1-2 s idle, and
     the next request pays a full re-wire: 2.7 s on K3.
+
+Native CUDA families may export `healthy(ctx: *anyopaque) bool`. The native host forwards this callback to
+lane health and admission. It must read thread-safe host state without binding a GPU context, waiting on device
+work or taking the inference thread's lock. Families without it retain the lane host's normal closing/stale checks.
+Unavailable or busy admission returns HTTP 503 before a streaming response opens. Context-window refusals retain
+their existing streamed error policy; failures after admission remain stream errors.
 
 ## Across several Macs
 

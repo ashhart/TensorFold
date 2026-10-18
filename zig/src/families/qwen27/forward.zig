@@ -82,13 +82,15 @@ pub const Stages = struct {
         var up = f.get(.mixed);
         up.offset += @as(usize, m.config.intermediate) * 2;
         const width: u32 = @intCast(m.config.intermediate);
-        if (if (m.kernels.prompt) m.ane else null) |share| {
-            // the Neural Engine runs MLP columns below share.columns; the GPU runs the rest, then adds its partial
-            const v = share.next(index);
-            const planes = Ref{ .buffer = share.output.buffer };
+        const shared = if (m.ane) |sh| m.kernels.prompt and s.rows <= sh.capacity() else false;
+        if (if (shared) m.ane else null) |share| {
+            // ANE slices run the shared columns; the GPU adds its remaining columns.
+            const used: u32 = (s.rows + ane_mlp.width - 1) / ane_mlp.width;
+            const v = share.next(index, used);
+            const planes = Ref{ .buffer = share.outputs[0].buffer };
             const own = share.columns / 64;
             const all = width / 64;
-            try m.kernels.aneInput(e, f.get(.input), f.get(.dims), .{ .buffer = share.input.buffer }, h, width, share.columns);
+            for (0..used) |slice| try m.kernels.aneInput(e, f.get(.input), f.get(.dims), .{ .buffer = share.inputs[slice].buffer }, h, width, share.columns, @intCast(slice * ane_mlp.width));
             try share.signal(lane, v[0]);
             try m.kernels.quantSkip(lane.enc, layer.gu, f.get(.input), sums(f, .sums, s.rows), f.get(.dims), f.get(.mixed), s.rows, share.columns / 32);
             lane.enc.barrier();
@@ -96,7 +98,10 @@ pub const Stages = struct {
             lane.enc.barrier();
             try m.kernels.quantCut(lane.enc, layer.down, f.get(.activated), sums(f, .act_sums, s.rows), f.get(.dims), .{ .buffer = share.partial }, s.rows, .{ own, all - own });
             share.wait(lane, v[1]);
-            try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, planes, f.get(.output), h, width, share.columns, s.rows);
+            for (0..used) |slice| {
+                const base: u32 = @intCast(slice * ane_mlp.width);
+                try m.kernels.addAne(lane.enc, .{ .buffer = share.partial }, .{ .buffer = share.outputs[slice].buffer }, f.get(.output), h, width, share.columns, @min(ane_mlp.width, s.rows - base), base);
+            }
             lane.enc.barrier();
             s.pending = f.get(.output);
             return;
@@ -118,6 +123,7 @@ pub const Stages = struct {
         e.barrier();
         std.mem.swap(Ref, &s.hidden, &s.residual);
         if (s.hooks.tap) |tap| try tap(s.hooks.ptr, e, m.config.layers - 1, s.hidden, s.rows);
+        if (s.head == .all and s.rows > @import("gpu_frame.zig").logit_rows) return error.BadFrameRows;
         if (s.head != .none) {
             var input = f.get(.input);
             var head_sums = sums(f, .sums, s.rows);

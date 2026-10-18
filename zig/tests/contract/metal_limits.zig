@@ -31,9 +31,22 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
             return std.mem.indexOf(u8, s, p) != null;
         }
     }.f;
+    if (std.mem.startsWith(u8, d.name, "drama3 ")) {
+        const text_d3 = try @import("metal_drama3.zig").source(a, d.name);
+        return .{ .decl = d, .function = fun, .here = text_d3, .pre_m5 = text_d3 };
+    }
     if (std.mem.startsWith(u8, fun, "tf_ctl_")) {
         text = sources.core_contract_controls;
         if (has(fun, "big_tg")) head = "#define TF_CTL_BIG_TG 1\n";
+    } else if (std.mem.startsWith(u8, d.name, "h3 gemm ")) {
+        text = for (sources.prefill) |f| {
+            if (std.mem.eql(u8, f.name, "gemm_nax")) break f.text;
+        } else return error.UnknownLaunch;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "h3 ")) {
+        text = @import("h3_kernels").source;
+    } else if (std.mem.startsWith(u8, d.name, "glm gather ")) {
+        text = tf.glm.wide.gather_source;
     } else if (std.mem.startsWith(u8, d.name, "glm ")) {
         const key = d.name[4..std.mem.indexOfScalarPos(u8, d.name, 4, ' ').?];
         text = for (sources.glm.all) |k| {
@@ -42,6 +55,11 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "qwen vision ")) {
         text = sources.core_qwen_vision;
         frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "qwen image ")) {
+        text = sources.qwen_image;
+        frags = true;
+    } else if (std.mem.startsWith(u8, d.name, "core deltanet ")) {
+        text = sources.core_deltanet;
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {
         text = if (has(d.name, " copy ")) tf.qwen27.runtime_sources.copy else tf.qwen27.runtime_sources.glue;
     } else if (has(d.name, "tile_qmm")) text = sources.core_tile_qmm else if (has(d.name, "softmax")) text = sources.ops_softmax else if (has(d.name, "rms")) text = sources.ops_embed_norm else if (has(d.name, "top-k")) text = topk_text else if (has(d.name, "row projection")) text = sources.core_row_projection else if (has(d.name, "simd_qmm_bits")) text = sources.core_simd_qmm_bits else if (has(d.name, "simd_qmm")) text = sources.core_simd_qmm else if (has(d.name, "affine_mm")) {
@@ -66,7 +84,7 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
 }
 
 /// One launch on this GPU: the pipeline's own thread limit and threadgroup bytes against its declaration.
-fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
+pub fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool) !usize {
     const p = rig_.pipeline(device, l.here, l.function) catch |err| {
         std.debug.print("{s} {s}: no pipeline on this GPU ({t})\n", .{ if (control) "RED " else "FAIL", l.decl.name, err });
         return 1;
@@ -86,14 +104,14 @@ fn onThisGpu(a: std.mem.Allocator, device: mtl.Device, l: Launch, control: bool)
 
 /// Gate 5: declarations against every family, each pipeline on this GPU, and offline M1/M2 compiles when asked.
 pub fn gate(a: std.mem.Allocator, io: std.Io, device: mtl.Device, offline: ?[]const u8) !usize {
-    var n = try registry.checkMetal(a, &registry.metal, false);
-    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.metal.len, n });
-    for (registry.metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
+    var n = try registry.checkMetal(a, &registry.all_metal, false);
+    std.debug.print("{s} limits: {d} registered Metal launches against M1-M5, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_metal.len, n });
+    for (registry.all_metal) |d| n += try onThisGpu(a, device, try launchOf(a, device, d), false);
     for (registry.metal_controls) |d| {
         const red = try registry.checkMetal(a, &.{d}, true) + try onThisGpu(a, device, try launchOf(a, device, d), true);
         if (red == 0) n += 1;
         std.debug.print("CONTROL {s} {s}: {d} limit problems\n", .{ if (red > 0) "red as planted," else "MISSED", d.name, red });
     }
-    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.metal ++ registry.metal_controls), launchOf, device);
+    if (offline) |dir| n += try @import("metal_offline.zig").run(a, io, dir, &(registry.all_metal ++ registry.metal_controls), launchOf, device);
     return n;
 }

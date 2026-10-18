@@ -13,12 +13,17 @@ fn Blob(comptime import_name: []const u8) type {
 pub const available = options.with_kernels;
 
 pub const gdn: []const u8 = if (available) &Blob("fatbin_gdn").bytes else &.{};
+pub const flashnext_gdn: []const u8 = if (available) &Blob("fatbin_flashnext_gdn").bytes else &.{};
+pub const flashnext_batch: []const u8 = if (available) &Blob("fatbin_flashnext_batch").bytes else &.{};
+pub const flashnext_mtp: []const u8 = if (available) &Blob("fatbin_flashnext_mtp").bytes else &.{};
 pub const probe: []const u8 = if (available) &Blob("fatbin_probe").bytes else &.{};
 pub const qmm_group: []const u8 = if (available) &Blob("fatbin_qmm_group").bytes else &.{};
+pub const qmm: []const u8 = if (available) &Blob("fatbin_qmm").bytes else &.{};
 pub const qmm_prefill: []const u8 = if (available) &Blob("fatbin_qmm_prefill").bytes else &.{};
 pub const experts: []const u8 = if (available) &Blob("fatbin_experts").bytes else &.{};
 pub const experts_prefill: []const u8 = if (available) &Blob("fatbin_experts_prefill").bytes else &.{};
 pub const experts_pack: []const u8 = if (available) &Blob("fatbin_experts_pack").bytes else &.{};
+pub const experts_rows: []const u8 = if (available) &Blob("fatbin_experts_rows").bytes else &.{};
 pub const prefill_attention: []const u8 = if (available) &Blob("fatbin_prefill_attention").bytes else &.{};
 pub const lfm2: []const u8 = if (available) &Blob("fatbin_lfm2").bytes else &.{};
 pub const vit: []const u8 = if (available) &Blob("fatbin_vit").bytes else &.{};
@@ -26,6 +31,8 @@ pub const scan_rows: []const u8 = if (available) &Blob("fatbin_scan_rows").bytes
 pub const nemotron_ops: []const u8 = if (available) &Blob("fatbin_nemotron_ops").bytes else &.{};
 pub const lane_gemv: []const u8 = if (available) &Blob("fatbin_lane_gemv").bytes else &.{};
 pub const affine4_pack: []const u8 = if (available) &Blob("fatbin_affine4_pack").bytes else &.{};
+pub const affine8: []const u8 = if (available) &Blob("fatbin_affine8").bytes else &.{};
+pub const affine_prefill: []const u8 = if (available) &Blob("fatbin_affine_prefill").bytes else &.{};
 pub const fp8_experts: []const u8 = if (available) &Blob("fatbin_fp8_experts").bytes else &.{};
 pub const exlr8: []const u8 = if (available) &Blob("fatbin_exlr8").bytes else &.{};
 pub const exlr8_dense: []const u8 = if (available) &Blob("fatbin_exlr8_dense").bytes else &.{};
@@ -33,13 +40,29 @@ pub const nvfp4_experts: []const u8 = if (available) &Blob("fatbin_nvfp4_experts
 pub const rank_sum: []const u8 = if (available) &Blob("fatbin_rank_sum").bytes else &.{};
 pub const sample: []const u8 = if (available) &Blob("fatbin_sample").bytes else &.{};
 pub const train: []const u8 = if (available) &Blob("fatbin_train").bytes else &.{};
+pub const qwen35: []const u8 = if (available) &Blob("fatbin_qwen35").bytes else &.{};
+pub const qwen35_draft: []const u8 = if (available) &Blob("fatbin_qwen35_draft").bytes else &.{};
+pub const qwen35_keep: []const u8 = if (available) &Blob("fatbin_qwen35_keep").bytes else &.{};
+pub const qwen_vision: []const u8 = if (available) &Blob("fatbin_qwen_vision").bytes else &.{};
+pub const qwen35_kv8: []const u8 = if (available) &Blob("fatbin_qwen35_kv8").bytes else &.{};
 pub const qmmf: []const u8 = if (available) &Blob("fatbin_qmmf").bytes else &.{};
 pub const prompt16: []const u8 = if (available) &Blob("fatbin_prompt16").bytes else &.{};
+pub const tree_attention: []const u8 = if (available) &Blob("fatbin_tree_attention").bytes else &.{};
+pub const block_attention: []const u8 = if (available) &Blob("fatbin_block_attention").bytes else &.{};
+pub const window_attention: []const u8 = if (available) &Blob("fatbin_window_attention").bytes else &.{};
+pub const moe_glue: []const u8 = if (available) &Blob("fatbin_moe_glue").bytes else &.{};
+pub const dense_rows: []const u8 = if (available) &Blob("fatbin_dense_rows").bytes else &.{};
 pub const modelopt_pack: []const u8 = if (available) &Blob("fatbin_modelopt_pack").bytes else &.{};
 pub const glm_glue: []const u8 = if (available) &Blob("fatbin_glm_glue").bytes else &.{};
 pub const glm_ops: []const u8 = if (available) &Blob("fatbin_glm_ops").bytes else &.{};
 pub const glm_quant: []const u8 = if (available) &Blob("fatbin_glm_quant").bytes else &.{};
+pub const glm_vision: []const u8 = if (available) &Blob("fatbin_glm_vision").bytes else &.{};
+pub const glm_mm: []const u8 = if (available) &Blob("fatbin_glm_mm").bytes else &.{};
+pub const glm_dflash: []const u8 = if (available) &Blob("fatbin_glm_dflash").bytes else &.{};
 pub const glm_kda: []const u8 = if (available) &Blob("fatbin_glm_kda").bytes else &.{};
+pub const exl3_linear: []const u8 = if (available) &Blob("fatbin_exl3_linear").bytes else &.{};
+pub const exl3_experts: []const u8 = if (available) &Blob("fatbin_exl3_experts").bytes else &.{};
+pub const exl3_candidate: []const u8 = if (available) &Blob("fatbin_exl3_candidate").bytes else &.{};
 pub const torch_argmax: []const u8 = if (available) &Blob("fatbin_torch_argmax").bytes else &.{};
 pub const torch_topk: []const u8 = if (available) &Blob("fatbin_torch_topk").bytes else &.{};
 pub const torch_pointwise: []const u8 = if (available) &Blob("fatbin_torch_pointwise").bytes else &.{};
@@ -56,6 +79,14 @@ pub const ck_lane: []const u8 = if (available) &Blob("fatbin_ck_lane").bytes els
 pub const ck_experts: []const u8 = if (available) &Blob("fatbin_ck_experts").bytes else &.{};
 pub const norms: []const u8 = if (available) &Blob("fatbin_norms").bytes else &.{};
 pub const embed_rows: []const u8 = if (available) &Blob("fatbin_embed_rows").bytes else &.{};
+pub const tree_round: []const u8 = if (available) &Blob("fatbin_tree_round").bytes else &.{};
+pub const act_rows: []const u8 = if (available) &Blob("fatbin_act_rows").bytes else &.{};
+pub const gdn_prep: []const u8 = if (available) &Blob("fatbin_gdn_prep").bytes else &.{};
+pub const qk_rows: []const u8 = if (available) &Blob("fatbin_qk_rows").bytes else &.{};
+pub const roce_gather: []const u8 = if (available) &Blob("fatbin_roce_gather").bytes else &.{};
+pub const route_rows: []const u8 = if (available) &Blob("fatbin_route_rows").bytes else &.{};
+pub const flashnext_hc: []const u8 = if (available) &Blob("fatbin_flashnext_hc").bytes else &.{};
+pub const flashnext_attn: []const u8 = if (available) &Blob("fatbin_flashnext_attn").bytes else &.{};
 
 /// Symbols in the gdn image as cuobjdump lists them for the built fatbin (named namespace tf_gdn).
 pub const gdn_symbols = struct {
@@ -89,3 +120,14 @@ pub fn treeVariant(slots: u32, streams: u32, major: c_int, minor: c_int, sms: c_
     if (slots <= 16) return tree(16, 2, 2, false);
     return tree(32, 2, 1, false);
 }
+
+pub const moe: []const u8 = if (available) &Blob("fatbin_moe").bytes else &.{};
+pub const qwen36_mtp: []const u8 = if (available) &Blob("fatbin_qwen36_mtp").bytes else &.{};
+
+pub const experts3: []const u8 = if (available) &Blob("fatbin_experts3").bytes else &.{};
+pub const experts3_prefill: []const u8 = if (available) &Blob("fatbin_experts3_prefill").bytes else &.{};
+pub const ggml: []const u8 = if (available) &Blob("fatbin_ggml").bytes else &.{};
+pub const drama3: []const u8 = if (available) &Blob("fatbin_drama3").bytes else &.{};
+pub const drama3_fp8: []const u8 = if (available) &Blob("fatbin_drama3_fp8").bytes else &.{};
+pub const drama3_codec: []const u8 = if (available) &Blob("fatbin_drama3_codec").bytes else &.{};
+pub const drama3_staged_gemv: []const u8 = if (available) &Blob("fatbin_drama3_staged_gemv").bytes else &.{};

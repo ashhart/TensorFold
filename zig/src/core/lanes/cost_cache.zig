@@ -1,5 +1,6 @@
 //! Timed costs are measured once per engine build, chip and model shape, then read back by later loads.
 const std = @import("std");
+const platform = @import("sys");
 const Allocator = std.mem.Allocator;
 
 const magic = "TFWC2\n";
@@ -53,7 +54,7 @@ fn hashPart(h: *std.crypto.hash.sha2.Sha256, part: []const u8) void {
 }
 
 fn path(a: Allocator, k: [32]u8, suffix: []const u8) !?[]u8 {
-    const home = std.c.getenv("HOME") orelse return null;
+    const home = platform.c.getenv("HOME") orelse return null;
     return try std.fmt.allocPrint(a, "{s}/.cache/tensorfold/window-costs/{s}{s}", .{ std.mem.span(home), std.fmt.bytesToHex(k, .lower), suffix });
 }
 
@@ -78,7 +79,7 @@ pub fn save(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, value: T) voi
     const p = (path(a, k, ".bin") catch return) orelse return;
     defer a.free(p);
     std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(p) orelse return) catch return;
-    const temp = std.fmt.allocPrint(a, "{s}.{d}.tmp", .{ p, std.c.getpid() }) catch return;
+    const temp = std.fmt.allocPrint(a, "{s}.{d}.tmp", .{ p, platform.c.getpid() }) catch return;
     defer a.free(temp);
     const bytes = std.mem.concat(a, u8, &.{ magic, std.mem.asBytes(&value) }) catch return;
     defer a.free(bytes);

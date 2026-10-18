@@ -9,7 +9,7 @@ pub const max_layers = 96;
 pub const latent_max_picks = 32;
 pub const latent_max_experts = 1024;
 
-/// The MTP head's acceptance at depth 1, 2, ... given the ones before it, until a stream has its own (model.py draft_prior).
+/// Conditional MTP acceptance by depth until a stream has its own estimates, from model.py draft_prior.
 pub const draft_prior = [_]f64{ 0.8, 0.72, 0.68, 0.62, 0.58, 0.55, 0.5, 0.5 };
 
 /// Why a check refused the checkpoint, kept for the caller's log line (tests read it instead).
@@ -66,6 +66,9 @@ pub fn members(kind: Kind) []const []const u8 {
     };
 }
 
+/// One MoE layer's routed experts and their width.
+pub const Moe = struct { experts: usize = 0, width: usize = 0 };
+
 pub const Config = struct {
     hidden: usize,
     vocab: usize,
@@ -79,9 +82,11 @@ pub const Config = struct {
     heads: usize,
     kv_heads: usize,
     head_dim: usize,
-    experts: usize,
+    experts: usize, // the widest MoE layer's routed experts (every layer's, unless `moe` says otherwise)
     top_k: usize,
-    expert_width: usize,
+    expert_width: usize, // the widest MoE layer's routed expert width
+    bolt: bool = false, // puzzle blocks and GGML tables use Bolt's own latent expert path
+    moe: [max_layers]Moe = @splat(.{}), // each MoE layer's own experts and width (block_configs); zero: the uniform ones
     shared_width: usize, // the shared expert's own neurons, learned ones (pocket) left out
     pocket: usize = 0, // tensorfold_learned_neurons: learned neurons after the shared expert's own, in the same tensors
     routed_scaling: f32,
@@ -104,6 +109,17 @@ pub const Config = struct {
     widths: [max_layers][4]Width = @splat(@splat(.{})), // each layer's matrices (members(kind) order) at their widths
     embed_width: Width = .{},
     head_width: Width = .{},
+
+    /// MoE layer `i`'s routed experts and width.
+    pub fn layerMoe(self: Config, i: usize) Moe {
+        const m = self.moe[i];
+        return if (m.experts == 0) .{ .experts = self.experts, .width = self.expert_width } else m;
+    }
+
+    /// The width routed experts read and write: the latent one, else hidden.
+    pub fn expertDims(self: Config) usize {
+        return if (self.latent > 0) self.latent else self.hidden;
+    }
 
     pub fn inner(self: Config) usize {
         return self.mamba_heads * self.mamba_head_dim;
@@ -363,11 +379,11 @@ fn learned(path: []const u8) bool {
 pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
     defer parsed.deinit();
-    const top = parsed.value.object;
-    // nemotron_h_omni wraps the text model's config in llm_config; quantization and our split stay at the top
-    const omni = std.mem.eql(u8, (top.get("model_type") orelse return error.BadConfig).string, "nemotron_h_omni");
-    const o = if (omni) ((top.get("llm_config") orelse return error.BadConfig).object) else top;
-    if (!std.mem.eql(u8, (o.get("model_type") orelse return error.BadConfig).string, "nemotron_h")) return error.NotNemotronH;
+    const root = parsed.value.object;
+    // nemotron_h_omni (Bolt) wraps the language model's config in llm_config, its quantization at the top
+    const wrapped = isType(root, "nemotron_h_omni");
+    const o = if (wrapped) (llmConfig(root) orelse return error.BadConfig) else root;
+    if (!isType(o, "nemotron_h") and !isType(o, "nemotron_h_puzzle")) return error.NotNemotronH;
     var c = Config{
         .hidden = try int(o, "hidden_size"),
         .vocab = try int(o, "vocab_size"),
@@ -380,9 +396,10 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         .heads = try int(o, "num_attention_heads"),
         .kv_heads = try int(o, "num_key_value_heads"),
         .head_dim = 0,
-        .experts = try int(o, "n_routed_experts"),
-        .top_k = try int(o, "num_experts_per_tok"),
-        .expert_width = try int(o, "moe_intermediate_size"),
+        // a puzzle config (Bolt) names these per block
+        .experts = if (o.get("block_configs") != null) 0 else try int(o, "n_routed_experts"),
+        .top_k = if (o.get("block_configs") != null) 0 else try int(o, "num_experts_per_tok"),
+        .expert_width = if (o.get("block_configs") != null) 0 else try int(o, "moe_intermediate_size"),
         .shared_width = try int(o, "moe_shared_expert_intermediate_size"),
         .routed_scaling = if (o.get("routed_scaling_factor")) |v| @floatCast(try number(v)) else 1.0,
         .eps = if (o.get("layer_norm_epsilon")) |v| @floatCast(try number(v)) else 1e-5,
@@ -394,8 +411,14 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         c.shared_width -= c.pocket;
     }
     if (o.get("norm_topk_prob")) |v| c.norm_topk = v.bool;
+    c.omni = wrapped;
+    if (o.get("moe_latent_size")) |v| if (v == .integer) {
+        if (v.integer < 0) return error.BadConfig; // a width: refused before the cast, as the latent checks below would
+        c.latent = @intCast(v.integer);
+    };
+    if (o.get("block_configs")) |v| if (v == .array and v.array.items.len > 0) try puzzle(&c, v.array.items, why);
     // hybrid_override_pattern (one character a block) wins over layers_block_type, as the Python loader reads them
-    if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
+    if (c.layers == 0) if (o.get("hybrid_override_pattern")) |v| if (v == .string and v.string.len > 0) {
         if (v.string.len > max_layers) return error.BadConfig;
         for (v.string, 0..) |ch, i| c.kinds[i] = try kindOf(&.{ch});
         c.layers = v.string.len;
@@ -406,29 +429,21 @@ pub fn parse(allocator: std.mem.Allocator, text: []const u8, why: *Why) !Config 
         for (blocks, 0..) |b, i| c.kinds[i] = try kindOf(b.string);
         c.layers = blocks.len;
     }
-    if (o.get("eos_token_id")) |e| switch (e) {
-        .integer => |i| {
-            c.eos[0] = @intCast(i);
-            c.eos_count = 1;
-        },
-        .array => |a| for (a.items[0..@min(a.items.len, 4)]) |x| {
-            c.eos[c.eos_count] = @intCast(x.integer);
-            c.eos_count += 1;
-        },
-        else => {},
-    };
+    // generation_config's [2, 11] is the omni wrapper's eos plus the language model's
+    if (wrapped) if (root.get("eos_token_id")) |e| eos(&c, e);
+    if (o.get("eos_token_id")) |e| eos(&c, e);
     if (o.get("time_step_limit")) |v| if (v == .array and v.array.items.len == 2) {
         c.dt_min = @floatCast(try number(v.array.items[0]));
         c.dt_max = @floatCast(try number(v.array.items[1]));
     };
-    c.omni = omni;
+    c.omni = wrapped;
     if (o.get("moe_latent_size")) |v| if (v == .integer and v.integer > 0) {
         c.latent = @intCast(v.integer);
-        c.shares = 2;
         try router(c, o, why);
-        try split(&c, top, why);
+        if (!c.bolt) c.shares = 2;
+        try split(&c, root, why);
     };
-    try quantization(&c, top, why);
+    try quantization(&c, root, why);
     return c;
 }
 
@@ -480,6 +495,56 @@ pub fn fourOnlyText(gpa: std.mem.Allocator, text: []const u8, engine: []const u8
 }
 
 /// The shapes our kernels serve (Nemotron 3.5 Lightning 30B-A3B at any width parse admits): Metal's and CUDA's.
+fn isType(o: std.json.ObjectMap, t: []const u8) bool {
+    const v = o.get("model_type") orelse return false;
+    return v == .string and std.mem.eql(u8, v.string, t);
+}
+
+fn llmConfig(o: std.json.ObjectMap) ?std.json.ObjectMap {
+    const v = o.get("llm_config") orelse return null;
+    return if (v == .object) v.object else null;
+}
+
+/// An eos id, or a list of them, added once each.
+fn eos(c: *Config, e: std.json.Value) void {
+    const items: []const std.json.Value = switch (e) {
+        .integer => &.{e},
+        .array => |a| a.items,
+        else => &.{},
+    };
+    for (items) |x| if (x == .integer and !c.isEos(@intCast(x.integer)) and c.eos_count < c.eos.len) {
+        c.eos[c.eos_count] = @intCast(x.integer);
+        c.eos_count += 1;
+    };
+}
+
+/// nemotron_h_puzzle's block_configs: a block type per layer, each MoE layer its own experts and width (one top-k).
+fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
+    if (blocks.len > max_layers) {
+        why.set("config.json has {d} layers; the native Nemotron engine reads up to {d}", .{ blocks.len, max_layers });
+        return error.BadConfig;
+    }
+    c.bolt = true;
+    c.experts = 0;
+    c.expert_width = 0;
+    for (blocks, 0..) |b, i| {
+        if (b != .object) return error.BadConfig;
+        c.kinds[i] = try kindOf((b.object.get("block_type") orelse return error.BadConfig).string);
+        if (c.kinds[i] != .moe) continue;
+        const m: Moe = .{ .experts = try int(b.object, "n_routed_experts"), .width = try int(b.object, "moe_intermediate_size") };
+        const k = try int(b.object, "num_experts_per_tok");
+        if (c.top_k == 0) c.top_k = k;
+        if (k != c.top_k) {
+            why.set("layer {d} routes to a different number of experts than the others; the engine reads one top-k", .{i});
+            return error.BadConfig;
+        }
+        c.moe[i] = m;
+        c.experts = @max(c.experts, m.experts);
+        c.expert_width = @max(c.expert_width, m.width);
+    }
+    c.layers = blocks.len;
+}
+
 pub fn checkShapes(c: Config) !void {
     const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
         c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
@@ -505,4 +570,8 @@ pub const lightning =
 
 test {
     _ = @import("config_test.zig");
+}
+
+test {
+    _ = @import("config_bolt_test.zig");
 }

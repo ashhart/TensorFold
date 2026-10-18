@@ -1,5 +1,7 @@
 //! Borrowed resident EXL3 projections; fixed tiles keep each row independent of its surrounding window.
 const std = @import("std");
+pub const checkpoint = @import("exl3_load.zig");
+pub const load = @import("exl3_metal_load.zig");
 const mtl = @import("metal");
 const sources = @import("kernel_sources");
 pub const format = @import("exl3_format.zig");
@@ -136,6 +138,7 @@ pub const Pipelines = struct {
     rotate_in: mtl.Pipeline,
     matmul: mtl.Pipeline,
     rotate_out: mtl.Pipeline,
+    prefill: ?mtl.Pipeline = null,
 
     pub fn load(device: mtl.Device) !Pipelines {
         const pool = mtl.objc.Pool.push();
@@ -150,12 +153,20 @@ pub const Pipelines = struct {
         errdefer ro.deinit();
         for ([_]mtl.Pipeline{ ri, mm, ro }) |p|
             if (p.simdWidth() != 32 or p.maxThreads() < 32) return error.UnsupportedExl3Simd;
-        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro };
+        var prefill = mtl.Pipeline.init(device, lib, "tf_exl3_matmul_prefill", false) catch null;
+        if (prefill) |pf| {
+            if (pf.simdWidth() != 32 or pf.maxThreads() < 128) {
+                pf.deinit();
+                prefill = null;
+            }
+        }
+        return .{ .rotate_in = ri, .matmul = mm, .rotate_out = ro, .prefill = prefill };
     }
     pub fn deinit(p: *Pipelines) void {
         p.rotate_in.deinit();
         p.matmul.deinit();
         p.rotate_out.deinit();
+        if (p.prefill) |pf| pf.deinit();
     }
 };
 
@@ -316,14 +327,16 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su
     bind(e, descriptors, 6);
     e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
     e.barrier();
-    e.setPipeline(p.matmul);
+    const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
+    e.setPipeline(if (shared) p.prefill.? else p.matmul);
     bind(e, scratch, 0);
     bind(e, trellis, 1);
     bind(e, sums, 2);
     e.setValue(a, 3);
     bind(e, routes, 4);
     bind(e, descriptors, 5);
-    e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + 7) / 8 }, .{ .width = 32 });
+    const group_rows: usize = if (shared) 32 else 8;
+    e.dispatchGroups(.{ .width = a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
     e.barrier();
     e.setPipeline(p.rotate_out);
     bind(e, sums, 0);

@@ -51,7 +51,7 @@ pub const Runner = struct {
     current_attention: ?*const attn.Plan = null,
     current_placed: image_rows.Placed = .{},
     /// Each slot's rows' M-RoPE layout from its stream's images (empty: text, plain rope at the cache row).
-    rope: [8]mrope.Layout = @splat(.{}),
+    rope: [attn.planning.max_streams]mrope.Layout = @splat(.{}),
     /// A prompt pass's image rows, while it runs.
     images: ?image_rows.Images = null,
 
@@ -61,7 +61,7 @@ pub const Runner = struct {
 
     /// A runner of `slots` whose first `ready` take their K/V rows now, the rest when first used (ensure).
     pub fn initReady(a: std.mem.Allocator, m: *Model, slots: u32, capacity: u32, ready: u32) !Runner {
-        if (slots == 0 or slots > 8 or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
+        if (slots == 0 or slots > attn.planning.max_streams or capacity == 0 or m.frame.capacity % 16 != 0 or ready == 0 or ready > slots) return error.BadRoundCapacity;
         const linear_index = try a.alloc(u32, m.config.layers);
         errdefer a.free(linear_index);
         const attention_index = try a.alloc(u32, m.config.layers);
@@ -190,7 +190,7 @@ pub const Runner = struct {
         const paths = try r.allocator.alloc([]const u32, round.windows.len);
         defer r.allocator.free(paths);
         @memset(paths, &.{});
-        var accepted_rows: [128]u32 = undefined;
+        var accepted_rows: [@import("gpu_frame.zig").max_rows]u32 = undefined;
         if (accepted) for (round.windows, round.firsts, paths) |window, first, *path| {
             for (window.parents, 0..) |parent, row| {
                 if (parent != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
@@ -254,7 +254,7 @@ pub const Runner = struct {
                 gi += 1;
             },
             .attention => {
-                var views: [8]attn.Cache = undefined;
+                var views: [attn.planning.max_streams]attn.Cache = undefined;
                 const caches = r.layerCaches(ai, round, &views);
                 const kept = try r.bindings[ai].uploadKeep(attention_plan, caches, paths);
                 try r.attention.keep(e, &r.scratch, &r.bindings[ai], kept, caches);
@@ -275,7 +275,7 @@ pub const Runner = struct {
     /// A validated single-window round consumes authoritative GPU keep metadata without host path selection.
     pub fn keepDevice(r: *Runner, round: *const Round, e: mtl.ComputeEncoder, ops: @import("core").tree_commit_gpu.Ops, result: @import("core").tree_commit_gpu.Ref) !void {
         const active = r.active orelse return error.RoundNotReady;
-        if (r.failed or round.windows.len != 1 or round.ids.len > 16 or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
+        if (r.failed or round.windows.len != 1 or round.ids.len > @import("core").tree_round.max_rows or !std.mem.eql(u8, &active, &fingerprint(round))) return error.RoundNotReady;
         var recurrent = try round.recurrent(try r.params(round.ids.len), &.{&.{}});
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
@@ -296,7 +296,7 @@ pub const Runner = struct {
         for (r.model.weights.layers) |layer| switch (layer.mixer) {
             .linear => {},
             .attention => {
-                var views: [8]attn.Cache = undefined;
+                var views: [attn.planning.max_streams]attn.Cache = undefined;
                 const caches = r.layerCaches(ai, round, &views);
                 try r.bindings[ai].admitDeviceKeep(attention_plan, caches, p.rows);
                 const map = r.bindings[ai].get(.keep_map);
@@ -344,17 +344,21 @@ pub const Runner = struct {
 
     fn metadata(r: *Runner) @import("gdn_pool_gpu.zig").Metadata {
         const f = &r.model.frame;
-        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows) };
+        return .{ .parents = f.get(.parents), .windows = f.get(.windows), .row_slots = f.get(.row_slots), .segments = f.get(.segments), .keeps = f.get(.keeps), .kept_rows = f.get(.kept_rows), .slot_steps = f.get(.slot_steps) };
+    }
+
+    pub fn promptRows(r: *const Runner, requested: u32) u32 {
+        return (attn.planning.Geometry{ .shared_prefix = r.model.device.tensorUnits() }).promptRows(@min(requested, r.model.frame.capacity));
     }
 
     fn attentionPlan(r: *Runner, round: *const Round) !attn.Plan {
-        var windows: [8]attn.planning.Window = undefined;
+        var windows: [attn.planning.max_streams]attn.planning.Window = undefined;
         if (round.windows.len > windows.len) return error.AttentionStreams;
         for (round.windows, 0..) |window, i| windows[i] = .{ .parents = window.parents, .start = window.start, .capacity = r.capacity };
         return attn.Plan.init(r.allocator, windows[0..round.windows.len], .{ .shared_prefix = r.model.device.tensorUnits() });
     }
 
-    fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[8]attn.Cache) []const attn.Cache {
+    fn layerCaches(r: *Runner, layer: usize, round: *const Round, views: *[attn.planning.max_streams]attn.Cache) []const attn.Cache {
         for (round.slots, 0..) |slot, i| views[i] = r.caches[layer * r.slots + slot];
         return views[0..round.slots.len];
     }
@@ -369,7 +373,7 @@ pub const Runner = struct {
         const r: *Runner = @ptrCast(@alignCast(ptr));
         const plan = (r.current_attention orelse return error.RoundNotReady).*;
         const layer = r.attention_index[block];
-        var views: [8]attn.Cache = undefined;
+        var views: [attn.planning.max_streams]attn.Cache = undefined;
         const caches = r.layerCaches(layer, r.current_round orelse return error.RoundNotReady, &views);
         try r.bindings[layer].upload(plan, caches);
         try r.model.kernels.quant(e, weights.q, f.get(.input), forward.sums(f, .sums, rows), f.get(.dims), f.get(.q_gate), rows);

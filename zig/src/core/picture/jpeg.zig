@@ -1,6 +1,7 @@
 //! JPEG through one pinned libjpeg-turbo, loaded at the first JPEG and run at Pillow's settings: 0.6.6's pixels.
 
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const picture = @import("picture.zig");
@@ -16,7 +17,7 @@ const needs = "JPEG images need libjpeg-turbo " ++ pinned ++ " (libturbojpeg)";
 pub const missing = needs ++ ", which this server could not load; send PNG, or install it and name the file in " ++ env;
 pub const wrong_version = needs ++ "; the one this server found is another release, whose pixels can differ";
 
-const library = if (builtin.os.tag == .macos) "libturbojpeg.0.dylib" else "libturbojpeg.so.0";
+const library = if (builtin.os.tag == .macos) "libturbojpeg.0.dylib" else if (builtin.os.tag == .windows) "turbojpeg.dll" else "libturbojpeg.so.0";
 
 // TurboJPEG 3's enums: an init type, pixel formats, parameters and error codes
 const init_decompress = 1;
@@ -60,7 +61,7 @@ fn load(io: std.Io, a: Allocator) error{ NoJpegLibrary, JpegLibraryVersion }!Fns
 }
 
 fn find(io: std.Io, a: Allocator) Loaded {
-    if (std.c.getenv(env)) |named| return open(io, a, std.mem.span(named)) orelse .missing;
+    if (platform.c.getenv(env)) |named| return open(io, a, std.mem.span(named)) orelse .missing;
     var seen_wrong = false;
     if (std.process.executableDirPathAlloc(io, a)) |exe| {
         defer a.free(exe);
@@ -84,7 +85,7 @@ fn find(io: std.Io, a: Allocator) Loaded {
 
 /// One candidate: null when it does not load or lacks TurboJPEG 3; `.wrong` when its version string is not the pin.
 fn open(io: std.Io, a: Allocator, path: []const u8) ?Loaded {
-    var dl = std.DynLib.open(path) catch return null;
+    var dl = platform.DynLib.open(path) catch return null;
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
@@ -103,9 +104,12 @@ fn open(io: std.Io, a: Allocator, path: []const u8) ?Loaded {
 
 /// The version string libjpeg-turbo builds into every binary ("libjpeg-turbo version X (build Y)") equals the pin.
 fn versionIs(io: std.Io, a: Allocator, symbol: *const anyopaque) bool {
-    var info: DlInfo = undefined;
-    if (dladdr(symbol, &info) == 0) return false;
-    const file = std.mem.span(info.fname orelse return false);
+    var path: [1100]u8 = undefined;
+    const file = if (comptime builtin.os.tag == .windows) platform.libraryOf(symbol, &path) orelse return false else blk: {
+        var info: DlInfo = undefined;
+        if (dladdr(symbol, &info) == 0) return false;
+        break :blk std.mem.span(info.fname orelse return false);
+    };
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, file, a, .limited(64 << 20)) catch return false;
     defer a.free(bytes);
     return versionOf(bytes) != null and std.mem.eql(u8, versionOf(bytes).?, pinned);
