@@ -432,7 +432,7 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bflo
     attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
-// attn_chunks with one buffer and every chunk of a row merged in place (prompt rows): OUT (bf16, in PO's place), no partials.
+// attn_chunks on one buffer, a row's chunks merged in place (prompt rows): OUT bf16 in PO's place, no partials.
 extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
                                                                 const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
                                                                 float* __restrict__ OUT, const int* __restrict__ IDS, const int* __restrict__ NKR,

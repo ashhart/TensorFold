@@ -123,7 +123,7 @@ __global__ void __launch_bounds__(WM * WN * 32, MINB) hcf_kernel(
         commit();
         unsigned char* p = stage(it % STAGES);
         if constexpr (NORM) {
-            // x = bf16(bf16(h) * rinv[row, stream] * scale[k]) as fn_hc_down rounds it, and each row's 32-group sum in order
+            // x = bf16(h * rinv[row, stream] * scale[k]) as fn_hc_down rounds it, each row's 32-group sum in order
             float* pxs = reinterpret_cast<float*>(p + T::X + T::W + 2 * T::S);
             for (int c = tid; c < GPS * BM; c += T::THREADS) {
                 const int gi = c / BM, r = c % BM, k0 = (it * GPS + gi) * GS;
