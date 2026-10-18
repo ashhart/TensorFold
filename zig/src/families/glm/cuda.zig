@@ -75,3 +75,4 @@ pub const dflash_load_owner = @import("dflash_load_owner.zig");
 pub const prompts = @import("cuda_prompts.zig");
 pub const prompt_hold = @import("cuda_prompt_hold.zig");
 pub const prompt_wire = @import("cuda_prompt_wire.zig");
+pub const structured = @import("cuda_structured.zig");

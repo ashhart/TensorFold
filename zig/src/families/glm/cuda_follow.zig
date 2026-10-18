@@ -10,15 +10,15 @@ const prompt_wire = @import("cuda_prompt_wire.zig");
 const dflash = @import("dflash.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many, redraw };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
     kind: u32,
     n: u32 = 0, // ids that follow
     depth: u32 = 0, // draft: drafts to chain; chunk: where it starts; shared: its parts
-    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs (the head on each row)
-    a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none)
+    flags: u32 = 0, // begin: sampled; draft: from the prompt; prefill, chunk: prompt_logprobs; verify, shared: whole rows
+    a: u64 = 0, // keep: rows; prefill, chunk: the kept state it resumes (0: none); redraw: the prompt's length
     seed: u64 = 0, // begin: the sampling seed; prefill, chunk: the kept state's position
     temperature: f64 = 0,
     top_p: f64 = 0,
@@ -198,10 +198,11 @@ pub const Leader = struct {
         return x.e.prefillChunk(part, start, ids.len, from, cancel, marks);
     }
 
-    pub fn verify(x: Leader, ids: []const u32, out: []u32) !void {
+    /// `bits`: the rows' grammar words (structured output, with Engine.structured), else 0.
+    pub fn verify(x: Leader, ids: []const u32, out: []u32, bits: u64) !void {
         try x.flush();
-        try x.send(.{ .kind = @backingInt(Kind.verify) }, ids);
-        try x.e.verify(ids, out);
+        try x.send(.{ .kind = @backingInt(Kind.verify), .flags = @intFromBool(x.e.structured) }, ids);
+        try x.e.verify(ids, out, bits);
     }
 
     /// Several streams' windows in one forward on every rank (Engine.verifyShared): parts' slots and rows, then ids.
@@ -217,7 +218,7 @@ pub const Leader = struct {
             @memcpy(buf[n..][0..p.ids.len], p.ids);
             n += p.ids.len;
         }
-        try x.send(.{ .kind = @backingInt(Kind.shared), .depth = @intCast(parts.len) }, buf[0..n]);
+        try x.send(.{ .kind = @backingInt(Kind.shared), .flags = @intFromBool(x.e.structured), .depth = @intCast(parts.len) }, buf[0..n]);
         try x.e.verifyShared(parts);
     }
 
@@ -233,6 +234,13 @@ pub const Leader = struct {
         try x.flush();
         try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
         try x.e.keep(n);
+    }
+
+    /// Structured output's first token: every rank gathers the prompt's last row again, rank 0 draws it among `bits`.
+    pub fn redraw(x: Leader, len: usize, bits: u64) !u32 {
+        try x.flush();
+        try x.send(.{ .kind = @backingInt(Kind.redraw), .a = len }, &.{});
+        return x.e.redrawFirst(len, bits);
     }
 
     pub fn draft(x: Leader, from_prompt: bool, follow_ids: []const u32, depth: usize, out: []u32) !void {
@@ -263,6 +271,12 @@ fn promptRows(h: Header) bool {
     return (kind == .prefill or kind == .chunk) and h.flags & 1 != 0;
 }
 
+/// A verify step under a grammar (Engine.structured): this rank's columns join the gather of each draw's whole rows.
+fn structuredStep(h: Header) bool {
+    const kind: Kind = @fromBackingInt(@intCast(h.kind));
+    return (kind == .verify or kind == .shared) and h.flags & 1 != 0;
+}
+
 /// A rank other than 0 runs rank 0's steps until it ends; a cancelled prefill is error.Cancelled and the loop goes on.
 pub fn follow(e: *Engine, link: *Link) !void {
     var drafts: [engine.max_drafts]u32 = undefined;
@@ -273,6 +287,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
         if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many) try e.bind(h.slot);
         e.prompt_logprobs = if (promptRows(h)) .{} else null;
+        e.structured = structuredStep(h); // rank 0 alone masks them
         switch (kind) {
             .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
@@ -293,7 +308,8 @@ pub fn follow(e: *Engine, link: *Link) !void {
                     else => return err,
                 };
             },
-            .verify => try e.verify(step.ids, sampled[0..step.ids.len]),
+            .verify => try e.verify(step.ids, sampled[0..step.ids.len], 0),
+            .redraw => _ = try e.redrawFirst(@intCast(h.a), 0),
             .shared => {
                 const k = h.depth;
                 if (k == 0 or k > engine.max_shared or step.ids.len < 2 * k) return error.BadStep;
@@ -413,4 +429,12 @@ test "flag 1 asks for prompt rows on prefill and chunk steps only (begin's is sa
     try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.chunk), .depth = 2048, .top_k = 4000 }));
     try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.begin), .flags = 1, .seed = 7 }));
     try std.testing.expect(!promptRows(.{ .kind = @backingInt(Kind.draft), .flags = 1, .depth = 3 }));
+}
+
+test "flag 1 on verify and shared steps draws from whole rows; a prompt step's flag 1 does not" {
+    try std.testing.expect(structuredStep(.{ .kind = @backingInt(Kind.verify), .flags = 1, .n = 4 }));
+    try std.testing.expect(structuredStep(.{ .kind = @backingInt(Kind.shared), .flags = 1, .depth = 2 }));
+    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.verify), .n = 4 }));
+    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.chunk), .flags = 1, .depth = 2048 }));
+    try std.testing.expect(!structuredStep(.{ .kind = @backingInt(Kind.begin), .flags = 1 }));
 }

@@ -294,6 +294,8 @@ CUDA determines support from its loaded backend's mask hook. GLM Metal
 The server does not silently turn a required call into `auto`. Installing the grammar library does not add a missing
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
 
+The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
+
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
 a grammar sent with `tool_choice: "required"` or a named function, and `logprobs` with a grammar or tools. A reply whose

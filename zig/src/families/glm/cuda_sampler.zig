@@ -30,6 +30,7 @@ pub const Sampler = struct {
     module: cuda.Module,
     tf_draw: cuda.Function,
     tf_logprob_rows: cuda.Function,
+    tf_grammar_mask: cuda.Function,
     vocab: usize,
     rows: usize,
     full: cuda.DeviceBuffer, // bf16 [rows][vocab]: every rank's columns in place
@@ -43,6 +44,7 @@ pub const Sampler = struct {
         errdefer m.unload();
         const f = try m.function("tf_draw");
         const lp = try m.function("tf_logprob_rows");
+        const gm = try m.function("tf_grammar_mask");
         var full = try cuda.DeviceBuffer.alloc(d, rows * vocab * 2);
         errdefer full.free();
         var r = try cuda.DeviceBuffer.alloc(d, @sizeOf(Rule));
@@ -52,7 +54,7 @@ pub const Sampler = struct {
         var tok = try cuda.DeviceBuffer.alloc(d, rows * 4);
         errdefer tok.free();
         const prob = try cuda.DeviceBuffer.alloc(d, rows * 4);
-        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
+        return .{ .d = d, .module = m, .tf_draw = f, .tf_logprob_rows = lp, .tf_grammar_mask = gm, .vocab = vocab, .rows = rows, .full = full, .rule = r, .meta = meta, .tok = tok, .prob = prob };
     }
 
     pub fn deinit(s: *Sampler) void {
@@ -66,9 +68,14 @@ pub const Sampler = struct {
 
     /// `rows` rows of `mine` -> `out`, tokens at positions first, first + 1, ...; `spans`: every rank's, rank order.
     pub fn draw(s: *Sampler, stream: cuda.Stream, exchange: Exchange, spans: []const Span, mine: []const Local, rows: usize, first: u64, r: Rule, out: []u32) !void {
+        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
+        try s.drawFull(stream, rows, first, r, out);
+    }
+
+    /// `rows` whole rows already in `full` -> `out` under `r`, tokens at positions first, first + 1, ...
+    pub fn drawFull(s: *Sampler, stream: cuda.Stream, rows: usize, first: u64, r: Rule, out: []u32) !void {
         std.debug.assert(rows <= s.rows and out.len >= rows and first >= 1);
         const V = s.vocab;
-        try s.gather(stream, exchange, spans, mine, rows, s.full.ptr);
         try s.rule.uploadAsync(0, std.mem.asBytes(&r), stream.handle);
         const meta = [4]i32{ @intCast(first - 1), 0, 0, 0 }; // row r keys meta[0] + r + 1
         try s.meta.uploadAsync(0, std.mem.asBytes(&meta), stream.handle);
@@ -96,6 +103,16 @@ pub const Sampler = struct {
             .local => {},
             .nccl => |x| try x.lib.group(Spread{ .lib = x.lib, .comm = x.comm, .stream = stream, .full = full, .vocab = V, .spans = spans, .rows = rows }, Spread.post),
         }
+    }
+
+    /// Structured output: each of `rows` whole rows in `full` keeps its allowed tokens (`words` u32 a row at `bits`).
+    pub fn mask(s: *const Sampler, stream: cuda.Stream, rows: usize, bits: u64, words: usize) !void {
+        var args: cuda.Args = .{};
+        args.add(s.full.ptr);
+        args.add(@as(u32, @intCast(s.vocab)));
+        args.add(bits);
+        args.add(@as(u32, @intCast(words)));
+        try cuda.launch.launch(s.tf_grammar_mask, .{ .grid = .{ .x = @intCast(rows) }, .block = .{ .x = 256 } }, stream, &args);
     }
 
     /// sample.cu's logprob words of `rows` whole rows at `full`: each row's pick in `picks`, its `k` best, its rank.

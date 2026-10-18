@@ -45,8 +45,7 @@ pub fn pass(e: anytype, parts: []const engine.Prompt, firsts: []u32, comptime Fo
     const D = e.c.hidden;
     for (parts, segs[0..parts.len], 0..) |p, g, k| {
         try e.bind(p.slot);
-        try e.draw(e.bp.logits + k * e.share.vocab.len() * 2, 1, p.ids.len, firsts[k..][0..1]);
-        if (!e.mtp) continue;
+        try e.draw(e.bp.logits + k * e.share.vocab.len() * 2, 1, p.ids.len, 0, firsts[k..][0..1]);
         try e.holdPrompt(e.bp.fnormed + (g.row0 + g.rows - 1) * D * 2);
     }
     f.pieces = null;

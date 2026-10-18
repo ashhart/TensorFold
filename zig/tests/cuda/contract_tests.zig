@@ -44,11 +44,13 @@ const h3_image = struct {
     pub const bytes align(16) = @embedFile("fatbin_h3").*;
 };
 
-/// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
-fn image(name: []const u8) []const u8 {
+/// The named embedded image; only contract_controls may select the planted controls.
+pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
-    return if (options.controls) &controls.bytes else &.{};
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
+    std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
+    return error.UnknownContractImage;
 }
 
 /// Gates 1-4 on every registered CUDA kernel and each control at its own gate, then gate 5 on this GPU.
@@ -304,7 +306,7 @@ pub fn live(gpu: check.Gpu) !usize {
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
         if (!control and registry.targetDecision(r, t, r.usage[at]) != .applicable) continue;
-        const bytes = image(r.launch.image);
+        const bytes = try image(r.launch.image);
         const rel = try built(gpu.gpa, bytes, sm);
         const set = registry.setFor(rel);
         if (said == null or !std.meta.eql(said.?, set)) records("live", rel, set);

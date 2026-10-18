@@ -89,7 +89,7 @@ const engine = struct {
         pub fn exchange(_: *Engine) u8 {
             return 0;
         }
-        pub fn draw(_: *Engine, logits: u64, _: usize, _: usize, out: []u32) !void {
+        pub fn draw(_: *Engine, logits: u64, _: usize, _: usize, _: u64, out: []u32) !void {
             const p: *const u16 = @ptrFromInt(logits);
             out[0] = p.*;
         }
@@ -251,4 +251,16 @@ test "GLM prompt workflow: both ranks share exact packets and reject malformed b
     buf[1] = 0;
     try t.expectError(error.BadStep, wire.decode(ids, 2, 4096, &decoded));
     try t.expectError(error.BadPrompts, wire.encode(&.{.{ .slot = 1, .ids = &.{} }}, 4096, &buf));
+}
+
+test "GLM structured: prompt rows survive without an MTP head" {
+    var b: Box = .{};
+    var e = b.make();
+    e.mtp = false;
+    try pass(&e, &.{ .{ .slot = 4, .ids = &.{ 31, 32 } }, .{ .slot = 9, .ids = &.{ 61, 62, 63 } } });
+    try t.expectEqual(@as(u16, 32), held(&e, 4));
+    try t.expectEqual(@as(u16, 63), held(&e, 9));
+    try pass(&e, &.{.{ .slot = 13, .ids = &.{ 81, 82 } }});
+    try t.expectEqual(@as(u16, 32), held(&e, 4));
+    try t.expectEqual(@as(u16, 63), held(&e, 9));
 }

@@ -1,5 +1,4 @@
 //! One TP rank's GLM-5.3-Flash CUDA engine (the Python family's decode.Engine); all ranks draw the same tokens.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -18,7 +17,6 @@ const tile = @import("cuda_tile.zig");
 const mm_mod = @import("cuda_mm.zig");
 const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
-
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -88,6 +86,7 @@ pub const Engine = struct {
     prompt_bufs: ?prompt_lp.Buffers = null, // their head passes' buffers, made at the first pass that asks
     prompt_tried: bool = false, // that pass came: without buffers after it, the passes take the window's
     prompt_out: prompt_lp.Output, // a head pass's logprob words, then its picks, host-mapped (rank 0 reads them)
+    structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -334,12 +333,12 @@ pub const Engine = struct {
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
-            try e.draw(e.bp.logits, 1, len, &t);
+            try e.draw(e.bp.logits, 1, len, 0, &t);
             first = t[0];
         }
         if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         if (e.mtp) {
-            if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
             const nxt = as_i32[1..];
             if (nxt.len > 0) { // decode._absorb_rows
                 const mp = f.prof;
@@ -463,7 +462,7 @@ pub const Engine = struct {
     };
 
     /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
-    pub fn verify(e: *Engine, ids: []const u32, out: []u32) !void {
+    pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bd, &one);
@@ -473,7 +472,7 @@ pub const Engine = struct {
         try f.run(@ptrCast(ids));
         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
         e.cur.rows_at = e.bd.fnormed;
-        try e.draw(e.bd.logits, ids.len, at + 1, out);
+        try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
         if (f.prof) |p| p.end();
     }
 
@@ -504,7 +503,7 @@ pub const Engine = struct {
         for (parts, segs[0..parts.len]) |p, g| {
             try e.bind(p.slot);
             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
-            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.out);
+            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
         }
     }
 
@@ -543,7 +542,7 @@ pub const Engine = struct {
             try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {
-            try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, out[j..][0..1]);
+            try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
             if (j + 1 < depth) {
                 try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + 1);
@@ -553,7 +552,8 @@ pub const Engine = struct {
     }
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
-    pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, out: []u32) !void {
+    pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+        if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
         if (e.cur.sampling) |s| {
             try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
             return e.checkGathers(); // the draw read rows the forward's gathers made
@@ -561,6 +561,9 @@ pub const Engine = struct {
         for (0..rows) |r| out[r] = try e.greedy(logits + r * e.share.vocab.len() * 2);
     }
 
+    pub const promptHead = @import("cuda_structured.zig").promptHead;
+    pub const drawWhole = @import("cuda_structured.zig").drawWhole;
+    pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
     fn greedy(e: *Engine, logits: u64) !u32 {
         const world = e.share.world;
@@ -586,7 +589,7 @@ pub const Engine = struct {
     }
 
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
-    fn checkGathers(e: *const Engine) !void {
+    pub fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
     }
 

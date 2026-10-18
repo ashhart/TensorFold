@@ -4,7 +4,7 @@ const fw = @import("cuda_forward.zig");
 const sampler = @import("cuda_sampler.zig");
 
 /// One stream's window of a shared verify: its slot, its ids, and its drawn tokens.
-pub const Part = struct { slot: u32, ids: []const u32, out: []u32 };
+pub const Part = struct { slot: u32, ids: []const u32, out: []u32, bits: u64 = 0 };
 
 /// A kept prompt state as the prompt cache holds it: the id every rank keeps its own copy under, and its position.
 pub const Kept = struct { id: u64, at: u32 };

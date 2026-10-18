@@ -7,6 +7,7 @@ const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
 const prompt_lp = @import("cuda_prompt_logprobs.zig");
+const cuda = @import("cuda");
 
 const be = lanes.backend;
 
@@ -47,9 +48,27 @@ pub const Lanes = struct {
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
+    bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
+    bits_dev: u64 = 0,
 
     pub fn deinit(self: *Lanes) void {
+        if (self.bits) |*b| b.free();
         self.lanes.deinit(self.x.e.gpa);
+    }
+
+    /// A window's grammar rows (rows of the vocabulary's words) at row `row` of the bits, device-read; 0 for none.
+    pub fn putBits(self: *Lanes, row: usize, rows: usize, masks: []const u32) !u64 {
+        if (masks.len == 0) return 0;
+        const words = (self.x.e.c.vocab + 31) / 32;
+        if (masks.len != rows * words or row + rows > engine.shared_rows) return error.InvalidGrammarMasks;
+        if (self.bits == null) {
+            var buf = try cuda.HostBuffer.allocMapped(self.x.e.d, engine.shared_rows * words * 4);
+            errdefer buf.free();
+            self.bits_dev = try buf.device();
+            self.bits = buf;
+        }
+        @memcpy(self.bits.?.slice(u32)[row * words ..][0..masks.len], masks);
+        return self.bits_dev + row * words * 4;
     }
 
     pub fn backend(self: *Lanes) be.Backend {
@@ -67,6 +86,8 @@ pub const Lanes = struct {
         .draft = draftFn,
         .probabilities = chancesFn,
         .release = releaseFn,
+        .first_masked = firstMaskedFn,
+        .held = heldFn,
         .prompt_rows = true,
     };
     const steps_vt: be.Backend.VTable = vt: {
@@ -278,6 +299,24 @@ pub const Lanes = struct {
         return l.first orelse error.NoFirstToken;
     }
 
+    /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
+    fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const self = of(ptr);
+        if (position != s.prompt_len) return error.PositionMismatch;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        const bits = try self.putBits(0, 1, mask);
+        if (bits == 0) return error.InvalidGrammarMasks;
+        try self.x.bind(l.slot);
+        return self.take(try self.x.redraw(@intCast(position), bits));
+    }
+
+    /// The head's drafts for the stream's next window as the host holds them (draftFn), for a grammar to walk.
+    fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+        const l = of(ptr).lanes.getPtr(s) orelse return error.UnknownStream;
+        if (out.len > l.held_n) return error.NoHeldDrafts;
+        @memcpy(out, l.held[0..out.len]);
+    }
+
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
         _ = ptr;
         _ = s;
@@ -309,7 +348,10 @@ pub const Lanes = struct {
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
             @memcpy(ids[1..][0..drafts.len], drafts);
             var sampled: [max_rows]u32 = undefined;
-            try self.x.verify(ids[0..rows], sampled[0..rows]);
+            const bits = try self.putBits(0, rows, w.masks); // before the step goes out: a refusal after it strands the ranks
+            self.x.e.structured = bits != 0;
+            defer self.x.e.structured = false;
+            try self.x.verify(ids[0..rows], sampled[0..rows], bits);
             @memcpy(o.sampled[0..rows], sampled[0..rows]);
             @memcpy(o.drafts[0..drafts.len], drafts);
             l.pending_rows = rows;
@@ -323,6 +365,8 @@ pub const Lanes = struct {
         var ids: [engine.max_shared][max_rows]u32 = undefined;
         var sampled: [engine.max_shared][max_rows]u32 = undefined;
         var lane: [engine.max_shared]*Lane = undefined;
+        var row: usize = 0; // the windows' rows so far: each one's grammar rows start there in the bits
+        var structured = false;
         for (windows, 0..) |w, k| {
             if (w.parents != null) return error.TreesNotBuilt;
             const l = try self.bind(w.stream, null);
@@ -334,9 +378,14 @@ pub const Lanes = struct {
             ids[k][0] = w.pending;
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
             @memcpy(ids[k][1..][0..drafts.len], drafts);
-            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows] };
+            const bits = try self.putBits(row, rows, w.masks);
+            structured = structured or bits != 0;
+            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows], .bits = bits };
             lane[k] = l;
+            row += rows;
         }
+        self.x.e.structured = structured; // one window under a grammar: the whole step draws from whole rows
+        defer self.x.e.structured = false;
         try self.x.verifyShared(parts[0..windows.len]);
         self.shared += 1;
         for (out[0..windows.len], parts[0..windows.len], lane[0..windows.len]) |*o, p, l| {

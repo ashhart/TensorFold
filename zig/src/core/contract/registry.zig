@@ -618,7 +618,8 @@ pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @im
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records;
+pub const glm_pending = @import("glm_sampling_pending.zig");
+pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records ++ glm_pending.sampling;
 test {
     _ = learning;
 }
