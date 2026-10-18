@@ -421,6 +421,8 @@ test "the draft counts beside the receipt show whether a passed drafter drafted,
         .{ .speculative = "", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{ "\"reported\":0", "\"rounds\":null" }, .unproven = false },
         // accepted past drafted is no count at all
         .{ .speculative = "\"rounds\": 1, \"drafted\": 1, \"accepted\": 2", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{"\"reported\":0"}, .unproven = false },
+        // two attempts' valid counts near 2^64 sum past it: no totals, each attempt's counts kept, and the run goes on
+        .{ .speculative = "\"rounds\": 9223372036854775808, \"drafted\": 18446744073709551615, \"accepted\": 18446744073709551000", .drafter = "auto", .line = "Draft counts: no totals, as a sum passes 64 bits (2 of 2 attempts reported counts); saved: ", .fields = &.{ "\"totals\":{\"accepted\":null,\"attempts\":2,\"drafted\":null,\"reported\":2,\"rounds\":null}", "\"accepted\":18446744073709551000,\"completion_tokens\":4,\"drafted\":18446744073709551615" }, .unproven = false },
     };
     for (cases) |c| {
         const m = try cli.draftedWorld(a, c.speculative);
@@ -439,6 +441,9 @@ test "the draft counts beside the receipt show whether a passed drafter drafted,
         // the receipt itself holds exactly the board's fields, so it loads under the same rules as before
         var problem: []const u8 = "";
         const v = (try receipt.load(a, io, out, std.Io.Clock.real.now(io).toMilliseconds(), &problem)).?;
-        for (v.get("samples").?.array) |s| try std.testing.expect(s.get("drafted") == null and s.get("rounds") == null);
+        for (v.get("samples").?.array) |s| {
+            try std.testing.expect(s.get("drafted") == null and s.get("rounds") == null);
+            try std.testing.expect(std.mem.eql(u8, s.get("status").?.string, "ok") and std.mem.eql(u8, s.get("completion_tokens").?.int, "4"));
+        }
     }
 }
