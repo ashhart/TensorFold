@@ -1,6 +1,4 @@
-//! route_bolt: the nemotron_h_puzzle router top-k at a runtime expert count. The key check is the pad-to-32 fix —
-//! at NE=240 (NE % 32 == 16, as every Bolt layer is) the last slice [224,240) must still be reachable, which the
-//! baked NE/32 striping dropped. Ids and weights are checked against a CPU reference (sigmoid + bias, normalised).
+//! Bolt kernels on the GPU: route_bolt's pad-to-32 fix at NE=240, dense_bf16, add_norm_moe_xs_bolt, combine_latent.
 const std = @import("std");
 const mtl = @import("metal");
 const common = @import("common.zig");
@@ -107,8 +105,7 @@ fn bf16rne(v: f32) u16 {
     return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
 }
 
-/// combine_latent: each row's K picks summed by weight in the latent, a sequential fp32 fma then one bf16 rounding.
-/// The host reference runs the same fma order and rounding, so the check is bit-for-bit.
+/// combine_latent bit for bit against a host reference in the same fma order and bf16 rounding.
 pub fn combineLatent(gpu: Gpu) !void {
     const rows: usize = 3;
     const K: usize = 9; // Bolt's top-k
@@ -151,8 +148,7 @@ pub fn combineLatent(gpu: Gpu) !void {
     };
 }
 
-/// dense_bf16: y = x . w^T over bf16 (no accumulate), the gate and latent projections. Checked against a CPU
-/// reference that reads back the same bf16 inputs and accumulates in fp32, to a bf16 output tolerance.
+/// dense_bf16 (y = x . w^T, written) against an fp32 host reference over the same bf16 inputs.
 pub fn denseBf16(gpu: Gpu) !void {
     const M: usize = 5; // rows (or picks)
     const N: usize = 20; // output width
@@ -197,9 +193,7 @@ pub fn denseBf16(gpu: Gpu) !void {
     };
 }
 
-/// add_norm_moe_xs_bolt is the Lightning add_norm kernel at <D=4096, T=512, E=1> (896 does not divide 4096; 512
-/// does). The code is golden-verified; the only new risk is the T=512 threadgroup reduction and the rmsnorm. With
-/// no routed picks (WE=0) and no shared (SH=0) the block reduces to OUT = rmsnorm(H) * W, which this checks.
+/// add_norm_moe_xs_bolt <4096, 512, 1> with no picks and no shared expert: OUT = rmsnorm(H) * W, HN = H, XS its sums.
 pub fn addNormBolt(gpu: Gpu) !void {
     const D: usize = 4096; // Bolt hidden, baked into the instantiation
     const E: usize = 1; // Bolt's MoE output is combined and projected before add_norm: one pick

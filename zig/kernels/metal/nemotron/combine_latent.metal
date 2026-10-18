@@ -1,6 +1,4 @@
-// nemotron_h_puzzle (Bolt): each row's routed picks combined by weight in the latent, as mlx_lm's
-// (y * scores[..., None]).sum(axis=-2).astype(bf16) before fc2_latent_proj, with add_norm_moe_xs's routed sum
-// (a sequential fma over the picks into fp32, one bf16 rounding). Hand-authored for this PR.
+// nemotron_h_puzzle (Bolt): the picks summed by weight in the latent as mlx_lm, a sequential fp32 fma (hand-authored)
 #include <metal_stdlib>
 using namespace metal;
 

@@ -138,26 +138,9 @@ pub fn mamba(f: Forward, e: *Enc, m: wts.Mamba, index: usize, t: *const Tables, 
 }
 
 fn groupNorm(f: Forward, rows: usize) mtl.Pipeline {
-    if (f.c.bolt) return switch (Forward.mp(rows)) {
-        16 => f.k.get("group_norm_xs_bolt_16"),
-        32 => f.k.get("group_norm_xs_bolt_32"),
-        48 => f.k.get("group_norm_xs_bolt_48"),
-        64 => f.k.get("group_norm_xs_bolt_64"),
-        80 => f.k.get("group_norm_xs_bolt_80"),
-        96 => f.k.get("group_norm_xs_bolt_96"),
-        112 => f.k.get("group_norm_xs_bolt_112"),
-        else => f.k.get("group_norm_xs_bolt_128"),
-    };
-    return switch (Forward.mp(rows)) {
-        16 => f.k.get("group_norm_xs_16"),
-        32 => f.k.get("group_norm_xs_32"),
-        48 => f.k.get("group_norm_xs_48"),
-        64 => f.k.get("group_norm_xs_64"),
-        80 => f.k.get("group_norm_xs_80"),
-        96 => f.k.get("group_norm_xs_96"),
-        112 => f.k.get("group_norm_xs_112"),
-        else => f.k.get("group_norm_xs_128"),
-    };
+    const mp = Forward.mp(rows);
+    inline for (.{ 16, 32, 48, 64, 80, 96, 112 }) |n| if (mp == n) return if (f.c.bolt) f.k.get(std.fmt.comptimePrint("group_norm_xs_bolt_{d}", .{n})) else f.k.get(std.fmt.comptimePrint("group_norm_xs_{d}", .{n}));
+    return if (f.c.bolt) f.k.get("group_norm_xs_bolt_128") else f.k.get("group_norm_xs_128");
 }
 
 pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32) void {
@@ -237,91 +220,6 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
     e.buf(s.x, 0, 8);
     e.buf(s.xs, 0, 9);
     e.run(.{ 896 * Forward.mp(rows), 1, 1 }, .{ 896, 1, 1 });
-}
-
-/// nemotron_h_puzzle (Bolt): the routed experts run in the moe_latent_size latent, mirroring cuda_latent.zig run().
-/// The normed input projects into the latent (into), the routed experts run up/down in the latent on the runtime-dim
-/// row kernels (reading each layer's own expert count and width), the picks combine by weight in the latent, the sum
-/// projects back to hidden once (out), then add_norm adds the shared expert (kept in hidden) and the residual — the
-/// order and roundings of mlx_lm's NemotronHMoE. The shared expert is the Lightning path unchanged. Reuses dense_bf16
-/// (gate/into/out), route_bolt (sigmoid + bias top-k, runtime NE/K), combine_latent and add_norm_moe_xs_bolt
-/// (<4096, 512, 1>).
-/// TODO(kernels): the shared expert's up_relu2 and the model's mamba kernels still need Bolt-dim variants to RUN;
-/// this wires the dataflow and the new MoE kernels. Verified by a kernel-contract test at synthetic shapes.
-pub fn bolt_moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32) void {
-    const c = f.c;
-    const s = f.s;
-    const pairs = rows * c.top_k;
-    const E: u32 = @intCast(m.gate.shape[0]); // this layer's own routed-expert count (per-layer in the Puzzle)
-    const K: u32 = @intCast(c.top_k);
-    const hidden: u32 = @intCast(c.hidden);
-    const latent: u32 = @intCast(c.latent);
-
-    // router logits = x . gate^T (gate bf16 [E, hidden], full precision)
-    e.pipe(f.k.get("dense_bf16"));
-    e.buf(s.x, 0, 0);
-    e.buf(m.gate.buffer, m.gate.offset, 1);
-    e.buf(s.logits_e, 0, 2);
-    e.bytes([3]u32{ @intCast(rows), E, hidden }, 3);
-    e.run(.{ 32 * E, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
-
-    // sigmoid + e_score_correction_bias top-k (uniform K), weights normalised and scaled
-    e.pipe(f.k.get("route_bolt"));
-    e.buf(s.logits_e, 0, 0);
-    e.buf(m.gate_bias.buffer, m.gate_bias.offset, 1);
-    e.bytes(c.routed_scaling, 2);
-    e.buf(s.idx, 0, 3);
-    e.buf(s.wt, 0, 4);
-    e.bytes(E, 5);
-    e.bytes(K, 6);
-    e.run(.{ 32 * rows, 1, 1 }, .{ 32, 1, 1 });
-
-    // the shared expert runs in hidden, as in the Lightning path
-    upRelu2(f, e, m.shared_up, rows);
-    f.coop(e, "down", m.shared_down, s.sh_act, 0, s.sh_xs, s.sh, rows);
-
-    // into: hidden -> latent, then the routed experts up/down in the latent (runtime-dim row kernels)
-    e.pipe(f.k.get("dense_bf16"));
-    e.buf(s.x, 0, 0);
-    e.buf(m.into.?.w, m.into.?.off, 1);
-    e.buf(s.x_lat, 0, 2);
-    e.bytes([3]u32{ @intCast(rows), latent, hidden }, 3);
-    e.run(.{ 32 * latent, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
-
-    f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat, s.idx, s.act);
-    f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat);
-
-    // the picks combined by weight in the latent (mlx_lm's (y * scores).sum(-2) in fp32, one bf16 rounding),
-    // into x_lat: free now the up projection has read it
-    e.pipe(f.k.get("combine_latent"));
-    e.buf(s.ey_lat, 0, 0);
-    e.buf(s.wt, 0, 1);
-    e.buf(s.x_lat, 0, 2);
-    e.bytes([3]u32{ @intCast(rows), K, latent }, 3);
-    e.run(.{ latent, rows, 1 }, .{ 256, 1, 1 });
-
-    // out: the combined latent back to hidden, once a row (delta is free in an MoE layer)
-    e.pipe(f.k.get("dense_bf16"));
-    e.buf(s.x_lat, 0, 0);
-    e.buf(m.out.?.w, m.out.?.off, 1);
-    e.buf(s.delta, 0, 2);
-    e.bytes([3]u32{ @intCast(rows), hidden, latent }, 3);
-    e.run(.{ 32 * hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
-
-    // + shared, + residual, then the next input norm and its sums: add_norm at one pick of weight 1, which gives
-    // mlx_lm's bf16(y + shared) and then bf16(h + y)
-    e.pipe(f.k.get("add_norm_moe_xs_bolt"));
-    e.buf(s.h, 0, 0);
-    e.buf(s.delta, 0, 1);
-    e.buf(s.ones, 0, 2);
-    e.buf(s.sh, 0, 3);
-    e.buf(next.buffer, next.offset, 4);
-    e.bytes(eps, 5);
-    e.bytes(Forward.mdims(rows), 6);
-    e.buf(s.h, 0, 7);
-    e.buf(s.x, 0, 8);
-    e.buf(s.xs, 0, 9);
-    e.run(.{ 512 * Forward.mp(rows), 1, 1 }, .{ 512, 1, 1 });
 }
 
 /// y [rows, D] += x [rows, width] times a projection's bf16 residual [D, width], its weight beyond its 4-bit codes.
@@ -500,7 +398,7 @@ fn expertGeo(f: Forward, j: usize, g: usize) mtl.Pipeline {
 }
 
 /// The shared expert's up projection + relu2 + the down projection's input sums (lane_fused.up_relu2).
-fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
+pub fn upRelu2(f: Forward, e: *Enc, lin: wts.Linear, rows: usize) void {
     const s = f.s;
     if (f.rowCall(e, lin, s.x, 0, s.sh_act, 0, rows, true)) return;
     const sk = fwd.splitK(lin.n, lin.k);

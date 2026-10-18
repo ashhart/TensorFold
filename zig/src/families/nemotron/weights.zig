@@ -263,9 +263,7 @@ pub const Builder = struct {
         return out;
     }
 
-    /// An MoE block at `ws` (fc1, fc2, shared up, shared down; members(.moe) order). `experts` and `ewidth` are the
-    /// layer's own (per-layer in nemotron_h_puzzle); `latent` > 0 routes the experts through it, hidden otherwise,
-    /// with the two bf16 latent projections (fc1/fc2_latent_proj) around them.
+    /// An MoE block at `ws`, this layer's experts and width; latent > 0 runs them there, between its latent projections
     fn moe(self: *Builder, comptime prefix: []const u8, args: anytype, ws: [4]Width, n_experts: usize, ewidth: usize, latent: usize) !Moe {
         const c = self.c;
         const inner = if (latent > 0) latent else c.hidden; // the width the routed experts read and write
@@ -284,9 +282,7 @@ pub const Builder = struct {
         }
         const own_up = Matrix{ .t = firstRows(up.t, c.shared_width), .w = up.w };
         const own_down = Matrix{ .t = if (c.pocket > 0) try self.firstColumns(down.t, c.shared_width) else down.t, .w = down.w };
-        // the lane up writes the input sums the lane down reads: both on lane tiles, or both in rows.
-        // nemotron_h_puzzle (latent > 0) runs the experts through the runtime-dim row kernels so they read the
-        // latent width at K; the baked 4/64 lane kernels serve only the Lightning inner width.
+        // both on lane tiles, else both in rows; the Puzzle (latent > 0) takes the runtime-dim row kernels, K = latent
         const routed = fc1.w.four() and fc2.w.four() and latent == 0;
         return .{
             .gate = gate,
