@@ -11,8 +11,13 @@ pub const Transport = struct {
     channel: fabric.Channel,
     packet: []u8,
     valid: bool = true,
+    control_base: usize = 0,
 
     pub fn init(gpa: std.mem.Allocator, json: []const u8, max_rows: u32) !Transport {
+        return initWithControl(gpa, json, max_rows, 0);
+    }
+
+    pub fn initWithControl(gpa: std.mem.Allocator, json: []const u8, max_rows: u32, control_bytes: usize) !Transport {
         if (max_rows == 0 or max_rows > 4096) return error.InvalidPrefillChunk;
         var arena = std.heap.ArenaAllocator.init(gpa);
         errdefer arena.deinit();
@@ -23,14 +28,15 @@ pub const Transport = struct {
         const packet = try gpa.alloc(u8, size);
         errdefer gpa.free(packet);
         const library = try arena.allocator().dupeSentinel(u8, config.library, 0);
+        const control_base = std.mem.alignForward(usize, fabric.Channel.bytes(2, size), fabric.mcdma.alignment);
         const endpoint = try fabric.mcdma.Endpoint.create(gpa, library, .{
             .rank = config.rank,
             .ranks = 2,
-            .window_bytes = std.mem.alignForward(usize, fabric.Channel.bytes(2, size), fabric.mcdma.alignment),
+            .window_bytes = try std.math.add(usize, control_base, control_bytes),
             .staging_bytes = std.mem.alignForward(usize, size + 4096, fabric.mcdma.alignment),
             .links = config.links,
         });
-        return .{ .gpa = gpa, .config_arena = arena, .endpoint = endpoint, .channel = fabric.Channel.init(endpoint.rdma(), 0, size), .packet = packet };
+        return .{ .gpa = gpa, .config_arena = arena, .endpoint = endpoint, .channel = fabric.Channel.init(endpoint.rdma(), 0, size), .packet = packet, .control_base = control_base };
     }
 
     pub fn deinit(t: *Transport) void {

@@ -22,6 +22,7 @@ pub const row_projection = @import("core/row_projection.zig");
 pub const affine_mm = @import("core/affine_mm.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
+pub const deepseek_v41_tp_pair = @import("families/deepseek_v41/tp_pair.zig");
 pub const deepseek_v41_config = @import("families/deepseek_v41/config.zig");
 pub const deepseek_v41_load = @import("families/deepseek_v41/load.zig");
 pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
@@ -67,6 +68,7 @@ test {
     _ = lora_merge;
     _ = deepseek_v41.tp_moe;
     _ = deepseek_v41.tp_transport;
+    _ = @import("families/deepseek_v41/tp_control.zig");
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");

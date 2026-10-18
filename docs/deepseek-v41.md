@@ -112,3 +112,40 @@ gate stays a trip-wire next to argmax agreement, which held at every width.
 The qualification receipts — the served parity legs, the lane bit-equality, the oracle
 and margin captures — live beside the PRs on the fork; the tree carries the tests that
 regenerate them.
+
+## Experimental two-Mac MoE
+
+The development branch adds `--speed-up SETTINGS` for two Metal ranks. Hardware
+qualification of this path is pending. The host tests exercise command ordering,
+rollback, peer disagreement and timeouts; they do not establish model correctness or
+speed on a pair of Macs.
+
+Each rank holds the full backbone and reads its Engram tables from its own SSD.
+The ranks split the output columns of the MoE gate, up and down projections and
+exchange their output halves. Each dot product still covers its complete input
+width. Attention and routing run on both ranks. This partition does not halve the
+memory required on either Mac. The GPU and model comparisons must establish whether
+its bytes match the single-rank path and whether the communication pays off.
+
+Use the existing [speed-up link settings](n-link-speed-up.md), with rank 0 on one Mac
+and rank 1 on the other, one peer per rank, and the same MCDMA library build. On both
+Macs, pass the respective settings file alongside the streamed-Engram options:
+
+```sh
+GLM_LOAD_LIMIT_GB=220 tensorfold-native serve <pack> \
+  --engram-stream --engram-table-dir <original-1017> \
+  --chat-template <qualified-template> --speed-up <rank-settings.json> \
+  --context 8192 --parallel 2 --no-drafts --prompt-cache-gib 0 \
+  --host 127.0.0.1 --port 8099 --keep-warm 0
+```
+
+Send generation requests to rank 0. Rank 1 follows its reset, forward, commit and
+rollback commands and refuses independent generation. Each command checks the
+starting cursor; the acknowledgement checks the resulting cursor. A failed exchange
+invalidates the pair. Restart both ranks after a failure.
+
+Both ranks must run the same executable, checkpoint metadata, token map, context,
+chunk size, lane count and arithmetic settings. Startup compares these identities.
+It does not hash all weight and Engram bytes: the launch recipe must verify their
+SHA256 manifests separately, including the original 1017 table revision. A successful
+startup is not a substitute for those checks.

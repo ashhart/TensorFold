@@ -1,4 +1,4 @@
-//! V4.1's lane slots behind the native server: greedy draws, drafts off, one Mac.
+//! V4.1's lane slots behind the native server: greedy draws, drafts off, optional two-Mac MoE.
 //! The load stays under 70% of RAM unless GLM_LOAD_LIMIT_GB opts past it, as GLM's does.
 //! --engram-stream leaves the two Engram tables (about 203 GB) in their shards and stages only the bound backbone.
 const std = @import("std");
@@ -12,6 +12,8 @@ const Allocator = std.mem.Allocator;
 pub const Host = struct {
     gpa: Allocator,
     model: *ds.Model,
+    pair: ?*tf.deepseek_v41_tp_pair.Pair = null,
+    follower: ?std.Thread = null,
     back: tf.deepseek_v41_backend.Backend,
     cfg: lanes.Config,
     wall: lanes.backend.WallClock,
@@ -26,6 +28,8 @@ pub const Host = struct {
 
 fn words(_: ?*anyopaque, err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.FollowsPeer => "this DeepSeek TP rank follows rank 0; send generation requests to rank 0",
+        error.InvalidTensorParallelState => "the DeepSeek TP pair lost synchronization; restart both ranks",
         error.GreedyOnly => "the native DeepSeek V4.1 engine decodes greedily only: send temperature 0",
         error.ContextFull => "the prompt and max_tokens do not fit this server's --context",
         error.NoFreeSlot => "every lane slot is busy",
@@ -76,11 +80,11 @@ fn loadLimit(device: mtl.Device) !struct { bytes: u64, asked: bool } {
 }
 
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
-    if (o.speed_up != null or o.slide or o.learn != null or
+    if (o.slide or o.learn != null or
         (o.prompt_cache_gib != null and o.prompt_cache_gib.? != 0) or o.prompt_cache_over_cap or
         o.drafter != null or o.tp != 1)
     {
-        problem.* = "V4.1 resident serving does not support speed-up pairs, Sliding or Living Weights, retained prompt caches, a drafter or tensor parallelism yet";
+        problem.* = "V4.1 resident serving does not support Sliding or Living Weights, retained prompt caches, a drafter or --tp; use --speed-up SETTINGS for a two-Mac MoE pair";
         return null;
     }
     const map = try std.fmt.allocPrintSentinel(a, "{s}/engram-token-map.bin", .{o.dir}, 0);
@@ -131,7 +135,15 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .host = undefined,
         .warm = undefined,
     };
+    if (o.speed_up) |settings_path| {
+        const json = try std.Io.Dir.cwd().readFileAlloc(io, settings_path, gpa, .limited(1 << 20));
+        defer gpa.free(json);
+        const identity = try tf.deepseek_v41_tp_pair.identity(gpa, io, o.dir);
+        h.pair = try tf.deepseek_v41_tp_pair.Pair.open(gpa, model_ptr, json, identity);
+    }
+    errdefer if (h.pair) |pair| pair.deinit();
     h.back = try tf.deepseek_v41_backend.Backend.init(gpa, model_ptr);
+    h.back.pair = h.pair;
     errdefer h.back.deinit();
     const window: u32 = model_ptr.caches[0].plan.capacity;
     h.cfg = try lanes.Config.init(gpa, h.back.facts(), ds.prefill_step, ds.prefill_step -| 1);
@@ -150,6 +162,9 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     errdefer h.host.stop();
+    if (h.pair) |pair| if (pair.follows()) {
+        h.follower = try std.Thread.spawn(.{ .stack_size = 16 << 20 }, tf.deepseek_v41_tp_pair.Pair.follow, .{pair});
+    };
     std.log.info("DeepSeek V4.1 resident loaded in {d:.1} s, {d:.2} GB admitted, {d} lane slots, context {d} tokens, greedy only", .{ model_ptr.load_seconds, @as(f64, @floatFromInt(model_ptr.admitted_bytes)) / 1e9, model_ptr.lanes, window });
     return .{ .engine = h.host.engine(), .close = close, .ctx = h };
 }
@@ -157,9 +172,12 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
 pub fn close(ctx: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     h.host.stop();
+    if (h.pair) |pair| pair.stop();
+    if (h.follower) |thread| thread.join();
     h.core.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
+    if (h.pair) |pair| pair.deinit();
     h.model.deinit();
     h.gpa.destroy(h);
 }

@@ -3,6 +3,7 @@
 //! a kept prefix shorter than the window rolls back and re-feeds the kept rows.
 const std = @import("std");
 const ds = @import("model.zig");
+const Pair = @import("tp_pair.zig").Pair;
 const kv = @import("kv_state.zig");
 const lanes = @import("lanes");
 const be = lanes.backend;
@@ -13,6 +14,7 @@ const RING = 1024;
 pub const Backend = struct {
     gpa: std.mem.Allocator,
     model: *ds.Model,
+    pair: ?*Pair = null,
     by: std.AutoHashMapUnmanaged(*Stream, u32) = .empty,
     /// Drawn tokens by handle: every read waits for its forward anyway (one sub-forward a window).
     ring: [RING]u32 = undefined,
@@ -70,6 +72,31 @@ pub const Backend = struct {
         };
     }
 
+    fn forwardOn(b: *Backend, slot: u32, ids: []const u32, logits: ds.Logits) ![]const f32 {
+        if (b.pair) |pair| return pair.forward(slot, ids, logits);
+        return b.model.forwardOn(slot, ids, logits);
+    }
+
+    fn resetSlot(b: *Backend, slot: u32) !void {
+        if (b.pair) |pair| return pair.slot(.reset, slot);
+        return b.model.resetSlot(slot);
+    }
+
+    fn beginSlot(b: *Backend, slot: u32) !void {
+        if (b.pair) |pair| return pair.slot(.begin, slot);
+        return b.model.beginSlot(slot);
+    }
+
+    fn commitSlot(b: *Backend, slot: u32) !void {
+        if (b.pair) |pair| return pair.slot(.commit, slot);
+        return b.model.commitSlot(slot);
+    }
+
+    fn rollbackSlot(b: *Backend, slot: u32) !void {
+        if (b.pair) |pair| return pair.slot(.rollback, slot);
+        return b.model.rollbackSlot(slot);
+    }
+
     fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
     }
@@ -110,6 +137,7 @@ pub const Backend = struct {
 
     fn prefill(ptr: *anyopaque, s: *Stream) anyerror!void {
         const b = self(ptr);
+        if (b.pair) |pair| if (pair.follows()) return error.FollowsPeer;
         if (s.sampling) |p| if (p.temperature > 0) return error.GreedyOnly;
         const prompt = s.prompt();
         if (prompt.len == 0) return error.EmptyPrompt;
@@ -117,7 +145,7 @@ pub const Backend = struct {
         const state = &b.model.caches[i];
         if (prompt.len + s.max_new + 1 > state.plan.capacity) return error.ContextFull;
         try b.by.put(b.gpa, s, i);
-        try b.model.resetSlot(i);
+        try b.resetSlot(i);
         s.cached = 0;
         var at: u32 = 0;
         const rows = b.model.workspace.plan.rows;
@@ -126,10 +154,10 @@ pub const Backend = struct {
             const end = @min(at + rows, @as(u32, @intCast(prompt.len)));
             const last = end == prompt.len;
             if (last) {
-                _ = try b.model.forwardOn(i, prompt[at..end], .last);
+                _ = try b.forwardOn(i, prompt[at..end], .last);
                 b.first[i] = try b.draw(i);
             } else {
-                _ = try b.model.forwardOn(i, prompt[at..end], .none);
+                _ = try b.forwardOn(i, prompt[at..end], .none);
             }
             at = end;
         }
@@ -151,7 +179,7 @@ pub const Backend = struct {
             .value => |v| v,
             .handle => |h| try read(ptr, h),
         };
-        _ = try b.model.forwardOn(i, &.{token}, .last);
+        _ = try b.forwardOn(i, &.{token}, .last);
         return b.put(try b.draw(i));
     }
 
@@ -173,13 +201,13 @@ pub const Backend = struct {
             const rows = w.rows();
             if (w.positions.len != rows) return error.WindowOutOfStep;
             for (w.positions, 0..) |p, r| if (p != state.position + r + 1) return error.PositionMismatch;
-            try b.model.beginSlot(i);
-            errdefer b.model.commitSlot(i) catch {};
+            try b.beginSlot(i);
+            errdefer b.commitSlot(i) catch {};
             var feeds = try b.gpa.alloc(u32, rows);
             defer b.gpa.free(feeds);
             feeds[0] = w.pending;
             @memcpy(feeds[1..], w.tokens);
-            const row = try b.model.forwardOn(i, feeds, .all);
+            const row = try b.forwardOn(i, feeds, .all);
             for (0..rows) |r| {
                 var best: u32 = 0;
                 var maximum = -std.math.inf(f32);
@@ -194,7 +222,7 @@ pub const Backend = struct {
             }
             // The window's fed tokens after the pending one landed: the verified drafts, GLM's contract.
             if (o.drafts.len > 0) @memcpy(o.drafts, feeds[1 .. 1 + o.drafts.len]);
-            try b.model.commitSlot(i);
+            try b.commitSlot(i);
         }
     }
 
@@ -207,13 +235,13 @@ pub const Backend = struct {
             if (kept >= rows) continue; // the whole window landed
             // Roll the slot back to before the window and re-feed the kept prefix:
             // the lanes receipt holds that re-fed rows are bit-identical to their first pass.
-            try b.model.rollbackSlot(i);
+            try b.rollbackSlot(i);
             if (kept == 0) continue;
             var feeds = try b.gpa.alloc(u32, kept);
             defer b.gpa.free(feeds);
             feeds[0] = w.pending;
             @memcpy(feeds[1..], w.tokens[0 .. kept - 1]);
-            _ = try b.model.forwardOn(i, feeds, .none);
+            _ = try b.forwardOn(i, feeds, .none);
         }
     }
 
@@ -224,6 +252,6 @@ pub const Backend = struct {
     fn release(ptr: *anyopaque, s: *Stream) void {
         const b = self(ptr);
         const entry = b.by.fetchRemove(s) orelse return;
-        b.model.resetSlot(entry.value) catch {};
+        b.resetSlot(entry.value) catch {};
     }
 };
