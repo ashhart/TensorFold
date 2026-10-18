@@ -74,3 +74,26 @@ test "Snapshot state: resume at odd compression and window seams equals fresh KV
         try t.expectEqualSlices(u8, &fresh.live, &restored.live);
     }
 }
+const FailingCopy = struct {
+    fail: bool = true,
+    fn copy(ptr: *anyopaque, dst: u64, src: u64, bytes: usize) !void {
+        const c: *FailingCopy = @ptrCast(@alignCast(ptr));
+        if (c.fail) return error.CopyFailed;
+        try Fixture.copy(ptr, dst, src, bytes);
+    }
+};
+test "Snapshot state: a failed rollback retains the transaction and retries before cursor publication" {
+    var f: Fixture = .{};
+    for (0..9) |i| f.append(@intCast(i + 1));
+    const before = f.live;
+    _ = try f.window(&.{ 81, 82 });
+    var fc: FailingCopy = .{};
+    const copier: kv.Copy = .{ .ctx = &fc, .run = FailingCopy.copy };
+    try t.expectError(error.CopyFailed, f.state.rollback(&f.regions(), copier));
+    try t.expectEqual(@as(?u32, 2), f.state.pending);
+    try t.expectEqual(@as(u64, 9), f.state.position);
+    fc.fail = false;
+    try f.state.rollback(&f.regions(), copier);
+    try t.expectEqualSlices(u8, &before, &f.live);
+    try t.expectError(error.NoCacheTransaction, f.state.keep(&f.regions(), copier, 1));
+}

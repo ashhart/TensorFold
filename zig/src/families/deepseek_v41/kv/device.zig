@@ -36,6 +36,7 @@ pub const DevicePool = struct {
     events: [fences]cuda.Event,
     compute: cuda.Stream,
     next_fence: u64 = 0,
+    staging: ?cuda.copy_source.Buffer = null,
 
     /// Allocates every family's tensor (zeroed) and the tables for `slots` slots of up to `max_pages` pages.
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, ctx: *const cuda.Context, pool: *Pool, compute: cuda.Stream, slots: u32, max_pages: u32) !DevicePool {
@@ -65,13 +66,24 @@ pub const DevicePool = struct {
         var io = try cuda.Stream.init(d, true);
         errdefer io.deinit();
         var ev: [fences]cuda.Event = undefined;
-        for (&ev) |*e| e.* = try cuda.Event.init(d, false);
+        var made_events: usize = 0;
+        errdefer for (ev[0..made_events]) |*e| e.deinit();
+        for (&ev) |*e| {
+            e.* = try cuda.Event.init(d, false);
+            made_events += 1;
+        }
         // fills ran on the compute stream (a legacy-stream memset races later uploads): sync before any use
         try compute.synchronize();
         return .{ .gpa = gpa, .d = d, .ctx = ctx, .pool = pool, .tensors = t, .table = table, .local = local, .host_table = ht, .host_local = hl, .pts = max_pages, .slots = slots, .io = io, .events = ev, .compute = compute };
     }
 
+    pub fn close(p: *DevicePool) !void {
+        try p.compute.synchronize();
+        try p.io.synchronize();
+        p.deinit();
+    }
     pub fn deinit(p: *DevicePool) void {
+        if (p.staging) |*h| h.free();
         for (p.tensors) |*b| b.free();
         p.gpa.free(p.tensors);
         p.table.free();
@@ -85,9 +97,14 @@ pub const DevicePool = struct {
 
     /// Uploads the table entries each slot changed since the last sync, on the compute stream.
     pub fn syncTables(p: *DevicePool) !void {
+        try p.compute.synchronize();
         for (p.pool.slots.items) |s| {
             if (s.id >= p.slots) return error.TooManySlots;
             const r = s.takeDirty() orelse continue;
+            errdefer {
+                s.dirty_lo = @min(s.dirty_lo, r.lo);
+                s.dirty_hi = @max(s.dirty_hi, r.hi);
+            }
             const row = @as(usize, s.id) * p.pts;
             for (r.lo..r.hi) |i| {
                 p.host_table[row + i] = @intCast(s.tableAt(@intCast(i)));
@@ -123,18 +140,32 @@ pub const DevicePool = struct {
         return j;
     }
 
+    fn stage(p: *DevicePool, len: usize) ![]u8 {
+        try p.io.synchronize();
+        if (p.staging) |*h| try h.wait();
+        if (p.staging == null or p.staging.?.bytes.len < len) {
+            if (p.staging) |*h| h.free();
+            p.staging = null;
+            p.staging = try cuda.copy_source.Buffer.alloc(p.d, @max(256, len));
+        }
+        return p.staging.?.bytes[0..len];
+    }
+
     fn read(ptr: *anyopaque, fam: u32, pages: []const u32, dst: []u8) anyerror!void {
         const p: *DevicePool = @ptrCast(@alignCast(ptr));
         try p.ctx.makeCurrent();
         const pb: usize = @intCast(p.pool.layout.families[fam].pageBytes(p.pool.page));
         if (dst.len != pages.len * pb) return error.BadLength;
+        const staged = try p.stage(dst.len);
+        try p.staging.?.mark(p.io);
         var i: usize = 0;
         while (i < pages.len) {
             const j = runs(pages, i);
-            try p.tensors[fam].downloadAsync(pages[i] * pb, dst[i * pb .. j * pb], p.io.handle);
+            try p.tensors[fam].downloadAsync(pages[i] * pb, staged[i * pb .. j * pb], p.io.handle);
             i = j;
         }
         try p.io.synchronize();
+        @memcpy(dst, staged);
     }
 
     fn write(ptr: *anyopaque, fam: u32, pages: []const u32, src: []const u8) anyerror!void {
@@ -142,10 +173,12 @@ pub const DevicePool = struct {
         try p.ctx.makeCurrent();
         const pb: usize = @intCast(p.pool.layout.families[fam].pageBytes(p.pool.page));
         if (src.len != pages.len * pb) return error.BadLength;
+        const staged = try p.stage(src.len);
+        @memcpy(staged, src);
         var i: usize = 0;
         while (i < pages.len) {
             const j = runs(pages, i);
-            try p.tensors[fam].uploadAsync(pages[i] * pb, src[i * pb .. j * pb], p.io.handle);
+            try p.staging.?.copyTo(p.tensors[fam], pages[i] * pb, staged[i * pb .. j * pb], p.io);
             i = j;
         }
         try p.io.synchronize(); // the staging buffer goes back to the lanes after this

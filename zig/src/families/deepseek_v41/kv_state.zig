@@ -1,6 +1,6 @@
 // Shared logical KV transactions. Backends supply copies and explicit physical formats.
 const std = @import("std");
-pub const Encoding = enum { bf16, cuda_fp8_584, cuda_index_fp8_132, metal_fp4_288, metal_index_fp4_68 };
+pub const Encoding = enum { bf16, f32, cuda_fp8_584, cuda_index_fp8_132, metal_fp4_288, metal_index_fp4_68 };
 pub const Region = struct {
     live: u64,
     backup: u64,
@@ -27,6 +27,7 @@ pub const State = struct {
         if (s.pending != null) return error.CacheTransactionActive;
         if (n == 0 or n > 64 or s.position > std.math.maxInt(u64) - @as(u64, n)) return error.BadWindow;
         for (regions) |r| {
+            _ = std.math.mul(usize, r.row_bytes, r.rows) catch return error.BadRegion;
             if (r.row_bytes == 0 or r.rows == 0 or (r.kind == .ring and n > r.rows)) return error.BadRegion;
         }
         for (regions) |r| try c.copy(r.backup, r.live, r.bytes());

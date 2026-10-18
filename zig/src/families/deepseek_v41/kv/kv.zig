@@ -12,6 +12,7 @@ pub const sched = @import("sched.zig");
 pub const progress = @import("progress.zig");
 
 test {
+    _ = @import("resume_host_test.zig");
     _ = layout;
     _ = split;
     _ = budget;

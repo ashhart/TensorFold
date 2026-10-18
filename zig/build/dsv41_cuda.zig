@@ -28,6 +28,9 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
     const m = shared.module(b, target, file);
     m.addImport("cuda", cuda);
     m.addImport("dsv41_kernels", dk);
+    const tp = @import("tp.zig").module(b, target, .Debug, cuda);
+    m.addImport("tp", tp);
+    m.addImport("kv", @import("dsv41_state.zig").kvModule(b, target, cuda, tp));
     return m;
 }
 pub fn steps(b: *std.Build) void {
