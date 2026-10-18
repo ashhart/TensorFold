@@ -58,8 +58,7 @@ pub const State = struct {
     grouped: [8192]u16 = undefined,
     observer: ?Observer = null,
     sparse_snapshot: ?[]u16 = null,
-    /// The indexer-selection probe: fires once per scored window with the contract's
-    /// boundary margin, the FP64-ideal boundary margin, and the pick flips between them.
+    /// Report contract/FP64 boundary margins and changed top-k picks once per scored window.
     score_probe: ?ScoreProbe = null,
     score_copy: []f32 = &.{},
     ideal_scores: []f32 = &.{},
@@ -215,8 +214,7 @@ pub const State = struct {
         std.mem.sort(u32, self.selected[0..self.selected_len], {}, std.sort.asc(u32));
         if (self.score_probe) |probe| self.reportSelection(probe, layer, position, count);
     }
-    /// The same selection against the FP64-ideal scores: same BF16 inputs, no
-    /// intermediate roundings. Flips between the two picks are the support-flip signal.
+    /// Select from ideal FP64 scores on the same BF16 inputs to measure support flips.
     fn idealScores(self: *State, a: Attention, count: usize) void {
         @setFloatMode(.strict);
         if (a.indexer == null) return;
@@ -360,18 +358,12 @@ pub const State = struct {
     }
 };
 
-/// The online-softmax sparse head at reference precision T. With T=f32 this reproduces the pinned
-/// source contract bit-for-bit (wide FP64 dot, one FP32 narrowing per score, FP32 online softmax,
-/// BF16-rounded probabilities before the value product, FP32 per-tile accumulator narrowing).
-/// With T=f64 every boundary is the ideal FP64 result: no FP32 narrowing, BF16 appears only at the
-/// algorithm's quantized inputs, the documented probability rounding and the final output.
+/// Online sparse softmax at FP32 contract or FP64 ideal precision; boundaries: docs/reference-precision.md.
 pub fn sparseHeadOf(comptime T: type, q: []const u16, keys: KeyTable, indices: []const i32, sink: f32, out: []u16) void {
     return sparseHeadPre(T, q, keys, indices, sink, out, null);
 }
 
-/// The same head, with `pre` optionally capturing acc/denominator before the output rounding: the
-/// same values in FP32 versus FP64 then differ only by the stage's arithmetic, so their ULP distance
-/// is the stage's true rounding level instead of the BF16 output quantum that hides it.
+/// Capture acc/denominator before output rounding to expose arithmetic ULP error below the BF16 output quantum.
 pub fn sparseHeadPre(
     comptime T: type,
     q: []const u16,

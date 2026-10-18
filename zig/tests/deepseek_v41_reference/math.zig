@@ -112,14 +112,11 @@ pub fn idealRsqrt(x: f32) f32 {
 pub fn rms(x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     rmsOf(f32, x, weight, eps, out);
 }
-/// Element type widened to the reference precision; FP32 is the source contract, FP64 the ideal.
-/// FP64 decode of a BF16 cell, exact at both reference precisions.
+/// Decode BF16 exactly at either reference precision: FP32 contract or FP64 ideal.
 pub fn d64(x: u16) f64 {
     return @as(f64, f(x));
 }
-/// Round an FP64 value once to BF16 (round-to-nearest-even) with no intermediate FP32 rounding.
-/// The RMS boundary at reference precision T: the source-contract FP32 mean projection for f32,
-/// a wide FP64 mean, exact division and reciprocal square root for f64.
+/// RMS at FP32 contract or FP64 ideal precision; rounding boundaries: docs/reference-precision.md.
 pub fn rmsOf(comptime T: type, x: []const u16, weight: Tensor, eps: f32, out: []u16) void {
     @setFloatMode(.strict);
     var sum: f64 = 0;
@@ -132,8 +129,7 @@ pub fn rmsOf(comptime T: type, x: []const u16, weight: Tensor, eps: f32, out: []
     const r = 1 / @sqrt(sum / @as(f64, @floatFromInt(x.len)) + @as(f64, eps));
     for (x, out, 0..) |v, *y, i| y.* = b64(@as(f64, f(v)) * r * @as(f64, value(weight, i)));
 }
-/// The same boundary with weight cells given explicitly (decoded BF16 or native FP32), so a
-/// harness needs no checkpoint tensor.
+/// Supply decoded BF16 or native FP32 weight cells directly, without requiring a checkpoint tensor.
 pub fn rmsOfValues(comptime T: type, x: []const u16, weight: []const f32, eps: f32, out: []u16) void {
     @setFloatMode(.strict);
     var sum: f64 = 0;

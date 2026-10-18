@@ -1,6 +1,4 @@
-//! The deep indexer-margin capture: prefill a long prompt, then one diagnostic token
-//! whose per-layer selection scratch (score tiles, top-k heap, positions) is copied
-//! out verbatim for offline margin analysis. No reference chain, no model reload.
+//! Prefill, then capture one diagnostic token's per-layer selection scratch for offline margins; no reload.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");

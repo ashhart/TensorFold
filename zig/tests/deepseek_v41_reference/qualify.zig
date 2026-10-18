@@ -18,9 +18,7 @@ pub const Result = struct {
     greedy_gate_passed: bool = false,
 };
 
-/// One indexer-selection boundary per scored window: the contract's margin
-/// (BF16-rounded FP32 scores), the FP64-ideal margin on the same inputs, and how
-/// many top-k picks differ between them — the real-data support-flip measurement.
+/// Report BF16/FP32-contract and FP64 margins, plus changed top-k picks, once per scored real-data window.
 const MarginLog = struct {
     records: [1024]MarginRecord = undefined,
     len: usize = 0,

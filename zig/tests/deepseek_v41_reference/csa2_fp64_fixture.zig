@@ -1,7 +1,4 @@
-//! FP64 ideal-reference isolation for the CSA2 compressed/sparse-attention stages: rounding level,
-//! Metal deltas and cancellation amplification. Receipt lines print with a "CSA64" prefix.
-//! No tolerance is relaxed and no source coefficient is injected: synthetic tensors only, the
-//! Metal kernel, the FP32 source-contract reference and the FP64 ideal reference on identical rows.
+//! CSA64 fixtures compare Metal, FP32 contract and FP64 ideal on identical synthetic rows; docs/reference-precision.md.
 pub const std = @import("std");
 pub const mtl = @import("metal");
 pub const tf = @import("tensorfold");
@@ -143,8 +140,7 @@ pub fn view(buffer: mtl.Buffer) View {
     return .{ .buffer = buffer };
 }
 
-/// The packed-cache code tables. Codes are generated directly, so the FP64 ideal and the kernel
-/// read bit-identical BF16 keys and the stage delta isolates the attention arithmetic itself.
+/// Directly generated cache codes give the kernel and FP64 ideal bit-identical BF16 keys.
 pub fn e4(code: u8) f32 {
     const magnitude = code & 127;
     if (magnitude == 127) return std.math.nan(f32);
@@ -180,8 +176,7 @@ pub fn decodeMainRow(bytes: []const u8) [width]u16 {
     return row;
 }
 
-/// The FP8 code of a value under the FP8 scale the pack kernel would choose for its block.
-/// Metal's `rint`: nearest integer, ties to even. The exponent-only code rounding needs it exactly.
+/// FP8 encoding under the block scale uses Metal rint semantics: nearest integer, ties to even.
 pub fn roundHalfEven(x: f32) f32 {
     const toward: f32 = @trunc(x);
     const magnitude: f32 = if (@abs(x - toward) > 0.5) toward + std.math.sign(x) else toward;
@@ -214,8 +209,7 @@ pub fn e2Code(x: f32) u8 {
     return pick | @as(u8, if (std.math.signbit(x)) 8 else 0);
 }
 
-/// Pack a window row exactly as dsv41_pack kind 0 would: per 32-column block, a power-of-two FP8
-/// scale and FP8 codes. The decoded cells are what both the kernel and the references will read.
+/// dsv41_pack kind 0: power-of-two FP8 scale and FP8 codes per 32 columns; both sides read decoded cells.
 pub fn packWindowRow(values: []const f32, out: []u8) void {
     @memset(out[0 .. width + width / 32], 0);
     for (0..width / 32) |block| {
@@ -229,8 +223,7 @@ pub fn packWindowRow(values: []const f32, out: []u8) void {
     }
 }
 
-/// Pack a compressed row exactly as dsv41_pack kind 1 would: per 16-column block, an FP8 scale and
-/// FP4 codes; the decoded cells are what both sides read.
+/// dsv41_pack kind 1: FP8 scale and FP4 codes per 16 columns; both sides read decoded cells.
 pub fn packMainRow(values: []const f32, out: []u8) void {
     @memset(out[0 .. width / 2 + width / 16], 0);
     for (0..width / 16) |block| {

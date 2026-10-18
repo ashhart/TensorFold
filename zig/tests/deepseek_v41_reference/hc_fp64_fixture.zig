@@ -1,6 +1,4 @@
-//! FP64 ideal-reference isolation for the mHC stage: rounding level, Metal deltas and 1-ULP
-//! input amplification. Receipt lines print with an "HC64" prefix. No tolerance is relaxed and
-//! no source coefficient is injected: retained rows and real checkpoint scale/base are inputs.
+//! HC64 compares mHC rounding and 1-ULP amplification using retained rows; see docs/reference-precision.md.
 pub const std = @import("std");
 pub const mtl = @import("metal");
 pub const tf = @import("tensorfold");
@@ -287,8 +285,7 @@ pub fn printMetric(case_name: []const u8, m: StageMetric) void {
     }
 }
 
-/// One full HC stage over `rows` streams: statistic, dense, split, collapse and post-expansion,
-/// each side (Metal, FP32 source-contract reference, FP64 ideal reference) on identical inputs.
+/// Full HC stage on identical Metal/FP32/FP64 inputs: statistic, dense, split, collapse and post-expansion.
 pub fn runCase(
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -415,8 +412,7 @@ pub fn runCase(
     };
     for (metrics) |m| printMetric(case.name, m);
 
-    // Rounding-level gate: Metal must sit at the FP32 source-contract reference's own distance
-    // from the FP64 ideal (measured bounds; a real operator defect breaks these by orders).
+    // Bound Metal error against the FP32 contract's distance from the FP64 ideal; retain existing tolerances.
     for (metrics, 0..) |m, i| {
         if (i < 5) {
             try std.testing.expect(m.metal.nrms < 2e-7);
@@ -491,8 +487,7 @@ pub fn mixesLegacy(x: []const u16, hc: Hc, c: Config) math.Mix {
     return m;
 }
 
-// Ideal FP64 stage propagation used by the amplification measurement: statistic, dense, split,
-// collapse and post-expansion, with the pre-rounding FP64 outputs kept for analog-gain figures.
+// Propagate the ideal HC stages in FP64, retaining pre-rounding outputs for analog-gain measurements.
 pub fn stageF64(stream: []const u16, hc: Hc, cfg: Config, branch: []const u16, y_pre: []f64, y_bf: *[stream_width]u16, coll_pre: []f64, inv_out: *f64, comb_out: *[16]f64) void {
     var proj: [mix_count]f64 = undefined;
     math.denseOf(f64, hc.projection, stream, &proj);
