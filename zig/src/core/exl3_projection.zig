@@ -114,6 +114,18 @@ pub const ExpertDescriptor = extern struct {
     svh_signs: u32,
     has_bias: u32,
     reserved: u32 = 0,
+
+    /// Apply the same output-block cut to an already validated resident expert descriptor.
+    pub fn columns(d: ExpertDescriptor, n: usize, start: usize, count: usize) !ExpertDescriptor {
+        if (n == 0 or n % 128 != 0 or start % 128 != 0 or count == 0 or count % 128 != 0 or
+            start > n or count > n - start) return error.InvalidExl3Partition;
+        var out = d;
+        out.trellis = try std.math.add(u64, d.trellis, try std.math.mul(u64, start / 16, d.tile_n_stride));
+        const scale_bytes = try std.math.mul(u64, start / (if (d.svh_signs != 0) @as(usize, 16) else 1), 2);
+        out.svh = try std.math.add(u64, d.svh, scale_bytes);
+        if (d.has_bias != 0) out.bias = try std.math.add(u64, d.bias, try std.math.mul(u64, start, 2));
+        return out;
+    }
 };
 
 /// Populate a caller-owned shared descriptor table once; no weight copying, packing or dequantization.
@@ -569,6 +581,25 @@ test "EXL3 output partitions retain rectangular strides and reject broken rotati
         try std.testing.expectError(error.InvalidExl3Partition, m.columns(cut[0], cut[1]));
     m.trellis.offset = std.math.maxInt(usize) - 1;
     try std.testing.expectError(error.Overflow, m.columns(128, 128));
+}
+
+test "EXL3 descriptor output cuts preserve K scales and use packed output scale offsets" {
+    var d = ExpertDescriptor{ .trellis = 1024, .suh = 2048, .svh = 4096, .bias = 8192, .tile_k_stride = 3072, .tile_n_stride = 96, .halves = 6, .codebook = 2, .suh_signs = 1, .svh_signs = 0, .has_bias = 1 };
+    const cut = try d.columns(512, 256, 256);
+    try std.testing.expectEqual(@as(u64, 2560), cut.trellis);
+    try std.testing.expectEqual(d.suh, cut.suh);
+    try std.testing.expectEqual(d.tile_k_stride, cut.tile_k_stride);
+    try std.testing.expectEqual(@as(u64, 4608), cut.svh);
+    try std.testing.expectEqual(@as(u64, 8704), cut.bias);
+    d.svh_signs = 1;
+    d.has_bias = 0;
+    d.bias = 0;
+    const packed_cut = try d.columns(512, 256, 256);
+    try std.testing.expectEqual(@as(u64, 4128), packed_cut.svh);
+    try std.testing.expectEqual(@as(u64, 0), packed_cut.bias);
+    try std.testing.expectError(error.InvalidExl3Partition, d.columns(512, 384, 256));
+    d.trellis = std.math.maxInt(u64);
+    try std.testing.expectError(error.Overflow, d.columns(512, 128, 128));
 }
 
 test "stored per-matrix width and rectangular strides include public target shapes" {
