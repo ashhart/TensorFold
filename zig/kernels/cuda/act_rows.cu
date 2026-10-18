@@ -141,3 +141,20 @@ extern "C" __global__ void __launch_bounds__(NT) tf_dconv_rows(const __nv_bfloat
     }
     *reinterpret_cast<uint4*>(out + r * d + 8 * c) = pack8(y);
 }
+
+// MLX's bf16-op-by-op activations (act_round.cuh), the same rows and sums as tf_swiglu_rows.
+#include "act_round.cuh"
+
+// out = bf16(gelu_tanh(gate) * up) as mlx_lm's geglu in MLX's bf16 ops (Gemma 4's MLP); xs (or null) out's sums.
+extern "C" __global__ void __launch_bounds__(NT) tf_geglu_rows(const __nv_bfloat16* gate, long long g_ld,
+                                                               const __nv_bfloat16* up, long long u_ld,
+                                                               __nv_bfloat16* out, float* xs, int n) {
+    tf_act_round::rows<true>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::GEGLU_ALL);
+}
+
+// out = bf16(silu(gate) * up) in MLX's bf16 steps (tf_draft_swiglu's, Gemma 4's DFlash drafter); xs (or null) its sums.
+extern "C" __global__ void __launch_bounds__(NT) tf_swiglu_rows_round(const __nv_bfloat16* gate, long long g_ld,
+                                                                      const __nv_bfloat16* up, long long u_ld,
+                                                                      __nv_bfloat16* out, float* xs, int n) {
+    tf_act_round::rows<false>(gate, g_ld, up, u_ld, out, xs, n, tf_act_round::SWIGLU_ALL);
+}
