@@ -148,8 +148,7 @@ pub const Block = struct {
         if (self.ns > 1) self.ownMax(1, 7, 23);
     }
 
-    /// Stream j, key head kh: block key 0 all 8, every other key all -8 with +inf at e, the block's row 0 querying all 2
-    /// (head 4 kh: weights below float32's least, inf) and all 8 (head 4 kh + 1: float64 weights of 0, NaN).
+    /// Stream j, key head kh: block key 0 all 8, other keys -8 with +inf at e; row 0 queries 2 (inf) and 8 (NaN).
     fn ownMax(self: *Block, j: usize, kh: usize, e: usize) void {
         const L = self.len();
         const rows = self.ns * L;

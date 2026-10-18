@@ -58,9 +58,7 @@ extern "C" __global__ void tf_tree_paths(const int* __restrict__ parents, int* _
     for (int slot = depth - 1; slot >= 0; --slot, cur = parents[cur]) paths[node * MAXD + slot] = cur;
 }
 
-// Group gi of key head kh for 16 (row, head) pairs from pair pf (pair m: row rq + m / G, head m % G), one mma tile.
-// ODD: every NaN and infinite value leaves the mma, and the pairs add them back at float64's weights.
-// !ODD: true (nothing written) when some warp's partial is NaN or infinite: the block runs again as ODD.
+// Group gi of key head kh for 16 (row, head) pairs from pf (m: row rq + m / G, head m % G); !ODD true: run tree_odd.
 template <int D, int HB, int W, int ST, bool ODD>
 __device__ __forceinline__ bool tree_group(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
@@ -323,7 +321,7 @@ __device__ __forceinline__ bool tree_group(
     }
 }
 
-// A block whose partial is NaN or infinite, run again as ODD (out of the common path).
+// A block with a NaN or infinite partial, again as ODD: those values out of the mma, added back at float64's weights.
 template <int D, int HB, int W, int ST>
 __device__ __noinline__ void tree_odd(
     const __nv_bfloat16* q, const __nv_bfloat16* kn, const __nv_bfloat16* vn, const __nv_bfloat16* origin,

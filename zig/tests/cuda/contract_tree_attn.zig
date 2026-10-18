@@ -153,8 +153,7 @@ pub const Tree = struct {
         return true;
     }
 
-    /// NaN in a query, +inf and -inf in values (committed and on a path), both in one column, NaN in a committed key;
-    /// +inf at float64 weights of 0 and below float32's least.
+    /// NaN in a query, +inf and -inf in values (committed, on a path, in one column), a NaN key, +inf at tiny weights.
     fn plant(self: *Tree) void {
         const d = self.v.d;
         const kv = self.v.hk * d;
@@ -175,8 +174,7 @@ pub const Tree = struct {
         self.under(1, 21);
     }
 
-    /// Key head kh, row 0: committed key p0 - 1 all 8, its other keys all -8 with +inf at e. Head kh's first query is
-    /// all 2 (weights below float32's least: inf), its second all 8 (float64 weights of 0, 0 x inf: NaN).
+    /// Key head kh, row 0: key p0 - 1 all 8, its other keys -8 with +inf at e; queries 2 (inf) and 8 (weight 0: NaN).
     fn under(self: *Tree, kh: usize, e: usize) void {
         const d = self.v.d;
         const kv = self.v.hk * d;
