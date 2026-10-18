@@ -23,7 +23,7 @@ pub fn detect(a: Allocator, io: std.Io, env: *const std.process.Environ.Map, bac
     const cpu = cpuinfo(a, readProc(a, io, "/proc/cpuinfo") orelse "");
     const memory = meminfo(readProc(a, io, "/proc/meminfo") orelse "") orelse (std.process.totalSystemMemory() catch null);
     const out = if (gpuQuery(backend)) |argv| run(a, io, argv) orelse "" else "";
-    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, env.get("HIP_VISIBLE_DEVICES") orelse env.get("ROCR_VISIBLE_DEVICES"));
+    if (std.mem.eql(u8, backend, "rocm")) return rocm(a, cpu, memory, out, rocmVisible(env));
     return linux(a, cpu, memory, out, env.get("CUDA_VISIBLE_DEVICES"));
 }
 
@@ -34,10 +34,19 @@ pub fn gpuQuery(backend: []const u8) ?[]const []const u8 {
     return &.{ "nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits" };
 }
 
+/// The visible-device list the rocm probe applies: HIP_VISIBLE_DEVICES, else ROCR_VISIBLE_DEVICES.
+pub fn rocmVisible(env: *const std.process.Environ.Map) ?[]const u8 {
+    return env.get("HIP_VISIBLE_DEVICES") orelse env.get("ROCR_VISIBLE_DEVICES");
+}
+
 /// ROCm facts from rocminfo's GPU agents by HIP_VISIBLE_DEVICES; an APU ("... Graphics") is ``unified``.
 pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visible: ?[]const u8) Probe {
-    const all = amdGpus(a, text);
-    const gpus = select(Gpu, a, all, visible) orelse return .{ .hardware = summarize(cpu, memory, &.{}, false) };
+    const none: Probe = .{ .hardware = summarize(cpu, memory, &.{}, false) };
+    // indices count every GPU agent, so selecting an agent with no reportable name lists no GPU, never the next one
+    const slots = select(?Gpu, a, amdAgents(a, text), visible) orelse return none;
+    var kept: std.ArrayList(Gpu) = .empty;
+    for (slots) |slot| if (slot) |g| kept.append(a, g) catch return none;
+    const gpus = kept.items;
     var h = summarize(cpu, memory, gpus, false);
     if (gpus.len > 0) h.memory_type = for (gpus) |g| {
         if (!std.mem.endsWith(u8, g.name, " Graphics")) break "dedicated";
@@ -45,9 +54,9 @@ pub fn rocm(a: Allocator, cpu: ?[]const u8, memory: ?u64, text: []const u8, visi
     return .{ .hardware = h };
 }
 
-/// GPU agents from ``rocminfo``: the vendor-prefixed marketing name, the first GLOBAL pool size and the compute units.
-pub fn amdGpus(a: Allocator, text: []const u8) []const Gpu {
-    var out: std.ArrayList(Gpu) = .empty;
+/// Every rocminfo GPU agent in order (vendor-prefixed name, first GLOBAL pool, compute units); null if a name fails.
+pub fn amdAgents(a: Allocator, text: []const u8) []const ?Gpu {
+    var out: std.ArrayList(?Gpu) = .empty;
     var agents = std.mem.splitSequence(u8, text, "*******");
     while (agents.next()) |block| {
         var marketing: []const u8 = "";
@@ -72,8 +81,8 @@ pub fn amdGpus(a: Allocator, text: []const u8) []const Gpu {
             std.fmt.allocPrint(a, "{s} {s}", .{ vendor, marketing }) catch return &.{}
         else
             marketing;
-        g.name = modelName(a, full) orelse continue;
-        out.append(a, g) catch return &.{};
+        const name = modelName(a, full);
+        out.append(a, if (name) |n| .{ .name = n, .memory_bytes = g.memory_bytes, .cores = g.cores } else null) catch return &.{};
     }
     return out.items;
 }
