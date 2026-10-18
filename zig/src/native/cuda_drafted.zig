@@ -38,6 +38,8 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
     const dir = o.drafter orelse return s;
     if (!o.drafts) return s;
     if (!@hasDecl(F, "openDrafter")) {
+        // a family that loads its drafter itself from its options (GLM's DFlash2) serves as it loaded
+        if (comptime @hasDecl(F, "Options") and @hasField(F.Options, "drafter")) return s;
         problem.* = try std.fmt.allocPrint(a, "--drafter: {s} checkpoints load no draft model on CUDA", .{F.model_type});
         return null;
     }
@@ -58,4 +60,24 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
     s.stream_bytes = h.drafted.streamBytes(loaded.stream_bytes);
     s.held = h;
     return s;
+}
+
+test "--drafter: a family that loads its own drafter (GLM's DFlash2) serves as it loaded, and one with neither refuses" {
+    const F = @import("glm_cuda").native;
+    try std.testing.expect(@hasField(F.Options, "drafter") and !@hasDecl(F, "openDrafter"));
+    const Loaded = struct { backend: lanes.backend.Backend, facts: lanes.Model, stream_bytes: usize };
+    var loaded: Loaded = undefined;
+    loaded.stream_bytes = 7;
+    const o: api.Open = .{ .dir = "glm", .model_type = F.model_type, .drafter = "dflash2" };
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var problem: []const u8 = "";
+    const served = (try wrap(F, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) orelse return error.TestUnexpectedResult;
+    try std.testing.expect(served.held == null and served.stream_bytes == 7);
+    const Plain = struct {
+        pub const model_type = "plain";
+        pub const Options = struct { context: usize };
+    };
+    try std.testing.expect((try wrap(Plain, arena.allocator(), std.testing.allocator, std.testing.io, loaded, o, &problem)) == null);
+    try std.testing.expectEqualStrings("--drafter: plain checkpoints load no draft model on CUDA", problem);
 }
