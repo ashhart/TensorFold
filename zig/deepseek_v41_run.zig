@@ -373,7 +373,9 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
         if (chunk == 0 or chunk > model.workspace.plan.rows) return error.InvalidPrefillChunk;
         const outputs = try a.alloc(f32, ids.len * 129280);
         defer a.free(outputs);
+        const teacher_start = mtl.clock.seconds();
         const elapsed = try teacher(model, ids, chunk, outputs);
+        const wall_seconds = mtl.clock.seconds() - teacher_start;
         // Capture execution before writing the receipt, not filesystem metadata reads from the receipt itself.
         if (is_seams) {
             const alternative = try a.alloc(f32, outputs.len);
@@ -402,7 +404,7 @@ fn execute(a: std.mem.Allocator, io: std.Io, model: *ds.Model, args: []const [:0
                 }
             }
         }
-        std.debug.print("{{\"mode\":\"teacher\",\"tokens\":{d},\"gpu_seconds\":{d}}}\n", .{ ids.len, elapsed });
+        std.debug.print("{{\"mode\":\"teacher\",\"tokens\":{d},\"elapsed_seconds\":{d},\"gpu_seconds\":{d}}}\n", .{ ids.len, wall_seconds, elapsed });
         execution_after.* = try counters();
         try write(io, a, dir, "logits.f32", std.mem.sliceAsBytes(outputs));
     } else if (std.mem.eql(u8, mode, "generate")) {
