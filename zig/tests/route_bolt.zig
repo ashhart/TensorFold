@@ -101,6 +101,56 @@ fn f32of(w: u16) f32 {
     return @bitCast(@as(u32, w) << 16);
 }
 
+/// f32 to bf16 rounding to nearest, ties to even, as Metal's bfloat() conversion does (finite values).
+fn bf16rne(v: f32) u16 {
+    const u: u32 = @bitCast(v);
+    return @truncate((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+}
+
+/// combine_latent: each row's K picks summed by weight in the latent, a sequential fp32 fma then one bf16 rounding.
+/// The host reference runs the same fma order and rounding, so the check is bit-for-bit.
+pub fn combineLatent(gpu: Gpu) !void {
+    const rows: usize = 3;
+    const K: usize = 9; // Bolt's top-k
+    const L: usize = 1024; // Bolt's latent
+    const y = try gpu.buffer(u16, rows * K * L);
+    defer y.deinit();
+    const we = try gpu.buffer(f32, rows * K);
+    defer we.deinit();
+    const out = try gpu.buffer(u16, rows * L);
+    defer out.deinit();
+    var prng = std.Random.DefaultPrng.init(0xc0b1);
+    const rnd = prng.random();
+    const yv = y.slice(u16, rows * K * L);
+    const wv = we.slice(f32, rows * K);
+    for (yv) |*v| v.* = bf16rne(rnd.float(f32) * 4 - 2);
+    for (wv) |*v| v.* = rnd.float(f32) * 0.6;
+    @memset(out.slice(u16, rows * L), 0xffff);
+
+    const p = try gpu.pipeline("tf_nemotron_combine_latent", false);
+    defer p.deinit();
+    const cb = gpu.queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    enc.setPipeline(p);
+    enc.setBuffer(y, 0, 0);
+    enc.setBuffer(we, 0, 1);
+    enc.setBuffer(out, 0, 2);
+    enc.setValue([3]u32{ @intCast(rows), @intCast(K), @intCast(L) }, 3);
+    enc.dispatchThreads(Size.of(L, rows, 1), Size.of(256, 1, 1));
+    enc.end();
+    try common.run(cb);
+
+    const got = out.slice(u16, rows * L);
+    for (0..rows) |r| for (0..L) |c| {
+        var routed: f32 = 0;
+        for (0..K) |e| routed = @mulAdd(f32, f32of(yv[(r * K + e) * L + c]), wv[r * K + e], routed);
+        if (got[r * L + c] != bf16rne(routed)) {
+            std.debug.print("  combine_latent [{d},{d}]: 0x{x:0>4} vs reference 0x{x:0>4}\n", .{ r, c, got[r * L + c], bf16rne(routed) });
+            return error.NotBitExact;
+        }
+    };
+}
+
 /// dense_bf16: y = x . w^T over bf16 (no accumulate), the gate and latent projections. Checked against a CPU
 /// reference that reads back the same bf16 inputs and accumulates in fp32, to a bf16 output tolerance.
 pub fn denseBf16(gpu: Gpu) !void {
@@ -147,12 +197,12 @@ pub fn denseBf16(gpu: Gpu) !void {
     };
 }
 
-/// add_norm_moe_xs_bolt is the Lightning add_norm kernel at <D=4096, T=512, E=9> (896 does not divide 4096; 512
+/// add_norm_moe_xs_bolt is the Lightning add_norm kernel at <D=4096, T=512, E=1> (896 does not divide 4096; 512
 /// does). The code is golden-verified; the only new risk is the T=512 threadgroup reduction and the rmsnorm. With
 /// no routed picks (WE=0) and no shared (SH=0) the block reduces to OUT = rmsnorm(H) * W, which this checks.
 pub fn addNormBolt(gpu: Gpu) !void {
     const D: usize = 4096; // Bolt hidden, baked into the instantiation
-    const E: usize = 9;
+    const E: usize = 1; // Bolt's MoE output is combined and projected before add_norm: one pick
     const rows: usize = 2;
     const mp: usize = 16; // rows padded to 16, the XS stride
     const eps: f32 = 1e-5;
