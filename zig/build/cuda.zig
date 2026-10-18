@@ -381,6 +381,12 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         load_check.dependOn(&check.step);
     }
 
+    b.step("test-runtime-api", "Optional planner, prompt piece, proposer and halt API tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
+    b.step("test-api-boundaries", "Runtime thread initialization failure regression").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Failure boundaries:"} })).step);
+    b.step("test-review-api", "Ownership rollback: ownership and final batching regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Ownership rollback:"} })).step);
+    const check_native = nativeServer(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision, check_mods.tokenizer, check_mods.living, build_options, false, null);
+    b.step("check-native-cuda-host", "Compile the real native CUDA server without kernels or GPU execution").dependOn(&check_native.step);
+
     const offer_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_vision_offer.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "qwen35", .module = mods.qwen35 } } }), .filters = if (video_filter) |f| &.{f} else &.{} }));
     offer_tests.has_side_effects = true;
     video_step.dependOn(&offer_tests.step);

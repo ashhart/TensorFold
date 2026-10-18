@@ -12,6 +12,7 @@ pub fn backend(o: api.Open) ?[]const u8 {
             !std.mem.eql(u8, o.model_type, nemotron.omni.model_type))
             return "--mtp-drafts: this CUDA family's drafts are not tunable; serve it without --mtp-drafts or --mtp-confidence";
     }
+    if (o.policy.len > 0) return "--policy is not supported by this CUDA build";
     if (o.learn != null and !o.learn_conversations) return "--learn learns shared prompt prefixes on Macs only; CUDA keeps conversation states on disk with --learn-conversations: serve with it, or without --learn, --learn-dir or --learn-gib";
     if (o.speed_up != null) return "--speed-up links two Macs: serve without --speed-up on CUDA";
     if (o.prompt_cache_over_cap) return "--prompt-cache-over-cap lifts a Mac's 70% cap: on CUDA the prompt cache takes at most the memory the weights and streams leave, so serve without it";
@@ -127,4 +128,9 @@ test "CUDA MTP controls refuse unsupported families before device work" {
         try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = model_type, .mtp_drafts = 0 }) orelse "", "--mtp-drafts");
         try std.testing.expectStringStartsWith(backend(.{ .dir = "d", .model_type = model_type, .mtp_confidence = 0 }) orelse "", "--mtp-drafts");
     }
+}
+
+test "policy options are refused by families that do not implement them" {
+    try std.testing.expect(backend(.{ .dir = "d", .model_type = "nemotron_h", .policy = "kv=fp8" }) != null);
+    try std.testing.expect(backend(.{ .dir = "d", .model_type = "lfm2_vl", .policy = "kv=fp8" }) != null);
 }
