@@ -1,5 +1,6 @@
 //! Stream slots on one Mac: a stream's caches each; prompt chunks, shared windows, keeps and drafts run on them.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const st = @import("state.zig");
 const fwd = @import("forward.zig");
@@ -30,6 +31,7 @@ pub const Slot = struct {
     mtp: bool = false, // the head follows this stream (it drafts)
     held_n: u32 = 0,
     prompt_len: u32 = 0,
+    prompt_tokens: []u32 = &.{}, // owned while a prompt fills: another stream may replace the shared ID scratch
     row0: u32 = 0, // the last window's first row
     rows: u32 = 0, // the last window's rows until a keep settles them (0: settled)
     width: u32 = 0, // the last window's rows
@@ -60,6 +62,7 @@ pub const Slots = struct {
     digest: u64 = 0, // the last window's picks hashed: a pair's ranks compare theirs
     grow: ?kept_mod.Grow = null, // the prompt cache's leave to make a resident state whole before its slot writes below it
     expire: ?kept_mod.Expire = null, // invalidates lookup immediately; destruction waits for the host's safe boundary
+    borrowed: ?kept_mod.Borrowed = null, // a lookup still restoring this state: eviction spares it while anything else fits
     ring: Ref, // u32 [ring_len]: tokens by handle, a queued round's input read from its slot on the GPU
     ring_at: u32 = 0,
     ring_cb: [ring_len]?mtl.CommandBuffer = @splat(null), // the queued round writing each slot (retained) until read
@@ -78,7 +81,7 @@ pub const Slots = struct {
             .last = try e.arena.buffer(@as(usize, e.c.hidden) * 2),
         };
         const plane = @as(usize, st.max_rows) * e.c.hidden * 2;
-        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = std.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
+        var sl: Slots = .{ .gpa = gpa, .e = e, .slots = slots, .log = platform.c.getenv("GLM_WINDOWS") != null, .rows = try e.arena.buffer(plane), .ids = try e.arena.buffer(st.max_rows * 4), .lasts = try e.arena.buffer(plane), .picks = try e.arena.buffer(st.max_rows * 4), .ring = try e.arena.buffer(ring_len * 4) };
         if (pool_mod.on(e)) pool_mod.setUp(&sl);
         return sl;
     }
@@ -91,6 +94,7 @@ pub const Slots = struct {
         var it = sl.snaps.valueIterator();
         while (it.next()) |snap| kept_mod.freeSnap(gpa, snap.*);
         sl.snaps.deinit(gpa);
+        for (sl.slots) |slot| gpa.free(slot.prompt_tokens);
         gpa.free(sl.slots);
     }
 
@@ -187,6 +191,8 @@ pub const Slots = struct {
         const least: u32 = @intCast(prompt.len + st.max_rows + 1);
         if (sl.pool != null and sl.slots[i].region == null) try pool_mod.reserve(sl, i, least, null);
         if (prompt.len + st.max_rows + 1 > sl.slots[i].s.cap) return error.ContextFull;
+        const tokens = try sl.gpa.dupe(u32, prompt);
+        errdefer sl.gpa.free(tokens);
         sl.settleAll(); // the prompt pass overwrites the projections a window's keep replays
         try sl.flush();
         sl.e.sync();
@@ -198,7 +204,7 @@ pub const Slots = struct {
         slot.held_n = 0;
         slot.rows = 0;
         slot.prompt_len = @intCast(prompt.len);
-        @memcpy(Engine.u32s(sl.e.prompt_ids, prompt.len), prompt);
+        slot.prompt_tokens = tokens;
     }
 
     /// The rows the prompt chunk at `at` takes up to `end` (a planned start or the prompt's end): generate's split.
@@ -218,7 +224,7 @@ pub const Slots = struct {
         const D = e.c.hidden;
         const last = at + n == P;
         const absorb = if (last) n - 1 else n;
-        try sl.flush();
+        try @import("prompt_input.zig").prepare(PromptInput{ .sl = sl }, slot.prompt_tokens, at, n);
         const pool = mtl.objc.Pool.push();
         defer pool.pop();
         var x = sl.ctx(slot);
@@ -245,14 +251,31 @@ pub const Slots = struct {
         if (last) fwd.head(&x, b.enc, slot.last, e.sc.logits, e.sc.picks, 1);
         try e.finish(b.cb, b.enc);
         slot.s.pos = at + n; // the pass stands here: a snapshot of it is this prefix's state
+        if (last) {
+            sl.gpa.free(slot.prompt_tokens);
+            slot.prompt_tokens = &.{};
+        }
     }
+
+    const PromptInput = struct {
+        sl: *Slots,
+        pub fn settle(p: @This()) void {
+            p.sl.settleAll();
+        }
+        pub fn flush(p: @This()) !void {
+            try p.sl.flush();
+        }
+        pub fn stage(p: @This(), at: u32, tokens: []const u32) void {
+            @memcpy(Engine.u32s(p.sl.e.prompt_ids.at(@as(usize, at) * 4), tokens.len), tokens);
+        }
+    };
 
     /// One forward over every window, each stream's rows against its own caches; `draws` rules its rows.
     pub fn window(sl: *Slots, wins: []const Win, draws: ?*const fwd.Draws) !void {
         const e = sl.e;
         var segs: [st.max_rows]fwd.Seg = undefined;
         if (wins.len == 0 or wins.len > segs.len) return error.WindowOutOfStep;
-        const t_in = std.c.mach_absolute_time();
+        const t_in = platform.c.mach_absolute_time();
         sl.settleAll();
         try sl.launch(); // the GPU runs the keeps and drafts while the window encodes
         const ids = Engine.u32s(e.sc.ids, st.max_rows);
@@ -280,7 +303,7 @@ pub const Slots = struct {
         fwd.head(&x, enc, e.sc.hidden, e.sc.logits, e.sc.picks, total);
         sl.ahead = .{ 0, 0 };
         try sl.flushBy(true);
-        const ret = std.c.mach_absolute_time();
+        const ret = platform.c.mach_absolute_time();
         if (sl.log) {
             const first = if (sl.ahead[1] > 0) sl.ahead[0] else e.gpu[0];
             std.log.info("glm window: streams {d} rows {d} gpu {d:.2} ms gap {d:.2} ms ahead {d:.2} join {d:.3} host {d:.2} encode {d:.2} ms", .{ wins.len, total, (e.gpu[1] - e.gpu[0]) * 1e3, (first - sl.last_end) * 1e3, (sl.ahead[1] - sl.ahead[0]) * 1e3, if (sl.ahead[1] > 0) (e.gpu[0] - sl.ahead[1]) * 1e3 else 0, @as(f64, @floatFromInt(t_in -| sl.last_ret)) / 24e3, @as(f64, @floatFromInt(e.committed - t_in)) / 24e3 });
@@ -475,6 +498,8 @@ pub const Slots = struct {
     pub fn release(sl: *Slots, i: u32) void {
         if (i >= sl.slots.len) return;
         const slot = &sl.slots[i];
+        sl.gpa.free(slot.prompt_tokens);
+        slot.prompt_tokens = &.{};
         slot.used = false;
         slot.rows = 0;
         slot.held_n = 0;

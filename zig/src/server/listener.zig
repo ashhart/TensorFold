@@ -1,6 +1,7 @@
 //! The listening socket: SO_REUSEADDR only (never REUSEPORT, so a second server on the port fails), backlog 128.
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("sys");
+const posix = platform.posix;
 const net = std.Io.net;
 const log = @import("log.zig");
 const Threaded = std.Io.Threaded;
@@ -53,8 +54,15 @@ pub const Listener = struct {
             const e = posix.errno(rc);
             switch (e) {
                 .SUCCESS => {
+                    const fd: posix.socket_t = @intCast(rc);
+                    const one: c_int = 1;
+                    posix.setsockopt(fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, std.mem.asBytes(&one)) catch |err| {
+                        _ = posix.system.close(fd);
+                        log.line("could not configure accepted TCP connection: {s}", .{@errorName(err)});
+                        continue;
+                    };
                     nofile_logged.store(false, .release);
-                    return .{ .fd = @intCast(rc), .peer = Threaded.addressFromPosix(&storage) };
+                    return .{ .fd = fd, .peer = Threaded.addressFromPosix(&storage) };
                 },
                 .INTR, .AGAIN, .CONNABORTED, .MFILE, .NFILE, .NOBUFS, .NOMEM => {
                     if (e != .INTR) {
@@ -131,4 +139,53 @@ test "peer text" {
     var buf: [64]u8 = undefined;
     try std.testing.expectEqualStrings("127.0.0.1", peerText(&buf, .{ .ip4 = .loopback(0) }));
     try std.testing.expectEqualStrings("::1", peerText(&buf, .{ .ip6 = .loopback(0) }));
+}
+
+test "accepted IPv4 and IPv6 TCP streams disable Nagle for incremental responses" {
+    for ([_]net.IpAddress{ .{ .ip4 = .loopback(0) }, .{ .ip6 = .loopback(0) } }) |address| {
+        const listener = try Listener.open(address);
+        defer listener.close();
+        const rc = posix.system.socket(if (address == .ip4) posix.AF.INET else posix.AF.INET6, posix.SOCK.STREAM, 0);
+        if (posix.errno(rc) != .SUCCESS) return error.SocketFailed;
+        const client: posix.socket_t = @intCast(rc);
+        defer _ = posix.system.close(client);
+        const peer: net.IpAddress = if (address == .ip4) .{ .ip4 = .loopback(listener.port()) } else .{ .ip6 = .loopback(listener.port()) };
+        var storage: Threaded.PosixAddress = undefined;
+        const len = Threaded.addressToPosix(&peer, &storage);
+        if (posix.errno(posix.system.connect(client, &storage.any, len)) != .SUCCESS) return error.ConnectFailed;
+        const accepted = acceptWithin(listener, 2000) orelse return error.AcceptFailed;
+        defer _ = posix.system.close(accepted.fd);
+        var value: c_int = 0;
+        var size: posix.socklen_t = @sizeOf(c_int);
+        try std.testing.expect(std.c.getsockopt(accepted.fd, posix.IPPROTO.TCP, posix.TCP.NODELAY, &value, &size) == 0);
+        try std.testing.expect(value != 0);
+    }
+}
+
+fn acceptWithin(listener: Listener, timeout_ms: u32) ?Listener.Accepted {
+    const Watchdog = struct {
+        stop: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+
+        fn run(w: *@This(), milliseconds: u32) void {
+            var elapsed: u32 = 0;
+            while (elapsed < milliseconds and !w.done.load(.acquire)) : (elapsed += 10) {
+                std.Io.sleep(log.io(), .fromMilliseconds(10), .awake) catch break;
+            }
+            if (!w.done.load(.acquire)) w.stop.store(true, .release);
+        }
+    };
+    var watchdog: Watchdog = .{};
+    const thread = std.Thread.spawn(.{}, Watchdog.run, .{ &watchdog, timeout_ms }) catch return null;
+    defer {
+        watchdog.done.store(true, .release);
+        thread.join();
+    }
+    return listener.accept(&watchdog.stop);
+}
+
+test "the accepted-stream test stops when no usable connection arrives" {
+    const listener = try Listener.open(.{ .ip4 = .loopback(0) });
+    defer listener.close();
+    try std.testing.expect(acceptWithin(listener, 20) == null);
 }

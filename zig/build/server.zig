@@ -29,10 +29,11 @@ pub fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     return .{ .serve = serveModule(b, target, optimize, j, tokenizer, lanes), .json = j };
 }
 
-/// A server module's `json` and `dsv41_serve` imports over its `tokenizer`; returns `json` (its tests run apart).
+/// A server module's `json`, `lanes` (the engine API's) and `dsv41_serve` imports; returns `json`.
 pub fn addTo(b: *std.Build, m: *std.Build.Module, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, tokenizer: *std.Build.Module, lanes: *std.Build.Module) *std.Build.Module {
     const s = family(b, target, optimize, tokenizer, lanes);
     m.addImport("json", s.json);
+    m.addImport("lanes", lanes);
     m.addImport("dsv41_serve", s.serve);
     return s.json;
 }

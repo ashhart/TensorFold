@@ -82,7 +82,7 @@ const Fixture = struct {
     }
 };
 
-test "GLM expiry: evicting the selected restore prefix falls back without a dangling snapshot" {
+test "GLM expiry: a failed relocation keeps its selected restore borrow alive until reported" {
     var f: Fixture = .{};
     f.init();
     defer f.deinit();
@@ -93,17 +93,22 @@ test "GLM expiry: evicting the selected restore prefix falls back without a dang
     const entry = (try f.store.lookup(arena.allocator(), &prompt, 1500, &.{}, &.{}, &.{})).entry.?;
     f.slots[1].region = .{ .start = 12, .blocks = 4 };
     f.critical = true;
-    try pool.reserve(&f.sl, 0, 3000, snap);
+    const Failed = struct {
+        pub fn move(_: @This(), _: *slot_mod.Slots, _: *const Snap, _: u32) !void {
+            return error.PoolMoveNotDrained;
+        }
+    };
+    try std.testing.expectError(error.PoolMoveNotDrained, pool.reserveWith(&f.sl, 0, 3000, snap, Failed{}));
     f.critical = false;
-    try std.testing.expect(snap.stale and snap.held == null);
-    try std.testing.expect(f.store.find(&prompt, &.{}, &.{}) == null);
+    try std.testing.expect(!snap.stale and snap.held != null and f.slots[0].region == null);
+    try std.testing.expect(f.store.find(&prompt, &.{}, &.{}) != null);
     try std.testing.expectEqual(@as(usize, 0), f.drops);
     try std.testing.expectEqual(@as(u32, 1500), entry.at);
     f.store.resumed(entry, &prompt, false);
     try std.testing.expectEqual(@as(usize, 1), f.drops);
     try std.testing.expect(!f.early_drop);
     try std.testing.expectEqual(@as(u64, 0), f.store.held);
-    try std.testing.expectEqual(@as(u64, 1), f.store.counts.evicted);
+    try std.testing.expectEqual(@as(u64, 0), f.store.counts.evicted);
     try std.testing.expectEqual(@as(u64, 1), f.store.counts.failed);
     try std.testing.expect((try f.store.lookup(arena.allocator(), &prompt, 1500, &.{}, &.{}, &.{})).entry == null);
 }
@@ -126,6 +131,72 @@ test "GLM expiry: multiple overwritten snapshots do not drop inside the backend 
     try std.testing.expectEqual(@as(u64, 2), f.store.counts.evicted);
     try std.testing.expectEqual(@as(usize, 0), f.sl.snaps.count());
     try std.testing.expect(!f.early_drop);
+}
+
+test "GLM expiry: a long continuing turn relocates its own prefix instead of evicting it" {
+    for ([_]struct { at: u32, old: ?u32, len: u32, previous: u32, start: u32 }{
+        .{ .at = 99180, .old = null, .len = 101398, .previous = 99409, .start = 440 },
+        .{ .at = 107824, .old = 107418, .len = 113214, .previous = 109844, .start = 400 },
+        .{ .at = 187000, .old = null, .len = 188000, .previous = 187001, .start = 100 },
+    }) |case| {
+        var f: Fixture = .{};
+        f.init();
+        defer f.deinit();
+        f.sl.pool.?.blocks = 1024;
+        f.engine.c.kv_lora = 3;
+        f.engine.c.i_dim = 2;
+        try std.testing.expect(case.start + (case.previous + 49152 + 17 + 4 + 255) / 256 <= 1024);
+        try std.testing.expect(case.start + (case.len + 49152 + 17 + 4 + 255) / 256 > 1024);
+        const prompt = try a.alloc(u32, case.len);
+        defer a.free(prompt);
+        for (prompt, 0..) |*t, i| t.* = @intCast(i % 317);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const blocks = (case.at + 4 + 255) / 256;
+        if (case.old) |old| _ = try f.keep(prompt, old, null, .{ case.start, blocks });
+        const own = try f.keep(prompt, case.at, null, .{ case.start, blocks });
+        const entry = (try f.store.lookup(arena.allocator(), prompt, case.len - 19, &.{}, &.{}, &.{})).entry.?;
+        const Ref = struct {
+            data: []u8,
+            pub fn addr(r: @This()) [*]u8 {
+                return r.data.ptr;
+            }
+        };
+        const Part = struct { keys: Ref, ik: Ref, ig: Ref, pool: Ref };
+        const Mover = struct {
+            parts: []Part,
+            pub fn move(m: @This(), sl: *slot_mod.Slots, snap: *const Snap, start: u32) !void {
+                @import("pool_move.zig").prefix(&sl.e.c, m.parts, snap.held.?[0], start, snap.at);
+            }
+        };
+        var parts: [1]Part = undefined;
+        var buffers: [4][]u8 = undefined;
+        for (&buffers, 0..) |*bytes, k| bytes.* = try a.alloc(u8, 262144 * @as(usize, if (k == 0) 6 else 4));
+        defer for (buffers) |bytes| a.free(bytes);
+        parts[0] = .{ .keys = .{ .data = buffers[0] }, .ik = .{ .data = buffers[1] }, .ig = .{ .data = buffers[2] }, .pool = .{ .data = buffers[3] } };
+        for (buffers, 0..) |bytes, k| {
+            const stride: usize = if (k == 0) 6 else 4;
+            @memset(bytes, 0xab);
+            const rows = own.at / @as(u32, if (k == 3) 4 else 1) + @intFromBool(k == 3);
+            const start: usize = @as(usize, case.start) * 256 / @as(usize, if (k == 3) 4 else 1) * stride;
+            for (bytes[start..][0 .. rows * stride], 0..) |*b, j| b.* = @truncate((j * 17) ^ (j >> 8) ^ (j >> 16) ^ k);
+        }
+        try pool.reserveWith(&f.sl, 0, case.len + 49152 + 17, own, Mover{ .parts = &parts });
+        try std.testing.expect(kept.usable(&f.sl, own) and own.held != null);
+        try std.testing.expectEqual(@as(u32, 0), f.slots[0].region.?.start);
+        try std.testing.expectEqual(@as(u32, 0), own.held.?[0]);
+        for (buffers, 0..) |bytes, k| {
+            const stride: usize = if (k == 0) 6 else 4;
+            const rows = prompt.len / @as(usize, if (k == 3) 4 else 1) + @intFromBool(k == 3);
+            const restored = own.at / @as(u32, if (k == 3) 4 else 1) + @intFromBool(k == 3);
+            for (bytes[0 .. restored * stride], 0..) |b, j| try std.testing.expectEqual(@as(u8, @truncate((j * 17) ^ (j >> 8) ^ (j >> 16) ^ k)), b);
+            for (bytes[restored * stride .. rows * stride], restored * stride..) |*b, j| b.* = @truncate((j * 17) ^ (j >> 8) ^ (j >> 16) ^ k);
+            for (bytes[0 .. rows * stride], 0..) |b, j| try std.testing.expectEqual(@as(u8, @truncate((j * 17) ^ (j >> 8) ^ (j >> 16) ^ k)), b);
+        }
+        f.store.resumed(entry, prompt, true);
+        try std.testing.expectEqual(@as(u64, 1), f.store.counts.hits);
+        try std.testing.expectEqual(@as(u64, 0), f.store.counts.failed);
+    }
 }
 
 test "GLM expiry: peer drops wait until a mirrored chunk can finish" {

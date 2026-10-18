@@ -53,6 +53,7 @@ pub const flags = [_]Flag{
     .{ .name = "--vision-urls", .kind = .store_true, .native = true },
     .{ .name = "--vision-offload", .kind = .store_true },
     .{ .name = "--vision-max-images", .native = true },
+    .{ .name = "--vision-max-videos", .native = true },
     .{ .name = "--vision-image-tokens", .native = true },
     .{ .name = "--vision-video-tokens", .native = true },
     .{ .name = "--context", .native = true },
@@ -77,6 +78,7 @@ pub const flags = [_]Flag{
     .{ .name = "--drafter", .native = true },
     .{ .name = "--drafter-bits", .choices = &.{ "0", "4" }, .native = true },
     .{ .name = "--record", .native = true },
+    .{ .name = "--kv-cache", .choices = &.{ "bf16", "fp8" }, .native = true },
     .{ .name = "--mtp-drafts", .native = served("--mtp-drafts") },
     .{ .name = "--mtp-confidence", .native = served("--mtp-confidence") },
     .{ .name = "--lane-kernels", .choices = &.{ "auto", "on", "off" } },
@@ -171,6 +173,7 @@ pub const Args = struct {
     drafter: ?[]const u8 = null,
     drafter_bits: u8 = 4,
     record: ?[]const u8 = null, // drafter training rows written under this folder
+    kv_cache: []const u8 = "bf16", // fp8: e4m3 attention caches with a scale a row, about twice the context
     slide: bool = false, // Sliding Weights learns what /v1/slide/learn is told into the served weights, live
     slide_graph: ?[]const u8 = null, // the Sliding Weights fact graph's file (null: memory only)
     parallel: []const u8 = "auto",
@@ -190,6 +193,7 @@ pub const Args = struct {
     vision: bool = false, // image input (GLM-5.3-Flash): data-URL image_url parts in user messages
     vision_urls: bool = false, // with --vision, public HTTPS image URLs too (media_fetch.zig)
     vision_max_images: u32 = 4,
+    vision_max_videos: u32 = 2,
     vision_image_tokens: u32 = 4096,
     vision_image_tokens_set: bool = false, // --vision-image-tokens given: a family's own default no longer applies
     vision_video_tokens: u32 = 16384, // the visual tokens a request's videos share (the processor's max_image_tokens)
@@ -295,7 +299,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.learn_conversations = true;
     } else if (is(name, "--learn-daily-gib")) {
         out.learn_daily_gib = try gib(u, a, name, v);
-    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
+    } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
             if (!(f > 0 and f <= 1)) return fail(u, a, "argument --compact-at: expected auto or a fraction in (0, 1]: '{s}'", .{v});
@@ -309,6 +313,10 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const n = try int(u, a, name, v);
         if (n < 1 or n > 64) return fail(u, a, "argument --vision-max-images: expected 1 to 64 images: '{s}'", .{v});
         out.vision_max_images = @intCast(n);
+    } else if (is(name, "--vision-max-videos")) {
+        const n = try int(u, a, name, v);
+        if (n < 1 or n > 16) return fail(u, a, "argument --vision-max-videos: expected 1 to 16 videos: '{s}'", .{v});
+        out.vision_max_videos = @intCast(n);
     } else if (is(name, "--vision-video-tokens")) {
         const n = try int(u, a, name, v);
         if (n < 64 or n > 262144) return fail(u, a, "argument --vision-video-tokens: expected 64 to 262144 tokens: '{s}'", .{v});
@@ -411,6 +419,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .drafter = args.drafter,
         .drafter_bits = args.drafter_bits,
         .record = args.record,
+        .kv8 = std.mem.eql(u8, args.kv_cache, "fp8"),
         .speed_up = args.speed_up,
         .prompt_cache_gib = args.prompt_cache_gib,
         .prompt_cache_over_cap = args.prompt_cache_over_cap,
@@ -432,7 +441,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
         .master = args.master,
         .master_port = args.master_port,
         .policy = args.policy,
-        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .video_tokens = args.vision_video_tokens } else null,
+        .vision = if (args.vision) .{ .image_tokens = args.vision_image_tokens, .image_tokens_set = args.vision_image_tokens_set, .max_images = args.vision_max_images, .max_videos = args.vision_max_videos, .video_tokens = args.vision_video_tokens } else null,
     };
 }
 

@@ -171,21 +171,23 @@ __device__ __forceinline__ void lane(const uint8_t* __restrict__ x, const uint8_
 
 }  // namespace tf_ck
 
-// The instances by tile (16, 32 or 64 rows by 64 columns; S skips m16 tiles past M) and K-slice meeting (C: cluster).
-#define TF_CK8(NAME, BM, SKIP, CLUSTER)                                                                              \
-    extern "C" __global__ void __launch_bounds__(128)                                                                \
+// S skips m16 tiles past M; C meets K slices in a cluster without changing their summation order.
+#define TF_CK8(NAME, BM, BN, WM, SKIP, CLUSTER)                                                                      \
+    extern "C" __global__ void __launch_bounds__(WM * 128)                                                           \
         NAME(const uint8_t* __restrict__ x, const uint8_t* __restrict__ w, float alpha, __nv_bfloat16* __restrict__ out, \
              float* __restrict__ part, int M, int N, int K, int SK, int group) {                                     \
-        tf_ck::lane<tf_ck::Cfg<BM, 64, 1, 4, SKIP>, CLUSTER>(x, w, alpha, out, part, M, N, K, SK, group);           \
+        tf_ck::lane<tf_ck::Cfg<BM, BN, WM, 4, SKIP>, CLUSTER>(x, w, alpha, out, part, M, N, K, SK, group);           \
     }
-TF_CK8(tf_ck8_16, 16, false, false)
-TF_CK8(tf_ck8_16c, 16, false, true)
-TF_CK8(tf_ck8_32, 32, false, false)
-TF_CK8(tf_ck8_32c, 32, false, true)
-TF_CK8(tf_ck8_64, 64, false, false)
-TF_CK8(tf_ck8_64c, 64, false, true)
-TF_CK8(tf_ck8_64s, 64, true, false)
-TF_CK8(tf_ck8_64sc, 64, true, true)
+TF_CK8(tf_ck8_16, 16, 64, 1, false, false)
+TF_CK8(tf_ck8_16c, 16, 64, 1, false, true)
+TF_CK8(tf_ck8_32, 32, 64, 1, false, false)
+TF_CK8(tf_ck8_32c, 32, 64, 1, false, true)
+TF_CK8(tf_ck8_64, 64, 64, 1, false, false)
+TF_CK8(tf_ck8_64c, 64, 64, 1, false, true)
+TF_CK8(tf_ck8_64s, 64, 64, 1, true, false)
+TF_CK8(tf_ck8_64sc, 64, 64, 1, true, true)
+TF_CK8(tf_ck8_128, 128, 64, 2, true, false)
+TF_CK8(tf_ck8_128c, 128, 128, 2, true, true)
 
 // The slices summed in slice order, one fp32 add a slice, then the factor and one bf16 rounding.
 extern "C" __global__ void __launch_bounds__(256)
