@@ -71,6 +71,31 @@ pub const Failure = error{ Refused, Cancelled, Failed, OutOfMemory };
 const nowNs = clock.nowNs;
 const seconds = clock.seconds;
 
+test "Server recovery: token staging allocation failure ends the loop without consuming tokens" {
+    for (0..2) |fail_index| {
+        var m: Mailbox = .{ .io = std.testing.io, .gpa = std.testing.allocator, .finished = true };
+        defer m.deinit();
+        try m.tokens.append(std.testing.allocator, 42);
+        try m.chunks.append(std.testing.allocator, 1);
+        try m.rows.append(std.testing.allocator, .{ .token = 42, .logprob = -1 });
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var g: Generation = undefined;
+        g.a = failing.allocator();
+        g.box = &m;
+        g.chunk_index = 0;
+        g.consumed = 0;
+        g.lp = .{};
+        const Gone = struct {
+            pub fn check(_: @This()) bool {
+                return false;
+            }
+        };
+        try std.testing.expectError(error.OutOfMemory, g.loop(Gone{}));
+        try std.testing.expectEqual(@as(usize, 0), g.consumed);
+        try std.testing.expectEqual(@as(usize, 0), g.chunk_index);
+    }
+}
+
 /// Python's ``bool(fields.get(key))`` on the sampling fields.
 fn flag(f: Value, key: []const u8) ?bool {
     const v = f.get(key) orelse return null;
@@ -384,9 +409,16 @@ const Generation = struct {
             var ended = false;
             if (g.chunk_index < m.chunks.items.len) {
                 const end = m.chunks.items[g.chunk_index];
+                chunk = g.a.dupe(u32, m.tokens.items[g.consumed..end]) catch |e| {
+                    m.mutex.unlock(m.io);
+                    return e;
+                };
+                if (g.lp) |*l| l.rows.appendSlice(g.a, m.rows.items[g.consumed..end]) catch |e| {
+                    g.a.free(chunk.?);
+                    m.mutex.unlock(m.io);
+                    return e;
+                };
                 g.chunk_index += 1;
-                chunk = g.a.dupe(u32, m.tokens.items[g.consumed..end]) catch null;
-                if (g.lp) |*l| l.rows.appendSlice(g.a, m.rows.items[g.consumed..end]) catch {};
                 g.consumed = end;
             } else if (m.finished) {
                 ended = true;

@@ -21,37 +21,10 @@ pub fn plainUrl(url: []const u8, query: ?usize) Error!void {
     if (url.len - q > cap) return error.Carries;
 }
 
-/// Whether an IPv4 address is public: not private, loopback, link-local, shared, reserved or multicast.
-pub fn publicIp4(b: [4]u8) bool {
-    return !(b[0] == 0 or b[0] == 10 or b[0] == 127 or b[0] >= 224 or
-        (b[0] == 100 and b[1] >= 64 and b[1] < 128) or
-        (b[0] == 169 and b[1] == 254) or
-        (b[0] == 172 and b[1] >= 16 and b[1] < 32) or
-        (b[0] == 192 and b[1] == 0 and (b[2] == 0 or b[2] == 2)) or
-        (b[0] == 192 and b[1] == 168) or
-        (b[0] == 198 and (b[1] == 18 or b[1] == 19)) or
-        (b[0] == 198 and b[1] == 51 and b[2] == 100) or
-        (b[0] == 203 and b[1] == 0 and b[2] == 113));
-}
-
-/// Whether an IPv6 address is public: global unicast, and an embedded IPv4 address must be public too.
-pub fn publicIp6(b: [16]u8) bool {
-    const zero10 = std.mem.allEqual(u8, b[0..10], 0);
-    if (zero10 and b[10] == 0xff and b[11] == 0xff) return publicIp4(b[12..16].*); // IPv4-mapped
-    if (zero10 and b[10] == 0 and b[11] == 0) return false; // unspecified, loopback and IPv4-compatible
-    if ((b[0] & 0xfe) == 0xfc or b[0] == 0xff) return false; // unique local, multicast
-    if (b[0] == 0xfe and (b[1] & 0xc0) == 0x80) return false; // link-local
-    if (b[0] == 0x20 and b[1] == 0x01 and b[2] == 0x0d and b[3] == 0xb8) return false; // documentation
-    if (b[0] == 0x00 and b[1] == 0x64 and b[2] == 0xff and b[3] == 0x9b) return publicIp4(b[12..16].*); // NAT64
-    return (b[0] & 0xe0) == 0x20; // 2000::/3
-}
-
-fn publicAddress(addr: Io.net.IpAddress) bool {
-    return switch (addr) {
-        .ip4 => |x| publicIp4(x.bytes),
-        .ip6 => |x| publicIp6(x.bytes),
-    };
-}
+const address_policy = @import("../public_address.zig");
+pub const publicIp4 = address_policy.publicIp4;
+pub const publicIp6 = address_policy.publicIp6;
+const publicAddress = address_policy.publicIp;
 
 pub const Client = struct {
     http: std.http.Client,
@@ -187,7 +160,7 @@ pub const Client = struct {
 
     /// The IPv4 address to connect to: an IP literal itself, else the first public IPv4; every address must be public.
     fn resolve(c: *Client, a: Allocator, host: []const u8, port: u16) Error![]const u8 {
-        if (std.ascii.eqlIgnoreCase(host, "localhost") or std.ascii.endsWithIgnoreCase(host, ".localhost")) return error.NotPublic;
+        if (!address_policy.publicHost(host)) return error.NotPublic;
         if (Io.net.IpAddress.parse(host, port)) |ip| {
             if (!publicAddress(ip)) return error.NotPublic;
             return if (ip == .ip4) host else error.Ipv6Only; // only an IPv4 address can be pinned under a TLS name
@@ -244,7 +217,8 @@ test "public addresses only" {
     const link: [16]u8 = .{ 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 };
     const global: [16]u8 = .{ 0x26, 0x06, 0x47, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11, 0x11 };
     try std.testing.expect(!publicIp6(loop6) and !publicIp6(mapped_private) and !publicIp6(ula) and !publicIp6(link));
-    try std.testing.expect(publicIp6(mapped_public) and publicIp6(global));
+    try std.testing.expect(!publicIp6(mapped_public));
+    try std.testing.expect(publicIp6(global));
 }
 
 test "redirect locations resolve against the page" {

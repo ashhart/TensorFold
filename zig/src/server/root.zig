@@ -140,4 +140,5 @@ test {
 
 test {
     _ = @import("slide_subject_guard_test.zig");
+    _ = @import("server_recovery_test.zig");
 }

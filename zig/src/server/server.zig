@@ -333,9 +333,14 @@ pub const Server = struct {
             if (!request_guard.allow(&conn, browser, a)) break;
             if (!srv.authenticate(&conn, a)) break;
             if (conn.header("Expect")) |expect| if (std.ascii.eqlIgnoreCase(expect, "100-continue") and std.mem.order(u8, conn.version, "HTTP/1.1") != .lt) conn.sendContinue();
-            routes.dispatch(srv, &conn, a);
+            srv.dispatch(&conn, a);
             if (conn.close or conn.broken) break;
         }
+    }
+
+    pub fn dispatch(srv: *Server, conn: *http_conn.Conn, a: Allocator) void {
+        routes.dispatch(srv, conn, a);
+        if (!conn.response_complete) conn.close = true;
     }
 
     fn countReply(ctx: *anyopaque, conn: *http_conn.Conn, code: u16) void {

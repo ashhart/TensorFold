@@ -41,6 +41,7 @@ pub const Conn = struct {
     timeouts: Timeouts = .{},
     budget: deadline.Budget = .{},
     read_hooks: ?ReadHooks = null,
+    write_hooks: ?struct { ctx: *anyopaque, write: *const fn (*anyopaque, []const u8) error{Closed}!void } = null,
     buf: []u8,
     start: usize = 0,
     end: usize = 0,
@@ -48,6 +49,7 @@ pub const Conn = struct {
     gpa: Allocator,
     /// Per request, reset by ``readRequest``.
     close: bool = true,
+    response_complete: bool = false,
     version: []const u8 = "HTTP/0.9",
     method: []const u8 = "",
     path: []const u8 = "",
@@ -149,6 +151,7 @@ pub const Conn = struct {
     /// Writes ``data`` whole; a write that cannot progress for ``write_ms`` marks the client gone.
     pub fn writeAll(c: *Conn, data: []const u8) error{Closed}!void {
         if (c.broken) return error.Closed;
+        if (c.write_hooks) |h| return h.write(h.ctx, data) catch c.fail();
         var sent: usize = 0;
         while (sent < data.len) {
             var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.OUT, .revents = 0 }};
@@ -192,6 +195,7 @@ pub const Conn = struct {
         defer c.budget = .{};
         c.key_label = null;
         c.counted = false;
+        c.response_complete = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => {
@@ -302,6 +306,7 @@ pub const Conn = struct {
 
     /// Python's ``send_response`` head: status line, Server and Date (nothing for HTTP/0.9).
     pub fn startResponse(c: *Conn, code: u16, phrase: ?[]const u8) Allocator.Error!void {
+        c.response_complete = false;
         c.out.clearRetainingCapacity();
         if (c.quiet_log) c.quiet_log = false else log.request(c, code);
         if (code >= 200 and !c.counted) {
@@ -327,6 +332,7 @@ pub const Conn = struct {
         c.out.appendSlice(c.gpa, body) catch return c.fail();
         try c.writeAll(c.out.items);
         c.out.clearRetainingCapacity();
+        c.response_complete = true;
     }
 
     /// A JSON reply with Python's ``_send_json`` headers.
