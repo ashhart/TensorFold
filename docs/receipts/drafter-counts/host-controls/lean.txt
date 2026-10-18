@@ -1,0 +1,8 @@
+# lean_check.py on 616d3065, then lean_new.py against main (b7ce8121) and the merge base (76aafcf2), as CI runs it
+head: 2626 files, 503 problems
+main b7ce8121: 2625 files, 503 problems
+merge base 76aafcf2: 2625 files, 503 problems
+against main: lean: 503 problems, 503 on the base, 0 new
+exit=0
+against the merge base: lean: 503 problems, 503 on the base, 0 new
+exit=0

@@ -1,0 +1,9 @@
+# Host controls for the draft counts' overflow fix: CPU only, a MacBook (Apple silicon, macOS), 19 October 2026.
+# Zig 0.17.0. Every test run is the repository's host test step, from the repository root, with a private cache:
+#   zig build test -Dcpu=apple_m1 --summary all -j8 --cache-dir <worktree>/.zc
+
+host-tests.log        the tree of 616d3065: the fix, its two regression tests and the doc line (first line: the SHA)
+negative-control.log  the same tree with zig/src/server/benchmark_drafts.zig as d2dfb603 has it (unchecked sums)
+                      and the new run test kept; the file was restored with git checkout afterwards
+lean.txt              tools/zig/lean_check.py and tools/zig/lean_new.py, as the no-gpu workflow runs them
+fmt.txt               zig fmt --check build.zig zig, as the zig-fmt workflow runs it
