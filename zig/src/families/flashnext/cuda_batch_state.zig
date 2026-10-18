@@ -54,6 +54,9 @@ const top = wt.index_top;
 const idw = wt.index_idw;
 const cubin_qmm: [:0]const u8 = "_ZN6tf_qmm10qmm_kernelILi32ELi16ELi64ELi1ELi4ELi4ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
 const qmm_smem: u32 = 9472;
+/// Prompt rows on qmm.cu's arithmetic (flashnext_fact.cu): 64 x 128 tiles, two groups a stage, the lane tile's bits.
+const cubin_fact: [:0]const u8 = "_ZN4fact11fact_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELi2ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
+pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
 const plan_small: usize = cuda.grouped.small;
@@ -142,6 +145,8 @@ pub const Kernels = struct {
     router: cuda.grouped.Router,
     moe: cuda.experts.RowsExperts,
     lane: cuda.Function,
+    fact_mod: cuda.Module,
+    fact: cuda.Function,
     native_lane: cuda.qmmf.Lane,
     nvfp4: cuda.experts.Nvfp4Experts,
     front: cuda.Function,
@@ -168,6 +173,10 @@ pub const Kernels = struct {
         errdefer k.batch.unload();
         k.lane = try k.qmm.function(cubin_qmm);
         try k.lane.allowDynamicShared(qmm_smem);
+        k.fact_mod = try cuda.Module.load(d, cuda.kernels.flashnext_fact);
+        errdefer k.fact_mod.unload();
+        k.fact = try k.fact_mod.function(cubin_fact);
+        try k.fact.allowDynamicShared(fact_smem);
         k.router = try cuda.grouped.Router.resolve(k.experts);
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.capability(0)) / 10);
@@ -196,6 +205,7 @@ pub const Kernels = struct {
         k.batch.unload();
         k.rows.unload();
         k.experts.unload();
+        k.fact_mod.unload();
         k.qmm.unload();
     }
 };

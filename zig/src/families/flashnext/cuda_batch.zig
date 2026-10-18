@@ -120,8 +120,10 @@ pub fn Pass(comptime Tri: type) type {
                 if (sk > 1) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), self.stream.handle), "cuMemsetD8Async");
                 return;
             }
-            const bm: usize = 16;
-            const bn: usize = 64;
+            // from 64 rows the prompt tile (flashnext_fact.cu), bit for bit the 16-row lane tile
+            const big = m >= 64;
+            const bm: usize = if (big) 64 else 16;
+            const bn: usize = if (big) 128 else 64;
             const k = w.k;
             const rows_t = cdiv(m, bm);
             const cols_t = cdiv(w.n, bn);
@@ -136,7 +138,10 @@ pub fn Pass(comptime Tri: type) type {
             a.add(out);
             a.add(part);
             for ([_]usize{ m, w.n, k, sk, npad, k, sweep }) |v| a.add(cint(v));
-            try cuda.launch.launch(self.k.lane, .{ .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(sk) }, .block = .{ .x = 128 }, .shared = qmm_smem }, self.stream, &a);
+            const f = if (big) self.k.fact else self.k.lane;
+            const block: u32 = if (big) 256 else 128;
+            const shared: u32 = if (big) parts.fact_smem else qmm_smem;
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(sk) }, .block = .{ .x = block }, .shared = shared }, self.stream, &a);
         }
 
         pub fn sumSlices(self: *Self, part: u64, out: u64, bf16: bool, n: usize, sk: usize) !void {
