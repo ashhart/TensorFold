@@ -35,6 +35,9 @@ __device__ __forceinline__ void clean(uint4* vs, int threads) {
     }
 }
 
+// x a, an infinite x (the replay's, already weighed in float64) left as it is whatever the rescale.
+__device__ __forceinline__ float keep(float x, float a) { return isinf(x) ? x : __fmul_rn(x, a); }
+
 // The least x whose float64 exp is not 0: a key whose score is further below its row's max weighs 0 in attention_ref.
 __device__ __forceinline__ double least() { return __longlong_as_double(0xc0874910d52d3051ll); }
 

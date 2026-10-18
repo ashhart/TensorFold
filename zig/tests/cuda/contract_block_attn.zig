@@ -145,6 +145,28 @@ pub const Block = struct {
         self.reach(k0, v0, 6, 24, null, 19); // the block's first key
         if (s0 > window) self.reach(k0, v0, 5, 20, s0 - window + 8, 17); // the window's edge tile, rows 0 to 8 see it
         self.under(k0, v0);
+        if (self.ns > 1) self.ownMax(1, 7, 23);
+    }
+
+    /// Stream j, key head kh: block key 0 all 8, every other key all -8 with +inf at e, the block's row 0 querying all 2
+    /// (head 4 kh: weights below float32's least, inf) and all 8 (head 4 kh + 1: float64 weights of 0, NaN).
+    fn ownMax(self: *Block, j: usize, kh: usize, e: usize) void {
+        const L = self.len();
+        const rows = self.ns * L;
+        const s = self.ctxLen(j);
+        const x = self.ctx.items[j];
+        const inf = c.toBf16(std.math.inf(f32));
+        const G = h / hk;
+        @memset(self.q.items[((kh * G) * rows + j * L) * D ..][0..D], c.toBf16(2));
+        @memset(self.q.items[((kh * G + 1) * rows + j * L) * D ..][0..D], c.toBf16(8));
+        for (0..s) |k| {
+            @memset(x[(kh * s + k) * D ..][0..D], c.toBf16(-8));
+            x[hk * s * D + (kh * s + k) * D + e] = inf;
+        }
+        for (0..L) |col| {
+            @memset(self.kb.items[(kh * rows + j * L + col) * D ..][0..D], c.toBf16(if (col == 0) 8 else -8));
+            if (col != 0) self.vb.items[(kh * rows + j * L + col) * D + e] = inf;
+        }
     }
 
     /// Head `head`'s row 0: query all 8, key s0 - 1 all 8, key `at` (null: block key 0) all -8 with +inf at e.
