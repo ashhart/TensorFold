@@ -88,7 +88,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     const stub_kernels = b.createModule(.{ .root_source_file = b.addWriteFiles().add("kernels.zig", stub) });
     const host = engineModules(b, b.graph.host, .Debug, stub_kernels, null);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.hip })).step);
-    test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.family })).step);
+    const family_host = b.addRunArtifact(b.addTest(.{ .root_module = host.family }));
+    test_step.dependOn(&family_host.step);
+    b.step("test-qwen35-hip-host", "Qwen HIP family CPU tests with inert kernels").dependOn(&family_host.step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.flashnext })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.serve })).step);
     test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.native })).step);

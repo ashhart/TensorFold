@@ -341,7 +341,11 @@ pub const Hip = struct {
 
     /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
-        const h = of(ptr);
+        return promptStep(of(ptr), s);
+    }
+
+    /// The real prompt dispatcher, also exercised with a recording engine on the host.
+    pub fn promptStep(h: anytype, s: *lanes.Stream) anyerror!bool {
         if (s.isCancelled()) return error.Cancelled;
         const lane = if (h.lanes.get(s)) |l| (if (l.fill != null) l else try h.begin(s)) else try h.begin(s);
         const prompt = s.prompt();
@@ -572,4 +576,8 @@ test "a prompt chunk's forward polls its stream's cancel" {
     var plain = try lanes.Stream.init(std.testing.allocator, .{ .id = "plain", .prompt = &.{ 1, 2, 3 }, .max_new = 8 });
     defer plain.deinit(std.testing.allocator);
     try std.testing.expect(Hip.cancelOf(&plain) == null); // no hook: nothing to poll, no sync a layer
+}
+
+test {
+    _ = @import("hip_prompt_test.zig");
 }

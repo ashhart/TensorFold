@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Qwen on single-GPU HIP polls cancellation inside prompt chunks, releasing cancelled work at layer boundaries (#1028). Thanks to @ThinkOffApp.
+
 - Metal serving keeps weights, stream state and draft, image and speech working buffers resident between requests within the memory bound. GLM enables the shared set by default; `GLM_RESIDENCY=0` turns it off.
 
 - Flash Next on Metal fills response prompts through the shared lane host, with at most 32 prompt rows per choice beside a decoder. A long prompt started alone can hand unfinished work to the host when another request arrives, retaining its session and MTP lookahead (#1032). Thanks to @tpischke.
