@@ -2,10 +2,12 @@
 const std = @import("std");
 const api = @import("engine_api");
 const nemotron = @import("nemotron");
+pub const deepseek_release_message = "DeepSeek-V4.1 is not served by this release's CUDA server; its whole-model gate is #827";
 
 /// Flags refused whatever the family; null when `o` may open.
 pub fn backend(o: api.Open) ?[]const u8 {
-    if (@import("sys").experimental.refusal(o.model_type, @import("sys").getenv("TF_EXPERIMENTAL"))) |text| return text;
+    if (std.mem.eql(u8, o.model_type, "deepseek_v4") or std.mem.eql(u8, o.model_type, "deepseek_v41"))
+        return deepseek_release_message;
     if (o.mtp_drafts) |n| if (n > nemotron.native.max_drafts) return std.fmt.comptimePrint("--mtp-drafts: the CUDA engine drafts at most {d}", .{nemotron.native.max_drafts});
     if (o.mtp_confidence) |c| if (!(c >= 0 and c <= 1)) return "--mtp-confidence must be from 0 to 1";
     if (o.mtp_drafts != null or o.mtp_confidence != null) {

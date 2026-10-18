@@ -14,7 +14,7 @@ test "experimental family: DeepSeek defaults to refused until the exact opt-in" 
 
 test "experimental family: admission precedes CUDA model or asset work" {
     const common = @embedFile("src/native/cuda_refusal.zig");
-    const shared = std.mem.indexOf(u8, common, "experimental.refusal(").?;
+    const shared = std.mem.indexOf(u8, common, "return deepseek_release_message;").?;
     try std.testing.expect(shared < std.mem.indexOf(u8, common, "if (o.mtp_drafts)").?);
     const server = @embedFile("src/families/deepseek_v41/serve_engine.zig");
     const entry = std.mem.indexOf(u8, server, "pub fn open(").?;
