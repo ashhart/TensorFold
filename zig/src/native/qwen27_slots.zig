@@ -172,6 +172,9 @@ pub fn unbind(b: *Metal, s: *lanes.Stream) void {
     b.owners[slot] = null;
     b.runner.rope[slot] = .{};
     if (slot == 0) promote(b);
+    var live: usize = 0;
+    for (b.owners[0..b.runner.slots]) |owner| live += @intFromBool(owner != null);
+    if (live <= 1) b.runner.trimBefore();
 }
 
 /// Slot 0 freed while other streams decode: the lowest one moves there and drafts from its next round on.

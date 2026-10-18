@@ -61,7 +61,7 @@ pub const Host = struct {
     /// A slot's first use: whether its memory fits beside everything taken and the margin, kept states freed first.
     fn roomFor(ptr: *anyopaque, bytes: usize, s: *const lanes.Stream) bool {
         const h = of(ptr);
-        return takeRoom(if (h.cache) |*c| c else null, room(h.model), bytes, s.reuse.saved, s.prompt());
+        return takeRoom(if (h.cache) |*c| c else null, room(h.model) -| h.runner.gdn.missingBeforeBytes(), bytes, s.reuse.saved, s.prompt());
     }
 
     /// A new slot's buffers join the residency set, so the keepalive holds them wired with the rest.
@@ -263,7 +263,7 @@ test "a reply's end is born with its request's prompt: the history mark that req
 /// Memory the slots past the ready ones take on first use: their K/V rows and taps rings.
 fn laterBytes(h: *const Host) u64 {
     const ring_bytes: usize = if (h.draft) |d| @as(usize, d.model.ring().window) * d.model.ring().stride else 0;
-    return (h.runner.slots - h.runner.ready) * (h.runner.slotBytes() + ring_bytes);
+    return (h.runner.slots - h.runner.ready) * (h.runner.slotBytes() + ring_bytes) + h.runner.gdn.missingBeforeBytes();
 }
 
 pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, o: Options, a: Allocator, why: *[]const u8) !*Host {

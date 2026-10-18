@@ -10,7 +10,7 @@ const Tensor = @import("gpu_weights.zig").Tensor;
 const profile = @import("core").gpu_profile;
 const Kernels = @import("gdn_library.zig").Kernels;
 
-const Field = enum { state, before, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
+const Field = enum { state, history, next_history, qkv, query, key, value, decay, mixing, snapshots, tails, recurrent };
 
 pub const Metadata = struct {
     parents: Ref,
@@ -55,6 +55,8 @@ pub const Pool = struct {
     budget: Budget,
     buffers: [std.enums.values(Field).len]metal.Buffer,
     kernels: Kernels,
+    before: ?metal.Buffer = null,
+    before_slots: usize = 0,
     profiler: ?*profile.Trace = null,
     tree_mode: gdn.TreeMode = .auto,
 
@@ -62,7 +64,7 @@ pub const Pool = struct {
     pub fn init(device: metal.Device, shape: abi.Shape, layers: usize, slots: usize, capacity: usize) !Pool {
         const budget = try Budget.init(shape, layers, slots, capacity);
         if (capacity % 16 != 0) return error.BadGdnProjectionCapacity;
-        const widths = [_]usize{ budget.state, budget.state, budget.history, budget.history, budget.projections, budget.query, budget.key, budget.value, budget.decay, budget.mixing, budget.snapshots, budget.conv_tails, capacity * shape.value * 2 };
+        const widths = [_]usize{ budget.state, budget.history, budget.history, budget.projections, budget.query, budget.key, budget.value, budget.decay, budget.mixing, budget.snapshots, budget.conv_tails, capacity * shape.value * 2 };
         var buffers: [widths.len]metal.Buffer = undefined;
         var count: usize = 0;
         errdefer for (buffers[0..count]) |buffer| buffer.deinit();
@@ -76,8 +78,36 @@ pub const Pool = struct {
     }
 
     pub fn deinit(pool: *Pool) void {
+        pool.releaseBefore();
         pool.kernels.deinit();
         for (pool.buffers) |buffer| buffer.deinit();
+    }
+
+    /// Called between completed rounds, with no pending keep, before the first encoder can use the bank.
+    pub fn prepare(pool: *Pool, device: metal.Device, plan: Plan, accepted: bool) !void {
+        try @import("gdn_pool.zig").validatePlan(pool.budget.shape, pool.budget.slots, pool.budget.rows, plan);
+        if (!inPlace(plan)) return error.GdnSlotMoves;
+        const slots = @import("gdn_pool.zig").beforeSlots(plan, !accepted and pool.advances(plan));
+        if (slots == pool.before_slots) return;
+        const bytes = try abi.countBytes(f32, pool.budget.shape.state, pool.budget.layers * slots);
+        // The old bank has no readers now; drop it first so growth never holds two rollback banks.
+        pool.releaseBefore();
+        if (slots == 0) return;
+        pool.before = try device.buffer(bytes, metal.ResourceOptions.shared | metal.ResourceOptions.untracked);
+        pool.before_slots = slots;
+    }
+
+    /// No submitted work or pending keep may reference the bank when its owner calls this.
+    pub fn releaseBefore(pool: *Pool) void {
+        if (pool.before) |buffer| buffer.deinit();
+        pool.before = null;
+        pool.before_slots = 0;
+    }
+
+    /// Reserve the still-unallocated peak bank beside prompt caches and future stream buffers.
+    pub fn missingBeforeBytes(pool: *const Pool) usize {
+        if (pool.budget.slots < 2 or pool.budget.shape.c.dk != 128 or pool.tree_mode == .snapshot) return 0;
+        return pool.budget.state -| (if (pool.before) |buffer| buffer.length() else 0);
     }
 
     /// Borrow committed bytes only after all encoded work has completed.
@@ -100,7 +130,7 @@ pub const Pool = struct {
 
     pub fn forward(pool: *Pool, layer: usize, plan: DevicePlan, refs: Refs, e: metal.ComputeEncoder) !void {
         try @import("gdn_pool.zig").validatePlan(pool.budget.shape, pool.budget.slots, pool.budget.rows, plan.host);
-        const prepared = try pool.round(layer, plan, refs);
+        const prepared = try pool.round(layer, plan, refs, false);
         try plan.metadata.upload(plan.host);
         var pre = profile.begin(pool.profiler, e, .gdn_prepare);
         prepared.prepare(pre.encoder);
@@ -118,7 +148,7 @@ pub const Pool = struct {
             for (0..segment.rows) |row| if (plan.host.parents[segment.first + row] != (if (row == 0) @as(i32, -1) else @as(i32, @intCast(row - 1)))) return error.NotAcceptedChain;
         }
         // Each scan thread reads and writes only its own state words, so a chain that keeps its slots scans in place.
-        var prepared = try pool.round(layer, plan, refs);
+        var prepared = try pool.round(layer, plan, refs, true);
         const in_place = inPlace(plan.host);
         if (in_place) prepared.b.next_state = prepared.b.state;
         // one row a slot kept in place: its prepare writes the next conv window, so no commit or publication follows
@@ -184,7 +214,7 @@ pub const Pool = struct {
         if (replays) {
             e.setPipeline(pool.kernels.pipelines.replay);
             e.setBuffer(m.segments.buffer, m.segments.offset, 9);
-            (try pool.layerSpan(.before, layer)).bind(e, 10);
+            ((try pool.beforeSpan(layer, plan.host, pool.advances(plan.host))) orelse state).bind(e, 10);
             gdn.bind(e, .{ try pool.layerSpan(.key, layer), try pool.layerSpan(.value, layer), try pool.layerSpan(.decay, layer), try pool.layerSpan(.mixing, layer), state }, 0);
             e.setBuffer(m.kept_rows.buffer, m.kept_rows.offset, 5);
             e.setBuffer(m.keeps.buffer, m.keeps.offset, 6);
@@ -229,7 +259,7 @@ pub const Pool = struct {
         e.barrier();
     }
 
-    fn round(pool: *Pool, layer: usize, device_plan: DevicePlan, refs: Refs) !gdn.Round {
+    fn round(pool: *Pool, layer: usize, device_plan: DevicePlan, refs: Refs, accepted: bool) !gdn.Round {
         const plan = device_plan.host;
         if (plan.parents.len > pool.budget.rows) return error.BadGdnPoolIndex;
         var p = try pool.budget.shape.params(plan.parents.len, pool.budget.slots, refs.scalars.kinds);
@@ -249,7 +279,7 @@ pub const Pool = struct {
             .norm = refs.scalars.norm,
             .history = try pool.layerSpan(.history, layer),
             .state = try pool.layerSpan(.state, layer),
-            .before = try pool.layerSpan(.before, layer),
+            .before = try pool.beforeSpan(layer, plan, !accepted and pool.advances(plan)),
             .query = try pool.layerSpan(.query, layer),
             .key = try pool.layerSpan(.key, layer),
             .value = try pool.layerSpan(.value, layer),
@@ -278,6 +308,15 @@ pub const Pool = struct {
     /// Whether a round's one-row windows step their state in its slot scan (shared rounds), so the replay skips them.
     fn advances(pool: *const Pool, plan: Plan) bool {
         return plan.segments.len > 1 and plan.compact and pool.budget.shape.c.dk == 128 and pool.tree_mode != .snapshot;
+    }
+
+    fn beforeSpan(pool: *const Pool, layer: usize, plan: Plan, advance: bool) !?gdn.Span {
+        const slots = @import("gdn_pool.zig").beforeSlots(plan, advance);
+        if (slots == 0) return null;
+        if (layer >= pool.budget.layers or slots > pool.before_slots) return error.MissingGdnBefore;
+        const buffer = pool.before orelse return error.MissingGdnBefore;
+        const bytes = try abi.countBytes(f32, pool.budget.shape.state, pool.before_slots);
+        return .{ .buffer = buffer, .offset = layer * bytes, .bytes = bytes };
     }
 
     fn get(pool: *const Pool, field: Field) metal.Buffer {
