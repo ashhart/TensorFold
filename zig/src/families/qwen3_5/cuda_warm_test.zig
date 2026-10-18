@@ -40,6 +40,9 @@ pub const Probe = struct {
     seen: [64]bool = @splat(false),
     costs: *[64]lanes.config.Cost,
     count: usize = 0,
+    stream: struct {
+        pub fn synchronize(_: @This()) !void {}
+    } = .{},
     pub fn forward(p: *Probe, parts: []const Part, ids: []const u32, keep: E.Keep) !void {
         var cache: E.Cache = undefined;
         cache.cap = parts[0].cache.cap;

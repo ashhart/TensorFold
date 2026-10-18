@@ -69,7 +69,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .vision = v, .target = undefined };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .startup = e.startup, .vision = v, .target = undefined };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -100,7 +100,6 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
     const l: *Lanes = @ptrCast(@alignCast(p));
     try reservation.target(E.Cache, E.Part, l, streams);
 }
-
 /// The DFlash2 drafter in `dir` over engine `p`, 4-bit only, and the target's windows timed for the round loop.
 pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u8, bits: u8) !struct { drafter: lanes.drafter.Drafter, ctx: *anyopaque, close: *const fn (*anyopaque) void, reserve: *const fn (*anyopaque, u32) anyerror!void, prepare: struct { ctx: *anyopaque, run: *const fn (*anyopaque) anyerror!lanes.drafter.Facts, bytes: usize } } {
     if (bits != 4) return error.DrafterBitsUnsupported;
@@ -109,6 +108,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     const d = try Draft.init(gpa, io, l.e, dir);
     errdefer d.deinit();
     try l.e.setTaps(d.taps());
+    d.target_taps = l.e.tapBytes();
     l.calibration = d;
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) l.e.streamBytes(l.e.window_rows) else 0 } };
 }
@@ -140,10 +140,13 @@ fn calibrateDrafter(p: *anyopaque) !lanes.drafter.Facts {
     const d = l.calibration orelse return error.MissingCalibrationDrafter;
     if (d.n_costs == 0) {
         if (l.pool.items.len == 0) return error.MissingReservedQwenCache;
-        try warm.prepare(l.gpa, l.io, l.e, d, l.pool.items[0], &l.warmed);
+        l.startup.add(try warm.prepareTimed(l.gpa, l.io, l.e, d, l.pool.items[0], &l.warmed));
     }
     if (d.n_costs != l.e.window_rows) return error.IncompleteWindowMeasurements;
     l.calibration = null;
+    var phases = l.startup;
+    phases.add(d.startup);
+    phases.print();
     return d.drafter().facts();
 }
 
@@ -217,6 +220,7 @@ const Lanes = struct {
     io: std.Io,
     e: *E.Engine,
     capacity: usize,
+    startup: warm.profile.Times = .{},
     /// --vision's tower: an image prompt's images encoded at its prefill.
     vision: ?*vision.Vision = null,
     target: reuse.Target,

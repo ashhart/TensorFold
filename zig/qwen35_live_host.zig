@@ -177,6 +177,37 @@ test "deferred calibration: a late failure frees temporary storage and publishes
     try q.native.warm.Test.failure();
 }
 
+test "served scratch: one drafter frame does not allocate 128 streams of logits and attention" {
+    var d: q.draft.Draft = undefined;
+    d.c = .{ .hidden = 5120, .intermediate = 17408, .layers = 5, .vocab = 248320, .heads = 32, .kv_heads = 8, .head_dim = 128, .block = 16, .mask = 248070, .window = 2048, .group = 16, .rank = 256, .topk = 16, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 5 };
+    d.frame_streams = 1;
+    d.scratch_one = 23667968;
+    d.target_taps = 111411200;
+    d.step_ms = 1;
+    d.n_costs = 0;
+    try std.testing.expectEqual(d.c.ringBytes() + d.target_taps + d.scratch_one, d.drafter().facts().stream_bytes);
+    const one = try d.layout(false);
+    try std.testing.expectEqual(@as(usize, 23667968), one);
+    for (1..129) |streams| {
+        d.frame_streams = streams;
+        const shared = try d.layout(false);
+        if (streams == 128) try std.testing.expectEqual(@as(usize, 1890814976), shared);
+        try std.testing.expect(shared <= streams * one);
+    }
+}
+
+test {
+    _ = q.draft.memory;
+    _ = q.native.warm.profile;
+}
+
+test "startup phases: cache allocation zeroing and free are reserve, with only warm work in warmups" {
+    try q.native.warm.profile.Test.timing();
+}
+test "startup phases: a failed base warm frees its temporary cache once" {
+    try q.native.warm.profile.Test.failure();
+}
+
 test "target reserve: context 32 reaches eager preparation through real admission" {
     try q.native.reservation.Test.check(32);
 }

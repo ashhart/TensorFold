@@ -41,6 +41,9 @@ const Head = struct {
     calls: usize = 0,
     const Lane = struct { ctx: q.draft.Ctx, history: std.ArrayList(u32) = .empty };
     fn init(h: *Head) !void {
+        h.d.frame_streams = 128;
+        h.d.scratch_one = 0;
+        h.d.target_taps = 0;
         h.d.c = @import("qwen35_draft_frame_host.zig").config();
         h.d.w.predecessor = &h.book;
         h.d.w.successor = &h.book;

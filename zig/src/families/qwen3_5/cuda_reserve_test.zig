@@ -15,6 +15,7 @@ pub fn check(capacity: usize) !void {
         capacity: usize,
         pool: std.ArrayList(*fixture.Probe.Cache) = .empty,
         warmed: warm.Seen = .{},
+        startup: warm.profile.Times = .{},
         calibration: ?*fixture.Probe,
     };
     var target: Target = .{ .gpa = gpa, .io = fixture.Clock.io(), .e = &probe, .capacity = capacity, .calibration = &probe };

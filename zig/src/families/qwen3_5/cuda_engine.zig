@@ -9,6 +9,7 @@ const caches = @import("cuda_cache.zig");
 const routed = @import("cuda_routed.zig");
 const hooks = @import("cuda_learn_hooks.zig");
 const pocket = @import("cuda_pocket.zig");
+const profile = @import("cuda_startup_profile.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -67,6 +68,7 @@ pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
 
 pub const Engine = struct {
+    startup: profile.Times = .{},
     gpa: std.mem.Allocator,
     dir: []const u8,
     pockets: pocket.Pockets,
@@ -162,6 +164,7 @@ pub const Engine = struct {
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool) !*Engine {
         if (!cuda.kernels.available) return error.BuiltWithoutKernels;
+        const started = profile.now(io);
         const g = try Geometry.read(gpa, io, dir);
         const d = ctx.d;
         const e = try gpa.create(Engine);
@@ -229,21 +232,22 @@ pub const Engine = struct {
         errdefer e.staged.free();
         e.host_logits = try cuda.HostBuffer.alloc(d, most_verify * g.vocab * 2);
         errdefer e.host_logits.free();
-        try e.warm(gpa);
+        try e.stream.synchronize();
+        const warm_start = profile.now(io);
+        e.startup = .{ .load = warm_start - started };
+        e.startup.add(try profile.withCache(gpa, io, e, Cache));
         return e;
     }
 
     /// Every path a request takes, run once now: WDDM stalls a process's first forwards for seconds (a 20 s launch).
-    fn warm(e: *Engine, gpa: std.mem.Allocator) !void {
-        var warm_cache = try Cache.init(gpa, e, 64);
-        defer warm_cache.deinit(gpa);
+    pub fn warmCache(e: *Engine, warm_cache: *Cache) !void {
         const ids: [32]u32 = @splat(0);
         const greedy: Draw = .{ .rule = null, .position = 33 };
-        try e.forward(&.{.{ .cache = &warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
-        try e.forward(&.{.{ .cache = &warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{greedy} });
-        try e.forward(&.{.{ .cache = &warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = .{ .seed = 1, .inv_t = 1.0 / 0.7, .top_p = 0.95, .near = 20.0, .min_log = -std.math.inf(f32), .top_k = 20 }, .position = 34 }} });
+        try e.forward(&.{.{ .cache = warm_cache, .rows = ids.len }}, &ids, .last); // a prompt chunk: the prompt GEMMs
+        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{greedy} });
+        try e.forward(&.{.{ .cache = warm_cache, .rows = 1 }}, ids[0..1], .{ .draws = &.{.{ .rule = .{ .seed = 1, .inv_t = 1.0 / 0.7, .top_p = 0.95, .near = 20.0, .min_log = -std.math.inf(f32), .top_k = 20 }, .position = 34 }} });
         // a tree window and a branch of it kept: the keep kernels, and the forward's branch path
-        try e.forward(&.{.{ .cache = &warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
+        try e.forward(&.{.{ .cache = warm_cache, .rows = 3, .parents = &.{ -1, 0, 0 } }}, ids[0..3], .{ .draws = &.{ greedy, greedy, greedy } });
         try warm_cache.keep(e, &.{ 0, 2 });
         try e.stream.synchronize();
     }

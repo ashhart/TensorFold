@@ -1,6 +1,7 @@
 //! Warm each captured launch shape, then measure every live width with a freshly reset cache.
 const std = @import("std");
 const E = @import("cuda_engine.zig");
+pub const profile = @import("cuda_startup_profile.zig");
 
 pub const Seen = struct {
     keys: [E.most_verify + E.most_window]u32 = undefined,
@@ -29,6 +30,13 @@ pub const Seen = struct {
 };
 
 pub fn time(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !void {
+    var phases: profile.Times = .{};
+    return timed(io, e, d, cache, warmed, &phases);
+}
+
+fn timed(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen, phases: *profile.Times) !void {
+    const started = profile.now(io);
+    var warm_ns: i96 = 0;
     const ids: [E.most_window]u32 = @splat(0);
     var picks: [E.most_window]E.Draw = undefined;
     for (&picks) |*pk| pk.* = .{ .rule = null, .position = 1 };
@@ -36,9 +44,11 @@ pub fn time(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !
     for (1..e.window_rows + 1) |rows| {
         const shape = E.Engine.Shape.init(rows, 1, true, e.n_taps > 0, 1);
         while (warmed.passes(shape) < 2) {
+            const warm_start = profile.now(io);
             try cache.reset(e);
             try e.forward(&.{.{ .cache = cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
             warmed.mark(shape);
+            warm_ns += profile.elapsed(io, warm_start);
         }
         try cache.reset(e);
         const t0 = std.Io.Clock.awake.now(io);
@@ -49,13 +59,29 @@ pub fn time(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !
     }
     try cache.reset(e);
     for (measured[0..e.window_rows]) |m| d.setCost(m.rows, m.ms);
+    phases.warmups += warm_ns;
+    phases.calibration += profile.elapsed(io, started) - warm_ns;
 }
 
 pub fn prepare(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !void {
-    if (cache.cap >= e.window_rows) return time(io, e, d, cache, warmed);
+    _ = try prepareTimed(gpa, io, e, d, cache, warmed);
+}
+
+pub fn prepareTimed(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !profile.Times {
+    var phases: profile.Times = .{};
+    if (cache.cap >= e.window_rows) {
+        try timed(io, e, d, cache, warmed, &phases);
+        return phases;
+    }
+    const started = profile.now(io);
     var temporary = try @TypeOf(cache.*).init(gpa, e, e.window_rows);
-    defer temporary.deinit(gpa);
-    try time(io, e, d, &temporary, warmed);
+    errdefer temporary.deinit(gpa);
+    phases.reserve += profile.elapsed(io, started);
+    try timed(io, e, d, &temporary, warmed, &phases);
+    const freeing = profile.now(io);
+    temporary.deinit(gpa);
+    phases.reserve += profile.elapsed(io, freeing);
+    return phases;
 }
 
 pub const Test = if (@import("builtin").is_test) @import("cuda_warm_test.zig") else struct {};

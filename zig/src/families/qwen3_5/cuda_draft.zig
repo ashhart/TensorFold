@@ -6,6 +6,7 @@ const lanes = @import("lanes");
 const engine = @import("cuda_engine.zig");
 const weights = @import("cuda_draft_weights.zig");
 const tree = @import("cuda_draft_tree.zig");
+const profile = @import("cuda_startup_profile.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -21,6 +22,7 @@ const lp_top = 20;
 
 pub const Config = @import("cuda_draft_config.zig").Config;
 pub const frame = @import("cuda_draft_frame.zig");
+pub const memory = @import("cuda_draft_memory.zig");
 const Fns = struct { gather_taps: cuda.Function, gather_rows: cuda.Function, dyn_conv: cuda.Function, norm_rope: cuda.Function, ring_put: cuda.Function, attn: cuda.Function, dyn_conv_batch: cuda.Function, norm_rope_batch: cuda.Function, mask_rows: cuda.Function, attn_partial: cuda.Function, attn_merge: cuda.Function };
 
 /// qwen35_draft.cu's TapRows.
@@ -94,11 +96,17 @@ pub const Draft = struct {
     costs: [engine.most_window]lanes.config.Cost = undefined,
     n_costs: usize = 0,
 
+    startup: profile.Times = .{},
+    frame_streams: usize = 1,
+    scratch_one: usize = 0,
+    target_taps: usize = 0,
+
     const words_at = frame.words_at;
     const hp_at = frame.hp_at;
     const stagedLen = frame.stagedLen;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, e: *E, dir: []const u8) !*Draft {
+        const started = profile.now(io);
         const c = try Config.read(gpa, io, dir, e.g);
         const d = try gpa.create(Draft);
         errdefer gpa.destroy(d);
@@ -110,6 +118,7 @@ pub const Draft = struct {
         errdefer d.w.deinit(gpa);
         d.scratch = try DeviceBuffer.alloc(e.d, try d.scratchBytes());
         errdefer d.scratch.free();
+        d.scratch_one = d.scratch.len;
         try d.scratch.fill8(0, null);
         d.at = 0;
         _ = try d.layout(true);
@@ -118,6 +127,8 @@ pub const Draft = struct {
         // the first context, and a hold timed on it (the quickest of several: the first ones pay the driver's stalls)
         const ctx = try d.create();
         errdefer d.drop(ctx);
+        try e.stream.synchronize();
+        const warm_start = profile.now(io);
         try d.absorb(ctx, d.taps_in, 0, 1, null);
         var quickest: f64 = std.math.inf(f64);
         for (0..8) |_| {
@@ -129,6 +140,8 @@ pub const Draft = struct {
         d.step_ms = quickest / @as(f64, @floatFromInt(c.block - 1));
         ctx.* = .{ .ring = ctx.ring };
         try d.pool.append(gpa, ctx);
+        d.startup.warmups += profile.elapsed(io, warm_start);
+        d.startup.load = profile.elapsed(io, started) - d.startup.reserve - d.startup.warmups;
         return d;
     }
 
@@ -173,17 +186,18 @@ pub const Draft = struct {
     /// The scratch rows, measured (nothing assigned) or assigned from the scratch buffer.
     pub fn layout(d: *Draft, assign: bool) !usize {
         const c = d.c;
-        const B = c.block * frame.max_streams;
+        if (d.frame_streams == 0 or d.frame_streams > frame.max_streams) return error.BadDraftFrame;
+        const B = c.block * d.frame_streams;
         const R = @max(max_rows, B);
         const sizes = .{
-            .{ "taps_in", try bytes(.{ R, c.n_taps, c.hidden, 2 }) },                   .{ "th", try bytes(.{ R, c.hidden, 2 }) },              .{ "thn", try bytes(.{ R, c.hidden, 2 }) },                         .{ "kabs", try bytes(.{ R, c.kvWidth(), 2 }) },
-            .{ "kn", try bytes(.{ R, c.kvWidth(), 2 }) },                               .{ "vabs", try bytes(.{ R, c.kvWidth(), 2 }) },         .{ "xs", try bytes(.{ R, c.n_taps, (c.hidden / 64), 4 }) },         .{ "h", try bytes(.{ B, c.hidden, 2 }) },
-            .{ "h2", try bytes(.{ B, c.hidden, 2 }) },                                  .{ "x", try bytes(.{ B, c.hidden, 2 }) },               .{ "xin", try bytes(.{ B, c.hidden, 2 }) },                         .{ "dyn", try bytes(.{ B, c.dynamic(), 2 }) },
-            .{ "qraw", try bytes(.{ B, c.qWidth(), 2 }) },                              .{ "q", try bytes(.{ B, c.qWidth(), 2 }) },             .{ "kraw", try bytes(.{ B, c.kvWidth(), 2 }) },                     .{ "kb", try bytes(.{ B, c.kvWidth(), 2 }) },
-            .{ "vb", try bytes(.{ B, c.kvWidth(), 2 }) },                               .{ "att", try bytes(.{ B, c.qWidth(), 2 }) },           .{ "o", try bytes(.{ B, c.hidden, 2 }) },                           .{ "gate", try bytes(.{ B, c.intermediate, 2 }) },
-            .{ "up", try bytes(.{ B, c.intermediate, 2 }) },                            .{ "act", try bytes(.{ B, c.intermediate, 2 }) },       .{ "logits", try bytes(.{ B, c.vocab, 2 }) },                       .{ "words", try bytes(.{ B, lp_words, 4 }) },
-            .{ "segments", try bytes(.{ frame.max_streams, @sizeOf(frame.Segment) }) }, .{ "pm", try bytes(.{ B, c.heads, frame.chunks, 4 }) }, .{ "pl", try bytes(.{ B, c.heads, frame.chunks, 4 }) },             .{ "po", try bytes(.{ B, c.heads, frame.chunks, c.head_dim, 4 }) },
-            .{ "hp", try bytes(.{ B, c.rank, 2 }) },                                    .{ "ids", try bytes(.{ B, 4 }) },                       .{ "parts", cuda.sample.Draws.topkPartsBytes(c.vocab, c.topk, B) },
+            .{ "taps_in", try bytes(.{ R, c.n_taps, c.hidden, 2 }) },                 .{ "th", try bytes(.{ R, c.hidden, 2 }) },              .{ "thn", try bytes(.{ R, c.hidden, 2 }) },                         .{ "kabs", try bytes(.{ R, c.kvWidth(), 2 }) },
+            .{ "kn", try bytes(.{ R, c.kvWidth(), 2 }) },                             .{ "vabs", try bytes(.{ R, c.kvWidth(), 2 }) },         .{ "xs", try bytes(.{ R, c.n_taps, (c.hidden / 64), 4 }) },         .{ "h", try bytes(.{ B, c.hidden, 2 }) },
+            .{ "h2", try bytes(.{ B, c.hidden, 2 }) },                                .{ "x", try bytes(.{ B, c.hidden, 2 }) },               .{ "xin", try bytes(.{ B, c.hidden, 2 }) },                         .{ "dyn", try bytes(.{ B, c.dynamic(), 2 }) },
+            .{ "qraw", try bytes(.{ B, c.qWidth(), 2 }) },                            .{ "q", try bytes(.{ B, c.qWidth(), 2 }) },             .{ "kraw", try bytes(.{ B, c.kvWidth(), 2 }) },                     .{ "kb", try bytes(.{ B, c.kvWidth(), 2 }) },
+            .{ "vb", try bytes(.{ B, c.kvWidth(), 2 }) },                             .{ "att", try bytes(.{ B, c.qWidth(), 2 }) },           .{ "o", try bytes(.{ B, c.hidden, 2 }) },                           .{ "gate", try bytes(.{ B, c.intermediate, 2 }) },
+            .{ "up", try bytes(.{ B, c.intermediate, 2 }) },                          .{ "act", try bytes(.{ B, c.intermediate, 2 }) },       .{ "logits", try bytes(.{ B, c.vocab, 2 }) },                       .{ "words", try bytes(.{ B, lp_words, 4 }) },
+            .{ "segments", try bytes(.{ d.frame_streams, @sizeOf(frame.Segment) }) }, .{ "pm", try bytes(.{ B, c.heads, frame.chunks, 4 }) }, .{ "pl", try bytes(.{ B, c.heads, frame.chunks, 4 }) },             .{ "po", try bytes(.{ B, c.heads, frame.chunks, c.head_dim, 4 }) },
+            .{ "hp", try bytes(.{ B, c.rank, 2 }) },                                  .{ "ids", try bytes(.{ B, 4 }) },                       .{ "parts", cuda.sample.Draws.topkPartsBytes(c.vocab, c.topk, B) },
         };
         var total: usize = 0;
         inline for (sizes) |s| {
@@ -201,21 +215,29 @@ pub const Draft = struct {
 
     /// A new context, its ring touched once (an absorb, then a draft), so no request pays the driver's stall.
     fn create(d: *Draft) !*Ctx {
+        const started = profile.now(d.io);
         const ctx = try d.gpa.create(Ctx);
         errdefer d.gpa.destroy(ctx);
         ctx.* = .{ .ring = try DeviceBuffer.alloc(d.e.d, d.c.ringBytes()) };
         errdefer ctx.ring.free();
         try ctx.ring.fill8(0, null);
+        d.startup.reserve += profile.elapsed(d.io, started);
+        const warm_start = profile.now(d.io);
         try d.absorb(ctx, d.taps_in, 0, 1, null); // any tap rows do: the drafter's own zeroed staging
         try d.hold(ctx, 0, 1, d.c.block - 1, null);
         ctx.* = .{ .ring = ctx.ring };
+        d.startup.warmups += profile.elapsed(d.io, warm_start);
         return ctx;
     }
 
     /// `n` contexts ready in the pool, for the streams the server admits.
     pub fn reserve(d: *Draft, n: usize) !void {
+        const started = profile.now(d.io);
+        const previous_times = d.startup;
+        try memory.resize(d, n);
         try d.pool.ensureTotalCapacity(d.gpa, n);
         while (d.pool.items.len < n) d.pool.appendAssumeCapacity(try d.create());
+        d.startup.reserve += profile.elapsed(d.io, started) - (d.startup.warmups - previous_times.warmups) - (d.startup.reserve - previous_times.reserve);
     }
 
     fn ringK(d: *Draft, ctx: *Ctx, layer: usize) u64 {
@@ -348,7 +370,7 @@ pub const Draft = struct {
     fn factsFn(p: *anyopaque) dr.Facts {
         const d = cast(p);
         // TF_NO_TREES=1: chains only (for comparing)
-        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes(), .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
+        return .{ .depth = @intCast(d.c.block - 1), .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = true, .stream_bytes = d.c.ringBytes() + d.target_taps + d.scratch_one, .trees = platform.c.getenv("TF_NO_TREES") == null, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .tree_nodes = @intCast(if (d.c.block == 16) tree.nodes() else 0) };
     }
 
     fn openFn(p: *anyopaque, s: *Stream) anyerror!void {
@@ -386,7 +408,7 @@ pub const Draft = struct {
         const t0 = std.Io.Clock.awake.now(d.io);
         defer timing("hold", d.io, t0);
         if (items.len == 0) return;
-        if (items.len > frame.max_streams) return error.BadDraftFrame;
+        if (items.len > d.frame_streams) return error.BadDraftFrame;
         var contexts: [frame.max_streams]*Ctx = undefined;
         for (items, contexts[0..items.len]) |it, *ctx| ctx.* = d.streams.get(it.stream) orelse return error.UnknownStream;
         try frame.forward(d, items, contexts[0..items.len]);

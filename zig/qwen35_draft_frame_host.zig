@@ -10,6 +10,9 @@ pub fn config() q.draft.Config {
 
 test "Draft frames: the actual drafter advertises batched holds" {
     var d: q.draft.Draft = undefined;
+    d.frame_streams = 128;
+    d.scratch_one = 0;
+    d.target_taps = 0;
     d.c = config();
     d.step_ms = 1;
     d.n_costs = 0;
@@ -125,6 +128,9 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
     e.draws.topk_slices_fn = function(&driver, 9);
     e.draws.topk_merge_fn = function(&driver, 12);
     var d: q.draft.Draft = undefined;
+    d.frame_streams = 128;
+    d.scratch_one = 0;
+    d.target_taps = 0;
     d.gpa = a;
     d.io = std.testing.io;
     d.e = &e;
@@ -236,6 +242,9 @@ test "Draft frames: combined target rows above capacity refuse before even settl
 test "Draft frames: enlarged frame byte counts reject overflow" {
     try std.testing.expectError(error.Overflow, q.draft.frame.stagedBytes(std.math.maxInt(usize)));
     var d: q.draft.Draft = undefined;
+    d.frame_streams = 128;
+    d.scratch_one = 0;
+    d.target_taps = 0;
     d.c = config();
     d.c.rank = std.math.maxInt(usize);
     try std.testing.expectError(error.Overflow, d.layout(false));
