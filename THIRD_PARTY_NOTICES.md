@@ -343,3 +343,8 @@ The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as describe
 No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
 
 The tensor-parallel fabric also uses the RoCE design described above (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`).
+
+## Shared EXL3 resolver setup
+
+The shared EXL3 resolver split and CUDA lane option forwarding retain work from PR #728 by @ajensenwaud,
+with the common EXL3 and DeepSeek contributor credits preserved.

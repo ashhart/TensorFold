@@ -264,7 +264,7 @@ pub const Functions = struct {
     /// TF_DSV41_LIN2: the two-tile variants, set by Kernels.load when the knob asks for them
     lin2: ?Lin2 = null,
 
-    pub fn resolve(linear: cuda.Module, x3seg: cuda.Module, dense3: cuda.Module) !Functions {
+    pub fn resolveBase(linear: cuda.Module) !Functions {
         var f: Functions = undefined;
         f.lin2 = null;
         f.rot_in = try linear.function("_ZN14tf_exl3_linear13rot_in_kernelEPKviPK6__halfPS2_i");
@@ -272,6 +272,11 @@ pub const Functions = struct {
             inline for (.{ 2, 4, 8 }, 0..) |wk, j| f.linear[i][j] = try linear.function(linearSymbol(k2, wk));
             f.unpack[i] = try linear.function(unpackSymbol(k2));
         }
+        return f;
+    }
+
+    pub fn resolve(linear: cuda.Module, x3seg: cuda.Module, dense3: cuda.Module) !Functions {
+        var f = try resolveBase(linear);
         f.seg_rot_in = try x3seg.function("_ZN11dsv41_x3seg17seg_rot_in_kernelENS_8RotTableE");
         inline for (x3seg_k2s, 0..) |k2, i| inline for (seg_cfgs, 0..) |c, j| {
             f.seg[i][j] = try x3seg.function(segSymbol(k2, c[0], c[1]));

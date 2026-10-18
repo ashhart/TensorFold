@@ -149,9 +149,24 @@ pub const Functions = struct {
     gm3: [v3_variants.len]Gm,
     epi: [3][epi_pds.len][ranges.len]cuda.Function, // [EpiKind][pd - 1][range]
 
+    pub fn resolveBase(experts: cuda.Module) !Functions {
+        var f: Functions = undefined;
+        inline for (grouped_cfgs, 0..) |c, ci| inline for (upstream_ranges, 0..) |r, ri| {
+            f.grouped[ci][ri] = try experts.function(groupedSymbol(c[0], c[1], c[2], r[0], r[1]));
+        };
+        inline for (0..15) |i| f.dequant[i] = try experts.function(dequantSymbol(i + 2));
+        f.group = try experts.function(up_sym.group);
+        f.rot_in = .{ try experts.function(up_sym.rot_in_bf16), try experts.function(up_sym.rot_in_f16) };
+        f.gateup_epilogue = try experts.function(up_sym.gateup_epilogue);
+        f.down_epilogue = try experts.function(up_sym.down_epilogue);
+        f.combine = try experts.function(up_sym.combine);
+        f.down_combine = .{ try experts.function(up_sym.down_combine_f32), try experts.function(up_sym.down_combine_bf16) };
+        return f;
+    }
+
     /// Resolves every instance (a wrong name fails here, not on a rare path) and opts x3gm into its shared memory.
     pub fn resolve(experts: cuda.Module, x3ld: cuda.Module, x3pf: cuda.Module, x3gm: cuda.Module, x3gm_plan: cuda.Module, x3gm3: cuda.Module, router_glue: cuda.Module, x3ld_epi: cuda.Module, optin: u32) !Functions {
-        var f: Functions = undefined;
+        var f = try resolveBase(experts);
         inline for (ld_cfgs, 0..) |c, ci| inline for (ranges, 0..) |r, ri| {
             f.ld[0][ci][ri] = try x3ld.function(ldSymbol(c[0], c[1], r[0], r[1], 0));
             f.ld[1][ci][ri] = if (ci < 2) try x3ld.function(ldSymbol(c[0], c[1], r[0], r[1], 3)) else null;
@@ -162,17 +177,7 @@ pub const Functions = struct {
         inline for (.{ EpiKind.gu, EpiKind.dn, EpiKind.dnb }, 0..) |kind, ki| inline for (epi_pds, 0..) |pd, pi| inline for (ranges, 0..) |r, ri| {
             f.epi[ki][pi][ri] = try x3ld_epi.function(epiSymbol(kind, pd, r[0], r[1]));
         };
-        inline for (grouped_cfgs, 0..) |c, ci| inline for (upstream_ranges, 0..) |r, ri| {
-            f.grouped[ci][ri] = try experts.function(groupedSymbol(c[0], c[1], c[2], r[0], r[1]));
-        };
-        inline for (0..15) |i| f.dequant[i] = try experts.function(dequantSymbol(i + 2));
-        f.group = try experts.function(up_sym.group);
         f.group_rot = try router_glue.function("router_group_rot");
-        f.rot_in = .{ try experts.function(up_sym.rot_in_bf16), try experts.function(up_sym.rot_in_f16) };
-        f.gateup_epilogue = try experts.function(up_sym.gateup_epilogue);
-        f.down_epilogue = try experts.function(up_sym.down_epilogue);
-        f.combine = try experts.function(up_sym.combine);
-        f.down_combine = .{ try experts.function(up_sym.down_combine_f32), try experts.function(up_sym.down_combine_bf16) };
         inline for (gm_k2s, 0..) |k2, ki| {
             inline for (.{ 1, 2 }) |xm| inline for (0..gu_tiles.len) |c| {
                 f.gm_gu[ki][xm - 1][c] = try gmResolve(x3gm, gmGuSymbol(xm, k2, c), GmShape.of(2, xm, k2, gu_tiles[c]), optin);
