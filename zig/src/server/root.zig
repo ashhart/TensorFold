@@ -103,6 +103,7 @@ test {
     _ = @import("slide_supplied.zig");
     _ = @import("slide_questions_test.zig");
     _ = @import("slide_teacher_test.zig");
+    _ = @import("slide_learn_path_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_span.zig");
