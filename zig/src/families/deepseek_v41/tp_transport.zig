@@ -35,7 +35,12 @@ fn tcpSettings(gpa: std.mem.Allocator, json: []const u8) !?fabric.tcp.Config {
     if (rank != .integer or rank.integer < 0 or rank.integer > 1 or
         host != .string or host.string.len == 0 or port != .integer or port.integer < 1 or port.integer >= 65535 or
         session != .string or session.string.len == 0 or session.string.len > 256) return error.BadTpSettings;
-    return .{ .rank = @intCast(rank.integer), .host = host.string, .port = @intCast(port.integer), .session = session.string };
+    var connect_ms: u64 = 30_000;
+    if (root.object.get("connect_timeout_ms")) |value| {
+        if (value != .integer or value.integer < 1 or value.integer > 900_000) return error.BadTpSettings;
+        connect_ms = @intCast(value.integer);
+    }
+    return .{ .rank = @intCast(rank.integer), .host = host.string, .port = @intCast(port.integer), .session = session.string, .connect_timeout_ns = connect_ms * std.time.ns_per_ms };
 }
 
 pub const Transport = struct {
@@ -118,12 +123,16 @@ test "TP TCP settings require an explicit transport and complete pair identity" 
     const config = (try tcpSettings(gpa, "{\"transport\":\"tcp\",\"rank\":1,\"host\":\"fe80::1%en3\",\"port\":19750,\"session\":\"test\"}")).?;
     try std.testing.expectEqual(@as(u32, 1), config.rank);
     try std.testing.expectEqualStrings("fe80::1%en3", config.host);
+    const slow = (try tcpSettings(gpa, "{\"transport\":\"tcp\",\"rank\":0,\"host\":\"::1\",\"port\":19750,\"session\":\"test\",\"connect_timeout_ms\":600000}")).?;
+    try std.testing.expectEqual(@as(u64, 600 * std.time.ns_per_s), slow.connect_timeout_ns);
+    try std.testing.expectEqual(@as(u64, 30 * std.time.ns_per_s), slow.timeout_ns);
     try std.testing.expectEqual(@as(?fabric.tcp.Config, null), try tcpSettings(gpa, "{}"));
     for ([_][]const u8{
         "{\"transport\":\"other\"}",
         "{\"transport\":\"tcp\",\"rank\":2,\"host\":\"127.0.0.1\",\"port\":19750,\"session\":\"test\"}",
         "{\"transport\":\"tcp\",\"rank\":0,\"host\":\"127.0.0.1\",\"port\":65535,\"session\":\"test\"}",
         "{\"transport\":\"tcp\",\"rank\":0,\"host\":\"127.0.0.1\",\"port\":19750,\"session\":\"\"}",
+        "{\"transport\":\"tcp\",\"rank\":0,\"host\":\"127.0.0.1\",\"port\":19750,\"session\":\"test\",\"connect_timeout_ms\":900001}",
     }) |bad| try std.testing.expectError(error.BadTpSettings, tcpSettings(gpa, bad));
 }
 

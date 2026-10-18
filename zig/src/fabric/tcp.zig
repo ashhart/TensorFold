@@ -15,6 +15,8 @@ pub const Config = struct {
     /// Same nonempty session name on both ranks, to bind the two connections together.
     session: []const u8,
     timeout_ns: u64 = 30 * std.time.ns_per_s,
+    /// Loading checkpoints can finish at different times; this never extends frame/flush waits.
+    connect_timeout_ns: u64 = 30 * std.time.ns_per_s,
 };
 
 pub const Endpoint = struct {
@@ -49,8 +51,8 @@ pub const Endpoint = struct {
 
     pub fn create(gpa: std.mem.Allocator, config: Config, window_bytes: usize, failed: ?*std.atomic.Value(bool)) !*Endpoint {
         if (config.rank > 1 or config.port == 0 or config.port == 65535 or config.session.len == 0 or
-            config.timeout_ns == 0 or window_bytes == 0) return error.BadTcpSettings;
-        const until = try socket.end(config.timeout_ns);
+            config.timeout_ns == 0 or config.connect_timeout_ns == 0 or window_bytes == 0) return error.BadTcpSettings;
+        const until = try socket.end(config.connect_timeout_ns);
         const data = try socket.open(config.host, config.port, config.rank, until);
         errdefer socket.close(data);
         try hello(data, config, window_bytes, 0, until);

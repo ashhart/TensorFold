@@ -142,6 +142,9 @@ completion acknowledgements respectively. Wildcard addresses are refused. Use a
 trusted private link: the session check prevents accidental pairing, but supplies
 neither authentication nor encryption. TCP uses ordinary sockets and does not open
 an RDMA device. Its latency and bandwidth must be measured separately from MCDMA.
+If checkpoint loading finishes at different times, `"connect_timeout_ms":600000`
+allows ten minutes for startup pairing. The default is 30 seconds, the maximum is
+15 minutes, and message and completion waits remain bounded by 30 seconds.
 
 The CPU-only `zig build tf-tcp-probe -Dcpu=apple_m3` target builds a link check. Run
 `tf-tcp-probe RANK HOST PORT SESSION ROUNDS` on both Macs before loading a model.
