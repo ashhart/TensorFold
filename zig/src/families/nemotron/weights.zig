@@ -25,7 +25,7 @@ pub const Linear = struct {
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
 pub const Tiles = struct { w: mtl.Buffer, sbt: mtl.Buffer };
 
-/// A plain bf16 matrix [n, k] a dense GEMM reads in place (nemotron_h_puzzle's latent projections; no scales).
+/// A plain bf16 matrix [n, k] a gemv reads in place (nemotron_h_puzzle's latent projections; no scales).
 pub const Dense = struct { w: mtl.Buffer, off: usize, n: usize, k: usize };
 
 /// One matrix of a fused stack, written from column `first` of the stack's output rows.
@@ -110,7 +110,7 @@ pub const Weights = struct {
     layers: [cfg.max_layers]Layer = undefined,
     norm_f: Tensor,
     head: Linear,
-    head_dense: ?Dense = null, // a full-precision bf16 lm_head (no .scales; Bolt), read in place by dense_bf16
+    head_dense: ?Dense = null, // a full-precision bf16 lm_head (no .scales; Bolt), read in place by the ops gemv
     mtp: ?Mtp = null,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     linears: std.StringHashMapUnmanaged(Linear) = .empty, // by the Python module path ("fused.qkv.5" for q/k/v)

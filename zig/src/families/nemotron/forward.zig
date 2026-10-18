@@ -7,6 +7,7 @@ const wts = @import("weights.zig");
 const st = @import("state.zig");
 const kern = @import("kernels.zig");
 const layers = @import("layers.zig");
+const pk = @import("prefill_kernels.zig");
 const bolt = @import("bolt.zig");
 const tree = @import("tree.zig");
 const encoder = @import("encoder.zig");
@@ -61,6 +62,7 @@ pub fn ints8(values: []const i32) [8]i32 {
 pub const Forward = struct {
     c: cfg.Config,
     k: *const kern.Kernels,
+    p: ?*const pk.Kernels = null, // the MLX-exact ops (Bolt's gemv, route and combine)
     w: *const wts.Weights,
     s: *st.Scratch,
     pool: *st.Pool,
@@ -411,12 +413,7 @@ pub const Forward = struct {
 
     /// logits = x . lm_head^T for a full-precision bf16 LM head (Bolt keeps lm_head unquantized).
     fn denseHead(self: Forward, e: *Enc, hd: wts.Dense, x_off: usize, rows: usize) void {
-        e.pipe(self.k.get("dense_bf16"));
-        e.buf(self.s.x, x_off, 0);
-        e.buf(hd.w, hd.off, 1);
-        e.buf(self.s.logits, 0, 2);
-        e.bytes([3]u32{ @intCast(rows), @intCast(hd.n), @intCast(hd.k) }, 3);
-        e.run(.{ 32 * hd.n, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
+        bolt.gemv(self, e, hd, self.s.x, x_off, self.s.logits, rows);
     }
 
     /// u32 rows of `src` from `src_off` into `dst` at `dst_off` (window ids into a shared round's ids).
