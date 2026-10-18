@@ -82,7 +82,6 @@ fn encoder(d: *const cuda.Driver, s: cuda.Stream) shared.media.Encoder {
 
 /// A rank of the pair over one end of a socket pair, its collective faked; the other end is the peer that leaves.
 fn session(engine: *prompt.Engine, rank: usize, pair: *[2]c_int) !ranks.Session {
-    if (@import("builtin").os.tag == .windows) return error.SkipZigTest; // the peer rank is a Unix socket pair
     if (std.c.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, pair) != 0) return error.SocketPair;
     const nonblock: c_int = @bitCast(@as(u32, @bitCast(std.c.O{ .NONBLOCK = true })));
     for (pair) |fd| {

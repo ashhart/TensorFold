@@ -31,7 +31,7 @@ pub const Key = struct {
         }
         const s = try file.stat(io);
         if (s.kind != .file) return error.DigestNotRegular;
-        return .{ .device = 0, .inode = @as(std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(s.inode))), @bitCast(s.inode)), .size = s.size, .mtime = s.mtime.toNanoseconds(), .ctime = s.ctime.toNanoseconds() };
+        return .{ .device = 0, .inode = @as(u64, @bitCast(s.inode)), .size = s.size, .mtime = s.mtime.toNanoseconds(), .ctime = s.ctime.toNanoseconds() };
     }
 
     pub fn equal(a: Key, b: Key) bool {
