@@ -96,3 +96,134 @@ pub fn routeBolt(gpu: Gpu) !void {
     // the pad-to-32 guarantee, stated plainly: row 0's winners are exactly experts 224..232
     for (0..K) |k| if (got_idx[k] != 224 + k) return error.LastSliceDropped;
 }
+
+fn f32of(w: u16) f32 {
+    return @bitCast(@as(u32, w) << 16);
+}
+
+/// dense_bf16: y = x . w^T over bf16 (no accumulate), the gate and latent projections. Checked against a CPU
+/// reference that reads back the same bf16 inputs and accumulates in fp32, to a bf16 output tolerance.
+pub fn denseBf16(gpu: Gpu) !void {
+    const M: usize = 5; // rows (or picks)
+    const N: usize = 20; // output width
+    const K: usize = 64; // input width (multiple of 4 for the bfloat4 loads)
+
+    const x = try gpu.buffer(u16, M * K);
+    defer x.deinit();
+    const w = try gpu.buffer(u16, N * K);
+    defer w.deinit();
+    const y = try gpu.buffer(u16, M * N);
+    defer y.deinit();
+    var prng = std.Random.DefaultPrng.init(0x5017d00d);
+    const rnd = prng.random();
+    const xv = x.slice(u16, M * K);
+    const wv = w.slice(u16, N * K);
+    for (xv) |*v| v.* = bf16(rnd.float(f32) - 0.5);
+    for (wv) |*v| v.* = bf16(rnd.float(f32) - 0.5);
+    @memset(y.slice(u16, M * N), 0xffff); // garbage, so a missed write is caught
+
+    const p = try gpu.pipeline("tf_nemotron_dense_bf16", false);
+    defer p.deinit();
+    const cb = gpu.queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    enc.setPipeline(p);
+    enc.setBuffer(x, 0, 0);
+    enc.setBuffer(w, 0, 1);
+    enc.setBuffer(y, 0, 2);
+    enc.setValue([3]u32{ @intCast(M), @intCast(N), @intCast(K) }, 3);
+    enc.dispatchThreads(Size.of(32 * N, (M + 7) / 8, 1), Size.of(256, 1, 1));
+    enc.end();
+    try common.run(cb);
+
+    const got = y.slice(u16, M * N);
+    for (0..M) |m| for (0..N) |j| {
+        var sum: f32 = 0;
+        for (0..K) |i| sum += f32of(xv[m * K + i]) * f32of(wv[j * K + i]);
+        const g = f32of(got[m * N + j]);
+        if (@abs(g - sum) > 0.01 * @abs(sum) + 1e-2) {
+            std.debug.print("  dense_bf16 [{d},{d}]: got {d}, reference {d}\n", .{ m, j, g, sum });
+            return error.WrongProduct;
+        }
+    };
+}
+
+/// add_norm_moe_xs_bolt is the Lightning add_norm kernel at <D=4096, T=512, E=9> (896 does not divide 4096; 512
+/// does). The code is golden-verified; the only new risk is the T=512 threadgroup reduction and the rmsnorm. With
+/// no routed picks (WE=0) and no shared (SH=0) the block reduces to OUT = rmsnorm(H) * W, which this checks.
+pub fn addNormBolt(gpu: Gpu) !void {
+    const D: usize = 4096; // Bolt hidden, baked into the instantiation
+    const E: usize = 9;
+    const rows: usize = 2;
+    const mp: usize = 16; // rows padded to 16, the XS stride
+    const eps: f32 = 1e-5;
+
+    const h = try gpu.buffer(u16, rows * D);
+    defer h.deinit();
+    const yexp = try gpu.buffer(u16, rows * E * D);
+    defer yexp.deinit();
+    const we = try gpu.buffer(f32, rows * E);
+    defer we.deinit();
+    const sh = try gpu.buffer(u16, rows * D);
+    defer sh.deinit();
+    const wnorm = try gpu.buffer(u16, D);
+    defer wnorm.deinit();
+    const hn = try gpu.buffer(u16, rows * D);
+    defer hn.deinit();
+    const out = try gpu.buffer(u16, rows * D);
+    defer out.deinit();
+    const xs = try gpu.buffer(f32, D / 64 * mp);
+    defer xs.deinit();
+
+    var prng = std.Random.DefaultPrng.init(0xadd_0_117);
+    const rnd = prng.random();
+    const hv = h.slice(u16, rows * D);
+    for (hv) |*v| v.* = bf16(rnd.float(f32) - 0.5);
+    @memset(yexp.slice(u16, rows * E * D), 0); // no routed contribution
+    @memset(we.slice(f32, rows * E), 0);
+    @memset(sh.slice(u16, rows * D), 0); // no shared contribution
+    for (wnorm.slice(u16, D)) |*v| v.* = bf16(1.0); // W = 1, so OUT is the pure rmsnorm
+    @memset(hn.slice(u16, rows * D), 0xffff);
+    @memset(out.slice(u16, rows * D), 0xffff);
+
+    const p = try gpu.pipeline("tf_nemotron_add_norm_moe_xs_bolt", false);
+    defer p.deinit();
+    const cb = gpu.queue.commandBuffer();
+    const enc = cb.compute(.serial);
+    enc.setPipeline(p);
+    enc.setBuffer(h, 0, 0);
+    enc.setBuffer(yexp, 0, 1);
+    enc.setBuffer(we, 0, 2);
+    enc.setBuffer(sh, 0, 3);
+    enc.setBuffer(wnorm, 0, 4);
+    enc.setValue(eps, 5);
+    enc.setValue([8]i32{ @intCast(rows), @intCast(mp), 0, 0, 0, 0, 0, 0 }, 6);
+    enc.setBuffer(hn, 0, 7);
+    enc.setBuffer(out, 0, 8);
+    enc.setBuffer(xs, 0, 9);
+    enc.dispatchThreads(Size.of(512 * mp, 1, 1), Size.of(512, 1, 1));
+    enc.end();
+    try common.run(cb);
+
+    const got_hn = hn.slice(u16, rows * D);
+    const got_out = out.slice(u16, rows * D);
+    const got_xs = xs.slice(f32, D / 64 * mp);
+    for (0..rows) |r| {
+        var ss: f32 = 0;
+        for (0..D) |c| ss += f32of(hv[r * D + c]) * f32of(hv[r * D + c]);
+        const scale = 1.0 / @sqrt(ss / @as(f32, D) + eps);
+        for (0..D) |c| {
+            if (got_hn[r * D + c] != hv[r * D + c]) return error.HnChanged; // delta is 0, so HN == H
+            const want = f32of(hv[r * D + c]) * scale;
+            if (@abs(f32of(got_out[r * D + c]) - want) > 0.02 * @abs(want) + 1e-2) {
+                std.debug.print("  add_norm_bolt out[{d},{d}]: got {d}, reference {d}\n", .{ r, c, f32of(got_out[r * D + c]), want });
+                return error.WrongNorm;
+            }
+        }
+        // XS[g] is the sum of OUT over each 64-wide group
+        for (0..D / 64) |g| {
+            var acc: f32 = 0;
+            for (0..64) |i| acc += f32of(got_out[r * D + g * 64 + i]);
+            if (@abs(got_xs[g * mp + r] - acc) > 0.05 * @abs(acc) + 1e-2) return error.WrongSums;
+        }
+    }
+}
