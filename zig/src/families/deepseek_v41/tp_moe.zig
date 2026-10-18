@@ -92,12 +92,12 @@ pub const Context = struct {
         const shared_rows = ws.bytes(shared, rows * n * 2);
         const began = if (c.trace) mtl.clock.seconds() else 0;
         pack(c.rank, routed, shared_rows, n, c.send[0..used]);
-        const packed = if (c.trace) mtl.clock.seconds() else 0;
+        const packed_at = if (c.trace) mtl.clock.seconds() else 0;
         const tag = (try std.math.mul(u64, c.sequence, 256)) | @as(u64, @intCast(layer * 3 + phase));
         try c.exchange.call(c.exchange.ptr, tag, c.send[0..used], c.peer[0..used]);
         const received = if (c.trace) mtl.clock.seconds() else 0;
         unpack(1 - c.rank, c.peer[0..used], n, routed, shared_rows);
-        if (c.trace) std.debug.print("{{\"tp_pack_rank\":{d},\"tag\":{d},\"pack_seconds\":{d},\"unpack_seconds\":{d}}}\n", .{ c.rank, tag, packed - began, mtl.clock.seconds() - received });
+        if (c.trace) std.debug.print("{{\"tp_pack_rank\":{d},\"tag\":{d},\"pack_seconds\":{d},\"unpack_seconds\":{d}}}\n", .{ c.rank, tag, packed_at - began, mtl.clock.seconds() - received });
     }
 
     /// Finish the enclosing command before CPU exchange, then restore its encoder for the next layer.
