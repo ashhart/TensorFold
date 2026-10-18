@@ -58,9 +58,12 @@ pub fn attention(
     rows: usize,
 ) Error!Tensor {
     const hd = d.head_dim;
-    const q = try o.project(x, w.q, rows, false);
-    const keys = try o.project(x, w.k, rows, false);
-    const values = try o.project(x, w.v, rows, false);
+    // q, k and v in one launch where a grouped tile takes them: each column's sum is the single product's
+    var qkv: [3]Tensor = undefined;
+    if (!try o.projectGroup(x, &.{ w.q, w.k, w.v }, rows, &qkv)) {
+        for (&qkv, [_]model.Projection{ w.q, w.k, w.v }) |*t, p| t.* = try o.project(x, p, rows, false);
+    }
+    const q, const keys, const values = qkv;
     const n = rows * d.heads * hd;
     const q32 = try o.arena.of(f32, n);
     const att = try o.arena.of(f32, n);
