@@ -1,4 +1,5 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
+const speech = @import("speech.zig");
 const std = @import("std");
 const json = @import("json");
 const http_conn = @import("http_conn.zig");
@@ -63,6 +64,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.startsWith(u8, route, "/slide/")) return slide.script(srv, conn, a, route["/slide/".len..]);
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
@@ -75,6 +77,7 @@ fn discardBody(conn: *Conn, a: Allocator) void {
 
 fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const route = auth.routePath(conn.path);
+    if (std.mem.eql(u8, route, "/v1/audio/speech")) return speech.post(srv, conn, a) catch {};
     if (std.mem.eql(u8, route, "/v1/slide/learn")) return slide.learn(srv, conn, a);
     if (std.mem.eql(u8, route, "/v1/imprint/resume")) return imprint.post(srv, conn, a, .where);
     if (std.mem.eql(u8, route, "/v1/imprint/load")) return imprint.post(srv, conn, a, .load);

@@ -2,7 +2,6 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
-
 /// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
 
@@ -70,7 +69,7 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
     rewind_len: u32 = 0,
-    /// Where the prompt's prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
+    /// Where prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
     chunks: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
     decode_spans: []const [2]u32 = &.{},
@@ -109,69 +108,21 @@ pub const Request = struct {
     }
 };
 
-/// An image prepared for the engine's tower (``Vision.prepare``): patches, patch grid, tokens and a content hash.
-pub const PreparedImage = struct { pixels: []f32, gh: u32, gw: u32, tokens: u32, hash: u64 };
+/// Image and video input an engine serves, and --vision's limits (engine_vision.zig).
+const vision_types = @import("engine_vision.zig");
+pub const PreparedImage = vision_types.PreparedImage;
+pub const Piece = vision_types.Piece;
+pub const Vision = vision_types.Vision;
+pub const VideoSource = vision_types.VideoSource;
+pub const FrameSink = vision_types.FrameSink;
+pub const PreparedVideo = vision_types.PreparedVideo;
+pub const VideoOffer = vision_types.VideoOffer;
+pub const VisionOpen = vision_types.VisionOpen;
 
-/// Image input an engine serves (``Info.vision``): image bytes to tower input, and what a request may hold.
-pub const Vision = struct {
-    ctx: *anyopaque,
-    /// The image's bytes (any format the platform decodes) at most ``max_tokens`` tokens; allocated in ``a``.
-    prepare: *const fn (ctx: *anyopaque, a: Allocator, bytes: []const u8, max_tokens: u32) anyerror!PreparedImage,
-    /// The token the chat template writes once per image, expanded to the image's tokens.
-    image_token: u32,
-    /// The tokens the template wraps an image in (the image token among them): text that spells one stays text.
-    markers: []const u32 = &.{},
-    /// Tokens the server writes around each image's rows (Nemotron Omni's <img> and </img>); null: the template's own.
-    wrap: ?[2]u32 = null,
-    /// Image tokens one request may hold in all, and images.
-    image_tokens: u32,
-    max_images: u32,
-    /// Video input, when the engine's family reads it.
-    video: ?VideoOffer = null,
-    /// The engine's words for a prepare error the server cannot word (a decoder library it lacks); null: the server's.
-    explain: ?*const fn (err: anyerror) ?[]const u8 = null,
-};
-
-/// A video's facts as the server's decoder reads them, and its frames on request.
-pub const VideoSource = struct {
-    frames: u64, // the stream's frame count
-    rate_num: u64, // its average frame rate, num / den
-    rate_den: u64,
-    width: u32,
-    height: u32,
-    ctx: *anyopaque,
-    /// The frames at ``indices`` (ascending, distinct), each to ``sink`` in order.
-    decode: *const fn (ctx: *anyopaque, indices: []const u32, sink: FrameSink) anyerror!void,
-};
-
-/// Where a decoded frame goes: RGB rows of ``width`` * 3 bytes, ``stride`` bytes apart.
-pub const FrameSink = struct {
-    ctx: *anyopaque,
-    take: *const fn (ctx: *anyopaque, k: usize, rgb: []const u8, width: u32, height: u32, stride: usize) anyerror!void,
-};
-
-/// A video prepared for the tower: each group of frames an image, and each group's time in seconds.
-pub const PreparedVideo = struct { groups: []PreparedImage, times: []f64 };
-
-/// Video input an engine serves (``Vision.video``): how a decoded video becomes images and how the prompt holds them.
-pub const VideoOffer = struct {
-    /// ``src`` at most ``max_tokens`` tokens and ``max_frames`` sampled frames; allocated in ``a``.
-    prepare: *const fn (ctx: *anyopaque, a: Allocator, src: VideoSource, max_tokens: u32, max_frames: u32) anyerror!PreparedVideo,
-    /// The token the chat template writes once per video, expanded to its groups.
-    video_token: u32,
-    /// The tokens around each group's image tokens; the group's time follows as text.
-    group_open: u32,
-    group_close: u32,
-    /// The tokens the template wraps a video in (the video token among them): text that spells one stays text.
-    markers: []const u32 = &.{},
-    /// Video tokens one request may hold in all, videos, and frames sampled a video.
-    video_tokens: u32,
-    max_videos: u32,
-    max_frames: u32,
-};
-
-/// --vision: image and video input's limits (``Open.vision``); image_tokens_set: the flag given, over a family default.
-pub const VisionOpen = struct { image_tokens: u32 = 4096, image_tokens_set: bool = false, max_images: u32 = 4, video_tokens: u32 = 16384, max_videos: u32 = 2, max_frames: u32 = 256 };
+pub const SpeechRequest = @import("speech_api.zig").SpeechRequest;
+pub const SpeechResult = @import("speech_api.zig").SpeechResult;
+pub const SpeechInfo = @import("speech_api.zig").SpeechInfo;
+pub const SpeechSubmitError = error{ Closed, Busy, InvalidRequest, Unsupported };
 
 pub const Reason = enum { stop, length, cancelled, failed };
 
@@ -201,6 +152,7 @@ pub const Event = union(enum) {
     prompt_logprobs: []const LogprobRow,
     /// Tokens committed for this request, in order; valid only during the call.
     tokens: []const u32,
+    audio: usize,
     /// The reply ended; nothing follows. ``message`` says why a failed reply failed.
     finished: struct { reason: Reason, stats: Stats = .{}, message: []const u8 = "" },
 };
@@ -214,6 +166,8 @@ pub const Sink = struct {
 /// What the engine serves, fixed once it has loaded.
 pub const Info = struct {
     name: []const u8 = "lanes",
+    text_generation: bool = true,
+    speech: ?SpeechInfo = null,
     lanes: u32 = 1,
     /// Prompt plus reply tokens one request may use (0: no limit).
     context_window: u32 = 0,
@@ -287,9 +241,8 @@ pub const Open = struct {
     /// --parallel named a number: an engine whose memory fits fewer streams refuses instead of serving fewer.
     lanes_fixed: bool = false,
     drafts: bool = true,
-    /// --drafter: a draft model's directory for families that load one (Qwen3.8-27B's DFlash2); null: none.
+    /// --drafter: a draft model's directory (Qwen3.8-27B's DFlash2; null: none), and --drafter-bits: 4, or 0 for bf16.
     drafter: ?[]const u8 = null,
-    /// --drafter-bits: 4 prepares the drafter's weights in 4 bits; 0 keeps them bf16.
     drafter_bits: u8 = 4,
     /// --record: each stream's committed rows and tapped features written under this folder, for drafter training.
     record: ?[]const u8 = null,
@@ -310,6 +263,7 @@ pub const Open = struct {
     slide: bool = false,
     /// --recall: the server attaches Recall's record once the engine loads; an engine that reads none refuses first.
     recall: bool = false,
+    kv8: bool = false, // --kv-cache fp8: e4m3 attention caches, an fp32 scale a row (families whose Options take kv8)
     /// --device and --segments (CUDA); null: the backend's environment fallback, then its default.
     device: ?u32 = null,
     segments: ?u32 = null,
@@ -346,7 +300,14 @@ pub const Decision = struct {
 };
 
 /// An opened engine; ``close`` stops its thread and frees its backend.
-pub const Opened = struct { engine: Engine, close: *const fn (ctx: *anyopaque) void, ctx: *anyopaque };
+pub const Opened = struct {
+    engine: Engine,
+    close: *const fn (ctx: *anyopaque) void,
+    ctx: *anyopaque,
+    /// A drain's deadline: rounds end at the next boundary, what is left fails with `reason`; null: `close` alone.
+    halt: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null,
+    follow: ?*const fn (*anyopaque) anyerror!void = null,
+};
 
 pub const Memory = struct { active: u64 = 0, cache: u64 = 0, peak: u64 = 0, pinned: u64 = 0, limit: ?u64 = null };
 
@@ -362,27 +323,8 @@ pub const MemorySource = struct {
     read: *const fn (ctx: ?*anyopaque, reset_peak: bool) ?Memory,
 };
 
-pub const Status = struct {
-    /// Requests in prefill or decode, and those waiting for a lane.
-    running: u32 = 0,
-    waiting: u32 = 0,
-    decode_tokens_per_second: f64 = 0,
-    prefill_tokens_per_second: f64 = 0,
-    /// Requests that gave a lane up to a later one; null when the engine does not count them.
-    preemptions: ?u64 = null,
-    warming: bool = false,
-    /// Live streams written to the caller's buffer: tokens each holds.
-    streams: usize = 0,
-    /// Generated tokens held by live streams, excluding their prompts.
-    generation_tokens: u64 = 0,
-    /// Filling prompts' total tokens and those still to prefill (null: no prompt is going in).
-    fill_prompt_tokens: ?u32 = null,
-    fill_tokens_left: ?u32 = null,
-    /// A prompt pass is running whose backend reports no `fill_at`: the totals stay null rather than guessed.
-    fill_unknown: bool = false,
-    /// Changes whenever the filling set does: a reader pairs its drain samples with one fill.
-    fill_run: u64 = 0,
-};
+pub const HealthSource = @import("engine_status.zig").HealthSource;
+pub const Status = @import("engine_status.zig").Status;
 
 pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a learner's put-back has not reached the device
 
@@ -393,65 +335,15 @@ pub const stale_message = "a Living Weights delete could not be put back on the 
 pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
-pub const LearnRequest = struct {
-    train: []const Example = &.{},
-    think: []const Example = &.{}, // the facts' answers with thinking on, learned beside `train` (one of each a step)
-    held: []const Example = &.{},
-    near: []const Example = &.{},
-    keep: []const Example = &.{}, // answers of every kind this lesson's change must leave as they are
-    asked: []const Example = &.{}, // more wordings of the fact's questions, for its router (prompts only)
-    unasked: []const Example = &.{}, // questions it must not answer, for its router (prompts only)
-    kept: []const Example = &.{}, // questions the last lesson took, with the answers they had (a reroute's)
-    undo: bool = false, // instead take the last lesson's change back, as if it never ran
-    steps: u32 = 60, // bounded steps this time at most
-    more: bool = false, // more steps on the last lesson's rows, which are not captured again
-    reroute: bool = false, // the last lesson's router fitted again with `unasked` among what it must not take
-    drop: bool = false, // the last lesson taken out whole
-    save: bool = false, // every kept lesson written beside the model's shards, each with its router
-    retire: []const Neuron = &.{}, // instead zero these neurons of facts a newer fact replaces
-    unretire: bool = false, // instead put back the neurons the last retire zeroed (the newer fact was not learned)
-    forget: []const Neuron = &.{}, // instead zero these neurons' input weights (a fact deleted on request), kept to put back
-    unforget: bool = false, // instead put back, bit for bit, what the last forget changed (a kept fact did not come back)
-};
-
-/// A neuron a pocket lesson placed (Sliding Weights): its layer, its index in that layer's pocket, the row it keys on.
-pub const Neuron = struct { layer: u16, neuron: u16, key: NeuronKey };
-pub const NeuronKey = enum { reply, subject, value };
-
-/// A pocket lesson's stage, as it runs: its rows read, its neurons fitted, their outputs, its held-out answers judged.
-pub const LearnPhase = enum { reading, fitting, values, checking };
-
-/// Where a pocket lesson stands: its unit `at` of `of` (0: unknown), its outputs' loss, its neurons once placed.
-pub const LearnProgress = struct { phase: LearnPhase, at: u32 = 0, of: u32 = 0, loss: f32 = 0, neurons: []const Neuron = &.{} };
-
-/// A lesson's outcome in order, ending with `done` (a message says why it failed); slices live only during the call.
-pub const LearnEvent = union(enum) {
-    learned: struct { recalled: bool, steps: u32, loss: f32, neurons: []const Neuron = &.{} }, // neurons: a pocket's
-    progress: LearnProgress,
-    done: struct { message: []const u8 = "" },
-};
-
-/// Where a learn request's events go; called on the engine's thread, so it must return at once.
-pub const LearnSink = struct {
-    ctx: *anyopaque,
-    event: *const fn (ctx: *anyopaque, event: *const LearnEvent) void,
-};
-
-pub const LearnError = error{ Closed, Busy, Unsupported };
-
-/// A family's learner, which LaneHost steps one bounded unit at a time while no stream decodes.
-pub const Learner = struct {
-    ctx: *anyopaque,
-    /// Start a job; its events, `done` last, go to `sink` from later steps.
-    begin: *const fn (ctx: *anyopaque, request: *const LearnRequest, sink: LearnSink) anyerror!void,
-    /// One unit of the job: `changed` when weights moved (kept prompt states are then dropped), `done` when it ended.
-    step: *const fn (ctx: *anyopaque) Step,
-    /// End the open job now; it still sends `done`, with the reason.
-    abort: *const fn (ctx: *anyopaque) void,
-
-    /// stale: the device lacks a put-back the learner holds, so replies are refused until a later step clears it.
-    pub const Step = struct { done: bool, changed: bool, stale: bool = false };
-};
+pub const LearnRequest = @import("learning_api.zig").LearnRequest;
+pub const Neuron = @import("learning_api.zig").Neuron;
+pub const NeuronKey = @import("learning_api.zig").NeuronKey;
+pub const LearnPhase = @import("learning_api.zig").LearnPhase;
+pub const LearnProgress = @import("learning_api.zig").LearnProgress;
+pub const LearnEvent = @import("learning_api.zig").LearnEvent;
+pub const LearnSink = @import("learning_api.zig").LearnSink;
+pub const LearnError = @import("learning_api.zig").LearnError;
+pub const Learner = @import("learning_api.zig").Learner;
 
 pub const Engine = struct {
     ctx: *anyopaque,
@@ -460,6 +352,7 @@ pub const Engine = struct {
     pub const VTable = struct {
         info: *const fn (ctx: *anyopaque) Info,
         submit: *const fn (ctx: *anyopaque, id: Id, request: *const Request, sink: Sink) SubmitError!void,
+        submit_speech: ?*const fn (*anyopaque, Id, *const SpeechRequest, Sink) SpeechSubmitError!void = null,
         /// Ends a request between rounds; its ``finished`` (cancelled) still arrives. Unknown ids are ignored.
         cancel: *const fn (ctx: *anyopaque, id: Id) void,
         status: *const fn (ctx: *anyopaque, out: *Status, stream_tokens: []u32) void,
@@ -487,6 +380,10 @@ pub const Engine = struct {
     pub fn submit(e: Engine, id: Id, request: *const Request, sink: Sink) SubmitError!void {
         try @import("cache_modes.zig").validate(request.decode_spans);
         return e.vtable.submit(e.ctx, id, request, sink);
+    }
+    pub fn submitSpeech(e: Engine, id: Id, request: *const SpeechRequest, sink: Sink) SpeechSubmitError!void {
+        const f = e.vtable.submit_speech orelse return error.Unsupported;
+        return f(e.ctx, id, request, sink);
     }
     pub fn cancel(e: Engine, id: Id) void {
         e.vtable.cancel(e.ctx, id);
@@ -545,7 +442,8 @@ pub const Lone = struct {
     sampled: bool = false, // it drives sampled streams too
     logprobs: bool = false, // it gives each token its logprob row too
     structures: bool = false, // it masks each window's rows by the stream's grammar too
-    min_budget: u32 = 0, // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
+    // thinking budgets above this and loop guards: it hands the stream over before a forced close (0: never)
+    min_budget: u32 = 0,
     resumes: bool = false, // it takes the lane core's stream back between rounds (LoneHooks.resumed); else only opens
     /// Prefills (or resumes) `s` and decodes it until it finishes (false) or `hooks.yield` hands it to the lane core.
     run: *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: LoneHooks) anyerror!bool,
@@ -561,6 +459,8 @@ pub const LoneHooks = struct {
 
 /// The lane core served to the HTTP threads (lane_host.zig).
 pub const LaneHost = @import("lane_host.zig").LaneHost;
+/// An opt-in family round planner for the lane host, in place of its `prefill_step` chunks (lane_rounds.zig).
+pub const Rounds = @import("lane_host.zig").Rounds;
 
 /// Exact prompt reuse between requests, for any family (prompt_cache.zig).
 pub const prompt_cache = @import("prompt_cache.zig");
@@ -592,6 +492,8 @@ pub const originals = @import("originals.zig");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_rounds_test.zig");
+    _ = @import("lane_halt_test.zig");
     _ = @import("prompt_cache.zig");
     _ = @import("prompt_radix.zig");
     _ = @import("prompt_imprint.zig");

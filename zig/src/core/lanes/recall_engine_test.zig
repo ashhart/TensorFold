@@ -6,6 +6,8 @@ const sm = @import("stream.zig");
 const fake = @import("fake.zig");
 const recall = @import("recall.zig");
 const SuffixLookup = @import("proposer.zig").SuffixLookup;
+const Proposer = @import("proposer.zig").Proposer;
+const win = @import("windows.zig");
 const Sampling = @import("sampling.zig").Sampling;
 
 const gpa = std.testing.allocator;
@@ -221,4 +223,63 @@ test "Recall's continuations graft beside the head's chain and keep the reply's 
     defer with.deinit();
     try std.testing.expectEqualSlices(u32, plain.emitted[0], with.emitted[0]);
     try std.testing.expect(with.recall_kept > before.recall_kept and with.rounds < before.rounds);
+}
+
+/// A proposer that gives `out` whatever the context, its match always 0; `priced`: Proposer.VTable.priced.
+const Stub = struct {
+    out: []const u32,
+    priced: bool,
+
+    fn propose(ptr: *anyopaque, _: []const u32, max_draft: i64) anyerror![]const u32 {
+        const x: *Stub = @ptrCast(@alignCast(ptr));
+        return x.out[0..@min(x.out.len, @as(usize, @intCast(@max(0, max_draft))))];
+    }
+    fn lastMatch(_: *anyopaque) i64 {
+        return 0;
+    }
+    fn proposer(x: *Stub) Proposer {
+        const plain: Proposer.VTable = .{ .propose = propose, .last_match = lastMatch };
+        const priced: Proposer.VTable = .{ .propose = propose, .last_match = lastMatch, .priced = true };
+        return .{ .ptr = x, .vtable = if (x.priced) &priced else &plain };
+    }
+};
+
+/// A shared round's copy for a stream of `p` drafting with `stub`, a record continuing `p` (tokens gpa-owned).
+fn copyWith(stub: *Stub, shared: *recall.Shared, p: []const u32) !win.Copy {
+    var cfg = try model(.{});
+    defer cfg.deinit(gpa);
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var engine = Engine.init(gpa, &cfg, target.backend(), clock.clock());
+    defer engine.deinit();
+    var r: recall.Reader = .{ .gpa = gpa, .shared = shared };
+    defer r.deinit();
+    var s = try sm.Stream.init(gpa, .{ .id = "s", .prompt = p, .max_new = 16, .eos = &.{96}, .proposer = stub.proposer(), .recall = &r });
+    defer s.deinit(gpa);
+    engine.alone = false;
+    const c = try win.copyProposal(&engine, &s);
+    return .{ .tokens = try gpa.dupe(u32, c.tokens), .recalled = c.recalled };
+}
+
+test "a priced proposer's copy is taken as it gives it, and its none stands: no gate, no Recall in its place" {
+    const p = prompt(40, 5);
+    const plain = try run(&.{.{ .prompt = &p, .drafts = false }}, null, .{});
+    defer plain.deinit();
+    var shared = try newShared();
+    defer shared.record.deinit();
+    try remember(&shared, &p, plain.emitted[0]);
+    var unpriced: Stub = .{ .out = &.{}, .priced = false };
+    const fallback = try copyWith(&unpriced, &shared, &p);
+    defer gpa.free(fallback.tokens);
+    try std.testing.expect(fallback.recalled and fallback.tokens.len >= 2); // an unpriced none: Recall's copy instead
+    var none: Stub = .{ .out = &.{}, .priced = true };
+    const kept_none = try copyWith(&none, &shared, &p);
+    defer gpa.free(kept_none.tokens);
+    try std.testing.expect(!kept_none.recalled and kept_none.tokens.len == 0);
+    var one: Stub = .{ .out = &.{plain.emitted[0][0]}, .priced = true }; // one token, no match: under every gate
+    const kept_one = try copyWith(&one, &shared, &p);
+    defer gpa.free(kept_one.tokens);
+    try std.testing.expect(!kept_one.recalled);
+    try std.testing.expectEqualSlices(u32, one.out, kept_one.tokens);
 }

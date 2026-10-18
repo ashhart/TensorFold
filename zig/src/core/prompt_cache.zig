@@ -114,6 +114,9 @@ pub const Entry = struct {
 
 pub const Counts = struct { hits: u64 = 0, misses: u64 = 0, kept: u64 = 0, evicted: u64 = 0, refused: u64 = 0, failed: u64 = 0 };
 
+pub const RestoreDetails = @import("prompt_cache_restore.zig").Details;
+pub const RestoreLog = @import("prompt_cache_restore.zig").Log;
+
 /// Where a prompt pass starts and where it stops to keep its state (marks sorted, in `a`).
 pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 
@@ -121,10 +124,12 @@ pub const Plan = struct { from: u32 = 0, marks: []const u32 = &.{} };
 pub const Lookup = struct { entry: ?*Entry = null, marks: []const u32 = &.{} };
 
 pub const Store = struct {
+    restore_log: ?RestoreLog = null,
     gpa: Allocator,
     family: Snapshots,
     rules: Rules,
     budget: u64,
+    most: usize = std.math.maxInt(usize), // states kept at most: a family's snapshot slots, one a state
     held: u64 = 0,
     clock: u64 = 0,
     entries: std.ArrayList(*Entry) = .empty,
@@ -176,6 +181,12 @@ pub const Store = struct {
             s.held += extra;
             return true;
         };
+        return false;
+    }
+
+    /// Whether an outstanding lookup still borrows `saved`'s state: the family spares it while restoring.
+    pub fn borrowed(s: *Store, saved: Saved) bool {
+        for (s.entries.items) |e| if (e.saved == saved and !e.expired and e.borrowers > 0) return true;
         return false;
     }
 
@@ -246,12 +257,9 @@ pub const Store = struct {
     pub fn beginRewind(s: *Store, a: Allocator, prompt: []const u32, history_len: u32, rewind_len: u32, shared: []const u32, starts: []const u32, owner: ?*anyopaque, spans: []const modes.Span) !Plan {
         const l = try s.lookupRewind(a, prompt, @intCast(prompt.len), history_len, rewind_len, shared, starts, spans);
         const e = l.entry orelse return .{ .marks = l.marks };
-        const ok = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| true else |err| blk: {
-            note("restoring {d} tokens failed ({s}); prefilling from the start", .{ e.at, @errorName(err) });
-            break :blk false;
-        };
-        const from = if (ok) e.at else 0;
-        s.resumed(e, prompt, ok);
+        const failure: ?anyerror = if (s.family.vtable.restore(s.family.ptr, owner, e.saved)) |_| null else |err| err;
+        const from = if (failure == null) e.at else 0;
+        s.resumedWithReason(e, prompt, failure);
         s.reserve(prompt, @intCast(prompt.len), null, l.marks, spans); // restored: the state it resumed may go too (a peer restores before it drops)
         return .{ .from = from, .marks = l.marks };
     }
@@ -292,14 +300,16 @@ pub const Store = struct {
     /// Room for every state the pass keeps, made before it: a peer that mirrors the keeps hears of these evictions with the request.
     fn reserve(s: *Store, prompt: []const u32, born: u32, from: ?*Entry, marks_: []const u32, spans: []const modes.Span) void {
         var need: u64 = 0;
+        var new: usize = 0; // states it keeps that the store lacks: a slot each
         for (marks_) |at| {
             const n = @as(usize, at) + s.rules.lookahead;
             const exists = for (s.entries.items) |e| {
                 if (!e.expired and e.at == at and e.tokens.len == n and n <= prompt.len and std.mem.eql(u32, e.tokens, prompt[0..n]) and modes.equal(e.decode_spans, spans, at)) break true;
             } else false;
             if (!exists) need += s.family.vtable.bytes(s.family.ptr, at);
+            new += @intFromBool(!exists);
         }
-        while (s.held + need > s.budget) {
+        while (s.held + need > s.budget or s.entries.items.len + @min(new, s.most) > s.most) {
             const i = s.victimBut(from, prompt, born) orelse return;
             s.remove(i);
             s.counts.evicted += 1;
@@ -375,9 +385,14 @@ pub const Store = struct {
 
     /// A looked-up entry's restore went through (it is now the prompt's), or failed (dropped: the pass ran from 0).
     pub fn resumed(s: *Store, e: *Entry, prompt: []const u32, ok: bool) void {
+        return s.resumedWithReason(e, prompt, if (ok) null else error.RestoreRejected);
+    }
+
+    pub fn resumedWithReason(s: *Store, e: *Entry, prompt: []const u32, failure: ?anyerror) void {
         if (std.mem.indexOfScalar(*Entry, s.entries.items, e) == null) return;
         defer s.release(e);
-        if (!ok) {
+        if (failure) |err| {
+            @import("prompt_cache_restore.zig").report(s.restore_log, .{ .kept = e.at, .prompt = prompt.len, .expired = e.expired, .err = err });
             s.counts.failed += 1;
             e.expired = true;
             return;
@@ -452,15 +467,15 @@ pub const Store = struct {
         var owns_decoded = true;
         defer if (owns_decoded) s.gpa.free(decoded);
         const bytes = s.family.vtable.bytes(s.family.ptr, at);
-        if (bytes > s.budget) {
+        if (bytes > s.budget or s.most == 0) {
             s.counts.refused += 1;
             note("kept nothing at {d} tokens: {d} MiB passes the {d} MiB budget", .{ at, bytes >> 20, s.budget >> 20 });
             return false;
         }
         while (s.entries.items.len > 0) { // room: spare storage this save can take, else new storage inside the budget
-            if (s.family.vtable.reuses) |f| if (f(s.family.ptr, at)) break;
+            if (s.family.vtable.reuses) |f| if (s.entries.items.len < s.most and f(s.family.ptr, at)) break;
             const free_ = s.spare();
-            if (s.held + free_ + bytes <= s.budget) break;
+            if (s.held + free_ + bytes <= s.budget and s.entries.items.len < s.most) break;
             if (free_ > 0) {
                 if (s.family.vtable.trim) |f| f(s.family.ptr, s.budget -| s.held -| bytes); // spare that cannot take this state goes before any state
                 if (s.spare() < free_) continue;
@@ -507,7 +522,7 @@ pub const Store = struct {
         const m = im.best(prompt, starts, s.rules.planned, if (have) |x| x.at else 0) orelse return have;
         if (!modes.equal(&.{}, spans, m.at)) return have; // the request decodes rows the learned prompt pass prefilled
         const bytes = s.family.vtable.bytes(s.family.ptr, m.at);
-        while (bytes <= s.budget and s.held + s.spare() + bytes > s.budget) {
+        while (bytes <= s.budget and (s.held + s.spare() + bytes > s.budget or s.entries.items.len >= s.most)) {
             s.remove(s.victimBut(have, prompt, born) orelse return have);
             s.counts.evicted += 1;
         }

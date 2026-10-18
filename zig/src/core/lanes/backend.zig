@@ -1,4 +1,4 @@
-//! What the round loop asks a backend (Metal, CUDA or the fake) to compute; drawn tokens stay on the GPU behind handles.
+//! Backend operations for shared rounds; drawn tokens remain on the GPU behind handles.
 const std = @import("std");
 const Stream = @import("stream.zig").Stream;
 const Shape = @import("shape.zig").Shape;
@@ -45,6 +45,12 @@ pub const Features = struct {
     ready: Fence = .none, // .none: written; else the fence to wait on before reading, kind naming the backend
 };
 
+/// Takes a prompt chunk's tapped rows, the first at position `start`, while they are still held.
+pub const FeatureSink = struct {
+    ptr: *anyopaque,
+    take: *const fn (ptr: *anyopaque, s: *Stream, f: Features, start: u64) anyerror!void,
+};
+
 /// Absorb a stream's kept rows into its draft head and hold `depth` drafts for its next round.
 pub const DraftRequest = struct {
     stream: *Stream,
@@ -59,7 +65,10 @@ pub const DraftRequest = struct {
     ranks: bool = false, // also keep each chained level's best tokens (alternatives(), for grafts)
 };
 
+pub const Committed = struct { ptr: *anyopaque, call: *const fn (*anyopaque) void };
+
 pub const Backend = struct {
+    first_before_draft: bool = false,
     ptr: *anyopaque,
     vtable: *const VTable,
 
@@ -68,6 +77,8 @@ pub const Backend = struct {
         prefill: *const fn (ptr: *anyopaque, s: *Stream) anyerror!void,
         /// One chunk of the prompt pass, false while chunks remain; null: the pass runs whole.
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
+        prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.
@@ -92,6 +103,8 @@ pub const Backend = struct {
         prepare_features: ?*const fn (ptr: *anyopaque, taps: []const u32) anyerror!void = null,
         /// Cache rows [start, start + count) of the prepared taps, within what `Features` says is held (null: none).
         features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, start: u64, count: u32) anyerror!Features = null,
+        /// The prompt pass handing `sink` each chunk's tapped rows as it makes them (null: features() after the pass).
+        prefill_features: ?*const fn (ptr: *anyopaque, s: *Stream, taps: []const u32, sink: FeatureSink) anyerror!void = null,
         /// The first token's logprob row (the prompt's last row) for a stream with `logprobs`; null: not given.
         first_row: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Row = null,
         /// `first` with the first token drawn among `mask`'s allowed tokens (structured output).
@@ -104,7 +117,27 @@ pub const Backend = struct {
         reports_fill: bool = false,
         /// The stream left the rounds: free its caches and held drafts.
         release: *const fn (ptr: *anyopaque, s: *Stream) void,
+        /// A prompt in pieces between rounds (`Rounds`) instead of `prefill`: begin, pieces, finish; null: whole only.
+        begin: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!Begun = null,
+        piece: ?*const fn (ptr: *anyopaque, s: *Stream, start: u64, end: u64, save: bool) anyerror!void = null,
+        finish: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!void = null,
+        /// `finish` minus the last row (Config.join_tail): true when that token is left for the first round.
+        join: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
+        /// A round's pieces in one call (Config.piece_runs), maybe one forward; a failure fails them all.
+        pieces: ?*const fn (ptr: *anyopaque, list: []const Piece) anyerror!void = null,
+        /// Before a round's `finish` / `join` calls (Config.replay_runs): their shared work in one go.
+        finals: ?*const fn (ptr: *anyopaque, streams: []const *Stream) anyerror!void = null,
     };
+
+    /// One stream's prompt rows [start, end) of a round (`save`: the prompt's snapshot right after them).
+    pub const Piece = struct { stream: *Stream, start: u64, end: u64, save: bool };
+
+    /// `begin`'s outcome: restored prefix tokens, or a damaged saved entry dropped (the prompt runs from 0).
+    pub const Begun = struct { cached: u64 = 0, damaged: bool = false };
+
+    pub fn pieces(b: Backend) bool {
+        return b.vtable.begin != null and b.vtable.piece != null and b.vtable.finish != null;
+    }
 
     pub fn prefill(b: Backend, s: *Stream) !void {
         return b.vtable.prefill(b.ptr, s);
@@ -139,7 +172,7 @@ pub const Backend = struct {
         b.vtable.release(b.ptr, s);
     }
 
-    /// A driver of its own starts a stream: the prompt pass and its first token, committed; a cancel or failure releases it.
+    /// Start a stream and commit its first token; cancellation or failure releases it.
     pub fn opening(b: Backend, gpa: std.mem.Allocator, s: *Stream) !u32 {
         errdefer b.release(s);
         try b.prefill(s);

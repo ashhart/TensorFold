@@ -14,17 +14,57 @@ const int = trail.int;
 
 /// Prefill a stream, draw its first token and ask for its first drafts; it takes part from the next round.
 pub fn add(e: *Engine, s: *Stream) !void {
+    return addCommitted(e, s, null);
+}
+
+pub fn addCommitted(e: *Engine, s: *Stream, hook: ?be.Committed) !void {
     _ = e.arena.reset(.retain_capacity);
     try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     e.backend.prefill(s) catch |err| {
         if (err == error.Cancelled) e.backend.release(s); // the host finishes a cancelled stream without the core
         return err;
     };
-    try opened(e, s);
+    try openedCommitted(e, s, .rule, hook);
+}
+
+/// How a stream's first drafts are sized: the depth rule, or the head's whole reach under node probabilities.
+pub const Reach = enum { rule, head };
+
+/// Streams a backend prefills in one pass at most.
+pub const max_together = 16;
+
+/// `add` for several streams, prompts in one pass when the backend takes them; `errs[i]`: stream i's error, or null.
+pub fn addStreams(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (errs) |*x| x.* = null;
+    const many = e.backend.vtable.prefill_many orelse return addEach(e, ss, errs);
+    if (ss.len < 2 or ss.len > max_together) return addEach(e, ss, errs);
+    _ = e.arena.reset(.retain_capacity);
+    for (ss) |s| trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) }) catch {};
+    const together = many(e.backend.ptr, ss) catch false; // one stream's refusal is its own: each goes alone
+    if (!together) return addEach(e, ss, errs);
+    for (ss, errs) |s, *x| opened(e, s) catch |err| { // a stream cancelled in the pass gets no first token
+        x.* = err;
+    };
+}
+
+fn addEach(e: *Engine, ss: []const *Stream, errs: []?anyerror) void {
+    for (ss, errs) |s, *x| add(e, s) catch |err| {
+        x.* = err;
+    };
 }
 
 /// After the prompt pass: the first token drawn and committed, the first drafts asked; rounds from the next.
 pub fn opened(e: *Engine, s: *Stream) !void {
+    return openedWith(e, s, .rule);
+}
+
+/// `opened` with its first drafts sized by `reach` (a family planner's prompts in pieces: `.head`).
+pub fn openedWith(e: *Engine, s: *Stream, reach: Reach) !void {
+    return openedCommitted(e, s, reach, null);
+}
+
+fn openedCommitted(e: *Engine, s: *Stream, reach: Reach, hook: ?be.Committed) !void {
+    if (e.backend.first_before_draft and e.cfg.family_mtp and s.drafts) return @import("open_first.zig").opened(e, s, reach, hook);
     if (s.isCancelled()) { // cancelled in its last chunk: no first token
         e.backend.release(s);
         return error.Cancelled;
@@ -40,7 +80,7 @@ pub fn opened(e: *Engine, s: *Stream) !void {
     var asked: ?u32 = null;
     if (e.cfg.family_mtp and s.drafts) {
         // the head reads the prompt's last row and the first token, and drafts the one after it
-        const d: u32 = @intCast(try e.rule.depth(win.who(s)));
+        const d = try firstDepth(e, s, reach);
         asked = d;
         try e.backend.draft(&.{.{ .stream = s, .follow = &.{}, .first = feed, .rows = null, .start = s.prompt_len, .position = position + 1, .depth = d }});
         s.dropHeld(e.gpa);
@@ -70,6 +110,13 @@ pub fn opened(e: *Engine, s: *Stream) !void {
     try e.live.append(e.gpa, s);
 }
 
+/// The first drafts' depth for `reach`.
+pub fn firstDepth(e: *Engine, s: *Stream, reach: Reach) !u32 {
+    var who = win.who(s);
+    if (reach == .head and e.cfg.node_probabilities) return @intCast(try e.rule.headDepth(&who, null, win.probe(e)));
+    return @intCast(try e.rule.depth(who));
+}
+
 /// Whether the backend can run a prompt pass a chunk at a time between rounds (`fillStream`).
 pub fn fills(e: *const Engine) bool {
     return e.backend.vtable.prefill_step != null;
@@ -77,6 +124,10 @@ pub fn fills(e: *const Engine) bool {
 
 /// One chunk of a stream's prompt pass; true once the stream is opened and joins the next round.
 pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
+    return fillStreamCommitted(e, s, first, null);
+}
+
+pub fn fillStreamCommitted(e: *Engine, s: *Stream, first: bool, hook: ?be.Committed) !bool {
     _ = e.arena.reset(.retain_capacity);
     if (first) try trail.event(e, &.{ f("ev", str("add")), f("stream", str(s.id)) });
     const chunk = e.backend.vtable.prefill_step orelse return error.NoPrefillSteps;
@@ -85,6 +136,6 @@ pub fn fillStream(e: *Engine, s: *Stream, first: bool) !bool {
         return err;
     };
     if (!done) return false;
-    try opened(e, s);
+    try openedCommitted(e, s, .rule, hook);
     return true;
 }

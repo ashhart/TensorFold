@@ -2,7 +2,7 @@
 
 const std = @import("std");
 
-pub const max_rows = 16;
+pub const max_rows = 32; // the widest verify window a cost table holds
 
 /// Measured ms on this GPU: `verify[r]` for a window of r rows (index 0 unused), `level` for one chain level.
 pub const Costs = struct {
@@ -10,16 +10,18 @@ pub const Costs = struct {
     rows: usize = 0,
     level: f64 = 0,
 
-    /// Timed costs with each extra row's ms pooled so it never rises with rows, as shared experts make them.
-    pub fn measured(verify: []const f64, level: f64) Costs {
+    /// Timed costs, each row's added ms pooled so it never rises with rows inside one regime of `regime` widths.
+    pub fn measured(verify: []const f64, level: f64, regime: usize) Costs {
         var sums: [max_rows]f64 = undefined;
         var counts: [max_rows]f64 = undefined;
         var n: usize = 0;
-        for (verify[1 .. verify.len - 1], verify[2..]) |a, b| {
+        var first: usize = 0; // the first pool a row may join: a regime's first row keeps its own ms
+        for (verify[1 .. verify.len - 1], verify[2..], 2..) |a, b, r| {
+            if ((r - 1) % regime == 0) first = n + 1;
             sums[n] = b - a;
             counts[n] = 1;
             n += 1;
-            while (n > 1 and sums[n - 2] * counts[n - 1] < sums[n - 1] * counts[n - 2]) {
+            while (n > first + 1 and sums[n - 2] * counts[n - 1] < sums[n - 1] * counts[n - 2]) {
                 sums[n - 2] += sums[n - 1];
                 counts[n - 2] += counts[n - 1];
                 n -= 1;
@@ -93,7 +95,7 @@ pub const DepthRule = struct {
 
 test "pooled costs never add more ms a row as rows grow" {
     const v = [_]f64{ 0, 9.85, 12.44, 14.72, 16.92, 18.51, 20.11, 21.7, 23.03, 24.36, 25.69, 26.95, 28.22, 29.33, 30.36, 31.22, 32.08 };
-    const c = Costs.measured(&v, 0.6132);
+    const c = Costs.measured(&v, 0.6132, 16);
     try std.testing.expectEqual(@as(usize, 16), c.rows);
     for (2..16) |k| try std.testing.expect(c.row(k) <= c.row(k - 1) + 1e-9);
     try std.testing.expectApproxEqAbs(@as(f64, 32.08), c.verify[16], 1e-9);
@@ -101,4 +103,18 @@ test "pooled costs never add more ms a row as rows grow" {
     try std.testing.expect(r.keep(1, 0.0) and r.keep(2, 0.99) and !r.keep(2, 0.1));
     r.done(4, 4, 3);
     try std.testing.expect(r.tokens > 2.0);
+}
+
+test "pooling stops at a kernel regime: rows 1 to 16 cost what they cost alone when 17 rows step up" {
+    var v: [33]f64 = @splat(0);
+    const small = [_]f64{ 46.33, 54.42, 60.47, 66.52, 71.58, 76.64, 81.3, 85.95, 90.52, 94.65, 98.78, 102.91, 107.04, 111.18, 115.31, 117.58 };
+    @memcpy(v[1..17], &small);
+    v[17] = 122.58;
+    for (18..33) |r| v[r] = v[r - 1] + 2.4 + 0.1 * @as(f64, @floatFromInt(r % 3));
+    const c = Costs.measured(&v, 3.5, 16);
+    const alone = Costs.measured(v[0..17], 3.5, 16);
+    try std.testing.expectEqual(@as(usize, 32), c.rows);
+    try std.testing.expectEqualSlices(f64, alone.verify[1..17], c.verify[1..17]);
+    for ([_]usize{ 16, 17, 32 }) |r| try std.testing.expectApproxEqAbs(v[r], c.verify[r], 1e-9);
+    for (19..33) |r| try std.testing.expect(c.row(r - 1) <= c.row(r - 2) + 1e-9);
 }

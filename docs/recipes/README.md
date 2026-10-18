@@ -3,18 +3,23 @@
 Each family page describes its supported checkpoint, kernels and operating limits, and says which engine it covers:
 the native engine, or the Python engine frozen at 0.6.6.
 
+For agent-assisted contributions, read the [TensorFold contributor skill](SKILL.md) before implementing a native family, kernel or serving change.
+
 | Family | Recipe |
 | --- | --- |
 | Nemotron 3.5 Lightning | [MLX](nemotron-3.5.md), [Intel Arc, experimental](xpu-arc.md) |
 | Nemotron 3.5 Super VL | [Native CUDA on one or two GB10s, images](nemotron-3.5-super-vl.md) |
 | Qwen3.8-27B | [MLX, quantization and CUDA](qwen3.8-27b.md) |
 | Qwen3.5-2B | [Native Metal preview, tied affine 4-bit](qwen3.5-2b-native.md) |
-| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [CUDA images](flash-next-vision.md) |
+| Qwen3.8 Flash Next | [MLX prefill and CUDA](qwen3.8-flash-next.md), [native CUDA](flash-next-cuda.md), [CUDA images](flash-next-vision.md) |
 | Ternary Bonsai 2 27B | [MLX](ternary-bonsai-2.md) |
 | GLM-5.3-Flash | [MLX on a 256 GB Mac, two-rank CUDA](glm-5.3-flash.md) |
 | Gemma 4 26B-A4B | [MLX, fused one-row decode](gemma-4.md) |
+| Gemma 4 31B | [Native Metal, affine 4-bit](gemma-4-native.md) |
+| Gemma 4 12B | [Native Metal, affine 4-bit, MTP assistant](gemma-4-12b-native.md) |
 | DeepSeek-V4-Flash | [MLX on a 256 GB Mac, DSpark and MTP drafts](deepseek-v4-flash.md) |
 | Qwen3.6-35B-A3B | [MLX with MTP drafts, one-GPU CUDA](qwen3.6-moe.md) |
+| Step-5-Preview | [Native Metal on one 256 GB Mac: 2-bit experts, MTP drafts, images](step-5-preview.md) |
 
 ## Capability floor
 
@@ -34,6 +39,8 @@ New families go on the Zig engine: [adding a Zig family](adding-a-zig-family.md)
 one gained, and which code owns it. For the Python engine, frozen at 0.6.6, the contributor guides cover
 [adding an MLX family](adding-a-family.md), [adding a CUDA family](adding-a-cuda-family.md) and
 [CUDA implementation rules](cuda.md).
+[Training a drafter](training-a-drafter.md) takes a target's `--record` output to a learned block drafter, with
+what each step gained on Kolibri-1.
 [EXL3 weights](exl3.md) and [universal EXL3 experts](exl3-universal-experts.md) describe the shared EXL3
 module @vcruz305 wrote for the Python engine's CUDA families in [#42](https://github.com/ashhart/TensorFold/pull/42):
 any codebook, any width per tensor, one grouped launch per MoE projection.

@@ -1,5 +1,6 @@
 //! The server: one engine and tokenizer behind the HTTP routes, one thread a connection.
 const std = @import("std");
+const platform = @import("sys");
 const api = @import("engine_api");
 const json = @import("json");
 const errors = @import("errors.zig");
@@ -14,8 +15,6 @@ const routes = @import("routes.zig");
 const responses = @import("responses.zig");
 const grammar = @import("grammar.zig");
 const clock = @import("clock.zig");
-const prompt = @import("prompt.zig");
-const tool_specs = @import("tool_specs.zig");
 const tool_grammar = @import("tool_grammar.zig");
 const chunk_plan = @import("chunk_plan.zig");
 const log = @import("log.zig");
@@ -72,6 +71,8 @@ pub const Config = struct {
     timeouts: http_conn.Timeouts = .{},
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
+    /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
+    environ: ?*const std.process.Environ.Map = null,
 };
 
 pub const Server = struct {
@@ -99,6 +100,7 @@ pub const Server = struct {
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
+    speech_inflight: std.atomic.Value(u32) = .init(0),
     arena: std.heap.ArenaAllocator,
     /// Structured output's compiler, opened by the first structured request (Python's grammar.compiler).
     grammars: ?*api.grammar.Compiler = null,
@@ -119,6 +121,10 @@ pub const Server = struct {
         const srv = try gpa.create(Server);
         srv.* = .{ .gpa = gpa, .io = io, .engine = engine, .info = engine.info(), .text = text, .config = config, .keys = keys, .metrics = .{ .gpa = gpa }, .store = .{ .gpa = gpa }, .arena = .init(gpa), .slide = .init(gpa, io, config.slide_graph), .teacher = .init(gpa) };
         errdefer srv.deinit(); // a later step's failure stops the keepalive before the caller closes the engine
+        if (!srv.info.text_generation) {
+            if (config.cortheon) return error.CortheonRequiresTextGeneration;
+            return srv;
+        }
         if (config.cortheon) srv.cortheon = try cortheon.State.init(gpa, io, "TensorFold-Cortheon (+https://github.com/ashhart/TensorFold)", config.cortheon_search_key);
         if (config.keep_warm_s > 0) if (engine.keepaliveTarget()) |target| {
             srv.keepalive = api.keepalive.Keepalive.start(gpa, io, target, @as(i64, config.keep_warm_s) * std.time.ns_per_s) catch |e| blk: {
@@ -190,28 +196,19 @@ pub const Server = struct {
         };
     }
 
-    /// The call gate and grammar a request asks for, or its refusal when the engine cannot enforce them.
+    /// A specific engine name, or the server's backend identity when the shared host uses its default name.
+    pub fn backendName(srv: *const Server) []const u8 {
+        return if (std.mem.eql(u8, srv.info.name, "lanes") and srv.config.identity.backend.len > 0) srv.config.identity.backend else srv.info.name;
+    }
+
+    /// The grammar a request asks for, or its refusal when the engine cannot enforce it.
     pub fn checkFeatures(srv: *Server, cx: *Cx, f: Value, has_tools: bool, thinking: bool, prompt_ids: []const u32, tools: []const Value, request: *api.Request) errors.Refused!void {
         _ = prompt_ids;
         const required = if (f.get("tool_call_required")) |r| r.truthy() else false;
-        if (has_tools and required and srv.info.structures) {
+        if (has_tools and required) {
+            if (!srv.info.structures) return cx.fail(.request, "backend '{s}' cannot enforce tool_choice \"required\" or a named function: it has no token grammar support; send \"auto\" or \"none\"", .{srv.backendName()});
             const one_call = if (f.get("tool_call_single")) |x| x.truthy() else false;
             request.structure = try tool_grammar.structure(srv, cx, tools, !one_call, thinking);
-        } else if (has_tools and required) {
-            const form = try srv.callForm(cx);
-            const opener = if (form) |fm| srv.text.tokenId(fm.opener) else null;
-            if (opener == null) return cx.refuse("tool_choice \"required\" or a named function needs a chat template that marks tool calls (<tool_call> or <|tool_call>), and this one does not: send \"auto\"");
-            if (!srv.info.call_gates) return cx.refuse("tool_choice \"required\" or a named function is not supported by this engine yet: send \"auto\"");
-            var names: std.ArrayList([]const u8) = .empty;
-            if (form.?.lead != null) for (tools) |t| try names.append(cx.a, try tool_specs.toolName(cx.a, t));
-            const think_open = if (srv.markers.open.len > 0) blk: {
-                const ids = srv.text.encode(cx.a, srv.markers.open, false) catch |e| switch (e) {
-                    error.OutOfMemory => return error.OutOfMemory,
-                    error.Template => &[_]u32{},
-                };
-                break :blk if (ids.len > 0) ids[0] else null;
-            } else srv.text.tokenId("<think>");
-            request.call = .{ .opener = opener.?, .lead = form.?.lead orelse "", .tail = form.?.tail orelse "", .names = names.items, .think_open = think_open, .think_end = srv.text.tokenId(srv.markers.close) };
         }
         if (try grammar.spec(cx, f)) |s| {
             if (!srv.info.structures) return cx.refuse("structured output (response_format and the guided_* fields) is not supported by this engine yet");
@@ -229,7 +226,7 @@ pub const Server = struct {
         return .{ .kind = kind, .text = text, .after = if (thinking) srv.text.tokenId(srv.markers.close) else null, .compiler = c };
     }
 
-    /// The model's grammar compiler: tokenizer.json, config.json's vocab_size (text_config first), the eos ids.
+    /// The model's grammar compiler: tokenizer.json, the text model's vocab_size, the eos ids.
     fn grammarCompiler(srv: *Server) ?*api.grammar.Compiler {
         srv.grammar_mutex.lockUncancelable(srv.io);
         defer srv.grammar_mutex.unlock(srv.io);
@@ -244,47 +241,18 @@ pub const Server = struct {
                 .ok => |v| v,
                 .err => break :blk "config.json is not JSON",
             };
-            var vocab: ?u32 = null;
-            for ([_]?json.Value{ cfg.get("text_config"), cfg }) |part| if (vocab == null) if (part) |p| if (p.get("vocab_size")) |v| if (v.int64()) |n| {
-                vocab = @intCast(n);
-            };
-            if (vocab == null) break :blk "structured output needs the checkpoint's config.json vocab_size";
+            const vocab = grammar.vocabSize(cfg) orelse break :blk "structured output needs the checkpoint's config.json vocab_size";
             var err: [512]u8 = undefined;
             const c = a.create(api.grammar.Compiler) catch break :blk "out of memory";
-            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab.?, srv.eos, &err) catch |e| break :blk switch (e) {
+            c.* = api.grammar.Compiler.open(srv.io, a, tok, vocab, srv.eos, &err) catch |e| break :blk switch (e) {
                 error.NoGrammarLibrary => "the server cannot load " ++ api.grammar.library ++ " (xgrammar; zig build grammar)",
                 else => a.dupe(u8, std.mem.sliceTo(&err, 0)) catch "out of memory",
             };
             srv.grammars = c;
-            log.line("structured output: xgrammar over {d} tokens", .{vocab.?});
+            log.line("structured output: xgrammar over {d} tokens", .{vocab});
             break :blk null;
         };
         return srv.grammars;
-    }
-
-    const Form = struct { opener: []const u8, lead: ?[]const u8, tail: ?[]const u8 };
-
-    /// (opener, lead, tail) of this template's tool calls, read from a rendered probe call.
-    fn callForm(srv: *Server, cx: *Cx) errors.Refused!?Form {
-        const probe = (try json.parse(cx.a, "[{\"role\": \"user\", \"content\": \"x\"}, {\"role\": \"assistant\", \"content\": \"\", \"tool_calls\": [{\"id\": \"call_0\", \"type\": \"function\", \"function\": {\"name\": \"tfprobe_fn\", \"arguments\": {}}}]}]")).ok;
-        var scratch: Cx = .{ .a = cx.a };
-        const text = if (prompt.renderIds(srv, &scratch, probe, &.{}, false, null, false)) |ids| try srv.text.decode(cx.a, ids) else |_| "";
-        if (std.mem.lastIndexOf(u8, text, "tfprobe_fn")) |at| {
-            var best: ?usize = null;
-            var opener: []const u8 = "";
-            for (reply_text.calls) |c| if (std.mem.lastIndexOf(u8, text[0..at], c[0])) |s| {
-                if (best == null or s > best.? or (s == best.? and std.mem.order(u8, c[0], opener) == .gt)) {
-                    best = s;
-                    opener = c[0];
-                }
-            };
-            if (best) |s| {
-                const end = at + "tfprobe_fn".len;
-                return .{ .opener = opener, .lead = text[s + opener.len .. at], .tail = if (end < text.len) text[end .. end + 1] else "" };
-            }
-        }
-        for (reply_text.calls) |c| if (srv.text.tokenId(c[0]) != null) return .{ .opener = c[0], .lead = null, .tail = null };
-        return null;
     }
 
     /// Counts one finished request for /metrics.
@@ -301,7 +269,7 @@ pub const Server = struct {
             _ = srv.open_connections.fetchAdd(1, .acq_rel);
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c }) catch {
                 _ = srv.open_connections.fetchSub(1, .acq_rel);
-                _ = std.posix.system.close(c.fd);
+                _ = platform.posix.system.close(c.fd);
                 continue;
             };
             t.detach();
@@ -310,7 +278,7 @@ pub const Server = struct {
 
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
         defer _ = srv.open_connections.fetchSub(1, .acq_rel);
-        defer _ = std.posix.system.close(accepted.fd);
+        defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
         const peer = listener_mod.peerText(&peer_buf, accepted.peer);
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
@@ -397,7 +365,7 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
 }
 
-/// ``needs_user_after_tool``: the template raises "No user query found" when the conversation has no user query, which a conversation whose user turn became tool results no longer has; such templates gain a user turn after a trailing tool message.
+/// ``needs_user_after_tool``: templates raising "No user query found" gain a user turn after a trailing tool message.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
 }

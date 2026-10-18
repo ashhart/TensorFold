@@ -70,8 +70,10 @@ inline void tf_rp_qdot16(const device uint8_t* w, const thread float (*xt)[16], 
 }
 
 // RPS output columns of MB rows: lanes split K in 16-input pieces (512 a pass, then a tail), one simd_sum a (row, column).
+template <int MB> struct TfRpRows { const device bfloat* x[MB]; };
+
 template <int RPS, int MB, int BITS, bool BF16SUM>
-inline void tf_rp_rows(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, const device bfloat* x0,
+inline void tf_rp_rows_at(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, thread const TfRpRows<MB>& x,
                        int K, int GS, uint lane, thread float (*acc)[RPS]) {
   const int KB = K * BITS / 8;
   const int KG = K / GS;
@@ -88,7 +90,7 @@ inline void tf_rp_rows(const device uint8_t* w, const device bfloat* sc, const d
     if (k0 == FULL && !(FULL < K && int(lane) < (K - FULL) / 16)) break;
     float xt[MB][16];
     float sum[MB];
-    for (int b = 0; b < MB; b++) sum[b] = tf_rp_load16<BITS, BF16SUM>(x0 + b * K + xl + k0, xt[b]);
+    for (int b = 0; b < MB; b++) sum[b] = tf_rp_load16<BITS, BF16SUM>(x.x[b] + xl + k0, xt[b]);
     for (int j = 0; j < RPS; j++) {
       for (int b = 0; b < MB; b++) col[b] = acc[b][j];
       tf_rp_qdot16<MB, BITS>(w + j * KB, xt, float(sc[j * KG]), float(bi[j * KG]), sum, col);
@@ -98,6 +100,15 @@ inline void tf_rp_rows(const device uint8_t* w, const device bfloat* sc, const d
   }
   for (int j = 0; j < RPS; j++)
     for (int b = 0; b < MB; b++) acc[b][j] = simd_sum(acc[b][j]);
+}
+
+// Contiguous callers use the same reduction with their original row starts.
+template <int RPS, int MB, int BITS, bool BF16SUM>
+inline void tf_rp_rows(const device uint8_t* w, const device bfloat* sc, const device bfloat* bi, const device bfloat* x0,
+                       int K, int GS, uint lane, thread float (*acc)[RPS]) {
+  TfRpRows<MB> x;
+  for (int b = 0; b < MB; b++) x.x[b] = x0 + b * K;
+  tf_rp_rows_at<RPS, MB, BITS, BF16SUM>(w, sc, bi, x, K, GS, lane, acc);
 }
 
 // A value out: bf16, relu squared with RELU2.

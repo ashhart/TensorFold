@@ -14,7 +14,7 @@ pub const max_redirects = 3;
 pub const timeout_s = 10;
 pub const total_s = 30;
 
-/// images_http.MEDIA_TYPES: the declared types an image URL may answer with (WebP is refused after, by its bytes).
+/// images_http.MEDIA_TYPES: the declared types an image URL may answer with.
 pub const image_media = [_][]const u8{ "image/jpeg", "image/png", "image/webp" };
 /// videos.py VIDEO_MEDIA_TYPES.
 pub const video_media = [_][]const u8{ "video/mp4", "video/webm", "video/quicktime", "video/x-matroska" };
@@ -253,6 +253,11 @@ fn readInto(a: std.mem.Allocator, io: Io, r: *Io.Reader, data: *std.ArrayList(u8
 
 /// A TCP connection to the checked address on port 443, its connect bounded by `ms` (std's connect has no timeout).
 fn connect(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
+    // the socket calls below are libc's on Linux and macOS; a Windows server refuses image URLs by name
+    return if (comptime @import("builtin").os.tag == .windows) fail(f, "image URLs are not supported on Windows yet") else connectPosix(addr, ms, f);
+}
+
+fn connectPosix(addr: net.IpAddress, ms: i64, f: *Failure) Error!net.Stream {
     const c = std.c;
     const failed = "image download failed or timed out";
     var storage: c.sockaddr.storage = undefined;
