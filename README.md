@@ -254,7 +254,7 @@ The `.metal` sources need Xcode's Metal compiler. Install full Xcode and its Met
 `unable to find utility "metal"`.
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.12
+zig build native -Dcpu=apple_m1
 zig build test test-golden -Dcpu=apple_m1
 ```
 

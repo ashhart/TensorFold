@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Mac source build instructions name full Xcode and its Metal Toolchain component, and the build example uses the package manifest's version (#1049). Thanks to @akol1.
+
 - HTTP serving bounds total request-head and body reads, caps open connections at 128, and returns 503 with Retry-After when full. Inference and streamed replies keep their existing timing policy.
 
 - Living Weights implementation and safety work is already in the 1.1.1 tree. Its model, retention and save/restart qualification remains pending; the #1029 lesson-counter repair is excluded and remains held.
