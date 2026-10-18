@@ -15,10 +15,10 @@ pub const most_experts = 1024;
 pub const most_picks = 128;
 
 /// tf_route_logits' staged rows (16 inputs and 32 experts, padded by 8): two stages of 128, or three of 256.
-const many_shared: u32 = 2 * 48 * (128 + 8) * 2;
-const few_shared: u32 = 3 * 48 * (256 + 8) * 2;
+pub const many_shared: u32 = 2 * 48 * (128 + 8) * 2;
+pub const few_shared: u32 = 3 * 48 * (256 + 8) * 2;
 /// tf_route_logits_wide's: 128 inputs and 64 experts, two stages of 64.
-const wide_shared: u32 = 2 * 192 * (64 + 8) * 2;
+pub const wide_shared: u32 = 2 * 192 * (64 + 8) * 2;
 
 pub const RouteRows = struct {
     mod: Module,
