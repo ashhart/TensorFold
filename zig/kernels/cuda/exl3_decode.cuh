@@ -1,3 +1,5 @@
+// After ExLlamaV3, MIT, Copyright (c) 2025 Turboderp; DeepSeek integration by @jayleaton.
+
 // EXL3 tiles: lane L decodes values 8L..8L+7 straight into its two mma B fragments; port of tensorfold's decode.cuh.
 #pragma once
 
@@ -38,6 +40,15 @@ __device__ __forceinline__ void lane_start(int lane, int& word, int& offset) {
     const int first = 4 * lane * K2 + K2 / 2 - 16 + 128 * K2;   // E(8 lane) - 16, made non-negative
     word = (first >> 5) % tile_words<K2>();
     offset = first & 31;
+}
+
+// This lane's words of a tile (tile: the tile's first 32-bit word; global or shared memory).
+template <int K2>
+__device__ __forceinline__ void load_lane_words(const uint32_t* tile, int lane, uint32_t (&w)[lane_words<K2>()]) {
+    int word, offset;
+    lane_start<K2>(lane, word, offset);
+#pragma unroll
+    for (int i = 0; i < lane_words<K2>(); ++i) w[i] = tile[(word + i) % tile_words<K2>()];
 }
 
 // The same from global memory through the read-only cache.
@@ -110,6 +121,10 @@ __device__ __forceinline__ void decode_lane(const uint32_t (&w)[lane_words<K2>()
     b1[0] = decode2<CB>(s[4], s[5]);
     b1[1] = decode2<CB>(s[6], s[7]);
 }
+
+// Row and column in the 16x16 tile (row = k, column = n) of this lane's value j (0..7).
+__host__ __device__ constexpr int value_row(int lane, int j) { return 2 * (lane & 3) + (j & 1) + 8 * ((j >> 1) & 1); }
+__host__ __device__ constexpr int value_col(int lane, int j) { return (lane >> 2) + 8 * (j >> 2); }
 
 // mma.m16n8k16, fp16 inputs, fp32 accumulators: d += a @ b.
 __device__ __forceinline__ void mma16816(float (&d)[4], const uint32_t (&a)[4], const uint32_t (&b)[2]) {
