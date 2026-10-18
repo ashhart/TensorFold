@@ -1,3 +1,5 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { ModelHelperDefaultsPanel } from '../models/ModelHelperDefaultsPanel'
 import clsx from 'clsx'
 import { BrandIcon, providerBrand } from '../../lib/brand'
 import { Icon } from '../../lib/icons'
@@ -25,11 +27,10 @@ import {
 } from './shared'
 
 export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const {
     draft,
-    setDraft,
     patch,
-    commit,
     updateProvider,
     commitProviders,
     updateProviderAccount,
@@ -68,71 +69,8 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
     discoveryLabel,
     applyLocalDiscovery,
     discoverBusy,
-    browseCwd,
-    updateStatus,
-    checkForUpdates,
-    openUpdateDownload,
-    emailBusy,
-    slackBusy,
-    documentBusy,
-    browserBusy,
-    browserTabUrl,
-    setBrowserTabUrl,
-    browserTabTitle,
-    setBrowserTabTitle,
-    browserTabExcerpt,
-    setBrowserTabExcerpt,
-    browserHistoryPath,
-    setBrowserHistoryPath,
-    botBusy,
-    botStatus,
-    controllerBusy,
-    controllerStatus,
-    remoteBusy,
-    remotePairing,
-    remoteTest,
-    remoteNotice,
-    securityControls,
-    securityBusy,
-    securityNotice,
-    voiceNames,
-    commitRemoteControl,
-    commitRemoteClient,
-    commitRemoteOrchestrators,
-    commitController,
-    commitVoice,
-    commitTelegram,
-    commitWhatsapp,
-    addEmailSource,
-    updateEmailSource,
-    removeEmailSource,
-    syncEmail,
-    addSlackSource,
-    updateSlackSource,
-    removeSlackSource,
-    syncSlack,
-    addDocumentSource,
-    updateDocumentSource,
-    removeDocumentSource,
-    syncDocuments,
-    addBrowserCurrentTabSource,
-    addBrowserHistorySource,
-    updateBrowserSource,
-    removeBrowserSource,
-    syncBrowser,
-    pollTelegram,
-    refreshControllerStatus,
-    refreshSecurityControls,
-    purgeLocalMemoryNow,
-    revealRemotePairing,
-    regenerateRemoteToken,
-    refreshRemoteStatus,
-    testRemoteClient,
-    enableController,
     conn,
     connect,
-    studioStatus,
-    localMemoryTotal,
   } = ctx
 
   // Provider whose model checklist modal is open (#46).
@@ -141,12 +79,13 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
   return (
 <SettingsPane>
+        <ModelHelperDefaultsPanel draft={draft} patch={patch} />
         <ProviderToolsPanel ctx={ctx} />
         <SurfaceModelSection
           draft={draft}
           patch={patch}
-          title="Assistant model"
-          desc="The model the Assistant surface uses for summaries and reply drafting. Any cloud, CLI, or local provider. Defaults to your active model when unset."
+          title={tx("Assistant model")}
+          desc={tx("The model the Assistant surface uses for summaries and reply drafting. Any cloud, CLI, or local provider. Defaults to your active model when unset.")}
           providerKey="assistantProviderId"
           accountKey="assistantProviderAccountId"
           modelKey="assistantModel"
@@ -154,24 +93,24 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
         <SurfaceModelSection
           draft={draft}
           patch={patch}
-          title="Coding tasks model"
-          desc="The model new coding tasks launch with (the home composer seeds from it; you can still change it per task). Defaults to your active model when unset."
+          title={tx("Coding tasks model")}
+          desc={tx("The model new coding tasks launch with (the home composer seeds from it; you can still change it per task). Defaults to your active model when unset.")}
           providerKey="codeProviderId"
           accountKey="codeProviderAccountId"
           modelKey="codeModel"
         />
-        <Section title="Models & accounts" desc="Add model sources here. Pick which agent uses which source inside rooms, automations, or solo runs.">
+        <Section title={tx("Models & accounts")} desc={tx("Add model sources here. Pick which agent uses which source inside rooms, automations, or solo runs.")}>
           <div className="space-y-3">
             <div className="rounded-xl border border-line bg-card p-3.5 shadow-card">
               <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
                 <div>
-                  <div className="text-[14px] font-semibold text-ink">Add provider or node</div>
-                  <div className="mt-0.5 text-[13px] leading-snug text-ink-3">Pick the provider type first, then TensorFold fills in the sensible endpoint shape.</div>
+                  <div className="text-[14px] font-semibold text-ink">{tx("Add provider or node")}</div>
+                  <div className="mt-0.5 text-[13px] leading-snug text-ink-3">{tx("Pick the provider type first, then TensorFold fills in the sensible endpoint shape.")}</div>
                 </div>
                 <Segmented<ProviderSetupMode>
                   value={providerSetup.mode}
                   onChange={(mode) => patchProviderSetup({ mode })}
-                  options={[{ value: 'cloud', label: 'Cloud', icon: 'globe' }, { value: 'local', label: 'Local node', icon: 'cpu' }]}
+                  options={[{ value: 'cloud', label: tx("Cloud"), icon: 'globe' }, { value: 'local', label: tx("Local node"), icon: 'cpu' }]}
                 />
               </div>
 
@@ -179,21 +118,21 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                 <div className="space-y-3">
                   {/* Provider type is chosen once, here, at add-time (#44). The card
                       itself no longer lets you flip transport after creation. */}
-                  <Field label="Provider type">
+                  <Field label={tx("Provider type")}>
                     <Segmented<CloudTransportType>
                       value={providerSetup.transportType}
                       onChange={(transportType) => patchProviderSetup({ transportType, providerName: '', apiKey: '', cliPath: '', cliProfile: '' })}
                       options={[
-                        { value: 'http', label: 'HTTP endpoint', icon: 'globe' },
-                        { value: 'codex-cli', label: 'Codex CLI', icon: 'terminal' },
-                        { value: 'claude-cli', label: 'Claude CLI', icon: 'terminal' },
+                        { value: 'http', label: tx("HTTP endpoint"), icon: 'globe' },
+                        { value: 'codex-cli', label: tx("Codex CLI"), icon: 'terminal' },
+                        { value: 'claude-cli', label: tx("Claude CLI"), icon: 'terminal' },
                       ]}
                     />
                   </Field>
 
                   {providerSetup.transportType === 'http' && (
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1.2fr]">
-                      <Field label="Cloud provider">
+                      <Field label={tx("Cloud provider")}>
                         <select
                           value={providerSetup.cloudKey}
                           onChange={(e) => patchProviderSetup({ cloudKey: e.target.value, providerName: '', apiKey: '', cliPath: '' })}
@@ -207,7 +146,7 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
                             <span className="truncate text-[13px] font-medium text-ink">{selectedCloudPreset.label}</span>
-                            <span className="shrink-0 rounded-full border border-line bg-card px-2 py-0.5 text-[12px] text-ink-3">{selectedCloudPreset.auth === 'cli-local' ? 'CLI auth' : 'API key'}</span>
+                            <span className="shrink-0 rounded-full border border-line bg-card px-2 py-0.5 text-[12px] text-ink-3">{selectedCloudPreset.auth === 'cli-local' ? tx("CLI auth") : tx("API key")}</span>
                           </div>
                           <div className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-ink-3">{selectedCloudPreset.desc}</div>
                         </div>
@@ -229,25 +168,25 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                     />
                   ) : (
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                      <Field label="Display name" hint="optional">
+                      <Field label={tx("Display name")} hint={tx("optional")}>
                         <Input value={providerSetup.providerName} onChange={(e) => patchProviderSetup({ providerName: e.target.value })} placeholder={selectedCloudPreset.provider.name} spellCheck={false} />
                       </Field>
                       {selectedCloudPreset.auth === 'cli-local' ? (
-                        <Field label="CLI binary" hint="uses Pi's own auth">
-                          <Input value={providerSetup.cliPath || selectedCloudPreset.provider.cliPath || 'pi'} onChange={(e) => patchProviderSetup({ cliPath: e.target.value })} placeholder="pi" spellCheck={false} />
+                        <Field label={tx("CLI binary")} hint={tx("uses Pi's own auth")}>
+                          <Input value={providerSetup.cliPath || selectedCloudPreset.provider.cliPath || 'pi'} onChange={(e) => patchProviderSetup({ cliPath: e.target.value })} placeholder={tx("pi")} spellCheck={false} />
                         </Field>
                       ) : (
-                        <Field label={selectedCloudPreset.provider.transport === 'opencode' || selectedCloudPreset.provider.transport === 'kilo' ? 'Server password' : 'API key'} hint={selectedCloudPreset.provider.transport === 'opencode' || selectedCloudPreset.provider.transport === 'kilo' ? 'optional' : undefined}>
-                          <Input type="password" value={providerSetup.apiKey} onChange={(e) => patchProviderSetup({ apiKey: e.target.value })} placeholder={selectedCloudPreset.provider.transport === 'opencode' ? 'OPENCODE_SERVER_PASSWORD (blank if none)' : 'Paste provider key'} spellCheck={false} />
+                        <Field label={selectedCloudPreset.provider.transport === 'opencode' || selectedCloudPreset.provider.transport === 'kilo' ? tx("Server password") : tx("API key")} hint={selectedCloudPreset.provider.transport === 'opencode' || selectedCloudPreset.provider.transport === 'kilo' ? tx("optional") : undefined}>
+                          <Input type="password" value={providerSetup.apiKey} onChange={(e) => patchProviderSetup({ apiKey: e.target.value })} placeholder={selectedCloudPreset.provider.transport === 'opencode' ? tx("OPENCODE_SERVER_PASSWORD (blank if none)") : tx("Paste provider key")} spellCheck={false} />
                         </Field>
                       )}
                       <div className="flex items-end sm:col-span-2">
                         <div className="w-full rounded-lg border border-line bg-card-2 px-3 py-2 text-[13px] leading-snug text-ink-3">
                           {selectedCloudPreset.auth === 'cli-local'
-                            ? <>Authenticate by launching <span className="font-mono text-ink-2">pi</span> once and configuring its provider, or provide a documented provider environment key to the TensorFold process. A generic key field is intentionally unavailable because Pi would require exposing it in process arguments.</>
+                            ? <>{tx("Authenticate by launching ")}<span className="font-mono text-ink-2">{tx("pi")}</span> {tx("once and configuring its provider, or provide a documented provider environment key to the TensorFold process. A generic key field is intentionally unavailable because Pi would require exposing it in process arguments.")}</>
                             : providerExists(selectedCloudPreset.provider)
-                            ? 'A matching provider already exists. You can still add another one for a separate account or key.'
-                            : 'This will create a provider that can be selected in chats, rooms, missions, and automations.'}
+                            ? tx("A matching provider already exists. You can still add another one for a separate account or key.")
+                            : tx("This will create a provider that can be selected in chats, rooms, missions, and automations.")}
                         </div>
                       </div>
                     </div>
@@ -256,14 +195,14 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
               ) : (
                 <div className="space-y-3">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_1fr]">
-                    <Field label="Where is it running?">
+                    <Field label={tx("Where is it running?")}>
                       <Segmented<LocalSetupLocation>
                         value={providerSetup.localLocation}
                         onChange={(localLocation) => patchProviderSetup({ localLocation, host: localLocation === 'this-mac' ? '127.0.0.1' : providerSetup.host })}
-                        options={[{ value: 'this-mac', label: 'This Mac', icon: 'monitor' }, { value: 'network', label: 'Network', icon: 'globe' }]}
+                        options={[{ value: 'this-mac', label: tx("This Mac"), icon: 'monitor' }, { value: 'network', label: tx("Network"), icon: 'globe' }]}
                       />
                     </Field>
-                    <Field label="Runtime">
+                    <Field label={tx("Runtime")}>
                       <select value={providerSetup.localRuntime} onChange={(e) => selectLocalRuntime(e.target.value as LocalRuntimeKey)} className={SELECT_CLASS}>
                         {LOCAL_RUNTIME_PRESETS.map((runtime) => <option key={runtime.key} value={runtime.key}>{runtime.label}</option>)}
                       </select>
@@ -280,28 +219,28 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                    <Field label="Node name" hint="optional">
-                      <Input value={providerSetup.nodeName} onChange={(e) => patchProviderSetup({ nodeName: e.target.value })} placeholder={providerSetup.localLocation === 'this-mac' ? 'This Mac' : 'DGX Spark'} spellCheck={false} />
+                    <Field label={tx("Node name")} hint={tx("optional")}>
+                      <Input value={providerSetup.nodeName} onChange={(e) => patchProviderSetup({ nodeName: e.target.value })} placeholder={providerSetup.localLocation === 'this-mac' ? tx("This Mac") : tx("DGX Spark")} spellCheck={false} />
                     </Field>
-                    <Field label="Provider name" hint="optional">
+                    <Field label={tx("Provider name")} hint={tx("optional")}>
                       <Input value={providerSetup.providerName} onChange={(e) => patchProviderSetup({ providerName: e.target.value })} placeholder={localNodeName()} spellCheck={false} />
                     </Field>
-                    <Field label="Host / IP">
+                    <Field label={tx("Host / IP")}>
                       <Input value={providerSetup.localLocation === 'this-mac' ? '127.0.0.1' : providerSetup.host} onChange={(e) => patchProviderSetup({ host: e.target.value })} disabled={providerSetup.localLocation === 'this-mac'} placeholder="192.168.1.45" spellCheck={false} />
                     </Field>
-                    <Field label="Port">
+                    <Field label={tx("Port")}>
                       <Input value={providerSetup.port} onChange={(e) => patchProviderSetup({ port: e.target.value.replace(/[^\d]/g, '') })} placeholder={selectedLocalRuntime.defaultPort} inputMode="numeric" />
                     </Field>
-                    <Field label="API token" hint={providerSetup.localRuntime === 'omlx' && providerSetup.localLocation === 'this-mac' ? 'auto from ~/.omlx' : 'optional'}>
-                      <Input type="password" value={providerSetup.apiKey} onChange={(e) => patchProviderSetup({ apiKey: e.target.value })} placeholder={selectedLocalRuntime.defaultApiKey || 'Bearer token'} spellCheck={false} />
+                    <Field label={tx("API token")} hint={providerSetup.localRuntime === 'omlx' && providerSetup.localLocation === 'this-mac' ? tx("auto from ~/.omlx") : tx("optional")}>
+                      <Input type="password" value={providerSetup.apiKey} onChange={(e) => patchProviderSetup({ apiKey: e.target.value })} placeholder={selectedLocalRuntime.defaultApiKey || tx("Bearer token")} spellCheck={false} />
                     </Field>
-                    <Field label="API path">
+                    <Field label={tx("API path")}>
                       <Input value={providerSetup.basePath} onChange={(e) => patchProviderSetup({ basePath: e.target.value })} placeholder="/v1" spellCheck={false} />
                     </Field>
                   </div>
 
                   <div className="rounded-lg border border-line bg-card-2 px-3 py-2 text-[13px] leading-snug text-ink-3">
-                    <span className="font-medium text-ink-2">Endpoint:</span> <span className="font-mono text-ink-3">{localBaseUrl()}</span>
+                    <span className="font-medium text-ink-2">{tx("Endpoint:")}</span> <span className="font-mono text-ink-3">{localBaseUrl()}</span>
                   </div>
                 </div>
               )}
@@ -321,15 +260,15 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                 <div className="flex flex-wrap items-center gap-2">
                   {providerSetup.mode === 'local' && providerSetup.localLocation === 'this-mac' && providerSetup.localRuntime !== 'custom' && (
                     <Button variant="default" size="sm" icon="cpu" onClick={() => applyLocalDiscovery(providerSetup.localRuntime as ProviderDiscoveryKind)} disabled={discoverBusy === 'new'}>
-                      {discoverBusy === 'new' ? 'Discovering' : 'Discover this Mac'}
+                      {discoverBusy === 'new' ? tx("Discovering") : tx("Discover this Mac")}
                     </Button>
                   )}
-                  <Button variant="default" size="sm" icon="signal" onClick={() => testConfiguredProvider()} disabled={setupBusy} title="Sends a fixed test prompt with no files or conversation history; provider usage may apply.">
-                    {setupBusy ? 'Testing' : 'Test response'}
+                  <Button variant="default" size="sm" icon="signal" onClick={() => testConfiguredProvider()} disabled={setupBusy} title={tx("Sends a fixed test prompt with no files or conversation history; provider usage may apply.")}>
+                    {setupBusy ? tx("Testing") : tx("Test response")}
                   </Button>
-                  <Button variant="default" size="sm" icon="plus" onClick={() => addConfiguredProvider(false)} disabled={setupBusy}>Add only</Button>
+                  <Button variant="default" size="sm" icon="plus" onClick={() => addConfiguredProvider(false)} disabled={setupBusy}>{tx("Add only")}</Button>
                   <Button variant="primary" size="sm" icon="plug" onClick={() => addConfiguredProvider(true)} disabled={setupBusy}>
-                    {setupBusy ? 'Connecting' : 'Add and connect'}
+                    {setupBusy ? tx("Connecting") : tx("Add and connect")}
                   </Button>
                 </div>
               </div>
@@ -338,8 +277,8 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
             <div className="flex items-center justify-between gap-3 border-t border-line pt-4">
               <div>
-                <div className="text-[13px] font-semibold text-ink">Configured providers</div>
-                <div className="mt-0.5 text-[13px] text-ink-3">Advanced details for endpoints, accounts, subscriptions, and model overrides.</div>
+                <div className="text-[13px] font-semibold text-ink">{tx("Configured providers")}</div>
+                <div className="mt-0.5 text-[13px] text-ink-3">{tx("Advanced details for endpoints, accounts, subscriptions, and model overrides.")}</div>
               </div>
               <span className="rounded-full border border-line bg-card px-2.5 py-1 text-[12px] text-ink-3">{draft.providers.length}</span>
             </div>
@@ -358,100 +297,98 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                       accident. Cloud/local stays adjustable for HTTP providers. */}
                   <span className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-card-2 px-2.5 py-1 text-[12px] font-medium text-ink-3">
                     <Icon name={p.transport === 'codex-cli' || p.transport === 'claude-cli' || p.transport === 'pi-cli' ? 'terminal' : 'globe'} size={13} />
-                    {p.transport === 'codex-cli' ? 'Codex CLI' : p.transport === 'claude-cli' ? 'Claude CLI' : p.transport === 'pi-cli' ? 'Pi CLI' : 'HTTP'}
+                    {p.transport === 'codex-cli' ? tx("Codex CLI") : p.transport === 'claude-cli' ? tx("Claude CLI") : p.transport === 'pi-cli' ? tx("Pi CLI") : 'HTTP'}
                   </span>
                   {p.transport !== 'codex-cli' && p.transport !== 'claude-cli' && p.transport !== 'pi-cli' && (
-                    <Segmented value={p.kind || 'cloud'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, kind: v } : x))} options={[{ value: 'cloud', label: 'Cloud' }, { value: 'local', label: 'Local' }]} />
+                    <Segmented value={p.kind || 'cloud'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, kind: v } : x))} options={[{ value: 'cloud', label: tx("Cloud") }, { value: 'local', label: tx("Local") }]} />
                   )}
-                  <button onClick={() => removeProvider(p.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove provider">
+                  <button onClick={() => removeProvider(p.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label={tx("Remove provider")}>
                     <Icon name="trash" size={15} />
                   </button>
                 </div>
                 {p.transport === 'codex-cli' ? (
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                    <Field label="CLI binary" hint="uses codex login">
-                      <Input value={p.cliPath || 'codex'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder="codex" spellCheck={false} />
+                    <Field label={tx("CLI binary")} hint={tx("uses codex login")}>
+                      <Input value={p.cliPath || 'codex'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder={tx("codex")} spellCheck={false} />
                     </Field>
-                    <Field label="Profile" hint="optional">
-                      <Input value={p.cliProfile || ''} onChange={(e) => updateProvider(p.id, { cliProfile: e.target.value })} placeholder="default" spellCheck={false} />
+                    <Field label={tx("Profile")} hint={tx("optional")}>
+                      <Input value={p.cliProfile || ''} onChange={(e) => updateProvider(p.id, { cliProfile: e.target.value })} placeholder={tx("default")} spellCheck={false} />
                     </Field>
-                    <Field label="Sandbox">
-                      <Segmented value={p.cliSandbox || 'workspace-write'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliSandbox: v } : x))} options={[{ value: 'read-only', label: 'Read', icon: 'file' }, { value: 'workspace-write', label: 'Write', icon: 'edit' }, { value: 'danger-full-access', label: 'Full', icon: 'warning' }]} />
+                    <Field label={tx("Sandbox")}>
+                      <Segmented value={p.cliSandbox || 'workspace-write'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliSandbox: v } : x))} options={[{ value: 'read-only', label: tx("Read"), icon: 'file' }, { value: 'workspace-write', label: tx("Write"), icon: 'edit' }, { value: 'danger-full-access', label: tx("Full"), icon: 'warning' }]} />
                     </Field>
-                    <Field label="CLI approval" hint="non-interactive">
-                      <Segmented value={p.cliApprovalPolicy || 'on-request'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliApprovalPolicy: v } : x))} options={[{ value: 'on-request', label: 'Ask' }, { value: 'untrusted', label: 'Guard' }, { value: 'never', label: 'Never' }]} />
+                    <Field label={tx("CLI approval")} hint={tx("non-interactive")}>
+                      <Segmented value={p.cliApprovalPolicy || 'on-request'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliApprovalPolicy: v } : x))} options={[{ value: 'on-request', label: tx("Ask") }, { value: 'untrusted', label: tx("Guard") }, { value: 'never', label: tx("Never") }]} />
                     </Field>
                   </div>
                 ) : p.transport === 'claude-cli' ? (
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                    <Field label="CLI binary" hint="uses claude auth">
-                      <Input value={p.cliPath || 'claude'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder="claude" spellCheck={false} />
+                    <Field label={tx("CLI binary")} hint={tx("uses claude auth")}>
+                      <Input value={p.cliPath || 'claude'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder={tx("claude")} spellCheck={false} />
                     </Field>
-                    <Field label="Settings file" hint="optional">
+                    <Field label={tx("Settings file")} hint={tx("optional")}>
                       <Input value={p.cliProfile || ''} onChange={(e) => updateProvider(p.id, { cliProfile: e.target.value })} placeholder="/path/to/settings.json" spellCheck={false} />
                     </Field>
-                    <Field label="Permission mode">
-                      <Segmented value={p.cliPermissionMode || 'default'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliPermissionMode: v } : x))} options={[{ value: 'default', label: 'Default' }, { value: 'auto', label: 'Auto' }, { value: 'acceptEdits', label: 'Edits' }, { value: 'plan', label: 'Plan' }]} />
+                    <Field label={tx("Permission mode")}>
+                      <Segmented value={p.cliPermissionMode || 'default'} onChange={(v) => commitProviders(draft.providers.map((x) => x.id === p.id ? { ...x, cliPermissionMode: v } : x))} options={[{ value: 'default', label: tx("Default") }, { value: 'auto', label: tx("Auto") }, { value: 'acceptEdits', label: tx("Edits") }, { value: 'plan', label: tx("Plan") }]} />
                     </Field>
                     <div className="flex items-end pb-1 text-[13px] leading-snug text-ink-3">
-                      Claude CLI runs through your local Claude Code login and its own permission/MCP surface.
-                    </div>
+                      {tx("Claude CLI runs through your local Claude Code login and its own permission/MCP surface.")}</div>
                   </div>
                 ) : p.transport === 'pi-cli' ? (
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                    <Field label="CLI binary" hint="uses Pi's own auth">
-                      <Input value={p.cliPath || 'pi'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder="pi" spellCheck={false} />
+                    <Field label={tx("CLI binary")} hint={tx("uses Pi's own auth")}>
+                      <Input value={p.cliPath || 'pi'} onChange={(e) => updateProvider(p.id, { cliPath: e.target.value })} placeholder={tx("pi")} spellCheck={false} />
                     </Field>
                     <div className="flex items-end pb-1 text-[13px] leading-snug text-ink-3">
-                      Configure a provider inside Pi, or launch TensorFold with a provider-specific key such as <span className="ml-1 font-mono text-ink-2">OPENAI_API_KEY</span>. TensorFold never sends a generic key through <span className="mx-1 font-mono text-ink-2">--api-key</span>.
+                      {tx("Configure a provider inside Pi, or launch TensorFold with a provider-specific key such as ")}<span className="ml-1 font-mono text-ink-2">OPENAI_API_KEY</span>{tx(". TensorFold never sends a generic key through ")}<span className="mx-1 font-mono text-ink-2">--api-key</span>.
                     </div>
                     {!!p.apiKey?.trim() && (
                       <div className="sm:col-span-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-warn/30 bg-warn/10 px-3 py-2.5 text-[13px] text-warn">
-                        <span>This legacy raw key cannot be handed to Pi safely. Clear it, then use Pi auth or a provider environment key.</span>
-                        <Button variant="default" size="xs" onClick={() => updateProvider(p.id, { apiKey: '' })}>Clear incompatible key</Button>
+                        <span>{tx("This legacy raw key cannot be handed to Pi safely. Clear it, then use Pi auth or a provider environment key.")}</span>
+                        <Button variant="default" size="xs" onClick={() => updateProvider(p.id, { apiKey: '' })}>{tx("Clear incompatible key")}</Button>
                       </div>
                     )}
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                    <Field label="Base URL">
+                    <Field label={tx("Base URL")}>
                       <Input value={p.baseUrl} onChange={(e) => updateProvider(p.id, { baseUrl: e.target.value })} placeholder="https://api.openai.com/v1" spellCheck={false} />
                     </Field>
-                    <Field label="API key" hint={p.kind === 'local' ? 'often any value' : undefined}>
-                      <Input type="password" value={p.apiKey} onChange={(e) => updateProvider(p.id, { apiKey: e.target.value })} placeholder="sk-…" spellCheck={false} />
+                    <Field label={tx("API key")} hint={p.kind === 'local' ? tx("often any value") : undefined}>
+                      <Input type="password" value={p.apiKey} onChange={(e) => updateProvider(p.id, { apiKey: e.target.value })} placeholder={"sk-…"} spellCheck={false} />
                     </Field>
                     {localDiscoveryKind(p) && (
                       <div className="sm:col-span-2 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-line bg-card-2 px-3 py-2.5">
                         <div className="min-w-0 text-[13px] leading-snug text-ink-3">
                           {!isLoopbackEndpoint(p.baseUrl)
-                            ? <>Probe the node at <span className="font-mono text-ink-2">{p.baseUrl || 'this address'}</span> for its model list — works over the network (e.g. a Mac TensorFold on your LAN).</>
+                            ? <>{tx("Probe the node at ")}<span className="font-mono text-ink-2">{p.baseUrl || tx("this address")}</span> {tx("for its model list — works over the network (e.g. a Mac TensorFold on your LAN).")}</>
                             : localDiscoveryKind(p) === 'omlx'
-                              ? <>Read <span className="font-mono text-ink-2">~/.omlx/settings.json</span> for the local port, API key, and model list.</>
-                              : <>Probe the local server and refresh the model list from its native API.</>}
+                              ? <>{tx("Read ")}<span className="font-mono text-ink-2">~/.omlx/settings.json</span> {tx("for the local port, API key, and model list.")}</>
+                              : <>{tx("Probe the local server and refresh the model list from its native API.")}</>}
                         </div>
                         <Button variant="default" size="sm" icon="cpu" onClick={() => { const kind = localDiscoveryKind(p); if (kind) applyLocalDiscovery(kind, p.id) }} disabled={discoverBusy === p.id}>
-                          {discoverBusy === p.id ? 'Discovering' : `Discover ${discoveryLabel(localDiscoveryKind(p)!)}`}
+                          {discoverBusy === p.id ? tx("Discovering") : tx("Discover {value0}", { value0: discoveryLabel(localDiscoveryKind(p)!) })}
                         </Button>
                       </div>
                     )}
                     {isOpenRouterProvider(p) && (
                       <div className="sm:col-span-2 rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] leading-snug text-ink-3">
-                        Connect refreshes OpenRouter's current tool-capable catalogue, including free variants and routers such as <span className="font-mono text-ink-2">openrouter/free</span>.
+                        {tx("Connect refreshes OpenRouter's current tool-capable catalogue, including free variants and routers such as ")}<span className="font-mono text-ink-2">openrouter/free</span>.
                       </div>
                     )}
                     {isAiGatewayProvider(p) && (
                       <div className="sm:col-span-2 rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] leading-snug text-ink-3">
-                        Use gateway-qualified model ids such as <span className="font-mono text-ink-2">openai/gpt-5.4</span>. If the gateway does not expose a models endpoint, TensorFold keeps the curated gateway list.
-                      </div>
+                        {tx("Use gateway-qualified model ids such as ")}<span className="font-mono text-ink-2">openai/gpt-5.4</span>{tx(". If the gateway does not expose a models endpoint, TensorFold keeps the curated gateway list.")}</div>
                     )}
                   </div>
                 )}
                 <div className="mt-3">
                   <SpendGuardControls
                     budget={p.spendBudget}
-                    title="Provider spend guard"
+                    title={tx("Provider spend guard")}
                     scope={p.name}
-                    desc="Warn or block routes when this provider reaches its budget."
+                    desc={tx("Warn or block routes when this provider reaches its budget.")}
                     onChange={(patch) => commitProviderSpendBudget(p.id, patch)}
                   />
                 </div>
@@ -462,108 +399,106 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                     overrides — so it collapses by default. */}
                 {p.kind !== 'local' && (
                 <div className="mt-3">
-                <AdvancedSection title="Accounts & subscriptions" icon="layers">
+                <AdvancedSection title={tx("Accounts & subscriptions")} icon="layers">
                   <div className="mb-2 flex items-center justify-between gap-2">
                     <div>
-                      <div className="text-[13px] font-medium text-ink-2">Accounts / subscriptions</div>
-                      <div className="text-[12px] text-ink-3">Pick one per chat, room seat, automation, or ticket run.</div>
+                      <div className="text-[13px] font-medium text-ink-2">{tx("Accounts / subscriptions")}</div>
+                      <div className="text-[12px] text-ink-3">{tx("Pick one per chat, room seat, automation, or ticket run.")}</div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {(p.transport === 'codex-cli' || p.transport === 'claude-cli') && (
-                        <Button variant="subtle" size="sm" icon="layers" onClick={() => addCliSubscriptionPair(p)}>Personal + work</Button>
+                        <Button variant="subtle" size="sm" icon="layers" onClick={() => addCliSubscriptionPair(p)}>{tx("Personal + work")}</Button>
                       )}
-                      <Button variant="default" size="sm" icon="plus" onClick={() => addProviderAccount(p)}>Add account</Button>
+                      <Button variant="default" size="sm" icon="plus" onClick={() => addProviderAccount(p)}>{tx("Add account")}</Button>
                     </div>
                   </div>
                   {(p.transport === 'codex-cli' || p.transport === 'claude-cli') && (
                     <div className="mb-2 rounded-lg border border-line bg-card px-2.5 py-2 text-[13px] leading-snug text-ink-3">
-                      Create one account per subscription. Run the login command once for each account, then select that account in chats, room agents, projects, missions, and automations.
-                    </div>
+                      {tx("Create one account per subscription. Run the login command once for each account, then select that account in chats, room agents, projects, missions, and automations.")}</div>
                   )}
                   {!(p.accounts ?? []).length && (
                     <div className="rounded-lg border border-dashed border-line px-2.5 py-2 text-[13px] text-ink-3">
-                      No named accounts yet. TensorFold will use the provider's default login/key.
-                    </div>
+                      {tx("No named accounts yet. TensorFold will use the provider's default login/key.")}</div>
                   )}
                   <div className="space-y-2">
                     {(p.accounts ?? []).map((account) => (
                       <div key={account.id} className="rounded-lg border border-line bg-card p-2.5">
                         <div className="mb-2 flex items-center gap-2">
-                          <Toggle label={`Enable ${account.name || "account"} on ${p.name}`} checked={account.enabled !== false} onChange={(enabled) => commitProviderAccount(p.id, account.id, { enabled })} />
-                          <Input value={account.name} onChange={(e) => updateProviderAccount(p.id, account.id, { name: e.target.value })} placeholder="Account name" />
+                          <Toggle label={tx("Enable {value0} on {value1}", { value0: account.name || tx("account"), value1: p.name })} checked={account.enabled !== false} onChange={(enabled) => commitProviderAccount(p.id, account.id, { enabled })} />
+                          <Input value={account.name} onChange={(e) => updateProviderAccount(p.id, account.id, { name: e.target.value })} placeholder={tx("Account name")} />
                           <button
                             onClick={() => commitProviders(draft.providers.map((provider) => provider.id === p.id ? { ...provider, defaultAccountId: provider.defaultAccountId === account.id ? null : account.id } : provider))}
                             className={clsx('shrink-0 rounded-md border px-2 py-1 text-[12px] font-medium transition-colors', p.defaultAccountId === account.id ? 'border-accent bg-accent-soft text-accent' : 'border-line text-ink-3 hover:border-line-strong hover:text-ink')}
                           >
-                            {p.defaultAccountId === account.id ? 'Default' : 'Make default'}
+                            {p.defaultAccountId === account.id ? tx("Default") : tx("Make default")}
                           </button>
-                          <button onClick={() => removeProviderAccount(p.id, account.id)} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove account">
+                          <button onClick={() => removeProviderAccount(p.id, account.id)} className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label={tx("Remove account")}>
                             <Icon name="trash" size={14} />
                           </button>
                         </div>
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                          <Field label="Kind">
-                            <Segmented value={account.kind || 'subscription'} onChange={(v) => commitProviderAccount(p.id, account.id, { kind: v as ProviderAccountKind })} options={[{ value: 'subscription', label: 'Subscription' }, { value: 'api-key', label: 'API key' }, { value: 'profile', label: 'Profile' }]} />
+                          <Field label={tx("Kind")}>
+                            <Segmented value={account.kind || 'subscription'} onChange={(v) => commitProviderAccount(p.id, account.id, { kind: v as ProviderAccountKind })} options={[{ value: 'subscription', label: tx("Subscription") }, { value: 'api-key', label: tx("API key") }, { value: 'profile', label: tx("Profile") }]} />
                           </Field>
-                          <Field label="Failover">
+                          <Field label={tx("Failover")}>
                             <div className="flex min-h-9 items-center justify-between gap-3 rounded-lg border border-line bg-card-2 px-2.5 py-2">
                               <div className="min-w-0">
-                                <div className="text-[13px] font-medium text-ink-2">Automatic failover</div>
-                                <div className="truncate text-[12px] text-ink-3">Use another equivalent account when this one hits a limit.</div>
+                                <div className="text-[13px] font-medium text-ink-2">{tx("Automatic failover")}</div>
+                                <div className="truncate text-[12px] text-ink-3">{tx("Use another equivalent account when this one hits a limit.")}</div>
                               </div>
-                              <Toggle label={`Automatic failover for ${account.name || "account"} on ${p.name}`} checked={account.autoFailover === true} onChange={(autoFailover) => commitProviderAccount(p.id, account.id, { autoFailover })} />
+                              <Toggle label={tx("Automatic failover for {value0} on {value1}", { value0: account.name || tx("account"), value1: p.name })} checked={account.autoFailover === true} onChange={(autoFailover) => commitProviderAccount(p.id, account.id, { autoFailover })} />
                             </div>
                           </Field>
-                          <Field label="After reset" hint={account.autoFailover ? 'failover policy' : 'enable failover first'}>
+                          <Field label={tx("After reset")} hint={account.autoFailover ? tx("failover policy") : tx("enable failover first")}>
                             <select
                               value={account.failoverResetPolicy ?? 'return_after_reset'}
                               onChange={(e) => commitProviderAccount(p.id, account.id, { failoverResetPolicy: e.target.value as ModelFailoverResetPolicy })}
                               disabled={account.autoFailover !== true}
                               className={SELECT_CLASS}
                             >
-                              <option value="return_after_reset">Return to this account</option>
-                              <option value="stay_on_failover">Stay on failover account</option>
-                              <option value="rotate_on_limit">Rotate only on next limit</option>
+                              <option value="return_after_reset">{tx("Return to this account")}</option>
+                              <option value="stay_on_failover">{tx("Stay on failover account")}</option>
+                              <option value="rotate_on_limit">{tx("Rotate only on next limit")}</option>
                             </select>
                           </Field>
                           {(p.transport === 'codex-cli' || p.transport === 'claude-cli') ? (
                             <Field label={accountProfileLabel(p)} hint={accountProfileHint(p)}>
-                              <Input value={account.cliProfile || ''} onChange={(e) => updateProviderAccount(p.id, account.id, { cliProfile: e.target.value })} placeholder={p.transport === 'codex-cli' ? 'work' : '/path/to/settings.json'} spellCheck={false} />
+                              <Input value={account.cliProfile || ''} onChange={(e) => updateProviderAccount(p.id, account.id, { cliProfile: e.target.value })} placeholder={p.transport === 'codex-cli' ? tx("work") : '/path/to/settings.json'} spellCheck={false} />
                             </Field>
                           ) : (
-                            <Field label="API key">
-                              <Input type="password" value={account.apiKey || ''} onChange={(e) => updateProviderAccount(p.id, account.id, { apiKey: e.target.value })} placeholder="sk-..." spellCheck={false} />
+                            <Field label={tx("API key")}>
+                              <Input type="password" value={account.apiKey || ''} onChange={(e) => updateProviderAccount(p.id, account.id, { apiKey: e.target.value })} placeholder={"sk-..."} spellCheck={false} />
                             </Field>
                           )}
                           {(p.transport === 'codex-cli' || p.transport === 'claude-cli') && (
-                            <Field label="Config home" hint={accountHomeHint(p)}>
+                            <Field label={tx("Config home")} hint={accountHomeHint(p)}>
                               <Input value={account.cliHome || ''} onChange={(e) => updateProviderAccount(p.id, account.id, { cliHome: e.target.value })} placeholder={p.transport === 'codex-cli' ? '~/.codex-work' : '~/.claude-work'} spellCheck={false} />
                             </Field>
                           )}
                           {p.transport === 'claude-cli' && (
-                            <Field label="OAuth token" hint="from claude setup-token">
+                            <Field label={tx("OAuth token")} hint={tx("from claude setup-token")}>
                               <Input type="password" value={account.env?.CLAUDE_CODE_OAUTH_TOKEN || ''} onChange={(e) => patchProviderAccountEnv(p.id, account, 'CLAUDE_CODE_OAUTH_TOKEN', e.target.value)} placeholder="CLAUDE_CODE_OAUTH_TOKEN" spellCheck={false} />
                             </Field>
                           )}
-                          <Field label="Models override" hint="optional">
-                            <Input value={(account.models ?? []).join(', ')} onChange={(e) => updateProviderAccount(p.id, account.id, { models: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} placeholder={p.models.join(', ') || 'inherit provider models'} spellCheck={false} />
+                          <Field label={tx("Models override")} hint={tx("optional")}>
+                            <Input value={(account.models ?? []).join(', ')} onChange={(e) => updateProviderAccount(p.id, account.id, { models: e.target.value.split(',').map((s) => s.trim()).filter(Boolean) })} placeholder={p.models.join(', ') || tx("inherit provider models")} spellCheck={false} />
                           </Field>
                         </div>
                         <div className="mt-2">
                           <SpendGuardControls
                             budget={account.spendBudget}
-                            title="Account spend guard"
+                            title={tx("Account spend guard")}
                             scope={`${account.name || "account"} on ${p.name}`}
-                            desc="Warn, stop, or fail over this subscription when it reaches a limit."
+                            desc={tx("Warn, stop, or fail over this subscription when it reaches a limit.")}
                             onChange={(patch) => commitProviderAccountSpendBudget(p.id, account.id, patch)}
                           />
                         </div>
                         {loginCommand(p, account) && (
                           <div className="mt-2 rounded-lg border border-line bg-card-2 px-2.5 py-2">
                             <div className="mb-1.5 flex items-center justify-between gap-2">
-                              <span className="text-[12px] font-medium text-ink-3">Login command</span>
+                              <span className="text-[12px] font-medium text-ink-3">{tx("Login command")}</span>
                               <Button variant="ghost" size="xs" icon="copy" onClick={() => copyLoginCommand(p, account)}>
-                                {copiedLoginAccount === account.id ? 'Copied' : 'Copy'}
+                                {copiedLoginAccount === account.id ? tx("Copied") : tx("Copy")}
                               </Button>
                             </div>
                             <code className="block select-text overflow-x-auto whitespace-nowrap rounded-md bg-ink-5 px-2 py-1.5 font-mono text-[12px] text-ink-2">
@@ -580,18 +515,18 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
                 <div className="mt-2.5">
                   <div className="mb-1.5 flex items-center justify-between gap-2">
-                    <span className="text-[13px] font-medium text-ink-2">Models</span>
+                    <span className="text-[13px] font-medium text-ink-2">{tx("Models")}</span>
                     <div className="flex items-center gap-2.5 text-[12px]">
                       {conn[p.id]?.state === 'ok' && <span className="flex items-center gap-1 text-positive"><Icon name="check" size={12} />{conn[p.id]?.msg}</span>}
                       {conn[p.id]?.state === 'error' && <span className="flex max-w-[230px] items-center gap-1 truncate text-danger" title={conn[p.id]?.msg}><Icon name="warning" size={12} className="shrink-0" /><span className="truncate">{conn[p.id]?.msg}</span></span>}
-                      {(!conn[p.id] || conn[p.id]?.state === 'loading') && <span className="text-ink-3">{p.models.length} selected</span>}
+                      {(!conn[p.id] || conn[p.id]?.state === 'loading') && <span className="text-ink-3">{p.models.length} {tx("selected")}</span>}
                       <button
                         onClick={() => connect(p)}
                         disabled={conn[p.id]?.state === 'loading'}
                         className="inline-flex items-center gap-1.5 rounded-md border border-line px-2 py-1 font-medium text-ink-2 transition-colors hover:border-line-strong hover:text-ink disabled:opacity-60"
                       >
                         {conn[p.id]?.state === 'loading' ? <Spinner size={12} /> : <BrandIcon brand={providerBrand(p)} size={16} className="rounded-[5px]" />}
-                        {conn[p.id]?.state === 'loading' ? 'Checking...' : conn[p.id]?.state === 'ok' ? 'Refresh' : 'Connect'}
+                        {conn[p.id]?.state === 'loading' ? tx("Checking...") : conn[p.id]?.state === 'ok' ? tx("Refresh") : tx("Connect")}
                       </button>
                     </div>
                   </div>
@@ -599,9 +534,9 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                       text field is replaced by a modal over the discovered catalogue. */}
                   <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-card-2 px-3 py-2.5">
                     <span className="min-w-0 flex-1 truncate text-[13px] text-ink-3" title={p.models.join(', ')}>
-                      {p.models.length ? p.models.join(', ') : 'No models selected yet'}
+                      {p.models.length ? p.models.join(', ') : tx("No models selected yet")}
                     </span>
-                    <Button variant="default" size="sm" icon="edit" onClick={() => setEditingModelsFor(p.id)}>Edit models</Button>
+                    <Button variant="default" size="sm" icon="edit" onClick={() => setEditingModelsFor(p.id)}>{tx("Edit models")}</Button>
                   </div>
                 </div>
 
@@ -609,7 +544,7 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
                     nothing persists on blur, so rapid edits + discovery races can't
                     spawn duplicate providers. One click commits the whole card. */}
                 <div className="mt-3 flex items-center justify-end gap-2 border-t border-line pt-3">
-                  <Button variant="primary" size="sm" icon="check" onClick={() => commitProviders(draft.providers)}>Save changes</Button>
+                  <Button variant="primary" size="sm" icon="check" onClick={() => commitProviders(draft.providers)}>{tx("Save changes")}</Button>
                 </div>
               </div>
             ))}
@@ -622,7 +557,7 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
               />
             )}
 
-            <Button variant="ghost" icon="plus" onClick={addProvider} className="w-full justify-center text-ink-3">Add blank advanced provider</Button>
+            <Button variant="ghost" icon="plus" onClick={addProvider} className="w-full justify-center text-ink-3">{tx("Add blank advanced provider")}</Button>
           </div>
         </Section>
 
@@ -636,6 +571,7 @@ export function ModelsSettings({ ctx }: { ctx: SettingsSectionContext }) {
 // the provider's current model list when no discovery has run yet, and lets you
 // add an id by hand for endpoints whose catalogue TensorFold can't enumerate.
 function ModelChecklistModal({ provider, onClose, onSave }: { provider: Provider; onClose: () => void; onSave: (models: string[]) => void }) {
+  const tx = useAuthoredText()
   const discovered = provider.discoveredModels?.length ? provider.discoveredModels : provider.models
   // Union of the discovered catalogue and any already-selected models, so a
   // hand-added model that isn't in the catalogue still appears (and stays
@@ -672,18 +608,17 @@ function ModelChecklistModal({ provider, onClose, onSave }: { provider: Provider
       <div className="flex max-h-[min(560px,calc(100vh-80px))] w-[min(480px,calc(100vw-40px))] flex-col overflow-hidden rounded-2xl border border-line bg-bg shadow-[0_24px_90px_rgb(0_0_0/0.45)]" onClick={(e) => e.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line px-4 py-3">
           <div className="min-w-0">
-            <div className="truncate text-[14px] font-semibold text-ink">Edit models</div>
-            <div className="mt-0.5 truncate text-[13px] text-ink-3">{provider.name} · {selected.size} selected</div>
+            <div className="truncate text-[14px] font-semibold text-ink">{tx("Edit models")}</div>
+            <div className="mt-0.5 truncate text-[13px] text-ink-3">{provider.name} · {selected.size} {tx("selected")}</div>
           </div>
-          <button onClick={onClose} aria-label="Close" className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
+          <button onClick={onClose} aria-label={tx("Close")} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
             <Icon name="x" size={15} />
           </button>
         </div>
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 py-3">
           {catalogue.length === 0 ? (
             <div className="rounded-lg border border-dashed border-line px-3 py-6 text-center text-[13px] text-ink-3">
-              No models discovered yet. Use Connect to refresh, or add one below.
-            </div>
+              {tx("No models discovered yet. Use Connect to refresh, or add one below.")}</div>
           ) : (
             <div className="space-y-1.5">
               {catalogue.map((model) => (
@@ -697,12 +632,12 @@ function ModelChecklistModal({ provider, onClose, onSave }: { provider: Provider
         </div>
         <div className="shrink-0 border-t border-line px-4 py-3">
           <div className="mb-2.5 flex items-center gap-2">
-            <Input value={customModel} onChange={(e) => setCustomModel(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustom() } }} placeholder="Add a model id" spellCheck={false} />
-            <Button variant="default" size="sm" icon="plus" onClick={addCustom}>Add</Button>
+            <Input value={customModel} onChange={(e) => setCustomModel(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addCustom() } }} placeholder={tx("Add a model id")} spellCheck={false} />
+            <Button variant="default" size="sm" icon="plus" onClick={addCustom}>{tx("Add")}</Button>
           </div>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
-            <Button variant="primary" size="sm" icon="check" onClick={save}>Save</Button>
+            <Button variant="ghost" size="sm" onClick={onClose}>{tx("Cancel")}</Button>
+            <Button variant="primary" size="sm" icon="check" onClick={save}>{tx("Save")}</Button>
           </div>
         </div>
       </div>
@@ -722,6 +657,7 @@ function SurfaceModelSection({ draft, patch, title, desc, providerKey, accountKe
   accountKey: 'assistantProviderAccountId' | 'codeProviderAccountId'
   modelKey: 'assistantModel' | 'codeModel'
 }) {
+  const tx = useAuthoredText()
   const providerId = draft[providerKey] ?? null
   const provider = providerId ? draft.providers.find((p) => p.id === providerId) ?? null : null
   const accounts = provider ? providerAccountChoices(provider) : []
@@ -745,7 +681,7 @@ function SurfaceModelSection({ draft, patch, title, desc, providerKey, accountKe
             patch({ [providerKey]: pid, [accountKey]: nextAccount?.id ?? null, [modelKey]: nextModels[0] ?? null })
           }}
         >
-          <option value="">Same as active model</option>
+          <option value="">{tx("Same as active model")}</option>
           {draft.providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
         {provider && (
@@ -762,7 +698,7 @@ function SurfaceModelSection({ draft, patch, title, desc, providerKey, accountKe
               {accounts.map((choice) => <option key={choice.id ?? 'default'} value={choice.id ?? ''}>{choice.name}</option>)}
             </select>
             <select className={SELECT_CLASS} value={draft[modelKey] ?? ''} onChange={(e) => patch({ [modelKey]: e.target.value || null })}>
-              {models.length === 0 && <option value="">(no models — connect this provider first)</option>}
+              {models.length === 0 && <option value="">{tx("(no models — connect this provider first)")}</option>}
               {models.map((m) => <option key={m} value={m}>{modelDisplayName(provider, m)}</option>)}
             </select>
           </>

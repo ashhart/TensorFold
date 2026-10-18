@@ -10,7 +10,7 @@ import { makeHarness, seedModel } from './test-fixtures/harness'
 const GIB = 1024 ** 3
 const MODEL = 'mlx-community/Qwen3.5-2B-MLX-4bit'
 const LEARNING_MODEL = 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit'
-const paused = /temporarily disabled for beta\.6/i
+const paused = /temporarily disabled in this beta/i
 const service = (h: Awaited<ReturnType<typeof makeHarness>>) => new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, totalMemoryBytes: 32 * GIB, pollMs: 20, emit: () => {} })
 
 async function main() {

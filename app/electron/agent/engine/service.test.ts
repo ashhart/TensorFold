@@ -65,7 +65,7 @@ async function main() {
     const pre = await service.preflight('mlx-community/Qwen3.5-2B-MLX-4bit')
     assert.equal(pre.verdict, 'ok', pre.reasons.join('; '))
     const started = await service.pull('mlx-community/Qwen3.5-2B-MLX-4bit')
-    assert.equal(started.state, 'running')
+    assert.equal(started.state, 'queued', 'downloads enter the serial queue before starting their subprocess')
     await waitFor(() => events.some((e) => e.kind === 'pull' && e.pull.state === 'done'), 10_000, 'pull to finish')
     await waitFor(() => synced.length === 1, 5000, 'installed list to refresh')
     assert.deepEqual(synced, ['mlx-community/Qwen3.5-2B-MLX-4bit'])
@@ -85,8 +85,8 @@ async function main() {
     await assert.rejects(() => offline.search('qwen'), /HF_HUB_OFFLINE/)
 
     // Unsupported repos are refused before any pull starts.
-    const refusing = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('google/gemma-9', 1024, 'gemma4_unified'), totalMemoryBytes: 32 * GIB, emit: () => {} })
-    await assert.rejects(() => refusing.pull('google/gemma-9'), /serves no gemma4_unified family/)
+    const refusing = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('google/gemma-9', 1024, 'gemma4'), totalMemoryBytes: 32 * GIB, emit: () => {} })
+    await assert.rejects(() => refusing.pull('google/gemma-9'), /serves no gemma4 family/)
     await assert.rejects(() => refusing.pull('../../etc'), /owner\/name/)
 
     // Load, then delete is refused until unloaded; delete removes only the cache folder.

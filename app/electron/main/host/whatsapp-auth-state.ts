@@ -53,6 +53,16 @@ const wipingAuthFiles = new Set<string>()
 let globalAuthWipeDepth = 0
 let authGenerationCounter = 0
 
+/** Startup never creates or migrates credentials; only an existing protected paired envelope resumes. */
+export async function hasProtectedRegisteredWhatsAppAuthState(baseDir: string, sourceId: string): Promise<boolean> {
+  const file = protectedAuthFileFor(baseDir, sourceId)
+  if (globalAuthWipeDepth > 0 || wipingAuthFiles.has(file)) return false
+  if (!await protectedFileExists(file)) return false
+  await assertProtectedEnvelope(file)
+  const stored = await readProtectedJson<StoredWhatsAppAuthState | null>(file, null, false)
+  return stored?.version === AUTH_VERSION && stored.creds?.registered === true && typeof stored.keys === 'object'
+}
+
 class AuthStateInvalidatedError extends Error {
   constructor() { super('WhatsApp credential state is no longer active; refusing a late write.') }
 }

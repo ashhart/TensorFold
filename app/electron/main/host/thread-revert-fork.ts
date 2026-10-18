@@ -85,10 +85,12 @@ export function createThreadForkFactory(deps: ThreadRevertForkDeps): (sourceThre
       id: randomUUID(),
       title: `Fork of ${source.title}`,
       kind: source.kind,
+      documentSourceIds: source.documentSourceIds ? [...source.documentSourceIds] : [],
       memoryPolicy: { ...captureThreadMemoryPolicy(source) },
       memoryPolicyRevision: 0,
       ...(source.bot ? { bot: frozenBotCopy(source.bot) } : {}),
       ...(source.phoneLocalOnly ? { phoneLocalOnly: true } : {}),
+      ...(source.googleLocalOnly ? { googleLocalOnly: true } : {}),
       projectId: source.projectId ?? null,
       // A fork worktree (VST-036) homes the fork at its own copy of the fork-point
       // snapshot; otherwise the fork shares the source folder as before. A worktree

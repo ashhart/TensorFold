@@ -1,3 +1,4 @@
+import { reviewedLanguageImport } from '../preferences/language-test-fixture'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -13,7 +14,7 @@ const compilerOptions = { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.
 function load(file: string, imports: Record<string, unknown>) {
   const module = { exports: {} as any }
   const output = ts.transpileModule(readFileSync(path.join(__dirname, file), 'utf8'), { compilerOptions }).outputText
-  new Function('require', 'module', 'exports', output)((id: string) => { assert.ok(id in imports, `Reviewed component import: ${id}`); return imports[id] }, module, module.exports)
+  new Function('require', 'module', 'exports', output)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports, `Reviewed component import: ${id}`); return imports[id] }, module, module.exports)
   return module.exports
 }
 const { Button } = load('../ui.tsx', { react: React, 'react/jsx-runtime': jsx, 'react-dom': { createPortal() { throw new Error('No portals in sidebar control.') } }, clsx, '../lib/icons': { Icon: () => null } })

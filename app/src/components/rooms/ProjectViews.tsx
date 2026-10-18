@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -18,6 +20,7 @@ import { TerminalsTab } from '../terminals/TerminalsTab'
 
 // ---------------------------------------------------------------- Projects index
 export function ProjectsIndex() {
+  const tx = useAuthoredText()
   const projects = useStore((s) => s.projects)
   const rooms = useStore((s) => s.rooms)
   const archives = useStore((s) => s.archives)
@@ -33,33 +36,33 @@ export function ProjectsIndex() {
       <div className="mx-auto w-full max-w-[820px] px-7 py-9">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Projects</h1>
-            <p className="mt-1 text-[13px] text-ink-3">A project holds shared memory and rooms where multiple agents work together.</p>
+            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{tx("Projects")}</h1>
+            <p className="mt-1 text-[13px] text-ink-3">{tx("A project holds shared memory and rooms where multiple agents work together.")}</p>
           </div>
-          <Button variant="primary" icon="plus" onClick={openNewProject}>New project</Button>
+          <Button variant="primary" icon="plus" onClick={openNewProject}>{tx("New project")}</Button>
         </div>
 
         <div className="mt-5 inline-flex rounded-lg border border-line bg-card-2 p-0.5">
-          <button onClick={() => setMode('active')} className={clsx('rounded-[7px] px-3 py-1.5 text-[13px] font-medium transition-colors', mode === 'active' ? 'bg-card text-ink shadow-card' : 'text-ink-3 hover:text-ink')}>Active</button>
-          <button onClick={() => setMode('archived')} className={clsx('rounded-[7px] px-3 py-1.5 text-[13px] font-medium transition-colors', mode === 'archived' ? 'bg-card text-ink shadow-card' : 'text-ink-3 hover:text-ink')}>Archive {archivedTotal > 0 && <span className="ml-1 text-ink-3">{archivedTotal}</span>}</button>
+          <button onClick={() => setMode('active')} className={clsx('rounded-[7px] px-3 py-1.5 text-[13px] font-medium transition-colors', mode === 'active' ? 'bg-card text-ink shadow-card' : 'text-ink-3 hover:text-ink')}>{tx("Active")}</button>
+          <button onClick={() => setMode('archived')} className={clsx('rounded-[7px] px-3 py-1.5 text-[13px] font-medium transition-colors', mode === 'archived' ? 'bg-card text-ink shadow-card' : 'text-ink-3 hover:text-ink')}>{tx("Archive ")}{archivedTotal > 0 && <span className="ml-1 text-ink-3">{archivedTotal}</span>}</button>
         </div>
 
         {mode === 'archived' ? (
           archivedTotal === 0 ? (
-            <div className="mt-6 rounded-2xl border border-dashed border-line py-14 text-center text-[13px] text-ink-3">Nothing archived yet.</div>
+            <div className="mt-6 rounded-2xl border border-dashed border-line py-14 text-center text-[13px] text-ink-3">{tx("Nothing archived yet.")}</div>
           ) : (
             <div className="mt-5 space-y-4">
-              <ArchiveGroup title="Projects" items={archives?.projects ?? []} icon="folder" onRestore={(id, hostId) => restoreItem('project', id, hostId)} />
-              <ArchiveGroup title="Rooms" items={archives?.rooms ?? []} icon="layers" onRestore={(id, hostId) => restoreItem('room', id, hostId)} />
-              <ArchiveGroup title="Chats and tasks" items={archives?.threads ?? []} icon="message" onRestore={(id, hostId) => restoreItem('thread', id, hostId)} />
-              <ArchiveGroup title="Tickets" items={archives?.tickets ?? []} icon="archive" onRestore={(id, hostId) => restoreItem('ticket', id, hostId)} />
+              <ArchiveGroup title={tx("Projects")} items={archives?.projects ?? []} icon="folder" onRestore={(id, hostId) => restoreItem('project', id, hostId)} />
+              <ArchiveGroup title={tx("Rooms")} items={archives?.rooms ?? []} icon="layers" onRestore={(id, hostId) => restoreItem('room', id, hostId)} />
+              <ArchiveGroup title={tx("Chats and tasks")} items={archives?.threads ?? []} icon="message" onRestore={(id, hostId) => restoreItem('thread', id, hostId)} />
+              <ArchiveGroup title={tx("Tickets")} items={archives?.tickets ?? []} icon="archive" onRestore={(id, hostId) => restoreItem('ticket', id, hostId)} />
             </div>
           )
         ) : projects.length === 0 ? (
           <div className="mt-6 flex flex-col items-center justify-center rounded-2xl border border-dashed border-line py-14 text-center">
             <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-ink-5 text-ink-3"><Icon name="folder" size={24} /></span>
-            <div className="mt-3 text-[14px] font-medium text-ink">No projects yet</div>
-            <div className="mt-1 max-w-[380px] text-[13px] text-ink-3">Create a project, then add rooms where two or more local/cloud models collaborate with shared memory.</div>
+            <div className="mt-3 text-[14px] font-medium text-ink">{tx("No projects yet")}</div>
+            <div className="mt-1 max-w-[380px] text-[13px] text-ink-3">{tx("Create a project, then add rooms where two or more local/cloud models collaborate with shared memory.")}</div>
           </div>
         ) : (
           <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -78,9 +81,9 @@ export function ProjectsIndex() {
                     <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name="folder" size={18} /></span>
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-[14px] font-medium text-ink">{p.name}</div>
-                      <div className="text-[13px] text-ink-3">{count} room{count === 1 ? '' : 's'} · {relativeTime(p.updatedAt)}</div>
+                      <div className="text-[13px] text-ink-3">{tx("Rooms: {count}", { count })} · {relativeTime(p.updatedAt)}</div>
                     </div>
-                    <button onClick={(e) => { e.stopPropagation(); archiveItem('project', p.id) }} className="flex h-7 items-center gap-1 rounded-lg border border-line px-2 text-[12px] font-medium text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100"><Icon name="archive" size={12} />Archive</button>
+                    <button onClick={(e) => { e.stopPropagation(); archiveItem('project', p.id) }} className="flex h-7 items-center gap-1 rounded-lg border border-line px-2 text-[12px] font-medium text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100"><Icon name="archive" size={12} />{tx("Archive")}</button>
                   </div>
                   {p.memory && <p className="mt-2.5 line-clamp-2 text-[13px] leading-snug text-ink-3">{p.memory}</p>}
                 </div>
@@ -94,15 +97,17 @@ export function ProjectsIndex() {
 }
 
 function Select({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
+  const tx = useAuthoredText()
   return (
     <select value={value} onChange={(e) => onChange(e.target.value)} className="no-drag h-9 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none transition-colors focus:border-accent">
-      {options.length === 0 && <option value="">No saved Orchestrators</option>}
+      {options.length === 0 && <option value="">{tx("No saved Orchestrators")}</option>}
       {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
     </select>
   )
 }
 
 function ArchiveGroup({ title, items, icon, onRestore }: { title: string; items: Array<{ id: string; name?: string; title?: string; updatedAt: number; archivedAt?: number | null; orchestratorHostId?: string | null; orchestratorId?: string | null }>; icon: 'folder' | 'layers' | 'message' | 'archive'; onRestore: (id: string, originHostId: string | null) => void }) {
+  const tx = useAuthoredText()
   const hosts = useStore((state) => state.settings?.remoteOrchestrators ?? [])
   if (!items.length) return null
   return (
@@ -111,15 +116,15 @@ function ArchiveGroup({ title, items, icon, onRestore }: { title: string; items:
       <div className="space-y-2">
         {items.map((item) => {
           const originHostId = item.orchestratorHostId ?? item.orchestratorId ?? null
-          const originLabel = originHostId ? (hosts.find((host) => host.id === originHostId)?.name ?? `Orchestrator ${originHostId.slice(0, 8)}`) : 'This Mac'
+          const originLabel = originHostId ? (hosts.find((host) => host.id === originHostId)?.name ?? tx("Orchestrator {value0}", { value0: String(originHostId.slice(0, 8)) })) : tx("This Mac")
           return (
           <div key={`${originHostId ?? 'local'}:${item.id}`} className="flex items-center gap-3 rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name={icon} size={15} /></span>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[14px] font-medium text-ink">{item.name ?? item.title ?? 'Archived item'}</div>
-              <div className="text-[13px] text-ink-3">Archived {relativeTime(item.archivedAt ?? item.updatedAt)} · {originLabel}</div>
+              <div className="truncate text-[14px] font-medium text-ink">{item.name ?? item.title ?? tx("Archived item")}</div>
+              <div className="text-[13px] text-ink-3">{tx("Archived ")}{relativeTime(item.archivedAt ?? item.updatedAt)} · {originLabel}</div>
             </div>
-            <Button size="sm" variant="default" icon="back" onClick={() => onRestore(item.id, originHostId)}>Restore</Button>
+            <Button size="sm" variant="default" icon="back" onClick={() => onRestore(item.id, originHostId)}>{tx("Restore")}</Button>
           </div>
           )
         })}
@@ -134,6 +139,7 @@ function ArchiveGroup({ title, items, icon, onRestore }: { title: string; items:
 // has no window.prompt, which is why the old prompt-based button did nothing). The chosen colour is
 // stored globally per tag name in settings.tagColors and drives both the chip and the tinted folder.
 function ProjectTagEditor({ project }: { project: Project }) {
+  const tx = useAuthoredText()
   const updateProject = useStore((s) => s.updateProject)
   const settings = useStore((s) => s.settings)
   const saveSettings = useStore((s) => s.saveSettings)
@@ -158,7 +164,7 @@ function ProjectTagEditor({ project }: { project: Project }) {
 
   return (
     <div className="mt-2 flex flex-wrap items-center gap-1.5">
-      <span className="mr-0.5 text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">Tags</span>
+      <span className="mr-0.5 text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">{tx("Tags")}</span>
       {TAG_PRESETS.map((t) => {
         const active = tags.includes(t)
         return (
@@ -175,7 +181,7 @@ function ProjectTagEditor({ project }: { project: Project }) {
         <button
           key={t}
           onClick={() => setTags(toggleTag(tags, t))}
-          title={`Remove "${t}"`}
+          title={tx("Remove \"{value0}\"", { value0: t })}
           className={clsx('group/tag flex items-center gap-1 rounded-md px-2 py-0.5 text-[12px] font-medium capitalize transition-colors hover:bg-danger/10 hover:text-danger', tagTone(t, tagColors))}
         >
           {t}
@@ -189,7 +195,7 @@ function ProjectTagEditor({ project }: { project: Project }) {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') commit(); else if (e.key === 'Escape') { setAdding(false); setDraft('') } }}
-            placeholder="tag name"
+            placeholder={tx("tag name")}
             className="h-5 w-24 bg-transparent text-[12px] text-ink outline-none placeholder:text-ink-4"
           />
           {TAG_COLORS.map((c) => (
@@ -200,21 +206,21 @@ function ProjectTagEditor({ project }: { project: Project }) {
               className={clsx('h-4 w-4 rounded-full transition-transform', c.swatch, color === c.name ? 'ring-2 ring-ink/70 ring-offset-1 ring-offset-card' : 'opacity-60 hover:opacity-100')}
             />
           ))}
-          <button onClick={commit} disabled={!draft.trim()} className="rounded bg-accent px-1.5 py-0.5 text-[12px] font-medium text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">Add</button>
+          <button onClick={commit} disabled={!draft.trim()} className="rounded bg-accent px-1.5 py-0.5 text-[12px] font-medium text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">{tx("Add")}</button>
         </span>
       ) : (
         <button
           onClick={() => { setAdding(true); setDraft(''); setColor('neutral') }}
           className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink"
         >
-          <Icon name="plus" size={11} />Tag
-        </button>
+          <Icon name="plus" size={11} />{tx("Tag")}</button>
       )}
     </div>
   )
 }
 
 export function ProjectView({ id, initialTab = 'overview' }: { id: string; initialTab?: 'overview' | 'rooms' | 'board' | 'chats' | 'files' | 'settings' | 'terminals' }) {
+  const tx = useAuthoredText()
   const project = useStore((s) => s.projects.find((p) => p.id === id))
   const rooms = useStore((s) => s.rooms).filter((r) => r.projectId === id)
   const createRoom = useStore((s) => s.createRoom)
@@ -261,13 +267,13 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
         <div className="border-b border-line px-7 pt-4">
           <ProjectTagEditor project={project} />
           <div className="mt-3 flex items-center gap-5">
-            <TabBtn k="overview" icon="folder" label="Overview" />
-            <TabBtn k="rooms" icon="layers" label="Rooms" count={rooms.length} />
-            <TabBtn k="board" icon="grid" label="Kanban" count={ticketCount} />
-            <TabBtn k="chats" icon="message" label="Solo" count={threads.length} />
-            <TabBtn k="files" icon="folder" label="Files" />
-            <TabBtn k="terminals" icon="terminal" label="Terminal" />
-            <TabBtn k="settings" icon="settings" label="Settings" />
+            <TabBtn k="overview" icon="folder" label={tx("Overview")} />
+            <TabBtn k="rooms" icon="layers" label={tx("Rooms")} count={rooms.length} />
+            <TabBtn k="board" icon="grid" label={tx("Kanban")} count={ticketCount} />
+            <TabBtn k="chats" icon="message" label={tx("Solo")} count={threads.length} />
+            <TabBtn k="files" icon="folder" label={tx("Files")} />
+            <TabBtn k="terminals" icon="terminal" label={tx("Terminal")} />
+            <TabBtn k="settings" icon="settings" label={tx("Settings")} />
           </div>
         </div>
       )}
@@ -277,21 +283,21 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
           <div className="scroll-thin h-full overflow-y-auto px-7 py-6">
             <div className="mx-auto w-full max-w-[860px]">
               <div className="mb-4">
-                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Project layers</h2>
-                <p className="mt-1 max-w-[620px] text-[13px] leading-relaxed text-ink-3">Start with a solo operation, a multi-agent room, or a Kanban board. They share the same project instructions and memory.</p>
+                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">{tx("Project layers")}</h2>
+                <p className="mt-1 max-w-[620px] text-[13px] leading-relaxed text-ink-3">{tx("Start with a solo operation, a multi-agent room, or a Kanban board. They share the same project instructions and memory.")}</p>
               </div>
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <LayerCard icon="terminal" label="Terminal" action="Terminal" detail="Open a shell or a CLI (Codex, Claude, …) scoped to this project." onClick={() => setTab('terminals')} />
-                <LayerCard icon="message" label="Solo operation" action="Solo" detail="One model works in a project-scoped chat or task." onClick={() => newThread(id)} />
-                <LayerCard icon="layers" label="Multi-agent room" action="Room" detail="Several agents deliberate, create tickets, and share room memory." onClick={() => createRoom(id, 'New room')} />
-                <LayerCard icon="grid" label="Kanban board" action="Kanban" detail="Plan work as epics, bugs, and tasks before assigning agents." onClick={() => setTab('board')} />
+                <LayerCard icon="terminal" label={tx("Terminal")} action="Terminal" detail="Open a shell or a CLI (Codex, Claude, …) scoped to this project." onClick={() => setTab('terminals')} />
+                <LayerCard icon="message" label={tx("Solo operation")} action="Solo" detail="One model works in a project-scoped chat or task." onClick={() => newThread(id)} />
+                <LayerCard icon="layers" label={tx("Multi-agent room")} action="Room" detail="Several agents deliberate, create tickets, and share room memory." onClick={() => createRoom(id, 'New room')} />
+                <LayerCard icon="grid" label={tx("Kanban board")} action="Kanban" detail="Plan work as epics, bugs, and tasks before assigning agents." onClick={() => setTab('board')} />
               </div>
               <div className="mt-5 rounded-xl border border-line bg-card-2/50 px-4 py-3">
                 <div className="flex flex-wrap gap-3 text-[13px] text-ink-3">
-                  <span className="flex items-center gap-1.5"><Icon name="terminal" size={13} />Terminal</span>
-                  <span className="flex items-center gap-1.5"><Icon name="message" size={13} />Solo operation</span>
-                  <span className="flex items-center gap-1.5"><Icon name="layers" size={13} />Multi-agent room</span>
-                  <span className="flex items-center gap-1.5"><Icon name="grid" size={13} />Kanban board</span>
+                  <span className="flex items-center gap-1.5"><Icon name="terminal" size={13} />{tx("Terminal")}</span>
+                  <span className="flex items-center gap-1.5"><Icon name="message" size={13} />{tx("Solo operation")}</span>
+                  <span className="flex items-center gap-1.5"><Icon name="layers" size={13} />{tx("Multi-agent room")}</span>
+                  <span className="flex items-center gap-1.5"><Icon name="grid" size={13} />{tx("Kanban board")}</span>
                 </div>
               </div>
             </div>
@@ -303,14 +309,14 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
           <div className="scroll-thin h-full overflow-y-auto px-7 py-6">
             <div className="mx-auto w-full max-w-[820px]">
               <div className="flex items-center justify-between">
-                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Chats</h2>
+                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">{tx("Chats")}</h2>
                 <div className="flex gap-2">
-                  <Button variant="default" size="sm" icon="plus" onClick={() => newThread(id)}>New task</Button>
-                  <Button variant="default" size="sm" icon="message" onClick={() => newChat(id)}>New chat</Button>
+                  <Button variant="default" size="sm" icon="plus" onClick={() => newThread(id)}>{tx("New task")}</Button>
+                  <Button variant="default" size="sm" icon="message" onClick={() => newChat(id)}>{tx("New chat")}</Button>
                 </div>
               </div>
               {threads.length === 0 ? (
-                <div className="mt-2 rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-ink-3">No chats in this project yet. Start one for the frontend and another for the backend. They run independently.</div>
+                <div className="mt-2 rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-ink-3">{tx("No chats in this project yet. Start one for the frontend and another for the backend. They run independently.")}</div>
               ) : (
                 <div className="mt-2 space-y-2">
                   {threads.map((t) => (
@@ -318,9 +324,9 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                       <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name={t.kind === 'chat' ? 'message' : 'spark'} size={15} /></span>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[14px] font-medium text-ink">{t.title}</div>
-                        <div className="text-[13px] text-ink-3">{t.kind === 'chat' ? 'Chat' : 'Task'} · {relativeTime(t.updatedAt)}</div>
+                        <div className="text-[13px] text-ink-3">{t.kind === 'chat' ? tx("Chat") : tx("Task")} · {relativeTime(t.updatedAt)}</div>
                       </div>
-                      <button onClick={(e) => { e.stopPropagation(); archiveItem('thread', t.id) }} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label="Archive"><Icon name="archive" size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); archiveItem('thread', t.id) }} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label={tx("Archive")}><Icon name="archive" size={14} /></button>
                     </div>
                   ))}
                 </div>
@@ -332,11 +338,11 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
           <div className="scroll-thin h-full overflow-y-auto px-7 py-6">
             <div className="mx-auto w-full max-w-[820px]">
               <div className="flex items-center justify-between">
-                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Rooms</h2>
-                <Button variant="default" size="sm" icon="plus" onClick={() => createRoom(id, 'New room')}>New room</Button>
+                <h2 className="text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">{tx("Rooms")}</h2>
+                <Button variant="default" size="sm" icon="plus" onClick={() => createRoom(id, 'New room')}>{tx("New room")}</Button>
               </div>
               {rooms.length === 0 ? (
-                <div className="mt-2 rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-ink-3">No rooms yet. Create one and add agents.</div>
+                <div className="mt-2 rounded-xl border border-dashed border-line py-8 text-center text-[13px] text-ink-3">{tx("No rooms yet. Create one and add agents.")}</div>
               ) : (
                 <div className="mt-2 space-y-2">
                   {rooms.map((r) => (
@@ -344,10 +350,10 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                       <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-ink-5 text-ink-2"><Icon name="message" size={16} /></span>
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-[14px] font-medium text-ink">{r.name}</div>
-                        <div className="text-[13px] text-ink-3">{r.seats.length} agent{r.seats.length === 1 ? '' : 's'} · {ROOM_STATE_LABEL[r.state]} · {relativeTime(r.updatedAt)}</div>
+                        <div className="text-[13px] text-ink-3">{tx("Agents: {count}", { count: r.seats.length })} · {ROOM_STATE_LABEL[r.state]} · {relativeTime(r.updatedAt)}</div>
                       </div>
                       <div className="flex -space-x-1.5">{r.seats.slice(0, 4).map((s) => <Avatar key={s.id} name={s.name} size={22} />)}</div>
-                      <button onClick={(e) => { e.stopPropagation(); archiveItem('room', r.id) }} className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label="Archive room"><Icon name="archive" size={14} /></button>
+                      <button onClick={(e) => { e.stopPropagation(); archiveItem('room', r.id) }} className="ml-1 flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label={tx("Archive room")}><Icon name="archive" size={14} /></button>
                     </div>
                   ))}
                 </div>
@@ -363,21 +369,20 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
               <GitReadinessCard project={project} />
 
               <div className="rounded-xl border border-line bg-card p-4 shadow-card">
-                <div className="mb-3 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Run location</div>
+                <div className="mb-3 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">{tx("Run location")}</div>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
                       <Icon name={project.executionTarget === 'orchestrator' ? 'globe' : 'monitor'} size={14} className="text-ink-3" />
-                      {project.executionTarget === 'orchestrator' ? 'Paired Orchestrator' : 'This Mac'}
+                      {project.executionTarget === 'orchestrator' ? tx("Paired Orchestrator") : tx("This Mac")}
                     </div>
                     <div className="mt-0.5 text-[13px] leading-snug text-ink-3">
-                      Choose whether new rooms and missions for this project should stay local or target an always-on TensorFold Orchestrator.
-                    </div>
+                      {tx("Choose whether new rooms and missions for this project should stay local or target an always-on TensorFold Orchestrator.")}</div>
                   </div>
                   <Segmented<ProjectExecutionTarget>
                     value={project.executionTarget ?? 'local'}
                     onChange={(executionTarget) => updateProject(id, { executionTarget })}
-                    options={[{ value: 'local', label: 'Local', icon: 'monitor' }, { value: 'orchestrator', label: 'Orchestrator', icon: 'globe' }]}
+                    options={[{ value: 'local', label: tx("Local"), icon: 'monitor' }, { value: 'orchestrator', label: tx("Orchestrator"), icon: 'globe' }]}
                   />
                 </div>
                 {project.executionTarget === 'orchestrator' && (() => {
@@ -387,16 +392,16 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                   const hostMissing = !project.orchestratorId || !hosts.some((host) => host.id === project.orchestratorId)
                   return (
                   <div className="mt-3 rounded-lg border border-line bg-card-2 px-3 py-2 text-[13px] leading-snug text-ink-3">
-                    <div className="mb-2 text-[12px] font-medium uppercase tracking-[0.08em] text-ink-3">Target host</div>
+                    <div className="mb-2 text-[12px] font-medium uppercase tracking-[0.08em] text-ink-3">{tx("Target host")}</div>
                     <Select
                       value={hostMissing ? '' : project.orchestratorId!}
                       onChange={(orchestratorId) => updateProject(id, { orchestratorId: orchestratorId || null })}
                       options={[...(hostMissing ? [{ value: '', label: hosts.length ? 'Pick a host…' : 'No Orchestrator configured' }] : []), ...hosts.map((host) => ({ value: host.id, label: `${host.name} · ${host.serverUrl}` }))]}
                     />
                     {hostMissing ? (
-                      <div className="mt-2 text-warn">{hosts.length ? 'No host selected — pick one above, or switch the run location back to Local.' : 'This project targets an Orchestrator, but none is configured. Add one in Settings → Orchestrator, or switch to Local.'}</div>
+                      <div className="mt-2 text-warn">{hosts.length ? tx("No host selected — pick one above, or switch the run location back to Local.") : tx("This project targets an Orchestrator, but none is configured. Add one in Settings → Orchestrator, or switch to Local.")}</div>
                     ) : (
-                      <div className="mt-2">This project is marked for Orchestrator execution. Remote rooms and missions use the selected host when remote routing is enabled.</div>
+                      <div className="mt-2">{tx("This project is marked for Orchestrator execution. Remote rooms and missions use the selected host when remote routing is enabled.")}</div>
                     )}
                   </div>
                   )
@@ -411,13 +416,13 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                 const models = selectedAccount?.models?.length ? selectedAccount.models : (dp?.models ?? [])
                 return (
                   <div className="rounded-xl border border-line bg-card p-4 shadow-card">
-                    <div className="mb-3 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">Model policy</div>
+                    <div className="mb-3 text-[13px] font-medium uppercase tracking-[0.05em] text-ink-3">{tx("Model policy")}</div>
                     <label className="flex items-center gap-3">
                       <span className="flex-1">
-                        <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="cpu" size={14} className="text-ink-3" />Local models only</span>
-                        <span className="mt-0.5 block text-[13px] leading-snug text-ink-3">Every chat and room agent in this project is restricted to on-device providers.</span>
+                        <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="cpu" size={14} className="text-ink-3" />{tx("Local models only")}</span>
+                        <span className="mt-0.5 block text-[13px] leading-snug text-ink-3">{tx("Every chat and room agent in this project is restricted to on-device providers.")}</span>
                       </span>
-                      <Toggle label="Local models only" checked={!!project.localOnly} onChange={(v) => {
+                      <Toggle label={tx("Local models only")} checked={!!project.localOnly} onChange={(v) => {
                         const next = allowedProviders(settings.providers, { ...project, localOnly: v })
                         const pid = next.some((p) => p.id === project.defaultProviderId) ? project.defaultProviderId : next[0]?.id ?? null
                         const nextProvider = next.find((p) => p.id === pid)
@@ -429,7 +434,7 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                     </label>
                     <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
                       <label className="block">
-                        <div className="mb-1.5 text-[13px] text-ink-2">Default provider</div>
+                        <div className="mb-1.5 text-[13px] text-ink-2">{tx("Default provider")}</div>
                         <select value={dp?.id ?? ''} onChange={(e) => {
                           const p = allowed.find((x) => x.id === e.target.value)
                           const accounts = p ? providerAccountChoices(p) : []
@@ -437,11 +442,11 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                           const nextModels = account?.models?.length ? account.models : (p?.models ?? [])
                           updateProject(id, { defaultProviderId: e.target.value, defaultProviderAccountId: account?.id ?? null, defaultModel: nextModels[0] ?? null })
                         }} className="no-drag h-9 w-full cursor-pointer rounded-lg border border-line bg-card-2 px-2.5 text-[13px] text-ink outline-none focus:border-accent">
-                          {allowed.map((p) => <option key={p.id} value={p.id}>{p.name}{p.kind === 'local' ? ' · local' : ''}</option>)}
+                          {allowed.map((p) => <option key={p.id} value={p.id}>{p.name}{p.kind === 'local' ? tx(" · local") : ''}</option>)}
                         </select>
                       </label>
                       <label className="block">
-                        <div className="mb-1.5 text-[13px] text-ink-2">Default account</div>
+                        <div className="mb-1.5 text-[13px] text-ink-2">{tx("Default account")}</div>
                         <select value={selectedAccount?.id ?? ''} onChange={(e) => {
                           const account = accountChoices.find((choice) => (choice.id ?? '') === e.target.value) ?? accountChoices[0]
                           const nextModels = account?.models?.length ? account.models : (dp?.models ?? [])
@@ -451,9 +456,9 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
                         </select>
                       </label>
                       <label className="block">
-                        <div className="mb-1.5 text-[13px] text-ink-2">Default model</div>
+                        <div className="mb-1.5 text-[13px] text-ink-2">{tx("Default model")}</div>
                         <select value={project.defaultModel ?? ''} onChange={(e) => updateProject(id, { defaultModel: e.target.value })} className="no-drag h-9 w-full cursor-pointer rounded-lg border border-line bg-card-2 px-2.5 text-[13px] text-ink outline-none focus:border-accent">
-                          {models.length === 0 && <option value="">None</option>}
+                          {models.length === 0 && <option value="">{tx("None")}</option>}
                           {models.map((m) => <option key={m} value={m}>{m}</option>)}
                         </select>
                       </label>
@@ -464,12 +469,12 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block">
-                  <div className="mb-1.5 text-[13px] font-medium text-ink-2">Shared memory</div>
-                  <textarea value={project.memory} onChange={(e) => updateProject(id, { memory: e.target.value })} placeholder="Durable context every agent in this project sees…" rows={6} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+                  <div className="mb-1.5 text-[13px] font-medium text-ink-2">{tx("Shared memory")}</div>
+                  <textarea value={project.memory} onChange={(e) => updateProject(id, { memory: e.target.value })} placeholder={tx("Durable context every agent in this project sees…")} rows={6} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
                 </label>
                 <label className="block">
-                  <div className="mb-1.5 text-[13px] font-medium text-ink-2">Team charter</div>
-                  <textarea value={project.team} onChange={(e) => updateProject(id, { team: e.target.value })} placeholder="How the team works together (roles, norms)…" rows={6} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+                  <div className="mb-1.5 text-[13px] font-medium text-ink-2">{tx("Team charter")}</div>
+                  <textarea value={project.team} onChange={(e) => updateProject(id, { team: e.target.value })} placeholder={tx("How the team works together (roles, norms)…")} rows={6} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
                 </label>
               </div>
               <ProjectSkills projectId={id} />
@@ -483,6 +488,7 @@ export function ProjectView({ id, initialTab = 'overview' }: { id: string; initi
 }
 
 function GitReadinessCard({ project }: { project: Project }) {
+  const tx = useAuthoredText()
   const [state, setState] = useState<GitRepositoryState | null>(null)
   const [busy, setBusy] = useState(false)
   const [initBusy, setInitBusy] = useState(false)
@@ -494,7 +500,7 @@ function GitReadinessCard({ project }: { project: Project }) {
     try { setState(await api.inspectGitRepository(project.cwd)) }
     catch (e: any) {
       setState(null)
-      setError(e?.message ?? 'Could not inspect Git repository.')
+      setError(e?.message ?? tx("Could not inspect Git repository."))
     } finally { setBusy(false) }
   }
 
@@ -505,7 +511,7 @@ function GitReadinessCard({ project }: { project: Project }) {
     setBusy(true)
     api.inspectGitRepository(project.cwd)
       .then((next) => { if (live) setState(next) })
-      .catch((e) => { if (live) setError(e?.message ?? 'Could not inspect Git repository.') })
+      .catch((e) => { if (live) setError(e?.message ?? tx("Could not inspect Git repository.")) })
       .finally(() => { if (live) setBusy(false) })
     return () => { live = false }
   }, [project.cwd])
@@ -514,7 +520,7 @@ function GitReadinessCard({ project }: { project: Project }) {
     if (!project.cwd || initBusy) return
     setInitBusy(true); setError('')
     try { setState(await api.initGitRepository(project.cwd)) }
-    catch (e: any) { setError(e?.message ?? 'Could not initialize Git.') }
+    catch (e: any) { setError(e?.message ?? tx("Could not initialize Git.")) }
     finally { setInitBusy(false) }
   }
 
@@ -528,28 +534,28 @@ function GitReadinessCard({ project }: { project: Project }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <div className="text-[13px] font-medium text-ink">Git and room worktrees</div>
-              <div className="mt-0.5 text-[13px] text-ink-3">{project.cwd ? shortPath(project.cwd, 4) : 'No folder selected for this project.'}</div>
+              <div className="text-[13px] font-medium text-ink">{tx("Git and room worktrees")}</div>
+              <div className="mt-0.5 text-[13px] text-ink-3">{project.cwd ? shortPath(project.cwd, 4) : tx("No folder selected for this project.")}</div>
             </div>
-            {project.cwd && <Button size="sm" variant="ghost" icon="branch" onClick={refresh} disabled={busy}>Refresh</Button>}
+            {project.cwd && <Button size="sm" variant="ghost" icon="branch" onClick={refresh} disabled={busy}>{tx("Refresh")}</Button>}
           </div>
           <div className="mt-3 rounded-lg border border-line bg-card-2/50 px-3 py-2 text-[13px] leading-snug text-ink-2">
             {!project.cwd
-              ? 'Choose a project folder before running multi-agent rooms.'
+              ? tx("Choose a project folder before running multi-agent rooms.")
               : busy
-                ? 'Checking Git repository…'
+                ? tx("Checking Git repository…")
                 : ready
-                  ? `Ready · ${state?.branch ? `branch ${state.branch}` : 'detached HEAD'} · new rooms get isolated worktrees.`
+                  ? state?.branch ? tx("Ready · Branch: {branch} · new rooms get isolated worktrees.", { branch: state.branch }) : tx("Ready · Detached HEAD · new rooms get isolated worktrees.")
                   : state?.exists
-                    ? 'Git exists, but it needs an initial commit before room worktrees can start.'
-                    : 'This folder is not initialized as a Git repo. Initialize it before starting a room.'}
+                    ? tx("Git exists, but it needs an initial commit before room worktrees can start.")
+                    : tx("This folder is not initialized as a Git repo. Initialize it before starting a room.")}
           </div>
           {state?.exists === false && (
             <div className="mt-3">
-              <Button size="sm" variant="primary" icon="branch" onClick={initialize} disabled={initBusy}>{initBusy ? 'Initializing…' : 'Initialize Git'}</Button>
+              <Button size="sm" variant="primary" icon="branch" onClick={initialize} disabled={initBusy}>{initBusy ? tx("Initializing…") : tx("Initialize Git")}</Button>
             </div>
           )}
-          {error && <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">{error}</div>}
+          {error && <div className="mt-3 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
         </div>
       </div>
     </div>

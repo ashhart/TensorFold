@@ -1,9 +1,12 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
 import { BrandMark } from '../BrandMark'
 import { BrandIcon, connectorBrand } from '../../lib/brand'
-import type { BubbleRow } from './conversation'
+import type { BubbleRow, MessageDeliveryStatus } from './conversation'
 
 // Discord-style message card: avatar + name + timestamp on a header line,
 // content below, all LEFT-aligned (not left/right bubbles). TensorFold's replies get
@@ -18,7 +21,7 @@ export interface MessageCardItem {
   connectorId?: string
   isBot?: boolean
   isFromMe?: boolean
-  status?: 'draft' | 'sent' | 'failed' | undefined
+  status?: MessageDeliveryStatus
   replyToId?: string | null
   threadKey?: string | null
   sort: number
@@ -39,7 +42,7 @@ function timeLabel(ts?: number): string {
   const now = new Date()
   const sameDay = d.toDateString() === now.toDateString()
   const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
-  return sameDay ? `Today at ${time}` : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
+  return sameDay ? authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Today at {value0}", { value0: String(time) }) : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`
 }
 
 interface DraftActions {
@@ -50,12 +53,13 @@ interface DraftActions {
 }
 
 const REDRAFTS: { label: string; how: string }[] = [
-  { label: 'Shorter', how: 'shorter and more to the point' },
-  { label: 'Warmer', how: 'warmer and friendlier' },
-  { label: 'Firmer', how: 'firmer and more direct' },
+  { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Shorter") }, how: 'shorter and more to the point' },
+  { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Warmer") }, how: 'warmer and friendlier' },
+  { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Firmer") }, how: 'firmer and more direct' },
 ]
 
 function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: MessageCardItem } & DraftActions) {
+  const tx = useAuthoredText()
   const { brand, initials } = avatarFor(item)
   const isTensorFoldStudio = item.isBot || ['TensorFold', 'Vontra'].includes(item.author)
   return (
@@ -73,25 +77,26 @@ function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: 
       <div className="min-w-0 flex-1">
         {/* Header: name + APP badge + timestamp. */}
         <div className="flex items-center gap-1.5">
-          <span className={clsx('text-[14px] font-semibold', isTensorFoldStudio ? 'text-accent' : 'text-ink')}>{isTensorFoldStudio ? 'TensorFold' : item.author}</span>
+          <span className={clsx('text-[14px] font-semibold', isTensorFoldStudio ? 'text-accent' : 'text-ink')}>{isTensorFoldStudio ? "TensorFold" : item.author}</span>
           {isTensorFoldStudio && <span className="rounded bg-accent-soft px-1 py-0.5 text-[11px] font-bold uppercase tracking-wide text-accent">APP</span>}
-          {item.isFromMe && !isTensorFoldStudio && <span className="rounded bg-surface px-1 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">You</span>}
+          {item.isFromMe && !isTensorFoldStudio && <span className="rounded bg-surface px-1 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{tx("You")}</span>}
           <span className="text-[12px] text-ink-4">{timeLabel(item.time)}</span>
         </div>
         {/* Content. */}
         <div className="mt-0.5 whitespace-pre-wrap break-words text-[14px] leading-relaxed text-ink-2">{item.text}</div>
+        {item.status && item.status !== 'draft' && <div role="status" className="mt-1 text-[12px] text-ink-2">{item.status === 'sent' ? tx("Delivered") : item.status === 'approved' ? tx("Approved, no delivery receipt") : item.status === 'sending' ? tx("Sending…") : item.status === 'uncertain' ? tx("Delivery uncertain; check the destination before sending again") : tx("Delivery failed")}</div>}
         {/* Draft approval affordance (TensorFold drafts awaiting the user). */}
         {isTensorFoldStudio && item.status === 'draft' && (
           <div className="mt-1.5 flex flex-col gap-1.5">
             <div className="flex items-center gap-1.5">
-              <button onClick={() => onApprove?.(item.id)} className="rounded-lg bg-accent px-2.5 py-1 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">Approve &amp; send</button>
-              <button onClick={() => onEdit?.(item.id)} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">Edit</button>
-              <button onClick={() => onDiscard?.(item.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">Discard</button>
+              <button onClick={() => onApprove?.(item.id)} className="rounded-lg bg-accent px-2.5 py-1 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">{tx("Review message")}</button>
+              <button onClick={() => onEdit?.(item.id)} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">{tx("Edit")}</button>
+              <button onClick={() => onDiscard?.(item.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">{tx("Discard")}</button>
             </div>
             {/* One-click redraft variants: ask the assistant to re-write this draft. */}
             {onRedraft && (
               <div className="flex flex-wrap items-center gap-1.5">
-                <span className="text-[12px] text-ink-4">Redraft:</span>
+                <span className="text-[12px] text-ink-4">{tx("Redraft:")}</span>
                 {REDRAFTS.map((r) => (
                   <button key={r.label} onClick={() => onRedraft(item.id, r.how)} className="rounded-md border border-line px-1.5 py-0.5 text-[12px] text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink">{r.label}</button>
                 ))}
@@ -99,7 +104,7 @@ function MessageCard({ item, onApprove, onEdit, onDiscard, onRedraft }: { item: 
             )}
           </div>
         )}
-        {item.status === 'sent' && <div className="mt-1 flex items-center gap-1 text-[12px] text-ink-4"><Icon name="check" size={11} /> Sent</div>}
+        {item.status === 'sent' && <div className="mt-1 flex items-center gap-1 text-[12px] text-ink-4"><Icon name="check" size={11} /> {tx("Sent")}</div>}
       </div>
     </div>
   )
@@ -131,6 +136,7 @@ export function MessageCardView({ items, emptyTitle, emptyDetail, onApprove, onE
   emptyTitle: string
   emptyDetail: string
 } & DraftActions) {
+  const tx = useAuthoredText()
   const endRef = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -175,8 +181,7 @@ export function MessageCardView({ items, emptyTitle, emptyDetail, onApprove, onE
                     onClick={() => setExpanded((s) => new Set(s).add(root.id))}
                     className="rounded-lg px-2 py-1 text-[13px] font-medium text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink"
                   >
-                    {replies.length} replies — click to expand
-                  </button>
+                    {replies.length} {tx("replies — click to expand")}</button>
                 </div>
               )
             )}

@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict'
+import { indexSearchTokens, matchingTerms, normalizeSearchText, searchExcerpt, searchTerms } from './text'
+
+assert.equal(normalizeSearchText('CAFÉ cafe\u0301'), 'cafe cafe')
+assert.deepEqual(searchTerms('ПРИВЕТ мир'), ['привет', 'мир'])
+assert.deepEqual(searchTerms('東京検索'), ['東京', '京検', '検索'])
+assert.deepEqual(searchTerms('京'), ['京'])
+assert.ok(indexSearchTokens('東京検索', 100).includes('京'))
+assert.equal(matchingTerms('invoice fixtures', searchTerms('voice')).length, 0, 'infix matching does not diverge from prefix-only index')
+assert.equal(matchingTerms('invoice fixtures', searchTerms('fixture')).length, 1)
+assert.equal(matchingTerms('東京fixture', searchTerms('fixture')).length, 1, 'mixed-script boundaries match indexed token splits')
+assert.ok(indexSearchTokens('café', 100).includes('cafe'))
+assert.equal(indexSearchTokens('a'.repeat(10_000), 20).length, 20, 'index expansion is bounded')
+const original = '😀 ' + 'x'.repeat(80) + ' cafe\u0301 東京検索 ' + 'tail'.repeat(100)
+const snippet = searchExcerpt(original, searchTerms('café 東京検索'))
+assert.ok(snippet.excerpt.startsWith('…'))
+assert.ok(snippet.excerpt.endsWith('…'))
+assert.deepEqual(snippet.highlights.map((range) => snippet.excerpt.slice(range.start, range.end)), ['cafe\u0301', '東京検索'])
+assert.ok(snippet.excerpt.length <= 242)
+assert.ok(!/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/u.test(snippet.excerpt), 'snippet boundaries do not cut surrogate pairs')
+console.log('Search normalization, prefix consistency, CJK grams and original-offset tests passed')

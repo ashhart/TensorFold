@@ -29,4 +29,7 @@ for (const patch of [{ memoryPolicy: { useExisting: false, contribute: false } }
 assert.throws(() => sanitizeRendererThreadPatch({ plan: [{ id: 'p1', text: 'x', done: 'yes' }] }), /Invalid plan step/)
 assert.throws(() => sanitizeRendererThreadPatch({ diffReviewedAt: Number.NaN }), /Invalid diff review timestamp/)
 
+assert.deepEqual(sanitizeRendererThreadPatch({ documentSourceIds: [] }), { documentSourceIds: [] })
+assert.deepEqual(sanitizeRendererThreadPatch({ documentSourceIds: ['synthetic-source'] }), { documentSourceIds: ['synthetic-source'] })
+for (const value of [undefined, null, 'all', ['same', 'same'], ['']]) assert.throws(() => sanitizeRendererThreadPatch({ documentSourceIds: value }))
 console.log('thread patch boundary tests passed')

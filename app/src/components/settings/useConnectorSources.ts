@@ -116,7 +116,8 @@ export function useConnectorSources({ draft, commit }: SettingsHookDeps) {
     try {
       const result = await api.syncDocuments()
       commitDocuments({ ...draft.documents, sources: result.sources, lastSyncAt: result.syncedAt })
-      flashConnectorStatus('documents', formatSyncSummary(result.sources.length, result.documents.length, 'document'))
+      const failures = result.sources.reduce((sum, source) => sum + (source.lastScan?.failed ?? (source.lastError ? 1 : 0)) + (source.lastScan?.unsupported ?? 0) + (source.lastScan?.skipped ?? 0), 0)
+      flashConnectorStatus('documents', failures ? `${result.documents.length} ready · ${failures} files need attention; see individual outcomes below` : formatSyncSummary(result.sources.length, result.documents.length, 'document'))
     } finally {
       setDocumentBusy('')
     }

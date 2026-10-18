@@ -1,0 +1,14 @@
+{
+  "This action could not be completed.": "ทำงานนี้ไม่เสร็จ",
+  "Some data failed to load — running with partial state.": "โหลดข้อมูลบางส่วนไม่สำเร็จ กำลังทำงานด้วยสถานะไม่ครบ",
+  "That room is not available for this project.": "ห้องนั้นใช้กับโครงการนี้ไม่ได้",
+  "That room and ticket belong to different hosts. Choose a room on the ticket owner.": "ห้องและทิกเก็ตอยู่คนละโฮสต์ เลือกห้องบนโฮสต์เจ้าของทิกเก็ต",
+  "Room ownership changed before dispatch. Refresh the project and try again.": "เจ้าของห้องเปลี่ยนก่อนส่ง รีเฟรชโครงการแล้วลองใหม่",
+  "Settings saved": "บันทึกการตั้งค่าแล้ว",
+  "Custom terminal commands are not available on Orchestrator projects.": "โครงการ Orchestrator ใช้คำสั่งเทอร์มินัลกำหนดเองไม่ได้",
+  "TensorFold cannot safely identify that terminal session.": "TensorFold ระบุเซสชันเทอร์มินัลนั้นอย่างปลอดภัยไม่ได้",
+  "This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.": "เทอร์มินัลระยะไกลนี้สร้างก่อนระบบติดตามต้นทาง จึงระบุโฮสต์เจ้าของอย่างปลอดภัยไม่ได้ เปิดใหม่จาก Orchestrator ที่เกี่ยวข้อง",
+  "Files stay in your draft until the current run finishes; they cannot be sent as text-only guidance.": "ไฟล์ยังอยู่ในร่างจนงานปัจจุบันจบ ส่งเป็นคำชี้แนะแบบข้อความอย่างเดียวไม่ได้",
+  "This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode.": "ทิกเก็ตนี้เป็นของในเครื่อง งานระยะไกลย้ายทิกเก็ตเดิมโดยปริยายไม่ได้ สร้างบน Orchestrator หรือเลือกโหมดอื่น",
+  "Layout changed for this session, but the preference could not be saved on this device.": "เปลี่ยนเค้าโครงเซสชันแล้ว แต่บันทึกค่าบนอุปกรณ์นี้ไม่ได้"
+}

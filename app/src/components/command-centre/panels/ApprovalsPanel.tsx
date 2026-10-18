@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { formatDuration, relativeTime, shortPath } from '../../../lib/format'
 import type { ApprovalRule } from '../../../lib/types'
@@ -17,15 +18,16 @@ interface ApprovalsPanelProps {
 }
 
 export function ApprovalsPanel(props: ApprovalsPanelProps) {
+  const tx = useAuthoredText()
   const { pendingApprovals, approvalGroups, approvalRows, savedPolicies, revokePolicy, revokingRuleId } = props
   const stickApprovals = approvalsShouldStick(pendingApprovals)
 
   return (
     <>
       <div id="command-centre-approvals" className={clsx(stickApprovals && 'sticky top-0 z-10')}>
-        <Panel title="Approvals" icon="shield" action={pendingApprovals ? `${pendingApprovals} waiting` : 'clear'}>
+        <Panel title={tx("Approvals")} icon="shield" action={pendingApprovals ? `${pendingApprovals} waiting` : 'clear'}>
           {approvalRows.length === 0 ? (
-            <EmptyState icon="check" title="No approvals waiting" detail="Tool calls, outbound connector actions, and ticket reviews will land here." />
+            <EmptyState icon="check" title={tx("No approvals waiting")} detail="Tool calls, outbound connector actions, and ticket reviews will land here." />
           ) : (
             <div className="divide-y divide-line">
               {approvalGroups.map((group) => (
@@ -45,10 +47,10 @@ export function ApprovalsPanel(props: ApprovalsPanelProps) {
         </Panel>
       </div>
 
-      <Panel title="Saved Policies" icon="shield" action={savedPolicies.length ? `${savedPolicies.length} scoped` : 'none'}>
+      <Panel title={tx("Saved Policies")} icon="shield" action={savedPolicies.length ? `${savedPolicies.length} scoped` : 'none'}>
         <div className="divide-y divide-line">
           {savedPolicies.length === 0 ? (
-            <EmptyState icon="shield" title="No saved policies" detail="Using Allow scoped creates a policy for this project or workspace, valid for up to 8 hours or 20 uses." />
+            <EmptyState icon="shield" title={tx("No saved policies")} detail="Using Allow scoped creates a policy for this project or workspace, valid for up to 8 hours or 20 uses." />
           ) : savedPolicies.map((rule) => (
             <div key={rule.id} className="px-3 py-3">
               <div className="flex items-start gap-3">
@@ -60,10 +62,10 @@ export function ApprovalsPanel(props: ApprovalsPanelProps) {
                       <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[12px] text-ink-4">
                         <span className="rounded bg-ink-5 px-1.5 py-0.5">{rule.scope}</span>
                         <span className="rounded bg-ink-5 px-1.5 py-0.5">{rule.decision}</span>
-                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{rule.projectId ? `project ${rule.projectId}` : rule.workspace ? `workspace ${shortPath(rule.workspace)}` : 'legacy unscoped · inactive'}</span>
-                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{Number.isInteger(rule.maxUses) ? `${rule.useCount ?? 0}/${rule.maxUses} uses` : 'legacy unlimited · inactive'}</span>
-                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{Number.isFinite(rule.expiresAt) ? (Number(rule.expiresAt) <= Date.now() ? `expired ${relativeTime(Number(rule.expiresAt))}` : `expires in ${formatDuration(Number(rule.expiresAt) - Date.now())}`) : 'legacy no expiry · inactive'}</span>
-                        <span>{rule.lastUsedAt ? `last used ${relativeTime(rule.lastUsedAt)}` : `saved ${relativeTime(rule.createdAt)}`}</span>
+                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{rule.projectId ? tx("project {value0}", { value0: rule.projectId }) : rule.workspace ? tx("workspace {value0}", { value0: shortPath(rule.workspace) }) : tx("legacy unscoped · inactive")}</span>
+                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{Number.isInteger(rule.maxUses) ? tx("{value0}/{value1} uses", { value0: rule.useCount ?? 0, value1: rule.maxUses }) : tx("legacy unlimited · inactive")}</span>
+                        <span className="rounded bg-ink-5 px-1.5 py-0.5">{Number.isFinite(rule.expiresAt) ? (Number(rule.expiresAt) <= Date.now() ? tx("expired {value0}", { value0: relativeTime(Number(rule.expiresAt)) }) : tx("expires in {value0}", { value0: formatDuration(Number(rule.expiresAt) - Date.now()) })) : tx("legacy no expiry · inactive")}</span>
+                        <span>{rule.lastUsedAt ? tx("last used {value0}", { value0: relativeTime(rule.lastUsedAt) }) : tx("saved {value0}", { value0: relativeTime(rule.createdAt) })}</span>
                       </div>
                     </div>
                     <Button
@@ -73,7 +75,7 @@ export function ApprovalsPanel(props: ApprovalsPanelProps) {
                       onClick={() => void revokePolicy(rule)}
                       disabled={revokingRuleId === rule.id}
                     >
-                      {revokingRuleId === rule.id ? 'Revoking' : 'Revoke'}
+                      {revokingRuleId === rule.id ? tx("Revoking") : tx("Revoke")}
                     </Button>
                   </div>
                   <div className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-ink-2">{rule.explanation || approvalRuleTitle(rule)}</div>

@@ -48,8 +48,15 @@ export async function executeToolExecutionBatches(
 ): Promise<void> {
   for (const batch of planToolExecutionBatches(calls, canRunInParallel, maxParallel)) {
     if (shouldStop()) break
-    if (batch.mode === 'parallel') await Promise.all(batch.calls.map(execute))
-    else await execute(batch.calls[0])
+    if (batch.mode === 'parallel') {
+      let failed = false
+      let firstError: unknown
+      await Promise.allSettled(batch.calls.map(async (call) => {
+        try { await execute(call) }
+        catch (error) { if (!failed) { failed = true; firstError = error }; throw error }
+      }))
+      if (failed) throw firstError
+    } else await execute(batch.calls[0])
     for (const call of batch.calls) commit(call)
   }
 }

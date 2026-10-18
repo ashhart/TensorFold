@@ -24,7 +24,7 @@ export interface AppState {
   settings: Settings | null
   threads: Thread[]
   view: View
-  notice: { kind: 'error' | 'info'; message: string } | null
+  notice: { kind: 'error' | 'info'; message: string; authored?: true } | null
   status: Record<string, RunStatus>
   approvals: Record<string, Approval[]>
   resolvedTheme: 'light' | 'dark'
@@ -99,7 +99,7 @@ export interface AppState {
   cycleApprovalMode(): void
   setView(v: View): void
   dismissNotice(): void
-  setNotice(notice: { kind: 'error' | 'info'; message: string } | null): void
+  setNotice(notice: { kind: 'error' | 'info'; message: string; authored?: true } | null): void
   newThread(projectId?: string | null): Promise<void>
   newChat(projectId?: string | null): Promise<void>
   // Fork a thread from one of its turn checkpoints (VST-036). The host creates and seeds
@@ -125,7 +125,7 @@ export interface AppState {
   archiveItem(kind: ArchiveKind, id: string): Promise<void>
   restoreItem(kind: ArchiveKind, id: string, originHostId?: string | null): Promise<void>
   refreshArchives(): Promise<void>
-  send(text: string, attachments?: Attachment[]): Promise<void>
+  send(text: string, attachments?: Attachment[], threadId?: string, quotes?: import('../../../shared/message-quotes').MessageQuote[]): Promise<boolean>
   cancel(threadId: string): Promise<void>
   approve(threadId: string, callId: string, decision: 'allow' | 'allow_always' | 'deny'): Promise<void>
   saveSettings(s: Settings, opts?: { silent?: boolean }): Promise<void>

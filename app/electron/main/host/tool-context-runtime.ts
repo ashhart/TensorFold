@@ -1,6 +1,10 @@
+import { documentEventAllowed, documentPolicySignature, scopedDocumentLibrary, scopedDocumentSettings, validateDocumentSourceIds } from '../../document-library/scope'
+import { selectedResponseLocale } from '../../agent/response-language'
+import { documentLibrary } from './document-library-runtime'
 import { assertSavedMemoryRead, assertMemoryContribution, captureThreadMemoryPolicy, assertThreadMemoryTransport, effectiveThreadMemoryPolicy, canContributeThreadMemory, threadMemoryPolicyRevision, roomWithoutSavedRecall } from '../../../shared/thread-memory-policy'
 import { assertThreadChildSupported } from '../../../shared/thread-child-policy'
 import { canRecallThread } from '../../agent/session-recall'
+import { scopeProjectMemoryEntries } from '../../agent/project-memory'
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../../agent/loop'
 import { assertProviderEndpoint } from '../../agent/security'
@@ -38,8 +42,12 @@ import { store } from '../state'
 import { addSuggestion, type SuggestionInput } from '../../agent/suggestions'
 import { persistArtifacts, persistSuggestions } from './persistence'
 import type { SshManager } from './ssh'
-import { blindSearchToken, searchSessionIndex, vontraPath } from '../../store'
+import { blindSearchToken, searchSessionIndex, saveThreads, vontraPath } from '../../store'
+import { sendToRenderer } from './renderer-events'
 import { createManagedOutputStore } from './managed-outputs'
+import { isWhatsAppEventInCurrentScope } from '../../../shared/whatsapp-event-scope'
+import { createGoogleContextMarker, createGoogleWorkspaceToolRunner } from './google-workspace-tool-runtime'
+import { googleWorkspaceService } from './google-workspace-runtime'
 
 export interface ToolContextRuntime {
   fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }): any
@@ -102,6 +110,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     mcpToolContext,
   } = deps
   const managedOutputs = createManagedOutputStore(vontraPath('outputs'))
+  const markGoogleContext = createGoogleContextMarker({ persist: () => saveThreads(store.threads), publish: (thread) => sendToRenderer('thread:update', thread) })
 
   async function runReadOnlySubAgent(
     agent: SubAgent,
@@ -139,16 +148,19 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     if (ownerId && (!owner || owner.archivedAt)) throw new Error('The owning chat is unavailable; refusing to create a permissive child.')
     const inheritedPolicy = captureThreadMemoryPolicy(owner ?? {}, input.memoryPolicy)
     const inheritedOwner = input.memoryOwner ?? (owner ? { id: owner.id, revision: threadMemoryPolicyRevision(owner) } : undefined)
+    const documentOwners = new Map([...new Set([...ownedIds, ...(input.memoryOwner?.id ? [input.memoryOwner.id] : [])])].map(id => [id, documentPolicySignature(store.threads.find(thread => thread.id === id)?.documentSourceIds)]))
     const assertRequestAllowed = () => {
       for (const id of new Set([...ownedIds, ...(input.memoryOwner?.id ? [input.memoryOwner.id] : [])])) {
         const current = store.threads.find((thread) => thread.id === id)
         if (!current || current.archivedAt) throw new Error('The owning chat is unavailable; refusing to continue this child.')
         assertThreadChildSupported(current)
+        if (documentPolicySignature(current.documentSourceIds) !== documentOwners.get(id)) throw new Error('The owning chat document collections changed; this child cannot continue with stale sources.')
       }
     }
     assertRequestAllowed()
     const childThread: Thread = {
       id: `thread-${agent.id}`,
+      documentSourceIds: owner?.documentSourceIds ? [...validateDocumentSourceIds(owner.documentSourceIds)!] : [],
       memoryPolicy: { ...inheritedPolicy },
       incognito: input.incognito || owner?.incognito,
       title: agent.name,
@@ -182,6 +194,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     try {
       assertProviderEndpoint(provider)
       await runAgent({
+        responseLocale: selectedResponseLocale(store.settings.uiPreferences),
         assertRequestAllowed,
         thread: childThread,
         provider,
@@ -376,7 +389,7 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
   function fullToolContext(run?: { thread?: Thread; provider?: Provider; model?: string; signal?: AbortSignal; subAgentId?: string; memoryPolicy?: import('../../agent/types').ThreadMemoryPolicy; memoryOwner?: { id: string; revision: number } }) {
     const childOwner = run?.thread
     const operationalSubAgentId = run?.subAgentId
-    const capturedChildOwner = Object.freeze({ bot: childOwner?.bot, phoneLocalOnly: childOwner?.phoneLocalOnly })
+    const capturedChildOwner = Object.freeze({ bot: childOwner?.bot, phoneLocalOnly: childOwner?.phoneLocalOnly, googleLocalOnly: childOwner?.googleLocalOnly })
     const memoryPolicy = captureThreadMemoryPolicy(run?.thread ?? {}, run?.memoryPolicy)
     const memoryOwner = run?.memoryOwner ?? (run?.thread && store.threads.includes(run.thread) ? { id: run.thread.id, revision: threadMemoryPolicyRevision(run.thread) } : null)
     const recallThreads = () => store.threads.filter((thread) => canRecallThread(thread, childOwner?.id) && (memoryPolicy.useExisting || thread.id === childOwner?.id))
@@ -394,8 +407,18 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
         return !!source && canRecallThread(source, childOwner?.id)
       })
     }
+    const documentSourceIds = childOwner ? validateDocumentSourceIds(childOwner.documentSourceIds) : []
+    const documentPolicy = documentPolicySignature(documentSourceIds)
+    const sourceConfiguration = () => JSON.stringify([store.settings.documents.maxDocumentBytes, store.settings.documents.maxDocuments, store.settings.documents.sources.filter(source => documentSourceIds === undefined || documentSourceIds.includes(source.id)).map(source => [source.id, source.path, source.kind, source.enabled])])
+    const capturedSourceConfiguration = sourceConfiguration()
+    const documentOwnerStored = !!childOwner && store.threads.some(thread => thread.id === childOwner.id)
+    const assertDocumentPolicyCurrent = () => {
+      const currentOwner = documentOwnerStored ? store.threads.find(thread => thread.id === childOwner!.id) : childOwner
+      if (sourceConfiguration() !== capturedSourceConfiguration || run?.signal?.aborted || documentOwnerStored && !currentOwner || documentPolicySignature(currentOwner?.documentSourceIds) !== documentPolicy) throw new Error('Document collections changed during this run; start a new turn with the selected sources.')
+    }
     const recalledSourceIds = new Set<string>()
     const assertRecallSourcesAllowed = () => {
+      assertDocumentPolicyCurrent()
       for (const id of recalledSourceIds) {
         const source = store.threads.find((thread) => thread.id === id)
         if (!source || !canRecallThread(source, childOwner?.id)) throw new Error('A recalled conversation is no longer available to this run; start a new conversation without that context.')
@@ -403,6 +426,13 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
     }
     const project = run?.thread?.projectId ? store.projects.find((p) => p.id === run.thread?.projectId) : null
     const cloudModelContext = !!run?.provider && run.provider.kind !== 'local'
+    const capturedMemoryOwner = memoryOwner ? store.threads.find((thread) => thread.id === memoryOwner.id) : null
+    const recallProjectMemory = () => {
+      if (!project || !store.projects.includes(project) || childOwner?.projectId !== project.id || cloudModelContext || childOwner?.bot?.executionTarget === 'vm' || run?.signal?.aborted) return []
+      if (memoryOwner && (!capturedMemoryOwner || !store.threads.includes(capturedMemoryOwner) || threadMemoryPolicyRevision(capturedMemoryOwner) !== memoryOwner.revision || !effectiveThreadMemoryPolicy(capturedMemoryOwner, memoryPolicy).useExisting)) return []
+      if (!effectiveThreadMemoryPolicy(childOwner ?? {}, memoryPolicy).useExisting) return []
+      return scopeProjectMemoryEntries(store.projectMemory, project.id)
+    }
     const workspace = run?.thread?.workspace ?? project?.workspace ?? null
     const backend = sshManager.backendForWorkspace(workspace)
     if (workspace?.kind === 'ssh' && backend?.kind !== 'ssh') {
@@ -424,7 +454,8 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       emailSettings: store.settings.email,
       slackSettings: store.settings.slack,
       calendarSettings: store.settings.calendar,
-      documentSettings: store.settings.documents,
+      documentSettings: scopedDocumentSettings(store.settings.documents, documentSourceIds),
+      documentLibrary: run?.provider && !isExternalProvider(run.provider) && !run.thread?.bot && !run.thread?.orchestratorHostId ? scopedDocumentLibrary(documentLibrary(), documentSourceIds, assertDocumentPolicyCurrent) : undefined,
       browserSettings: store.settings.browser,
       threads: recallThreads(),
       recallThreads,
@@ -481,12 +512,13 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
         assertSavedMemoryRead(run?.thread ?? {}, memoryPolicy)
         return searchSessionIndex(vontraPath('state', 'session-search.sqlite'), recallThreads(), { ...options, currentThreadId: childOwner?.id }, blindSearchToken)
       },
-      connectorEvents: store.connectorEvents,
+      connectorEvents: store.connectorEvents.filter(event => documentEventAllowed(event, store.settings.documents, documentSourceIds)).filter((event) => event.connectorId !== 'whatsapp' || !event.threadKey.startsWith('whatsapp:') || isWhatsAppEventInCurrentScope(event, store.settings.whatsapp.sources)),
       missions: recallMissions(),
       recallMissions,
       rooms: memoryPolicy.useExisting ? store.rooms : store.rooms.map(roomWithoutSavedRecall),
       tickets: store.tickets,
-      projectMemory: memoryPolicy.useExisting ? store.projectMemory : [],
+      projectMemory: recallProjectMemory(),
+      recallProjectMemory,
       sensitiveRetrievalAllowed: !cloudModelContext,
       sensitiveRetrievalReason: cloudModelContext
         ? `cloud model route via ${run?.provider?.name ?? 'cloud provider'}; use a local provider to include connector, chat, document, and memory retrieval sources`
@@ -535,12 +567,24 @@ export function createToolContextRuntime(deps: ToolContextRuntimeDeps): ToolCont
       recordCalendarEvent,
       recordMessageEvent,
       runBrowserAutomation,
+      runGoogleWorkspaceTool: createGoogleWorkspaceToolRunner(run, {
+        getThread: (id) => store.threads.find((thread) => thread.id === id),
+        resolveProvider: (thread) => { const provider = store.settings.providers.find((candidate) => candidate.id === thread.providerId); return provider ? runtimeProvider(provider, thread.providerAccountId ?? null) : undefined },
+        service: googleWorkspaceService,
+        disabledCapabilities: () => store.settings.capabilities?.disabledCapabilityIds ?? [],
+        disabledTools: () => [],
+        assertRecallSourcesAllowed,
+        hasExternalResearchEnabled: () => engineService()?.hasExternalResearchEnabled() === true,
+        markContext: markGoogleContext,
+      }),
       runControllerAction: (input: ControllerActionInput) => runControllerAction(store.settings.controller, input, 'TensorFold'),
       runComputerUse: (input: ComputerUseInput) => runComputerUse(input, { threadId: run?.thread?.id ?? null, signal: run?.signal }, deps.cancelThreadRun),
       phoneControlAvailable: !!run?.thread && !!run.provider && !isExternalProvider(run.provider) && run.thread.kind === 'chat' && !run.thread.orchestratorHostId && workspace?.kind !== 'ssh' && !run.subAgentId && phoneHost()?.service.isGranted(run.thread.id) === true,
       phoneLocalOnly: run?.thread?.phoneLocalOnly === true,
       phonePrivacyGuard: () => !run?.provider || isExternalProvider(run.provider) || engineService()?.hasExternalResearchEnabled()
         ? 'This phone conversation stays local; choose a model running on this Mac and turn Cortheon off before continuing.' : null,
+      googlePrivacyGuard: () => !run?.provider || isExternalProvider(run.provider) || engineService()?.hasExternalResearchEnabled()
+        ? 'This Google account conversation stays on this Mac; choose a local API model and turn external research off.' : null,
       runPhoneControl: async (input: PhoneToolInput) => {
         if (!run?.thread || !run.provider || isExternalProvider(run.provider) || run.thread.orchestratorHostId || workspace?.kind === 'ssh' || run.subAgentId) return { ok: false, title: 'Phone control', output: 'Phone control requires its explicitly allowed local chat; remote and external model routes cannot access the phone.' }
         const service = phoneHost()?.service

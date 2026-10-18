@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -32,6 +34,7 @@ export function ReviewChangesModal({
   onClose: () => void
   threadId: string
 }) {
+  const tx = useAuthoredText()
   const setView = useStore((s) => s.setView)
   const seedComposer = useStore((s) => s.seedComposer)
   // Wrap toggle (VST-040): long diff lines either scroll horizontally (default, faithful) or
@@ -62,14 +65,14 @@ export function ReviewChangesModal({
             <Icon name="file" size={17} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-semibold text-ink">Review changes</div>
+            <div className="text-[13px] font-semibold text-ink">{tx("Review changes")}</div>
             <div className="mt-0.5 flex items-center gap-2 font-mono text-[12px]">
-              <span className="text-ink-3">{files.length} file{files.length === 1 ? '' : 's'}</span>
+              <span className="text-ink-3">{tx("Files changed: {count}", { count: files.length })}</span>
               <span className="text-positive">+{additions}</span>
               <span className="text-danger">−{deletions}</span>
             </div>
           </div>
-          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label="Close review">
+          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label={tx("Close review")}>
             <Icon name="x" size={15} />
           </button>
         </div>
@@ -77,7 +80,7 @@ export function ReviewChangesModal({
         <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr]">
           <div className="min-h-0 overflow-y-auto border-r border-line bg-card-2 p-2">
             {files.length === 0 && !loading ? (
-              <div className="px-3 py-8 text-center text-[13px] text-ink-3">{error || 'No textual changes to review.'}</div>
+              <div className="px-3 py-8 text-center text-[13px] text-ink-3">{error || tx("No textual changes to review.")}</div>
             ) : files.map((f) => {
               const activeFile = active?.path === f.path
               return (
@@ -88,7 +91,7 @@ export function ReviewChangesModal({
                 >
                   <FileGlyph path={f.path} size={16} />
                   <span className="min-w-0 flex-1 truncate text-[13px] font-medium">{basename(f.path)}</span>
-                  <span className={clsx('font-mono text-[12px]', STATUS_TINT[f.status])}>{f.status === '?' ? 'new' : f.status}</span>
+                  <span className={clsx('font-mono text-[12px]', STATUS_TINT[f.status])}>{f.status === '?' ? tx("new") : f.status}</span>
                   <span className="font-mono text-[12px] text-positive">+{f.additions}</span>
                   <span className="font-mono text-[12px] text-danger">−{f.deletions}</span>
                 </button>
@@ -104,18 +107,18 @@ export function ReviewChangesModal({
                   <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{active.path}</span>
                   <span className="font-mono text-[12px] text-positive">+{active.additions}</span>
                   <span className="font-mono text-[12px] text-danger">−{active.deletions}</span>
-                  <button onClick={toggleWrap} title={wrap ? 'Scroll long lines' : 'Wrap long lines'} className={clsx('ml-1 rounded-md px-2 py-0.5 text-[12px] font-medium transition-colors', wrap ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>Wrap</button>
-                  <button onClick={askWhy} title="Ask the agent why this file changed" className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5 text-[12px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink"><Icon name="spark" size={11} className="text-accent" />Ask why</button>
+                  <button onClick={toggleWrap} title={wrap ? tx("Scroll long lines") : tx("Wrap long lines")} className={clsx('ml-1 rounded-md px-2 py-0.5 text-[12px] font-medium transition-colors', wrap ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>{tx("Wrap")}</button>
+                  <button onClick={askWhy} title={tx("Ask the agent why this file changed")} className="flex items-center gap-1 rounded-md border border-line px-2 py-0.5 text-[12px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink"><Icon name="spark" size={11} className="text-accent" />{tx("Ask why")}</button>
                 </>
               ) : (
-                <span className="text-[13px] text-ink-3">{loading ? 'Loading diff…' : 'No file selected'}</span>
+                <span className="text-[13px] text-ink-3">{loading ? tx("Loading diff…") : tx("No file selected")}</span>
               )}
             </div>
             <div className="min-h-0 flex-1 overflow-auto bg-canvas">
               {loading ? (
-                <div className="p-6 text-[13px] text-ink-3">Loading diff…</div>
+                <div className="p-6 text-[13px] text-ink-3">{tx("Loading diff…")}</div>
               ) : error ? (
-                <div className="p-6 text-[13px] text-danger">{error}</div>
+                <div className="p-6 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>
               ) : active ? (
                 <pre className={clsx('select-text py-2 font-mono text-[13px] leading-5', wrap ? 'whitespace-pre-wrap break-words' : 'min-w-max')}>
                   {lines.map((line, i) => (
@@ -126,7 +129,7 @@ export function ReviewChangesModal({
                   ))}
                 </pre>
               ) : (
-                <div className="p-6 text-[13px] text-ink-3">No textual changes to review.</div>
+                <div className="p-6 text-[13px] text-ink-3">{tx("No textual changes to review.")}</div>
               )}
             </div>
           </div>

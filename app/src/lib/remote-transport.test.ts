@@ -422,4 +422,20 @@ const SNAPSHOT = {
   ok('revoked token: 401 → clear error + auth-failure signal')
 }
 
+{
+  const h = harness(SNAPSHOT)
+  const first = await h.api.getSettings()
+  first.email.sources.push({ id: 'synthetic-source' } as any)
+  first.light.accent = '#000000'
+  const next = await h.api.getSettings()
+  assert.deepEqual(next.email.sources, [], 'paired defaults are fresh, not a mutable singleton')
+  assert.notEqual(next.light.accent, '#000000')
+  assert.equal(next.defaultCwd, null, 'no demo path is exported as a real host workspace')
+  assert.deepEqual(next.agentPresets, [], 'no fixture bots are exported as real host bots')
+  await assert.rejects(h.api.whatsappRuntime(), PairedSessionError)
+  await assert.rejects(h.api.updateWhatsAppSource('synthetic', { enabled: true }), PairedSessionError)
+  assert.equal(typeof h.api.onWhatsAppRuntime(() => { throw new Error('inert callback ran') }), 'function')
+  ok('paired defaults have no demo identity and new host-only APIs fail closed')
+}
+
 console.log(`  ${passed} passed`)

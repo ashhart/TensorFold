@@ -1,5 +1,6 @@
 // Run: npx tsx electron/agent/capability-registry.test.ts
 import assert from 'node:assert'
+import { GOOGLE_WORKSPACE_READ_TOOL_NAMES } from './google-workspace-tools'
 import {
   buildCapabilityRegistry,
   capabilityAuditForTool,
@@ -326,10 +327,10 @@ console.log('capability registry tests:')
   const names = schemaNames(buildChatToolSchemas({ disabledCapabilityIds: ['tool:web'] }))
   // A local clarification is an explicit user interaction, independent of
   // public web access; it cannot expose shell/files/connectors or grant approval.
-  assert.deepStrictEqual(names, ['ask_user', 'visualize'])
+  assert.deepStrictEqual(names, [...GOOGLE_WORKSPACE_READ_TOOL_NAMES, 'ask_user', 'visualize'])
   assert.ok(!names.some((name) => ['web_search', 'web_fetch', 'run_command', 'write_file', 'email_compose'].includes(name)))
   const withoutQuestions = schemaNames(buildChatToolSchemas({ disabledCapabilityIds: ['tool:web'], disabledToolNames: ['ask_user'] }))
-  assert.deepStrictEqual(withoutQuestions, ['visualize'], 'the explicit question tool disable still wins')
+  assert.deepStrictEqual(withoutQuestions, [...GOOGLE_WORKSPACE_READ_TOOL_NAMES, 'visualize'], 'the explicit question tool disable still wins')
   ok('chat schemas retain local clarification while respecting web and explicit tool restrictions')
 }
 

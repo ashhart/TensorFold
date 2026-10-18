@@ -1,10 +1,22 @@
+import { requestMessageQuote } from '../lib/message-quotes'
+import { CollectionPicker } from './documents/CollectionPicker'
+import { ConversationOutline } from './search/ConversationOutline'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { ModelHelperDialog } from './models/ModelHelperDialog'
+import { RunOutcomeReviewDialog } from './run-recovery/RunOutcomeReviewDialog'
+import { RunRecoveryCard } from './run-recovery/RunRecoveryCard'
+import { useTranscriptWindow } from './search/useTranscriptWindow'
+import { ReadableExportDialog } from './reading/ReadableExportDialog'
+import { requestConversationSearch } from './search/search-events'
+import { useConversationSearchTarget } from './search/useConversationSearchTarget'
+import { SentUserMessage, EarlierMessageRevisions } from './SentUserMessage'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { threadPendingApproval } from '../lib/thread-approval'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
 import clsx from 'clsx'
 import { Composer } from './Composer'
-import { AssistantMessage, CueBubble, ErrorBlock, ToolCard, UserBubble, VisualizationCard } from './timeline'
+import { AssistantMessage, CueBubble, ErrorBlock, ToolCard, VisualizationCard } from './timeline'
 import { ThreadPanel } from './ThreadPanel'
 import { RunPlanCard } from './thread-panel/RunPlanCard'
 import { ApprovalCard } from './ApprovalCard'
@@ -27,6 +39,7 @@ import { builtinChatLoadingPhase } from '../lib/chat-loading-phase'
 const BUSY_STATES = ['thinking', 'streaming', 'tool', 'awaiting']
 
 export function ThreadView({ threadId, simpleLayout = false }: { threadId: string; simpleLayout?: boolean }) {
+  const tx = useAuthoredText()
   const thread = useStore((s) => s.threads.find((t) => t.id === threadId))
   const st = useStore((s) => s.status[threadId])
   const approvals = useStore((s) => s.approvals[threadId])
@@ -38,7 +51,11 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   const selectedProvider = useStore((s) => s.settings?.providers.find((provider) => provider.id === (thread?.providerId ?? s.settings?.activeProviderId)) ?? null)
   const localEngineRoute = isBuiltInProvider(selectedProvider) && !isExternalProvider(selectedProvider) && !thread?.orchestratorHostId
   const engineStatus = useEngineStatus(localEngineRoute)
-  const loadingPhase = builtinChatLoadingPhase({ status: st, provider: selectedProvider, model: thread?.model, engine: engineStatus, remoteExecution: !!thread?.orchestratorHostId })
+  const loadingPhaseSource = builtinChatLoadingPhase({ status: st, provider: selectedProvider, model: thread?.model, engine: engineStatus, remoteExecution: !!thread?.orchestratorHostId })
+  const loadingPhase = loadingPhaseSource ? tx('Loading model') : undefined
+  const [helpersOpen, setHelpersOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [exportOpen, setExportOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const followRef = useRef(true)
@@ -75,6 +92,9 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   const annotations = useMemo(() => parseAnnotations(thread?.annotations), [thread?.annotations])
   // One turn, one block: the user message, one "Worked for" row, then the answer and its edits.
   const turnRows = useMemo(() => buildTurnRows(timeline, { running: busy }), [timeline, busy])
+  const searchTarget = useConversationSearchTarget({ threadId, timeline, rows: turnRows, scrollRef, followRef,
+    revealWork: key => setRevealedTurns(previous => ({ ...previous, [key]: (previous[key] ?? 0) + 1 })) })
+  const transcriptWindow = useTranscriptWindow(threadId, turnRows, searchTarget.itemId, scrollRef)
   const userTurns = useMemo(() => timeline.filter((item) => item.kind === 'user').length, [timeline])
   // Turns that have a checkpoint can be undone from their edits card.
   const [checkpointTurns, setCheckpointTurns] = useState<Set<number>>(() => new Set())
@@ -123,11 +143,12 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
 
   if (!thread) return null
   const renderTimelineItem = (item: TimelineItem, turn: TurnSummary) => {
-    if (item.kind === 'user') return <UserBubble text={item.text || ''} attachments={item.attachments} />
+    if (item.kind === 'user') return <SentUserMessage thread={thread} item={item} busy={busy} onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined} />
     if (item.kind === 'cue') return <CueBubble text={item.text || ''} state={item.state} />
     if (item.kind === 'assistant') return (
       <AssistantMessage
         text={item.text || ''}
+        onQuote={!thread.orchestratorHostId ? selection => { void requestMessageQuote({ threadId: thread.id, itemId: item.id, ...(selection ? { selection } : {}) }) } : undefined}
         meta={item.meta}
         active={st === 'streaming' && item.id === lastAssistantId}
         footer={item.stats && item.id === turn.answerId && !turn.running ? <TurnStatsLine stats={item.stats} /> : undefined}
@@ -160,7 +181,7 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
         {rendered}
         <button
           onClick={toggle}
-          title={pinned ? 'Unpin this message' : 'Pin this message'}
+          title={pinned ? tx("Unpin this message") : tx("Pin this message")}
           className={clsx('absolute -left-6 top-1 flex h-5 w-5 items-center justify-center rounded-md transition-opacity', pinned ? 'text-accent opacity-100' : 'text-ink-4 opacity-0 hover:text-ink group-hover/pin:opacity-100')}
         >
           <Icon name={pinned ? 'starFilled' : 'star'} size={13} />
@@ -172,17 +193,31 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
   return (
     <div className="relative flex h-full">
       <div className="flex h-full min-w-0 flex-1 flex-col">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-b border-line/50 px-4 py-1.5">
+          <CollectionPicker key={`collections-${threadId}`} threadId={threadId} sourceIds={thread.documentSourceIds} disabled={busy || thread.status === 'running' || !!thread.bot || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || !!thread.orchestratorHostId || workspace?.kind === 'ssh' || api.platform === 'web-remote' || !!selectedProvider && isExternalProvider(selectedProvider)} onChange={ids => patchThread(threadId, { documentSourceIds: ids })} />
+          <ConversationOutline key={threadId} threadId={threadId} timeline={timeline} annotations={annotations} activeAssistantId={st === 'streaming' ? lastAssistantId : undefined} />
+          <button type="button" className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface focus-visible:outline-2 focus-visible:outline-accent" onClick={() => requestConversationSearch({ scope: 'thread', threadId })}>{tx("Find in chat")}</button>
+          <button type="button" disabled={busy || !!thread.bot || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || !!thread.orchestratorHostId || api.platform === 'web-remote'} className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => setHelpersOpen(true)}>{tx("Local helpers")}</button>
+          <button type="button" disabled={!!thread.orchestratorHostId || api.platform === 'web-remote'} className="rounded-lg px-2 py-1 text-[12px] text-ink-2 hover:bg-surface disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => setExportOpen(true)}>{tx("Export readable text")}</button>
+        </div>
+        {helpersOpen && <ModelHelperDialog key={threadId} thread={thread} onClose={() => setHelpersOpen(false)} />}
+        {reviewOpen && <RunOutcomeReviewDialog key={threadId} thread={thread} onClose={() => setReviewOpen(false)} />}
+        {exportOpen && <ReadableExportDialog key={threadId} threadId={threadId} messages={timeline.filter(item => item.kind === 'user' || item.kind === 'assistant').map((item, index) => ({ id: item.id, label: `${index + 1}. ${item.kind === 'user' ? 'You' : 'Assistant'}: ${(item.text || '').slice(0, 90)}` }))} api={api} onClose={() => setExportOpen(false)} />}
+        {searchTarget.notice && <div role="status" className="flex items-center gap-3 border-b border-line bg-card px-6 py-2 text-[12px] text-ink-2"><span className="flex-1">{searchTarget.notice}</span><button type="button" className="rounded px-2 py-1 text-accent focus-visible:outline-2 focus-visible:outline-accent" onClick={searchTarget.clear}>{tx("Clear match")}</button></div>}
         <div ref={scrollRef} onScroll={onScroll} className="scroll-thin min-h-0 flex-1 overflow-y-auto select-text">
           <div className="mx-auto w-full max-w-3xl space-y-4 px-6 pb-8 pt-12">
             {thread.bot && <BotChatContext thread={thread} />}
+            <EarlierMessageRevisions thread={thread} />
             {simpleLayout && thread.kind === 'chat' && !timeline.length && !busy && <div className="flex min-h-[220px] flex-col items-center justify-center gap-4 px-2 text-center">
               <BrandMark size={64} />
-              <div><h1 className="text-[20px] font-medium tracking-tight text-ink">Start a conversation</h1><p className="mt-2 max-w-[420px] text-[13px] leading-relaxed text-ink-2">Choose a model below and tell TensorFold what you need. Models has downloads and setup; Complete workspace opens projects and developer tools.</p>{localEngineRoute && <p className="mt-2 max-w-[420px] text-[12px] leading-relaxed text-ink-2">The selected TensorFold model loads on your first send. The first answer can take longer while it loads.</p>}</div>
+              <div><h1 className="text-[20px] font-medium tracking-tight text-ink">{tx("Start a conversation")}</h1><p className="mt-2 max-w-[420px] text-[13px] leading-relaxed text-ink-2">{tx("Choose a model below and tell TensorFold what you need. Models has downloads and setup; Complete workspace opens projects and developer tools.")}</p>{localEngineRoute && <p className="mt-2 max-w-[420px] text-[12px] leading-relaxed text-ink-2">{tx("The selected TensorFold model loads on your first send. The first answer can take longer while it loads.")}</p>}</div>
             </div>}
-            {turnRows.map((row) => {
+            {transcriptWindow.segments.flatMap(segment => segment.kind === 'gap'
+              ? [<div key={`gap-${segment.start}`} className="flex flex-wrap items-center justify-center gap-3 rounded-lg border border-dashed border-line p-3 text-[12px] text-ink-2"><span>{segment.end - segment.start} {tx("earlier transcript rows hidden")}</span><button type="button" className="rounded-lg px-3 py-1 text-accent focus-visible:outline-2 focus-visible:outline-accent" onClick={() => transcriptWindow.load(Math.max(segment.start, segment.end - transcriptWindow.pageSize), segment.end)}>{tx("Load ")}{Math.min(transcriptWindow.pageSize, segment.end - segment.start)} {tx("earlier rows")}</button><button type="button" className="rounded-lg px-3 py-1 text-ink-2 focus-visible:outline-2 focus-visible:outline-accent" onClick={() => transcriptWindow.load(segment.start, segment.end)}>{tx("Show this entire gap")}</button></div>]
+              : turnRows.slice(segment.start, segment.end).map((row) => {
               if (row.type === 'work') return (
                 <div key={`work-${row.turn.key}`} id={`turn-work-${row.turn.key}`}>
-                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} phaseLabel={row.turn.running ? loadingPhase : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} />
+                  <TurnWorkRow turn={row.turn} status={row.turn.running ? st : undefined} phaseLabel={row.turn.running ? loadingPhase : undefined} defaultOpen={!collapseToolRunsDefault} reveal={revealedTurns[row.turn.key] ?? 0} searchItemId={searchTarget.itemId} />
                   {!row.turn.answerId && <TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} />}
                 </div>
               )
@@ -191,9 +226,10 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
                   <EditedFilesCard thread={thread} turn={row.turn} canUndo={isTask && !busy && checkpointTurns.has(row.turn.index)} onChanged={refreshGit} />
                 </div>
               )
-              return <div key={row.item.id} id={`ti-${row.item.id}`}>{renderPinnable(row.item, row.turn)}{row.item.id === row.turn.answerId && <div className="mt-3"><TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} /></div>}</div>
-            })}
+              return <div key={row.item.id} id={`ti-${row.item.id}`} className={searchTarget.itemId === row.item.id ? 'rounded-lg outline outline-2 outline-accent outline-offset-4' : undefined}>{renderPinnable(row.item, row.turn)}{row.item.id === row.turn.answerId && <div className="mt-3"><TurnOutcome turn={row.turn} onShowActivity={() => showRecordedActivity(row.turn.key)} /></div>}</div>
+            }))}
 
+            <RunRecoveryCard recovery={thread.runRecovery} onEditRequest={() => scrollRef.current?.parentElement?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message composer"]')?.focus()} onChooseModel={() => useStore.getState().setView({ name: 'models' })} onReviewEffects={() => { const last = [...turnRows].reverse().find(row => row.type === 'work'); if (last) showRecordedActivity(last.turn.key); setReviewOpen(true) }} />
             <RunPlanCard thread={thread} busy={!!busy} />
 
             <div ref={endRef} className="h-px" />
@@ -212,8 +248,8 @@ export function ThreadView({ threadId, simpleLayout = false }: { threadId: strin
               <div className="mb-2 fade-in">
                 <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-line bg-card-2/70 px-3 py-1 text-[13px] text-ink-2">
                   <Icon name="grid" size={12} className="shrink-0 text-ink-3" />
-                  <span className="shrink-0 font-medium text-ink-3">{(thread.plan ?? []).filter((p) => p.done).length}/{thread.plan!.length} steps</span>
-                  <span className="min-w-0 truncate text-ink-3">{(thread.plan ?? []).find((p) => !p.done)?.text ?? 'wrapping up'}</span>
+                  <span className="shrink-0 font-medium text-ink-3">{(thread.plan ?? []).filter((p) => p.done).length}/{thread.plan!.length} {tx("steps")}</span>
+                  <span className="min-w-0 truncate text-ink-3">{(thread.plan ?? []).find((p) => !p.done)?.text ?? tx("wrapping up")}</span>
                 </div>
               </div>
             )}

@@ -10,6 +10,7 @@ export function createThreadTitleGenerator(deps: {
   emitToRenderer(event: AgentEvent): void
 }) {
   return async function maybeAutoTitle(thread: Thread, provider: Provider, model: string, userText: string): Promise<void> {
+    if (thread.googleLocalOnly) return
     let reservation: { release(): void } | null = null
     try {
       reservation = deps.reserveOperation()
@@ -31,9 +32,10 @@ export function createThreadTitleGenerator(deps: {
           { role: 'user', content: userText.slice(0, 500) },
         ],
         approvalMode: 'readonly',
+        assertRequestAllowed: () => { if (thread.googleLocalOnly) throw new Error('Google account chats do not use automatic title models.') },
       })
       const clean = title.replace(/^["']|["'.]+$/g, '').slice(0, 48)
-      if (clean && deps.isCurrentThread(thread) && thread.title === initialTitle) {
+      if (clean && !thread.googleLocalOnly && deps.isCurrentThread(thread) && thread.title === initialTitle) {
         thread.title = clean
         deps.persistThreads()
         deps.emitToRenderer({ runId: '', threadId: thread.id, type: 'title', title: clean })

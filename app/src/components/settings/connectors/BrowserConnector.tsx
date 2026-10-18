@@ -1,3 +1,6 @@
+import { currentIntlLocale } from '../../../lib/preferences/current-locale'
+import { OriginalDiagnostic } from '../../OriginalDiagnostic'
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import { shortPath } from '../../../lib/format'
 import { BrandIcon } from '../../../lib/brand'
 import { Icon } from '../../../lib/icons'
@@ -6,6 +9,7 @@ import { Section, type SettingsSectionContext } from '../shared'
 import { ConnectorStatusChip } from './ConnectorStatusChip'
 
 export function BrowserConnector({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const {
     draft,
     setDraft,
@@ -28,33 +32,33 @@ export function BrowserConnector({ ctx }: { ctx: SettingsSectionContext }) {
   const connectorStatusMap = connectorStatus ?? {}
 
   return (
-    <Section title="Browser connector" desc="Save explicit current-tab snapshots or a user-provided JSON history export for source-backed browser reads and summaries.">
+    <Section title={tx("Browser connector")} desc={tx("Save explicit current-tab snapshots or a user-provided JSON history export for source-backed browser reads and summaries.")}>
       <div className="space-y-3">
         <div className="rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
-              <div className="text-[13px] font-medium text-ink">{draft.browser.sources.length} source{draft.browser.sources.length === 1 ? '' : 's'} configured</div>
-              <div className="mt-0.5 text-[13px] text-ink-3">{draft.browser.lastSyncAt ? `Last sync ${new Date(draft.browser.lastSyncAt).toLocaleString()}` : 'Not synced yet'}</div>
+              <div className="text-[13px] font-medium text-ink">{tx("Configured sources: {count}", { count: draft.browser.sources.length })}</div>
+              <div className="mt-0.5 text-[13px] text-ink-3">{draft.browser.lastSyncAt ? tx("Last sync {value0}", { value0: new Date(draft.browser.lastSyncAt).toLocaleString(currentIntlLocale()) }) : tx("Not synced yet")}</div>
               <ConnectorStatusChip status={connectorStatusMap.browser} />
             </div>
-            <Button variant="primary" size="sm" icon="browser" onClick={syncBrowser} disabled={!!browserBusy || draft.browser.sources.length === 0}>{browserBusy === 'sync' ? 'Syncing' : 'Sync browser'}</Button>
+            <Button variant="primary" size="sm" icon="browser" onClick={syncBrowser} disabled={!!browserBusy || draft.browser.sources.length === 0}>{browserBusy === 'sync' ? tx("Syncing") : tx("Sync browser")}</Button>
           </div>
 
           <div className="mt-3 grid gap-2 lg:grid-cols-[1.3fr_.8fr]">
             <div className="space-y-2 rounded-lg border border-line bg-card-2 p-2.5">
               <Input value={browserTabUrl} onChange={(e) => setBrowserTabUrl(e.target.value)} placeholder="https://example.com/current-page" className="h-8" />
               <div className="grid gap-2 sm:grid-cols-2">
-                <Input value={browserTabTitle} onChange={(e) => setBrowserTabTitle(e.target.value)} placeholder="Page title" className="h-8" />
-                <Input value={browserTabExcerpt} onChange={(e) => setBrowserTabExcerpt(e.target.value)} placeholder="Short excerpt or note" className="h-8" />
+                <Input value={browserTabTitle} onChange={(e) => setBrowserTabTitle(e.target.value)} placeholder={tx("Page title")} className="h-8" />
+                <Input value={browserTabExcerpt} onChange={(e) => setBrowserTabExcerpt(e.target.value)} placeholder={tx("Short excerpt or note")} className="h-8" />
               </div>
               <div className="flex justify-end">
-                <Button variant="default" size="sm" icon="plus" onClick={addBrowserCurrentTabSource} disabled={!!browserBusy || !browserTabUrl.trim()}>{browserBusy === 'add-tab' ? 'Adding' : 'Add current tab'}</Button>
+                <Button variant="default" size="sm" icon="plus" onClick={addBrowserCurrentTabSource} disabled={!!browserBusy || !browserTabUrl.trim()}>{browserBusy === 'add-tab' ? tx("Adding") : tx("Add current tab")}</Button>
               </div>
             </div>
             <div className="space-y-2 rounded-lg border border-line bg-card-2 p-2.5">
               <Input value={browserHistoryPath} onChange={(e) => setBrowserHistoryPath(e.target.value)} placeholder="/path/to/history-export.json" className="h-8" />
               <div className="flex justify-end">
-                <Button variant="default" size="sm" icon="fileText" onClick={addBrowserHistorySource} disabled={!!browserBusy || !browserHistoryPath.trim()}>{browserBusy === 'add-history' ? 'Adding' : 'Add history export'}</Button>
+                <Button variant="default" size="sm" icon="fileText" onClick={addBrowserHistorySource} disabled={!!browserBusy || !browserHistoryPath.trim()}>{browserBusy === 'add-history' ? tx("Adding") : tx("Add history export")}</Button>
               </div>
             </div>
           </div>
@@ -62,8 +66,7 @@ export function BrowserConnector({ ctx }: { ctx: SettingsSectionContext }) {
 
         {draft.browser.sources.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line px-3.5 py-5 text-center text-[13px] text-ink-3">
-            Browser sources stay empty until you explicitly save a current tab or provide a local history export file.
-          </div>
+            {tx("Browser sources stay empty until you explicitly save a current tab or provide a local history export file.")}</div>
         ) : draft.browser.sources.map((source) => {
           const target = source.kind === 'history_export' ? (source.path ?? '') : (source.url ?? '')
           return (
@@ -78,16 +81,16 @@ export function BrowserConnector({ ctx }: { ctx: SettingsSectionContext }) {
                     className="h-8"
                   />
                   <div className="mt-1 truncate text-[13px] text-ink-3" title={target}>{source.kind === 'history_export' ? shortPath(target, 5) : target}</div>
-                  {source.lastError && <div className="mt-1 text-[13px] text-danger">{source.lastError}</div>}
+                  {source.lastError && <div className="mt-1 text-[13px] text-danger">{<OriginalDiagnostic>{source.lastError}</OriginalDiagnostic>}</div>}
                 </div>
-                <Toggle label={`Enable ${source.label || "browser source"}`} checked={source.enabled} onChange={(enabled) => updateBrowserSource(source.id, { enabled })} />
-                <button onClick={() => removeBrowserSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove browser source">
+                <Toggle label={tx("Enable {value0}", { value0: source.label || tx("browser source") })} checked={source.enabled} onChange={(enabled) => updateBrowserSource(source.id, { enabled })} />
+                <button onClick={() => removeBrowserSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label={tx("Remove browser source")}>
                   <Icon name="trash" size={15} />
                 </button>
               </div>
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                <span className="rounded-lg border border-line bg-card-2 px-2.5 py-1.5 text-[13px] text-ink-3">{source.kind === 'history_export' ? 'History export JSON' : 'Current tab snapshot'}</span>
-                <span className="text-[12px] text-ink-3">{source.lastSyncAt ? `Synced ${new Date(source.lastSyncAt).toLocaleString()}` : 'Not scanned'}</span>
+                <span className="rounded-lg border border-line bg-card-2 px-2.5 py-1.5 text-[13px] text-ink-3">{source.kind === 'history_export' ? tx("History export JSON") : tx("Current tab snapshot")}</span>
+                <span className="text-[12px] text-ink-3">{source.lastSyncAt ? tx("Synced {value0}", { value0: new Date(source.lastSyncAt).toLocaleString(currentIntlLocale()) }) : tx("Not scanned")}</span>
               </div>
             </div>
           )

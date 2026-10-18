@@ -32,7 +32,7 @@ const HUB: HubModelSummary[] = [
 ]
 
 export function createMockEngineApi(): Pick<TensorFoldStudioApi,
-  'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
+  'engineCompareModels' | 'engineComparisonStatus' | 'engineCancelComparison' | 'engineTryModel' | 'engineCancelTryModel' | 'engineSaveModelProfiles' | 'engineLibrary' | 'engineScanLibrary' | 'engineAddLibraryFolder' | 'engineRemoveLibraryFolder' | 'engineCancelLibraryScan' | 'engineSnapshot' | 'engineConnection' | 'engineRefresh' | 'engineSearch' | 'enginePreflight' | 'enginePull' | 'engineCancelPull' | 'engineLoad' | 'engineUnload' | 'engineSetCortheon' | 'engineLearning' | 'engineSetLearning' | 'engineTeach' | 'engineCancelTeach' | 'engineDelete' | 'onEngineEvent'> & { mockEngineReadiness(model: string | null): Readiness } {
   const listeners = new Set<(event: EngineEvent) => void>()
   const emit = (event: EngineEvent) => { for (const cb of listeners) cb(event) }
   let installed: EngineInstalledModel[] = [{
@@ -54,7 +54,7 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
   const timers = new Map<string, ReturnType<typeof setInterval>>()
   let status: EngineStatus = {
     hardware: { platform: 'darwin', architecture: 'arm64', chip: 'Apple M3 Max' },
-    available: true, version: '1.0.10', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
+    available: true, version: '1.1.0', binaryPath: '/Applications/TensorFold.app/Contents/Resources/engine/bin/tensorfold-native',
     state: 'stopped', model: null, drafter: null, port: null, startedAt: null, readyAt: null, message: null, logTail: [], totalMemoryBytes: TOTAL_MEMORY, memoryLimitBytes: LIMIT, contextTokens: null,
     cortheon: { supported: true, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason },
   }
@@ -137,6 +137,12 @@ export function createMockEngineApi(): Pick<TensorFoldStudioApi,
       emit({ kind: 'pull', pull: next })
       return { cancelled: true }
     },
+    engineCompareModels: async () => { throw new Error('A local model comparison requires the desktop app and two installed compatible models.') },
+    engineComparisonStatus: async () => null,
+    engineCancelComparison: async () => false,
+    engineTryModel: async () => { throw new Error('A measured preview requires the desktop app and a real local model.') },
+    engineCancelTryModel: async () => false,
+    engineSaveModelProfiles: async () => { throw new Error('Model profile changes require the desktop app; this browser preview does not modify your engine.') },
     engineLoad: async (repo) => {
       if (['teaching', 'cancelling', 'preparing'].includes(learning.state)) throw new Error('Wait for the current lesson to finish.')
       setStatus({ state: 'starting', model: repo, startedAt: Date.now(), readyAt: null, message: `Loading ${repo}`, port: 52814 })

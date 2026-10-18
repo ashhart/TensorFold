@@ -39,11 +39,11 @@ console.log('assistant conversation bubble tests:')
   assert.equal(draft.direction, 'out')
   assert.equal(draft.status, 'draft')
 
-  // Once approved it flips to 'sent'.
-  const sent = eventToBubble({ id: 'e2', actor: 'You', summary: '3pm works.', action: 'send_requested', direction: 'outbound', approvalStatus: 'approved', createdAt: 2000 })
+  // A real transport receipt, rather than approval alone, flips it to 'sent'.
+  const sent = eventToBubble({ id: 'e2', actor: 'You', summary: '3pm works.', action: 'send_requested', direction: 'outbound', approvalStatus: 'approved', delivery: { transport: 'fixture', status: 'delivered' }, createdAt: 2000 })
   assert.equal(sent.direction, 'out')
   assert.equal(sent.status, 'sent')
-  ok('eventToBubble maps inbound->gray, agent drafts->blue/draft, approved->blue/sent')
+  ok('eventToBubble maps inbound->gray, agent drafts->blue/draft, delivered->blue/sent')
 }
 
 {

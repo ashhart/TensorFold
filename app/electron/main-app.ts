@@ -1,4 +1,22 @@
-import { app, BrowserWindow, shell, session, clipboard, Notification, dialog, Tray, Menu } from 'electron'
+import { assertClusterWorkspaceIdle, quiesceClusterWorkspace, loadClusterWorkspaceIdleState } from './main/host/cluster-runtime'
+import { registerInputHistoryIpc } from './main/host/ipc/input-history-ipc'
+import { registerMessageQuoteIpc } from './main/host/ipc/message-quote-ipc'
+import { registerModelHelperRuntime, quiesceModelHelpers, resumeModelHelpers } from './main/host/model-helper-runtime'
+import { registerModelQualificationRuntime, quiesceModelQualifications, resumeModelQualifications, purgeModelQualifications } from './main/host/model-qualification-runtime'
+import { recoverWorkspaceBackupCheckpoints } from './main/host/workspace-backup/recovery'
+import type { BackupHostState } from './main/host/workspace-backup/repository'
+import { reviewedRunOutcome } from './agent/run-outcome-review'
+import type { RunOutcomeReviewInput } from '../shared/run-recovery-api'
+import { registerWorkspaceBackupRuntime } from './main/host/workspace-backup/runtime'
+import { readProtectedJson, writeProtectedJson } from './store'
+import { beginComposerDraftPurge, endComposerDraftPurge } from './store/composer-drafts'
+import { normalizeAgentPresets } from '../shared/bot-policy'
+import { registerReadableExportRuntime } from './main/host/readable-export-runtime'
+import { registerDocumentLibraryRuntime, quiesceDocumentLibrary, resumeDocumentLibrary, purgeDocumentLibrary } from './main/host/document-library-runtime'
+import { registerConversationSearchRuntime } from './main/host/conversation-search-runtime'
+import { recoverInterruptedConnectorDeliveries } from './main/host/connector-outbound-delivery'
+import { stopAllWhatsAppBridges } from './agent/whatsapp-bridge'
+import { app, BrowserWindow, shell, session, clipboard, Notification, dialog, Tray, Menu, MenuItem } from 'electron'
 import path from 'node:path'
 import { promises as fs, statSync } from 'node:fs'
 import os from 'node:os'
@@ -101,6 +119,9 @@ import type { SchedulerLease } from './agent/automation-scheduler'
 import { registerCommandsIpc } from './main/host/commands-ipc'
 import { killAllTerminals, killProjectTerminals, liveTerminalCount, registerTerminalIpc, type TerminalRemoteApi } from './main/host/terminal-runtime'
 import { createMobileBridgeRuntime } from './main/host/mobile-bridge-runtime'
+import { createWatchCommandProjection } from './main/host/watch-command-projection'
+import { createWatchSpeechRuntime } from './main/host/watch-speech-runtime'
+import { getManagedKokoroService } from './main/host/ipc/provider-ipc'
 import { closeAllCodexAppServerSessions } from './agent/codex-app-server'
 import { createAutomationRuntime, registerAutomationIpc, type AutomationRuntime, type AutomationRunSource } from './main/host/automations'
 import { createMissionRuntime, type MissionRuntime } from './main/host/mission-runtime'
@@ -118,10 +139,13 @@ import { desktopTrayIcon } from './main/host/desktop-tray-icon'
 import { buildCoreIpcConfig } from './main/host/core-ipc-config'
 import { createLocalPrRuntime, type LocalPrRuntime } from './main/host/local-pr-runtime'
 import { createTicketWorkerRuntime, type TicketWorkerInput, type TicketWorkerRuntime } from './main/host/ticket-worker-runtime'
-import { createThreadRuntime, type ThreadRuntime } from './main/host/thread-runtime'
+import { createThreadRuntime, type ThreadRuntime, type ThreadRunAdmission } from './main/host/thread-runtime'
 import { createLoopHost } from './main/host/loop-host'
 import { createJobControlRuntime, buildJobControlConfig, type JobControlRuntime } from './main/host/job-control-runtime'
 import { createBotPollingRuntime, type BotPollingRuntime } from './main/host/bot-polling-runtime'
+import { createTelegramRemoteRuntime } from './main/host/telegram-remote-runtime'
+import { createTelegramRemoteDispatch } from './main/host/telegram-remote-dispatch'
+import { steerExistingRoom } from './main/host/room-steering-runtime'
 import { renderProjectMemoryBucket } from './main/host/project-memory-renderer'
 import { createRoomJobRuntime, type RoomJobRuntime } from './main/host/room-job-runtime'
 import { createToolContextRuntime, type ToolContextRuntime } from './main/host/tool-context-runtime'
@@ -140,8 +164,12 @@ import { durablePairingMutation } from './main/host/durable-pairing'
 import { registerIncidentIpc } from './main/host/incidents-ipc'
 import { createEngineRuntime, engineService } from './main/host/engine-runtime'
 import { createLearningQuitGuard } from './main/host/learning-quit'
-import { shutdownComputerUse } from './main/host/computer-use-host'
+import { shutdownComputerUse, computerHelperPath } from './main/host/computer-use-host'
+import { installNativeTextEditing, ensureApplicationEditMenu } from './main/host/native-text-editing'
+import { registerComposerDraftIpc, requestRendererDraftFlush, observeComposerDraftRenderer } from './main/host/ipc/composer-draft-ipc'
+import { createAttachmentTextService } from './main/host/attachment-text'
 import { registerEngineIpc } from './main/host/ipc/engine-ipc'
+import { registerModelBenchmarkIpc } from './main/host/ipc/model-benchmark-ipc'
 import { initializePhoneHost, phoneHost } from './main/host/phone-host'
 import { registerPhoneIpc } from './main/host/ipc/phone-ipc'
 import { initializeBotVmHost, getBotVmHost } from './main/host/bot-vm-host'
@@ -208,7 +236,6 @@ const {
   recordCalendarEvent,
   recordMessageEvent,
   registerConnectorIpc,
-  transportApprovedEmailEvent,
 } = connectorRuntime
 
 let automationRuntime: AutomationRuntime
@@ -306,6 +333,9 @@ const remoteServer = createRemoteControlServer(buildRemoteControlConfig({
 const mcpHost = new McpHost()
 
 const mobileBridgeRuntime = createMobileBridgeRuntime({
+  projectWatchSnapshot: createWatchCommandProjection({activeThreadIds: () => [...aborters.keys()]}),
+  watchSpeech: createWatchSpeechRuntime(getManagedKokoroService, (id) => pairingRegistry.isWatchSpeechAllowed(id)),
+  setWatchSpeech: (sessionId, enabled) => durablePairingMutation(pairingRegistry, () => pairingRegistry.setWatchSpeechAllowed(sessionId, enabled), () => savePairingSessions(pairingRegistry.snapshot()), { rollbackOnFailure: enabled }),
   profileRoot: () => vontraPath(),
   remoteServer,
   ownerToken: () => store.settings.remoteControl.authToken,
@@ -348,13 +378,7 @@ const sshManager = new SshManager({
   getHosts: () => store.settings.sshHosts ?? [],
   getTrustedKeys: () => store.settings.trustedSshHostKeys ?? [],
   interactivePrompts: () => !HEADLESS_MODE && rendererWindowAvailable(),
-  saveTrustedKey: async (key) => {
-    store.settings = {
-      ...store.settings,
-      trustedSshHostKeys: upsertTrustedHostKey(store.settings.trustedSshHostKeys ?? [], key),
-    }
-    await saveSettings(store.settings)
-  },
+  saveTrustedKey: async key => { await coreIpc.saveTrustedKey(key) },
   sendEvent: (channel, payload) => { sendToRenderer(channel, payload) },
   onStateChange: (state) => {
     if (state.phase !== 'disconnected' && state.phase !== 'error') return
@@ -434,7 +458,7 @@ const runAttention = createRunAttention({
     const thread = store.threads.find((thread) => thread.id === id)
     // Approval runtime calls attention directly, so admission must protect both
     // phone-derived titles and Incognito even when the event emitter is bypassed.
-    return !thread || thread.incognito === true || thread.phoneLocalOnly === true
+    return !thread || thread.incognito === true || thread.phoneLocalOnly === true || thread.googleLocalOnly === true
   },
   enabled: () => store.settings?.notifyRuns !== false,
   focused: () => { try { return !!store.win && !store.win.isDestroyed() && store.win.isFocused() } catch { return false } },
@@ -556,6 +580,9 @@ missionRuntime = createMissionRuntime({
 })
 
 const securityPurgeRuntime = createSecurityPurgeRuntime(buildSecurityPurgeConfig({
+  quiesceDocumentLibrary: async () => { await Promise.all([quiesceDocumentLibrary(), quiesceModelQualifications(), quiesceModelHelpers(), quiesceClusterWorkspace()]) },
+  resumeDocumentLibrary: () => { resumeDocumentLibrary(); resumeModelQualifications(); resumeModelHelpers() },
+  purgeDocumentLibrary: async () => { await purgeDocumentLibrary(); await purgeModelQualifications() },
   quiescePhoneControl: async () => { await phoneHost()?.service.disconnect() },
   quiesceBotVms: async () => { await getBotVmHost()?.quiesce() },
   purgeBotVmData: async () => { await getBotVmHost()?.purgeOwnedData() },
@@ -581,6 +608,8 @@ const securityPurgeRuntime = createSecurityPurgeRuntime(buildSecurityPurgeConfig
 }))
 async function purgeLocalMemory(): Promise<SecurityPurgeResult> {
   requireSecurityRole('owner', 'purge local memory')
+  assertClusterWorkspaceIdle()
+  await quiesceClusterWorkspace()
   return securityPurgeRuntime.purgeLocalMemory()
 }
 
@@ -697,8 +726,16 @@ const botPollingApi = {
   pollTelegramUpdates: (...args: Parameters<BotPollingRuntime['pollTelegramUpdates']>) => botPollingRuntime.pollTelegramUpdates(...args),
   stopBotControlPolling: () => botPollingRuntime.stopBotControlPolling(),
 }
+const telegramRemoteRuntime = createTelegramRemoteRuntime({ dispatchTurn: createTelegramRemoteDispatch({
+  settings: () => store.settings, threads: () => store.threads, rooms: () => store.rooms, aborters,
+  requireOperator: () => requireSecurityRole('operator', 'run Telegram remote assistant requests'),
+  startThreadRun: (payload, admission) => startThreadRun(payload, undefined, admission), streamChat,
+  steerRoom: (roomId, text) => { steerExistingRoom({ rooms: () => store.rooms, requireOperator: () => requireSecurityRole('operator', 'steer rooms'),
+    createId: randomUUID, persistRooms, emitRoom, hasActiveRoom: (id) => roomAborters.has(id) }, roomId, text) },
+}) })
 botPollingRuntime = createBotPollingRuntime({
   botControlRuntime,
+  telegramRemote: telegramRemoteRuntime,
   // Inline-approval callbacks: a Telegram approve/deny button (token) or a "/approve" reply
   // resolves the parked in-channel approval before it's routed as a normal bot command.
   resolveChannelApproval: (token, decision) => connectorRuntime.resolveChannelApproval(token, decision),
@@ -731,14 +768,43 @@ automationRuntime = createAutomationRuntime({
 })
 registerAutomationIpc(automationRuntime)
 
+registerComposerDraftIpc()
+handle('runRecovery:review', async (_event, input: RunOutcomeReviewInput) => {
+  requireSecurityRole('operator', 'review an uncertain run outcome')
+  const lease = workspaceMutationGuard.reserveStart({ threadId: input?.threadId })
+  try {
+    const thread = store.threads.find(thread => thread.id === input?.threadId && !thread.orchestratorHostId)
+    if (!thread) throw new Error('Choose a local conversation.')
+    const next = reviewedRunOutcome(thread, input, aborters.has(thread.id))
+    requireSecurityRole('operator', 'review an uncertain run outcome')
+    await saveThreads(store.threads.map(item => item === thread ? next : item))
+    requireSecurityRole('operator', 'review an uncertain run outcome')
+    if (!store.threads.includes(thread) || thread.runRecovery?.runId !== input.runId || aborters.has(thread.id)) throw new Error('The run changed; review its current outcome.')
+    thread.runRecoveryReviewedId = input.runId
+    sendToRenderer('agent:event', { runId: input.runId, threadId: thread.id, type: 'thread_update', patch: { runRecoveryReviewedId: input.runId } })
+    return { recovery: thread.runRecovery!, reviewedRunId: input.runId }
+  } finally { lease.release() }
+})
+registerConversationSearchRuntime()
+registerInputHistoryIpc({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['input:history'] }) })
+registerMessageQuoteIpc({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['input:quotes'] }) })
+registerReadableExportRuntime({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['export:readable'] }) })
+registerDocumentLibraryRuntime({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['documents:library'] }) })
+const attachmentTextService = createAttachmentTextService({ helperPath: computerHelperPath })
+handle('attachments:textCapability', () => { requireSecurityRole('operator', 'check local text extraction'); return attachmentTextService.getCapability() })
+handle('attachments:extractText', (_event, input) => { requireSecurityRole('operator', 'read text from a selected file'); return attachmentTextService.extract(input) })
 const appWindowRuntime = createAppWindowRuntime({
   BrowserWindow,
   baseDir: __dirname,
   openExternalSafely,
   session,
   onWindowClosed: () => sshManager.cancelPendingPrompts(),
-  onWindowCreated: (win) => desktopModeRuntime.attachWindow(win),
+  onWindowCreated: (win) => { observeComposerDraftRenderer(win.webContents); desktopModeRuntime.attachWindow(win) },
   shouldShowWindow: () => desktopModeRuntime.shouldShowWindow(),
+  installTextEditing: (win) => { ensureApplicationEditMenu(Menu, (options) => new MenuItem(options), store.settings?.uiPreferences?.locale); installNativeTextEditing(win, Menu, () => store.settings?.uiPreferences?.locale) },
+  shouldGuardWindowClose: () => !draftQuitSettled,
+  beforeWindowClose: (win) => requestRendererDraftFlush(win.webContents),
+  onWindowCloseFailure: () => dialog.showErrorBox('Your draft needs attention', 'TensorFold could not confirm that unfinished messages were saved; keep the window open and retry saving the draft.'),
 })
 // Lazy-accessor bundle: replaces the installSessionHardening + createWindow forwarder shims.
 const appWindowApi = {
@@ -785,9 +851,9 @@ app.on('second-instance', () => { if (app.isReady() && store.settings) desktopMo
 
 let threadRuntime: ThreadRuntime
 // Semi-shim: emits an observer event before delegating — keep as a named function.
-function startThreadRun(payload: StartRunPayload, existingJob?: Job): Promise<{ runId: string }> {
+function startThreadRun(payload: StartRunPayload, existingJob?: Job, admission?: ThreadRunAdmission): Promise<{ runId: string }> {
   observerHub.emit('session.start', { threadId: payload.threadId, payload: { hasAttachments: !!payload.attachments?.length } })
-  return threadRuntime.startThreadRun(payload, existingJob)
+  return threadRuntime.startThreadRun(payload, existingJob, admission)
 }
 // Hoisted forwarder shims: function declarations are hoisted so runtimes
 // constructed above can reference them before threadRuntime is assigned.
@@ -962,7 +1028,7 @@ const coreIpc = registerCoreIpc(buildCoreIpcConfig({
   ensureRemoteControlToken,
   applyTheme,
   applyPowerSettings,
-  applyDesktopMode: () => desktopModeRuntime.applySettings(),
+  applyDesktopMode: () => { desktopModeRuntime.applySettings(); ensureApplicationEditMenu(Menu, (options) => new MenuItem(options), store.settings?.uiPreferences?.locale) },
   hideDesktopWindow: () => desktopModeRuntime.hide(),
   startUpdateChecks,
   startBotControlPolling: botPollingApi.startBotControlPolling,
@@ -1147,10 +1213,25 @@ registerIncidentIpc({
 
 // Built-in TensorFold engine: Models page, pulls, and the engine behind the built-in provider.
 createEngineRuntime()
+const assertCanBenchmark = () => {
+  requireSecurityRole('operator', 'benchmark a local model')
+  if (store.threads.some((thread) => {
+    const providerId = thread.providerId ?? surfaceModelOverride(store.settings, thread.kind === 'chat' ? 'chat' : 'code')?.providerId ?? store.settings.activeProviderId
+    return providerId === 'tensorfold' && !thread.orchestratorHostId && thread.workspace?.kind !== 'ssh' && (thread.status === 'running' || aborters.has(thread.id))
+  })) throw new Error('Finish or stop active local conversations before benchmarking a model.')
+}
+registerModelBenchmarkIpc(engineService, { assertCanBenchmark, reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] }) })
 registerEngineIpc(engineService, {
+  assertCanCompare: () => {
+    requireSecurityRole('operator', 'compare two local models')
+    if (store.threads.some((thread) => {
+      const providerId = thread.providerId ?? surfaceModelOverride(store.settings, thread.kind === 'chat' ? 'chat' : 'code')?.providerId ?? store.settings.activeProviderId
+      return providerId === 'tensorfold' && !thread.orchestratorHostId && thread.workspace?.kind !== 'ssh' && (thread.status === 'running' || aborters.has(thread.id))
+    })) throw new Error('Finish or stop active local conversations before comparing models.')
+  },
   reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['engine:local'] }),
   assertCanEnableCortheon: () => {
-    if (store.threads.some((thread) => aborters.has(thread.id) && (thread.phoneLocalOnly || thread.bot?.executionTarget === 'vm' || isRestrictedBot(thread.bot)))) {
+    if (store.threads.some((thread) => aborters.has(thread.id) && (thread.phoneLocalOnly || thread.googleLocalOnly || thread.bot?.executionTarget === 'vm' || isRestrictedBot(thread.bot)))) {
       throw new Error('Stop active phone, isolated or restricted bot conversations before enabling Cortheon; hidden research cannot bypass their execution boundaries.')
     }
   },
@@ -1215,9 +1296,9 @@ const userQuestions = HEADLESS_MODE ? null : initializeUserQuestionHost({
   commitQuestion: questionPersistence.commit,
 })
 if (userQuestions) registerUserQuestionIpc(userQuestions, { reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['user:question'] }) })
-configureUpdateInstallSafety({
-  acquireLease: () => workspaceMutationGuard.acquireGlobal('App update installation'),
-  assertIdle: () => assertUpdateQuiescent({
+function assertWorkspaceIdle(): void {
+  assertClusterWorkspaceIdle()
+  assertUpdateQuiescent({
     ready: app.isReady() && !!store.settings,
     threadControllers: aborters.size,
     roomControllers: roomAborters.size,
@@ -1231,8 +1312,36 @@ configureUpdateInstallSafety({
     mobileOperations: mobileBridgeRuntime.activeOperations(),
     engineRequests: engineService()?.supervisor.activeRequestCount ?? 0,
     modelLoading: engineService()?.supervisor.status().state === 'starting',
-    modelDownloads: engineService()?.pullList().filter((pull) => pull.state === 'running').length ?? 0,
-  }),
+    modelDownloads: engineService()?.pullList().filter((pull) => ['queued', 'running', 'verifying'].includes(pull.state)).length ?? 0,
+  })
+}
+async function persistWorkspaceSnapshot(next: BackupHostState): Promise<void> {
+  next.settings.agentPresets = normalizeAgentPresets(next.settings.agentPresets ?? [], true)
+  const results = await Promise.allSettled([saveSettings(next.settings), saveThreads(next.threads), saveProjects(next.projects)])
+  if (results.some(result => result.status === 'rejected')) throw new Error('Workspace storage could not complete; restore will roll back the reviewed items.')
+}
+registerModelHelperRuntime({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['models:helper'] }), assertIdle: assertWorkspaceIdle })
+registerModelQualificationRuntime({ reserveOperation: () => workspaceMutationGuard.reserveStart({ workspaceKeys: ['models:qualification'] }), assertIdle: assertWorkspaceIdle })
+registerWorkspaceBackupRuntime({
+  handle,
+  authorize: () => requireSecurityRole('owner', 'back up or restore this workspace'),
+  profileRoot: vontraHomeDir,
+  getState: () => ({ settings: store.settings, threads: store.threads, projects: store.projects }),
+  setState: next => { store.settings = next.settings; store.threads = next.threads; store.projects = next.projects },
+  persist: persistWorkspaceSnapshot,
+  readProtectedJson, writeProtectedJson,
+  flushDrafts: event => requestRendererDraftFlush(event.sender),
+  pauseDraftWrites: beginComposerDraftPurge,
+  resumeDraftWrites: endComposerDraftPurge,
+  acquireLease: () => workspaceMutationGuard.acquireGlobal('Workspace backup or restore'),
+  assertIdle: assertWorkspaceIdle,
+  chooseOpen: async () => { const result = await dialog.showOpenDialog({ title: 'Choose an encrypted workspace backup', properties: ['openFile'], filters: [{ name: 'TensorFold backup', extensions: ['tfbackup'] }] }); return result.canceled ? null : result.filePaths[0] ?? null },
+  chooseSave: async () => { const result = await dialog.showSaveDialog({ title: 'Save encrypted workspace backup', defaultPath: 'tensorfold-workspace.tfbackup', filters: [{ name: 'TensorFold backup', extensions: ['tfbackup'] }] }); return result.canceled ? null : result.filePath ?? null },
+  publishRestored: () => { sendToRenderer('composer-drafts:reset', null); setImmediate(() => store.win?.webContents.reload()) },
+})
+configureUpdateInstallSafety({
+  acquireLease: () => workspaceMutationGuard.acquireGlobal('App update installation'),
+  assertIdle: assertWorkspaceIdle,
   preserve: preserveStateForUpdate,
 })
 registerUpdateInstallIpc()
@@ -1249,6 +1358,7 @@ app.whenReady().then(() => bootAppState({
   ensureCliPath,
   migrateLegacyUserData,
   ensureTensorFoldStudioHome,
+  recoverWorkspaceBackup: async () => { await recoverWorkspaceBackupCheckpoints({ profileRoot: vontraHomeDir, readProtectedJson, writeProtectedJson, persist: persistWorkspaceSnapshot }); await loadClusterWorkspaceIdleState() },
   enableOrchestrationJournal,
   wireOrchestrationEventsToWindow,
   sendToRenderer,
@@ -1264,6 +1374,7 @@ app.whenReady().then(() => bootAppState({
   loadTickets,
   loadAutomations,
   loadConnectorEvents,
+  recoverConnectorDeliveries: recoverInterruptedConnectorDeliveries,
   loadContactDirectory,
   loadCliSessions,
   loadMissions,
@@ -1321,7 +1432,7 @@ app.whenReady().then(() => bootAppState({
   getSpineHost: () => spineHost,
   setSpineHost: (host) => { spineHost = host },
   setBootSchedulerLease: (lease) => { bootSchedulerLease = lease },
-})).then(async () => { await userQuestions?.recoverInterrupted(store.threads); await mobileBridgeRuntime.initialize() }).catch(handleBootFailure)
+})).then(async () => { await userQuestions?.recoverInterrupted(store.threads); await mobileBridgeRuntime.initialize(); if (!quitAdmissionPause) void connectorRuntime.resumeWhatsAppAccounts().catch((error) => { void auditEvent('whatsapp.resume_failed', { message: String(error instanceof Error ? error.message : 'Saved accounts could not resume').slice(0, 220) }) }) }).catch(handleBootFailure)
 
 // Last-resort safety net: a rejected promise or thrown error anywhere in the main
 // process should be logged (and surfaced), not silently swallowed into a windowless
@@ -1335,9 +1446,12 @@ process.on('uncaughtException', (err) => {
 
 let quitAdmissionPause: { release(): void } | null = null
 function resumeAfterFailedQuit() {
+  draftQuitSettled = false
+  if (store.win && !store.win.isDestroyed()) store.win.setEnabled(true)
   // A later device fence can fail after earlier services have already stopped.
   // Reopen their admission without reconnecting phones or restarting bot VMs.
   try {
+    resumeDocumentLibrary(); resumeModelQualifications(); resumeModelHelpers(); documentQuitSettled = false
     userQuestions?.resume(); questionQuitSettled = false
     phones.service.resume(); phoneQuitSettled = false
     botVms.resume(); botVmQuitSettled = false
@@ -1371,8 +1485,22 @@ const deferQuestionQuit = createLearningQuitGuard({
   quit: () => { setImmediate(() => app.quit()) },
   failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Questions are stopping', 'TensorFold could not confirm that its pending questions were safely interrupted; try Quit again after the current save finishes.') },
 })
+let documentQuitSettled = false
+const deferDocumentQuit = createLearningQuitGuard({
+  service: () => ({ isLearningBusy: () => !documentQuitSettled, prepareToQuit: async () => { await Promise.all([quiesceDocumentLibrary(), quiesceModelQualifications(), quiesceModelHelpers(), quiesceClusterWorkspace()]); documentQuitSettled = true } }),
+  quit: () => { setImmediate(() => app.quit()) },
+  failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Document indexing is stopping', 'TensorFold is waiting for document indexing to stop safely; try Quit again after the current scan finishes.') },
+})
+let draftQuitSettled = false
+const deferDraftQuit = createLearningQuitGuard({
+  service: () => ({ isLearningBusy: () => !draftQuitSettled, prepareToQuit: async () => { await requestRendererDraftFlush(store.win?.webContents ?? null); draftQuitSettled = true } }),
+  quit: () => { setImmediate(() => app.quit()) },
+  failed: () => { resumeAfterFailedQuit(); dialog.showErrorBox('Your draft needs attention', 'TensorFold could not save an unfinished message, so it remains open; retry saving the draft before quitting.') },
+})
 app.on('before-quit', (event) => {
+  if (store.win && !store.win.isDestroyed()) store.win.setEnabled(false)
   quitAdmissionPause ??= workspaceMutationGuard.pauseAdmission('TensorFold is quitting')
+  telegramRemoteRuntime.cancelPending()
   // Stop model work before asynchronous save/device fences can release a parked
   // question; Quit must never interpret an interrupted question as permission.
   for (const controller of aborters.values()) controller.abort()
@@ -1383,8 +1511,12 @@ app.on('before-quit', (event) => {
   if (deferQuestionQuit(event)) return
   if (deferPhoneQuit(event)) return
   if (deferBotVmQuit(event)) return
+  // The renderer cannot accept new keyboard input while device/model fences run; save last.
+  if (deferDocumentQuit(event)) return
+  if (deferDraftQuit(event)) return
   desktopModeRuntime.dispose()
   botPollingApi.stopBotControlPolling()
+  stopAllWhatsAppBridges()
   closeBrowserAutomationSessions()
   stopCaffeinate()
   // Abort in-flight thread/room/mission/automation runs: CLI one-shot transports spawn
@@ -1396,6 +1528,7 @@ app.on('before-quit', (event) => {
   try { automationRuntime?.abortAll() } catch { /* best effort */ }
   // The computer-use helper never outlives the app.
   try { shutdownComputerUse() } catch { /* best effort */ }
+  attachmentTextService.shutdown()
   // FIX 1b: reap all live PTYs on app quit so shells don't outlive the process
   try { killAllTerminals() } catch { /* best effort */ }
   // Close every pooled codex app-server process so it doesn't outlive the app either.

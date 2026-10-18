@@ -19,6 +19,7 @@ export interface BootStateDeps {
   // Forwarders / helpers wired earlier in the bootstrap.
   ensureCliPath(): void
   migrateLegacyUserData(): Promise<void>
+  recoverWorkspaceBackup?(): Promise<void>
   ensureTensorFoldStudioHome(): Promise<void>
   enableOrchestrationJournal(): void
   wireOrchestrationEventsToWindow(forward: (event: OrchestrationEvent) => void): void
@@ -37,6 +38,7 @@ export interface BootStateDeps {
   loadTickets(): Promise<any[]>
   loadAutomations(): Promise<any[]>
   loadConnectorEvents(): Promise<any[]>
+  recoverConnectorDeliveries?(): Promise<void>
   loadContactDirectory(): Promise<any>
   loadCliSessions(): Promise<any[]>
   loadMissions(): Promise<any[]>
@@ -195,6 +197,7 @@ export async function bootAppState(deps: BootStateDeps): Promise<void> {
   ensureCliPath()
   await migrateLegacyUserData()
   await ensureTensorFoldStudioHome()
+  await deps.recoverWorkspaceBackup?.()
   // Turn on the durable on-disk orchestration journal now that we're in Electron with a
   // writable home dir. Off by default so pure unit tests never write to the real ~/.vontra.
   enableOrchestrationJournal()
@@ -264,6 +267,9 @@ export async function bootAppState(deps: BootStateDeps): Promise<void> {
   store.tickets = await loadTickets()
   store.automations = await loadAutomations()
   store.connectorEvents = await loadConnectorEvents()
+  // A durable pending send never becomes an implicit retry after restart. Recover
+  // before creating windows, exposing remote control, or starting scheduled work.
+  await deps.recoverConnectorDeliveries?.()
   store.contacts = await loadContactDirectory()
   // The terminals that were live at the last (clean) quit — terminal:restore re-spawns + resumes them.
   store.cliSessions = await loadCliSessions()

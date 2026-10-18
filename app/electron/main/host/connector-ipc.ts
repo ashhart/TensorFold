@@ -2,9 +2,9 @@ import { composingDraftStream, resolveAdapter, sendViaChannel, streamDraftViaCha
 import { draftEditIntervalForPlatform, makeDraftEditThrottle } from '../../agent/draft-throttle'
 import { parseThreadAddress } from '../../agent/thread-address'
 import { buildAssistantControlSnapshot, recordConnectorInteraction } from '../../agent/connector-spine'
+import { getWhatsAppBridgeRuntime } from '../../agent/whatsapp-bridge'
 import { auditPreview } from '../../agent/security'
-import { createSerialTaskQueue } from '../../agent/serial-task-queue'
-import { persistConnectorEvents } from './persistence'
+import { connectorDecisionQueue, createReviewedConnectorDelivery, isOutboundSendRequest, sealConnectorOutboundEvent } from './connector-outbound-delivery'
 import { auditActor, auditEvent, requireSecurityRole } from './audit'
 import { handle as registerHandler } from './ipc'
 import { store } from '../state'
@@ -35,9 +35,8 @@ import { registerBrowserIpc } from './connector-ipc/browser'
 export function registerAllConnectorIpc(deps: ConnectorIpcDeps): void {
   const { spine, emailTransport, channels, callbacks } = deps
   const { rememberConnectorEvents } = spine
-  const { isEmailSendRequest, transportApprovedEmailEvent } = emailTransport
   const { requestChannelApproval, resolveChannelApprovalByThread, channelAdapters } = channels
-  const connectorDecisions = createSerialTaskQueue()
+  const reviewedDelivery = createReviewedConnectorDelivery({ adapters: channelAdapters, sendEmail: (event) => emailTransport.deliverApprovedEmailEvent(event) })
   const readonlyActions = new Set(['list', 'read', 'thread', 'summary', 'access'])
   const handle: typeof registerHandler = (channel, listener) => {
     registerHandler(channel, async (event, ...args) => {
@@ -81,6 +80,8 @@ export function registerAllConnectorIpc(deps: ConnectorIpcDeps): void {
     return result
   })
   handle('assistant:snapshot', async () => {
+    // Legacy pending drafts acquire a host-authored exact review snapshot on read.
+    store.connectorEvents = store.connectorEvents.map(event => isOutboundSendRequest(event) && !event.delivery ? sealConnectorOutboundEvent(event) : event)
     const defaultProjectId = store.settings.defaultCwd
       ? store.projects.find((project) => !project.archivedAt && project.cwd === store.settings.defaultCwd)?.id ?? null
       : null
@@ -89,6 +90,7 @@ export function registerAllConnectorIpc(deps: ConnectorIpcDeps): void {
       missions: store.missions,
       existingMemoryCandidates: store.projectMemoryCandidates,
       defaultProjectId,
+      whatsappRuntime: getWhatsAppBridgeRuntime(),
     })
   })
 
@@ -99,55 +101,47 @@ export function registerAllConnectorIpc(deps: ConnectorIpcDeps): void {
     return event
   })
 
-  handle('assistant:resolveApproval', async (_e, { eventId, decision }: { eventId: string; decision: 'approve' | 'deny' }) => {
+  handle('assistant:resolveApproval', async (_e, { eventId, decision, reviewDigest }: { eventId: string; decision: 'approve' | 'deny'; reviewDigest?: string }) => {
     requireSecurityRole('operator', 'resolve assistant connector approvals')
+    if (!['approve', 'deny'].includes(decision)) throw new Error('Choose approve or deny.')
     const candidate = store.connectorEvents.find((item) => item.id === eventId || item.approvalId === eventId)
     if (!candidate) throw new Error('Connector approval not found.')
-    // Approving an email send_requested/reply_requested actually transmits the mail over SMTP
-    // (transportApprovedEmailEvent). That is a real outbound send, so it must clear the SAME
-    // 'owner' gate every other connector send enforces (slack/discord/whatsapp/imessage/...),
-    // not the 'operator' gate that suffices to resolve a non-transmitting approval. Without this
-    // an operator-only principal could compose + approve arbitrary outbound email.
-    if (decision === 'approve' && isEmailSendRequest(candidate)) {
-      requireSecurityRole('owner', 'approve an outbound email send')
-    }
-    if (!candidate.requiresApproval && (candidate.approvalStatus ?? null) !== 'pending') return candidate
-    // A double click or conflicting channel/app decision must share the same
-    // event queue across the durable policy await and external delivery.
-    return connectorDecisions.run(candidate.id, async () => {
+    const outbound = isOutboundSendRequest(candidate)
+    if (decision === 'approve' && outbound) requireSecurityRole('owner', 'approve an outbound connector send')
+    // Settled/in-flight decisions return immediately, including reentrant callbacks. A
+    // sending or uncertain record never becomes pending just because a user clicks again.
+    if (candidate.delivery || (!candidate.requiresApproval && candidate.approvalStatus !== 'pending')) return candidate
+    return connectorDecisionQueue.run(candidate.id, async () => {
       const event = store.connectorEvents.find((item) => item.id === candidate.id)
       if (!event) throw new Error('Connector approval not found.')
-      if (!event.requiresApproval && (event.approvalStatus ?? null) !== 'pending') return event
+      if (event.delivery || (!event.requiresApproval && event.approvalStatus !== 'pending')) return event
       const policy = connectorPolicyForEvent(event)
-      // The UI implicitly remembers connector decisions. Do not resolve the parked prompt,
-      // transmit an approved action, or acknowledge the IPC until that bounded rule is durable.
-      // The host callback rejects after rolling back on save failure.
-      const savedRule = await callbacks.rememberApprovalRule('connector', policy.key, decision === 'approve' ? 'allow' : 'deny', 'always', {
-        label: policy.label,
-        explanation: policy.explanation,
-        workspace: `connector:${event.connectorId}`,
-      })
-      if (!savedRule) throw new Error('Connector approval policy could not be saved with a bounded workspace scope.')
-      if (!store.connectorEvents.includes(event)) throw new Error('Connector approval changed while saving the decision. Review the current draft again.')
-      event.approvalStatus = decision === 'approve' ? 'approved' : 'denied'
-      event.requiresApproval = false
-      event.resolvedAt = Date.now()
-      event.resolvedBy = auditActor()
-      // If this event also had an in-channel approval prompt parked (block-until-answered),
-      // resolving it in-app unblocks the waiting channel request with the same decision.
+      let resolved: ConnectorEvent
+      if (isOutboundSendRequest(event)) {
+        // External sends are single-content approvals, never silently remembered allow
+        // rules for future bodies/recipients. The protected one-shot marker is durable
+        // before the exact approved snapshot reaches any adapter.
+        resolved = decision === 'approve'
+          ? await reviewedDelivery.approve(event, reviewDigest, auditActor())
+          : { ...event, approvalStatus: 'denied', requiresApproval: false, resolvedAt: Date.now(), resolvedBy: auditActor() }
+        if (decision === 'deny') await reviewedDelivery.durable(resolved)
+      } else {
+        const savedRule = await callbacks.rememberApprovalRule('connector', policy.key, decision === 'approve' ? 'allow' : 'deny', 'always', {
+          label: policy.label, explanation: policy.explanation, workspace: `connector:${event.connectorId}`,
+        })
+        if (!savedRule) throw new Error('Connector approval policy could not be saved with a bounded workspace scope.')
+        if (!store.connectorEvents.includes(event)) throw new Error('Connector approval changed while saving the decision. Review the current draft again.')
+        resolved = { ...event, approvalStatus: decision === 'approve' ? 'approved' : 'denied', requiresApproval: false, resolvedAt: Date.now(), resolvedBy: auditActor() }
+        await reviewedDelivery.durable(resolved)
+      }
       if (event.threadKey) resolveChannelApprovalByThread(event.threadKey, decision)
-      if (decision === 'approve') await transportApprovedEmailEvent(event)
-      persistConnectorEvents()
-      await auditEvent('connector.approval_resolved', { eventId: event.id, connectorId: event.connectorId, action: event.action, decision, policyKey: policy.key, policyExplanation: policy.explanation })
+      await auditEvent('connector.approval_resolved', { eventId: resolved.id, connectorId: resolved.connectorId, action: resolved.action, decision, delivery: resolved.delivery?.status ?? null, policyKey: policy.key })
       await rememberConnectorEvents([recordConnectorInteraction({
-        connectorId: event.connectorId,
-        pluginName: event.pluginName,
-        action: decision === 'approve' ? 'approval_approved' : 'approval_denied',
-        direction: 'internal',
-        target: event.threadKey,
-        input: { title: event.title, action: event.action },
+        connectorId: resolved.connectorId, pluginName: resolved.pluginName,
+        action: decision === 'approve' ? 'approval_approved' : 'approval_denied', direction: 'internal', target: resolved.threadKey,
+        input: { title: resolved.title, action: resolved.action },
       })])
-      return event
+      return resolved
     })
   })
 

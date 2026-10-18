@@ -1,3 +1,4 @@
+import { reviewedLanguageImport } from '../preferences/language-test-fixture'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import path from 'node:path'
@@ -25,7 +26,7 @@ function loadComponent(name: string): any {
   // replacing only state/effect and external-service collaborators.
   imports['react/jsx-runtime'].jsx = imports['react/jsx-runtime'].jsxs = (type: any, props: any, key: any) => React.createElement(type, { ...props, ...(key == null ? {} : { key }) })
   const module = { exports: {} as any }
-  new Function('require', 'module', 'exports', output)((id: string) => { assert.ok(id in imports, `Reviewed component import ${id}`); return imports[id] }, module, module.exports)
+  new Function('require', 'module', 'exports', output)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports, `Reviewed component import ${id}`); return imports[id] }, module, module.exports)
   return module.exports[name]
 }
 const Editor = loadComponent('BotToolScopeEditor'), Chat = loadComponent('BotChatContext')

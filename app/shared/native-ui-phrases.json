@@ -1,0 +1,22 @@
+[
+  "Edit",
+  "Undo",
+  "Redo",
+  "Cut",
+  "Copy",
+  "Paste",
+  "Paste as Plain Text",
+  "Select All",
+  "Open Minimal",
+  "Models and downloads…",
+  "API setup…",
+  "Open Full workspace",
+  "Quit TensorFold",
+  "Server running on this Mac",
+  "Starting local model…",
+  "Local server needs attention",
+  "Local server stopped",
+  "Updating local server…",
+  "Stop local server",
+  "Start selected model"
+]

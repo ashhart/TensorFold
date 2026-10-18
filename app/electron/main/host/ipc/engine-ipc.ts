@@ -1,6 +1,7 @@
 import { assertCortheonReleaseAllowed } from '../../../../shared/release-feature-policy'
 import { BrowserWindow, dialog } from 'electron'
 import type { EngineService } from '../../../agent/engine/service'
+import { comparisonId, comparisonInput } from '../../../agent/engine/model-comparison'
 import { isRepoId, isRevision } from '../../../agent/engine/paths'
 import { auditEvent, requireSecurityRole } from '../audit'
 import { handle } from '../ipc'
@@ -39,7 +40,7 @@ export function engineLibraryScanOptions(value: unknown): { includeHuggingFace?:
   return enabled === undefined ? {} : { includeHuggingFace: enabled }
 }
 
-export function registerEngineIpc(engine: () => EngineService | null, options: { reserveOperation?: () => { release(): void }; assertCanEnableCortheon?: () => void } = {}) {
+export function registerEngineIpc(engine: () => EngineService | null, options: { reserveOperation?: () => { release(): void }; assertCanEnableCortheon?: () => void; assertCanCompare?: () => void } = {}) {
   const operation = async <T>(run: () => Promise<T>): Promise<T> => {
     const lease = options.reserveOperation?.()
     try { return await run() } finally { lease?.release() }
@@ -95,6 +96,41 @@ export function registerEngineIpc(engine: () => EngineService | null, options: {
     requireSecurityRole('operator', 'load a model')
     const model = engineRepo(repo)
     return operation(async () => { await auditEvent('engine.load', { repo: model }); return svc().load(model) })
+  })
+
+  handle('engine:compareModels', async (_e, value: unknown) => {
+    requireSecurityRole('operator', 'compare two local models')
+    const input = comparisonInput(value)
+    return operation(async () => {
+      const service = svc()
+      service.setComparisonAdmission(options.assertCanCompare ?? null)
+      options.assertCanCompare?.()
+      const result = service.compareModels(input) // Reserve synchronously before audit IO or cancellation can race startup.
+      try { await auditEvent('engine.comparison', { models: input.models }) }
+      catch (error) { service.cancelComparison(input.id); await result.catch(() => {}); throw error }
+      return result
+    })
+  })
+
+  handle('engine:comparisonStatus', async (_e, id: unknown) => {
+    requireSecurityRole('operator', 'read a local model comparison')
+    return svc().comparisonStatus(comparisonId(id))
+  })
+
+  handle('engine:cancelComparison', async (_e, id: unknown) => {
+    requireSecurityRole('operator', 'cancel a local model comparison')
+    return svc().cancelComparison(comparisonId(id))
+  })
+
+  handle('engine:tryModel', async (_e, repo: unknown) => {
+    requireSecurityRole('operator', 'measure a local model preview')
+    const model = engineRepo(repo)
+    return operation(async () => { await auditEvent('engine.preview', { repo: model }); return svc().tryModel(model) })
+  })
+
+  handle('engine:cancelTryModel', async () => {
+    requireSecurityRole('operator', 'cancel a local model preview')
+    return svc().cancelTryModel()
   })
 
   handle('engine:setCortheon', async (_e, enabled: unknown) => {

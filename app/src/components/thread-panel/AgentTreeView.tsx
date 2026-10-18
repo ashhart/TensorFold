@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import clsx from 'clsx'
 import type { ThreadAgentNodeStatus, ThreadAgentTreeNode } from '../../lib/thread-agent-tree'
 
@@ -18,15 +21,16 @@ const AGENT_STATUS_TEXT: Record<ThreadAgentNodeStatus, string> = {
   cancelled: 'text-ink-3',
 }
 const AGENT_STATUS_LABEL: Record<ThreadAgentNodeStatus, string> = {
-  idle: 'idle',
-  queued: 'queued',
-  running: 'running',
-  succeeded: 'done',
-  failed: 'failed',
-  cancelled: 'stopped',
+  get idle() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "idle") },
+  get queued() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "queued") },
+  get running() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "running") },
+  get succeeded() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "done") },
+  get failed() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "failed") },
+  get cancelled() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "stopped") },
 }
 
 export function ThreadAgentTreeView({ tree }: { tree: ThreadAgentTreeNode }) {
+  const tx = useAuthoredText()
   return (
     <div className="space-y-1">
       <ThreadAgentNodeRow node={tree} />
@@ -35,6 +39,7 @@ export function ThreadAgentTreeView({ tree }: { tree: ThreadAgentTreeNode }) {
 }
 
 export function ThreadAgentNodeRow({ node }: { node: ThreadAgentTreeNode }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0">
       <div className={clsx('flex min-w-0 items-start gap-2 rounded-lg px-2 py-1.5', node.kind === 'thread' ? 'bg-card-2/70' : 'hover:bg-ink-5')}>

@@ -1,3 +1,7 @@
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -15,31 +19,31 @@ type WorktreeRow = { path: string; head: string | null; branch: string | null; d
 const BUSY = new Set(['thinking', 'streaming', 'tool', 'awaiting'])
 const ACTIVE_ROOM_STATES = new Set<RoomState>(['queued', 'running', 'waiting_user', 'waiting_external'])
 const ROOM_STATE_LABEL: Record<RoomState, string> = {
-  idle: 'Idle',
-  created: 'Created',
-  ready: 'Ready',
-  degraded: 'Degraded',
-  queued: 'Queued',
-  running: 'Running',
-  waiting_user: 'Needs you',
-  waiting_external: 'Waiting',
-  complete: 'Complete',
-  stopped: 'Stopped',
-  failed: 'Failed',
-  archived: 'Archived',
-  error: 'Failed',
+  get idle() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Idle") },
+  get created() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Created") },
+  get ready() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ready") },
+  get degraded() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Degraded") },
+  get queued() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Queued") },
+  get running() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Running") },
+  get waiting_user() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Needs you") },
+  get waiting_external() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Waiting") },
+  get complete() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Complete") },
+  get stopped() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Stopped") },
+  get failed() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Failed") },
+  get archived() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Archived") },
+  get error() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Failed") },
 }
 
 const UPDATE_STATE_LABEL: Record<AppUpdateStatus['state'], string> = {
-  not_configured: 'No feed',
-  not_checked: 'Not checked',
-  checking: 'Checking',
-  current: 'Current',
-  available: 'Available',
-  downloading: 'Downloading',
-  ready: 'Ready to install',
-  installing: 'Preparing restart',
-  error: 'Error',
+  get not_configured() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "No feed") },
+  get not_checked() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Not checked") },
+  get checking() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Checking") },
+  get current() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Current") },
+  get available() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Available") },
+  get downloading() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Downloading") },
+  get ready() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ready to install") },
+  get installing() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Preparing restart") },
+  get error() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Error") },
 }
 
 function activeWorkspace() {
@@ -74,11 +78,12 @@ function readSources(thread: Thread | null): string[] {
 }
 
 function workspaceLabel(cwd: string): string {
-  if (!cwd) return 'No workspace'
+  if (!cwd) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "No workspace")
   return basename(cwd) || shortPath(cwd, 3)
 }
 
 export function WorkspaceDock() {
+  const tx = useAuthoredText()
   const view = useStore((s) => s.view)
   const threads = useStore((s) => s.threads)
   const projects = useStore((s) => s.projects)
@@ -112,7 +117,7 @@ export function WorkspaceDock() {
   const remote = workspace?.kind === 'ssh'
   const provider = settings?.providers.find((p) => p.id === (thread?.providerId ?? settings.activeProviderId)) ?? settings?.providers[0]
   const model = thread?.model ?? settings?.activeModel ?? provider?.models[0] ?? null
-  const sources = useMemo(() => readSources(thread), [thread])
+  const sources = useMemo(() => readSources(thread), [thread, tx])
   const plan = thread?.plan ?? []
   const planDone = plan.filter((p) => p.done).length
   const runningThreads = threads.filter((t) => BUSY.has(status[t.id] ?? ''))
@@ -132,11 +137,11 @@ export function WorkspaceDock() {
   const gapCount = assistantSnapshot?.gaps.length ?? 0
   const updateAvailable = ['available', 'downloading', 'ready', 'installing'].includes(updateStatus?.state ?? '')
   const updateBusy = updateStatus?.state === 'checking'
-  const threadAgentTree = useMemo(() => thread ? buildThreadAgentTree(thread) : null, [thread])
+  const threadAgentTree = useMemo(() => thread ? buildThreadAgentTree(thread) : null, [thread, tx])
   const threadSubAgentCount = threadAgentTree ? countThreadAgentNodes(threadAgentTree) : 0
-  const threadAgentStats = useMemo(() => thread ? threadAgentDiffStats(thread) : new Map<string, DiffStats>(), [thread])
-  const roomAgentTree = useMemo(() => room ? buildRoomAgentTree(room) : [], [room])
-  const roomSubAgentCount = useMemo(() => roomAgentTree.reduce((sum, node) => sum + countRoomAgentNodes(node), 0), [roomAgentTree])
+  const threadAgentStats = useMemo(() => thread ? threadAgentDiffStats(thread) : new Map<string, DiffStats>(), [thread, tx])
+  const roomAgentTree = useMemo(() => room ? buildRoomAgentTree(room) : [], [room, tx])
+  const roomSubAgentCount = useMemo(() => roomAgentTree.reduce((sum, node) => sum + countRoomAgentNodes(node), 0), [roomAgentTree, tx])
   const subAgentCount = threadSubAgentCount || roomSubAgentCount
 
   useEffect(() => {
@@ -179,13 +184,13 @@ export function WorkspaceDock() {
 
   const commit = async () => {
     if (!cwd || !git?.files.length || remote) return
-    const msg = prompt('Commit message', thread?.goal || thread?.title || 'TensorFold changes')
+    const msg = prompt(tx("Commit message"), thread?.goal || thread?.title || tx("TensorFold changes"))
     if (!msg) return
     try {
       await api.commit(cwd, msg, workspace)
       setRefresh((n) => n + 1)
     } catch (e: any) {
-      alert(e?.message ?? 'Commit blocked by Git hygiene.')
+      alert(e?.message ?? tx("Commit blocked by Git hygiene."))
     }
   }
 
@@ -194,9 +199,9 @@ export function WorkspaceDock() {
     setWtBusy(true); setWtError(null)
     try {
       const r = await api.checkoutBranch({ cwd, workspace, branch })
-      if (!r.ok) { setWtError(r.error || 'Could not switch branch'); return }
+      if (!r.ok) { setWtError(r.error || tx("Could not switch branch")); return }
       setRefresh((n) => n + 1)
-    } catch (e: any) { setWtError(e?.message || 'Could not switch branch') }
+    } catch (e: any) { setWtError(e?.message || tx("Could not switch branch")) }
     finally { setWtBusy(false) }
   }
 
@@ -213,27 +218,27 @@ export function WorkspaceDock() {
     setWtBusy(true); setWtError(null)
     try {
       const r = await api.createWorktree({ cwd, workspace, name, mode })
-      if (!r.ok) { setWtError(r.error || 'Could not create feature'); return }
+      if (!r.ok) { setWtError(r.error || tx("Could not create feature")); return }
       setFeatureName('')
       if (mode === 'worktree' && r.path && thread) {
         await setThreadWorkspace(thread.id, null, r.path)
         setWtOpen(false)
       }
       setRefresh((n) => n + 1)
-    } catch (e: any) { setWtError(e?.message || 'Could not create feature') }
+    } catch (e: any) { setWtError(e?.message || tx("Could not create feature")) }
     finally { setWtBusy(false) }
   }
 
   const undoLastTurn = async () => {
     if (!thread || !cwd || cpBusy) return
-    if (!confirm('Revert the file changes from the last agent turn? This restores the workspace to before that turn — the conversation is kept.')) return
+    if (!confirm(tx("Revert the file changes from the last agent turn? This restores the workspace to before that turn — the conversation is kept."))) return
     setCpBusy(true); setCpError(null); setCpNotice(null); setCpDiff(null)
     try {
       const r = await api.checkpointUndoLast({ threadId: thread.id })
-      if (!r.ok) { setCpError(r.error || 'Nothing to undo.'); return }
+      if (!r.ok) { setCpError(r.error || tx("Nothing to undo.")); return }
       setCpNotice(r.warning ?? null)
       setRefresh((n) => n + 1)
-    } catch (e: any) { setCpError(e?.message || 'Could not undo the last turn.') }
+    } catch (e: any) { setCpError(e?.message || tx("Could not undo the last turn.")) }
     finally { setCpBusy(false) }
   }
 
@@ -243,9 +248,9 @@ export function WorkspaceDock() {
     setCpBusy(true); setCpError(null)
     try {
       const r = await api.checkpointDiffLast({ threadId: thread.id })
-      if (!r.ok) { setCpError(r.error || 'No turn to diff.'); return }
+      if (!r.ok) { setCpError(r.error || tx("No turn to diff.")); return }
       setCpDiff(r.diff?.trim() ? r.diff : '(no file changes in the last turn)')
-    } catch (e: any) { setCpError(e?.message || 'Could not load the turn diff.') }
+    } catch (e: any) { setCpError(e?.message || tx("Could not load the turn diff.")) }
     finally { setCpBusy(false) }
   }
 
@@ -256,28 +261,28 @@ export function WorkspaceDock() {
   return (
     <aside className="no-drag fixed right-3 top-[66px] z-50 max-h-[calc(100vh-78px)] w-[282px] max-w-[calc(100vw-24px)] overflow-y-auto overflow-x-hidden rounded-xl border border-line bg-card shadow-pop scroll-thin sm:right-[52px] sm:max-w-[calc(100vw-64px)]">
       <div className="flex items-center gap-2 border-b border-line px-3 py-2.5">
-        <span className="text-[13px] font-semibold text-ink">Workspace</span>
+        <span className="text-[13px] font-semibold text-ink">{tx("Workspace")}</span>
         <span className="min-w-0 flex-1 truncate text-[13px] text-ink-3">{projectName || workspaceLabel(cwd)}</span>
-        <button onClick={() => setOpen(false)} className="flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label="Close workspace dock">
+        <button onClick={() => setOpen(false)} className="flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label={tx("Close workspace dock")}>
           <Icon name="x" size={13} />
         </button>
       </div>
 
-      <Section title="Environment">
-        <DockRow icon="file" label="Changes" value={git ? (git.files.length ? `${git.files.length} files` : 'clean') : 'checking'} accent={git && git.files.length > 0} />
+      <Section title={tx("Environment")}>
+        <DockRow icon="file" label={tx("Changes")} value={git ? (git.files.length ? `${git.files.length} files` : 'clean') : 'checking'} accent={git && git.files.length > 0} />
         {room ? (
-          <DockRow icon={roomHasCloud ? 'globe' : 'cpu'} label={roomHasCloud ? 'Mixed' : 'Local'} value={roomModels.length ? `${roomModels.length} model${roomModels.length === 1 ? '' : 's'}` : 'No seats'} />
+          <DockRow icon={roomHasCloud ? 'globe' : 'cpu'} label={roomHasCloud ? tx("Mixed") : tx("Local")} value={roomModels.length ? `${roomModels.length} model${roomModels.length === 1 ? '' : 's'}` : 'No seats'} />
         ) : (
-          <DockRow icon={provider?.kind === 'local' ? 'cpu' : 'globe'} label={provider?.kind === 'local' ? 'Local' : 'Frontier'} value={model || 'No model'} />
+          <DockRow icon={provider?.kind === 'local' ? 'cpu' : 'globe'} label={provider?.kind === 'local' ? tx("Local") : tx("Frontier")} value={model || 'No model'} />
         )}
         <button
           onClick={() => setWtOpen((v) => !v)}
           className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-ink-5"
         >
           <Icon name="branch" size={13} className="text-ink-3" />
-          <span className="text-[13px] text-ink-3">Branch</span>
+          <span className="text-[13px] text-ink-3">{tx("Branch")}</span>
           <span className="ml-auto flex min-w-0 items-center gap-1">
-            <span className="truncate text-[13px] font-medium text-ink">{git?.branch || wt?.current || 'no branch'}</span>
+            <span className="truncate text-[13px] font-medium text-ink">{git?.branch || wt?.current || tx("no branch")}</span>
             <Icon name="chevronDown" size={12} className={clsx('text-ink-4 transition-transform', wtOpen && 'rotate-180')} />
           </span>
         </button>
@@ -285,7 +290,7 @@ export function WorkspaceDock() {
           <div className="mb-1 mt-1 space-y-2 rounded-lg border border-line bg-card-2 p-2">
             {wtError && <div className="rounded-md bg-danger/10 px-2 py-1 text-[12px] leading-snug text-danger">{wtError}</div>}
             <div>
-              <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">Branches</div>
+              <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">{tx("Branches")}</div>
               {wt?.branches.length ? (
                 <div className="scroll-thin max-h-32 space-y-0.5 overflow-y-auto">
                   {wt.branches.map((b) => {
@@ -303,11 +308,11 @@ export function WorkspaceDock() {
                     )
                   })}
                 </div>
-              ) : <div className="px-1.5 py-1 text-[12px] text-ink-4">{wtBusy ? 'Loading…' : 'No branches'}</div>}
+              ) : <div className="px-1.5 py-1 text-[12px] text-ink-4">{wtBusy ? tx("Loading…") : tx("No branches")}</div>}
             </div>
             {wt && wt.worktrees.length > 1 && (
               <div>
-                <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">Worktrees</div>
+                <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">{tx("Worktrees")}</div>
                 <div className="scroll-thin max-h-32 space-y-0.5 overflow-y-auto">
                   {wt.worktrees.map((w) => {
                     const here = w.path === cwd
@@ -320,8 +325,8 @@ export function WorkspaceDock() {
                         className={clsx('flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[13px] transition-colors disabled:cursor-default', here ? 'text-ink' : 'text-ink-2 hover:bg-ink-5')}
                       >
                         <Icon name={here ? 'check' : 'folder'} size={11} className={here ? 'text-accent' : 'text-ink-4'} />
-                        <span className="flex-1 truncate">{w.branch || (w.detached ? 'detached' : basename(w.path))}</span>
-                        {here && <span className="text-[11px] text-ink-4">here</span>}
+                        <span className="flex-1 truncate">{w.branch || (w.detached ? tx("detached") : basename(w.path))}</span>
+                        {here && <span className="text-[11px] text-ink-4">{tx("here")}</span>}
                       </button>
                     )
                   })}
@@ -329,31 +334,29 @@ export function WorkspaceDock() {
               </div>
             )}
             <div className="border-t border-line pt-2">
-              <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">New feature</div>
+              <div className="mb-1 px-1 text-[12px] font-semibold uppercase tracking-wide text-ink-4">{tx("New feature")}</div>
               <input
                 value={featureName}
                 onChange={(e) => setFeatureName(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter' && featureName.trim() && !remote) createFeature('worktree') }}
-                placeholder="feature name"
+                placeholder={tx("feature name")}
                 className="mb-1.5 w-full rounded-md border border-line bg-card px-2 py-1 text-[13px] text-ink placeholder:text-ink-4 focus:border-ink-3 focus:outline-none"
               />
               <div className="flex gap-1.5">
                 <button
                   onClick={() => createFeature('worktree')}
                   disabled={!featureName.trim() || wtBusy || remote}
-                  title={remote ? 'Worktrees are local-only for now — use Branch here.' : 'Create an isolated worktree (separate folder) and switch this chat to it.'}
+                  title={remote ? tx("Worktrees are local-only for now — use Branch here.") : tx("Create an isolated worktree (separate folder) and switch this chat to it.")}
                   className="flex flex-1 items-center justify-center gap-1 rounded-md bg-ink px-2 py-1.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
                 >
-                  <Icon name="plus" size={11} /> Create worktree
-                </button>
+                  <Icon name="plus" size={11} /> {tx("Create worktree")}</button>
                 <button
                   onClick={() => createFeature('branch')}
                   disabled={!featureName.trim() || wtBusy}
-                  title="Create the branch here and switch to it in place."
+                  title={tx("Create the branch here and switch to it in place.")}
                   className="flex flex-1 items-center justify-center gap-1 rounded-md border border-line px-2 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 disabled:opacity-40"
                 >
-                  <Icon name="branch" size={11} /> Branch here
-                </button>
+                  <Icon name="branch" size={11} /> {tx("Branch here")}</button>
               </div>
             </div>
           </div>
@@ -361,11 +364,11 @@ export function WorkspaceDock() {
         <button
           onClick={commit}
           disabled={!git?.files.length || remote}
-          title={remote ? 'Commit runs on the local repo — use the agent for remote workspaces.' : undefined}
+          title={remote ? tx("Commit runs on the local repo — use the agent for remote workspaces.") : undefined}
           className="mt-1 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-ink-2 transition-colors hover:bg-ink-5 disabled:opacity-45 disabled:hover:bg-transparent"
         >
           <Icon name="check" size={13} className="text-ink-3" />
-          <span className="flex-1">Commit or push</span>
+          <span className="flex-1">{tx("Commit or push")}</span>
           {git?.files.length ? <span className="font-mono text-[12px] text-positive">+{git.additions}</span> : null}
           {git?.files.length ? <span className="font-mono text-[12px] text-danger">-{git.deletions}</span> : null}
         </button>
@@ -375,21 +378,20 @@ export function WorkspaceDock() {
               <button
                 onClick={undoLastTurn}
                 disabled={cpBusy}
-                title="Restore the workspace to before the last agent turn. Only files are reverted — the conversation is kept."
+                title={tx("Restore the workspace to before the last agent turn. Only files are reverted — the conversation is kept.")}
                 className="flex flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left text-[13px] text-ink-2 transition-colors hover:bg-ink-5 disabled:opacity-45"
               >
                 <Icon name="back" size={13} className="text-ink-3" />
-                <span className="flex-1">Undo last agent turn</span>
-                <span className="font-mono text-[12px] text-ink-3">turn {cpTurns[cpTurns.length - 1]}</span>
+                <span className="flex-1">{tx("Undo last agent turn")}</span>
+                <span className="font-mono text-[12px] text-ink-3">{tx("turn ")}{cpTurns[cpTurns.length - 1]}</span>
               </button>
               <button
                 onClick={diffLastTurn}
                 disabled={cpBusy}
-                title="Show what the last agent turn changed."
+                title={tx("Show what the last agent turn changed.")}
                 className={clsx('flex h-7 items-center rounded-md px-2 text-[12px] font-medium transition-colors disabled:opacity-45', cpDiff !== null ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink-2')}
               >
-                Diff
-              </button>
+                {tx("Diff")}</button>
             </div>}
             {cpError && <p className="mt-1 px-1.5 text-[12px] text-danger">{cpError}</p>}
             {cpNotice && <p className="mt-1 px-1.5 text-[12px] text-ink-3">{cpNotice}</p>}
@@ -411,7 +413,7 @@ export function WorkspaceDock() {
       {room && (
         <>
           <Divider />
-          <Section title="Loop Mode">
+          <Section title={tx("Loop Mode")}>
             <LoopPanel cwd={cwd} source="room" surfaceId={room.id} projectId={room.projectId ?? null} />
           </Section>
         </>
@@ -420,62 +422,62 @@ export function WorkspaceDock() {
       {(thread || room) && (
         <>
           <Divider />
-          <Section title="Subagents" right={subAgentCount ? <Pill>{subAgentCount}</Pill> : undefined}>
+          <Section title={tx("Subagents")} right={subAgentCount ? <Pill>{subAgentCount}</Pill> : undefined}>
             {threadAgentTree && threadSubAgentCount > 0 ? (
               <ThreadDockAgentTreeView tree={threadAgentTree} stats={threadAgentStats} />
             ) : room && roomAgentTree.length > 0 ? (
               <RoomDockAgentTreeView tree={roomAgentTree} />
             ) : (
-              <div className="px-1 text-[13px] text-ink-4">No sub-agents yet.</div>
+              <div className="px-1 text-[13px] text-ink-4">{tx("No sub-agents yet.")}</div>
             )}
           </Section>
         </>
       )}
 
       <Divider />
-      <Section title="App update" right={updateStatus ? <Pill>{UPDATE_STATE_LABEL[updateStatus.state]}</Pill> : undefined}>
+      <Section title={tx("App update")} right={updateStatus ? <Pill>{UPDATE_STATE_LABEL[updateStatus.state]}</Pill> : undefined}>
         <DockRow
           icon={updateAvailable ? 'spark' : updateStatus?.state === 'error' ? 'warning' : 'check'}
-          label={updateAvailable ? `v${updateStatus?.latestVersion ?? ''}` : 'TensorFold'}
+          label={updateAvailable ? tx("v{value0}", { value0: updateStatus?.latestVersion ?? '' }) : "TensorFold"}
           value={updateStatus?.state === 'not_configured' ? 'feed not set' : updateStatus?.currentVersion ? `v${updateStatus.currentVersion}` : 'checking'}
           accent={updateAvailable || updateStatus?.state === 'error'}
         />
         {updateStatus?.releaseName && updateAvailable && <div className="mt-1 px-2 text-[13px] font-medium text-ink-2">{updateStatus.releaseName}</div>}
-        {updateAvailable && updateStatus?.integrity && <div className="mt-1 px-2 text-[12px] text-ink-4">Integrity: {updateStatus.integrity.replace(/_/g, ' ')}</div>}
-        {updateStatus?.error && <div className="mt-1 line-clamp-2 px-2 text-[13px] leading-snug text-danger">{updateStatus.error}</div>}
+        {updateAvailable && updateStatus?.integrity && <div className="mt-1 px-2 text-[12px] text-ink-4">{tx("Integrity: ")}{updateStatus.integrity.replace(/_/g, ' ')}</div>}
+        {updateStatus?.error && <div className="mt-1 line-clamp-2 px-2 text-[13px] leading-snug text-danger">{<OriginalDiagnostic>{updateStatus.error}</OriginalDiagnostic>}</div>}
         <button
           onClick={() => updateAvailable ? openUpdateModal() : checkForUpdates()}
           disabled={updateBusy}
           className="mt-1.5 flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-ink-2 transition-colors hover:bg-ink-5 disabled:opacity-45 disabled:hover:bg-transparent"
         >
           <Icon name={updateAvailable ? 'spark' : 'clock'} size={13} className="text-ink-3" />
-          <span className="flex-1">{updateAvailable ? 'View release notes' : updateBusy ? 'Checking...' : 'Check now'}</span>
+          <span className="flex-1">{updateAvailable ? tx("View release notes") : updateBusy ? tx("Checking...") : tx("Check now")}</span>
         </button>
       </Section>
 
       {room && (
         <>
           <Divider />
-          <Section title="Room" right={roomState ? <Pill>{ROOM_STATE_LABEL[roomState]}</Pill> : undefined}>
-            <DockRow icon="cpu" label="Seats" value={String(room.seats.length)} />
-            <DockRow icon="list" label="Tasks" value={`${openRoomTasks.length}/${roomTasks.length}`} accent={openRoomTasks.length > 0} />
-            <DockRow icon="message" label="Questions" value={String(roomQuestions.length)} accent={roomQuestions.length > 0} />
-            <DockRow icon="file" label="Files touched" value={String(roomFiles.length)} accent={roomFiles.length > 0} />
+          <Section title={tx("Room")} right={roomState ? <Pill>{ROOM_STATE_LABEL[roomState]}</Pill> : undefined}>
+            <DockRow icon="cpu" label={tx("Seats")} value={String(room.seats.length)} />
+            <DockRow icon="list" label={tx("Tasks")} value={`${openRoomTasks.length}/${roomTasks.length}`} accent={openRoomTasks.length > 0} />
+            <DockRow icon="message" label={tx("Questions")} value={String(roomQuestions.length)} accent={roomQuestions.length > 0} />
+            <DockRow icon="file" label={tx("Files touched")} value={String(roomFiles.length)} accent={roomFiles.length > 0} />
           </Section>
         </>
       )}
 
       <Divider />
-      <Section title="Assistant" right={assistantSnapshot?.pendingApprovals ? <Pill>{assistantSnapshot.pendingApprovals}</Pill> : undefined}>
-        <DockRow icon="plug" label="Connectors" value={connectorCount ? `${activeConnectors}/${connectorCount}` : 'checking'} accent={activeConnectors > 0} />
-        <DockRow icon="warning" label="Gaps" value={String(gapCount)} accent={gapCount > 0} />
-        <DockRow icon="check" label="Approvals" value={String(assistantSnapshot?.pendingApprovals ?? 0)} accent={(assistantSnapshot?.pendingApprovals ?? 0) > 0} />
+      <Section title={tx("Assistant")} right={assistantSnapshot?.pendingApprovals ? <Pill>{assistantSnapshot.pendingApprovals}</Pill> : undefined}>
+        <DockRow icon="plug" label={tx("Connectors")} value={connectorCount ? `${activeConnectors}/${connectorCount}` : 'checking'} accent={activeConnectors > 0} />
+        <DockRow icon="warning" label={tx("Gaps")} value={String(gapCount)} accent={gapCount > 0} />
+        <DockRow icon="check" label={tx("Approvals")} value={String(assistantSnapshot?.pendingApprovals ?? 0)} accent={(assistantSnapshot?.pendingApprovals ?? 0) > 0} />
       </Section>
 
       <Divider />
-      <Section title="Running" right={runningCount ? <Pill>{runningCount}</Pill> : undefined}>
+      <Section title={tx("Running")} right={runningCount ? <Pill>{runningCount}</Pill> : undefined}>
         {runningCount === 0 ? (
-          <div className="px-1 text-[13px] text-ink-4">Nothing running.</div>
+          <div className="px-1 text-[13px] text-ink-4">{tx("Nothing running.")}</div>
         ) : (
           <div className="space-y-1">
             {thread && currentStatus && BUSY.has(currentStatus) && <RunRow title={thread.title} detail={currentStatus} />}
@@ -487,12 +489,12 @@ export function WorkspaceDock() {
       </Section>
 
       <Divider />
-      <Section title="Plan" right={plan.length ? <Pill>{planDone}/{plan.length}</Pill> : undefined}>
+      <Section title={tx("Plan")} right={plan.length ? <Pill>{planDone}/{plan.length}</Pill> : undefined}>
         {thread?.goal && <div className="mb-2 rounded-lg bg-ink-5 px-2 py-1.5 text-[13px] font-medium leading-snug text-ink">{thread.goal}</div>}
         {plan.length === 0 ? (
           <div className="flex min-h-[74px] flex-col items-center justify-center rounded-lg border border-dashed border-line text-center">
             <Icon name="list" size={16} className="text-ink-4" />
-            <div className="mt-1 text-[13px] text-ink-4">No plan yet</div>
+            <div className="mt-1 text-[13px] text-ink-4">{tx("No plan yet")}</div>
           </div>
         ) : (
           <div className="space-y-1.5">
@@ -507,9 +509,9 @@ export function WorkspaceDock() {
       </Section>
 
       <Divider />
-      <Section title="Sources" right={sources.length ? <Pill>{sources.length}</Pill> : undefined}>
+      <Section title={tx("Sources")} right={sources.length ? <Pill>{sources.length}</Pill> : undefined}>
         {sources.length === 0 ? (
-          <div className="px-1 text-[13px] text-ink-4">No sources yet</div>
+          <div className="px-1 text-[13px] text-ink-4">{tx("No sources yet")}</div>
         ) : (
           <div className="space-y-1">
             {sources.map((source) => (
@@ -526,6 +528,7 @@ export function WorkspaceDock() {
 }
 
 function Section({ title, right, children }: { title: string; right?: React.ReactNode; children: React.ReactNode }) {
+  const tx = useAuthoredText()
   return (
     <div className="px-3 py-3">
       <div className="mb-2 flex items-center justify-between gap-2">
@@ -538,14 +541,17 @@ function Section({ title, right, children }: { title: string; right?: React.Reac
 }
 
 function Divider() {
+  const tx = useAuthoredText()
   return <div className="border-t border-line" />
 }
 
 function Pill({ children }: { children: React.ReactNode }) {
+  const tx = useAuthoredText()
   return <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] font-medium text-ink-3">{children}</span>
 }
 
 function DockRow({ icon, label, value, accent }: { icon: IconName; label: string; value: string; accent?: boolean | null }) {
+  const tx = useAuthoredText()
   return (
     <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px]">
       <Icon name={icon} size={13} className="shrink-0 text-ink-3" />
@@ -556,6 +562,7 @@ function DockRow({ icon, label, value, accent }: { icon: IconName; label: string
 }
 
 function RunRow({ title, detail }: { title: string; detail: string }) {
+  const tx = useAuthoredText()
   return (
     <div className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-[13px]">
       <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" />
@@ -595,17 +602,18 @@ const AGENT_STATUS_TEXT: Record<AgentStatus, string> = {
 }
 
 const AGENT_STATUS_LABEL: Record<AgentStatus, string> = {
-  idle: 'idle',
-  queued: 'queued',
-  running: 'working',
-  active: 'working',
-  succeeded: 'done',
-  done: 'done',
-  failed: 'failed',
-  cancelled: 'stopped',
+  get idle() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "idle") },
+  get queued() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "queued") },
+  get running() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "working") },
+  get active() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "working") },
+  get succeeded() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "done") },
+  get done() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "done") },
+  get failed() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "failed") },
+  get cancelled() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "stopped") },
 }
 
 function ThreadDockAgentTreeView({ tree, stats }: { tree: ThreadAgentTreeNode; stats: Map<string, DiffStats> }) {
+  const tx = useAuthoredText()
   return (
     <div className="space-y-1">
       <ThreadDockAgentRow node={tree} stats={stats} />
@@ -614,6 +622,7 @@ function ThreadDockAgentTreeView({ tree, stats }: { tree: ThreadAgentTreeNode; s
 }
 
 function ThreadDockAgentRow({ node, stats }: { node: ThreadAgentTreeNode; stats: Map<string, DiffStats> }) {
+  const tx = useAuthoredText()
   const nodeStats = stats.get(node.id) ?? (node.eventId ? stats.get(node.eventId) : undefined)
   return (
     <div className="min-w-0">
@@ -635,8 +644,9 @@ function ThreadDockAgentRow({ node, stats }: { node: ThreadAgentTreeNode; stats:
 }
 
 function RoomDockAgentTreeView({ tree }: { tree: RoomAgentTreeNode[] }) {
+  const tx = useAuthoredText()
   const visible = tree.filter((node) => node.children.length > 0 || node.status !== 'idle')
-  if (visible.length === 0) return <div className="px-1 text-[13px] text-ink-4">No sub-agents yet.</div>
+  if (visible.length === 0) return <div className="px-1 text-[13px] text-ink-4">{tx("No sub-agents yet.")}</div>
   return (
     <div className="space-y-1">
       {visible.map((node) => <RoomDockAgentRow key={node.id} node={node} />)}
@@ -645,6 +655,7 @@ function RoomDockAgentTreeView({ tree }: { tree: RoomAgentTreeNode[] }) {
 }
 
 function RoomDockAgentRow({ node }: { node: RoomAgentTreeNode }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0">
       <AgentRowShell
@@ -678,6 +689,7 @@ function AgentRowShell({
   stats?: DiffStats
   prominent?: boolean
 }) {
+  const tx = useAuthoredText()
   return (
     <div className={clsx('flex min-w-0 items-start gap-2 rounded-lg px-2 py-1.5', prominent ? 'bg-card-2/70' : 'hover:bg-ink-5')}>
       <span className={clsx('mt-[7px] h-2 w-2 shrink-0 rounded-sm', AGENT_STATUS_DOT[status], (status === 'running' || status === 'active') && 'animate-pulse')} />

@@ -7,7 +7,6 @@ import { formatName } from './cli'
 import { isRepoId } from './paths'
 
 const STATE_LIMIT = 2 * 1024 * 1024
-// The native engine reads checkpoint metadata well above this cap; the limit only guards the scan's bounded read loop.
 const JSON_LIMIT = 64 * 1024 * 1024
 const DEFAULT_LIMITS = { directories: 512, entries: 12_000, models: 256, depth: 4, metadataBytes: 256 * 1024 * 1024, durationMs: 15_000 }
 const INVALID = 'The local model library is invalid. Preserve its settings and repair them before scanning or loading models.'
@@ -219,7 +218,6 @@ export class ModelLibrary {
   }
 
   private async inspect(root: Root, directory: string, rawNames: string[], caps: EngineCapabilities, budget: ScanBudget, repo: string | null = null, revision: string | null = null, blobRoot: string | null = null): Promise<{ model: EngineLibraryModel; fingerprint: string }> {
-    // AppleDouble companions (._file) hold resource forks, never checkpoint assets, so drop them before inspection.
     const names = rawNames.filter((name) => !name.startsWith('._'))
     const model: EngineLibraryModel = { id: `local/${digest(directory)}`, repo, title: repo ?? path.basename(directory), path: directory, source: blobRoot ? 'huggingface' : 'folder', folderId: root.id, revision, modelType: null, format: null, complete: false, compatible: false, loadable: false, reason: null, weightsBytes: null, memoryFloorBytes: null, fitsMemory: null }
     let fingerprint = directory

@@ -1,3 +1,5 @@
+import { isManagedComputeProvider } from '../../shared/provider-trust'
+import { fetchManagedCompute } from './managed-compute-transport'
 import type { Provider } from './types'
 import {
   resolveConnectorRequest,
@@ -17,6 +19,10 @@ function requestUrl(input: Parameters<typeof fetch>[0]): string {
 
 export function createProviderFetch(provider: Provider, fetchImpl: typeof fetch = fetch, assertRequestAllowed?: () => void): typeof fetch {
   return (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    if (isManagedComputeProvider(provider)) {
+      if (typeof input !== 'string' && !(input instanceof URL)) throw new Error('Managed compute requests require the explicit app-owned URL and request body.')
+      return fetchManagedCompute(provider, requestUrl(input), init ?? {}, assertRequestAllowed)
+    }
     const target = await resolveProviderRequest(provider, requestUrl(input))
     assertRequestAllowed?.()
     return createPinnedFetch(target, fetchImpl)(input, init)

@@ -17,7 +17,7 @@ export function makeDiscordSource(label: string, now = Date.now()): DiscordConne
     label: label || 'Discord server',
     token: '',
     allowedChannels: '',
-    enabled: true,
+    enabled: false,
     lastSyncAt: null,
     lastError: null,
     createdAt: now,
@@ -45,11 +45,11 @@ export async function verifyDiscordToken(token: string, deps: ConnectorHttpDeps 
 export async function listDiscordChannels(token: string, deps: ConnectorHttpDeps = {}): Promise<DiscordChannel[]> {
   const out: DiscordChannel[] = []
   const { response: guildsRes, json: guildData } = await discordJson(`${DISCORD_API}/users/@me/guilds`, { headers: authHeaders(token) }, deps)
-  if (!guildsRes.ok) return out
+  if (!guildsRes.ok) throw new Error(`Discord could not list servers (${guildsRes.status}); check the bot token and permissions.`)
   const guilds = Array.isArray(guildData) ? guildData : []
   for (const guild of guilds) {
     const { response: chRes, json: channelData } = await discordJson(`${DISCORD_API}/guilds/${guild.id}/channels`, { headers: authHeaders(token) }, deps)
-    if (!chRes.ok) continue
+    if (!chRes.ok) throw new Error(`Discord could not list server channels (${chRes.status}); check View Channels permission.`)
     const channels = Array.isArray(channelData) ? channelData : []
     // Type 0 = text channel. Threads are fetched separately via active threads.
     for (const ch of channels) {
@@ -72,11 +72,14 @@ export async function listDiscordChannels(token: string, deps: ConnectorHttpDeps
 // (more than 50 messages) is retrieved in full rather than truncated to the newest 50 — the
 // cursor can only dedupe what WAS fetched, it can't recover messages Discord never returned.
 export async function fetchDiscordMessages(source: DiscordConnectorSettings['sources'][number], deps: ConnectorHttpDeps = {}): Promise<DiscordReadResult[]> {
+  if (!source.enabled) throw new Error('Discord connection is disconnected.')
   const validation = validateDiscordSource(source)
   if (validation) throw new Error(validation)
+  if (!source.allowedChannels?.trim()) return []
   const token = source.token!.trim()
   const channels = await listDiscordChannels(token, deps)
   const visible = filterChannels(channels, source.allowedChannels)
+  if (source.allowedChannels.trim() !== '*' && !visible.length) throw new Error('None of the selected Discord channels are available; check the bot installation and channel permissions.')
   const out: DiscordReadResult[] = []
   for (const channel of visible) {
     const target = channel.threadId ?? channel.id
@@ -93,6 +96,7 @@ export async function fetchDiscordMessages(source: DiscordConnectorSettings['sou
 
 // Read one message (+ its thread context if it's in a thread).
 export async function readDiscordMessage(source: DiscordConnectorSettings['sources'][number], channelId: string, messageId: string, deps: ConnectorHttpDeps = {}): Promise<DiscordReadResult | null> {
+  await ensureDiscordChannelAllowed(source, channelId, deps)
   const token = source.token!.trim()
   const { response: res, json: m } = await discordJson(`${DISCORD_API}/channels/${channelId}/messages/${messageId}`, { headers: authHeaders(token) }, deps)
   if (!res.ok) return null
@@ -104,20 +108,23 @@ export async function readDiscordMessage(source: DiscordConnectorSettings['sourc
 // Send a message to a channel, or reply to a specific message (Discord reply).
 // The allowedChannels allowlist scopes which channels this source may touch. It was enforced
 // on reads (filterChannels) but NOT on sends, so a send/reply could target ANY channel.
-// Synchronous fast-path: true when there is no allowlist or the channel id is explicitly
+// Synchronous fast-path: true with an explicit * or when the channel id is explicitly
 // listed. Anything else (incl. a name-based allowlist) returns false and the caller must
 // resolve names -> ids before allowing — a name-only allowlist must NOT be permissive, or the
 // agent can harvest a restricted channel's id and post to it.
 export function isDiscordChannelAllowed(allowed: string | undefined, channelId: string): boolean {
   const raw = allowed?.trim()
-  if (!raw) return true
+  if (raw === '*') return true
+  if (!raw) return false
   const entries = raw.split(/[\s,;]+/).map((s) => s.replace(/^#/, '').trim().toLowerCase()).filter(Boolean)
   return entries.includes(channelId.trim().toLowerCase())
 }
 
 // Enforce the allowlist on the WRITE path, resolving channel NAMES to ids when needed.
 async function ensureDiscordChannelAllowed(source: DiscordConnectorSettings['sources'][number], channelId: string, deps: ConnectorHttpDeps = {}): Promise<void> {
-  if (isDiscordChannelAllowed(source.allowedChannels, channelId)) return // no allowlist or id listed
+  if (!source.enabled) throw new Error('Discord connection is disconnected.')
+  if (!source.allowedChannels?.trim()) throw new Error('Choose allowed Discord channels before reading or sending messages.')
+  if (isDiscordChannelAllowed(source.allowedChannels, channelId)) return
   // Resolve the allowed set (handles name-based allowlists; filterChannels matches id OR name)
   // and require membership. Fail closed: if the channel list can't be fetched, reject.
   const channels = await listDiscordChannels(source.token!.trim(), deps)
@@ -167,7 +174,8 @@ function authHeaders(token: string): Record<string, string> {
 
 function filterChannels(channels: DiscordChannel[], allowed: string | undefined): DiscordChannel[] {
   const raw = allowed?.trim()
-  if (!raw) return channels
+  if (raw === '*') return channels
+  if (!raw) return []
   const allow = new Set(raw.split(/[\s,;]+/).map((s) => s.replace(/^#/, '').trim().toLowerCase()).filter(Boolean))
   return channels.filter((c) => allow.has(c.id.toLowerCase()) || allow.has(c.name.toLowerCase()))
 }
@@ -183,27 +191,31 @@ async function channelMessages(token: string, channelId: string, limit: number, 
   const params = new URLSearchParams({ limit: String(limit) })
   if (after) params.set('after', after)
   const { response: res, json } = await discordJson(`${DISCORD_API}/channels/${channelId}/messages?${params.toString()}`, { headers: authHeaders(token) }, deps)
-  if (!res.ok) return []
+  if (!res.ok) throw new Error(`Discord could not read channel history (${res.status}); check View Channels, Read Message History and Message Content Intent.`)
   return Array.isArray(json) ? json : []
 }
 
 // Fetch all messages newer than `after` (a Discord snowflake id), paginating forward with
-// after=<last-seen id> until a page returns fewer than MESSAGES_PAGE_SIZE messages (exhausted)
+// after=<greatest seen id> until a page returns fewer than MESSAGES_PAGE_SIZE messages (exhausted)
 // or MAX_PAGES_PER_SYNC is hit. With no `after`, this is a single bounded fetch of the newest
 // MESSAGES_PAGE_SIZE messages — the existing full-resync behaviour is unchanged.
 async function channelMessagesSince(token: string, channelId: string, after: string | null, deps: ConnectorHttpDeps): Promise<any[]> {
   if (!after) return channelMessages(token, channelId, MESSAGES_PAGE_SIZE, null, deps)
+  if (!/^\d{1,20}$/.test(after)) throw new Error('Discord history cursor is invalid; reconnect this source before reading history.')
   const out: any[] = []
   let cursor = after
   for (let page = 0; page < MAX_PAGES_PER_SYNC; page++) {
-    // after= returns messages ascending (oldest of the new batch first), so the last item
-    // of each page is the new high-water mark to page forward from.
+    // Discord returns newest-to-oldest, including after= pages; never advance to the
+    // last/oldest item or coerce a snowflake to Number, which loses integer precision.
     const batch = await channelMessages(token, channelId, MESSAGES_PAGE_SIZE, cursor, deps)
     if (!batch.length) break
-    out.push(...batch)
-    const lastId = batch[batch.length - 1]?.id
-    if (!lastId || lastId === cursor) break // defensive: no progress, avoid an infinite loop
-    cursor = lastId
+    const fresh = batch.filter((message) => {
+      if (typeof message?.id !== 'string' || !/^\d{1,20}$/.test(message.id)) throw new Error('Discord returned an invalid message ID; history was not advanced.')
+      return BigInt(message.id) > BigInt(cursor)
+    })
+    if (!fresh.length) break
+    out.push(...fresh)
+    cursor = fresh.reduce((greatest, message) => BigInt(message.id) > BigInt(greatest) ? message.id : greatest, cursor)
     if (batch.length < MESSAGES_PAGE_SIZE) break // fewer than a full page => no more messages
   }
   return out

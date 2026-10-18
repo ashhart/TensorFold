@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useState } from 'react'
 import { MarkdownLink } from '../../lib/markdown-link'
 import { cortheonSummary } from '../../lib/turn-stats-line'
@@ -5,6 +6,7 @@ import type { AssistantTurnStats } from '../../lib/types'
 
 // Under an answer the built-in engine shaped with Cortheon: what it searched and read, with its sources.
 export function CortheonNote({ stats }: { stats: AssistantTurnStats }) {
+  const tx = useAuthoredText()
   const [open, setOpen] = useState(false)
   const summary = cortheonSummary(stats)
   if (!summary) return null
@@ -18,7 +20,7 @@ export function CortheonNote({ stats }: { stats: AssistantTurnStats }) {
         aria-expanded={sources.length ? open : undefined}
         className="rounded-sm text-info-ink/80 enabled:hover:text-info-ink disabled:cursor-default focus-visible:outline-2 focus-visible:outline-accent"
       >
-        {summary}{sources.length > 0 && ` · ${sources.length} source${sources.length === 1 ? '' : 's'}`}
+        {summary}{sources.length > 0 && tx(" · Sources: {count}", { count: sources.length })}
       </button>
       {open && sources.length > 0 && (
         <ul className="mt-1.5 space-y-1">

@@ -35,8 +35,8 @@ export const ONBOARDING_STEPS = [
   {
     id: 'guide',
     label: 'Get started',
-    title: 'A few things before you start',
-    desc: 'Your model and tools stay in reach. Here is where to find them.',
+    title: 'Make a useful start',
+    desc: 'Review model readiness and choose your next action. Nothing is sent during setup.',
     icon: 'spark',
   },
 ] as const satisfies ReadonlyArray<{

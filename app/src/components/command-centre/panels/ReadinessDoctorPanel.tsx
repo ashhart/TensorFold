@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import type { DoctorCheck, DoctorSummary } from '../../../lib/readiness-doctor'
 import { Button } from '../../ui'
@@ -14,6 +15,7 @@ interface ReadinessDoctorPanelProps {
 }
 
 export function ReadinessDoctorPanel(props: ReadinessDoctorPanelProps) {
+  const tx = useAuthoredText()
   const { readinessChecks, readinessSummary, readinessTone, refreshReadiness, openReadinessSettings } = props
 
   const readinessIssues = readinessChecks
@@ -39,17 +41,17 @@ export function ReadinessDoctorPanel(props: ReadinessDoctorPanelProps) {
   const readinessStatusLabel = (status: DoctorCheck['status']) => status === 'error' ? 'Blocked' : status === 'warning' ? 'Review' : status === 'checking' ? 'Checking' : 'Ready'
 
   return (
-    <Panel title="Readiness Doctor" icon="check" action={readinessLabel}>
+    <Panel title={tx("Readiness Doctor")} icon="check" action={readinessLabel}>
       <div className="space-y-3 px-3 py-3">
         <div className="grid grid-cols-4 gap-px overflow-hidden rounded-lg border border-line bg-line">
-          <RunStat label="Ready" value={readinessSummary.ok} tone="good" />
-          <RunStat label="Review" value={readinessSummary.warning} tone={readinessSummary.warning ? 'high' : 'good'} />
-          <RunStat label="Blocked" value={readinessSummary.error} tone={readinessSummary.error ? 'critical' : 'good'} />
-          <RunStat label="Checking" value={readinessSummary.checking} tone={readinessSummary.checking ? 'low' : 'good'} />
+          <RunStat label={tx("Ready")} value={readinessSummary.ok} tone="good" />
+          <RunStat label={tx("Review")} value={readinessSummary.warning} tone={readinessSummary.warning ? 'high' : 'good'} />
+          <RunStat label={tx("Blocked")} value={readinessSummary.error} tone={readinessSummary.error ? 'critical' : 'good'} />
+          <RunStat label={tx("Checking")} value={readinessSummary.checking} tone={readinessSummary.checking ? 'low' : 'good'} />
         </div>
 
         {readinessIssues.length === 0 ? (
-          <EmptyState icon="check" title="All systems ready" detail="Providers, connectors, remote control, terminals, and security checks are passing." />
+          <EmptyState icon="check" title={tx("All systems ready")} detail="Providers, connectors, remote control, terminals, and security checks are passing." />
         ) : (
           <div className="divide-y divide-line rounded-lg border border-line">
             {readinessIssues.map((check) => {
@@ -78,9 +80,9 @@ export function ReadinessDoctorPanel(props: ReadinessDoctorPanelProps) {
         )}
 
         <div className="flex items-center gap-2">
-          <span className="min-w-0 flex-1 truncate text-[13px] text-ink-4">{readinessSummary.total} checks tracked</span>
-          <Button variant="ghost" size="xs" icon="refresh" onClick={refreshReadiness}>Refresh</Button>
-          <Button variant={readinessTone === 'critical' || readinessTone === 'high' ? 'default' : 'ghost'} size="xs" icon="settings" onClick={openReadinessSettings}>Full doctor</Button>
+          <span className="min-w-0 flex-1 truncate text-[13px] text-ink-4">{readinessSummary.total} {tx("checks tracked")}</span>
+          <Button variant="ghost" size="xs" icon="refresh" onClick={refreshReadiness}>{tx("Refresh")}</Button>
+          <Button variant={readinessTone === 'critical' || readinessTone === 'high' ? 'default' : 'ghost'} size="xs" icon="settings" onClick={openReadinessSettings}>{tx("Full doctor")}</Button>
         </div>
       </div>
     </Panel>

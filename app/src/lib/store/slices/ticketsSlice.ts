@@ -53,7 +53,7 @@ export const ticketsSlice: Slice = (set, get) => ({
       if (!ticket) return
       const remoteHostId = owningRemoteHostIdForTicket(st, ticket)
       if (!remoteHostId) {
-        set({ notice: { kind: 'error', message: 'This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode.' } })
+        set({ notice: { kind: 'error', message: 'This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode.', authored: true } })
         return
       }
       try {

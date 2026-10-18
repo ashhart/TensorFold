@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "เรียกเซสชัน Codex CLI เทอร์มินัลที่ทำต่อได้ และงานโค้ดที่ยืนยันตัวตนด้วย OAuth",
+  "Runs Claude Code through your local Claude account and permission surface.": "เรียก Claude Code ผ่านบัญชี Claude ในเครื่องและระบบสิทธิ์ของบัญชีนั้น",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "Cursor Agent CLI เป็นตัวเลือกสำหรับเซสชันโค้ดแบบ ACP หรือไม่มีหน้าต่าง",
+  "Gemini CLI candidate for code and research sessions.": "Gemini CLI เป็นตัวเลือกสำหรับเซสชันโค้ดและค้นคว้า",
+  "Grok CLI candidate for xAI coding sessions.": "Grok CLI เป็นตัวเลือกสำหรับเซสชันโค้ด xAI",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode CLI เป็นตัวเลือกสำหรับเซสชันโค้ดที่เข้ากับ OpenCode",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "Kilo CLI เป็นตัวเลือกสำหรับเซสชันโค้ดที่เข้ากับ OpenCode",
+  "Pi coding-agent harness for terminal-based agent sessions.": "ตัวเรียกเอเจนต์โค้ด Pi สำหรับเซสชันเอเจนต์ผ่านเทอร์มินัล",
+  "Broken": "ขัดข้อง",
+  "Not found on PATH or the configured path": "ไม่พบใน PATH หรือเส้นทางที่ตั้งไว้",
+  "--version printed no version": "--version ไม่แสดงเวอร์ชัน"
+}

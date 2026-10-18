@@ -22,9 +22,9 @@ export function parseLearningGraph(value: unknown): EngineLearningGraph {
   const finite = (v: any) => typeof v === 'number' && Number.isFinite(v)
   const text = (v: any, max = 8192) => typeof v === 'string' && v.length <= max ? v : ''
   const facts: EngineLearningFact[] = doc.facts.map((f: any) => {
-    if (!f || !integer(f.id) || !text(f.text) || !integer(f.at) || !['queued', 'learning', 'learned', 'missed', 'replaced'].includes(f.state)) throw new Error('The engine returned an invalid learning fact.')
+    if (!f || !integer(f.id) || !text(f.text) || !integer(f.at) || !['queued', 'learning', 'learned', 'missed', 'replaced', 'deleting', 'deleted'].includes(f.state)) throw new Error('The engine returned an invalid learning fact.')
     const out: EngineLearningFact = { id: f.id, text: f.text, source: text(f.source, 200), at: f.at, state: f.state, links: numbers(f.links, 4096) }
-    for (const key of ['round', 'checks', 'since', 'step', 'of'] as const) if (integer(f[key])) out[key] = f[key]
+    for (const key of ['round', 'checks', 'since', 'step', 'of', 'deleted'] as const) if (integer(f[key])) out[key] = f[key]
     if (typeof f.recalled === 'boolean') out.recalled = f.recalled
     if (finite(f.loss)) out.loss = f.loss
     if (text(f.message)) out.message = f.message

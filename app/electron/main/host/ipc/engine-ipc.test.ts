@@ -26,7 +26,7 @@ for (const bad of [{ path: '/tmp/model' }, { includeHuggingFace: 'yes' }, [], '/
 // Every channel goes through handle() with a role check; delete needs the owner role.
 const source = readFileSync(path.join(__dirname, 'engine-ipc.ts'), 'utf8')
 const channels = [...source.matchAll(/handle\('(engine:[A-Za-z]+)'/g)].map((m) => m[1])
-assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:setCortheon', 'engine:learning', 'engine:setLearning', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
+assert.deepEqual(channels, ['engine:snapshot', 'engine:connection', 'engine:refresh', 'engine:search', 'engine:preflight', 'engine:pull', 'engine:cancelPull', 'engine:load', 'engine:compareModels', 'engine:comparisonStatus', 'engine:cancelComparison', 'engine:tryModel', 'engine:cancelTryModel', 'engine:setCortheon', 'engine:learning', 'engine:setLearning', 'engine:teach', 'engine:cancelTeach', 'engine:unload', 'engine:delete', 'engine:library', 'engine:scanLibrary', 'engine:addLibraryFolder', 'engine:removeLibraryFolder', 'engine:cancelLibraryScan'])
 assert.match(source, /handle\('engine:setCortheon'[\s\S]*?typeof enabled !== 'boolean'/, 'Cortheon takes only a boolean')
 assert.equal((source.match(/requireSecurityRole\(/g) ?? []).length, channels.length, 'each channel checks the caller role')
 assert.match(source, /handle\('engine:delete'[\s\S]*?requireSecurityRole\('owner'/)
@@ -51,9 +51,9 @@ assert.match(preload, /engineConnection: \(\): Promise<EngineConnection \| null>
 // Browser demos have no server or measured requests, even after their simulated model is ready.
 const mock = createMockEngineApi()
 const beforeEnable = await mock.engineSnapshot()
-await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled for beta\.6/)
+await assert.rejects(mock.engineSetCortheon(true), /temporarily disabled in this beta/)
 assert.deepEqual(await mock.engineSnapshot(), beforeEnable, 'the browser mock also refuses stale enable calls without mutation')
-assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled for beta\.6/)
+assert.match(beforeEnable.status.cortheon?.disabledReason ?? '', /temporarily disabled in this beta/)
 assert.equal(await mock.engineConnection(), null)
 assert.equal((await mock.engineSnapshot()).performance, null)
 await mock.engineLoad('mlx-community/Qwen3.5-2B-MLX-4bit')

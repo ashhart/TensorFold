@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Codex CLI 세션, 재개 가능한 터미널 및 OAuth 인증 코드 작업을 실행합니다.",
+  "Runs Claude Code through your local Claude account and permission surface.": "로컬 Claude 계정과 권한 인터페이스를 통해 Claude Code를 실행합니다.",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "ACP 또는 헤드리스 코딩 세션을 위한 Cursor Agent CLI 후보입니다.",
+  "Gemini CLI candidate for code and research sessions.": "코드 및 조사 세션을 위한 Gemini CLI 후보입니다.",
+  "Grok CLI candidate for xAI coding sessions.": "xAI 코딩 세션을 위한 Grok CLI 후보입니다.",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode 호환 코딩 세션을 위한 OpenCode CLI 후보입니다.",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "OpenCode 호환 코딩 세션을 위한 Kilo CLI 후보입니다.",
+  "Pi coding-agent harness for terminal-based agent sessions.": "터미널 기반 에이전트 세션을 위한 Pi 코딩 에이전트 실행 프레임워크입니다.",
+  "Broken": "오류 상태",
+  "Not found on PATH or the configured path": "PATH 또는 구성된 경로에서 찾을 수 없습니다",
+  "--version printed no version": "--version이 버전을 출력하지 않았습니다"
+}

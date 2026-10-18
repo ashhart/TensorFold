@@ -1,4 +1,17 @@
+import { currentUiLanguage, localDateText } from './preferences/current-locale'
+import { authoredText } from './preferences/language-packs'
 export function relativeTime(ts: number): string {
+  const locale = currentUiLanguage()
+  if (locale !== 'en') {
+    if (locale === 'la') return localDateText(ts)
+    const seconds = Math.max(0, Math.floor((Date.now() - ts) / 1000))
+    const format = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'short' })
+    if (seconds < 60) return format.format(0, 'second')
+    if (seconds < 3600) return format.format(-Math.floor(seconds / 60), 'minute')
+    if (seconds < 86400) return format.format(-Math.floor(seconds / 3600), 'hour')
+    if (seconds < 604800) return format.format(-Math.floor(seconds / 86400), 'day')
+    return localDateText(ts, { month: 'short', day: 'numeric' })
+  }
   const diff = Date.now() - ts
   const s = Math.floor(diff / 1000)
   if (s < 60) return 'just now'
@@ -17,16 +30,23 @@ export function dateBucket(ts: number): string {
   const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   const startYesterday = startToday - 86_400_000
   const start7 = startToday - 6 * 86_400_000
-  if (ts >= startToday) return 'Today'
-  if (ts >= startYesterday) return 'Yesterday'
-  if (ts >= start7) return 'Previous 7 days'
-  if (d.getFullYear() === now.getFullYear()) return d.toLocaleDateString(undefined, { month: 'long' })
+  if (ts >= startToday) return authoredText(currentUiLanguage(), 'Today')
+  if (ts >= startYesterday) return authoredText(currentUiLanguage(), 'Yesterday')
+  if (ts >= start7) return authoredText(currentUiLanguage(), 'Previous 7 days')
+  if (d.getFullYear() === now.getFullYear()) return currentUiLanguage() === 'en' ? d.toLocaleDateString(undefined, { month: 'long' }) : localDateText(d, { month: 'long' })
   return d.getFullYear().toString()
 }
 
 // Compact duration like "2m", "1h 4m", "45s" for goal/run timing.
 export function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
+  const s = Math.max(0, Math.round(ms / 1000)), locale = currentUiLanguage()
+  if (locale !== 'en' && locale !== 'la') {
+    const unit = (value: number, name: 'second' | 'minute' | 'hour') => new Intl.NumberFormat(locale, { style: 'unit', unit: name, unitDisplay: 'narrow' }).format(value)
+    if (s < 60) return unit(s, 'second')
+    const minutes = Math.floor(s / 60)
+    if (minutes < 60) return unit(minutes, 'minute')
+    return [unit(Math.floor(minutes / 60), 'hour'), ...(minutes % 60 ? [unit(minutes % 60, 'minute')] : [])].join(' ')
+  }
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m`

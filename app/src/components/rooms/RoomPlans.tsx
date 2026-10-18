@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import clsx from 'clsx'
 import { useState } from 'react'
 import { Icon } from '../../lib/icons'
@@ -112,6 +115,7 @@ export function RoomLivePlanPanel({
   conflictBlockers: ReturnType<typeof roomConflictBlockers>
   totalTickets: number
 }) {
+  const tx = useAuthoredText()
   const plan = roomPlanSnapshot({ room, events, leftToWork, activeWorkers, ticketJobsByTicket, conflictBlockers, totalTickets })
   return (
     <div className="rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
@@ -120,21 +124,22 @@ export function RoomLivePlanPanel({
           <Icon name="list" size={14} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-ink">Live room plan</div>
+          <div className="text-[13px] font-semibold text-ink">{tx("Live room plan")}</div>
           <div className="truncate text-[12px] text-ink-4">{roomEventSnippet(plan.objective, 130)}</div>
         </div>
       </div>
       <div className="grid gap-2 md:grid-cols-2">
-        <PlanCell label="Phase" value={plan.phase} accent />
-        <PlanCell label="Next action" value={plan.nextAction} accent={!!leftToWork.length || !!activeWorkers.length || !!conflictBlockers.length} />
-        <PlanCell label="Open question" value={plan.openQuestion || 'No direct asks pending.'} />
-        <PlanCell label="Latest decision" value={plan.latestDecision || 'No durable decision yet.'} />
+        <PlanCell label={tx("Phase")} value={plan.phase} accent />
+        <PlanCell label={tx("Next action")} value={plan.nextAction} accent={!!leftToWork.length || !!activeWorkers.length || !!conflictBlockers.length} />
+        <PlanCell label={tx("Open question")} value={plan.openQuestion || 'No direct asks pending.'} />
+        <PlanCell label={tx("Latest decision")} value={plan.latestDecision || 'No durable decision yet.'} />
       </div>
     </div>
   )
 }
 
 function PlanCell({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0 rounded-lg border border-line bg-card-2 px-2.5 py-2">
       <div className="text-[11px] font-semibold uppercase tracking-[0.06em] text-ink-4">{label}</div>
@@ -144,14 +149,15 @@ function PlanCell({ label, value, accent }: { label: string; value: string; acce
 }
 
 export function RoomHandoffQueuePanel({ events }: { events: RoomEventItem[] }) {
+  const tx = useAuthoredText()
   const queue = buildRoomHandoffQueue(events)
   if (!queue.length) return null
   const pending = queue.filter((item) => item.status === 'pending').length
   return (
     <div className="border-b border-line px-3 py-3">
       <div className="mb-2 flex items-center justify-between gap-2">
-        <span className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Handoff queue</span>
-        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', pending ? 'bg-accent-soft text-accent' : 'bg-ink-5 text-ink-3')}>{pending} pending</span>
+        <span className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Handoff queue")}</span>
+        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', pending ? 'bg-accent-soft text-accent' : 'bg-ink-5 text-ink-3')}>{pending} {tx("pending")}</span>
       </div>
       <div className="space-y-1.5">
         {queue.slice(0, 5).map(({ event, status, answer }) => (
@@ -162,11 +168,11 @@ export function RoomHandoffQueuePanel({ events }: { events: RoomEventItem[] }) {
               <Icon name="arrowRight" size={10} className="shrink-0 text-ink-4" />
               <span className="truncate text-ink-3">{event.target}</span>
               <span className={clsx('ml-auto shrink-0 rounded px-1 py-0.5 text-[11px]', status === 'pending' ? 'bg-accent-soft text-accent' : 'bg-positive/12 text-positive')}>
-                {status === 'pending' ? 'Open' : 'Answered'}
+                {status === 'pending' ? tx("Open") : tx("Answered")}
               </span>
             </div>
             <div className="mt-1 line-clamp-2 text-[12px] leading-snug text-ink-3">{roomEventSnippet(event.text, 130)}</div>
-            {answer && <div className="mt-1 truncate border-t border-line pt-1 text-[12px] text-ink-4">Answered by {answer.seat}: {roomEventSnippet(answer.text, 90)}</div>}
+            {answer && <div className="mt-1 truncate border-t border-line pt-1 text-[12px] text-ink-4">{tx("Answered by ")}{answer.seat}: {roomEventSnippet(answer.text, 90)}</div>}
           </div>
         ))}
       </div>
@@ -175,6 +181,7 @@ export function RoomHandoffQueuePanel({ events }: { events: RoomEventItem[] }) {
 }
 
 export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room }: { tickets: Ticket[]; leftToWork: Ticket[]; conflictBlockers: ReturnType<typeof roomConflictBlockers>; room: Room }) {
+  const tx = useAuthoredText()
   const [merging, setMerging] = useState(false)
   const [mergeResult, setMergeResult] = useState<RoomMergeResult | null>(null)
   const mergeWorktree = async () => {
@@ -193,10 +200,10 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
   const complete = tickets.length > 0 && leftToWork.length === 0 && missingEvidence.length === 0 && reviewTickets.length === 0 && conflictBlockers.length === 0
   const merged = mergeResult?.status === 'merged' || mergeResult?.status === 'nothing'
   const rows = [
-    { label: 'Tickets', value: tickets.length ? `${tickets.length - leftToWork.length}/${tickets.length} complete` : 'No tickets yet', ok: tickets.length > 0 && leftToWork.length === 0 },
-    { label: 'Evidence', value: missingEvidence.length ? `${missingEvidence.length} missing required evidence` : 'Evidence requirements met', ok: missingEvidence.length === 0 },
-    { label: 'Review', value: reviewTickets.length ? `${reviewTickets.length} waiting for review` : 'No review queue', ok: reviewTickets.length === 0 },
-    { label: 'Blockers', value: conflictBlockers.length ? `${conflictBlockers.length} conflict blocker${conflictBlockers.length === 1 ? '' : 's'}` : 'No conflict blockers', ok: conflictBlockers.length === 0 },
+    { label: tx("Tickets"), value: tickets.length ? `${tickets.length - leftToWork.length}/${tickets.length} complete` : 'No tickets yet', ok: tickets.length > 0 && leftToWork.length === 0 },
+    { label: tx("Evidence"), value: missingEvidence.length ? `${missingEvidence.length} missing required evidence` : 'Evidence requirements met', ok: missingEvidence.length === 0 },
+    { label: tx("Review"), value: reviewTickets.length ? `${reviewTickets.length} waiting for review` : 'No review queue', ok: reviewTickets.length === 0 },
+    { label: tx("Blockers"), value: conflictBlockers.length ? `${conflictBlockers.length} conflict blocker${conflictBlockers.length === 1 ? '' : 's'}` : 'No conflict blockers', ok: conflictBlockers.length === 0 },
   ]
   return (
     <div className={clsx('rounded-xl border px-3.5 py-3 shadow-card', complete ? 'border-positive/30 bg-positive/8' : 'border-line bg-card')}>
@@ -205,17 +212,17 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
           <Icon name={complete ? 'check' : 'shield'} size={14} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-semibold text-ink">Final readiness</div>
-          <div className="truncate text-[12px] text-ink-4">{complete ? 'The room has enough signal to finalize.' : 'The room still has gates to satisfy.'}</div>
+          <div className="text-[13px] font-semibold text-ink">{tx("Final readiness")}</div>
+          <div className="truncate text-[12px] text-ink-4">{complete ? tx("The room has enough signal to finalize.") : tx("The room still has gates to satisfy.")}</div>
         </div>
         <button
           onClick={() => void mergeWorktree()}
           disabled={!complete || merging || merged}
-          title={complete ? 'Merge the room worktree branches back into the project branch' : 'Final gates must be green before merging'}
+          title={complete ? tx("Merge the room worktree branches back into the project branch") : tx("Final gates must be green before merging")}
           className="flex h-7 shrink-0 items-center gap-1.5 rounded-lg border border-line px-2.5 text-[13px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-45"
         >
           <Icon name="branch" size={12} />
-          {merging ? 'Merging…' : merged ? 'Merged' : 'Merge worktree'}
+          {merging ? tx("Merging…") : merged ? tx("Merged") : tx("Merge worktree")}
         </button>
       </div>
       <div className="grid gap-1.5 sm:grid-cols-4">
@@ -232,21 +239,21 @@ export function RoomFinalGatePanel({ tickets, leftToWork, conflictBlockers, room
       {mergeResult && (
         <div className={clsx('mt-2 rounded-lg border px-2.5 py-1.5 text-[13px] leading-snug', mergeResult.ok ? 'border-positive/30 bg-positive/8 text-positive' : 'border-danger/30 bg-danger/8 text-ink-2')}>
           {mergeResult.ok && (
-            <span>{mergeResult.status === 'nothing' ? 'No room branches to merge.' : `Merged ${mergeResult.merged.join(', ')} into ${mergeResult.baseBranch}.`}</span>
+            <span>{mergeResult.status === 'nothing' ? tx("No room branches to merge.") : tx("Merged {value0} into {value1}.", { value0: mergeResult.merged.join(', '), value1: mergeResult.baseBranch })}</span>
           )}
           {!mergeResult.ok && mergeResult.status === 'gated' && (
-            <span>Cannot merge yet: {mergeResult.blockers.join(' ')}</span>
+            <span>{tx("Cannot merge yet: ")}{mergeResult.blockers.join(' ')}</span>
           )}
           {!mergeResult.ok && mergeResult.status === 'conflict' && mergeResult.conflict && (
             <div>
-              <div className="font-medium text-danger">Merge conflict on {mergeResult.conflict.branch}. The merge was aborted and a ticket was opened for the builder seat.</div>
+              <div className="font-medium text-danger">{tx("Merge conflict on ")}{mergeResult.conflict.branch}{tx(". The merge was aborted and a ticket was opened for the builder seat.")}</div>
               {mergeResult.conflict.files.length > 0 && (
                 <ul className="mt-1 list-inside list-disc text-ink-3">
                   {mergeResult.conflict.files.slice(0, 8).map((file) => <li key={file} className="truncate">{file}</li>)}
-                  {mergeResult.conflict.files.length > 8 && <li>+{mergeResult.conflict.files.length - 8} more</li>}
+                  {mergeResult.conflict.files.length > 8 && <li>+{mergeResult.conflict.files.length - 8} {tx("more")}</li>}
                 </ul>
               )}
-              {mergeResult.remaining.length > 0 && <div className="mt-1 text-ink-4">Not merged: {mergeResult.remaining.join(', ')}</div>}
+              {mergeResult.remaining.length > 0 && <div className="mt-1 text-ink-4">{tx("Not merged: ")}{mergeResult.remaining.join(', ')}</div>}
             </div>
           )}
           {!mergeResult.ok && (mergeResult.status === 'blocked' || mergeResult.status === 'error') && (
@@ -265,18 +272,19 @@ const ROOM_MODE_PRESETS: Array<{
   icon: 'warning' | 'branch' | 'message' | 'check' | 'search'
   patch: Pick<Room, 'collaborationMode' | 'deliberationEffort'> & { workerBudget?: Room['workerBudget'] }
 }> = [
-  { id: 'bug_bash', label: 'Bug bash', detail: 'Triage, isolate, fix, verify.', icon: 'warning', patch: { collaborationMode: 'balanced', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 6 } } },
-  { id: 'build_review', label: 'Build and review', detail: 'Planner, builder, reviewer flow.', icon: 'branch', patch: { collaborationMode: 'frontier_plans_local_builds', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 4 } } },
-  { id: 'planning', label: 'Planning council', detail: 'Explore options, then ticket.', icon: 'message', patch: { collaborationMode: 'frontier_council', deliberationEffort: 'deep', workerBudget: { maxActive: 1, maxStarts: 2 } } },
-  { id: 'code_review', label: 'Code review', detail: 'Evidence and risk first.', icon: 'check', patch: { collaborationMode: 'frontier_council', deliberationEffort: 'normal', workerBudget: { maxActive: 1, maxStarts: 3 } } },
-  { id: 'research', label: 'Research room', detail: 'Facts, sources, narrow tickets.', icon: 'search', patch: { collaborationMode: 'balanced', deliberationEffort: 'deep', workerBudget: { maxActive: 1, maxStarts: 2 } } },
-  { id: 'supervised', label: 'Supervised build', detail: 'Supervisor assigns, workers auto-start.', icon: 'branch', patch: { collaborationMode: 'supervisor', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 4 } } },
+  { id: 'bug_bash', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Bug bash") }, detail: 'Triage, isolate, fix, verify.', icon: 'warning', patch: { collaborationMode: 'balanced', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 6 } } },
+  { id: 'build_review', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Build and review") }, detail: 'Planner, builder, reviewer flow.', icon: 'branch', patch: { collaborationMode: 'frontier_plans_local_builds', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 4 } } },
+  { id: 'planning', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Planning council") }, detail: 'Explore options, then ticket.', icon: 'message', patch: { collaborationMode: 'frontier_council', deliberationEffort: 'deep', workerBudget: { maxActive: 1, maxStarts: 2 } } },
+  { id: 'code_review', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Code review") }, detail: 'Evidence and risk first.', icon: 'check', patch: { collaborationMode: 'frontier_council', deliberationEffort: 'normal', workerBudget: { maxActive: 1, maxStarts: 3 } } },
+  { id: 'research', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Research room") }, detail: 'Facts, sources, narrow tickets.', icon: 'search', patch: { collaborationMode: 'balanced', deliberationEffort: 'deep', workerBudget: { maxActive: 1, maxStarts: 2 } } },
+  { id: 'supervised', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Supervised build") }, detail: 'Supervisor assigns, workers auto-start.', icon: 'branch', patch: { collaborationMode: 'supervisor', deliberationEffort: 'normal', workerBudget: { maxActive: 2, maxStarts: 4 } } },
 ]
 
 export function RoomModePresets({ room, running, onApply }: { room: Room; running: boolean; onApply: (patch: Partial<Room>) => void }) {
+  const tx = useAuthoredText()
   return (
     <div className="mt-3">
-      <div className="mb-1.5 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Room modes</div>
+      <div className="mb-1.5 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Room modes")}</div>
       <div className="grid grid-cols-2 gap-1.5">
         {ROOM_MODE_PRESETS.map((preset) => {
           const active = room.collaborationMode === preset.patch.collaborationMode && room.deliberationEffort === preset.patch.deliberationEffort

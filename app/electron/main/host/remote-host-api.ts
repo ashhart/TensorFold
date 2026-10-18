@@ -423,6 +423,7 @@ export function createRemoteHostApi(deps: RemoteHostApiDeps) {
     const now = Date.now()
     const t: Thread = {
       id: randomUUID(),
+      documentSourceIds: [],
       title: kind === 'chat' ? 'New chat' : 'New task',
       kind,
       projectId,

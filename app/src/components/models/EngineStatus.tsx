@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
 import { engineStateLabel, useEngine } from '../../lib/engine'
@@ -19,6 +20,7 @@ export function EngineDot() {
 }
 
 export function EngineStatusRow({ onOpenModels }: { onOpenModels: () => void }) {
+  const tx = useAuthoredText()
   const { snapshot } = useEngine()
   const status = snapshot?.status
   return (
@@ -26,8 +28,7 @@ export function EngineStatusRow({ onOpenModels }: { onOpenModels: () => void }) 
       <span className={clsx('h-2 w-2 shrink-0 rounded-full', engineDotTone(status))} />
       <span className="min-w-0 flex-1 truncate">{engineStateLabel(status)}</span>
       <button onClick={onOpenModels} className="flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
-        <Icon name="cpu" size={11} />Models
-      </button>
+        <Icon name="cpu" size={11} />{tx("Models")}</button>
     </div>
   )
 }

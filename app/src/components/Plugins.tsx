@@ -1,34 +1,23 @@
+import { currentIntlLocale } from '../lib/preferences/current-locale'
+import { statusText } from '../lib/preferences/display'
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../lib/icons'
 import { BrandIcon, connectorBrand } from '../lib/brand'
 import { Button, Input, Toggle } from './ui'
 import { api } from '../lib/ipc'
-import { useStore } from '../lib/store'
+import { useStore, requestConnectorSetup } from '../lib/store'
+import { CONNECTOR_CATALOG, CONNECTOR_SETUP_IDS } from '../../shared/connector-catalog'
 import { WebhooksPanel } from './WebhooksPanel'
 import type { AssistantControlSnapshot, CapabilityHealthState, ConnectorDefinition, ConnectorStatus, LocalScriptCapability, McpServerConfig, McpServerStatus, McpSnapshot, PackagedPluginCapability, WebhookSnapshot } from '../lib/types'
 import { BUILTIN_CAPABILITIES, type BuiltInCapability } from '../lib/capabilities'
 import { executableEvidence, formatMcpArguments, matchesPluginSearch, parseMcpArguments, pluginRegistrationEnabled } from '../lib/plugin-library'
 
-interface Connector {
-  id: string
-  name: string
-  tag: string
-  desc: string
-}
-
-const CONNECTORS: Connector[] = [
-  { id: 'email', name: 'Email', tag: 'IMAP / SMTP', desc: 'Connect a mailbox with read and send controls.' },
-  { id: 'slack', name: 'Slack', tag: 'Workspace', desc: 'Connect selected channels with scoped bot access.' },
-  { id: 'discord', name: 'Discord', tag: 'Bot', desc: 'Bring selected server channels into your workspace.' },
-  { id: 'telegram', name: 'Telegram', tag: 'Bot API', desc: 'Control rooms with allowlisted chats and senders.' },
-  { id: 'whatsapp', name: 'WhatsApp', tag: 'Cloud API / experimental bridge', desc: 'Configure Cloud events or pair your own account.' },
-  { id: 'imessage', name: 'iMessage', tag: 'macOS', desc: 'Configure local access and explicitly enable message sync.' },
-  { id: 'mattermost', name: 'Mattermost', tag: 'Workspace', desc: 'Connect a server and choose channels to sync.' },
-  { id: 'matrix', name: 'Matrix', tag: 'Homeserver', desc: 'Connect selected rooms with your account credentials.' },
-  { id: 'googlechat', name: 'Google Chat', tag: 'Workspace', desc: 'Connect spaces through the configured Google account.' },
-  { id: 'docs', name: 'Documents', tag: 'Local folders', desc: 'Choose which document folders the assistant may index.' },
-]
+const CONNECTORS = CONNECTOR_SETUP_IDS.map((id) => {  return (({ id, name: CONNECTOR_CATALOG[id].name, tag: CONNECTOR_CATALOG[id].tag, desc: CONNECTOR_CATALOG[id].description })) })
 
 const LIBRARY_TABS = ['Built-in', 'Installed', 'Connections', 'Advanced'] as const
 type LibraryTab = typeof LIBRARY_TABS[number]
@@ -55,12 +44,12 @@ function capabilityHealthCheck(capability: BuiltInCapability, enabled: boolean):
 }
 
 function shortTime(value: number | null | undefined): string {
-  if (!value) return 'never checked'
+  if (!value) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "never checked")
   const minutes = Math.max(0, Math.round((Date.now() - value) / 60_000))
-  if (minutes < 1) return 'just now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "just now")
+  if (minutes < 60) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}m ago", { value0: String(minutes) })
   const hours = Math.round(minutes / 60)
-  return hours < 24 ? `${hours}h ago` : `${Math.round(hours / 24)}d ago`
+  return hours < 24 ? authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}h ago", { value0: String(hours) }) : authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}d ago", { value0: String(Math.round(hours / 24)) })
 }
 
 type ExecutableTrustItem = {
@@ -118,6 +107,7 @@ function CapabilityTile({
   onCheck: () => void
   disabled: boolean
 }) {
+  const tx = useAuthoredText()
   const healthStatus = health?.status ?? 'unknown'
   return (
     <div className="rounded-xl border border-line bg-card p-3.5 shadow-card">
@@ -131,15 +121,15 @@ function CapabilityTile({
             <Toggle disabled={disabled} checked={enabled} onChange={onToggle} label={`${enabled ? 'Disable' : 'Enable'} ${capability.name}`} />
           </div>
           <span className={clsx('mt-1 inline-block rounded-md px-1.5 py-0.5 text-[12px] font-medium', enabled && capability.status === 'available' ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-2')}>
-            {!enabled ? 'Disabled' : capability.status === 'available' ? 'Available' : 'Worker required'}
+            {!enabled ? tx("Disabled") : capability.status === 'available' ? tx("Available") : tx("Worker required")}
           </span>
           <p className="mt-1 text-[13px] leading-snug text-ink-2">{capability.description}</p>
           <div className="mt-2 flex items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="font-mono text-[12px] text-ink-2">@{capability.mention}</div>
-              <div className={clsx("mt-0.5 text-[12px] leading-snug", healthStatus === 'error' ? 'text-danger' : 'text-ink-2')}>{health?.lastError ?? (capability.status === 'contract' ? 'The document worker is not installed.' : 'Uses your existing tool approval settings.')}</div>
+              <div className={clsx("mt-0.5 text-[12px] leading-snug", healthStatus === 'error' ? 'text-danger' : 'text-ink-2')}>{health?.lastError ?? (capability.status === 'contract' ? tx("The document worker is not installed.") : tx("Uses your existing tool approval settings."))}</div>
             </div>
-            <Button variant="ghost" size="xs" icon="check" className="shrink-0 whitespace-nowrap" disabled={disabled} onClick={onCheck}>Check setup</Button>
+            <Button variant="ghost" size="xs" icon="check" className="shrink-0 whitespace-nowrap" disabled={disabled} onClick={onCheck}>{tx("Check setup")}</Button>
           </div>
         </div>
       </div>
@@ -164,6 +154,7 @@ function SourceCapabilityCard({
   provenance: string
   tools: string
 }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-xl border border-line bg-card p-3.5 shadow-card">
       <div className="flex items-start gap-3">
@@ -187,6 +178,7 @@ function SourceCapabilityCard({
 }
 
 function ExecutableTrustCard({ item, disabled, onToggle }: { item: ExecutableTrustItem; disabled: boolean; onToggle: (enabled: boolean) => void }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-xl border border-line bg-card p-4 shadow-card">
       <div className="flex items-start gap-3">
@@ -194,9 +186,9 @@ function ExecutableTrustCard({ item, disabled, onToggle }: { item: ExecutableTru
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="break-words text-[14px] font-medium text-ink">{item.name}</span>
-            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', item.enabled ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-2')}>{item.enabled ? 'Enabled in settings' : item.canEnable ? 'Disabled' : 'Blocked'}</span>
+            <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', item.enabled ? 'bg-positive/10 text-positive' : 'bg-ink-5 text-ink-2')}>{item.enabled ? tx("Enabled in settings") : item.canEnable ? tx("Disabled") : tx("Blocked")}</span>
           </div>
-          <p className="mt-1 text-[13px] leading-snug text-ink-2">{item.description || (item.source === 'plugin' ? 'A local packaged plugin registered on this Mac.' : 'A local script registered on this Mac.')}</p>
+          <p className="mt-1 text-[13px] leading-snug text-ink-2">{item.description || (item.source === 'plugin' ? tx("A local packaged plugin registered on this Mac.") : tx("A local script registered on this Mac."))}</p>
         </div>
         <Toggle checked={item.enabled} disabled={disabled || (!item.enabled && !item.canEnable)} label={`${item.enabled ? 'Disable' : 'Enable'} ${item.name}`} onChange={onToggle} />
       </div>
@@ -205,16 +197,16 @@ function ExecutableTrustCard({ item, disabled, onToggle }: { item: ExecutableTru
         <span className="rounded-md bg-ink-5 px-2 py-1">{item.evidence}</span>
       </div>
       <p className="mt-2 text-[13px] leading-snug text-ink-2">{item.access}</p>
-      {!item.canEnable && <p className="mt-2 text-[13px] leading-snug text-ink-2">This registration has no persisted trust approval, so it cannot load.</p>}
+      {!item.canEnable && <p className="mt-2 text-[13px] leading-snug text-ink-2">{tx("This registration has no persisted trust approval, so it cannot load.")}</p>}
       <details className="mt-3 text-[13px] text-ink-2">
-        <summary className="cursor-pointer font-medium text-ink-2">Registration details</summary>
+        <summary className="cursor-pointer font-medium text-ink-2">{tx("Registration details")}</summary>
         <div className="mt-2 space-y-2 rounded-lg bg-card-2 p-3">
           <div className="break-all font-mono text-[12px]">{item.detail}</div>
-          {item.checksum && <div className="break-all font-mono text-[12px]">SHA-256 record: {item.checksum}</div>}
-          {item.recordedAt && <div>Signature record saved {shortTime(item.recordedAt)}.</div>}
+          {item.checksum && <div className="break-all font-mono text-[12px]">{tx("SHA-256 record: ")}{item.checksum}</div>}
+          {item.recordedAt && <div>{tx("Signature record saved ")}{shortTime(item.recordedAt)}.</div>}
           {item.source === 'plugin' && <>
-            <div>{item.tools.length ? `Configured tools: ${item.tools.join(', ')}` : 'No tool names recorded in settings.'}</div>
-            <p>Configured metadata does not confirm successful loading or restrict host access.</p>
+            <div>{item.tools.length ? tx("Configured tools: {value0}", { value0: item.tools.join(', ') }) : tx("No tool names recorded in settings.")}</div>
+            <p>{tx("Configured metadata does not confirm successful loading or restrict host access.")}</p>
           </>}
         </div>
       </details>
@@ -223,6 +215,7 @@ function ExecutableTrustCard({ item, disabled, onToggle }: { item: ExecutableTru
 }
 
 function LibraryEmpty({ title, detail }: { title: string; detail: string }) {
+  const tx = useAuthoredText()
   return <div className="mt-4 rounded-xl border border-dashed border-line px-5 py-10 text-center">
     <Icon name="plug" size={24} className="mx-auto text-ink-2" />
     <p className="mt-3 text-[14px] font-medium text-ink-2">{title}</p>
@@ -303,6 +296,7 @@ function sourceCards(snapshot: AssistantControlSnapshot | null, mcp: McpSnapshot
 type McpDraft = Partial<McpServerConfig> & { argsText?: string; envAllowlistText?: string }
 
 export function Plugins() {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)
   const status = useStore((s) => s.status)
   const threads = useStore((s) => s.threads)
@@ -446,7 +440,7 @@ export function Plugins() {
   const testMcpTool = (callName: string) => withMcpBusy(`test:${callName}`, async () => {
     const result = await api.testMcpTool(callName)
     const next = await api.getMcpSnapshot()
-    if (!result.ok) { setMcp(next); throw new Error(result.output || 'The tool check failed.') }
+    if (!result.ok) { setMcp(next); throw new Error(result.output || tx("The tool check failed.")) }
     return next
   })
 
@@ -455,135 +449,135 @@ export function Plugins() {
       <div className="mx-auto w-full max-w-[800px] px-4 py-7 sm:px-7 sm:py-9">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Plugins</h1>
-            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Choose the tools and connections your assistant can use.</p>
+            <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{tx("Plugins")}</h1>
+            <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{tx("Choose the tools and connections your assistant can use.")}</p>
           </div>
-          <Button variant="ghost" size="sm" icon="refresh" disabled={loading || !!mcpBusy} onClick={() => void refreshLibrary()}>{loading ? 'Checking' : 'Refresh status'}</Button>
+          <Button variant="ghost" size="sm" icon="refresh" disabled={loading || !!mcpBusy} onClick={() => void refreshLibrary()}>{loading ? tx("Checking") : tx("Refresh status")}</Button>
         </div>
-        <nav aria-label="Plugin categories" className="mt-6 grid grid-cols-2 gap-1 rounded-xl border border-line bg-card-2 p-1 sm:grid-cols-4">
+        <nav aria-label={tx("Plugin categories")} className="mt-6 grid grid-cols-2 gap-1 rounded-xl border border-line bg-card-2 p-1 sm:grid-cols-4">
           {LIBRARY_TABS.map((name) => <button key={name} type="button" aria-pressed={tab === name} onClick={() => setTab(name)} className={clsx('rounded-lg px-3 py-2 text-[13px] font-medium transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent', tab === name ? 'bg-card text-ink shadow-card' : 'text-ink-2 hover:bg-ink-5 hover:text-ink')}>
             {name}{name === 'Installed' && executableTrustItems.length > 0 ? ` · ${executableTrustItems.length}` : ''}
           </button>)}
         </nav>
         <div className="relative mt-4">
           <Icon name="search" size={16} className="pointer-events-none absolute left-3 top-2.5 text-ink-2" />
-          <Input aria-label="Search plugins and connections" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'Built-in' ? 'Search built-in tools' : tab === 'Installed' ? 'Search installed plugins and scripts' : tab === 'Connections' ? 'Search connections' : 'Search MCP servers and services'} className="pl-9" />
+          <Input aria-label={tx("Search plugins and connections")} value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tab === 'Built-in' ? tx("Search built-in tools") : tab === 'Installed' ? tx("Search installed plugins and scripts") : tab === 'Connections' ? tx("Search connections") : tx("Search MCP servers and services")} className="pl-9" />
         </div>
         {(error || loadErrors.length > 0) && <div role="alert" className="mt-3 rounded-xl border border-danger/30 bg-danger/5 p-3 text-[13px] leading-relaxed text-danger">
-          {error && <p>{error}</p>}{loadErrors.map((detail) => <p key={detail}>{detail}</p>)}
-          {loadErrors.length > 0 && <button type="button" className="mt-2 font-medium underline" disabled={loading} onClick={() => void refreshLibrary()}>Retry status check</button>}
+          {error && <p>{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}{loadErrors.map((detail) => <p key={detail}>{detail}</p>)}
+          {loadErrors.length > 0 && <button type="button" className="mt-2 font-medium underline" disabled={loading} onClick={() => void refreshLibrary()}>{tx("Retry status check")}</button>}
         </div>}
-        {activeRuns && (tab === 'Built-in' || tab === 'Installed') && <p role="status" className="mt-3 text-[13px] leading-relaxed text-ink-2">Finish or stop active tasks before changing tools, because settings changes reload registered plugins.</p>}
+        {activeRuns && (tab === 'Built-in' || tab === 'Installed') && <p role="status" className="mt-3 text-[13px] leading-relaxed text-ink-2">{tx("Finish or stop active tasks before changing tools, because settings changes reload registered plugins.")}</p>}
 
-        {tab === 'Built-in' && <section aria-label="Built-in tools" className="mt-5">
+        {tab === 'Built-in' && <section aria-label={tx("Built-in tools")} className="mt-5">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-[14px] font-medium text-ink">Included with TensorFold</h2>
-            <span className="text-[12px] text-ink-2">{BUILTIN_CAPABILITIES.filter((item) => item.status === 'available').length} available · {BUILTIN_CAPABILITIES.filter((item) => item.status === 'contract').length} need a worker</span>
+            <h2 className="text-[14px] font-medium text-ink">{tx("Included with TensorFold")}</h2>
+            <span className="text-[12px] text-ink-2">{BUILTIN_CAPABILITIES.filter((item) => item.status === 'available').length} {tx("available · ")}{BUILTIN_CAPABILITIES.filter((item) => item.status === 'contract').length} {tx("need a worker")}</span>
           </div>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Type <span className="font-mono">@</span> in a chat to select a tool; access still follows your approval settings.</p>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{tx("Type ")}<span className="font-mono">@</span> {tx("in a chat to select a tool; access still follows your approval settings.")}</p>
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             {builtins.map((capability) => {
               const enabled = !(settings?.capabilities?.disabledCapabilityIds ?? []).includes(capability.id)
               return <CapabilityTile key={capability.id} capability={capability} enabled={enabled} health={settings?.capabilities?.health?.[capability.id]} disabled={!settings || settingsBusy || activeRuns} onToggle={(next) => void updateCapabilityEnabled(capability.id, next)} onCheck={() => void checkCapability(capability, enabled)} />
             })}
           </div>
-          {!builtins.length && <LibraryEmpty title="No built-in tools match" detail="Try another name, such as browser or documents." />}
+          {!builtins.length && <LibraryEmpty title={tx("No built-in tools match")} detail="Try another name, such as browser or documents." />}
         </section>}
 
-        {tab === 'Installed' && <section aria-label="Installed plugins" className="mt-5">
-          <h2 className="text-[14px] font-medium text-ink">On this Mac</h2>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Manage existing local plugin and script registrations; enabling a trusted plugin loads its code into the app.</p>
+        {tab === 'Installed' && <section aria-label={tx("Installed plugins")} className="mt-5">
+          <h2 className="text-[14px] font-medium text-ink">{tx("On this Mac")}</h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{tx("Manage existing local plugin and script registrations; enabling a trusted plugin loads its code into the app.")}</p>
           <div className="mt-3 space-y-3">{installed.map((item) => <ExecutableTrustCard key={item.key} item={item} disabled={!settings || settingsBusy || activeRuns} onToggle={(enabled) => void updateExecutableEnabled(item, enabled)} />)}</div>
-          {!installed.length && <LibraryEmpty title={query.trim() ? 'No installed plugins match' : 'No local plugins registered'} detail={query.trim() ? 'Try another name or clear your search.' : 'Built-in tools are available in the first tab; external tool servers can be configured in Advanced.'} />}
-          <p className="mt-3 text-[12px] leading-relaxed text-ink-2">Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.</p>
+          {!installed.length && <LibraryEmpty title={query.trim() ? tx("No installed plugins match") : tx("No local plugins registered")} detail={query.trim() ? 'Try another name or clear your search.' : 'Built-in tools are available in the first tab; external tool servers can be configured in Advanced.'} />}
+          <p className="mt-3 text-[12px] leading-relaxed text-ink-2">{tx("Plugin registration does not isolate code or confirm successful loading; review the source before approving trust.")}</p>
         </section>}
 
-        {tab === 'Connections' && <section aria-label="Connections" className="mt-5">
-          <h2 className="text-[14px] font-medium text-ink">Connect your services</h2>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">Setup opens the connection settings with credential fields, scope controls and connection checks.</p>
+        {tab === 'Connections' && <section aria-label={tx("Connections")} className="mt-5">
+          <h2 className="text-[14px] font-medium text-ink">{tx("Connect your services")}</h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{tx("Setup opens the connection settings with credential fields, scope controls and connection checks.")}</p>
           <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             {connectors.map((connector) => {
               const contract = snapshot?.connectors.find((item) => item.id === connector.id)
               const state = contract?.status
-              const label = !snapshot ? 'Status unavailable' : state === 'mock' ? 'Demo connection' : state === 'connected' ? 'Connected' : state === 'error' ? 'Needs attention' : 'Not connected'
+              const label = !snapshot ? tx("Status unavailable") : state === 'mock' ? tx("Demo connection") : state === 'connected' ? tx("Connected") : state === 'error' ? tx("Needs attention") : tx("Not connected")
               return <div key={connector.id} className="flex flex-col rounded-xl border border-line bg-card p-4 shadow-card">
                 <div className="flex items-start gap-3">
                   <BrandIcon brand={connectorBrand(connector.id)} size={36} />
                   <div className="min-w-0"><h3 className="text-[14px] font-medium text-ink">{connector.name}</h3><p className="mt-0.5 text-[12px] text-ink-2">{connector.tag}</p></div>
                 </div>
                 <p className="mt-3 flex-1 text-[13px] leading-relaxed text-ink-2">{connector.desc}</p>
-                {contract?.error && <p className="mt-2 break-words text-[13px] text-danger">{contract.error}</p>}
+                {contract?.error && <p className="mt-2 break-words text-[13px] text-danger">{<OriginalDiagnostic>{contract.error}</OriginalDiagnostic>}</p>}
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-line pt-3">
                   <span className={clsx('text-[12px]', state === 'connected' ? 'text-positive' : state === 'error' ? 'text-danger' : 'text-ink-2')}>{label}</span>
-                  <Button variant="default" size="xs" icon="chevronRight" onClick={() => useStore.getState().setView({ name: 'settings', section: 'connectors' })}>{state === 'connected' ? 'Manage' : 'Set up'}</Button>
+                  <Button variant="default" size="xs" icon="chevronRight" onClick={() => { requestConnectorSetup(connector.id); useStore.getState().setView({ name: 'settings', section: 'connectors' }) }}>{state === 'connected' ? tx("Manage") : tx("Set up")}</Button>
                 </div>
               </div>
             })}
           </div>
-          {!connectors.length && <LibraryEmpty title="No connections match" detail="Try another service name or clear your search." />}
+          {!connectors.length && <LibraryEmpty title={tx("No connections match")} detail="Try another service name or clear your search." />}
         </section>}
 
-        {tab === 'Advanced' && <section aria-label="Advanced plugin connections">
+        {tab === 'Advanced' && <section aria-label={tx("Advanced plugin connections")}>
         <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
           <div>
-            <h2 className="text-[14px] font-medium text-ink">MCP servers</h2>
-            <p className="mt-1 text-[13px] text-ink-2">Connect a tool server; use Ask to review each action, or explicitly choose Trusted.</p>
+            <h2 className="text-[14px] font-medium text-ink">{tx("MCP servers")}</h2>
+            <p className="mt-1 text-[13px] text-ink-2">{tx("Connect a tool server; use Ask to review each action, or explicitly choose Trusted.")}</p>
           </div>
           <div className="flex gap-2">
-            <Button variant="default" icon="play" disabled={!!mcpBusy || !mcp?.servers.length} onClick={() => withMcpBusy('refresh', () => api.refreshMcpServer())}>{mcpBusy === 'refresh' ? 'Refreshing' : 'Refresh'}</Button>
-            <Button variant="primary" icon="plus" disabled={!!mcpBusy} onClick={() => startMcpDraft()}>Add server</Button>
+            <Button variant="default" icon="play" disabled={!!mcpBusy || !mcp?.servers.length} onClick={() => withMcpBusy('refresh', () => api.refreshMcpServer())}>{mcpBusy === 'refresh' ? tx("Refreshing") : tx("Refresh")}</Button>
+            <Button variant="primary" icon="plus" disabled={!!mcpBusy} onClick={() => startMcpDraft()}>{tx("Add server")}</Button>
           </div>
         </div>
 
         <div className="mt-3 rounded-xl border border-line bg-card-2 px-3.5 py-2.5 text-[13px] text-ink-2">
-          {mcp ? `${mcp.servers.filter((server) => server.runtime.status === 'connected').length}/${mcp.servers.length} servers connected · ${mcp.tools.length} tools · ${mcp.resources.length} resources · ${mcp.prompts.length} prompts.` : loading ? 'Checking MCP servers…' : 'MCP status unavailable; retry the status check.'}
+          {mcp ? tx("{value0}/{value1} servers connected · {value2} tools · {value3} resources · {value4} prompts.", { value0: mcp.servers.filter((server) => server.runtime.status === 'connected').length, value1: mcp.servers.length, value2: mcp.tools.length, value3: mcp.resources.length, value4: mcp.prompts.length }) : loading ? tx("Checking MCP servers…") : tx("MCP status unavailable; retry the status check.")}
         </div>
 
         {mcpDraft && (
           <fieldset disabled={!!mcpBusy} className="mt-3 min-w-0 rounded-xl border border-accent/40 bg-card p-3.5 shadow-card">
             <div className="mb-3 flex items-center justify-between">
               <div>
-                <div className="text-[13px] font-medium text-ink">{mcpDraft.id ? 'Edit MCP server' : 'New MCP server'}</div>
-                <div className="text-[13px] text-ink-2">Stdio transport; environment secrets stay in the main process.</div>
+                <div className="text-[13px] font-medium text-ink">{mcpDraft.id ? tx("Edit MCP server") : tx("New MCP server")}</div>
+                <div className="text-[13px] text-ink-2">{tx("Stdio transport; environment secrets stay in the main process.")}</div>
               </div>
-              <Button variant="ghost" size="sm" disabled={!!mcpBusy} onClick={() => setMcpDraft(null)}>Cancel</Button>
+              <Button variant="ghost" size="sm" disabled={!!mcpBusy} onClick={() => setMcpDraft(null)}>{tx("Cancel")}</Button>
             </div>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <Labeled label="Name"><Input value={mcpDraft.name || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, name: e.target.value })} placeholder="Filesystem" /></Labeled>
-              <Labeled label="Command"><Input value={mcpDraft.command || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, command: e.target.value })} placeholder="npx" spellCheck={false} /></Labeled>
-              <Labeled label="Arguments"><Input value={mcpDraft.argsText || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, argsText: e.target.value })} placeholder="-y @modelcontextprotocol/server-filesystem ~/Projects" spellCheck={false} /></Labeled>
-              <Labeled label="Working directory"><Input value={mcpDraft.cwd || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, cwd: e.target.value })} placeholder="optional" spellCheck={false} /></Labeled>
+              <Labeled label={tx("Name")}><Input value={mcpDraft.name || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, name: e.target.value })} placeholder={tx("Filesystem")} /></Labeled>
+              <Labeled label={tx("Command")}><Input value={mcpDraft.command || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, command: e.target.value })} placeholder={tx("npx")} spellCheck={false} /></Labeled>
+              <Labeled label={tx("Arguments")}><Input value={mcpDraft.argsText || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, argsText: e.target.value })} placeholder="-y @modelcontextprotocol/server-filesystem ~/Projects" spellCheck={false} /></Labeled>
+              <Labeled label={tx("Working directory")}><Input value={mcpDraft.cwd || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, cwd: e.target.value })} placeholder={tx("optional")} spellCheck={false} /></Labeled>
             </div>
             <div className="mt-3 rounded-xl border border-line bg-card-2 p-3">
               <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="text-[13px] font-medium text-ink-2">Launch mode</span>
-                <button onClick={() => setMcpDraft({ ...mcpDraft, launchMode: 'direct', dockerGateway: null })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.launchMode ?? 'direct') !== 'docker_gateway' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Direct</button>
-                <button onClick={() => setMcpDraft({ ...mcpDraft, launchMode: 'docker_gateway', dockerGateway: { image: mcpDraft.dockerGateway?.image ?? '', network: mcpDraft.dockerGateway?.network ?? 'none', readOnlyRootfs: mcpDraft.dockerGateway?.readOnlyRootfs !== false, envAllowlist: splitCsv(mcpDraft.envAllowlistText || ''), mounts: mcpDraft.dockerGateway?.mounts ?? [], workdir: mcpDraft.dockerGateway?.workdir ?? null } })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', mcpDraft.launchMode === 'docker_gateway' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Docker gateway</button>
+                <span className="text-[13px] font-medium text-ink-2">{tx("Launch mode")}</span>
+                <button onClick={() => setMcpDraft({ ...mcpDraft, launchMode: 'direct', dockerGateway: null })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.launchMode ?? 'direct') !== 'docker_gateway' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{tx("Direct")}</button>
+                <button onClick={() => setMcpDraft({ ...mcpDraft, launchMode: 'docker_gateway', dockerGateway: { image: mcpDraft.dockerGateway?.image ?? '', network: mcpDraft.dockerGateway?.network ?? 'none', readOnlyRootfs: mcpDraft.dockerGateway?.readOnlyRootfs !== false, envAllowlist: splitCsv(mcpDraft.envAllowlistText || ''), mounts: mcpDraft.dockerGateway?.mounts ?? [], workdir: mcpDraft.dockerGateway?.workdir ?? null } })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', mcpDraft.launchMode === 'docker_gateway' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{tx("Docker gateway")}</button>
               </div>
               {mcpDraft.launchMode === 'docker_gateway' && (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Labeled label="Docker image digest"><Input value={mcpDraft.dockerGateway?.image || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { network: 'none', readOnlyRootfs: true, mounts: [], envAllowlist: [] }), image: e.target.value } })} placeholder="mcp/server@sha256:…" spellCheck={false} /></Labeled>
-                  <Labeled label="Env allowlist"><Input value={mcpDraft.envAllowlistText || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, envAllowlistText: e.target.value })} placeholder="API_TOKEN, TENANT_ID" spellCheck={false} /></Labeled>
+                  <Labeled label={tx("Docker image digest")}><Input value={mcpDraft.dockerGateway?.image || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { network: 'none', readOnlyRootfs: true, mounts: [], envAllowlist: [] }), image: e.target.value } })} placeholder={tx("mcp/server@sha256:…")} spellCheck={false} /></Labeled>
+                  <Labeled label={tx("Env allowlist")}><Input value={mcpDraft.envAllowlistText || ''} onChange={(e) => setMcpDraft({ ...mcpDraft, envAllowlistText: e.target.value })} placeholder={"API_TOKEN, TENANT_ID"} spellCheck={false} /></Labeled>
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[13px] text-ink-2">Network</span>
+                    <span className="text-[13px] text-ink-2">{tx("Network")}</span>
                     {(['none', 'bridge'] as const).map((mode) => (
                       <button key={mode} onClick={() => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { image: '', readOnlyRootfs: true, mounts: [], envAllowlist: [] }), network: mode } })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.dockerGateway?.network ?? 'none') === mode ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{mode}</button>
                     ))}
-                    {mcpDraft.dockerGateway?.network === 'host' && <span className="text-[12px] text-danger">Host networking is blocked; choose none or bridge.</span>}
+                    {mcpDraft.dockerGateway?.network === 'host' && <span className="text-[12px] text-danger">{tx("Host networking is blocked; choose none or bridge.")}</span>}
                   </div>
-                  <SwitchRow label="Read-only rootfs" checked={mcpDraft.dockerGateway?.readOnlyRootfs !== false} onChange={(readOnlyRootfs) => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { image: '', network: 'none', mounts: [], envAllowlist: [] }), readOnlyRootfs } })} />
+                  <SwitchRow label={tx("Read-only rootfs")} checked={mcpDraft.dockerGateway?.readOnlyRootfs !== false} onChange={(readOnlyRootfs) => setMcpDraft({ ...mcpDraft, dockerGateway: { ...(mcpDraft.dockerGateway ?? { image: '', network: 'none', mounts: [], envAllowlist: [] }), readOnlyRootfs } })} />
                 </div>
               )}
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-4">
-              <SwitchRow label="Enabled" checked={mcpDraft.enabled ?? true} onChange={(enabled) => setMcpDraft({ ...mcpDraft, enabled })} />
-              <SwitchRow label="Auto-connect" checked={mcpDraft.autoConnect ?? false} onChange={(autoConnect) => setMcpDraft({ ...mcpDraft, autoConnect })} />
+              <SwitchRow label={tx("Enabled")} checked={mcpDraft.enabled ?? true} onChange={(enabled) => setMcpDraft({ ...mcpDraft, enabled })} />
+              <SwitchRow label={tx("Auto-connect")} checked={mcpDraft.autoConnect ?? false} onChange={(autoConnect) => setMcpDraft({ ...mcpDraft, autoConnect })} />
               <div className="flex items-center gap-2">
-                <span className="text-[13px] text-ink-2">Policy</span>
-                <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'ask' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.approvalMode ?? 'ask') === 'ask' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Ask</button>
-                <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'trusted' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', mcpDraft.approvalMode === 'trusted' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>Trusted</button>
+                <span className="text-[13px] text-ink-2">{tx("Policy")}</span>
+                <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'ask' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', (mcpDraft.approvalMode ?? 'ask') === 'ask' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{tx("Ask")}</button>
+                <button onClick={() => setMcpDraft({ ...mcpDraft, approvalMode: 'trusted' })} className={clsx('rounded-lg px-2.5 py-1.5 text-[13px] font-medium transition-colors', mcpDraft.approvalMode === 'trusted' ? 'bg-accent text-accent-ink' : 'bg-ink-5 text-ink-2 hover:text-ink')}>{tx("Trusted")}</button>
               </div>
-              <Button variant="primary" size="sm" icon="check" onClick={saveMcpDraft} disabled={!!mcpBusy || !mcpDraft.command?.trim() || (mcpDraft.launchMode === 'docker_gateway' && !mcpDraft.dockerGateway?.image?.trim())}>{mcpBusy === 'save' ? 'Saving' : 'Save server'}</Button>
+              <Button variant="primary" size="sm" icon="check" onClick={saveMcpDraft} disabled={!!mcpBusy || !mcpDraft.command?.trim() || (mcpDraft.launchMode === 'docker_gateway' && !mcpDraft.dockerGateway?.image?.trim())}>{mcpBusy === 'save' ? tx("Saving") : tx("Save server")}</Button>
             </div>
           </fieldset>
         )}
@@ -599,28 +593,28 @@ export function Plugins() {
                     <div className="min-w-0 flex-1">
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="text-[14px] font-medium text-ink">{server.name}</span>
-                        <span className="flex items-center gap-1.5 text-[12px] text-ink-2"><span className={clsx('h-1.5 w-1.5 rounded-full', MCP_STATUS_COLOR[server.runtime.status])} />{server.runtime.status}</span>
-                        {server.launchMode === 'docker_gateway' && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] font-medium text-ink-2">docker gateway</span>}
-                        {server.approvalMode === 'trusted' && <span className="rounded-md bg-accent-soft px-1.5 py-0.5 text-[12px] font-medium text-accent">trusted</span>}
+                        <span className="flex items-center gap-1.5 text-[12px] text-ink-2"><span className={clsx('h-1.5 w-1.5 rounded-full', MCP_STATUS_COLOR[server.runtime.status])} />{statusText(server.runtime.status, tx)}</span>
+                        {server.launchMode === 'docker_gateway' && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] font-medium text-ink-2">{tx("docker gateway")}</span>}
+                        {server.approvalMode === 'trusted' && <span className="rounded-md bg-accent-soft px-1.5 py-0.5 text-[12px] font-medium text-accent">{tx("trusted")}</span>}
                       </div>
                       <div className="mt-1 truncate font-mono text-[13px] text-ink-2">{server.command} {server.args.join(' ')}</div>
-                      {server.runtime.lastError && <div className="mt-1 text-[13px] text-danger">{server.runtime.lastError}</div>}
+                      {server.runtime.lastError && <div className="mt-1 text-[13px] text-danger">{<OriginalDiagnostic>{server.runtime.lastError}</OriginalDiagnostic>}</div>}
                     </div>
                     <div className="flex shrink-0 flex-wrap justify-end gap-1.5">
-                      <Button variant="ghost" size="xs" icon="edit" disabled={!!mcpBusy} onClick={() => startMcpDraft(server)}>Edit</Button>
+                      <Button variant="ghost" size="xs" icon="edit" disabled={!!mcpBusy} onClick={() => startMcpDraft(server)}>{tx("Edit")}</Button>
                       {connected
-                        ? <Button variant="default" size="xs" icon="stop" disabled={!!mcpBusy} onClick={() => withMcpBusy(`disconnect:${server.id}`, () => api.disconnectMcpServer(server.id))}>Stop</Button>
-                        : <Button variant="default" size="xs" icon="play" disabled={!!mcpBusy || !server.enabled} onClick={() => withMcpBusy(`connect:${server.id}`, () => api.connectMcpServer(server.id))}>Connect</Button>}
-                      <Button variant="ghost" size="xs" icon="trash" disabled={!!mcpBusy} onClick={() => withMcpBusy(`delete:${server.id}`, () => api.deleteMcpServer(server.id))}>Delete</Button>
+                        ? <Button variant="default" size="xs" icon="stop" disabled={!!mcpBusy} onClick={() => withMcpBusy(`disconnect:${server.id}`, () => api.disconnectMcpServer(server.id))}>{tx("Stop")}</Button>
+                        : <Button variant="default" size="xs" icon="play" disabled={!!mcpBusy || !server.enabled} onClick={() => withMcpBusy(`connect:${server.id}`, () => api.connectMcpServer(server.id))}>{tx("Connect")}</Button>}
+                      <Button variant="ghost" size="xs" icon="trash" disabled={!!mcpBusy} onClick={() => withMcpBusy(`delete:${server.id}`, () => api.deleteMcpServer(server.id))}>{tx("Delete")}</Button>
                     </div>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2 text-[13px] text-ink-2">
-                    <span>{server.runtime.tools.length} tool{server.runtime.tools.length === 1 ? '' : 's'}</span>
-                    <span>{server.runtime.resources.length} resource{server.runtime.resources.length === 1 ? '' : 's'}</span>
-                    <span>{server.runtime.prompts.length} prompt{server.runtime.prompts.length === 1 ? '' : 's'}</span>
-                    {server.runtime.pid && <span>pid {server.runtime.pid}</span>}
-                    {server.runtime.lastConnectedAt && <span>connected {new Date(server.runtime.lastConnectedAt).toLocaleTimeString()}</span>}
-                    <button disabled={!!mcpBusy} className="font-medium text-ink-2 hover:text-ink disabled:opacity-40" onClick={() => withMcpBusy(`refresh:${server.id}`, () => api.refreshMcpServer(server.id))}>refresh</button>
+                    <span>{tx("Tools: {count}", { count: server.runtime.tools.length })}</span>
+                    <span>{tx("Resources: {count}", { count: server.runtime.resources.length })}</span>
+                    <span>{tx("Prompts: {count}", { count: server.runtime.prompts.length })}</span>
+                    {server.runtime.pid && <span>{tx("pid ")}{server.runtime.pid}</span>}
+                    {server.runtime.lastConnectedAt && <span>{tx("connected ")}{new Date(server.runtime.lastConnectedAt).toLocaleTimeString(currentIntlLocale())}</span>}
+                    <button disabled={!!mcpBusy} className="font-medium text-ink-2 hover:text-ink disabled:opacity-40" onClick={() => withMcpBusy(`refresh:${server.id}`, () => api.refreshMcpServer(server.id))}>{tx("refresh")}</button>
                   </div>
                   {server.runtime.tools.length > 0 && (
                     <div className="mt-2 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
@@ -631,7 +625,7 @@ export function Plugins() {
                             <div className="truncate text-[13px] font-medium text-ink-2">{tool.title || tool.name}</div>
                             <div className="truncate font-mono text-[12px] text-ink-4">{tool.callName}</div>
                           </div>
-                          {tool.readOnlyHint && <Button variant="ghost" size="xs" disabled={!!mcpBusy} onClick={() => void testMcpTool(tool.callName)}>Test</Button>}
+                          {tool.readOnlyHint && <Button variant="ghost" size="xs" disabled={!!mcpBusy} onClick={() => void testMcpTool(tool.callName)}>{tx("Test")}</Button>}
                         </div>
                       ))}
                     </div>
@@ -648,11 +642,11 @@ export function Plugins() {
         ) : (
           <div className="mt-3 flex flex-col items-center justify-center rounded-xl border border-dashed border-line py-10 text-center">
             <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-ink-5 text-ink-2"><Icon name="grid" size={20} /></span>
-            <div className="mt-2.5 text-[13px] font-medium text-ink-2">{query.trim() ? 'No MCP servers match' : 'No MCP servers yet'}</div>
-            <div className="mt-0.5 max-w-[340px] text-[13px] text-ink-2">{query.trim() ? 'Try another server name or clear your search.' : 'Add a stdio server to make external tools available to Chat and Code runs.'}</div>
+            <div className="mt-2.5 text-[13px] font-medium text-ink-2">{query.trim() ? tx("No MCP servers match") : tx("No MCP servers yet")}</div>
+            <div className="mt-0.5 max-w-[340px] text-[13px] text-ink-2">{query.trim() ? tx("Try another server name or clear your search.") : tx("Add a stdio server to make external tools available to Chat and Code runs.")}</div>
           </div>
         )}
-        <h2 className="mt-7 text-[14px] font-medium text-ink">Runtime status</h2>
+        <h2 className="mt-7 text-[14px] font-medium text-ink">{tx("Runtime status")}</h2>
         <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
           {sourceCards(snapshot, mcp, webhooks).filter((card) => matchesPluginSearch(query, card.title, card.detail, card.tools)).map((card) => <SourceCapabilityCard key={card.title} {...card} />)}
         </div>
@@ -664,6 +658,7 @@ export function Plugins() {
 }
 
 function Labeled({ label, children }: { label: string; children: React.ReactNode }) {
+  const tx = useAuthoredText()
   return (
     <label className="block">
       <div className="mb-1.5 text-[13px] font-medium text-ink-2">{label}</div>
@@ -673,6 +668,7 @@ function Labeled({ label, children }: { label: string; children: React.ReactNode
 }
 
 function SwitchRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  const tx = useAuthoredText()
   return (
     <div className="flex items-center gap-2">
       <Toggle label={label} checked={checked} onChange={onChange} />

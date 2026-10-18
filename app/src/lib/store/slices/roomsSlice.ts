@@ -149,11 +149,11 @@ export const roomsSlice: Slice = (set, get) => ({
       if (requestedRoomId) {
         const existing = get().rooms.find((candidate) => candidate.id === requestedRoomId && candidate.projectId === ticket.projectId)
         if (!existing) {
-          set({ notice: { kind: 'error', message: 'That room is not available for this project.' } })
+          set({ notice: { kind: 'error', message: 'That room is not available for this project.', authored: true } })
           return
         }
         if (remoteHostIdForRoom(get(), existing.id) !== ticketHostId) {
-          set({ notice: { kind: 'error', message: 'That room and ticket belong to different hosts. Choose a room on the ticket owner.' } })
+          set({ notice: { kind: 'error', message: 'That room and ticket belong to different hosts. Choose a room on the ticket owner.', authored: true } })
           return
         }
         selectedRoom = existing
@@ -170,7 +170,7 @@ export const roomsSlice: Slice = (set, get) => ({
         const problem = roomProblemFromTicket(currentTicket)
         const roomHostId = remoteHostIdForRoom(get(), currentRoom.id) ?? (createdNewRoom ? ticketHostId : null)
         if (roomHostId !== ticketHostId) {
-          set({ notice: { kind: 'error', message: 'Room ownership changed before dispatch. Refresh the project and try again.' } })
+          set({ notice: { kind: 'error', message: 'Room ownership changed before dispatch. Refresh the project and try again.', authored: true } })
           return
         }
 

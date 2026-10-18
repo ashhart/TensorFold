@@ -45,17 +45,30 @@ export function encodeKokoroWav(chunks: Float32Array[]): Buffer {
   return wav
 }
 
-parentPort?.on('message', async (input: KokoroSynthesisInput) => {
+const acknowledgements = new Map<string, () => void>()
+parentPort?.on('message', async (input: KokoroSynthesisInput & { stream?: boolean; ack?: number }) => {
+  if (typeof input.ack === 'number') { acknowledgements.get(`${input.requestId}:${input.ack}`)?.(); return }
   try {
     engine ??= await KokoroTTS.from_pretrained(workerData.modelDirectory, { dtype: 'q8', device: 'cpu' })
     const audio: Float32Array[] = []
+    let index = 0
     for (const text of splitKokoroText(input.text)) {
       const phonemes = (await phonemize(text, 'en-us')).join(' ')
       const { input_ids } = engine.tokenizer(phonemes, { truncation: false })
       if (input_ids.dims.at(-1)! > 511) throw new Error('A passage is too long to read. Shorten the text and try again.')
       const output = await engine.generate_from_ids(input_ids, { voice: input.voice as 'af_heart', speed: input.rate })
-      audio.push(new Float32Array(output.audio))
+      const samples = new Float32Array(output.audio)
+      if (input.stream) {
+        const wav = encodeKokoroWav([samples])
+        await new Promise<void>((resolve) => {
+          const key = `${input.requestId}:${index}`
+          acknowledgements.set(key, () => { acknowledgements.delete(key); resolve() })
+          parentPort?.postMessage({ requestId: input.requestId, chunk: true, index, ok: true, audioBase64: wav.toString('base64'), mimeType: 'audio/wav' })
+        })
+        index++
+      } else audio.push(samples)
     }
+    if (input.stream) { parentPort?.postMessage({ requestId: input.requestId, ok: true, mimeType: 'audio/wav' }); return }
     const wav = encodeKokoroWav(audio)
     parentPort?.postMessage({ requestId: input.requestId, ok: true, audioBase64: wav.toString('base64'), mimeType: 'audio/wav' })
   } catch (error) {

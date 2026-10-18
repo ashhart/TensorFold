@@ -1,3 +1,4 @@
+import { nativeUiText } from './native-ui-text'
 import type { BrowserWindow, Menu, MenuItemConstructorOptions, Tray } from 'electron'
 import type { EngineStatus, Settings } from '../../agent/types'
 
@@ -125,23 +126,25 @@ export function createDesktopModeRuntime(deps: DesktopModeDeps) {
       : status?.state === 'starting' ? 'Starting local model…'
       : status?.state === 'failed' ? 'Local server needs attention'
       : 'Local server stopped'
-    const signature = JSON.stringify([stateLabel, status?.model, selected, modelOperation, runs > 0, learningBusy])
+    const locale = settings?.uiPreferences?.locale
+    const text = (source: string) => nativeUiText(locale, source)
+    const signature = JSON.stringify([locale, stateLabel, status?.model, selected, modelOperation, runs > 0, learningBusy])
     if (signature === lastMenuSignature) return
     const items: MenuItemConstructorOptions[] = [
-      { label: stateLabel, enabled: false },
+      { label: text(stateLabel), enabled: false },
       ...(status?.model ? [{ label: status.model, enabled: false }] : []),
       { type: 'separator' },
-      { label: 'Open Minimal', click: () => show('overview') },
-      { label: 'Models and downloads…', click: () => show('models') },
-      { label: 'API setup…', click: () => show('api') },
-      { label: modelOperation ? 'Updating local server…' : active ? 'Stop local server' : 'Start selected model', enabled: !modelOperation && !learningBusy && runs === 0 && (active || !!selected) && status?.available !== false, click: () => { void runModelAction() } },
+      { label: text('Open Minimal'), click: () => show('overview') },
+      { label: text('Models and downloads…'), click: () => show('models') },
+      { label: text('API setup…'), click: () => show('api') },
+      { label: text(modelOperation ? 'Updating local server…' : active ? 'Stop local server' : 'Start selected model'), enabled: !modelOperation && !learningBusy && runs === 0 && (active || !!selected) && status?.available !== false, click: () => { void runModelAction() } },
       { type: 'separator' },
-      { label: 'Open Full workspace', click: () => { void deps.changeMode('full').then(() => show()).catch(report) } },
+      { label: text('Open Full workspace'), click: () => { void deps.changeMode('full').then(() => show()).catch(report) } },
       { type: 'separator' },
-      { label: 'Quit TensorFold', click: () => deps.quit() },
+      { label: text('Quit TensorFold'), click: () => deps.quit() },
     ]
     try {
-      tray!.setToolTip(`TensorFold · ${stateLabel}`)
+      tray!.setToolTip(`TensorFold · ${text(stateLabel)}`)
       tray!.setContextMenu(deps.buildMenu(items))
       lastMenuSignature = signature
     } catch {

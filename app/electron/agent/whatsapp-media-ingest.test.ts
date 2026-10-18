@@ -6,7 +6,7 @@
 // download+decrypt+write is I/O (covered by the crypto unit test for the decrypt core, and by
 // Baileys for the real download); this proves the message-shape parsing deterministically.
 import assert from 'node:assert/strict'
-import { whatsappMediaDescriptor, whatsappMediaCaption } from './whatsapp-media-ingest.ts'
+import { cacheWhatsAppMediaMessage, whatsappMediaDescriptor, whatsappMediaCaption } from './whatsapp-media-ingest.ts'
 
 let passed = 0
 const ok = (name: string) => { passed++; console.log(`  ✓ ${name}`) }
@@ -76,6 +76,24 @@ console.log('whatsapp-media-ingest tests:')
   assert.equal(whatsappMediaCaption({ audioMessage: { mimetype: 'audio/ogg', mediaKey: new Uint8Array([1]) } }), '')
   assert.equal(whatsappMediaCaption({ conversation: 'hi' }), '')
   ok('whatsappMediaCaption: caption first, then document fileName, else empty')
+}
+
+{
+  const descriptor = whatsappMediaDescriptor({ imageMessage: { mediaKey: 'fixture', mimetype: 'image/jpeg' } })!
+  let allowed = true
+  let fetched = 0
+  const guarded = await cacheWhatsAppMediaMessage(descriptor, {
+    cacheRoot: '/unused-offline-cache-must-not-exist',
+    shouldCache: () => allowed,
+    fetchDecryptedBytes: async () => { fetched++; allowed = false; return new Uint8Array([1, 2, 3]) },
+  })
+  assert.equal(guarded, null, 'revoked scope after decryption prevents cache admission')
+  assert.equal(fetched, 1)
+  await cacheWhatsAppMediaMessage(descriptor, {
+    cacheRoot: '/unused-offline-cache-must-not-exist', shouldCache: () => false,
+    fetchDecryptedBytes: async () => { throw new Error('forbidden fetch must never happen') },
+  })
+  ok('media ownership is checked before download and after decryption, before cache writes')
 }
 
 console.log(`\n${passed} checks passed.`)

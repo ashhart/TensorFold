@@ -1,3 +1,4 @@
+import { currentModelQualification, modelTaskFit, type ModelQualificationReport, type ModelTaskRequirements } from '../../shared/model-fit'
 import { isExternalProvider } from '../../shared/provider-trust'
 import type { EngineSnapshot, Provider } from './types'
 import type { RecentModel } from './recent-models'
@@ -18,6 +19,8 @@ export interface ModelPickerChoice {
   state: string | null
   local: boolean
   disabledReason: string | null
+  capabilityLabels?: string[]
+  capabilityCheckedAt?: number
 }
 
 export function modelChoiceKey(providerId: string, model: string, accountId: string | null): string {
@@ -25,7 +28,7 @@ export function modelChoiceKey(providerId: string, model: string, accountId: str
 }
 
 /** The caller supplies policy-allowed providers, including for the recent list. */
-export function modelPickerChoices(providers: readonly Provider[], engine: EngineSnapshot | null): ModelPickerChoice[] {
+export function modelPickerChoices(providers: readonly Provider[], engine: EngineSnapshot | null, fitOptions: { requirements?: ModelTaskRequirements; qualifications?: readonly ModelQualificationReport[] } = {}): ModelPickerChoice[] {
   return [...providers].sort((a, b) => Number(b.source === 'tensorfold') - Number(a.source === 'tensorfold'))
     .flatMap((provider) => providerModelGroups(provider).flatMap((group) => group.models.map((model): ModelPickerChoice => {
       const local = !isExternalProvider(provider)
@@ -41,6 +44,10 @@ export function modelPickerChoices(providers: readonly Provider[], engine: Engin
         : tooBig ? 'This model needs more memory than this Mac allows.'
         : installed?.drafter && installed.drafterInstalled === false ? 'Download the companion drafter in Models before using this model.'
         : null
+      const qualification = currentModelQualification(fitOptions.qualifications ?? [], { providerId: provider.id, accountId: group.accountId, model })
+      // External routes remain deliberate planners; they never acquire local tools.
+      const requirements = !local && fitOptions.requirements?.tools ? { ...fitOptions.requirements, tools: false } : fitOptions.requirements
+      const fit = modelTaskFit({ local, report: qualification, requirements, toolPolicyAllowed: local })
       // The catalog maximum is not the window this engine will actually serve.
       const context = ready ? status?.contextTokens : null
       const facts = builtIn ? [
@@ -54,7 +61,7 @@ export function modelPickerChoices(providers: readonly Provider[], engine: Engin
         groupId: group.id, groupLabel: group.label,
         label: installed?.title ?? statsModelLabel(model, provider, engine?.suggestions),
         detail: facts || (builtIn ? 'Runs with the built-in TensorFold engine' : `${local ? 'On this Mac' : 'Planning only'}${group.accountId ? ` · ${group.label}` : ` · ${provider.name}`}`),
-        state, local, disabledReason,
+        state, local, disabledReason: disabledReason ?? fit.disabledReason, capabilityLabels: fit.labels, capabilityCheckedAt: qualification?.checkedAt,
       }
     })))
 }

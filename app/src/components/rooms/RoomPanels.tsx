@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -67,6 +70,7 @@ export function RoomSupervisorPanel({
   onWake: () => void
   onStop: () => void
 }) {
+  const tx = useAuthoredText()
   const blocked = conflictBlockers.length > 0 || roomState === 'waiting_user' || roomState === 'waiting_external' || roomJob?.status === 'waiting_approval' || roomJob?.status === 'stalled'
   const stateTone = roomState === 'failed' || roomState === 'error' || roomJob?.status === 'failed'
     ? 'text-danger'
@@ -87,7 +91,7 @@ export function RoomSupervisorPanel({
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <div className="text-[13px] font-semibold text-ink">Room supervisor</div>
+                <div className="text-[13px] font-semibold text-ink">{tx("Room supervisor")}</div>
                 <span className={clsx('rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] font-medium', stateTone)}>{ROOM_STATE_LABEL[roomState]}</span>
               </div>
               <div className="mt-0.5 truncate text-[13px] text-ink-3">{roomJobTitle(roomJob)}</div>
@@ -96,27 +100,26 @@ export function RoomSupervisorPanel({
             <div className="flex shrink-0 items-center gap-1.5">
               {!running && canWake && (
                 <Button size="xs" variant="default" icon="play" onClick={onWake} disabled={starting || room.seats.length === 0}>
-                  {starting ? 'Waking...' : 'Wake'}
+                  {starting ? tx("Waking...") : tx("Wake")}
                 </Button>
               )}
               {running && (
                 <Button size="xs" variant="danger" icon="stop" onClick={onStop}>
-                  Stop
-                </Button>
+                  {tx("Stop")}</Button>
               )}
             </div>
           </div>
 
           <div className="mt-3 grid grid-cols-4 gap-2 text-[12px]">
-            <SupervisorMetric label="Phase" value={roomSupervisorPhase(leftToWork, activeWorkers, ticketJobsByTicket, totalTickets)} accent={running} />
-            <SupervisorMetric label="Left" value={`${leftToWork.length}/${totalTickets}`} accent={leftToWork.length > 0} />
-            <SupervisorMetric label="Workers" value={String(activeWorkers.length)} accent={activeWorkers.length > 0} />
-            <SupervisorMetric label="Budget" value={budgetLabel} />
+            <SupervisorMetric label={tx("Phase")} value={roomSupervisorPhase(leftToWork, activeWorkers, ticketJobsByTicket, totalTickets)} accent={running} />
+            <SupervisorMetric label={tx("Left")} value={`${leftToWork.length}/${totalTickets}`} accent={leftToWork.length > 0} />
+            <SupervisorMetric label={tx("Workers")} value={String(activeWorkers.length)} accent={activeWorkers.length > 0} />
+            <SupervisorMetric label={tx("Budget")} value={budgetLabel} />
           </div>
 
           {activeWorkers.length > 0 && (
             <div className="mt-3 border-t border-line pt-2">
-              <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Active workers</div>
+              <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Active workers")}</div>
               <div className="space-y-1">
                 {activeWorkers.slice(0, 3).map((ticket) => (
                   <div key={ticket.id} className="flex min-w-0 items-center gap-1.5 text-[13px]">
@@ -131,7 +134,7 @@ export function RoomSupervisorPanel({
           )}
 
           <div className="mt-3 border-t border-line pt-2">
-            <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Conflict blockers</div>
+            <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Conflict blockers")}</div>
             {conflictBlockers.length > 0 ? (
               <div className="space-y-1">
                 {conflictBlockers.slice(0, 3).map((blocker) => (
@@ -140,10 +143,10 @@ export function RoomSupervisorPanel({
                     <span className="min-w-0"><span className="font-medium">{blocker.ticketTitle}</span>: {blocker.text}</span>
                   </div>
                 ))}
-                {conflictBlockers.length > 3 && <div className="text-[12px] text-ink-4">+{conflictBlockers.length - 3} more</div>}
+                {conflictBlockers.length > 3 && <div className="text-[12px] text-ink-4">+{conflictBlockers.length - 3} {tx("more")}</div>}
               </div>
             ) : (
-              <div className="text-[13px] text-ink-4">No conflict blockers.</div>
+              <div className="text-[13px] text-ink-4">{tx("No conflict blockers.")}</div>
             )}
           </div>
         </div>
@@ -153,6 +156,7 @@ export function RoomSupervisorPanel({
 }
 
 function SupervisorMetric({ label, value, accent }: { label: string; value: string; accent?: boolean }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-lg bg-card-2 px-2 py-1.5">
       <div className="text-[11px] uppercase tracking-[0.06em] text-ink-4">{label}</div>
@@ -162,25 +166,27 @@ function SupervisorMetric({ label, value, accent }: { label: string; value: stri
 }
 
 export function RoomTicketQueue({ tickets, total, blockers, ticketJobsByTicket }: { tickets: Ticket[]; total: number; blockers: RoomConflictBlocker[]; ticketJobsByTicket: Map<string, Job> }) {
+  const tx = useAuthoredText()
   const blockersByTicket = new Map<string, string[]>()
   for (const blocker of blockers) blockersByTicket.set(blocker.ticketId, [...(blockersByTicket.get(blocker.ticketId) ?? []), blocker.text])
-  if (total === 0) return <div className="mt-3 rounded-lg border border-dashed border-line px-2.5 py-4 text-center text-[13px] text-ink-3">No room tickets yet.</div>
-  if (tickets.length === 0) return <div className="mt-3 rounded-lg border border-line bg-card px-2.5 py-3 text-center text-[13px] text-positive">All room tickets complete.</div>
+  if (total === 0) return <div className="mt-3 rounded-lg border border-dashed border-line px-2.5 py-4 text-center text-[13px] text-ink-3">{tx("No room tickets yet.")}</div>
+  if (tickets.length === 0) return <div className="mt-3 rounded-lg border border-line bg-card px-2.5 py-3 text-center text-[13px] text-positive">{tx("All room tickets complete.")}</div>
   return (
     <div className="mt-3">
       <div className="mb-1.5 flex items-center justify-between gap-2">
-        <span className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Left to work</span>
+        <span className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Left to work")}</span>
         <span className="rounded bg-ink-5 px-1.5 py-0.5 text-[11px] text-ink-4">{tickets.length}</span>
       </div>
       <div className="space-y-1.5">
         {tickets.slice(0, 6).map((ticket) => <RoomTicketQueueItem key={ticket.id} ticket={ticket} job={ticketJobsByTicket.get(ticket.id)} blockers={blockersByTicket.get(ticket.id) ?? []} />)}
       </div>
-      {tickets.length > 6 && <div className="mt-1.5 text-[12px] text-ink-4">+{tickets.length - 6} more ticket{tickets.length - 6 === 1 ? '' : 's'}</div>}
+      {tickets.length > 6 && <div className="mt-1.5 text-[12px] text-ink-4">+{tx("More tickets: {count}", { count: tickets.length - 6 })}</div>}
     </div>
   )
 }
 
 function RoomTicketQueueItem({ ticket, job, blockers }: { ticket: Ticket; job?: Job; blockers: string[] }) {
+  const tx = useAuthoredText()
   const worker = ticketWorkerLabel(ticket)
   const refs = ticketFileRefsForDisplay(ticket).slice(0, 2)
   const required = ticket.requiredEvidence ?? []
@@ -207,9 +213,9 @@ function RoomTicketQueueItem({ ticket, job, blockers }: { ticket: Ticket; job?: 
         {blockers.length > 0 && <span className="shrink-0 rounded bg-warn/12 px-1.5 py-0.5 text-[11px] font-medium text-warn">{blockers.length}</span>}
       </div>
       <div className="mt-1 flex items-center gap-1.5 text-[11px] text-ink-4">
-        <span className="capitalize">risk {ticket.risk ?? 'low'}</span>
-        {caps.length ? <span className="truncate">caps {caps.slice(0, 2).join(', ')}{caps.length > 2 ? ` +${caps.length - 2}` : ''}</span> : null}
-        {required.length ? <span className="ml-auto tabular-nums">ev {evidence.length}/{required.length}</span> : null}
+        <span className="capitalize">{tx("risk ")}{ticket.risk ?? tx("low")}</span>
+        {caps.length ? <span className="truncate">{tx("caps ")}{caps.slice(0, 2).join(', ')}{caps.length > 2 ? ` +${caps.length - 2}` : ''}</span> : null}
+        {required.length ? <span className="ml-auto tabular-nums">{tx("ev ")}{evidence.length}/{required.length}</span> : null}
       </div>
       {refs.length > 0 && (
         <div className="mt-1 flex min-w-0 flex-wrap gap-1">
@@ -231,11 +237,12 @@ function RoomTicketQueueItem({ ticket, job, blockers }: { ticket: Ticket; job?: 
 }
 
 export function RoomFlowTicker({ room, events, live, running }: { room: Room; events: RoomEventItem[]; live?: { seat: string; text: string }; running: boolean }) {
+  const tx = useAuthoredText()
   const tick = events.reduce((max, event) => Math.max(max, event.tick ?? 0), 0)
   const latest = [...events].reverse().find((event) => event.seat !== 'you')
   const activeSeat = live?.seat ?? (running ? latest?.seat : null)
   const sleeping = room.state === 'waiting_external' || room.state === 'waiting_user'
-  const label = live ? `${live.seat} is speaking` : running ? 'Room is flowing' : sleeping ? 'Room sleeping' : room.state === 'complete' ? 'Room complete' : 'Room idle'
+  const label = live ? tx("{value0} is speaking", { value0: String(live.seat) }) : running ? tx("Room is flowing") : sleeping ? tx("Room sleeping") : room.state === 'complete' ? tx("Room complete") : tx("Room idle")
   return (
     <div className="rounded-xl border border-line bg-card px-3.5 py-2.5 shadow-card">
       <div className="flex items-center gap-2">
@@ -243,7 +250,7 @@ export function RoomFlowTicker({ room, events, live, running }: { room: Room; ev
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 text-[13px] font-medium text-ink">
             <span>{label}</span>
-            <span className="rounded bg-ink-5 px-1.5 py-0.5 font-mono text-[12px] text-ink-3">tick {tick}</span>
+            <span className="rounded bg-ink-5 px-1.5 py-0.5 font-mono text-[12px] text-ink-3">{tx("tick ")}{tick}</span>
           </div>
           <div className="mt-1 flex items-center gap-1.5 overflow-hidden">
             {room.seats.map((seat) => (
@@ -261,6 +268,7 @@ export function RoomFlowTicker({ room, events, live, running }: { room: Room; ev
 }
 
 export function RoomStatePill({ state }: { state: RoomState }) {
+  const tx = useAuthoredText()
   const active = ACTIVE_ROOM_STATES.has(state)
   const danger = state === 'failed' || state === 'error'
   const done = state === 'complete'
@@ -275,6 +283,7 @@ export function RoomStatePill({ state }: { state: RoomState }) {
 }
 
 export function RoomStat({ icon, label, value, accent }: { icon: 'cpu' | 'list' | 'file' | 'message'; label: string; value: string; accent?: boolean }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-lg border border-line bg-card px-2 py-1.5">
       <div className="flex items-center gap-1.5 text-[12px] text-ink-4">
@@ -287,13 +296,14 @@ export function RoomStat({ icon, label, value, accent }: { icon: 'cpu' | 'list' 
 }
 
 const AGENT_NODE_STATUS_LABEL: Record<RoomAgentTreeNode['status'], string> = {
-  idle: 'Idle',
-  active: 'Active',
-  done: 'Done',
-  failed: 'Failed',
+  get idle() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Idle") },
+  get active() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Active") },
+  get done() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Done") },
+  get failed() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Failed") },
 }
 
 function AgentStatusDot({ status }: { status: RoomAgentTreeNode['status'] }) {
+  const tx = useAuthoredText()
   return (
     <span
       className={clsx(
@@ -306,12 +316,13 @@ function AgentStatusDot({ status }: { status: RoomAgentTreeNode['status'] }) {
 }
 
 function RoomAgentDelegates({ node }: { node: RoomAgentTreeNode | undefined }) {
+  const tx = useAuthoredText()
   if (!node?.children.length) return null
   return (
     <div className="mt-2 border-t border-line pt-1.5">
       <div className="mb-1 flex items-center gap-1.5 text-[12px] font-medium uppercase tracking-wide text-ink-3">
         <Icon name="branch" size={11} />
-        <span>Delegates</span>
+        <span>{tx("Delegates")}</span>
         <span className="ml-auto rounded bg-ink-5 px-1 text-[11px] text-ink-4">{node.children.length}</span>
       </div>
       <div className="space-y-1">
@@ -322,6 +333,7 @@ function RoomAgentDelegates({ node }: { node: RoomAgentTreeNode | undefined }) {
 }
 
 function RoomAgentDelegateRow({ node }: { node: RoomAgentTreeNode }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0">
       <div className="flex min-w-0 items-start gap-1.5 rounded-md bg-card-2 px-1.5 py-1">
@@ -347,7 +359,7 @@ function RoomAgentDelegateRow({ node }: { node: RoomAgentTreeNode }) {
 function roomSeatFocus(room: Room, tickets: Ticket[], seat: Seat, node: RoomAgentTreeNode | undefined): { label: string; detail: string; icon: IconName; tone: 'active' | 'blocked' | 'done' | 'idle' } {
   const heartbeat = room.seatHeartbeats?.[seat.id]
   if (heartbeat?.missedSince) {
-    return { label: 'Stalled', detail: `missed heartbeat ${relativeTime(heartbeat.missedSince)}`, icon: 'warning', tone: 'blocked' }
+    return { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Stalled") }, detail: `missed heartbeat ${relativeTime(heartbeat.missedSince)}`, icon: 'warning', tone: 'blocked' }
   }
 
   const pendingHandoff = [...room.events].reverse().find((event) => {
@@ -359,7 +371,7 @@ function roomSeatFocus(room: Room, tickets: Ticket[], seat: Seat, node: RoomAgen
     )
   })
   if (pendingHandoff) {
-    return { label: 'Answering handoff', detail: `${pendingHandoff.seat} is waiting`, icon: 'message', tone: 'active' }
+    return { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Answering handoff") }, detail: `${pendingHandoff.seat} is waiting`, icon: 'message', tone: 'active' }
   }
 
   const claimed = tickets.find((t) => t.assignee === seat.name && t.projectId === room.projectId && t.roomId === room.id && (t.status === 'in_progress' || t.status === 'review' || isActiveRunState(t.runState)))
@@ -369,7 +381,7 @@ function roomSeatFocus(room: Room, tickets: Ticket[], seat: Seat, node: RoomAgen
   }
 
   if (node?.children.some((child) => child.status === 'active')) {
-    return { label: 'Delegated', detail: `${node.children.filter((child) => child.status === 'active').length} active delegate${node.children.filter((child) => child.status === 'active').length === 1 ? '' : 's'}`, icon: 'branch', tone: 'active' }
+    return { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Delegated") }, detail: `${node.children.filter((child) => child.status === 'active').length} active delegate${node.children.filter((child) => child.status === 'active').length === 1 ? '' : 's'}`, icon: 'branch', tone: 'active' }
   }
 
   const last = [...room.events].reverse().find((event) => event.seat === seat.name && event.kind !== 'yield')
@@ -378,10 +390,11 @@ function roomSeatFocus(room: Room, tickets: Ticket[], seat: Seat, node: RoomAgen
     return { label, detail: last.text.replace(/\s+/g, ' ').trim().slice(0, 90), icon: last.kind === 'tool' ? 'grid' : last.kind === 'final' ? 'check' : 'spark', tone: last.kind === 'final' ? 'done' : 'idle' }
   }
 
-  return { label: 'Available', detail: seat.lane ? `${seat.lane} lane` : 'Ready for a handoff', icon: 'clock', tone: 'idle' }
+  return { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Available") }, detail: seat.lane ? `${seat.lane} lane` : 'Ready for a handoff', icon: 'clock', tone: 'idle' }
 }
 
 function SeatFocusLine({ focus }: { focus: ReturnType<typeof roomSeatFocus> }) {
+  const tx = useAuthoredText()
   return (
     <div className={clsx(
       'mt-1 flex min-w-0 items-center gap-1.5 rounded-md px-1.5 py-1 text-[12px]',
@@ -411,9 +424,10 @@ export function RoomAgentsSection({
   setAdding: Dispatch<SetStateAction<boolean>>
   setSeats: (seats: Seat[]) => void
 }) {
+  const tx = useAuthoredText()
   const modelGroups = providers.flatMap((provider) => providerModelGroups(provider).map((group) => ({ provider, group })))
-  const agentTree = useMemo(() => buildRoomAgentTree(room), [room])
-  const agentTreeBySeat = useMemo(() => new Map(agentTree.map((node) => [node.seatName, node])), [agentTree])
+  const agentTree = useMemo(() => buildRoomAgentTree(room), [room, tx])
+  const agentTreeBySeat = useMemo(() => new Map(agentTree.map((node) => [node.seatName, node])), [agentTree, tx])
   const updateSeatModel = (seat: Seat, value: string) => {
     const picked = parseModelChoice(value)
     if (!picked) return
@@ -425,10 +439,10 @@ export function RoomAgentsSection({
     <div className="border-b border-line px-3 py-3">
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div>
-          <div className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Room agents</div>
-          <div className="mt-0.5 text-[12px] leading-snug text-ink-4">Pick the model each local or cloud agent uses.</div>
+          <div className="text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Room agents")}</div>
+          <div className="mt-0.5 text-[12px] leading-snug text-ink-4">{tx("Pick the model each local or cloud agent uses.")}</div>
         </div>
-        <button onClick={() => setAdding((v) => !v)} disabled={running} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-45" aria-label="Add agent"><Icon name="plus" size={16} /></button>
+        <button onClick={() => setAdding((v) => !v)} disabled={running} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-45" aria-label={tx("Add agent")}><Icon name="plus" size={16} /></button>
       </div>
       <div className="space-y-1.5">
         {room.seats.map((seat) => {
@@ -449,7 +463,7 @@ export function RoomAgentsSection({
                   </div>
                   <div className="mt-0.5 truncate text-[12px] text-ink-3">{seat.lane ? `${seat.lane} · ` : ''}{seat.role}</div>
                 </div>
-                <button onClick={() => removeSeat(seat.id)} disabled={running} className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:text-danger disabled:opacity-30 group-hover:opacity-100" aria-label="Remove agent"><Icon name="x" size={14} /></button>
+                <button onClick={() => removeSeat(seat.id)} disabled={running} className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:text-danger disabled:opacity-30 group-hover:opacity-100" aria-label={tx("Remove agent")}><Icon name="x" size={14} /></button>
               </div>
               <SeatFocusLine focus={focus} />
               <select
@@ -458,7 +472,7 @@ export function RoomAgentsSection({
                 onChange={(e) => updateSeatModel(seat, e.target.value)}
                 className="no-drag mt-2 h-8 w-full cursor-pointer rounded-lg border border-line bg-card-2 px-2 text-[13px] text-ink outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-55"
               >
-                {!choiceValue && <option value="">Choose model</option>}
+                {!choiceValue && <option value="">{tx("Choose model")}</option>}
                 {modelGroups.map(({ provider, group }) => (
                   <optgroup key={group.id} label={group.detail ? `${group.label} · ${group.detail}` : group.label}>
                     {group.models.map((model) => (
@@ -481,7 +495,7 @@ export function RoomAgentsSection({
           )
         })}
         {adding && <AddSeat room={room} onAdd={(seat) => { setSeats([...room.seats, seat]); setAdding(false) }} onCancel={() => setAdding(false)} />}
-        {room.seats.length === 0 && !adding && <div className="rounded-lg border border-dashed border-line px-2.5 py-5 text-center text-[13px] text-ink-3">No agents yet. Add one or use the preset below.</div>}
+        {room.seats.length === 0 && !adding && <div className="rounded-lg border border-dashed border-line px-2.5 py-5 text-center text-[13px] text-ink-3">{tx("No agents yet. Add one or use the preset below.")}</div>}
       </div>
     </div>
   )
@@ -499,6 +513,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
   onSetCollaboration: (mode: RoomCollaborationMode) => void
   onSetMode: (mode: RoomMode) => void
 }) {
+  const tx = useAuthoredText()
   const [dragOver, setDragOver] = useState(false)
   const noProviders = allowedProviders(providers, project).length === 0
   const activeMode = room.collaborationMode ?? 'frontier_plans_local_builds'
@@ -510,8 +525,8 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
 
   return (
     <div className="mx-auto w-full max-w-[640px] py-8 fade-in">
-      <h2 className="text-[16px] font-semibold text-ink">Build your room</h2>
-      <p className="mt-1 text-[13px] text-ink-3">Drag a role into the room — or click to add. Each agent picks a fitting model: builders and operators run local, planners and reviewers run on a frontier model.</p>
+      <h2 className="text-[16px] font-semibold text-ink">{tx("Build your room")}</h2>
+      <p className="mt-1 text-[13px] text-ink-3">{tx("Drag a role into the room — or click to add. Each agent picks a fitting model: builders and operators run local, planners and reviewers run on a frontier model.")}</p>
 
       <div className="mt-4 flex flex-wrap gap-2">
         {ROLE_PROFILES.map((p) => (
@@ -522,16 +537,15 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
             onClick={() => addRole(p.id)}
             disabled={noProviders}
             className="flex cursor-grab items-center gap-1.5 rounded-full border border-line bg-card px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink active:cursor-grabbing disabled:opacity-50"
-            title={`Add a ${p.label}`}
+            title={tx("Add a {value0}", { value0: p.label })}
           >
             <Icon name={p.lane === 'development' || p.lane === 'operations' ? 'cpu' : 'globe'} size={13} className="text-ink-3" />
             {p.label}
             <Icon name="plus" size={12} className="text-ink-4" />
           </button>
         ))}
-        <button onClick={() => onSetSeats(presetSeats(providers, project))} disabled={noProviders} className="flex items-center gap-1.5 rounded-full border border-dashed border-line px-3 py-1.5 text-[13px] text-ink-3 transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50" title="Add a planner, builder and reviewer">
-          <Icon name="spark" size={13} />Recommended trio
-        </button>
+        <button onClick={() => onSetSeats(presetSeats(providers, project))} disabled={noProviders} className="flex items-center gap-1.5 rounded-full border border-dashed border-line px-3 py-1.5 text-[13px] text-ink-3 transition-colors hover:border-line-strong hover:text-ink disabled:opacity-50" title={tx("Add a planner, builder and reviewer")}>
+          <Icon name="spark" size={13} />{tx("Recommended trio")}</button>
       </div>
 
       <div
@@ -541,7 +555,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
         className={clsx('mt-3 rounded-2xl border-2 border-dashed p-4 transition-colors', dragOver ? 'border-accent bg-accent-soft/40' : 'border-line')}
       >
         {room.seats.length === 0 ? (
-          <div className="py-8 text-center text-[13px] text-ink-3">{noProviders ? 'No models configured — connect one in Settings first.' : 'Drop agents here to staff the room.'}</div>
+          <div className="py-8 text-center text-[13px] text-ink-3">{noProviders ? tx("No models configured — connect one in Settings first.") : tx("Drop agents here to staff the room.")}</div>
         ) : (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {room.seats.map((seat) => {
@@ -554,7 +568,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
                     <div className="truncate text-[12px] text-ink-3">{seat.role}</div>
                     <div className="truncate text-[11px] text-ink-4">{prov ? modelDisplayName(prov, seat.model) : seat.model}</div>
                   </div>
-                  <button onClick={() => removeSeat(seat.id)} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label="Remove agent"><Icon name="x" size={12} /></button>
+                  <button onClick={() => removeSeat(seat.id)} className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded text-ink-3 opacity-0 transition-opacity hover:bg-ink-5 hover:text-ink group-hover:opacity-100" aria-label={tx("Remove agent")}><Icon name="x" size={12} /></button>
                 </div>
               )
             })}
@@ -564,7 +578,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
 
       {room.seats.length > 0 && (
         <>
-          <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">What this room is for</div>
+          <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("What this room is for")}</div>
           <div className="grid gap-2 sm:grid-cols-3">
             {ROOM_MODE_OPTIONS.map((opt) => (
               <button key={opt.id} onClick={() => onSetMode(opt.id)} className={clsx('rounded-xl border px-3 py-2.5 text-left transition-colors', room.mode === opt.id ? 'border-line-strong bg-card' : 'border-line bg-card-2 hover:border-line-strong')}>
@@ -573,7 +587,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
               </button>
             ))}
           </div>
-          <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">How they work together</div>
+          <div className="mb-2 mt-6 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("How they work together")}</div>
           <div className="grid gap-2 sm:grid-cols-2">
             {ROOM_COLLABORATION_OPTIONS.map((opt) => (
               <button key={opt.id} onClick={() => onSetCollaboration(opt.id)} className={clsx('rounded-xl border px-3 py-2.5 text-left transition-colors', activeMode === opt.id ? 'border-line-strong bg-card' : 'border-line bg-card-2 hover:border-line-strong')}>
@@ -582,7 +596,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
               </button>
             ))}
           </div>
-          <p className="mt-4 text-center text-[13px] text-ink-3">Pose a problem below to start the huddle.</p>
+          <p className="mt-4 text-center text-[13px] text-ink-3">{tx("Pose a problem below to start the huddle.")}</p>
         </>
       )}
     </div>
@@ -590,6 +604,7 @@ export function RoomCanvas({ room, providers, project, onSetSeats, onSetCollabor
 }
 
 function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => void; onCancel: () => void }) {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)!
   const project = useStore((s) => s.projects.find((p) => p.id === room.projectId)) ?? null
   const agentPresets = (settings.agentPresets ?? []).filter((preset) => !preset.archivedAt && !preset.paused)
@@ -666,7 +681,7 @@ function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => vo
           onChange={(e) => applyAgentPreset(e.target.value)}
           className="no-drag mb-2 h-8 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent"
         >
-          <option value="" disabled>Use saved agent...</option>
+          <option value="" disabled>{tx("Use saved agent...")}</option>
           {agentPresets.map((preset: AgentPreset) => <option key={preset.id} value={preset.id}>{preset.name} · {preset.role}</option>)}
         </select>
       )}
@@ -685,17 +700,17 @@ function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => vo
         }}
         className="no-drag mb-2 h-8 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent"
       >
-        {ROLE_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.label} room role</option>)}
+        {ROLE_PROFILES.map((profile) => <option key={profile.id} value={profile.id}>{profile.label} {tx("room role")}</option>)}
       </select>
-      <Input value={name} onChange={(e) => { setNameTouched(true); setName(e.target.value) }} placeholder="Name (e.g. architect)" className="mb-2 h-8" />
-      <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role (e.g. Architect)" className="mb-2 h-8" />
+      <Input value={name} onChange={(e) => { setNameTouched(true); setName(e.target.value) }} placeholder={tx("Name (e.g. architect)")} className="mb-2 h-8" />
+      <Input value={role} onChange={(e) => setRole(e.target.value)} placeholder={tx("Role (e.g. Architect)")} className="mb-2 h-8" />
       <div className="mb-2 grid grid-cols-2 gap-2">
         <select value={lane} onChange={(e) => setLane(e.target.value as RoomSeatLane)} className="no-drag h-8 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent">
-          <option value="planning">Planning</option>
-          <option value="development">Development</option>
-          <option value="review">Review</option>
-          <option value="research">Research</option>
-          <option value="operations">Operations</option>
+          <option value="planning">{tx("Planning")}</option>
+          <option value="development">{tx("Development")}</option>
+          <option value="review">{tx("Review")}</option>
+          <option value="research">{tx("Research")}</option>
+          <option value="operations">{tx("Operations")}</option>
         </select>
         <select value={fanOutBudget} onChange={(e) => setFanOutBudget(e.target.value as FanOutBudget)} className="no-drag h-8 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent">
           {FAN_OUT_OPTIONS.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}
@@ -703,12 +718,11 @@ function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => vo
       </div>
       {noAllowedProviders ? (
         <div className="mb-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2 text-[13px] leading-snug text-warn">
-          This project is local-only, but no local providers are configured.
-        </div>
+          {tx("This project is local-only, but no local providers are configured.")}</div>
       ) : (
         <div className="mb-2">
           <select value={currentModelChoice} onChange={(e) => pickModel(e.target.value)} className="no-drag h-8 w-full cursor-pointer rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none focus:border-accent">
-            {project?.localOnly && <option value="" disabled>Local models only</option>}
+            {project?.localOnly && <option value="" disabled>{tx("Local models only")}</option>}
             {pickerProviders.flatMap((p) => providerModelGroups(p).map((group) => (
               <optgroup key={group.id} label={group.detail ? `${group.label} · ${group.detail}` : group.label}>
                 {group.models.map((m) => (
@@ -721,8 +735,8 @@ function AddSeat({ room, onAdd, onCancel }: { room: Room; onAdd: (s: Seat) => vo
         </div>
       )}
       <div className="flex gap-2">
-        <Button variant="primary" size="sm" className="flex-1 justify-center" onClick={add} disabled={noAllowedProviders || !model}>Add agent</Button>
-        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
+        <Button variant="primary" size="sm" className="flex-1 justify-center" onClick={add} disabled={noAllowedProviders || !model}>{tx("Add agent")}</Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>{tx("Cancel")}</Button>
       </div>
     </div>
   )

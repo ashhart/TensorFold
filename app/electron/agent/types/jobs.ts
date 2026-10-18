@@ -419,6 +419,7 @@ export interface AppUpdateStatus {
 }
 
 export interface StartRunPayload {
+  quotes?: import('../../../shared/message-quotes').MessageQuote[]
   threadId: string
   /** Trusted host scope; never copied from a remote request body. */
   workspaceBoundary?: 'home'
@@ -459,7 +460,7 @@ export type AgentEvent = (
   | { runId: string; threadId: string; type: 'item_add'; item: TimelineItem }
   | { runId: string; threadId: string; type: 'item_delta'; id: string; field: 'text' | 'output'; chunk: string }
   | { runId: string; threadId: string; type: 'item_update'; id: string; patch: Partial<TimelineItem> }
-  | { runId: string; threadId: string; type: 'thread_update'; patch: Partial<Pick<Thread, 'providerId' | 'providerAccountId' | 'model' | 'modelRoute' | 'activeRunContract' | 'lastRunReceipt' | 'memoryPolicy' | 'memoryPolicyRevision'>> }
+  | { runId: string; threadId: string; type: 'thread_update'; patch: Partial<Pick<Thread, 'providerId' | 'providerAccountId' | 'model' | 'modelRoute' | 'activeRunContract' | 'lastRunReceipt' | 'memoryPolicy' | 'memoryPolicyRevision' | 'runRecovery' | 'runRecoveryReviewedId'>> }
   | { runId: string; threadId: string; type: 'approval_request'; callId: string; itemId: string }
   | { runId: string; threadId: string; type: 'title'; title: string }
   | { runId: string; threadId: string; type: 'plan'; plan: PlanStep[]; goalStatus?: 'active' | 'complete' | 'paused' }

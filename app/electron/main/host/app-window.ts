@@ -13,6 +13,10 @@ interface AppWindowRuntimeDeps {
   onWindowClosed?(): void
   onWindowCreated?(win: BrowserWindowType): void
   shouldShowWindow?(): boolean
+  installTextEditing?(win: BrowserWindowType): void
+  beforeWindowClose?(win: BrowserWindowType): Promise<void>
+  shouldGuardWindowClose?(): boolean
+  onWindowCloseFailure?(error: unknown): void
 }
 
 interface MediaPermissionDetails {
@@ -105,6 +109,24 @@ export function createAppWindowRuntime(deps: AppWindowRuntimeDeps) {
     const appEntryUrl = rendererEntryUrl()
     const appWebContents = appWindow.webContents
     configureTrustedRenderer(appWebContents, appEntryUrl)
+    deps.installTextEditing?.(appWindow)
+    if (deps.beforeWindowClose) {
+      let closing = false
+      let saved = false
+      appWindow.on('close', (event) => {
+        if (deps.shouldGuardWindowClose?.() === false) return
+        if (saved) { saved = false; return }
+        event.preventDefault()
+        if (closing) return
+        closing = true
+        appWindow.setEnabled(false)
+        void Promise.resolve().then(() => deps.beforeWindowClose!(appWindow)).then(() => {
+          closing = false
+          if (!appWindow.isDestroyed()) { saved = true; appWindow.close() }
+          if (!appWindow.isDestroyed()) appWindow.setEnabled(true)
+        }, (error) => { closing = false; if (!appWindow.isDestroyed()) appWindow.setEnabled(true); deps.onWindowCloseFailure?.(error) })
+      })
+    }
     appWindow.once('closed', () => {
       clearTrustedRenderer(appWebContents)
       // Only clear the shared reference when this is still the current window. A delayed `closed`

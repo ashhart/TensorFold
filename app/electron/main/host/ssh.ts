@@ -193,6 +193,14 @@ export class SshManager {
     }
   }
 
+  /** Verified session seam for app-owned setup and loopback forwarding, never renderer IPC. */
+  async sessionForHost(hostId: string): Promise<SshSession> {
+    await this.ensureConnected(hostId)
+    const session = this.sessions.get(hostId)?.session
+    if (!session) throw new Error('The SSH host disconnected before its verified session was available.')
+    return session
+  }
+
   private async connect(hostId: string): Promise<SshBackend> {
     const host = await this.resolveHost(hostId)
     if (!host) throw new Error(`Unknown SSH host: ${hostId}`)

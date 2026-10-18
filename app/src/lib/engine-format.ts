@@ -1,3 +1,5 @@
+import { currentAuthoredText } from './preferences/display'
+import { currentUiLanguage } from './preferences/current-locale'
 import type { EngineStatus, ModelPreflight, PreflightVerdict, PullProgress } from './types'
 
 // Pure display helpers for the built-in engine (no IPC), shared by the Models page and the picker.
@@ -37,6 +39,14 @@ export function canDownload(preflight: ModelPreflight | null | undefined): boole
 }
 
 export function engineStateLabel(status: EngineStatus | null | undefined): string {
+  if (currentUiLanguage() !== 'en') {
+    if (!status) return currentAuthoredText('Checking engine')
+    if (!status.available) return currentAuthoredText('Engine missing from this build')
+    if (status.state === 'ready') return currentAuthoredText('Running {model}', { model: status.model ?? '' })
+    if (status.state === 'starting') return status.message ? `${currentAuthoredText('Diagnostic, original text')}: ${status.message}` : currentAuthoredText('Loading {model}', { model: status.model ?? '' })
+    if (status.state === 'failed') return status.message ? `${currentAuthoredText('Diagnostic, original text')}: ${status.message}` : currentAuthoredText('The engine stopped')
+    return status.version ? currentAuthoredText('Engine {version} idle', { version: status.version }) : currentAuthoredText('Engine idle')
+  }
   if (!status) return 'Checking engine'
   if (!status.available) return 'Engine missing from this build'
   if (status.state === 'ready') return `Running ${status.model}`

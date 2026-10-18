@@ -1,3 +1,4 @@
+import { beginProjectMemoryPurge, endProjectMemoryPurge, purgeProjectMemoryState } from '../../store/project-memory'
 import path from 'node:path'
 import { promises as fs } from 'node:fs'
 import type { JobApprovalDecision, Project, SecurityPurgeResult } from '../../agent/types'
@@ -18,6 +19,7 @@ import { purgeBrowserAutomationSessions } from './browser-automation'
 import { quiesceOrchestrationJournal, enableOrchestrationJournal } from '../../agent/orchestration-journal'
 import { sendToRenderer } from './renderer-events'
 import { durablePairingMutation } from './durable-pairing'
+import { beginComposerDraftPurge, endComposerDraftPurge, purgeComposerDrafts } from '../../store/composer-drafts'
 
 interface SecurityPurgeRuntimeDeps {
   aborters: Map<string, AbortController>
@@ -38,6 +40,9 @@ interface SecurityPurgeRuntimeDeps {
   clearProviderStatus(): Promise<void>
   clearUsageMemory(): void | Promise<void>
   beginLearningPurge(): Promise<void>
+  quiesceDocumentLibrary?(): Promise<void>
+  purgeDocumentLibrary?(): Promise<void>
+  resumeDocumentLibrary?(): void
   quiescePhoneControl?(): Promise<void>
   quiesceBotVms?(): Promise<void>
   purgeBotVmData?(): Promise<void>
@@ -78,17 +83,23 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     let loopsQuiesced = false
     let learningPurgeActive = false
     let whatsappAuthPurgeActive = false
+    let draftPurgeActive = false
+    let projectMemoryPurgeActive = false
     let purgeLease: WorkspaceMutationLease | null = null
     try {
       // Engine admission closes synchronously before the first await. Learning can
       // otherwise write a checkpoint or recreate its journal during a global purge.
       learningPurgeActive = true
       const learningQuiescing = deps.beginLearningPurge()
+      draftPurgeActive = true
+      const draftsQuiescing = beginComposerDraftPurge()
+      projectMemoryPurgeActive = true
+      const projectMemoryQuiescing = beginProjectMemoryPurge()
       const purgeLeasePending = deps.workspaceMutationGuard.acquireGlobal()
       loopsQuiesced = true
       const loopsQuiescing = deps.quiesceLoops()
       // Observe every rejection immediately while existing workspace owners drain.
-      const quiescence = Promise.allSettled([purgeLeasePending, learningQuiescing, loopsQuiescing, deps.quiescePhoneControl?.() ?? Promise.resolve(), deps.quiesceBotVms?.() ?? Promise.resolve(), deps.quiesceUserQuestions?.() ?? Promise.resolve()])
+      const quiescence = Promise.allSettled([purgeLeasePending, learningQuiescing, loopsQuiescing, deps.quiescePhoneControl?.() ?? Promise.resolve(), deps.quiesceBotVms?.() ?? Promise.resolve(), deps.quiesceUserQuestions?.() ?? Promise.resolve(), draftsQuiescing, projectMemoryQuiescing, deps.quiesceDocumentLibrary?.() ?? Promise.resolve()])
       for (const controller of deps.aborters.values()) controller.abort()
       for (const controller of deps.roomAborters.values()) controller.abort()
       for (const controller of deps.missionAborters.values()) controller.abort()
@@ -97,7 +108,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       closeSessionSearchIndexes()
       const settled = await quiescence
       if (settled[0].status === 'fulfilled') purgeLease = settled[0].value
-      const labels = ['workspaceQuiescence', 'learningQuiescence', 'loopQuiescence', 'phoneQuiescence', 'botVmQuiescence', 'questionQuiescence']
+      const labels = ['workspaceQuiescence', 'learningQuiescence', 'loopQuiescence', 'phoneQuiescence', 'botVmQuiescence', 'questionQuiescence', 'draftQuiescence', 'projectMemoryQuiescence', 'documentLibraryQuiescence']
       const failures = settled.flatMap((result, i) => result.status === 'rejected' ? [{ label: labels[i], error: result.reason }] : [])
       if (failures.length) {
         await auditEvent('security.purge_local_memory_failed', {
@@ -106,6 +117,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
         })
         throw new Error(`Local memory purge could not safely stop: ${failures.map((failure) => failure.label).join(', ')}. Private learning data was not removed.`)
       }
+      await deps.purgeDocumentLibrary?.()
       const auditTargets = [
       vontraPath('security-events.jsonl'),
       vontraPath('security-events.anchor.json'),
@@ -125,6 +137,10 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       vontraPath('journals'),
       vontraPath('loops.json'),
       vontraPath('state', 'provider-status.json'),
+      vontraPath('state', 'input-history.json'),
+      vontraPath('state', 'cluster-workspace.json'),
+      vontraPath('clusters', 'ssh'),
+      vontraPath('state', 'composer-drafts'),
       vontraPath('state', 'session-search.sqlite'),
       vontraPath('worktrees'),
       vontraPath('mission-attempts'),
@@ -133,6 +149,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       const preservedResiduals = await collectManagedWorktreeResiduals()
       const preservedByPath = new Map(preservedResiduals.map((item) => [path.resolve(item.path), item]))
       const residualFileCounts = await Promise.all([...residualTargets, ...auditTargets].map(countFiles))
+      const draftDirectoryExisted = (await fs.lstat(vontraPath('state', 'composer-drafts')).catch(() => null)) !== null
       const preservedFileCounts = await Promise.all([...preservedByPath.keys()].map(countFiles))
       const counts: Record<string, number> = {
       ...localMemoryCounts(),
@@ -221,8 +238,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       ['jobs', saveJobs(store.jobs)],
       ['subAgents', saveSubAgents(store.subAgents)],
       ['botSessions', saveBotControlSessions(store.botSessions)],
-      ['projectMemory', saveProjectMemory(store.projectMemory)],
-      ['projectMemoryCandidates', saveProjectMemoryCandidates(store.projectMemoryCandidates)],
+      ['projectMemory', purgeProjectMemoryState()],
       ['incidents', saveIncidents(store.incidents)],
       ['contacts', saveContactDirectory(store.contacts)],
       ['cliSessions', saveCliSessions(store.cliSessions)],
@@ -285,6 +301,8 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     // while still reporting success.
     try {
       await shredPurgedStateFiles()
+      await purgeComposerDrafts()
+      sendToRenderer('composer-drafts:reset', null)
     } catch (error) {
       await auditEvent('security.purge_local_memory_failed', {
         counts,
@@ -328,7 +346,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
     const learningReceipt = learningRemoval as { removedPaths: string[]; files: number } | null
     if (!learningReceipt) throw new Error('Local memory purge did not receive a private learning-data removal receipt.')
     counts.learningFiles = learningReceipt.files
-    const removedPaths: string[] = [...learningReceipt.removedPaths]
+    const removedPaths: string[] = [...learningReceipt.removedPaths, ...(draftDirectoryExisted ? [vontraPath('state', 'composer-drafts')] : [])]
     // These paths carry plaintext or derived conversational state outside the protected
     // collections: transcripts, browser screenshots/DOM, email bodies, usage caches, event
     // receipts, and the audit trail. Securely overwrite regular files before unlinking and
@@ -393,6 +411,8 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       preservedResiduals: finalPreservedResiduals,
     }
     } finally {
+      if (projectMemoryPurgeActive) endProjectMemoryPurge()
+      if (draftPurgeActive) endComposerDraftPurge()
       if (whatsappAuthPurgeActive) endWhatsAppAuthStatePurge()
       if (learningPurgeActive) deps.endLearningPurge()
       purgeLease?.release()
@@ -403,6 +423,7 @@ export function createSecurityPurgeRuntime(deps: SecurityPurgeRuntimeDeps) {
       if (loopsQuiesced) deps.resumeLoops()
       deps.resumeBotVms?.()
       deps.resumeUserQuestions?.()
+      deps.resumeDocumentLibrary?.()
       purgeInProgress = false
     }
   }
@@ -527,6 +548,9 @@ async function shredPath(
 }
 
 export interface SecurityPurgeConfigDeps {
+  quiesceDocumentLibrary?(): Promise<void>
+  purgeDocumentLibrary?(): Promise<void>
+  resumeDocumentLibrary?(): void
   quiescePhoneControl?(): Promise<void>
   quiesceBotVms?(): Promise<void>
   purgeBotVmData?(): Promise<void>
@@ -584,6 +608,9 @@ export function buildSecurityPurgeConfig(deps: SecurityPurgeConfigDeps): Securit
   } = deps
 
   return {
+    quiesceDocumentLibrary: deps.quiesceDocumentLibrary,
+    purgeDocumentLibrary: deps.purgeDocumentLibrary,
+    resumeDocumentLibrary: deps.resumeDocumentLibrary,
     quiescePhoneControl: deps.quiescePhoneControl,
     quiesceBotVms: deps.quiesceBotVms,
     purgeBotVmData: deps.purgeBotVmData,

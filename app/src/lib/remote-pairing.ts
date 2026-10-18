@@ -144,7 +144,7 @@ function takePairCredentialFromUrl(): string | null {
 }
 
 export async function preparePairedSession(fetchImpl: typeof fetch = fetch): Promise<PairedBootMode> {
-  if (typeof window !== 'undefined' && (window as { vontra?: unknown }).vontra) return 'desktop'
+  if (typeof window !== 'undefined' && (window.tensorfoldStudio || window.vontra)) return 'desktop'
 
   const urlCredential = takePairCredentialFromUrl()
   if (urlCredential) {

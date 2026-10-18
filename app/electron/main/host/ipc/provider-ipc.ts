@@ -19,7 +19,7 @@ import { KokoroService } from '../../../voice/kokoro-service'
 import type { KokoroSynthesisInput } from '../../../agent/types/kokoro'
 
 let managedKokoro: KokoroService | null = null
-function kokoro(): KokoroService {
+export function getManagedKokoroService(): KokoroService {
   if (!managedKokoro) {
     managedKokoro = new KokoroService({ root: path.join(app.getPath('userData'), 'voice', 'kokoro'), workerFile: path.join(__dirname, 'kokoro-worker.js') })
     app.once('before-quit', () => managedKokoro?.dispose())
@@ -86,25 +86,25 @@ handle('voice:localSynthesize', async (_e, payload: { text: string }) => {
   return synthesizeLocalTts(String(payload?.text ?? ''))
 })
 
-handle('voice:kokoroStatus', async () => kokoro().status())
+handle('voice:kokoroStatus', async () => getManagedKokoroService().status())
 handle('voice:kokoroInstall', async () => {
   requireSecurityRole('operator', 'download the Kokoro speech model')
-  return kokoro().install()
+  return getManagedKokoroService().install()
 })
 handle('voice:kokoroCancelInstall', async () => {
   requireSecurityRole('operator', 'cancel the Kokoro download')
-  return kokoro().cancelInstall()
+  return getManagedKokoroService().cancelInstall()
 })
 handle('voice:kokoroRemove', async () => {
   requireSecurityRole('operator', 'remove the Kokoro speech model')
-  return kokoro().remove()
+  return getManagedKokoroService().remove()
 })
 handle('voice:kokoroSynthesize', async (_e, input: KokoroSynthesisInput) => {
   requireSecurityRole('operator', 'read text with Kokoro')
   if (!store.settings.voice.enabled || !store.settings.voice.ttsEnabled) return { ok: false, error: 'Voice output is disabled.' }
-  return kokoro().synthesize(input)
+  return getManagedKokoroService().synthesize(input)
 })
-handle('voice:kokoroCancelSpeech', async (_e, input: { requestId: string }) => ({ cancelled: kokoro().cancelSpeech(String(input?.requestId ?? '')) }))
+handle('voice:kokoroCancelSpeech', async (_e, input: { requestId: string }) => ({ cancelled: getManagedKokoroService().cancelSpeech(String(input?.requestId ?? '')) }))
 
 handle('voice:transcribe', async (_e, _payload: VoiceTranscriptionInput) => {
   return { ok: false, error: CLOUD_VOICE_OFF }

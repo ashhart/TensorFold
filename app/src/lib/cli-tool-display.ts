@@ -1,5 +1,7 @@
 // How a provider CLI row reads in Settings: one state, a quiet version and the probe's error when broken.
 import type { CliToolState, CliToolStatus } from './types'
+import { authoredText } from './preferences/language-packs'
+import { currentUiLanguage } from './preferences/current-locale'
 
 export function cliToolState(tool: Pick<CliToolStatus, 'command' | 'installed' | 'state'>): CliToolState {
   if (!tool.command) return 'installed'
@@ -14,10 +16,14 @@ export function cliVersionLabel(version: string | null | undefined): string | nu
 
 /** The status column text and its hover title. */
 export function cliToolStatusText(tool: Pick<CliToolStatus, 'command' | 'installed' | 'state' | 'version' | 'problem'>): { text: string; title: string } {
-  if (!tool.command) return { text: 'Built in', title: 'Built in' }
+  const tx = (source: string) => authoredText(currentUiLanguage(), source)
+  if (!tool.command) {
+    const builtIn = currentUiLanguage() === 'en' ? 'Built in' : tx('Built-in tools')
+    return { text: builtIn, title: builtIn }
+  }
   const state = cliToolState(tool)
-  if (state === 'missing') return { text: 'Missing', title: 'Not found on PATH or the configured path' }
-  if (state === 'broken') return { text: 'Broken', title: tool.problem || '--version printed no version' }
+  if (state === 'missing') return { text: tx('Missing'), title: tx('Not found on PATH or the configured path') }
+  if (state === 'broken') return { text: tx('Broken'), title: tool.problem || tx('--version printed no version') }
   const version = cliVersionLabel(tool.version)
-  return version ? { text: version, title: tool.version?.trim() || version } : { text: 'Installed', title: 'Installed' }
+  return version ? { text: version, title: tool.version?.trim() || version } : { text: tx('Installed'), title: tx('Installed') }
 }

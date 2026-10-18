@@ -88,7 +88,11 @@ export async function scanSlackMessages(settings: SlackConnectorSettings, opts: 
 
 export async function readSlackMessage(settings: SlackConnectorSettings, id: string): Promise<SlackReadResult> {
   const target = normalizeSlackId(id)
-  for (const source of settings.sources.filter((s) => s.enabled)) {
+  const explicitSource = settings.sources.find((source) => id.startsWith(`slack:${source.id}:`) || id.startsWith(`${source.id}:`) || id.startsWith(`${source.id}/`))
+  if ((id.startsWith('slack:') && !explicitSource) || explicitSource && !explicitSource.enabled) throw new Error('Slack message source is unavailable or disconnected.')
+  const liveId = parseLiveSlackId(id)
+  if (!explicitSource && liveId.channel && liveId.ts && settings.sources.filter((source) => source.enabled && isLiveSlackSource(source)).length > 1) throw new Error('Use the full source-bound Slack message citation when multiple workspaces are connected.')
+  for (const source of settings.sources.filter((source) => source.enabled && (!explicitSource || source.id === explicitSource.id))) {
     if (isLiveSlackSource(source)) {
       // Live: id is "<channel>:<ts>" or "<channel>/<ts>". Read the thread.
       const { channel, ts } = parseLiveSlackId(id)

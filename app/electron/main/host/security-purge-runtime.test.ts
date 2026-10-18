@@ -86,6 +86,8 @@ async function main() {
   const { createSecurityPurgeRuntime, localProjectGitCandidates } = await import('./security-purge-runtime.ts')
   const { store } = await import('../state.ts')
   const { defaultSettings } = await import('../../store.ts')
+  const { writeComposerDraft, composerDraftFile } = await import('../../store/composer-drafts')
+  const projectMemoryPersistence = await import('../../store/project-memory')
 
   assert.deepEqual(
     localProjectGitCandidates([
@@ -143,6 +145,14 @@ async function main() {
   process.env.VONTRA_HOME = okHome
 
   store.threads = [{ id: 'SYNTHETIC-THREAD-TO-PURGE-REMOVED' } as any]
+  const trashedMemory = { id: 'synthetic-trash', projectId: 'synthetic-project', kind: 'summary', text: 'SYNTHETIC-TRASH-BODY', sourceType: 'manual', sourceRef: null, confidence: 'medium', privacyScope: 'project', owner: null, lastVerifiedAt: null, trashedAt: 10, stateRevision: 2, createdAt: 1, updatedAt: 1 } as any
+  await projectMemoryPersistence.saveProjectMemory([trashedMemory])
+  store.projectMemory = await projectMemoryPersistence.loadProjectMemory()
+  writeFileSync(path.join(okHome, 'state', 'project-memory.json.synthetic.bak'), 'SYNTHETIC-TRASH-RECOVERY-COPY')
+  const draftScope = { surface: 'home' as const, conversationId: null, hostId: null, incognito: false }
+  await writeComposerDraft({ scope: draftScope, expectedRevision: 0, text: 'SYNTHETIC-DRAFT-TO-PURGE', attachments: [] })
+  const draftFile = composerDraftFile(draftScope)
+  writeFileSync(`${draftFile}.undecryptable-fixture.bak`, 'SYNTHETIC-DRAFT-RECOVERY-COPY')
   store.artifacts = [{ id: 'artifact-secret' } as any]
   store.suggestions = [{ id: 'suggestion-secret', title: 'SUGGESTION-PLAINTEXT-SECRET' } as any]
   store.settings = {
@@ -174,6 +184,7 @@ async function main() {
   writeFileSync(path.join(okHome, 'journals', 'missions', 'mission.ndjson'), 'SECRET-LATE-JOURNAL\n', { mode: 0o600 })
   writeFileSync(path.join(okHome, 'loops.json'), 'SECRET-LOOP-RUNTIME\n', { mode: 0o600 })
   writeFileSync(path.join(okHome, 'state', 'provider-status.json'), 'SECRET-PROVIDER-STATUS\n', { mode: 0o600 })
+  writeFileSync(path.join(okHome, 'state', 'input-history.json'), 'SYNTHETIC-HISTORY-CUTOFF-METADATA\n', { mode: 0o600 })
   const managedWorktree = path.join(okHome, 'rooms', 'project', 'room', 'code')
   mkdirSync(managedWorktree, { recursive: true, mode: 0o700 })
   execFileSync('git', ['init', '-q'], { cwd: managedWorktree })
@@ -266,6 +277,8 @@ async function main() {
     resumeLoops: () => { loopsResumed++ },
   } as any)
   const pendingPurge = okRuntime.purgeLocalMemory()
+  await assert.rejects(() => writeComposerDraft({ scope: draftScope, expectedRevision: 1, text: 'late draft must not resurrect', attachments: [] }), /cleared/)
+  await assert.rejects(() => projectMemoryPersistence.saveProjectMemory([trashedMemory]), /being cleared/, 'Trash cannot be recreated while the purge barrier is closed')
   assert.equal(learningAdmissionClosed, true, 'engine admission closes synchronously before purge yields')
   assert.equal(learningAdmissionClosedBeforeGlobal, true, 'engine admission closes before global workspace acquisition')
   await Promise.resolve()
@@ -275,6 +288,11 @@ async function main() {
   releaseLearningBoundary()
   const result = await pendingPurge
   assert.equal(result.ok, true, 'happy path still reports ok: true when all saves resolve')
+  assert.deepEqual(await projectMemoryPersistence.loadProjectMemory(), [], 'full purge removes Trash from protected restart state')
+  assert.deepEqual(await projectMemoryPersistence.loadProjectMemoryCandidates(), [], 'full purge removes memory proposal history')
+  assert.equal(existsSync(path.join(okHome, 'state', 'project-memory.json.synthetic.bak')), false, 'full purge removes Trash recovery copies')
+  assert.equal(existsSync(path.dirname(draftFile)), false, 'Draft envelopes and recovery copies are removed by full local-memory purge')
+  assert.ok(result.removedPaths.includes(path.dirname(draftFile)), 'Purge receipt includes private draft directory')
   assert.equal(learningRemoved, 1, 'private learned weights and history are removed exactly once')
   assert.equal(learningEnded, 1, 'learning admission reopens after successful purge')
   assert.equal(learningAdmissionClosed, false)
@@ -317,6 +335,7 @@ async function main() {
   assert.equal(store.settings.whatsapp.sources[0]?.paired, false, 'credential purge marks linked WhatsApp sources unpaired')
   assert.equal(store.settings.whatsapp.sources[0]?.credentialRotatedAt, null, 'credential purge clears the retired credential age')
   assert.equal(existsSync(path.join(okHome, 'state', 'provider-status.json')), false, 'provider-status residual file is removed')
+  assert.equal(existsSync(path.join(okHome, 'state', 'input-history.json')), false, 'full purge removes recent prompt cutoff metadata as well as protected conversation text')
   assert.ok(!readFileSync(path.join(okHome, 'state', 'skill-suggestions.json'), 'utf8').includes('SUGGESTION-PLAINTEXT-SECRET'), 'skill suggestions are cleared from protected state')
   assert.equal(existsSync(path.join(managedWorktree, 'UNMERGED-USER-WORK.txt')), true, 'dirty managed worktree is preserved instead of silently deleting user changes')
   assert.equal(existsSync(path.join(okHome, 'rooms', 'project', 'room', 'scratchpad')), false, 'non-worktree room residuals are still purged')

@@ -1,3 +1,8 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
+import { currentAuthoredText } from '../../lib/preferences/display'
+import { currentUiLanguage, localDateText } from '../../lib/preferences/current-locale'
 import { relativeTime } from '../../lib/format'
 import { allowedProviders, projectDefaultModel } from '../../lib/policy'
 import { providerAccountChoices } from '../../lib/provider-accounts'
@@ -20,19 +25,24 @@ export const FILE_TOOL_VERB: Record<string, string> = { edit_file: 'edited', wri
 const TINTS = ['#3a86ff', '#0bb07b', '#e8a33d', '#e5564f', '#8b5cf6', '#d6457f', '#1597a5', '#6366f1']
 export const ACTIVE_ROOM_STATES = new Set<RoomState>(['queued', 'running'])
 export const ROLE_PROFILES: Array<{ id: AgentRoleProfileId; label: string; role: string; lane: RoomSeatLane; name: string }> = [
-  { id: 'planner', label: 'Planner', role: 'Planner', lane: 'planning', name: 'planner' },
-  { id: 'builder', label: 'Builder', role: 'Engineer', lane: 'development', name: 'builder' },
-  { id: 'reviewer', label: 'Reviewer', role: 'Reviewer', lane: 'review', name: 'reviewer' },
-  { id: 'researcher', label: 'Researcher', role: 'Researcher', lane: 'research', name: 'researcher' },
-  { id: 'operator', label: 'Operator', role: 'Operator', lane: 'operations', name: 'operator' },
+  { id: 'planner', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Planner") }, role: 'Planner', lane: 'planning', name: 'planner' },
+  { id: 'builder', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Builder") }, role: 'Engineer', lane: 'development', name: 'builder' },
+  { id: 'reviewer', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Reviewer") }, role: 'Reviewer', lane: 'review', name: 'reviewer' },
+  { id: 'researcher', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Researcher") }, role: 'Researcher', lane: 'research', name: 'researcher' },
+  { id: 'operator', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Operator") }, role: 'Operator', lane: 'operations', name: 'operator' },
 ]
 export const FAN_OUT_OPTIONS: Array<{ id: FanOutBudget; label: string }> = [
-  { id: 'single', label: 'Single' },
-  { id: 'paired', label: 'Paired' },
-  { id: 'council', label: 'Council' },
-  { id: 'swarm', label: 'Swarm' },
+  { id: 'single', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Single") } },
+  { id: 'paired', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Paired") } },
+  { id: 'council', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Council") } },
+  { id: 'swarm', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Swarm") } },
 ]
-export const ROOM_STATE_LABEL: Record<RoomState, string> = {
+function displayLabels<Key extends string>(sources: Record<Key, string>): Record<Key, string> {
+  return Object.defineProperties({} as Record<Key, string>, Object.fromEntries(Object.entries(sources).map(([key, source]) => [key, {
+    enumerable: true, get: () => currentAuthoredText(source as string),
+  }])))
+}
+export const ROOM_STATE_LABEL: Record<RoomState, string> = displayLabels({
   idle: 'Idle',
   created: 'Created',
   ready: 'Ready',
@@ -46,39 +56,39 @@ export const ROOM_STATE_LABEL: Record<RoomState, string> = {
   failed: 'Failed',
   archived: 'Archived',
   error: 'Failed',
-}
+})
 const LEFT_TO_WORK_RANK: Record<Ticket['status'], number> = { needs_clarification: 0, review: 1, in_progress: 2, ready: 3, todo: 4, completed: 5 }
 const ACTIVE_TICKET_STATUSES = new Set<Ticket['status']>(['in_progress', 'review'])
 const ACTIVE_TICKET_RUN_STATES = new Set<Exclude<Ticket['runState'], null>>(['queued', 'running'])
-const ROOM_JOB_STATUS_LABEL: Record<Job['status'], string> = {
+const ROOM_JOB_STATUS_LABEL: Record<Job['status'], string> = displayLabels({
   queued: 'Queued',
   running: 'Running',
-  waiting_approval: 'Waiting approval',
+  waiting_approval: 'Awaiting approval',
   paused: 'Paused',
   stalled: 'Stalled',
   completed: 'Completed',
   failed: 'Failed',
   cancelled: 'Cancelled',
   dead_letter: 'Dead letter',
-}
+})
 export const ACTIVE_ROOM_JOB_STATES = new Set<Job['status']>(['queued', 'running', 'waiting_approval', 'paused', 'stalled'])
 export const DEFAULT_ROOM_COLLABORATION_MODE: RoomCollaborationMode = 'frontier_plans_local_builds'
 export const DEFAULT_ROOM_DELIBERATION_EFFORT: RoomDeliberationEffort = 'normal'
 export const DEFAULT_ROOM_WORKER_BUDGET = { maxActive: 2, maxStarts: 4 }
 export const ROOM_COLLABORATION_OPTIONS: Array<{ id: RoomCollaborationMode; label: string; detail: string }> = [
-  { id: 'frontier_plans_local_builds', label: 'Frontier plans, local builds', detail: 'Cloud/frontier seats plan and review; local seats build with private context.' },
-  { id: 'balanced', label: 'Balanced room', detail: 'Every seat plans, inspects, challenges, and summarizes by role.' },
-  { id: 'local_private', label: 'Local/private room', detail: 'Keep sensitive work grounded in local models and local evidence.' },
-  { id: 'frontier_council', label: 'Frontier council', detail: 'Use cloud seats as independent strategy and review critics.' },
-  { id: 'supervisor', label: 'Supervisor', detail: 'A planner seat assigns tickets; workers auto-start for the assigned seat.' },
+  { id: 'frontier_plans_local_builds', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Frontier plans, local builds") }, get detail() { return currentAuthoredText("Cloud/frontier seats plan and review; local seats build with private context.") } },
+  { id: 'balanced', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Balanced room") }, get detail() { return currentAuthoredText("Every seat plans, inspects, challenges, and summarizes by role.") } },
+  { id: 'local_private', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Local/private room") }, get detail() { return currentAuthoredText("Keep sensitive work grounded in local models and local evidence.") } },
+  { id: 'frontier_council', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Frontier council") }, get detail() { return currentAuthoredText("Use cloud seats as independent strategy and review critics.") } },
+  { id: 'supervisor', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Supervisor") }, get detail() { return currentAuthoredText("A planner seat assigns tickets; workers auto-start for the assigned seat.") } },
 ]
 export { ROOM_MODE_OPTIONS, roomModeDefaultEffort } from '../../lib/room-modes'
 
 export const ROOM_DELIBERATION_OPTIONS: Array<{ id: RoomDeliberationEffort; label: string; detail: string; maxTurns: number; timeBudgetMs: number; consensusThreshold: number }> = [
-  { id: 'quick', label: 'Quick', detail: 'Short agreement pass for simple work.', maxTurns: 4, timeBudgetMs: 2 * 60 * 1000, consensusThreshold: 0.6 },
-  { id: 'normal', label: 'Normal', detail: 'Default room loop: challenge, resolve, then land the next step.', maxTurns: 8, timeBudgetMs: 5 * 60 * 1000, consensusThreshold: 0.7 },
-  { id: 'deep', label: 'Deep', detail: 'More rounds for planning, review, and named dissent.', maxTurns: 16, timeBudgetMs: 15 * 60 * 1000, consensusThreshold: 0.8 },
-  { id: 'max', label: 'Max', detail: 'Long council mode for hard problems, still capped for safety.', maxTurns: 48, timeBudgetMs: 0, consensusThreshold: 0.9 },
+  { id: 'quick', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Quick") }, get detail() { return currentAuthoredText("Short agreement pass for simple work.") }, maxTurns: 4, timeBudgetMs: 2 * 60 * 1000, consensusThreshold: 0.6 },
+  { id: 'normal', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Normal") }, get detail() { return currentAuthoredText("Default room loop: challenge, resolve, then land the next step.") }, maxTurns: 8, timeBudgetMs: 5 * 60 * 1000, consensusThreshold: 0.7 },
+  { id: 'deep', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Deep") }, get detail() { return currentAuthoredText("More rounds for planning, review, and named dissent.") }, maxTurns: 16, timeBudgetMs: 15 * 60 * 1000, consensusThreshold: 0.8 },
+  { id: 'max', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Max") }, get detail() { return currentAuthoredText("Long council mode for hard problems, still capped for safety.") }, maxTurns: 48, timeBudgetMs: 0, consensusThreshold: 0.9 },
 ]
 // Friendly auto-names so agents address each other by name (e.g. "Aria, what do you think?").
 const NAMES = ['Aria', 'Milo', 'Nova', 'Felix', 'Iris', 'Leo', 'Sage', 'June', 'Theo', 'Wren']
@@ -97,7 +107,7 @@ function seatColor(name: string): string {
   return TINTS[h % TINTS.length]
 }
 function initials(name: string): string {
-  return name.replace(/[^a-zA-Z0-9]/g, ' ').trim().split(/\s+/).slice(0, 2).map((p) => p[0]?.toUpperCase()).join('') || '?'
+  return (name.match(/[\p{L}\p{N}][\p{L}\p{N}\p{M}]*/gu) ?? []).slice(0, 2).map((part) => Array.from(part)[0]?.toUpperCase()).join('') || '?'
 }
 export function collaborationOption(mode?: RoomCollaborationMode | null) {
   return ROOM_COLLABORATION_OPTIONS.find((o) => o.id === (mode ?? DEFAULT_ROOM_COLLABORATION_MODE)) ?? ROOM_COLLABORATION_OPTIONS[0]
@@ -108,8 +118,10 @@ export function deliberationOption(effort?: RoomDeliberationEffort | null) {
 export function deliberationBudgetLabel(effort?: RoomDeliberationEffort | null): string {
   const profile = deliberationOption(effort)
   const minutes = profile.timeBudgetMs > 0 ? Math.round(profile.timeBudgetMs / 60000) : 0
-  const time = minutes > 0 ? `${minutes}m` : 'open'
-  return `${profile.maxTurns} turns · ${time} · ${Math.round(profile.consensusThreshold * 100)}%`
+  const agreement = Math.round(profile.consensusThreshold * 100)
+  if (currentUiLanguage() === 'en') return `${profile.maxTurns} turns · ${minutes > 0 ? `${minutes}m` : 'open'} · ${agreement}%`
+  const time = minutes > 0 ? currentAuthoredText('{count} min', { count: minutes }) : currentAuthoredText('No time limit')
+  return currentAuthoredText('Turns: {turns} · Time: {time} · Agreement: {agreement}%', { turns: profile.maxTurns, time, agreement })
 }
 export function roomWorkerBudget(room: Room): NonNullable<Room['workerBudget']> {
   const configured = room.workerBudget ?? DEFAULT_ROOM_WORKER_BUDGET
@@ -119,7 +131,8 @@ export function roomWorkerBudget(room: Room): NonNullable<Room['workerBudget']> 
 }
 export function roomWorkerBudgetLabel(room: Room, activeWorkers = 0): string {
   const budget = roomWorkerBudget(room)
-  return `${activeWorkers}/${budget.maxActive} active · ${budget.maxStarts} starts`
+  if (currentUiLanguage() === 'en') return `${activeWorkers}/${budget.maxActive} active · ${budget.maxStarts} starts`
+  return currentAuthoredText('Active workers: {active}/{limit} · Starts: {starts}', { active: activeWorkers, limit: budget.maxActive, starts: budget.maxStarts })
 }
 export function pickProvider(providers: Provider[], want: 'cloud' | 'local', fallback?: { providerId: string | null; providerAccountId?: string | null; model: string | null }): { provider: Provider | null; providerAccountId: string | null; model: string } {
   const preferred = providers.find((p) => p.kind === want && p.models.length > 0)
@@ -183,6 +196,7 @@ export function seatModelChoice(seat: Seat, providers: Provider[]) {
   return modelChoiceValue(provider.id, seat.providerAccountId ?? null, seat.model)
 }
 export function Avatar({ name, size = 26 }: { name: string; size?: number }) {
+  const tx = useAuthoredText()
   const c = seatColor(name)
   return (
     <span className="flex shrink-0 items-center justify-center rounded-full font-semibold text-white" style={{ width: size, height: size, background: c, fontSize: size * 0.4 }}>
@@ -198,7 +212,9 @@ export interface RoomConflictBlocker {
 }
 
 export function ticketStatusLabel(status: Ticket['status']): string {
-  return status.replace(/_/g, ' ')
+  if (currentUiLanguage() === 'en') return status.replace(/_/g, ' ')
+  const labels: Record<Ticket['status'], string> = { todo: 'Todo', ready: 'Ready', in_progress: 'In progress', review: 'Review', needs_clarification: 'Needs Clarification', completed: 'Completed' }
+  return labels[status] ? currentAuthoredText(labels[status]) : status.replace(/_/g, ' ')
 }
 
 export function isActiveRunState(state: Ticket['runState']): state is Exclude<Ticket['runState'], null> {
@@ -257,12 +273,12 @@ export function roomConflictBlockers(tickets: Ticket[]): RoomConflictBlocker[] {
 
 export function ticketWorkerLabel(ticket: Ticket): string {
   const owner = ticket.assignee ? ` @${ticket.assignee}` : ''
-  if (ticket.runState === 'running') return `Worker running${owner}${ticket.startedAt ? ` · ${relativeTime(ticket.startedAt)}` : ''}`
-  if (ticket.runState === 'queued') return `Worker queued${owner}`
-  if (ticket.runState === 'done') return `Worker done${owner}`
-  if (ticket.status === 'in_progress') return `In progress${owner}`
-  if (ticket.status === 'review') return `Review needed${owner}`
-  return owner ? `Claimed${owner}` : ''
+  if (ticket.runState === 'running') return `${currentAuthoredText('Worker running')}${owner}${ticket.startedAt ? ` · ${relativeTime(ticket.startedAt)}` : ''}`
+  if (ticket.runState === 'queued') return `${currentAuthoredText('Worker queued')}${owner}`
+  if (ticket.runState === 'done') return `${currentAuthoredText('Worker done')}${owner}`
+  if (ticket.status === 'in_progress') return `${currentAuthoredText('In progress')}${owner}`
+  if (ticket.status === 'review') return `${currentUiLanguage() === 'en' ? 'Review needed' : currentAuthoredText('Needs review')}${owner}`
+  return owner ? `${currentUiLanguage() === 'en' ? 'Claimed' : currentAuthoredText('claimed')}${owner}` : ''
 }
 
 export function ticketJobPhase(job: Job | null | undefined): 'build' | 'review' | null {
@@ -271,14 +287,14 @@ export function ticketJobPhase(job: Job | null | undefined): 'build' | 'review' 
 
 export function ticketPhaseLabel(ticket: Ticket, job?: Job | null): string {
   const phase = ticketJobPhase(job)
-  if (phase === 'review') return 'Work review'
-  if (phase === 'build') return 'Build'
-  if (ticket.status === 'todo') return 'Ticket draft'
-  if (ticket.status === 'ready') return 'Build ready'
-  if (ticket.status === 'in_progress') return 'Build'
-  if (ticket.status === 'review') return 'Work review'
-  if (ticket.status === 'needs_clarification') return 'Clarify'
-  if (ticket.status === 'completed') return 'Final gate'
+  if (phase === 'review') return currentAuthoredText('Work review')
+  if (phase === 'build') return currentAuthoredText('Build')
+  if (ticket.status === 'todo') return currentAuthoredText('Ticket draft')
+  if (ticket.status === 'ready') return currentAuthoredText('Build ready')
+  if (ticket.status === 'in_progress') return currentAuthoredText('Build')
+  if (ticket.status === 'review') return currentAuthoredText('Work review')
+  if (ticket.status === 'needs_clarification') return currentAuthoredText('Clarify')
+  if (ticket.status === 'completed') return currentAuthoredText('Final gate')
   return ticketStatusLabel(ticket.status)
 }
 
@@ -287,21 +303,24 @@ export function roomSupervisorPhase(leftToWork: Ticket[], activeWorkers: Ticket[
   if (active) return ticketPhaseLabel(active, ticketJobsByTicket.get(active.id))
   const next = leftToWork[0]
   if (next) return ticketPhaseLabel(next, ticketJobsByTicket.get(next.id))
-  return totalTickets > 0 ? 'Final gate' : 'Planning'
+  return currentAuthoredText(totalTickets > 0 ? 'Final gate' : 'Planning')
 }
 
 export function roomJobTitle(job: Job | null | undefined): string {
-  if (!job) return 'No durable room job'
-  const title = typeof job.metadata?.name === 'string' ? job.metadata.name : job.kind === 'ticket' ? 'Ticket worker' : 'Room run'
-  return `${title} · ${ROOM_JOB_STATUS_LABEL[job.status]}`
+  if (!job) return currentAuthoredText('No durable room job')
+  const title = typeof job.metadata?.name === 'string' ? job.metadata.name : currentAuthoredText(job.kind === 'ticket' ? 'Ticket worker' : 'Room run')
+  const status = currentUiLanguage() === 'en' && job.status === 'waiting_approval' ? 'Waiting approval' : ROOM_JOB_STATUS_LABEL[job.status]
+  return `${title} · ${status}`
 }
 
 export function roomJobDetail(job: Job | null | undefined): string | null {
   if (!job) return null
   if (job.nextWakeAt) {
-    const wake = job.nextWakeAt <= Date.now()
-      ? `wake due ${relativeTime(job.nextWakeAt)}`
-      : `wake around ${new Date(job.nextWakeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    const due = job.nextWakeAt <= Date.now()
+    const time = due ? relativeTime(job.nextWakeAt) : currentUiLanguage() === 'en'
+      ? new Date(job.nextWakeAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      : localDateText(job.nextWakeAt, { hour: '2-digit', minute: '2-digit' })
+    const wake = currentUiLanguage() === 'en' ? `${due ? 'wake due' : 'wake around'} ${time}` : currentAuthoredText(due ? 'Wake due {time}' : 'Wake around {time}', { time })
     return job.blockedReason ? `${job.blockedReason} · ${wake}` : wake
   }
   return job.blockedReason || job.resumePlan || null

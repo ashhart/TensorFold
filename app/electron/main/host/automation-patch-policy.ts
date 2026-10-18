@@ -16,6 +16,11 @@ export const AUTOMATION_USER_FIELDS = [
   'mode',
   'cwd',
   'deliverTo',
+  'deliveryTarget',
+  'previewOnly',
+  'botId',
+  'sourceScope',
+  'routineKind',
   'enabled',
   'misfire',
   'requiredRisks',
@@ -89,7 +94,27 @@ function sanitizeAutomationUserFields(input: unknown, current?: Automation): Par
   if (patch.prompt !== undefined && (typeof patch.prompt !== 'string' || patch.prompt.length > 1_000_000)) throw new Error('Automation prompt must be text no longer than 1,000,000 characters.')
   if (patch.scheduleKind !== undefined && !['manual', 'interval', 'daily'].includes(String(patch.scheduleKind))) throw new Error('Automation scheduleKind is invalid.')
   if (patch.mode !== undefined && !['chat', 'agent', 'digest'].includes(String(patch.mode))) throw new Error('Automation mode is invalid.')
-  if (patch.deliverTo !== undefined && !['inbox', 'telegram', 'email'].includes(String(patch.deliverTo))) throw new Error('Automation deliverTo is invalid.')
+  if (patch.deliverTo !== undefined && !['inbox', 'telegram', 'email', 'whatsapp'].includes(String(patch.deliverTo))) throw new Error('Automation deliverTo is invalid.')
+  if (patch.previewOnly !== undefined && typeof patch.previewOnly !== 'boolean') throw new Error('Automation previewOnly must be a boolean.')
+  shortNullableString(patch.botId, 'botId', 100)
+  if (patch.botId !== undefined && !/^[a-zA-Z0-9_-]{1,100}$/.test(patch.botId)) throw new Error('Choose a saved bot ID.')
+  if (patch.routineKind !== undefined && !['morning-brief', 'meeting-prep', 'follow-up'].includes(patch.routineKind)) throw new Error('Choose a supported personal routine.')
+  if (patch.deliveryTarget !== undefined) {
+    const target = patch.deliveryTarget
+    if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).some(key => !['connectorId', 'accountId', 'recipient', 'subject'].includes(key))) throw new Error('Choose an exact supported delivery target.')
+    if (!['telegram', 'email', 'whatsapp'].includes(target.connectorId) || (target.accountId !== null && (typeof target.accountId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(target.accountId))) || typeof target.recipient !== 'string' || !target.recipient.trim() || target.recipient.length > 500 || /[\r\n\0]/.test(target.recipient)) throw new Error('Choose an exact account and recipient for this destination.')
+    if (target.connectorId === 'whatsapp' && !target.accountId) throw new Error('Choose a linked WhatsApp account for this destination.')
+    if (target.connectorId === 'email' && !target.accountId) throw new Error('Choose an email account for this destination.')
+    if (target.subject !== undefined && (typeof target.subject !== 'string' || !target.subject.trim() || target.subject.length > 1_000 || /[\r\n\0]/.test(target.subject))) throw new Error('Choose a valid single-line email subject.')
+    patch.deliveryTarget = { ...target, recipient: target.recipient.trim() }
+  }
+  if (patch.sourceScope !== undefined) {
+    if (!Array.isArray(patch.sourceScope) || patch.sourceScope.length > 32 || patch.sourceScope.some(scope => !scope || typeof scope !== 'object' || Array.isArray(scope) || Object.keys(scope).some(key => !['connectorId', 'sourceId'].includes(key)) || !['email','whatsapp','telegram','imessage','calendar','docs','slack','discord','mattermost','matrix','googlechat','browser'].includes(scope.connectorId) || typeof scope.sourceId !== 'string' || !/^[a-zA-Z0-9_-]{1,100}$/.test(scope.sourceId))) throw new Error('Choose at most 32 exact source identities for this routine.')
+    patch.sourceScope = [...new Map(patch.sourceScope.map(scope => [`${scope.connectorId}:${scope.sourceId}`, { ...scope }])).values()]
+  }
+  const resulting = { ...current, ...patch }
+  if (resulting.deliverTo && resulting.deliverTo !== 'inbox' && resulting.deliveryTarget?.connectorId !== resulting.deliverTo) throw new Error('Choose a matching explicit account and recipient before enabling external delivery.')
+  if ((resulting.routineKind || resulting.botId || resulting.sourceScope) && (!resulting.routineKind || !resulting.botId || !resulting.sourceScope || resulting.mode !== 'chat' || !resulting.providerId || !resulting.model)) throw new Error('Personal routines require a saved bot, pinned model, explicit source scope and read-only chat mode.')
   if (patch.misfire !== undefined && !['coalesce', 'run_each'].includes(String(patch.misfire))) throw new Error('Automation misfire policy is invalid.')
   if (patch.enabled !== undefined && typeof patch.enabled !== 'boolean') throw new Error('Automation enabled must be a boolean.')
   if (patch.everyMinutes !== undefined && (!Number.isInteger(patch.everyMinutes) || patch.everyMinutes < 1 || patch.everyMinutes > 525_600)) throw new Error('Automation everyMinutes must be an integer from 1 to 525600.')

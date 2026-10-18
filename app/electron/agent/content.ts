@@ -1,3 +1,5 @@
+import { quotedUserText } from '../../shared/message-quotes'
+import type { MessageQuote } from '../../shared/message-quotes'
 import type { Attachment, ContentBlock } from './types/base'
 
 // Plain-text view of (possibly multimodal) message content. Every consumer that used
@@ -16,8 +18,14 @@ export function contentText(content: string | ContentBlock[] | null | undefined)
 //   images    → image_url blocks for vision transports (chat-completions); the text
 //               also names them so CLI/non-vision seats still know an image was sent.
 // Returns a plain string when there are no images (back-compat with the string path).
-export function buildUserContent(text: string, attachments: Attachment[] | undefined): string | ContentBlock[] {
+export function buildUserContent(text: string, attachments: Attachment[] | undefined, quotes?: readonly MessageQuote[]): string | ContentBlock[] {
+  text = quotedUserText(text, quotes)
   const list = attachments ?? []
+  // Internal callers also pass through this assembler; do not leak an unreviewed transcript
+  // or a failed/pending placeholder if a caller forgets the trusted host normalizer.
+  for (const item of list) {
+    if ((item.status && item.status !== 'ready') || (item.extraction && item.extraction.state !== 'accepted')) throw new Error(`Attachment ${item.name} is not ready to send.`)
+  }
   if (!list.length) return text
   const docs = list.filter((a) => a.kind === 'document' && a.text && a.text.trim())
   const images = list.filter((a) => a.kind === 'image')

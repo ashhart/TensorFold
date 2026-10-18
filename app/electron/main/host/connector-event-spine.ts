@@ -1,9 +1,12 @@
+import { sealConnectorOutboundEvent, isOutboundSendRequest } from './connector-outbound-delivery'
+import { saveConnectorEvents } from '../../store'
 import { randomUUID } from 'node:crypto'
 import { connectorProjectMemoryCandidateInputs } from '../../agent/connector-feed'
 import { createProjectMemoryCandidate } from '../../agent/project-memory'
+import { projectMemoryAutoSourceSuppressed } from './project-memory-auto-policy'
 import { approvalPolicyScope, requiresFreshConnectorApproval, type ApprovalPolicyScope } from '../../agent/approval-policy'
 import { auditPreview, redactSettings } from '../../agent/security'
-import { persistConnectorEvents, persistProjectMemoryCandidates } from './persistence'
+import { persistProjectMemoryCandidates } from './persistence'
 import { auditEvent } from './audit'
 import { store } from '../state'
 import type { ConnectorEvent } from '../../agent/types'
@@ -32,6 +35,7 @@ export async function resolveSavedConnectorApprovalPolicy(
     now?: () => number
   },
 ): Promise<ConnectorEvent> {
+  event = sealConnectorOutboundEvent(event)
   if (!event.requiresApproval && (event.approvalStatus ?? null) !== 'pending') return event
   const policy = connectorPolicyForEvent(event)
   const rule = await callbacks.findApprovalRule(policy.scope, policy.key, { workspace: `connector:${event.connectorId}` })
@@ -40,7 +44,7 @@ export async function resolveSavedConnectorApprovalPolicy(
   // A durable rule can remember a denial, but it must not silently authorize a
   // decision-sensitive external mutation whose content may have changed since the
   // rule was created (messages, calendar changes, purchases, permissions, etc.).
-  if (approved && requiresFreshConnectorApproval(policy)) return event
+  if (approved && (isOutboundSendRequest(event) || requiresFreshConnectorApproval(policy))) return event
   const status = approved ? 'approved' : 'denied'
   const summary = `${event.summary}\n\nAuto-${status} by saved policy: ${policy.explanation}`
   await callbacks.audit?.({
@@ -65,7 +69,6 @@ export interface ConnectorEventSpine {
   rememberConnectorEvents: (events: ConnectorEvent[]) => Promise<void>
   recordCalendarEvent: (event: ConnectorEvent) => Promise<ConnectorEvent>
   recordMessageEvent: (event: ConnectorEvent) => Promise<ConnectorEvent>
-  recordEventDelivery: (event: ConnectorEvent, delivery: ConnectorEvent['delivery']) => Promise<void>
   rememberConnectorMemoryCandidates: (events: ConnectorEvent[]) => void
   applySavedConnectorApprovalPolicy: (event: ConnectorEvent) => Promise<ConnectorEvent>
 }
@@ -97,6 +100,7 @@ export function createConnectorEventSpine(
     const seen = new Set(store.projectMemoryCandidates.map((candidate) => `${candidate.projectId}:${candidate.sourceRef ?? ''}`))
     const candidates = inputs
       .filter((input) => {
+        if (projectMemoryAutoSourceSuppressed(store.projectMemory, input)) return false
         const key = `${input.projectId}:${input.sourceRef ?? ''}`
         if (seen.has(key)) return false
         seen.add(key)
@@ -108,18 +112,23 @@ export function createConnectorEventSpine(
     persistProjectMemoryCandidates()
   }
 
-  function commitConnectorEvents(events: ConnectorEvent[]) {
+  async function commitConnectorEvents(events: ConnectorEvent[]): Promise<void> {
     if (!events.length) return
     // Dedup by stable message id AT INSERT TIME against the CURRENT store (not a snapshot a
     // sync took before its await): closes the window where two concurrent syncs double-ingest
     // the same messages, and drops WhatsApp replays the push bridge can re-deliver.
+    const seenEventIds = new Set(store.connectorEvents.map(event => event.id))
     const seenIds = new Set<string>()
     for (const e of store.connectorEvents) {
       const mid = typeof e.payload?.messageId === 'string' ? e.payload.messageId : null
       if (mid) seenIds.add(mid)
     }
     const fresh: ConnectorEvent[] = []
+    let replayedHostEvent = false
     for (const event of events) {
+      // A repeated host event must not resurrect a consumed send approval.
+      if (seenEventIds.has(event.id)) { replayedHostEvent = true; continue }
+      seenEventIds.add(event.id)
       const mid = typeof event.payload?.messageId === 'string' ? event.payload.messageId : null
       if (mid) {
         if (seenIds.has(mid)) continue
@@ -127,9 +136,14 @@ export function createConnectorEventSpine(
       }
       fresh.push(event)
     }
-    if (!fresh.length) return
+    if (!fresh.length) {
+      // Retry persistence of an unchanged known event without restoring an older
+      // pending body or erasing a consumed delivery marker.
+      if (replayedHostEvent) await saveConnectorEvents(structuredClone(store.connectorEvents))
+      return
+    }
     store.connectorEvents = [...fresh, ...store.connectorEvents].slice(0, 500)
-    persistConnectorEvents()
+    await saveConnectorEvents(structuredClone(store.connectorEvents))
     rememberConnectorMemoryCandidates(fresh)
     for (const event of fresh) {
       callbacks.remotePublish(event)
@@ -138,51 +152,24 @@ export function createConnectorEventSpine(
   }
 
   let connectorApprovalTail: Promise<void> = Promise.resolve()
-  async function rememberConnectorEvents(events: ConnectorEvent[]): Promise<void> {
-    if (!events.length) return
-    const needsPolicy = events.some((event) => event.requiresApproval || (event.approvalStatus ?? null) === 'pending')
-    if (!needsPolicy) {
-      commitConnectorEvents(events)
-      return
-    }
+  function rememberConnectorEvents(events: ConnectorEvent[]): Promise<void> {
+    if (!events.length) return Promise.resolve()
+    events = events.map(sealConnectorOutboundEvent)
     const batch = events.slice()
     const run = connectorApprovalTail.then(async () => {
       const resolved: ConnectorEvent[] = []
-      for (const event of batch) resolved.push(await applySavedConnectorApprovalPolicy(event))
-      commitConnectorEvents(resolved)
-    })
-    connectorApprovalTail = run.catch((error) => {
-      console.warn('[connector] saved approval policy lookup failed; events remain pending:', auditPreview(error))
-      commitConnectorEvents(batch)
-    })
-    await connectorApprovalTail
-  }
-
-  // Record a delivery result with a read-modify-write against the CURRENT store, by event id.
-  // Mutating the live event object across the send's await is unsafe: a concurrent
-  // rememberConnectorEvents can slice it past the 500-event cap, so the in-place mutation
-  // would be lost from disk. Re-locate by id (or re-insert if it was evicted) so the
-  // delivery/approval result is never dropped.
-  //
-  // This MUST serialize through the same connectorApprovalTail chain as
-  // commitConnectorEvents: otherwise a delivery write interleaving with a pending
-  // rememberConnectorEvents (whose commitConnectorEvents reassigns the store from a
-  // fresh list computed before the delivery ran) would silently drop the delivery
-  // result from persistence (last-write-wins between the two queued writes).
-  function recordEventDelivery(event: ConnectorEvent, delivery: ConnectorEvent['delivery']): Promise<void> {
-    const run = connectorApprovalTail.then(() => {
-      const idx = store.connectorEvents.findIndex((e) => e.id === event.id)
-      if (idx >= 0) {
-        store.connectorEvents = store.connectorEvents.map((e) => (e.id === event.id ? { ...e, delivery } : e))
-      } else {
-        store.connectorEvents = [{ ...event, delivery }, ...store.connectorEvents].slice(0, 500)
+      try {
+        for (const event of batch) resolved.push(await applySavedConnectorApprovalPolicy(event))
+      } catch (error) {
+        console.warn('[connector] saved approval policy lookup failed; events remain pending:', auditPreview(error))
+        resolved.splice(0, resolved.length, ...batch)
       }
-      persistConnectorEvents()
+      await commitConnectorEvents(resolved)
     })
     connectorApprovalTail = run.catch((error) => {
-      console.warn('[connector] recordEventDelivery failed:', auditPreview(error))
+      console.warn('[connector] event persistence failed:', auditPreview(error))
     })
-    return connectorApprovalTail
+    return run
   }
 
   async function recordCalendarEvent(event: ConnectorEvent): Promise<ConnectorEvent> {
@@ -217,7 +204,6 @@ export function createConnectorEventSpine(
     rememberConnectorEvents,
     recordCalendarEvent,
     recordMessageEvent,
-    recordEventDelivery,
     rememberConnectorMemoryCandidates,
     applySavedConnectorApprovalPolicy,
   }

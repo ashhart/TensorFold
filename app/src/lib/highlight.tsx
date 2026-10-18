@@ -1,6 +1,7 @@
 import React from 'react'
-import { api } from './ipc'
-import { Icon } from './icons'
+import { CodeBlock } from '../components/reading/CodeBlock'
+import { DiagramBlock } from '../components/reading/DiagramBlock'
+import { SafeMath } from '../components/reading/SafeMath'
 import { MarkdownLink } from './markdown-link'
 
 // Tiny dependency-free tokenizer. Good enough for colored code
@@ -82,45 +83,22 @@ function textFromNode(node: React.ReactNode): string {
   return ''
 }
 
-function CopyCodeButton({ text }: { text: string }) {
-  const [copied, setCopied] = React.useState(false)
-  const copy = async () => {
-    await api.writeClipboard(text)
-    setCopied(true)
-    window.setTimeout(() => setCopied(false), 1200)
-  }
-  return (
-    <button
-      type="button"
-      onClick={copy}
-      className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink"
-    >
-      <Icon name={copied ? 'check' : 'copy'} size={12} />
-      {copied ? 'Copied' : 'Copy'}
-    </button>
-  )
-}
-
-// react-markdown component overrides (external links, highlighted code).
+// Keep Markdown links and citation repair owned by their existing safe handlers.
 export const mdComponents = {
-  // Model-produced links open externally; see markdown-link.ts.
   a: MarkdownLink,
-  pre({ children, ...props }: any) {
+  pre({ children }: any) {
     const text = textFromNode(children).replace(/\n$/, '')
-    return (
-      <div className="my-3 overflow-hidden rounded-lg border border-line bg-card-2">
-        <pre {...props} className="scroll-thin overflow-x-auto p-3">{children}</pre>
-        <div className="flex justify-end border-t border-line px-2 py-1">
-          <CopyCodeButton text={text} />
-        </div>
-      </div>
-    )
+    const child = React.Children.toArray(children).find((node) => React.isValidElement(node)) as React.ReactElement<any> | undefined
+    const language = /language-([^\s]+)/.exec(child?.props.className || '')?.[1]
+    if (language === 'diagram' || language === 'mermaid') return <DiagramBlock source={text} />
+    if (language === 'math') return <SafeMath expression={text} display />
+    return <CodeBlock code={text} language={language} />
   },
-  code({ className, children, ...props }: any) {
-    const text = Array.isArray(children) ? children.join('') : String(children ?? '')
-    const lang = /language-(\w+)/.exec(className || '')?.[1]
-    const isBlock = text.includes('\n') || !!lang
-    if (!isBlock) return <code {...props}>{children}</code>
-    return <code className="syn-code">{highlight(text.replace(/\n$/, ''), lang)}</code>
+  code({ children, className }: any) {
+    return <code className={className}>{children}</code>
+  },
+  span({ children, ...props }: any) {
+    if (typeof props['data-tf-math'] === 'string') return <SafeMath expression={props['data-tf-math']} display={props['data-tf-display'] === 'true'} />
+    return <span>{children}</span>
   },
 }

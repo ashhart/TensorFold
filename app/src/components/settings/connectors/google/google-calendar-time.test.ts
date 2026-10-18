@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict'
+import { allDayEventError, calendarTimeLabel, timedEventError, timestampInZone, wallTimeCandidates } from './google-calendar-time'
+assert.equal(timestampInZone(new Date('2026-07-01T09:00:00Z'), 'Europe/London'), '2026-07-01T10:00:00+01:00')
+assert.equal(timestampInZone(new Date('2026-01-01T09:00:00Z'), 'Europe/London'), '2026-01-01T09:00:00+00:00')
+assert.equal(timedEventError('2026-07-01T10:00:00+01:00', '2026-07-01T11:00:00+01:00', 'Europe/London'), null)
+assert.match(timedEventError('2026-07-01T10:00:00Z', '2026-07-01T11:00:00Z', 'Europe/London')!, /offset/)
+assert.match(timedEventError('2026-03-29T01:30:00+00:00', '2026-03-29T03:30:00+01:00', 'Europe/London')!, /daylight/)
+assert.equal(timedEventError('2026-10-25T01:30:00+01:00', '2026-10-25T01:30:00+00:00', 'Europe/London'), null, 'explicit offsets disambiguate the repeated wall time')
+assert.deepEqual(wallTimeCandidates('2026-03-29T01:30:00', 'Europe/London'), [], 'spring-forward gap never rolls silently')
+assert.deepEqual(wallTimeCandidates('2026-10-25T01:30:00', 'Europe/London'), ['2026-10-25T01:30:00+00:00', '2026-10-25T01:30:00+01:00'])
+assert.deepEqual(wallTimeCandidates('2026-07-01T10:30', 'Europe/London'), ['2026-07-01T10:30:00+01:00'])
+assert.equal(allDayEventError('2028-02-29', '2028-03-01', 'Europe/London'), null)
+for (const [start, end] of [['2026-02-29', '2026-03-01'], ['2026-10-16', '2026-10-16'], ['2026-10-17', '2026-10-16']]) assert.ok(allDayEventError(start, end, 'UTC'))
+assert.match(calendarTimeLabel('2026-10-16'), /All day/)
+assert.match(calendarTimeLabel('2026-10-16T09:00:00Z', 'Invalid/Zone'), /unavailable/)
+console.log('Google Calendar native picker offsets, DST gap/fold, exclusive all-day/leap boundaries and malformed remote zone regressions passed')

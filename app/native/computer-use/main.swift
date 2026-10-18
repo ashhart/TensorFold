@@ -84,6 +84,15 @@ func argumentValue(_ flag: String) -> String? {
     return arguments[index + 1]
 }
 
+// Attachment extraction is an isolated byte-only mode, independent of computer control.
+if CommandLine.arguments.contains("--attachment-text-capability") {
+    writeLine(attachmentOcrCapability())
+    exit(0)
+}
+if CommandLine.arguments.contains("--extract-attachment-text") {
+    exit(runAttachmentTextMode())
+}
+
 if CommandLine.arguments.contains("--self-test") {
     exit(runSelfTest())
 }

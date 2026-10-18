@@ -1,3 +1,4 @@
+import { registerProjectMemoryIpc } from './project-memory-ipc'
 import type { RoomSupervisorMetadataPatch } from '../../agent/jobs'
 import type { runRoom as typedRunRoom } from '../../agent/rooms'
 import { buildUserContent, contentText } from '../../agent/content'
@@ -27,7 +28,6 @@ import { resolveDelegationRoute } from '../../agent/delegation-route'
 import { createSharedMemory, MEMORY_MAX_BLOCK_CHARS, MEMORY_MAX_BLOCKS, renderSharedMemory, writeBlock } from '../../agent/shared-room-memory'
 import { canonicalLocalWorkspaceKey, lexicalLocalWorkspaceKey, type WorkspaceMutationGuard, type WorkspaceMutationLease } from './workspace-mutation-guard'
 import {
-  appendRoomSteeringEvent,
   applyRoomManualMemoryCommand,
   assertRoomConfigUpdateAllowed,
   assertRoomSeatRoutesConfigured,
@@ -43,6 +43,7 @@ import { scanGitHygiene } from '../../agent/git-hygiene'
 import { inspectGitRepository } from './workspace'
 import { requireNativeConfirmation } from './sensitive-confirmation'
 import { localRoomMergeRunner, mergeRoomWorktreeBranches, roomMergeBranches, roomMergeConflictTicket, roomMergeGateBlockers } from './room-merge'
+import { steerExistingRoom } from './room-steering-runtime'
 
 export interface WorkspaceRuntimeIpc {
   ensureProjectInstructionFiles(project: Project): Promise<void>
@@ -1051,6 +1052,7 @@ async function startRoomRun(roomId: string, problem: string, attachments?: Attac
           cloudLimit: store.settings.contextLimit,
           localLimit: store.settings.localContextLimit,
           override: store.settings.contextLimitOverride,
+          engineModelProfiles: store.settings.engineModelProfiles,
         },
       )
       return floor > 0 ? floor : effectiveContextLimit(provider, seat.model)
@@ -1091,15 +1093,8 @@ async function startRoomRun(roomId: string, problem: string, attachments?: Attac
 handle('room:cancel', async (_e, roomId: string) => cancelRoomRun(roomId))
 handle('room:start', async (_e, { roomId, problem, attachments }: { roomId: string; problem: string; attachments?: Attachment[] }) => startRoomRun(roomId, problem, attachments))
 handle('room:steer', async (_e, { roomId, text }: { roomId: string; text: string }) => {
-  requireSecurityRole('operator', 'steer rooms')
-  const room = store.rooms.find((candidate) => candidate.id === roomId)
-  if (!room) throw new Error('Room not found')
-  if (room.archivedAt) throw new Error('Restore this archived room before steering it.')
-  const item = appendRoomSteeringEvent(room, text, randomUUID)
-  room.updatedAt = Date.now()
-  persistRooms()
-  emitRoom({ roomId, type: 'event', item })
-  return item
+  return steerExistingRoom({ rooms: () => store.rooms, requireOperator: () => requireSecurityRole('operator', 'steer rooms'),
+    createId: randomUUID, persistRooms, emitRoom, hasActiveRoom: (id) => roomAborters.has(id) }, roomId, text)
 })
 handle('room:manualMemory', async (_e, { roomId, command: requestedCommand }: { roomId: string; command: RoomManualMemoryCommand }) => {
   requireSecurityRole('operator', 'change room memory')
@@ -1266,101 +1261,8 @@ handle('skills:delete', async (_e, id: string) => {
   store.skills = store.skills.filter((s) => s.id !== id); persistSkills()
 })
 
-// ---------------------------------------------------------------- project memory (typed entries)
-handle('memory:get', async (_e, projectId: string) => scopeProjectMemoryEntries(store.projectMemory, projectId))
-handle('memory:candidates', async (_e, projectId: string) => scopeProjectMemoryCandidates(store.projectMemoryCandidates, projectId))
-handle('memory:propose', async (_e, m: Partial<ProjectMemoryCandidate>) => {
-  requireSecurityRole('operator', 'propose project memory')
-  if (!m.projectId) throw new Error('memory:propose requires a projectId')
-  const candidate = createProjectMemoryCandidate({
-    id: m.id,
-    targetEntryId: m.targetEntryId,
-    projectId: m.projectId,
-    kind: m.kind,
-    text: m.text || '',
-    sourceType: m.sourceType,
-    sourceRef: m.sourceRef,
-    sourceIds: m.sourceIds,
-    confidence: m.confidence,
-    privacyScope: m.privacyScope,
-    owner: m.owner,
-    reason: m.reason,
-  }, Date.now(), m.id || `mc_${randomUUID().slice(0, 8)}`)
-  store.projectMemoryCandidates.unshift(candidate)
-  persistProjectMemoryCandidates()
-  return candidate
-})
-// What approving a candidate would DO (VST-009): create vs update + per-field before/after.
-// Computed host-side so the pure diff has one implementation (renderer/type boundary).
-handle('memory:candidateDiff', async (_e, id: string) => {
-  const candidate = store.projectMemoryCandidates.find((item) => item.id === id)
-  if (!candidate) throw new Error('memory candidate not found')
-  return projectMemoryCandidateDiff(store.projectMemory, candidate)
-})
-handle('memory:approveCandidate', async (_e, id: string) => {
-  requireSecurityRole('operator', 'approve project memory candidates')
-  const result = approveProjectMemoryCandidate(store.projectMemory, store.projectMemoryCandidates, id, Date.now(), 'user', `m_${randomUUID().slice(0, 8)}`)
-  store.projectMemory = result.entries
-  store.projectMemoryCandidates = result.candidates
-  persistProjectMemory()
-  persistProjectMemoryCandidates()
-  await auditEvent('memory.candidate_approved', { candidateId: auditPreview(id), entryId: auditPreview(result.entry.id), projectId: auditPreview(result.entry.projectId), update: !!result.candidate.targetEntryId })
-  return result.entry
-})
-handle('memory:rejectCandidate', async (_e, id: string) => {
-  requireSecurityRole('operator', 'reject project memory candidates')
-  const result = rejectProjectMemoryCandidate(store.projectMemoryCandidates, id, Date.now(), 'user')
-  store.projectMemoryCandidates = result.candidates
-  persistProjectMemoryCandidates()
-  await auditEvent('memory.candidate_rejected', { candidateId: auditPreview(id), projectId: auditPreview(result.candidate.projectId) })
-  return result.candidate
-})
-// Roll back the newest change to a durable entry (VST-009): restores the prior revision,
-// or removes an entry whose creation WAS the change. Operator-gated + audited — durable
-// behavior mutations are reversible, visible actions.
-handle('memory:rollbackEntry', async (_e, id: string) => {
-  requireSecurityRole('operator', 'roll back project memory')
-  const result = rollbackProjectMemoryEntry(store.projectMemory, store.projectMemoryCandidates, id, Date.now())
-  store.projectMemory = result.entries
-  store.projectMemoryCandidates = result.candidates
-  persistProjectMemory()
-  persistProjectMemoryCandidates()
-  await auditEvent('memory.entry_rolled_back', { entryId: auditPreview(id), action: result.action })
-  return { action: result.action, entry: result.entry }
-})
-handle('memory:save', async (_e, m: Partial<ProjectMemoryEntry>) => {
-  requireSecurityRole('operator', 'save project memory')
-  const existing = m.id ? store.projectMemory.find((entry) => entry.id === m.id) : null
-  if (m.id && !existing) throw new Error('memory:save target entry not found')
-  if (!m.projectId && !existing?.projectId) throw new Error('memory:save requires a projectId for new entries')
-  const now = Date.now()
-  const hasSourceRef = Object.prototype.hasOwnProperty.call(m, 'sourceRef')
-  const hasSourceIds = Object.prototype.hasOwnProperty.call(m, 'sourceIds')
-  const candidate = createProjectMemoryCandidate({
-    targetEntryId: existing?.id ?? null,
-    projectId: existing?.projectId ?? m.projectId!,
-    kind: m.kind ?? existing?.kind ?? 'summary',
-    text: m.text || existing?.text || '',
-    sourceType: m.sourceType ?? existing?.sourceType ?? 'manual',
-    sourceRef: hasSourceRef ? m.sourceRef ?? null : existing?.sourceRef ?? null,
-    sourceIds: hasSourceIds ? m.sourceIds : hasSourceRef ? undefined : existing?.sourceIds,
-    confidence: m.confidence ?? existing?.confidence ?? 'medium',
-    privacyScope: m.privacyScope ?? existing?.privacyScope ?? 'project',
-    owner: Object.prototype.hasOwnProperty.call(m, 'owner') ? m.owner ?? null : existing?.owner ?? null,
-    reason: 'Manual save reviewed in settings.',
-  }, now, `mc_${randomUUID().slice(0, 8)}`)
-  store.projectMemoryCandidates.unshift(candidate)
-  const result = approveProjectMemoryCandidate(store.projectMemory, store.projectMemoryCandidates, candidate.id, now, 'user', `m_${randomUUID().slice(0, 8)}`)
-  store.projectMemory = result.entries
-  store.projectMemoryCandidates = result.candidates
-  persistProjectMemory()
-  persistProjectMemoryCandidates()
-  return result.entry
-})
-handle('memory:delete', async (_e, id: string) => {
-  requireSecurityRole('operator', 'delete project memory')
-  store.projectMemory = forgetProjectMemoryEntry(store.projectMemory, id); persistProjectMemory()
-})
+// Project memory writes commit protected entries and review history atomically.
+registerProjectMemoryIpc({ store, handle, requireSecurityRole, auditEvent, auditPreview })
 
 // ---------------------------------------------------------------- webhooks
 registerWebhookIpc({ webhookServer, rememberConnectorEvents })

@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -9,6 +11,7 @@ import type { Thread } from '../../lib/types'
 // and Guide steering — omp owns the agent loop itself.
 
 export function EngineSection({ thread }: { thread: Thread }) {
+  const tx = useAuthoredText()
   const setThreadEngine = useStore((s) => s.setThreadEngine)
   const [omp, setOmp] = useState<{ available: boolean; version?: string } | null>(null)
   const [busy, setBusy] = useState(false)
@@ -53,14 +56,14 @@ export function EngineSection({ thread }: { thread: Thread }) {
   return (
     <div className="space-y-2 px-4 py-3">
       <div className="flex items-center justify-between">
-        <span className="text-[12px] font-semibold uppercase tracking-wider text-ink-3">Engine</span>
+        <span className="text-[12px] font-semibold uppercase tracking-wider text-ink-3">{tx("Engine")}</span>
         {omp?.available && omp.version ? <span className="font-mono text-[11px] text-ink-4">{omp.version}</span> : null}
       </div>
       <div className="flex gap-2">
-        {option('native', 'Native loop', 'TensorFold tools, approvals, guards', true)}
-        {option('omp', 'OMP agent', omp === null ? 'checking…' : omp.available ? 'omp runs the loop; TensorFold gates writes' : 'omp CLI not installed', omp?.available === true)}
+        {option('native', tx("Native loop"), tx("TensorFold tools, approvals, guards"), true)}
+        {option('omp', tx("OMP agent"), omp === null ? tx("checking…") : omp.available ? tx("omp runs the loop; TensorFold gates writes") : tx("omp CLI not installed"), omp?.available === true)}
       </div>
-      {error ? <div className="text-[12px] text-danger">{error}</div> : null}
+      {error ? <div className="text-[12px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div> : null}
     </div>
   )
 }

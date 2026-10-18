@@ -7,6 +7,7 @@ import { createThreadForkFactory, assertThreadForkRestrictions } from './thread-
 import { captureBotConfig, botRunApprovalMode } from '../../../shared/bot-policy'
 import { captureThreadMemoryPolicy, assertThreadMemoryTransport } from '../../../shared/thread-memory-policy'
 import { classifyProvider } from '../../../shared/provider-trust'
+import { assertGoogleContextTransport } from '../../../shared/google-workspace-privacy'
 import { executeTool } from '../../agent/tools'
 import { runAgent } from '../../agent/loop'
 import { buildHandoff } from '../../agent/turn-checkpoints'
@@ -98,8 +99,8 @@ try {
 
   let handoff: any, transcriptBuilds = 0, handoffPersisted = 0, handoffStarted = 0
   const registration = compile('electron/main/host/handoff-ipc.ts', (tree) => find(tree, (node) => ts.isFunctionDeclaration(node) && node.name?.text === 'registerThreadHandoffIpc'))
-  const register = new Function('handle', 'requireSecurityRole', 'store', 'captureThreadMemoryPolicy', 'assertThreadMemoryTransport', 'classifyProvider', 'runtimeProvider', 'selectedProviderAccountId', 'latestPlanText', 'runPlanPrompt', 'assertSshThreadTransportSupported', 'buildHandoff', 'threadTurnNumber', 'resolveProviderModel', 'spineEligible', 'auditEvent', 'auditPreview', 'randomUUID', registration.replace('export function', 'function') + '\nreturn registerThreadHandoffIpc;')(
-    (_channel: string, callback: any) => { handoff = callback }, () => {}, store, captureThreadMemoryPolicy, assertThreadMemoryTransport, classifyProvider, providerWithAccount,
+  const register = new Function('handle', 'requireSecurityRole', 'store', 'captureThreadMemoryPolicy', 'assertThreadMemoryTransport', 'assertGoogleContextTransport', 'classifyProvider', 'runtimeProvider', 'selectedProviderAccountId', 'latestPlanText', 'runPlanPrompt', 'assertSshThreadTransportSupported', 'buildHandoff', 'threadTurnNumber', 'resolveProviderModel', 'spineEligible', 'auditEvent', 'auditPreview', 'randomUUID', registration.replace('export function', 'function') + '\nreturn registerThreadHandoffIpc;')(
+    (_channel: string, callback: any) => { handoff = callback }, () => {}, store, captureThreadMemoryPolicy, assertThreadMemoryTransport, assertGoogleContextTransport, classifyProvider, providerWithAccount,
     (p: Provider, accountId: string | null) => selectProviderAccount(p, accountId)?.id ?? null, latestPlanText, runPlanPrompt, () => {},
     (input: any) => { transcriptBuilds++; return buildHandoff(input) }, () => 1, resolveProviderModel, spineEligible, async () => {}, String, () => `handoff-${handoffPersisted}-${handoffStarted}`,
   )
@@ -133,6 +134,18 @@ try {
   assert.equal(handoffStarted, 0); assert.equal(Object.hasOwn(phoneHandoff, 'phoneGrant'), false)
   const callsBefore = modelCalls
   await assert.rejects(run(phoneHandoff, { provider: target }), /phone privacy guard is unavailable/)
+  assert.equal(modelCalls, callsBefore)
+  const google = { ...base, id: 'lifecycle-google', googleLocalOnly: true }
+  const builtBeforeGoogle = transcriptBuilds
+  for (const toProvider of [cloud, cli, lan]) {
+    store.threads = [google]
+    await assert.rejects(handoff({}, { threadId: google.id, toProviderId: toProvider.id, autoStart: false }), /private Google account data/)
+    assert.equal(transcriptBuilds, builtBeforeGoogle, 'Google external handoffs refuse before reading or copying the transcript')
+  }
+  store.threads = [google]
+  const googleHandoff = await handoff({}, { threadId: google.id, toProviderId: target.id, autoStart: false })
+  assert.equal(googleHandoff.googleLocalOnly, true)
+  await assert.rejects(run(googleHandoff, { provider: target }), /Google account privacy guard is unavailable/)
   assert.equal(modelCalls, callsBefore)
   store.threads = [ordinary]
   const ordinaryHandoff = await handoff({}, { threadId: ordinary.id, toProviderId: cloud.id, autoStart: false })

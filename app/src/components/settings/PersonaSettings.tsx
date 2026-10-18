@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import { useState } from 'react'
 import clsx from 'clsx'
 import { Toggle } from '../ui'
@@ -14,18 +17,19 @@ const PRESETS: { name: string; body: string }[] = [
 
 // Scopes resolve most-specific-first: connector > assistant > workspace > global.
 const SCOPES: { value: string; label: string }[] = [
-  { value: 'global', label: 'Everywhere' },
-  { value: 'assistant', label: 'Assistant' },
-  { value: 'connector:imessage', label: 'iMessage' },
-  { value: 'connector:whatsapp', label: 'WhatsApp' },
-  { value: 'connector:slack', label: 'Slack' },
-  { value: 'connector:discord', label: 'Discord' },
-  { value: 'connector:email', label: 'Email' },
+  { value: 'global', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Everywhere") } },
+  { value: 'assistant', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Assistant") } },
+  { value: 'connector:imessage', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "iMessage") } },
+  { value: 'connector:whatsapp', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "WhatsApp") } },
+  { value: 'connector:slack', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Slack") } },
+  { value: 'connector:discord', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Discord") } },
+  { value: 'connector:email', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Email") } },
 ]
 
 const TEXTAREA = 'w-full resize-y rounded-lg border border-line bg-card px-3 py-2 text-[13px] leading-relaxed text-ink outline-none transition-colors focus:border-line-strong'
 
 export function PersonaSettings({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const { draft, setDraft, commit } = ctx
   const [scope, setScope] = useState('global')
   const personas: PersonaProfile[] = draft.personas ?? []
@@ -48,7 +52,7 @@ export function PersonaSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
   return (
     <SettingsPane>
-      <Section title="Voice" desc="The assistant's voice and personality. Edits apply to the very next message — no restart. Give a different voice per surface or connector; the most specific one wins.">
+      <Section title={tx("Voice")} desc={tx("The assistant's voice and personality. Edits apply to the very next message — no restart. Give a different voice per surface or connector; the most specific one wins.")}>
         {/* Scope picker */}
         <div className="mb-2 flex flex-wrap gap-1.5">
           {SCOPES.map((s) => {
@@ -67,7 +71,7 @@ export function PersonaSettings({ ctx }: { ctx: SettingsSectionContext }) {
 
         {/* Presets */}
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
-          <span className="mr-1 text-[12px] text-ink-3">Start from:</span>
+          <span className="mr-1 text-[12px] text-ink-3">{tx("Start from:")}</span>
           {PRESETS.map((p) => (
             <button
               key={p.name}
@@ -84,27 +88,26 @@ export function PersonaSettings({ ctx }: { ctx: SettingsSectionContext }) {
           onChange={(e) => upsert({ body: e.target.value })}
           onBlur={() => commit(draft)}
           rows={6}
-          placeholder={`How should the assistant sound for "${SCOPES.find((s) => s.value === scope)?.label}"? e.g. warm and brief, technical and exact, playful…`}
+          placeholder={tx("How should the assistant sound for \"{value0}\"? e.g. warm and brief, technical and exact, playful…", { value0: SCOPES.find((s) => s.value === scope)?.label })}
           className={TEXTAREA}
         />
         <div className="mt-2 flex items-center justify-between">
-          <Toggle checked={current ? current.enabled : false} onChange={(enabled) => upsert({ enabled }, true)} label="Use this persona" />
+          <Toggle checked={current ? current.enabled : false} onChange={(enabled) => upsert({ enabled }, true)} label={tx("Use this persona")} />
           {current?.body.trim() ? (
-            <button onClick={clearScope} className="text-[13px] text-ink-3 transition-colors hover:text-danger">Clear</button>
+            <button onClick={clearScope} className="text-[13px] text-ink-3 transition-colors hover:text-danger">{tx("Clear")}</button>
           ) : null}
         </div>
       </Section>
 
-      <Section title="Your profile">
+      <Section title={tx("Your profile")}>
         <p className="mb-1.5 text-[13px] leading-relaxed text-ink-3">
-          A short note about you the assistant keeps in mind across conversations — your name, role, and how you like replies. Treated as reference only, never run as instructions.
-        </p>
+          {tx("A short note about you the assistant keeps in mind across conversations — your name, role, and how you like replies. Treated as reference only, never run as instructions.")}</p>
         <textarea
           value={draft.userProfile ?? ''}
           onChange={(e) => setDraft({ ...draft, userProfile: e.target.value })}
           onBlur={() => commit(draft)}
           rows={4}
-          placeholder="e.g. Founder. Ships fast, hates fluff. Prefer the bottom line first, then bullets."
+          placeholder={tx("e.g. Founder. Ships fast, hates fluff. Prefer the bottom line first, then bullets.")}
           className={TEXTAREA}
         />
       </Section>

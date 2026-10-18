@@ -53,7 +53,7 @@ async function main() {
 
     const [serveRecord] = (await h.records()).filter((r) => r.kind === 'serve')
     assert.deepEqual(serveRecord.args.slice(0, 7), ['mlx-community/Qwen3.5-2B-MLX-4bit', '--host', '127.0.0.1', '--port', String(port), '--name', 'mlx-community/Qwen3.5-2B-MLX-4bit'])
-    assert.equal(serveRecord.args.includes('--prompt-cache-gib'), false, 'native sizes kept states from actual memory use')
+    assert.equal(serveRecord.args.includes('--prompt-cache-gib'), false, 'native admission sizes retained states from actual loaded memory')
     assert.equal(serveRecord.args.includes(live.apiKey), false, 'the key travels by environment, never argv')
     assert.equal(serveRecord.hasKey, true)
     assert.equal(serveRecord.noUpdateCheck, '1')
@@ -72,7 +72,8 @@ async function main() {
 
     // The 27B needs its drafter: refused while missing, passed as --drafter once cached.
     await assert.rejects(() => sup.serve('TensorFold/Qwen3.8-27B-MLX-4bit'), /needs its drafter z-lab\/Qwen3.8-27B-DFlash2/)
-    assert.equal(sup.status().state, 'failed')
+    assert.equal(sup.status().state, 'ready', 'failed selection restores the previously working engine')
+    assert.equal(sup.status().model, 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit')
     await seedModel(h.hub, 'z-lab/Qwen3.8-27B-DFlash2', { dflash: true })
     await sup.serve('TensorFold/Qwen3.8-27B-MLX-4bit')
     const last = (await h.records()).filter((r) => r.kind === 'serve').at(-1)
@@ -101,16 +102,16 @@ async function main() {
     await assert.rejects(() => small.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit'), /needs at least 2\.0 GB of memory, more than the 1\.4 GB limit \(70% of this Mac's 2\.0 GB\)/)
     assert.equal((await servePids(h)).length, before)
 
-    // The engine knows its loaded footprint and future streams, beyond info's weight-based floor.
-    // The reported 48 GiB case leaves zero cache room; another load on that Mac can retain states.
+    const explicitCache = await runEngineCli(h.binary, ['serve', 'mlx-community/Qwen3.5-2B-MLX-4bit', '--prompt-cache-gib', '8'], { ...h.env, FAKE_PROMPT_CACHE_ROOM_GIB: '0' })
+    assert.equal(explicitCache.code, 1); assert.match(explicitCache.stderr, /prompt cache exceeds memory left/, 'the fake engine reproduces native rejection of a positive cache beside a fitting model')
     for (const roomGiB of [0, 3]) {
       const adaptive = supervisor(h, { totalMemoryBytes: 48 * GIB }, { FAKE_PROMPT_CACHE_ROOM_GIB: String(roomGiB) })
       try {
         await adaptive.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit')
-        const launch = (await h.records()).filter((r) => r.kind === 'serve').at(-1)!
-        assert.equal(launch.promptCacheGiB, roomGiB, 'the native planner uses the room beside actual buffers')
-        assert.equal(launch.args.includes('--prompt-cache-gib'), false, 'a positive pre-load guess can refuse a fitting model')
-        assert.equal(launch.args.includes('--prompt-cache-over-cap'), false)
+        assert.equal(adaptive.sup.status().state, 'ready', 'a fitting native load remains usable even when retained prompt states have no room')
+        const launch = (await h.records()).filter((record) => record.kind === 'serve').at(-1)
+        assert.equal(launch.args.includes('--prompt-cache-gib'), false, 'the app cannot reserve a positive cache from its weights-only floor')
+        assert.equal(launch.args.includes('--prompt-cache-over-cap'), false, 'the app cannot bypass native memory admission')
       } finally { await adaptive.sup.stop() }
     }
 
@@ -153,6 +154,7 @@ async function main() {
     await assert.rejects(() => missing.sup.serve('mlx-community/Qwen3.5-2B-MLX-4bit'), /not bundled/)
     await assert.rejects(() => missing.sup.serve('../escape'), /owner\/name/)
   } finally {
+    for (const pid of await servePids(h)) if (Number.isSafeInteger(pid) && pid > 1 && processAlive(pid)) { try { process.kill(-pid, 'SIGKILL') } catch {} }
     await h.cleanup()
   }
   console.log('engine supervisor tests passed')

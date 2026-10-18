@@ -1,3 +1,8 @@
+import { validateDocumentSourceIds } from '../../shared/document-collections'
+import { normalizeStoredHelperDefaults } from './model-helper-defaults'
+import { normalizeStoredUiPreferences } from './ui-preferences'
+import { interruptedRunRecovery } from '../../shared/run-recovery'
+import { loadEngineModelProfiles, validateEngineModelProfileSets } from '../../shared/model-profiles'
 import { parseThreadMemoryPolicy, threadMemoryPolicyRevision } from '../../shared/thread-memory-policy'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -55,6 +60,9 @@ export async function loadSettings(): Promise<Settings> {
   const revealed = revealSettings({
     ...def,
     ...loaded,
+    ...loadEngineModelProfiles(loaded.engineModelProfiles),
+    modelHelperDefaults: normalizeStoredHelperDefaults(loaded.modelHelperDefaults),
+    uiPreferences: normalizeStoredUiPreferences(loaded.uiPreferences),
     desktopMode: loaded.desktopMode === 'minimal' ? 'minimal' : 'full',
     desktopOnboardingComplete: loaded.desktopOnboardingComplete === true,
     agentPresets: normalizeAgentPresets(loaded.agentPresets ?? def.agentPresets),
@@ -213,18 +221,22 @@ export async function loadSettings(): Promise<Settings> {
   return result
 }
 
-export async function saveSettings(s: Settings): Promise<void> {
+export async function saveSettings(s: Settings, options: { validateCommit?: () => void } = {}): Promise<void> {
+  const authoritativePath = settingsPath(), cataloguePath = modelsPath()
+  options.validateCommit?.()
+  validateEngineModelProfileSets(s.engineModelProfiles)
   // Readable JSON: protectSettings already encrypts secret fields in-place (safe:v1:), so we skip the
   // whole-file envelope — settings.json is now human-readable/editable, with only API keys/tokens
   // opaque. The discovered model catalogue per provider goes in a sibling readable models.json.
-  const protectedSettings = protectSettings(s)
+  const protectedSettings = protectSettings({ ...s, uiPreferences: normalizeStoredUiPreferences(s.uiPreferences), modelHelperDefaults: normalizeStoredHelperDefaults(s.modelHelperDefaults) })
   const merged = getLegacySecretTemplate()
     ? mergeUnresolvedLegacySecrets(getLegacySecretTemplate(), protectedSettings) as Settings
     : protectedSettings
   // The catalogue is derived; prepare it before the authoritative configuration
   // commit so a rejected cache write cannot leave settings.json secretly changed.
-  await writeModelsJson(s)
-  await writeJson(settingsPath(), merged)
+  await writeModelsJson(s, cataloguePath, options.validateCommit)
+  options.validateCommit?.()
+  await writeJson(authoritativePath, merged, options.validateCommit)
   const remainingLegacy = countLegacySecrets(merged)
   setLegacySecretTemplate(remainingLegacy > 0 ? JSON.parse(JSON.stringify(merged)) as Settings : null)
   if (remainingLegacy === 0) setLegacySettingsBackupPath(null)
@@ -232,17 +244,21 @@ export async function saveSettings(s: Settings): Promise<void> {
 
 // Function declaration (hoisted) so loadSettings/saveSettings above can reference it. readSettingsJson
 // takes it as a callback to avoid a circular dependency between this module and write-infra.
-function writeModelsJson(s: Settings): Promise<void> {
+function writeModelsJson(s: Settings, target = modelsPath(), validateCommit?: () => void): Promise<void> {
   const catalogue: Record<string, string[]> = {}
   for (const p of s.providers) {
     const models = p.discoveredModels?.length ? p.discoveredModels : p.models
     if (models?.length) catalogue[p.id] = models
   }
-  return writeJson(modelsPath(), catalogue)
+  return writeJson(target, catalogue, validateCommit)
 }
 
 export async function loadThreads(): Promise<Thread[]> {
-  const threads = await readProtectedState<Thread[]>('threads.json', [])
+  const threads = (await readProtectedState<Thread[]>('threads.json', [])).map(thread => {
+    let sourceIds: string[] | undefined
+    try { sourceIds = validateDocumentSourceIds(thread.documentSourceIds) } catch { sourceIds = [] }
+    return { ...thread, ...(sourceIds !== undefined ? { documentSourceIds: sourceIds } : {}), ...(thread.runRecovery ? { runRecovery: interruptedRunRecovery(thread.runRecovery) } : {}) }
+  })
   try {
     syncSessionSearchIndex(vontraPath('state', 'session-search.sqlite'), stripIncognitoThreads(threads), blindSearchToken)
   } catch (error) {
@@ -253,10 +269,11 @@ export async function loadThreads(): Promise<Thread[]> {
 
 export async function saveThreads(threads: Thread[]): Promise<void> {
   // Incognito threads are memory-only: never let them touch threads.json.
+  for (const thread of threads) validateDocumentSourceIds(thread.documentSourceIds)
   const persisted = stripIncognitoThreads(threads)
   // An empty new thread can become Incognito while an earlier save is queued.
   // Re-evaluate privacy in the serialized slot, immediately before encryption.
-  await writeProtectedJson(threadsPath(), persisted, { prepareData: () => stripIncognitoThreads(threads) })
+  await writeProtectedJson(threadsPath(), persisted, { prepareData: () => { for (const thread of threads) validateDocumentSourceIds(thread.documentSourceIds); return stripIncognitoThreads(threads) } })
   // The search DB is disposable and stores keyed token digests, not transcript text.
   // Failure never invalidates the canonical protected JSON save.
   try {
@@ -427,13 +444,8 @@ const suggestionsPath = () => statePath('skill-suggestions.json')
 export async function loadSuggestions(): Promise<SkillSuggestion[]> { return readProtectedState<SkillSuggestion[]>('skill-suggestions.json', []) }
 export async function saveSuggestions(s: SkillSuggestion[]): Promise<void> { await writeProtectedJson(suggestionsPath(), s) }
 
-const projectMemoryPath = () => statePath('project-memory.json')
-export async function loadProjectMemory(): Promise<ProjectMemoryEntry[]> { return readProtectedState<ProjectMemoryEntry[]>('project-memory.json', []) }
-export async function saveProjectMemory(m: ProjectMemoryEntry[]): Promise<void> { await writeProtectedJson(projectMemoryPath(), m) }
+export { loadProjectMemory, saveProjectMemory, loadProjectMemoryCandidates, saveProjectMemoryCandidates } from './project-memory'
 
-const projectMemoryCandidatesPath = () => statePath('project-memory-candidates.json')
-export async function loadProjectMemoryCandidates(): Promise<ProjectMemoryCandidate[]> { return readProtectedState<ProjectMemoryCandidate[]>('project-memory-candidates.json', []) }
-export async function saveProjectMemoryCandidates(c: ProjectMemoryCandidate[]): Promise<void> { await writeProtectedJson(projectMemoryCandidatesPath(), c) }
 
 // Keep the existing per-field secret wrapping for compatibility, but protect the whole file too:
 // MCP commands, arguments, server names, and env-var names are sensitive operational metadata.
@@ -538,6 +550,8 @@ export async function shredPurgedStateFiles(): Promise<void> {
       ? { version: 1, ledgers: {}, planLinks: [] }
       : base === 'pairing-sessions.json'
         ? { links: [], sessions: [] }
+        : base === 'project-memory.json'
+          ? { version: 1, entries: [], candidates: [], candidateCutoff: Date.now() }
         : []
     await writeProtectedJson(p, empty)
   }

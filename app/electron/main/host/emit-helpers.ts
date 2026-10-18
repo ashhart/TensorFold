@@ -125,7 +125,7 @@ export function createEmitHelpers(deps: EmitHelpersDeps): EmitHelpers {
     // Phone-derived approval labels can contain captured screen text. Only the
     // owner's UI projection may receive them; automatic sinks need a known,
     // non-phone conversation, including after a phone grant during the run.
-    const automaticSinksAllowed = !!thread && !thread.phoneLocalOnly
+    const automaticSinksAllowed = !!thread && !thread.phoneLocalOnly && !thread.googleLocalOnly
     fanOutHostEvent('agent:event', traced, [
       { label: 'remote agent projection', deliver: () => remoteServer().publish({ kind: 'agent', data: { ...traced, trace: { ...traced.trace, surface: traced.trace?.surface ?? 'remote' } } }) },
       // Per-token deltas never reach webhooks: each would be a DNS-checked POST, a persist and an audit entry.

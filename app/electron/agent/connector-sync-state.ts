@@ -4,6 +4,8 @@ type SyncOwnedSourceState = {
   id: string
   lastSyncAt?: number | null
   lastError?: string | null
+  lastScan?: import('../../shared/document-library').DocumentScanSummary
+  lastFileOutcomes?: import('../../shared/document-library').DocumentFileOutcome[]
   cursor?: SyncCursor
 }
 
@@ -29,6 +31,8 @@ export function mergeConnectorSyncSources<T extends SyncOwnedSourceState>(
       ...source,
       ...(hasOwn(update, 'lastSyncAt') ? { lastSyncAt: update.lastSyncAt } : {}),
       ...(hasOwn(update, 'lastError') ? { lastError: update.lastError } : {}),
+      ...(hasOwn(update, 'lastScan') ? { lastScan: update.lastScan } : {}),
+      ...(hasOwn(update, 'lastFileOutcomes') ? { lastFileOutcomes: update.lastFileOutcomes } : {}),
       ...(hasOwn(update, 'cursor') ? { cursor: update.cursor } : {}),
     }
   })

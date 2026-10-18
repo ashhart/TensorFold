@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
@@ -12,8 +15,8 @@ import type { Provider, ProviderAccountProfile } from '../../lib/types'
 type Transport = 'codex-cli' | 'claude-cli'
 
 const META: Record<Transport, { label: string; bin: string; install: string }> = {
-  'codex-cli': { label: 'Codex', bin: 'codex', install: 'npm i -g @openai/codex' },
-  'claude-cli': { label: 'Claude', bin: 'claude', install: 'npm i -g @anthropic-ai/claude-code' },
+  'codex-cli': { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Codex") }, bin: 'codex', install: 'npm i -g @openai/codex' },
+  'claude-cli': { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Claude") }, bin: 'claude', install: 'npm i -g @anthropic-ai/claude-code' },
 }
 
 let _rowSeq = 0
@@ -43,12 +46,13 @@ function loginCommand(transport: Transport, bin: string, cliHome: string): strin
 }
 
 function CopyCommand({ command }: { command: string }) {
+  const tx = useAuthoredText()
   const [copied, setCopied] = useState(false)
   return (
     <button
       onClick={async () => { await api.writeClipboard(command); setCopied(true); window.setTimeout(() => setCopied(false), 1400) }}
       className="group flex w-full items-center gap-2 rounded-lg border border-line bg-card px-2.5 py-1.5 text-left font-mono text-[12px] text-ink-3 transition-colors hover:border-line-strong hover:text-ink-2"
-      title="Copy the sign-in command"
+      title={tx("Copy the sign-in command")}
     >
       <Icon name={copied ? 'check' : 'copy'} size={12} className="shrink-0" />
       <span className="truncate">{command}</span>
@@ -64,17 +68,18 @@ export function CliProviderSetup({ transport, cliSubscriptionMode, cliPath, cliP
   onPatch: (patch: { cliSubscriptionMode?: 'single' | 'multi'; cliPath?: string; cliProfile?: string }) => void
   addCliProvider: (transport: Transport, accountSeeds: Partial<ProviderAccountProfile>[] | null) => Promise<Provider>
 }) {
+  const tx = useAuthoredText()
   const meta = META[transport]
 
   return (
     <div className="space-y-3">
-      <Field label="How many subscriptions?">
+      <Field label={tx("How many subscriptions?")}>
         <Segmented<'single' | 'multi'>
           value={cliSubscriptionMode}
           onChange={(mode) => onPatch({ cliSubscriptionMode: mode })}
           options={[
-            { value: 'single', label: 'Single', icon: 'shield' },
-            { value: 'multi', label: 'Multiple', icon: 'layers' },
+            { value: 'single', label: tx("Single"), icon: 'shield' },
+            { value: 'multi', label: tx("Multiple"), icon: 'layers' },
           ]}
         />
       </Field>
@@ -95,6 +100,7 @@ function SingleSetup({ transport, cliPath, cliProfile, onPatch, addCliProvider, 
   addCliProvider: (transport: Transport, accountSeeds: Partial<ProviderAccountProfile>[] | null) => Promise<Provider>
   meta: { label: string; bin: string; install: string }
 }) {
+  const tx = useAuthoredText()
   const [detect, setDetect] = useState<Detect>({ state: 'checking' })
   const [busy, setBusy] = useState(false)
   const [added, setAdded] = useState<string | null>(null)
@@ -133,7 +139,7 @@ function SingleSetup({ transport, cliPath, cliProfile, onPatch, addCliProvider, 
     return (
       <div className="flex items-center gap-2 rounded-lg border border-positive/30 bg-positive/10 px-3 py-2.5 text-[13px] text-positive">
         <Icon name="check" size={15} className="shrink-0" />
-        <span>Added <span className="font-medium">{added}</span> — pick it on any chat, room, agent, or automation.</span>
+        <span>{tx("Added ")}<span className="font-medium">{added}</span> {tx("— pick it on any chat, room, agent, or automation.")}</span>
       </div>
     )
   }
@@ -143,19 +149,18 @@ function SingleSetup({ transport, cliPath, cliProfile, onPatch, addCliProvider, 
       {detect.state === 'checking' && (
         <div className="flex items-center gap-2 rounded-lg border border-line bg-card-2 px-3 py-2.5 text-[13px] text-ink-3">
           <Icon name="refresh" size={14} className="shrink-0 animate-spin" />
-          Looking for {meta.label} on this machine…
-        </div>
+          {tx("Looking for ")}{meta.label} {tx("on this machine…")}</div>
       )}
 
       {detect.state === 'ready' && (
         <div className="rounded-lg border border-positive/30 bg-positive/10 px-3 py-2.5">
           <div className="flex items-center gap-2 text-[13px] text-positive">
             <Icon name="check" size={15} className="shrink-0" />
-            <span>{meta.label} detected — signed in{detect.detail ? <> as <span className="font-medium">{detect.detail}</span></> : ''}.</span>
+            <span>{meta.label} {tx("detected — signed in")}{detect.detail ? <> {tx("as ")}<span className="font-medium">{detect.detail}</span></> : ''}.</span>
           </div>
           <div className="mt-2.5 flex items-center gap-2">
-            <Button variant="primary" size="sm" icon="plug" onClick={connect} disabled={busy}>{busy ? 'Connecting' : 'Connect'}</Button>
-            <button onClick={() => void recheck()} disabled={busy} className="text-[13px] text-ink-3 transition-colors hover:text-ink">Re-check</button>
+            <Button variant="primary" size="sm" icon="plug" onClick={connect} disabled={busy}>{busy ? tx("Connecting") : tx("Connect")}</Button>
+            <button onClick={() => void recheck()} disabled={busy} className="text-[13px] text-ink-3 transition-colors hover:text-ink">{tx("Re-check")}</button>
           </div>
         </div>
       )}
@@ -164,13 +169,13 @@ function SingleSetup({ transport, cliPath, cliProfile, onPatch, addCliProvider, 
         <div className="rounded-lg border border-warn/30 bg-warn/10 px-3 py-2.5">
           <div className="flex items-center gap-2 text-[13px] text-warn">
             <Icon name="warning" size={15} className="shrink-0" />
-            <span>{meta.label} is installed but not signed in.</span>
+            <span>{meta.label} {tx("is installed but not signed in.")}</span>
           </div>
           <div className="mt-2.5 flex flex-wrap items-center gap-2">
-            <Button variant="primary" size="sm" icon="plug" onClick={addAndSignIn} disabled={busy}>{busy ? 'Signing in…' : 'Add & sign in'}</Button>
-            <button onClick={() => void recheck()} disabled={busy} className="text-[13px] text-ink-3 transition-colors hover:text-ink">Re-check</button>
+            <Button variant="primary" size="sm" icon="plug" onClick={addAndSignIn} disabled={busy}>{busy ? tx("Signing in…") : tx("Add & sign in")}</Button>
+            <button onClick={() => void recheck()} disabled={busy} className="text-[13px] text-ink-3 transition-colors hover:text-ink">{tx("Re-check")}</button>
           </div>
-          <div className="mt-2.5 text-[12px] text-ink-3">Sign-in opens your browser. Or run it yourself, then Re-check:</div>
+          <div className="mt-2.5 text-[12px] text-ink-3">{tx("Sign-in opens your browser. Or run it yourself, then Re-check:")}</div>
           <div className="mt-1.5"><CopyCommand command={loginCommand(transport, bin, '')} /></div>
         </div>
       )}
@@ -179,28 +184,28 @@ function SingleSetup({ transport, cliPath, cliProfile, onPatch, addCliProvider, 
         <div className="rounded-lg border border-danger/30 bg-danger/5 px-3 py-2.5">
           <div className="flex items-center gap-2 text-[13px] text-danger">
             <Icon name="warning" size={15} className="shrink-0" />
-            <span>Couldn't find <span className="font-mono">{bin}</span> on your PATH.</span>
+            <span>{tx("Couldn't find ")}<span className="font-mono">{bin}</span> {tx("on your PATH.")}</span>
           </div>
-          <div className="mt-2 text-[13px] text-ink-3">Install it, then re-check:</div>
+          <div className="mt-2 text-[13px] text-ink-3">{tx("Install it, then re-check:")}</div>
           <div className="mt-1.5"><CopyCommand command={meta.install} /></div>
-          <div className="mt-2.5"><Button variant="default" size="sm" icon="refresh" onClick={() => void recheck()}>Re-check</Button></div>
+          <div className="mt-2.5"><Button variant="default" size="sm" icon="refresh" onClick={() => void recheck()}>{tx("Re-check")}</Button></div>
         </div>
       )}
 
       {detect.state === 'error' && (
         <div className="flex items-center justify-between gap-2 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2.5 text-[13px] text-danger">
-          <span className="truncate">{detect.message ?? 'Detection failed.'}</span>
-          <Button variant="default" size="sm" icon="refresh" onClick={() => void recheck()}>Re-check</Button>
+          <span className="truncate">{detect.message ?? tx("Detection failed.")}</span>
+          <Button variant="default" size="sm" icon="refresh" onClick={() => void recheck()}>{tx("Re-check")}</Button>
         </div>
       )}
 
-      <AdvancedSection title="Advanced" icon="settings">
+      <AdvancedSection title={tx("Advanced")} icon="settings">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-          <Field label="CLI binary" hint={`defaults to ${meta.bin}`}>
+          <Field label={tx("CLI binary")} hint={tx("defaults to {value0}", { value0: meta.bin })}>
             <Input value={cliPath} onChange={(e) => onPatch({ cliPath: e.target.value })} placeholder={meta.bin} spellCheck={false} />
           </Field>
-          <Field label={transport === 'codex-cli' ? 'Profile' : 'Settings file'} hint="optional">
-            <Input value={cliProfile} onChange={(e) => onPatch({ cliProfile: e.target.value })} placeholder={transport === 'codex-cli' ? 'work' : '/path/to/settings.json'} spellCheck={false} />
+          <Field label={transport === 'codex-cli' ? tx("Profile") : tx("Settings file")} hint={tx("optional")}>
+            <Input value={cliProfile} onChange={(e) => onPatch({ cliProfile: e.target.value })} placeholder={transport === 'codex-cli' ? tx("work") : '/path/to/settings.json'} spellCheck={false} />
           </Field>
         </div>
       </AdvancedSection>
@@ -214,6 +219,7 @@ function MultiSetup({ transport, addCliProvider, meta }: {
   addCliProvider: (transport: Transport, accountSeeds: Partial<ProviderAccountProfile>[] | null) => Promise<Provider>
   meta: { label: string; bin: string; install: string }
 }) {
+  const tx = useAuthoredText()
   const [rows, setRows] = useState<AccountRow[]>(() => defaultAccounts(transport))
   const [created, setCreated] = useState<Provider | null>(null)
   const [busy, setBusy] = useState(false)
@@ -251,8 +257,7 @@ function MultiSetup({ transport, addCliProvider, meta }: {
     return (
       <div className="space-y-2.5">
         <div className="rounded-lg border border-positive/30 bg-positive/10 px-3 py-2 text-[13px] text-positive">
-          <Icon name="check" size={13} className="mr-1.5 inline" />Added <span className="font-medium">{created.name}</span> with {accounts.length} account{accounts.length === 1 ? '' : 's'}. Sign in to each below.
-        </div>
+          <Icon name="check" size={13} className="mr-1.5 inline" />{tx("Added {name}. Accounts: {count}. Sign in to each below.", { name: created.name, count: accounts.length })}</div>
         {accounts.map((account) => {
           const state = signin[account.id]
           return (
@@ -263,15 +268,15 @@ function MultiSetup({ transport, addCliProvider, meta }: {
                   <div className="truncate font-mono text-[12px] text-ink-4">{account.cliHome || '~/.' + meta.bin}</div>
                 </div>
                 {state === 'ok'
-                  ? <span className="flex shrink-0 items-center gap-1 text-[13px] text-positive"><Icon name="check" size={13} />Signed in{signinDetail[account.id] ? ` · ${signinDetail[account.id]}` : ''}</span>
-                  : <Button variant={state === 'fail' ? 'default' : 'primary'} size="sm" icon="plug" onClick={() => signIn(account)} disabled={state === 'busy'}>{state === 'busy' ? 'Signing in…' : state === 'fail' ? 'Retry' : 'Sign in'}</Button>}
+                  ? <span className="flex shrink-0 items-center gap-1 text-[13px] text-positive"><Icon name="check" size={13} />{tx("Signed in")}{signinDetail[account.id] ? ` · ${signinDetail[account.id]}` : ''}</span>
+                  : <Button variant={state === 'fail' ? 'default' : 'primary'} size="sm" icon="plug" onClick={() => signIn(account)} disabled={state === 'busy'}>{state === 'busy' ? tx("Signing in…") : state === 'fail' ? tx("Retry") : tx("Sign in")}</Button>}
               </div>
-              {state === 'fail' && <div className="mt-2 text-[12px] text-ink-3">Browser sign-in didn't complete. Run it yourself, then Retry:</div>}
+              {state === 'fail' && <div className="mt-2 text-[12px] text-ink-3">{tx("Browser sign-in didn't complete. Run it yourself, then Retry:")}</div>}
               {state !== 'ok' && <div className="mt-1.5"><CopyCommand command={loginCommand(transport, created.cliPath?.trim() || meta.bin, account.cliHome ?? '')} /></div>}
             </div>
           )
         })}
-        <div className="text-[12px] text-ink-3">You can sign the rest in any time from the provider's card below.</div>
+        <div className="text-[12px] text-ink-3">{tx("You can sign the rest in any time from the provider's card below.")}</div>
       </div>
     )
   }
@@ -279,25 +284,25 @@ function MultiSetup({ transport, addCliProvider, meta }: {
   // Step 1 — define the accounts to create.
   return (
     <div className="space-y-2.5">
-      <div className="text-[13px] leading-snug text-ink-3">Each subscription gets its own config home so their logins don't collide. Name them, then create — you'll sign in to each next.</div>
+      <div className="text-[13px] leading-snug text-ink-3">{tx("Each subscription gets its own config home so their logins don't collide. Name them, then create — you'll sign in to each next.")}</div>
       {rows.map((row) => (
         <div key={row.id} className="rounded-lg border border-line bg-card-2 px-3 py-2.5">
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-[1.1fr_1.2fr_auto]">
-            <Field label="Name">
-              <Input value={row.name} onChange={(e) => patchRow(row.id, { name: e.target.value })} placeholder={`${meta.label} account`} spellCheck={false} />
+            <Field label={tx("Name")}>
+              <Input value={row.name} onChange={(e) => patchRow(row.id, { name: e.target.value })} placeholder={tx("{value0} account", { value0: meta.label })} spellCheck={false} />
             </Field>
-            <Field label="Config home" hint={transport === 'codex-cli' ? 'CODEX_HOME' : 'CLAUDE config dir'}>
+            <Field label={tx("Config home")} hint={transport === 'codex-cli' ? 'CODEX_HOME' : tx("CLAUDE config dir")}>
               <Input value={row.cliHome} onChange={(e) => patchRow(row.id, { cliHome: e.target.value })} placeholder={`~/.${meta.bin}-work`} spellCheck={false} />
             </Field>
             <div className="flex items-end">
-              <button onClick={() => removeRow(row.id)} disabled={rows.length <= 1} className="flex h-9 w-9 items-center justify-center rounded-lg border border-line text-ink-3 transition-colors hover:border-line-strong hover:text-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label="Remove account"><Icon name="trash" size={14} /></button>
+              <button onClick={() => removeRow(row.id)} disabled={rows.length <= 1} className="flex h-9 w-9 items-center justify-center rounded-lg border border-line text-ink-3 transition-colors hover:border-line-strong hover:text-danger disabled:cursor-not-allowed disabled:opacity-40" aria-label={tx("Remove account")}><Icon name="trash" size={14} /></button>
             </div>
           </div>
         </div>
       ))}
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <Button variant="default" size="sm" icon="plus" onClick={addRow}>Add another</Button>
-        <Button variant="primary" size="sm" icon="layers" onClick={create} disabled={busy || !rows.some((r) => r.name.trim())}>{busy ? 'Creating…' : `Create ${rows.filter((r) => r.name.trim()).length} account${rows.filter((r) => r.name.trim()).length === 1 ? '' : 's'}`}</Button>
+        <Button variant="default" size="sm" icon="plus" onClick={addRow}>{tx("Add another")}</Button>
+        <Button variant="primary" size="sm" icon="layers" onClick={create} disabled={busy || !rows.some((r) => r.name.trim())}>{busy ? tx("Creating…") : tx("Create accounts: {count}", { count: rows.filter((r) => r.name.trim()).length })}</Button>
       </div>
     </div>
   )

@@ -88,10 +88,25 @@ export function useEngineContextTokens(active: boolean, model: string | null | u
 }
 
 // Load = make it the active model and start the engine on it.
-export async function loadEngineModel(repo: string): Promise<EngineStatus> {
-  const { settings, saveSettings } = useStore.getState()
-  if (settings && (settings.activeProviderId !== ENGINE_PROVIDER_ID || settings.activeModel !== repo)) {
-    await saveSettings({ ...settings, activeProviderId: ENGINE_PROVIDER_ID, activeProviderAccountId: null, activeModel: repo }, { silent: true })
-  }
-  return api.engineLoad(repo)
+let selectionQueue: Promise<unknown> = Promise.resolve()
+export function loadEngineModel(repo: string): Promise<EngineStatus> {
+  const next = selectionQueue.then(async () => {
+    const previous = await api.engineSnapshot()
+    const loaded = await api.engineLoad(repo)
+    const { settings, saveSettings } = useStore.getState()
+    try {
+      if (settings && (settings.activeProviderId !== ENGINE_PROVIDER_ID || settings.activeModel !== repo)) {
+        await saveSettings({ ...settings, activeProviderId: ENGINE_PROVIDER_ID, activeProviderAccountId: null, activeModel: repo }, { silent: true })
+      }
+    } catch (error) {
+      try {
+        if (previous.status.state === 'ready' && previous.status.model && previous.status.model !== repo) await api.engineLoad(previous.status.model)
+        else if (previous.status.state !== 'ready') await api.engineUnload()
+      } catch (restoreError) { throw new Error(`${(error as Error).message} The previous engine state could not be restored: ${(restoreError as Error).message}`, { cause: error }) }
+      throw error
+    }
+    return loaded
+  })
+  selectionQueue = next.catch(() => {})
+  return next
 }

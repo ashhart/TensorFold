@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Menjalankan sesi Codex CLI, terminal yang dapat dilanjutkan, dan tugas kode dengan OAuth.",
+  "Runs Claude Code through your local Claude account and permission surface.": "Menjalankan Claude Code melalui akun Claude lokal dan sistem izinnya.",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "Cursor Agent CLI sebagai kandidat untuk sesi kode ACP atau tanpa antarmuka.",
+  "Gemini CLI candidate for code and research sessions.": "Gemini CLI sebagai kandidat untuk sesi kode dan riset.",
+  "Grok CLI candidate for xAI coding sessions.": "Grok CLI sebagai kandidat untuk sesi kode xAI.",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode CLI sebagai kandidat untuk sesi kode yang kompatibel dengan OpenCode.",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "Kilo CLI sebagai kandidat untuk sesi kode yang kompatibel dengan OpenCode.",
+  "Pi coding-agent harness for terminal-based agent sessions.": "Lingkungan agen pemrograman Pi untuk sesi agen berbasis terminal.",
+  "Broken": "Bermasalah",
+  "Not found on PATH or the configured path": "Tidak ditemukan di PATH atau jalur yang dikonfigurasi",
+  "--version printed no version": "--version tidak menampilkan versi"
+}

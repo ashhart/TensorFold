@@ -1,7 +1,15 @@
 import assert from 'node:assert/strict'
 import React from 'react'
 import { createJiti } from 'jiti'
-const { Composer } = await createJiti(import.meta.url, { jsx: { runtime: 'automatic' } }).import('./Composer.tsx')
+const jiti = createJiti(import.meta.url, { jsx: { runtime: 'automatic' } })
+const { load, jsx } = await jiti.import('../reading/reading-test-harness.ts')
+const keyboard = await jiti.import('../../lib/composer-keyboard.ts')
+const taskContext = await jiti.import('./task-context.ts')
+// Locale subscription is isolated; separate actual-hook tests cover language changes and state.
+const { Composer } = load('src/components/assistant/Composer.tsx', {
+  'react/jsx-runtime': jsx, '../composer/DraftSaveIndicator': { DraftSaveIndicator: 'draft-indicator' },
+  '../ui': { Button: 'button' }, './task-context': taskContext, '../../lib/composer-keyboard': keyboard,
+})
 
 // Exercise the actual textarea handler, rather than a copied keyboard predicate.
 function input(overrides = {}) {
@@ -46,4 +54,18 @@ assert.deepEqual(reply.result(), { sent: 1, started: 0, prevented: 1 })
 const task = input({ canDirectReply: false })
 task.key()
 assert.equal(task.result().started, 1)
+const hydrating = input({ draftReady: false })
+hydrating.key()
+assert.equal(hydrating.result().sent, 0, 'A different conversation cannot submit before its own draft hydrates')
+const copy = input()
+copy.key({ key: 'c', metaKey: true })
+assert.deepEqual(copy.result(), { sent: 0, started: 0, prevented: 0 }, 'Assistant composer leaves native text editing shortcuts to Chromium')
 console.log('assistant composer keyboard safety: ok')
+
+const explicitKey = input({ sendKey: 'modified-enter' })
+explicitKey.key(); assert.equal(explicitKey.result().sent, 0)
+explicitKey.key({ metaKey: true }); assert.equal(explicitKey.result().sent, 1)
+const controlKey = input({ sendKey: 'modified-enter' })
+controlKey.key({ ctrlKey: true }); assert.equal(controlKey.result().sent, 1)
+const modifiedNewline = input({ sendKey: 'modified-enter' })
+modifiedNewline.key({ shiftKey: true, metaKey: true }); assert.equal(modifiedNewline.result().prevented, 0)

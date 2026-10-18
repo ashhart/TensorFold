@@ -13,7 +13,7 @@ import { store } from '../state'
 
 export function projectMemorySourceSnapshots(project: Project, entries: ProjectMemoryEntry[]): Record<string, ProjectMemorySourceSnapshot> {
   const sources: Record<string, ProjectMemorySourceSnapshot> = {}
-  for (const entry of entries) {
+  for (const entry of scopeProjectMemoryEntries(entries, project.id)) {
     const ref = entry.sourceRef?.trim()
     if (!ref || entry.sourceType !== 'file' || sources[ref]) continue
     // File refs belong to the remote host. A local lookalike must not make stale remote

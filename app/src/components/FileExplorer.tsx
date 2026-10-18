@@ -1,3 +1,6 @@
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -9,7 +12,7 @@ import type { GitFileChange, GitStatus, WorkspaceLocation } from '../lib/types'
 interface Node { name: string; path: string; dir: boolean; children: Node[]; status?: GitFileChange['status'] }
 
 const STATUS_TINT: Record<string, string> = { A: 'text-positive', M: 'text-warn', D: 'text-danger', R: 'text-accent', '?': 'text-positive' }
-const STATUS_CH: Record<string, string> = { A: 'A', M: 'M', D: 'D', R: 'R', '?': 'A' }
+const STATUS_CH: Record<string, string> = { get A() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "A") }, get M() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "M") }, get D() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "D") }, get R() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "R") }, get '?'() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "A") } }
 
 function buildTree(files: string[], statusByPath: Map<string, GitFileChange['status']>): Node[] {
   const root: Node[] = []
@@ -34,6 +37,7 @@ function buildTree(files: string[], statusByPath: Map<string, GitFileChange['sta
 }
 
 function Row({ node, depth, defaultOpen }: { node: Node; depth: number; defaultOpen: boolean }) {
+  const tx = useAuthoredText()
   const [open, setOpen] = useState(depth < 1 || defaultOpen)
   const addFileMention = useStore((s) => s.addFileMention)
   const pad = { paddingLeft: 8 + depth * 12 }
@@ -55,7 +59,7 @@ function Row({ node, depth, defaultOpen }: { node: Node; depth: number; defaultO
       draggable
       onDragStart={(e) => e.dataTransfer.setData('text/plain', `@${node.path} `)}
       onClick={() => addFileMention(node.path)}
-      title={`${node.path} — click or drag into the composer`}
+      title={tx("{value0} — click or drag into the composer", { value0: node.path })}
       style={pad}
       className="no-drag group flex cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 text-[13px] text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink"
     >
@@ -68,6 +72,7 @@ function Row({ node, depth, defaultOpen }: { node: Node; depth: number; defaultO
 }
 
 export function FileExplorer({ cwd, workspace = null }: { cwd: string; workspace?: WorkspaceLocation | null }) {
+  const tx = useAuthoredText()
   const [files, setFiles] = useState<string[]>([])
   const [git, setGit] = useState<GitStatus | null>(null)
   const [query, setQuery] = useState('')
@@ -88,25 +93,25 @@ export function FileExplorer({ cwd, workspace = null }: { cwd: string; workspace
     const m = new Map<string, GitFileChange['status']>()
     for (const f of git?.files ?? []) m.set(f.path, f.status)
     return m
-  }, [git])
+  }, [git, tx])
 
   const tree = useMemo(() => {
     const q = query.trim().toLowerCase()
     let src = changedOnly ? (git?.files.map((f) => f.path) ?? []) : files
     if (q) src = src.filter((f) => f.toLowerCase().includes(q))
     return buildTree(src, statusByPath)
-  }, [files, git, query, changedOnly, statusByPath])
+  }, [files, git, query, changedOnly, statusByPath, tx])
 
   const changedCount = git?.files.length ?? 0
 
-  if (!cwd) return <div className="px-4 py-6 text-center text-[13px] text-ink-3">Open a task or project with a folder to browse its files.</div>
+  if (!cwd) return <div className="px-4 py-6 text-center text-[13px] text-ink-3">{tx("Open a task or project with a folder to browse its files.")}</div>
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       <div className="space-y-1.5 px-3 pb-2">
         <div className="flex items-center gap-2 rounded-lg bg-ink-5/60 px-2.5 py-1.5">
           <Icon name="search" size={14} className="shrink-0 text-ink-3" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Filter files" className="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={tx("Filter files")} className="w-full bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3" />
           {query && <button onClick={() => setQuery('')} className="text-ink-3 hover:text-ink"><Icon name="x" size={13} /></button>}
         </div>
         <button
@@ -114,15 +119,14 @@ export function FileExplorer({ cwd, workspace = null }: { cwd: string; workspace
           className={clsx('flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-[13px] transition-colors', changedOnly ? 'bg-accent-soft text-accent' : 'text-ink-2 hover:bg-ink-5')}
         >
           <Icon name="branch" size={13} className={changedOnly ? 'text-accent' : 'text-ink-3'} />
-          Changed files only
-          <span className={clsx('ml-auto rounded px-1.5 text-[12px] tabular-nums', changedOnly ? 'bg-accent/15' : 'bg-ink-5 text-ink-3')}>{changedCount}</span>
+          {tx("Changed files only")}<span className={clsx('ml-auto rounded px-1.5 text-[12px] tabular-nums', changedOnly ? 'bg-accent/15' : 'bg-ink-5 text-ink-3')}>{changedCount}</span>
         </button>
       </div>
       <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {loading && files.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-3">Loading…</div>
+          <div className="px-3 py-4 text-[13px] text-ink-3">{tx("Loading…")}</div>
         ) : tree.length === 0 ? (
-          <div className="px-3 py-4 text-[13px] text-ink-3">{changedOnly ? 'No changes.' : 'No files.'}</div>
+          <div className="px-3 py-4 text-[13px] text-ink-3">{changedOnly ? tx("No changes.") : tx("No files.")}</div>
         ) : (
           tree.map((n) => <Row key={n.path} node={n} depth={0} defaultOpen={changedOnly} />)
         )}

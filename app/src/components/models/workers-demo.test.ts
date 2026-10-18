@@ -8,6 +8,7 @@ globals.addEventListener = () => {}
 globals.removeEventListener = () => {}
 globals.window = globals
 
+await (await import('../../lib/browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('../../lib/ipc')
 const { useStore } = await import('../../lib/store')
 const settings = await api.getSettings()

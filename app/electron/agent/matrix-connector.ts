@@ -8,9 +8,7 @@ import type {
 } from './types'
 import { advanceSyncCursor, injectReplyContext, isNewerThanCursor, makeReplyContext } from './connector-sync'
 import { assertConnectorBaseUrl } from './security'
-import { fetchWithRetry } from './connector-retry.ts'
-import { createConnectorFetch } from './secure-fetch'
-import { readBoundedConnectorJson } from './connector-http'
+import { fetchConnectorResponse, readBoundedConnectorJson } from './connector-http'
 
 export type { MatrixConnectorSettings, MatrixMessage, MatrixReadResult, MatrixRoom, MatrixSource } from './types'
 
@@ -228,9 +226,7 @@ function authHeaders(token: string): Record<string, string> {
 }
 
 function matrixFetch(baseUrl: string, allowPrivateNetwork: boolean | undefined, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, init, {
-    fetchImpl: createConnectorFetch(baseUrl, 'Matrix homeserver', { allowPrivateNetwork: allowPrivateNetwork === true }),
-  })
+  return fetchConnectorResponse(baseUrl, 'Matrix homeserver', url, init, { allowPrivateNetwork })
 }
 
 // Matrix error bodies look like { errcode: 'M_FORBIDDEN', error: 'message' }.

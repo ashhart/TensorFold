@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
 import type { BuiltInCapability } from '../../lib/capabilities'
@@ -29,6 +30,7 @@ export function MentionPopover({
   onSelectCapability,
   onSelectMention,
 }: MentionPopoverProps) {
+  const tx = useAuthoredText()
   return (
     <div
       className={clsx(
@@ -39,7 +41,7 @@ export function MentionPopover({
     >
       {capabilityItems.length > 0 && (
         <>
-          <div className="px-2.5 pb-1 pt-1.5 text-[13px] font-medium text-ink-3">Capabilities</div>
+          <div className="px-2.5 pb-1 pt-1.5 text-[13px] font-medium text-ink-3">{tx("Capabilities")}</div>
           {capabilityItems.map((capability, i) => (
             <button
               type="button"
@@ -55,7 +57,7 @@ export function MentionPopover({
           ))}
         </>
       )}
-      <div className={clsx('px-2.5 pb-1 pt-2 text-[13px] font-medium text-ink-3', capabilityItems.length > 0 && 'border-t border-line')}>Files</div>
+      <div className={clsx('px-2.5 pb-1 pt-2 text-[13px] font-medium text-ink-3', capabilityItems.length > 0 && 'border-t border-line')}>{tx("Files")}</div>
       {items.map((f, i) => (
         <button
           type="button"
@@ -68,7 +70,7 @@ export function MentionPopover({
           <span className="truncate">{f.includes('/') ? <><span className="text-ink-3">{f.slice(0, f.lastIndexOf('/') + 1)}</span>{f.slice(f.lastIndexOf('/') + 1)}</> : f}</span>
         </button>
       ))}
-      {items.length === 0 && <div className="px-2.5 py-1.5 text-[13px] text-ink-3">Type to search for files</div>}
+      {items.length === 0 && <div className="px-2.5 py-1.5 text-[13px] text-ink-3">{tx("Type to search for files")}</div>}
     </div>
   )
 }

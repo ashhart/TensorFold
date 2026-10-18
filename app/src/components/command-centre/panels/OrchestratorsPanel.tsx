@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { relativeTime, shortPath } from '../../../lib/format'
 import type { RemoteOrchestratorSnapshotResult, Settings } from '../../../lib/types'
@@ -18,13 +19,14 @@ interface OrchestratorsPanelProps {
 }
 
 export function OrchestratorsPanel(props: OrchestratorsPanelProps) {
+  const tx = useAuthoredText()
   const { orchestrators, remoteSnapshots, remoteBusy, refreshRemoteHost, setView, isOpen, onToggle } = props
 
   return (
-    <DisclosurePanel title="Orchestrators" icon="globe" badge={orchestrators.length ? `${orchestrators.length} paired` : 'none'} isOpen={isOpen} onToggle={onToggle}>
+    <DisclosurePanel title={tx("Orchestrators")} icon="globe" badge={orchestrators.length ? `${orchestrators.length} paired` : 'none'} isOpen={isOpen} onToggle={onToggle}>
       <div className="space-y-2 px-3 py-3">
         {orchestrators.length === 0 ? (
-          <EmptyState icon="globe" title="No paired Orchestrators" detail="Add one in Settings to control an always-on TensorFold from this app." />
+          <EmptyState icon="globe" title={tx("No paired Orchestrators")} detail="Add one in Settings to control an always-on TensorFold from this app." />
         ) : orchestrators.map((host) => {
           const result = remoteSnapshots[host.id]
           const ok = result?.ok
@@ -43,28 +45,28 @@ export function OrchestratorsPanel(props: OrchestratorsPanelProps) {
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
                     <div className="truncate text-[13px] font-semibold text-ink">{result?.name || host.name}</div>
-                    <span className="ml-auto text-[12px] text-ink-4">{result?.generatedAt ? relativeTime(result.generatedAt) : host.lastConnectedAt ? `seen ${relativeTime(host.lastConnectedAt)}` : 'not checked'}</span>
+                    <span className="ml-auto text-[12px] text-ink-4">{result?.generatedAt ? relativeTime(result.generatedAt) : host.lastConnectedAt ? tx("seen {value0}", { value0: relativeTime(host.lastConnectedAt) }) : tx("not checked")}</span>
                   </div>
                   <div className="mt-0.5 truncate font-mono text-[12px] text-ink-4">{host.serverUrl}</div>
                   {result?.ok ? (
                     <>
                       <div className="mt-2 grid grid-cols-4 gap-1 text-center text-[12px] text-ink-3">
-                        <span className="rounded-md bg-card px-1.5 py-1">{active} active</span>
-                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalProjects ?? 0} projects</span>
-                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalRooms ?? 0} rooms</span>
-                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalMissions ?? 0} missions</span>
+                        <span className="rounded-md bg-card px-1.5 py-1">{active} {tx("active")}</span>
+                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalProjects ?? 0} {tx("projects")}</span>
+                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalRooms ?? 0} {tx("rooms")}</span>
+                        <span className="rounded-md bg-card px-1.5 py-1">{result.totalMissions ?? 0} {tx("missions")}</span>
                       </div>
                       {remoteWork && (
                         <div className="mt-1.5 grid grid-cols-4 gap-1 text-center text-[12px] text-ink-3">
-                          <span className="rounded-md bg-card px-1.5 py-1">{remoteWork.jobs.visible}/{remoteWork.jobs.total} jobs</span>
-                          <span className={clsx('rounded-md px-1.5 py-1', remoteBlocked ? 'bg-danger/10 text-danger' : 'bg-card')}>{remoteBlocked} blocked</span>
-                          <span className={clsx('rounded-md px-1.5 py-1', remoteWork.approvals.pending ? 'bg-warn/12 text-warn' : 'bg-card')}>{remoteWork.approvals.pending} approvals</span>
-                          <span className={clsx('rounded-md px-1.5 py-1', remoteLeaseRisk ? 'bg-warn/12 text-warn' : 'bg-card')}>{remoteLeaseRisk} lease risk</span>
+                          <span className="rounded-md bg-card px-1.5 py-1">{remoteWork.jobs.visible}/{remoteWork.jobs.total} {tx("jobs")}</span>
+                          <span className={clsx('rounded-md px-1.5 py-1', remoteBlocked ? 'bg-danger/10 text-danger' : 'bg-card')}>{remoteBlocked} {tx("blocked")}</span>
+                          <span className={clsx('rounded-md px-1.5 py-1', remoteWork.approvals.pending ? 'bg-warn/12 text-warn' : 'bg-card')}>{remoteWork.approvals.pending} {tx("approvals")}</span>
+                          <span className={clsx('rounded-md px-1.5 py-1', remoteLeaseRisk ? 'bg-warn/12 text-warn' : 'bg-card')}>{remoteLeaseRisk} {tx("lease risk")}</span>
                         </div>
                       )}
                       {remoteWork?.nextWakeAt && (
                         <div className="mt-1.5 truncate rounded-md bg-card px-2 py-1 text-[12px] text-ink-4">
-                          Next wake {wakeTime(remoteWork.nextWakeAt)}
+                          {tx("Next wake ")}{wakeTime(remoteWork.nextWakeAt)}
                         </div>
                       )}
                       {remoteProjects.length > 0 && (
@@ -73,7 +75,7 @@ export function OrchestratorsPanel(props: OrchestratorsPanelProps) {
                             <div key={project.id} className="flex items-center gap-2 rounded-md bg-card px-2 py-1.5 text-[12px] text-ink-3">
                               <Icon name="globe" size={12} className="shrink-0 text-accent" />
                               <span className="min-w-0 flex-1 truncate text-ink-2">{project.name}</span>
-                              <span className="max-w-[120px] truncate font-mono text-[11px] text-ink-4">{project.cwd ? shortPath(project.cwd, 2) : 'no folder'}</span>
+                              <span className="max-w-[120px] truncate font-mono text-[11px] text-ink-4">{project.cwd ? shortPath(project.cwd, 2) : tx("no folder")}</span>
                             </div>
                           ))}
                         </div>
@@ -91,17 +93,17 @@ export function OrchestratorsPanel(props: OrchestratorsPanelProps) {
                       )}
                     </>
                   ) : (
-                    <div className="mt-1.5 line-clamp-2 text-[13px] text-ink-3">{result?.error || host.lastError || 'Refresh to fetch live state.'}</div>
+                    <div className="mt-1.5 line-clamp-2 text-[13px] text-ink-3">{result?.error || host.lastError || tx("Refresh to fetch live state.")}</div>
                   )}
                 </div>
-                <Button variant="ghost" size="xs" icon="clock" aria-label={`Refresh ${host.name}`} onClick={() => void refreshRemoteHost(host.id)} disabled={remoteBusy === host.id}>
-                  {remoteBusy === host.id ? 'Checking' : 'Refresh'}
+                <Button variant="ghost" size="xs" icon="clock" aria-label={tx("Refresh {value0}", { value0: host.name })} onClick={() => void refreshRemoteHost(host.id)} disabled={remoteBusy === host.id}>
+                  {remoteBusy === host.id ? tx("Checking") : tx("Refresh")}
                 </Button>
               </div>
             </div>
           )
         })}
-        <Button variant="default" size="xs" icon="settings" onClick={() => setView({ name: 'settings' })}>Settings</Button>
+        <Button variant="default" size="xs" icon="settings" onClick={() => setView({ name: 'settings' })}>{tx("Settings")}</Button>
       </div>
     </DisclosurePanel>
   )

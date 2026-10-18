@@ -72,7 +72,7 @@ export const terminalsSlice: Slice = (set, get) => ({
     try {
       const hostId = remoteHostIdForProjectId(get(), projectId)
       if (hostId && (opts?.command || cliId.startsWith('custom:'))) {
-        set({ notice: { kind: 'error', message: 'Custom terminal commands are not available on Orchestrator projects.' } })
+        set({ notice: { kind: 'error', message: 'Custom terminal commands are not available on Orchestrator projects.', authored: true } })
         return null
       }
       const raw = hostId
@@ -92,12 +92,12 @@ export const terminalsSlice: Slice = (set, get) => ({
   async killTerminal(projectId, sessionId) {
     const session = findTerminalSession(get().terminals[projectId] ?? [], sessionId)
     if (!session) {
-      set({ notice: { kind: 'error', message: 'TensorFold cannot safely identify that terminal session.' } })
+      set({ notice: { kind: 'error', message: 'TensorFold cannot safely identify that terminal session.', authored: true } })
       return
     }
     const route = terminalSessionRoute(session)
     if (route.kind === 'unresolved') {
-      set({ notice: { kind: 'error', message: 'This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.' } })
+      set({ notice: { kind: 'error', message: 'This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.', authored: true } })
       return
     }
     try {
@@ -121,12 +121,12 @@ export const terminalsSlice: Slice = (set, get) => ({
     if (!clean) return
     const session = findTerminalSession(get().terminals[projectId] ?? [], sessionId)
     if (!session) {
-      set({ notice: { kind: 'error', message: 'TensorFold cannot safely identify that terminal session.' } })
+      set({ notice: { kind: 'error', message: 'TensorFold cannot safely identify that terminal session.', authored: true } })
       return
     }
     const route = terminalSessionRoute(session)
     if (route.kind === 'unresolved') {
-      set({ notice: { kind: 'error', message: 'This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.' } })
+      set({ notice: { kind: 'error', message: 'This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.', authored: true } })
       return
     }
     try {

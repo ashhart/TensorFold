@@ -11,7 +11,7 @@ import type { Settings } from '../../agent/types'
 
 const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'tensorfold-recipe-transaction-'))
 process.env.VONTRA_HOME = profile
-const { defaultSettings, saveSettings, loadSettings, closeSessionSearchIndexes } = await import('../../store')
+const { defaultSettings, saveSettings, loadSettings, closeSessionSearchIndexes, vontraHomeDir } = await import('../../store')
 const provider = { id: 'local-fixture', name: 'Local fixture', kind: 'local' as const, baseUrl: 'http://127.0.0.1:9090/v1', apiKey: 'synthetic-recipe-provider-key', models: ['fixture'] }
 const original = { id: 'existing_bot', name: 'Evidence helper', role: 'Review evidence', lane: 'review' as const, instructions: 'Explain what supports each conclusion.', providerId: provider.id, model: 'fixture', approvalScope: 'review' as const, executionTarget: 'vm' as const, createdAt: 1, updatedAt: 1 }
 const store = { settings: { ...defaultSettings(), providers: [provider], agentPresets: [original], approvalRules: [] } as Settings }
@@ -21,7 +21,7 @@ const ast = ts.createSourceFile('core-ipc.ts', source, ts.ScriptTarget.ES2022, t
 function visit(node: ts.Node) { if (ts.isFunctionDeclaration(node) && node.name?.text === 'commitSettingsChange') declaration = node; ts.forEachChild(node, visit) }
 visit(ast);assert.ok(declaration)
 const compiled = ts.transpileModule(ts.createPrinter().printNode(ts.EmitHint.Unspecified, declaration, ast), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText
-const commit = new Function('store', 'workspaceMutationGuard', 'settingsChanges', 'saveSettings', 'redactSettings', 'auditPreview', `${compiled};return commitSettingsChange;`)(store, new WorkspaceMutationGuard(), serial, async (next: Settings) => { if (fail) throw new Error('Synthetic disk unavailable'); await saveSettings(next) }, redactSettings, (e: unknown) => String(e))
+const commit = new Function('store', 'workspaceMutationGuard', 'settingsChanges', 'saveSettings', 'redactSettings', 'auditPreview', 'vontraHomeDir', `${compiled};return commitSettingsChange;`)(store, new WorkspaceMutationGuard(), serial, async (next: Settings, options: Parameters<typeof saveSettings>[1]) => { if (fail) throw new Error('Synthetic disk unavailable'); await saveSettings(next, options) }, redactSettings, (e: unknown) => String(e), vontraHomeDir)
 const transaction = (prepare: (current: Settings) => Promise<Settings>) => commit(prepare, async () => { effects++ })
 try {
   await saveSettings(store.settings)

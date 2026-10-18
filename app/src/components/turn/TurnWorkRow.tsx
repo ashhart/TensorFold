@@ -1,3 +1,4 @@
+import { DocumentEvidenceButtons } from '../documents/DocumentEvidenceButtons'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
@@ -25,17 +26,19 @@ function useNow(active: boolean): number {
 }
 
 // One collapsible row per turn: "Worked for 12s · 4 steps", or live "Working · 12s · Editing App.tsx".
-export function TurnWorkRow({ turn, status, phaseLabel, defaultOpen = false, reveal = 0 }: {
+export function TurnWorkRow({ turn, status, phaseLabel, defaultOpen = false, reveal = 0, searchItemId }: {
   turn: TurnSummary
   status?: string
   phaseLabel?: string
   defaultOpen?: boolean
   reveal?: number
+  searchItemId?: string | null
 }) {
   const [open, setOpen] = useState(defaultOpen)
   useEffect(() => { if (reveal > 0) setOpen(true) }, [reveal])
+  const locale = useStore(state => state.settings?.uiPreferences?.locale)
   const now = useNow(turn.running)
-  const label = workRowLabel(turn, { now, status, phaseLabel })
+  const label = workRowLabel(turn, { now, status, phaseLabel, locale })
   const hasDetails = turn.work.length > 0
   return (
     <div className="fade-in">
@@ -52,29 +55,30 @@ export function TurnWorkRow({ turn, status, phaseLabel, defaultOpen = false, rev
       </button>
       {open && hasDetails && (
         <div className="ml-[3px] mt-1.5 space-y-1.5 border-l border-line pb-1 pl-4">
-          <WorkItems items={turn.work} running={turn.running} status={status} />
+          <WorkItems items={turn.work} running={turn.running} status={status} searchItemId={searchItemId} />
         </div>
       )}
     </div>
   )
 }
 
-function WorkItems({ items, running, status }: { items: TimelineItem[]; running: boolean; status?: string }) {
+function WorkItems({ items, running, status, searchItemId }: { items: TimelineItem[]; running: boolean; status?: string; searchItemId?: string | null }) {
   const collapseReasoningDefault = useStore((s) => s.collapseReasoningDefault)
   const lastReasoningId = [...items].reverse().find((item) => item.kind === 'reasoning')?.id
   return (
     <>
-      {groupToolRuns(items).map((group) => {
+      {(searchItemId ? items.map(item => [item]) : groupToolRuns(items)).map((group) => {
         if (group.length > 1) return <ActivityLineGroup key={`g-${group[0].id}`} items={group} />
         const item = group[0]
-        if (item.kind === 'tool') return <ToolCard key={item.id} item={item} foldDiff />
-        if (item.kind === 'reasoning') return <Reasoning key={item.id} text={item.text || ''} active={running && status === 'thinking' && item.id === lastReasoningId} forceExpanded={!collapseReasoningDefault} />
+        const wrap = (child: React.ReactNode) => <div key={item.id} id={`ti-${item.id}`} className={item.id === searchItemId ? 'rounded-lg outline outline-2 outline-accent outline-offset-4' : undefined}>{child}</div>
+        if (item.kind === 'tool') return wrap(<><ToolCard item={item} foldDiff forceExpanded={item.id === searchItemId} />{item.documentEvidence?.length ? <DocumentEvidenceButtons references={item.documentEvidence} /> : null}</>)
+        if (item.kind === 'reasoning') return wrap(<Reasoning text={item.text || ''} active={running && status === 'thinking' && item.id === lastReasoningId} forceExpanded={!collapseReasoningDefault || item.id === searchItemId} />)
         if (item.kind === 'assistant') return (
-          <div key={item.id} className="prose-tf text-[13px] leading-5 text-ink-2">
+          <div key={item.id} id={`ti-${item.id}`} className="prose-tf text-[13px] leading-5 text-ink-2">
             <ReactMarkdown remarkPlugins={[remarkGfm, remarkCitationAutolinks]} components={mdComponents}>{item.text || ''}</ReactMarkdown>
           </div>
         )
-        if (item.kind === 'notice') return <WorkNote key={item.id} item={item} />
+        if (item.kind === 'notice') return wrap(<WorkNote item={item} />)
         return null
       })}
     </>

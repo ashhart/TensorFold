@@ -4,7 +4,6 @@ import { auditPreview } from '../../agent/security'
 import { vontraPath } from '../../store'
 import { auditEvent } from './audit'
 import { store } from '../state'
-import { recordConnectorInteraction } from '../../agent/connector-spine'
 import type { ConnectorEvent, EmailDraftInput } from '../../agent/types'
 import type { ConnectorEventSpine } from './connector-event-spine'
 
@@ -12,138 +11,47 @@ export interface ConnectorEmailTransport {
   recordEmailDraft: (input: EmailDraftInput, sources?: ConnectorEvent['sources']) => Promise<ConnectorEvent>
   recordEmailEvent: (event: ConnectorEvent) => Promise<ConnectorEvent>
   isEmailSendRequest: (event: ConnectorEvent) => boolean
-  transportApprovedEmailEvent: (event: ConnectorEvent) => Promise<void>
+  deliverApprovedEmailEvent: (event: ConnectorEvent) => Promise<NonNullable<ConnectorEvent['delivery']>>
 }
 
 export function createEmailTransport(deps: {
-  spine: Pick<ConnectorEventSpine, 'rememberConnectorEvents' | 'recordEventDelivery'>
+  spine: Pick<ConnectorEventSpine, 'rememberConnectorEvents'>
 }): ConnectorEmailTransport {
-  const { rememberConnectorEvents, recordEventDelivery } = deps.spine
-
+  const { rememberConnectorEvents } = deps.spine
   async function recordEmailDraft(input: EmailDraftInput, sources: ConnectorEvent['sources'] = []): Promise<ConnectorEvent> {
     const event = emailDraftEvent(input, Date.now(), sources)
     await rememberConnectorEvents([event])
-    await auditEvent('email.compose', {
-      eventId: event.id,
-      action: event.action,
-      threadKey: event.threadKey,
-      approvalId: event.approvalId,
-      requiresApproval: event.requiresApproval,
-      sourceIds: (event.sources ?? []).map((source) => source.id),
-      to: auditPreview(input.to),
-      subject: auditPreview(input.subject),
-    })
-    const recorded = store.connectorEvents.find((candidate) => candidate.id === event.id) ?? event
-    await transportApprovedEmailEvent(recorded)
-    return recorded
+    await auditEvent('email.compose', { eventId: event.id, action: event.action, approvalId: event.approvalId, sourceIds: sources.map(source => source.id), to: auditPreview(input.to) })
+    // Recording a draft never sends it, even when an old broad saved allow rule exists.
+    return store.connectorEvents.find(candidate => candidate.id === event.id) ?? event
   }
-
   async function recordEmailEvent(event: ConnectorEvent): Promise<ConnectorEvent> {
     await rememberConnectorEvents([event])
-    await auditEvent('email.event', {
-      eventId: event.id,
-      action: event.action,
-      threadKey: event.threadKey,
-      sourceIds: (event.sources ?? []).map((source) => source.id),
-    })
-    return store.connectorEvents.find((candidate) => candidate.id === event.id) ?? event
+    await auditEvent('email.event', { eventId: event.id, action: event.action, threadKey: event.threadKey })
+    return store.connectorEvents.find(candidate => candidate.id === event.id) ?? event
   }
-
   function isEmailSendRequest(event: ConnectorEvent): boolean {
     return event.connectorId === 'email' && ['send_requested', 'reply_requested'].includes(event.action)
   }
-
-  async function transportApprovedEmailEvent(event: ConnectorEvent): Promise<void> {
-    if (!isEmailSendRequest(event) || event.approvalStatus !== 'approved' || event.requiresApproval) return
-    // If the send was composed against an IMAP account, deliver over SMTP so the
-    // reply actually leaves the inbox; otherwise fall back to the local outbox.
-    const sourceId = event.sources?.[0]?.sourceId ?? null
-    const account = sourceId ? store.settings.email.sources.find((s) => s.id === sourceId && s.kind === 'imap') : null
-    if (account) {
-      try {
-        const result = await sendEmailOverSmtp(event, account)
-        recordEventDelivery(event, {
-          transport: result.transport,
-          status: 'delivered',
-          path: `smtp:${account.host}`,
-          deliveredAt: result.deliveredAt,
-          error: null,
-        })
-        await auditEvent('email.transport.smtp', {
-          eventId: event.id,
-          approvalId: event.approvalId,
-          to: auditPreview(result.envelope.to),
-          messageId: auditPreview(result.messageId),
-        })
-        rememberConnectorEvents([recordConnectorInteraction({
-          connectorId: 'email',
-          pluginName: 'Email',
-          action: 'email_smtp_sent',
-          direction: 'outbound',
-          target: result.envelope.to,
-          output: {
-            title: 'Email sent via SMTP',
-            summary: `${event.title} -> ${result.envelope.to}`,
-            threadKey: event.threadKey,
-          },
-        })])
-      } catch (e: any) {
-        const error = String(e?.message ?? e)
-        recordEventDelivery(event, { transport: 'smtp', status: 'failed', path: null, deliveredAt: null, error })
-        await auditEvent('email.transport.smtp_failed', {
-          eventId: event.id,
-          approvalId: event.approvalId,
-          error: auditPreview(error),
-        })
-        throw e
-      }
-      return
+  async function deliverApprovedEmailEvent(event: ConnectorEvent): Promise<NonNullable<ConnectorEvent['delivery']>> {
+    if (!isEmailSendRequest(event) || event.approvalStatus !== 'approved' || event.requiresApproval || event.delivery?.status !== 'sending' || !event.outbound || event.delivery.reviewDigest !== event.reviewDigest) throw new Error('Email requires a durable exact-content approval before transport.')
+    const snapshot = event.outbound
+    const account = snapshot.accountId ? store.settings.email.sources.find(source => source.id === snapshot.accountId) : null
+    if (snapshot.accountId && !account) return { transport: 'smtp', status: 'failed', deliveredAt: null, error: 'The reviewed email account is no longer available. Nothing was sent.' }
+    // SMTP and local-outbox writers receive a detached approved payload, never the live
+    // mutable event object. Preserve selected account identity instead of picking a default.
+    const transportEvent: ConnectorEvent = { ...event, payload: { to: snapshot.recipient, subject: snapshot.subject, body: snapshot.body, inReplyTo: snapshot.inReplyTo, threadKey: snapshot.threadKey } }
+    if (account?.kind === 'imap') {
+      const selected = { ...account }
+      if (!selected.host || !selected.user || !selected.password) return { transport: 'smtp', status: 'failed', deliveredAt: null, error: 'The reviewed email account is missing SMTP configuration. Nothing was sent.' }
+      const result = await sendEmailOverSmtp(transportEvent, selected)
+      await auditEvent('email.transport.smtp', { eventId: event.id, approvalId: event.approvalId, messageId: auditPreview(result.messageId) })
+      return { transport: 'smtp', status: 'delivered', path: `smtp:${selected.id}`, sentId: result.messageId, deliveredAt: result.deliveredAt, error: null }
     }
-    // File-based email sources: write the approved draft to the local outbox.
-    try {
-      const result = await writeEmailOutboxMessage(event, vontraPath('email-outbox'))
-      recordEventDelivery(event, {
-        transport: result.transport,
-        status: 'delivered',
-        path: result.path,
-        deliveredAt: result.deliveredAt,
-        error: null,
-      })
-      await auditEvent('email.transport.local_outbox', {
-        eventId: event.id,
-        approvalId: event.approvalId,
-        path: auditPreview(result.path),
-        sourceIds: (event.sources ?? []).map((source) => source.id),
-      })
-      rememberConnectorEvents([recordConnectorInteraction({
-        connectorId: 'email',
-        pluginName: 'Email',
-        action: 'email_outbox_delivered',
-        direction: 'internal',
-        target: result.path,
-        output: {
-          title: 'Email written to local outbox',
-          summary: `${event.title} -> ${result.path}`,
-          threadKey: event.threadKey,
-        },
-      })])
-    } catch (e: any) {
-      const error = String(e?.message ?? e)
-      recordEventDelivery(event, {
-        transport: 'local_outbox',
-        status: 'failed',
-        path: null,
-        deliveredAt: null,
-        error,
-      })
-      await auditEvent('email.transport.local_outbox_failed', {
-        eventId: event.id,
-        approvalId: event.approvalId,
-        error: auditPreview(error),
-      })
-      throw e
-    }
+    const result = await writeEmailOutboxMessage(transportEvent, vontraPath('email-outbox'))
+    await auditEvent('email.transport.local_outbox', { eventId: event.id, approvalId: event.approvalId })
+    // A file has been queued for an external mail client; no recipient delivery occurred.
+    return { transport: 'local_outbox', status: 'queued', path: result.path, deliveredAt: null, error: null }
   }
-
-  return { recordEmailDraft, recordEmailEvent, isEmailSendRequest, transportApprovedEmailEvent }
+  return { recordEmailDraft, recordEmailEvent, isEmailSendRequest, deliverApprovedEmailEvent }
 }

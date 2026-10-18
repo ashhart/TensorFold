@@ -132,8 +132,8 @@ request; restart the model and copy fresh details when the port and key change.
 ### Local engine modes and voice
 
 With the built-in TensorFold model selected, **AI settings** beside the chat model picker opens
-the Living Weights controls and Cortheon's status. Cortheon web research is temporarily disabled
-for beta.6, including previously saved On choices and old API enable calls. Local chat and API
+the Living Weights controls and Cortheon's status. Cortheon web research remains disabled
+in this beta, including previously saved On choices and old API enable calls. Local chat and API
 serving remain available; independently configured servers and the standalone CLI keep their
 own settings. Changing a supported engine mode restarts a loaded model and is blocked while
 managed local work or a learning checkpoint save is active.
@@ -173,7 +173,7 @@ npm run dist:mac     # Developer ID signed + notarized dmg + zip release artifac
 ```
 
 The pack scripts first run `scripts/fetch-engine.mjs`, which stages the TensorFold engine pinned in
-`build/engine.json` (1.0.10, macos-arm64) into `build/engine/`. It takes the archive from
+`build/engine.json` (1.0.12, macos-arm64) into `build/engine/`. It takes the archive from
 `TENSORFOLD_ENGINE_ARCHIVE` when set, otherwise from the pinned release URL (cached in
 `build/.engine-cache/` after the first download). Anything whose sha256 or `SHA256SUMS` does not match
 is refused. The app ships it at `Contents/Resources/engine/{bin,lib}`;

@@ -108,6 +108,7 @@ async function createLocalPrLoop(input: CreatePrLoopInput): Promise<CreatePrLoop
   })
   const now = Date.now()
   const implementationThread: Thread = {
+    documentSourceIds: [],
     id: randomUUID(),
     title: draft.implementationTitle,
     kind: 'task',
@@ -130,6 +131,7 @@ async function createLocalPrLoop(input: CreatePrLoopInput): Promise<CreatePrLoop
     plan: draft.implementationPlan,
   }
   const reviewThread: Thread = {
+    documentSourceIds: [],
     id: randomUUID(),
     title: draft.reviewTitle,
     kind: 'task',

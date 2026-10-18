@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
 import { Icon } from '../../lib/icons'
@@ -8,6 +9,7 @@ import { PanelSection } from './primitives'
 // Environment section: where this thread runs (Local / Orchestrator host /
 // SSH), which model drives it, and the approval mode — with a gear into Settings.
 export function EnvironmentSection({ thread }: { thread: Thread }) {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)
   const setView = useStore((s) => s.setView)
   const project = useStore((s) => thread.projectId ? s.projects.find((candidate) => candidate.id === thread.projectId) ?? null : null)
@@ -22,13 +24,13 @@ export function EnvironmentSection({ thread }: { thread: Thread }) {
     ? { label: `SSH · ${sshName}`, ok: true }
     : thread.orchestratorHostId
       ? { label: host?.name ?? 'Orchestrator', ok: !!host?.enabled }
-      : { label: 'Local', ok: true }
+      : { label: tx("Local"), ok: true }
   const provider = settings?.providers.find((p) => p.id === (thread.providerId ?? settings?.activeProviderId))
   const model = thread.model ?? settings?.activeModel ?? null
   return (
     <PanelSection
-      title="Environment"
-      right={<button onClick={() => setView({ name: 'settings', section: 'orchestrator' })} className="flex h-5 w-5 items-center justify-center rounded text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink" aria-label="Environment settings"><Icon name="settings" size={13} /></button>}
+      title={tx("Environment")}
+      right={<button onClick={() => setView({ name: 'settings', section: 'orchestrator' })} className="flex h-5 w-5 items-center justify-center rounded text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink" aria-label={tx("Environment settings")}><Icon name="settings" size={13} /></button>}
     >
       <div className="space-y-0.5">
         <div className="flex h-7 items-center gap-2 rounded-lg px-1.5 text-[13px] text-ink/85">

@@ -1,13 +1,13 @@
 import type { EngineLearningFact } from './types'
 
-export const LEARNING_STATES = ['queued', 'learning', 'learned', 'missed', 'replaced'] as const
+export const LEARNING_STATES = ['queued', 'learning', 'learned', 'missed', 'replaced', 'deleting', 'deleted'] as const
 export function summarizeLearning(facts: EngineLearningFact[]) {
   return {
     total: facts.length,
     learned: facts.filter((fact) => fact.state === 'learned').length,
     recalled: facts.filter((fact) => fact.state === 'learned' && fact.recalled === true).length,
     missed: facts.filter((fact) => fact.state === 'missed').length,
-    pending: facts.filter((fact) => fact.state === 'queued' || fact.state === 'learning').length,
+    pending: facts.filter((fact) => fact.state === 'queued' || fact.state === 'learning' || fact.state === 'deleting').length,
   }
 }
 export function buildLearningLayout(facts: EngineLearningFact[], limit = 60) {
@@ -30,7 +30,7 @@ export function buildLearningLayout(facts: EngineLearningFact[], limit = 60) {
     if (seen.has(key)) continue
     seen.add(key); edges.push({ from, to })
   }
-  return { nodes, edges, height: Math.max(210, 110 + Math.max(0, ...rows.values()) * 58), hidden: facts.length - nodes.length }
+  return { nodes, edges, width: LEARNING_STATES.length * 160, height: Math.max(210, 110 + Math.max(0, ...rows.values()) * 58), hidden: facts.length - nodes.length }
 }
 export function filterLearningFacts(facts: EngineLearningFact[], query: string) {
   const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { useState } from 'react'
 import { api } from '../../lib/ipc'
@@ -10,6 +11,7 @@ import type { Thread } from '../../lib/types'
 // explicit verdict with the missing half named. The mark-reviewed action stamps
 // thread.diffReviewedAt; a NEWER run receipt invalidates the mark (freshness is derived).
 export function WorkbenchDoneGate({ thread, contract, reviewState }: { thread: Thread; contract: AgenticRunContract; reviewState: WorkbenchPrReviewState }) {
+  const tx = useAuthoredText()
   const [marking, setMarking] = useState(false)
   const verdict = workbenchDoneVerdict({
     surface: contract.surface,
@@ -32,13 +34,13 @@ export function WorkbenchDoneGate({ thread, contract, reviewState }: { thread: T
     <div className={clsx('mt-2 rounded-xl border p-2.5', verdict.done ? 'border-positive/40 bg-positive/5' : 'border-line bg-card-2')}>
       <div className="flex items-center gap-2">
         <Icon name={verdict.done ? 'check' : 'circle'} size={13} className={clsx('shrink-0', verdict.done ? 'text-positive' : 'text-ink-3')} />
-        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{verdict.done ? 'Done' : 'Not done'}</span>
-        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', verdict.testsPassed ? 'bg-positive/12 text-positive' : 'bg-ink-5 text-ink-3')}>tests {verdict.testsPassed ? '✓' : '—'}</span>
-        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', verdict.diffReviewed ? 'bg-positive/12 text-positive' : 'bg-ink-5 text-ink-3')}>review {verdict.diffReviewed ? '✓' : '—'}</span>
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold text-ink">{verdict.done ? tx("Done") : tx("Not done")}</span>
+        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', verdict.testsPassed ? 'bg-positive/12 text-positive' : 'bg-ink-5 text-ink-3')}>{tx("tests ")}{verdict.testsPassed ? '✓' : '—'}</span>
+        <span className={clsx('rounded-md px-1.5 py-0.5 text-[12px] font-medium', verdict.diffReviewed ? 'bg-positive/12 text-positive' : 'bg-ink-5 text-ink-3')}>{tx("review ")}{verdict.diffReviewed ? '✓' : '—'}</span>
       </div>
       <div className="mt-1 text-[12px] leading-snug text-ink-3">{verdict.detail}</div>
       {reviewState.required && !reviewState.approved && (
-        <div className="mt-1 text-[12px] text-warn">Evidence-bound review passes: {reviewState.recordedApprovals}/{reviewState.requiredApprovals}</div>
+        <div className="mt-1 text-[12px] text-warn">{tx("Evidence-bound review passes: ")}{reviewState.recordedApprovals}/{reviewState.requiredApprovals}</div>
       )}
       {canMarkDiffsReviewed(verdict) && (
         <button
@@ -46,7 +48,7 @@ export function WorkbenchDoneGate({ thread, contract, reviewState }: { thread: T
           disabled={marking}
           onClick={() => { void markReviewed() }}
         >
-          {marking ? 'Marking…' : 'Mark diffs reviewed'}
+          {marking ? tx("Marking…") : tx("Mark diffs reviewed")}
         </button>
       )}
     </div>

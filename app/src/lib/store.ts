@@ -3,4 +3,4 @@
 // `'../lib/store'` / `'./store'` (including src/lib/store.test.ts) keep working unchanged.
 export { useStore } from './store/index'
 export type { AppState, View, ProjectTab } from './store/types'
-export { requestSettingsSection, consumeSettingsSection, SETTINGS_SECTION_REQUEST_EVENT } from './store/settings-section'
+export { requestSettingsSection, consumeSettingsSection, SETTINGS_SECTION_REQUEST_EVENT, requestConnectorSetup, consumeConnectorSetup } from './store/settings-section'

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { formatBytes } from '../../lib/engine'
 import type { ModelRecommendation } from '../../lib/model-recommendation'
 import type { PullProgress } from '../../lib/types'
@@ -14,23 +15,24 @@ export function ModelRecommendationPanel({ recommendation, pull, starting, locke
   onDownload: (repo: string) => void
   onRetry: () => void
 }) {
+  const tx = useAuthoredText()
   const model = recommendation.selected
-  const downloading = pull?.state === 'running'
+  const downloading = !!pull && ['queued', 'running', 'verifying'].includes(pull.state)
   return (
     <section data-testid="model-recommendation" className="mt-6 rounded-xl border border-line-strong bg-card p-4">
       <p className="text-[12px] text-ink-2">{recommendation.hardwareLabel}</p>
       <div className="mt-2 flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0 flex-1 basis-48">
-          <h2 className="text-[15px] font-medium text-ink">{model ? `Recommended: ${model.title}` : recommendation.status === 'unsupported' ? 'This build needs an Apple silicon Mac' : recommendation.status === 'unavailable' ? 'No compatible recommendation yet' : checkFailed ? 'Model checks need a connection' : 'Finding a model for this Mac'}</h2>
-          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{!model && checkFailed ? 'Compatibility checks could not finish; reconnect and retry, or choose a verified installed model.' : recommendation.reason}</p>
-          {model && <p className="mt-2 text-[12px] text-ink-2">{formatBytes(model.memoryBytes)} memory required{recommendation.fallback ? `; ${recommendation.fallback.title} uses less memory` : ''}.</p>}
+          <h2 className="text-[15px] font-medium text-ink">{model ? tx("Recommended: {value0}", { value0: model.title }) : recommendation.status === 'unsupported' ? tx("This build needs an Apple silicon Mac") : recommendation.status === 'unavailable' ? tx("No compatible recommendation yet") : checkFailed ? tx("Model checks need a connection") : tx("Finding a model for this Mac")}</h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-ink-2">{!model && checkFailed ? tx("Compatibility checks could not finish; reconnect and retry, or choose a verified installed model.") : recommendation.reason}</p>
+          {model && <p className="mt-2 text-[12px] text-ink-2">{formatBytes(model.memoryBytes)} {tx("memory required")}{recommendation.fallback ? tx("; {value0} uses less memory", { value0: recommendation.fallback.title }) : ''}.</p>}
         </div>
-        {model && <div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="primary" icon={model.action === 'load' ? minimal ? 'play' : 'message' : 'arrowDown'} onClick={() => model.action === 'load' ? onStart(model.repo) : onDownload(model.repo)} disabled={starting || downloading || locked}>{starting ? 'Starting model…' : downloading ? 'Downloading…' : model.action === 'load' ? minimal ? 'Start server' : 'Start chatting' : 'Download model'}</Button>
-          {model.action === 'download' && recommendation.fallback?.installed && <Button size="sm" variant="default" icon="message" onClick={() => onStart(recommendation.fallback!.repo)} disabled={starting || locked}>Use installed {recommendation.fallback.title}</Button>}
+        {model && <div className="flex flex-wrap items-center gap-2"><Button size="sm" variant="primary" icon={model.action === 'load' ? minimal ? 'play' : 'message' : 'arrowDown'} onClick={() => model.action === 'load' ? onStart(model.repo) : onDownload(model.repo)} disabled={starting || downloading || locked}>{starting ? tx("Starting model…") : downloading ? pull?.state === 'queued' ? tx("Queued") : pull?.state === 'verifying' ? tx("Checking files…") : tx("Downloading…") : model.action === 'load' ? minimal ? tx("Start server") : tx("Start chatting") : tx("Download model")}</Button>
+          {model.action === 'download' && recommendation.fallback?.installed && <Button size="sm" variant="default" icon="message" onClick={() => onStart(recommendation.fallback!.repo)} disabled={starting || locked}>{tx("Use installed ")}{recommendation.fallback.title}</Button>}
         </div>}
-        {!model && checkFailed && recommendation.status !== 'unsupported' && <Button size="sm" icon="refresh" onClick={onRetry}>Retry checks</Button>}
+        {!model && checkFailed && recommendation.status !== 'unsupported' && <Button size="sm" icon="refresh" onClick={onRetry}>{tx("Retry checks")}</Button>}
       </div>
-      {model?.action === 'download' && <p className="mt-3 border-t border-line pt-3 text-[12px] text-ink-2">{minimal ? 'After the download completes, choose Start server to load the model and open its local API.' : 'After the download completes, start chatting here; the engine loads the model for you.'}</p>}
+      {model?.action === 'download' && <p className="mt-3 border-t border-line pt-3 text-[12px] text-ink-2">{minimal ? tx("After the download completes, choose Start server to load the model and open its local API.") : tx("After the download completes, start chatting here; the engine loads the model for you.")}</p>}
     </section>
   )
 }

@@ -45,7 +45,7 @@ export const uiSlice: Slice = (set, get) => ({
 
   setFullWorkspaceLayout(layout) {
     const saved = saveFullWorkspaceLayout(layout)
-    set({ fullWorkspaceLayout: layout, ...(!saved ? { notice: { kind: 'error', message: 'Layout changed for this session, but the preference could not be saved on this device.' } } : {}) })
+    set({ fullWorkspaceLayout: layout, ...(!saved ? { notice: { kind: 'error', message: 'Layout changed for this session, but the preference could not be saved on this device.', authored: true } } : {}) })
   },
   toggleSidebar() {
     if (get().fullWorkspaceLayout === 'chat') { get().setFullWorkspaceLayout('workspace'); return }

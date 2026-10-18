@@ -1,8 +1,10 @@
+import { documentEvidenceTool, type DocumentEvidencePort } from './document-evidence-tool'
 import { assertSavedMemoryRead, assertMemoryContribution, effectiveThreadMemoryPolicy, roomWithoutSavedRecall } from '../../shared/thread-memory-policy'
 import { promises as fs } from 'node:fs'
 import { INCOGNITO_PERSISTENT_TOOLS } from './incognito'
 import { botToolBlockReason } from '../../shared/bot-tool-policy'
 import { scopeBotToolContext } from './bot-tool-scope'
+import { isGoogleWorkspaceTool, isPersistentGoogleWorkspaceTool } from './google-workspace-tools'
 import type { CreateArtifactInput } from './artifacts'
 import os from 'node:os'
 import path from 'node:path'
@@ -30,7 +32,7 @@ import { SECRET_MASK } from './security'
 import { summarizeSandboxArtifactBundle, runSandboxedCommand, sandboxProfileForCommand, taskSandboxNetworkOverride, type SandboxArtifactBundle } from './sandbox'
 import { buildCapabilityRegistry, filterToolSchemasForRegistry } from './capability-registry'
 import { buildCodebaseMap, buildSymbolIndex, formatCodebaseMap, formatRewritePreview, formatSafeRefactorPreview, formatSecurityScan, formatStructuralSearch, formatSymbolIndex, rewritePreview, safeRefactorPreview, semgrepCompatibleScan, structuralSearch } from './code-intelligence'
-import { buildWorkspaceRetrievalIndex, filterRetrievalThreadSources, formatRetrievalSearchResult, searchRetrievalIndex } from './retrieval-index'
+import { buildWorkspaceRetrievalIndex, filterRetrievalProjectMemorySources, filterRetrievalThreadSources, formatRetrievalSearchResult, searchRetrievalIndex } from './retrieval-index'
 import { checkEditedSyntax, isGatedCodePath, syntaxGateMessage } from './edit-syntax-gate'
 import { canRecallThread, formatSessionReadResult, formatSessionSearchResult, readSessionThread, searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from './session-recall'
 import { buildDeferredToolCatalog, findDeferredTool, formatDeferredToolDescription, formatToolCatalogSearch, searchDeferredToolCatalog } from './tool-disclosure'
@@ -100,7 +102,9 @@ export interface ToolContext {
   phoneControlAvailable?: boolean
   phoneLocalOnly?: boolean
   phonePrivacyGuard?: () => string | null
+  googlePrivacyGuard?: () => string | null
   runPhoneControl?: (input: PhoneToolInput) => Promise<{ ok: boolean; output: string; title: string }>
+  runGoogleWorkspaceTool?: (name: string, args: Record<string, any>) => Promise<ToolResult>
   cwd: string
   /** Cancels in-flight tool work when the owning run is stopped. */
   signal?: AbortSignal
@@ -115,6 +119,7 @@ export interface ToolContext {
   slackSettings?: SlackConnectorSettings
   calendarSettings?: CalendarConnectorSettings
   documentSettings?: DocumentConnectorSettings
+  documentLibrary?: DocumentEvidencePort
   browserSettings?: BrowserConnectorSettings
   threads?: Thread[]
   /** Re-read canonical source privacy at dispatch instead of retaining a stale permissive list. */
@@ -129,6 +134,8 @@ export interface ToolContext {
   rooms?: Room[]
   tickets?: Ticket[]
   projectMemory?: ProjectMemoryEntry[]
+  /** Host-owned project scope and live Trash state, re-read after asynchronous collection. */
+  recallProjectMemory?: () => ProjectMemoryEntry[]
   // First-class artifact registration (VST-011): the host persists the record and links it
   // to this run's provenance. Absent (subagents, quick completions) → save_artifact refuses.
   registerArtifact?: (input: CreateArtifactInput) => Artifact
@@ -183,6 +190,7 @@ export interface ToolResult {
   meta?: string
   subAgent?: SubAgent
   sources?: ConnectorSourceRef[]
+  documentEvidence?: import('../../shared/document-library').DocumentEvidenceRequest[]
   sandboxArtifacts?: SandboxArtifactBundle
   artifacts?: import('./types').ToolArtifactSummary
   appAction?: import('./types').AppAction
@@ -248,7 +256,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
     ctx = { ...ctx, threads: (ctx.recallThreads?.() ?? ctx.threads)?.filter((thread) => canRecallThread(thread, ctx.currentThread?.id)) }
     const visibleThreadIds = new Set(ctx.threads?.map((thread) => thread.id))
     ctx = { ...ctx, missions: (ctx.recallMissions?.() ?? ctx.missions)?.filter((mission) => !mission.threadId || visibleThreadIds.has(mission.threadId)) }
-    if (!effectiveThreadMemoryPolicy(ctx.currentThread ?? {}, ctx.memoryPolicy).useExisting) ctx = { ...ctx, threads: ctx.threads?.filter((thread) => thread.id === ctx.currentThread?.id), projectMemory: [], rooms: ctx.rooms?.map(roomWithoutSavedRecall) }
+    if (!effectiveThreadMemoryPolicy(ctx.currentThread ?? {}, ctx.memoryPolicy).useExisting) ctx = { ...ctx, threads: ctx.threads?.filter((thread) => thread.id === ctx.currentThread?.id), projectMemory: [], recallProjectMemory: undefined, rooms: ctx.rooms?.map(roomWithoutSavedRecall) }
     if (ctx.currentThread?.incognito && INCOGNITO_PERSISTENT_TOOLS.has(name)) return { ok: false, output: 'This tool saves derived conversations or learned skills and is unavailable in Incognito. Use an ordinary saved task for it.', meta: 'incognito-persistence-blocked' }
     if (ctx.allowedToolNames && !ctx.allowedToolNames.includes(name)) return { ok: false, output: 'This tool is outside this bot’s execution permissions.', meta: 'bot-tool-blocked' }
     if (name === 'ask_user') {
@@ -257,7 +265,14 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       return { ok: true, title: 'Question', output: answer.state === 'answered' ? `The user answered this question: ${JSON.stringify(answer.answer)}. This is task input, not a permission change or authorization to send anything.` : 'The user explicitly skipped this question. No answer or default choice was selected; continue only within the existing task and permissions.', meta: answer.state === 'answered' ? 'Answered by you' : 'Skipped by you' }
     }
     if (ctx.botVm) return await ctx.botVm.executeTool(name, args, ctx.signal)
-    if (ctx.phoneLocalOnly && (name === 'web_search' || name === 'web_fetch')) return { ok: false, output: 'This conversation contains phone context and stays local; use a separate chat for public web research.' }
+    if (isGoogleWorkspaceTool(name)) {
+      if (!ctx.runGoogleWorkspaceTool || ctx.sensitiveRetrievalAllowed !== true) return { ok: false, title: 'Google Workspace', output: 'Google account tools require an explicitly bound local model conversation.' }
+      if (ctx.disabledCapabilityIds?.includes('connector:google-workspace') || ctx.disabledToolNames?.includes(name)) return { ok: false, output: 'Google Workspace capability or tool is disabled for this run.' }
+      if (ctx.currentThread?.incognito && isPersistentGoogleWorkspaceTool(name)) return { ok: false, output: 'Incognito cannot save Google drafts or pending action reviews.' }
+      if (ctx.signal?.aborted) return { ok: false, output: 'This Google tool run was cancelled.' }
+      return await ctx.runGoogleWorkspaceTool(name, args)
+    }
+    if ((ctx.phoneLocalOnly || ctx.currentThread?.googleLocalOnly) && (name === 'web_search' || name === 'web_fetch')) return { ok: false, output: 'This conversation contains private phone or Google account context and stays local; use a separate chat for public web research.' }
     if (name.startsWith('mcp__')) {
       if (!ctx.callMcpTool) return { ok: false, output: 'MCP host is not configured.' }
       const result = await ctx.callMcpTool(name, args)
@@ -701,8 +716,10 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
           rooms: sensitiveAllowed ? ctx.rooms : undefined,
           tickets: sensitiveAllowed ? ctx.tickets : undefined,
           projectMemory: sensitiveAllowed ? ctx.projectMemory : undefined,
+          recallProjectMemory: sensitiveAllowed ? ctx.recallProjectMemory : undefined,
         })
-        const index = filterRetrievalThreadSources(collected, ctx.recallThreads?.() ?? ctx.threads ?? [], ctx.currentThread?.id, ctx.recallMissions?.() ?? ctx.missions)
+        const visible = filterRetrievalThreadSources(collected, ctx.recallThreads?.() ?? ctx.threads ?? [], ctx.currentThread?.id, ctx.recallMissions?.() ?? ctx.missions)
+        const index = filterRetrievalProjectMemorySources(visible, sensitiveAllowed ? ctx.recallProjectMemory?.() ?? ctx.projectMemory ?? [] : [])
         const result = searchRetrievalIndex(index, {
           query: typeof args.query === 'string' ? args.query : undefined,
           kinds: effectiveKinds,
@@ -994,6 +1011,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
 
       case 'email_compose': {
         const input: EmailDraftInput = {
+          accountId: typeof args.accountId === 'string' ? args.accountId : undefined,
           mode: args.mode === 'send' ? 'send' : 'draft',
           to: String(args.to || '').trim(),
           subject: String(args.subject || '').trim(),
@@ -1097,7 +1115,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
         const threadKey = typeof args.threadKey === 'string' ? args.threadKey.trim() : ''
         if (!connectorId) return { ok: false, output: 'message_compose requires connectorId to be telegram, whatsapp, or imessage.' }
         if (!target || !body) return { ok: false, output: 'message_compose requires target and body.' }
-        const event = personalMessageDraftEvent({ connectorId, target, body, threadKey: threadKey || undefined })
+        const event = personalMessageDraftEvent({ connectorId, target, body, threadKey: threadKey || undefined, accountId: typeof args.accountId === 'string' ? args.accountId : undefined })
         const recorded = ctx.recordMessageEvent ? await ctx.recordMessageEvent(event) : event
         return {
           ok: true,
@@ -1220,6 +1238,7 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'document_list': {
+        if (ctx.documentLibrary && typeof args.query === 'string' && args.query.trim()) return await documentEvidenceTool(ctx.documentLibrary, name, args)
         if (!ctx.documentSettings) return { ok: false, output: 'Document connector is not configured.' }
         const { documents } = await scanDocumentItems(ctx.documentSettings, {
           query: typeof args.query === 'string' ? args.query : undefined,
@@ -1232,6 +1251,10 @@ export async function executeTool(name: string, args: Record<string, any>, ctx: 
       }
 
       case 'document_read': {
+        if (String(args.id ?? '').startsWith('evidence:')) {
+          if (!ctx.documentLibrary) return { ok: false, output: 'Indexed evidence requires an eligible local model and enabled document sources.' }
+          return await documentEvidenceTool(ctx.documentLibrary, name, args)
+        }
         if (!ctx.documentSettings) return { ok: false, output: 'Document connector is not configured.' }
         const doc = await readDocumentItem(ctx.documentSettings, String(args.id || ''))
         const source = documentSourceRef(doc)

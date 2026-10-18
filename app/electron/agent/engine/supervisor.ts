@@ -2,15 +2,16 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import http from 'node:http'
 import net from 'node:net'
-import type { EngineState } from '../types'
+import type { EngineState, EngineModelGenerationSettings } from '../types'
 import type { ModelInfo } from './cli'
 import { assertRepoId, type EngineBinary } from './paths'
 import { killGroup } from './pull'
 import { loweredEngineMemoryBudget } from './memory-budget'
 import { CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
+import { modelLaunchOptions } from './launch-options'
+import { assertEngineModelSamplingSupported, isGreedyOnlyEngineModel } from '../../../shared/model-profiles'
 
-// Let native size kept states from RAM, loaded buffers and future stream allocations.
-// The weight-based info floor cannot safely reserve a fixed cache beside those buffers.
+// Native admission accounts for loaded buffers and streams; the weights-only floor cannot reserve retained states.
 
 // One engine process at a time: `serve MODEL` on a free loopback port with a fresh API key per launch,
 // ready once /v1/models answers. Switching models stops the old process first; a model whose memory
@@ -35,12 +36,14 @@ export interface SupervisorDeps {
   // True when the next start should pass --cortheon.
   cortheon?: () => boolean
   learning?: (repo: string) => { enabled: boolean; graphFile: string } | null
+  modelSettings?: (repo: string) => EngineModelGenerationSettings | null
 }
 
 export interface LiveEngine {
   model: string
   baseUrl: string
   apiKey: string
+  greedyOnly?: boolean
 }
 
 export interface EngineRequestLease extends LiveEngine {
@@ -143,9 +146,16 @@ export class EngineSupervisor {
   private generation = 0
   private stopping = false
   private activeRequests = 0
+  private exclusiveRequest = false
+  private sequenceOwner: symbol | null = null
+  private sequenceLabel = 'model comparison'
+  private activeSettings: EngineModelGenerationSettings | null = null
+  private restoreSettings: { model: string; settings: EngineModelGenerationSettings | null } | null = null
+  private cancellation = 0
   private requestModel: string | null = null
   private cortheon = false
   private learning = false
+  private greedyOnly = false
 
   constructor(private readonly deps: SupervisorDeps) {}
 
@@ -180,11 +190,12 @@ export class EngineSupervisor {
   live(model?: string): LiveEngine | null {
     if (this.state !== 'ready' || !this.model || !this.port || !this.apiKey) return null
     if (model && model !== this.model) return null
-    return { model: this.model, baseUrl: `http://127.0.0.1:${this.port}/v1`, apiKey: this.apiKey }
+    return { model: this.model, baseUrl: `http://127.0.0.1:${this.port}/v1`, apiKey: this.apiKey, ...(this.greedyOnly ? { greedyOnly: true } : {}) }
   }
 
   serve(model: string): Promise<LiveEngine> {
     try { assertRepoId(model) } catch (error) { return Promise.reject(error) }
+    try { this.assertSequenceOwner() } catch (error) { return Promise.reject(error) }
     const ready = this.live(model)
     if (ready) return Promise.resolve(ready)
     if (this.starting?.model === model) return this.starting.promise
@@ -193,7 +204,7 @@ export class EngineSupervisor {
       const current = this.live(model)
       if (current) return current
       if (this.starting?.model === model) return this.starting.promise
-      return this.switchTo(model)
+      return this.switchWithRecovery(model)
     })
     this.queue = next.catch(() => {})
     return next
@@ -232,21 +243,24 @@ export class EngineSupervisor {
 
   // Reserve the serving model before another queued load can replace its process. Same-model
   // requests share it; another model gets a defined refusal rather than killing an active turn.
-  acquire(model: string, options: { start: boolean; signal?: AbortSignal }): Promise<EngineRequestLease> {
+  acquire(model: string, options: { start: boolean; signal?: AbortSignal; exclusive?: boolean; owner?: symbol }): Promise<EngineRequestLease> {
     const next = this.queue.then(async () => {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error('Aborted.')
-      this.assertRequestIdle(model)
+      if (this.exclusiveRequest || options.exclusive && this.activeRequests > 0) throw new Error('Finish or stop active local requests before measuring model speed.')
+      this.assertRequestIdle(model, options.owner)
       let live = this.live(model)
       if (!live && !options.start) throw new Error(`The built-in engine is not serving ${model}.`)
-      live ??= await this.switchTo(assertRepoId(model))
+      live ??= await this.switchWithRecovery(assertRepoId(model), options.signal)
       if (options.signal?.aborted) throw options.signal.reason ?? new Error('Aborted.')
       this.activeRequests++
+      if (options.exclusive) this.exclusiveRequest = true
       this.requestModel = model
       let released = false
       return { ...live, release: () => {
         if (released) return
         released = true
         this.activeRequests--
+        if (options.exclusive) this.exclusiveRequest = false
         if (!this.activeRequests) this.requestModel = null
       } }
     })
@@ -254,7 +268,51 @@ export class EngineSupervisor {
     return next
   }
 
-  private assertRequestIdle(model?: string): void {
+  private assertSequenceOwner(owner?: symbol): void {
+    if (this.sequenceOwner && owner !== this.sequenceOwner) throw new Error(`Finish or cancel the ${this.sequenceLabel} before changing or using the local engine.`)
+  }
+
+  // Keep admission closed between two measured requests and through restoring the old runtime.
+  // The owner is a main-process symbol, never a renderer or model-supplied identifier.
+  reserveSequence(label = 'model comparison'): Promise<{ owner: symbol; previousModel: string | null; pause(): Promise<void>; restore(signal?: AbortSignal): Promise<void>; release(): void }> {
+    const next = this.queue.then(() => {
+      this.assertRequestIdle()
+      if (this.state === 'starting') throw new Error('Wait for the current model to finish loading before comparing models.')
+      const owner = Symbol('model-comparison')
+      const previousModel = this.live()?.model ?? null
+      const previousSettings = structuredClone(this.activeSettings)
+      this.sequenceOwner = owner
+      this.sequenceLabel = label
+      let released = false
+      return { owner, previousModel,
+        pause: async () => {
+          const pausing = this.queue.then(async () => { this.assertSequenceOwner(owner); if (this.activeRequests) throw new Error('The owned local engine still has active requests.'); await this.stopNow('stopped', null) })
+          this.queue = pausing.catch(() => {})
+          await pausing
+        },
+        restore: async (signal?: AbortSignal) => {
+          const restoring = this.queue.then(async () => {
+            this.assertSequenceOwner(owner)
+            if (signal?.aborted) throw new Error('Local model restoration was cancelled while TensorFold closed.')
+            if (this.activeRequests) throw new Error('The comparison request has not stopped yet.')
+            if (previousModel) {
+              this.restoreSettings = { model: previousModel, settings: previousSettings }
+              try { if (!this.live(previousModel)) await this.switchTo(previousModel, signal) } finally { this.restoreSettings = null }
+            }
+            else await this.stopNow('stopped', null)
+          })
+          this.queue = restoring.catch(() => {})
+          await restoring
+        },
+        release: () => { if (!released) { released = true; if (this.sequenceOwner === owner) this.sequenceOwner = null } },
+      }
+    })
+    this.queue = next.catch(() => {})
+    return next
+  }
+
+  private assertRequestIdle(model?: string, owner?: symbol): void {
+    this.assertSequenceOwner(owner)
     if (this.activeRequests && (model == null || model !== this.requestModel)) {
       throw Object.assign(new Error('Finish or stop active TensorFold requests before switching or unloading the built-in engine.'), { code: 'ENGINE_MODEL_BUSY' })
     }
@@ -262,6 +320,7 @@ export class EngineSupervisor {
 
   stop(): Promise<void> {
     try { this.assertRequestIdle() } catch (error) { return Promise.reject(error) }
+    this.cancellation++
     // A load in progress holds the queue until it settles, so cancel it before queueing the stop.
     if (this.state === 'starting') {
       this.generation++
@@ -274,6 +333,7 @@ export class EngineSupervisor {
 
   // Synchronous quit path: SIGTERM now (or SIGKILL with force), nothing awaited.
   killNow(signal: NodeJS.Signals = 'SIGKILL'): void {
+    this.cancellation++
     this.generation++
     this.stopping = true
     killGroup(this.child, signal)
@@ -292,15 +352,55 @@ export class EngineSupervisor {
     }
   }
 
-  private async switchTo(model: string): Promise<LiveEngine> {
+  private async switchTo(model: string, signal?: AbortSignal): Promise<LiveEngine> {
     if (this.child) await this.stopNow('stopped', null)
-    const promise = this.start(model)
+    if (signal?.aborted) throw signal.reason ?? new Error('Engine start was cancelled.')
+    const promise = this.start(model, signal)
     this.starting = { model, promise }
     try {
       return await promise
     } finally {
       if (this.starting?.promise === promise) this.starting = null
     }
+  }
+
+  private async switchWithRecovery(model: string, signal?: AbortSignal): Promise<LiveEngine> {
+    const previous = this.live()?.model
+    const cancellation = this.cancellation
+    try { return await this.switchTo(model, signal) }
+    catch (error) {
+      if (!previous || previous === model || cancellation !== this.cancellation || signal?.aborted) throw error
+      try { await this.switchTo(previous) }
+      catch (restoreError) { throw new Error(`${(error as Error).message} Restoring the previous model also failed: ${(restoreError as Error).message}`, { cause: error }) }
+      throw new Error(`${(error as Error).message} The previous model has been restored.`, { cause: error })
+    }
+  }
+
+  // A profile for an idle different model can be saved without restarting the current model.
+  configureModel(model: string, apply: () => Promise<void>, rollback: () => Promise<void>): Promise<void> {
+    const next = this.queue.then(async () => {
+      this.assertSequenceOwner()
+      const running = this.model === model && (this.state === 'ready' || this.state === 'starting')
+      if (running) this.assertRequestIdle()
+      try { await apply(); if (running) await this.switchTo(model) }
+      catch (error) {
+        await rollback()
+        if (running && !this.live(model)) {
+          try { await this.switchTo(model) }
+          catch (restoreError) { throw new Error(`${(error as Error).message} Restoring the previous profile also failed: ${(restoreError as Error).message}`, { cause: error }) }
+        }
+        throw error
+      }
+    })
+    this.queue = next.catch(() => {})
+    return next
+  }
+
+  // Keep cache deletion ordered with launches; its callback performs no engine requests.
+  mutateCache<T>(run: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(() => { this.assertSequenceOwner(); return run() })
+    this.queue = next.catch(() => {})
+    return next
   }
 
   private fail(message: string): never {
@@ -310,7 +410,7 @@ export class EngineSupervisor {
     throw new Error(message)
   }
 
-  private async start(model: string): Promise<LiveEngine> {
+  private async start(model: string, signal?: AbortSignal): Promise<LiveEngine> {
     const generation = ++this.generation
     this.state = 'starting'
     this.model = model
@@ -324,6 +424,16 @@ export class EngineSupervisor {
     this.log = []
     this.changed()
 
+    const cancel = () => {
+      if (generation === this.generation && this.state === 'starting') {
+        if (this.sequenceOwner) { this.generation++; killGroup(this.child, 'SIGTERM') }
+        else void this.stop().catch(() => {})
+      }
+    }
+    signal?.addEventListener('abort', cancel, { once: true })
+    if (signal?.aborted) cancel()
+    try {
+
     const binary = this.deps.binary()
     if (!binary) this.fail('The TensorFold engine is not bundled with this build.')
     let info: ModelInfo
@@ -332,7 +442,12 @@ export class EngineSupervisor {
     } catch (error) {
       this.fail((error as Error).message)
     }
-    const drafter = this.deps.drafterFor(model)
+    const settings = this.restoreSettings?.model === model ? this.restoreSettings.settings : this.deps.modelSettings?.(model)
+    this.activeSettings = settings ? structuredClone(settings) : null
+    this.greedyOnly = isGreedyOnlyEngineModel(info)
+    if (settings) assertEngineModelSamplingSupported(info, settings)
+    const profileArgs = modelLaunchOptions(settings, info.contextTokens)
+    const drafter = settings?.speculativeDecoding === 'off' ? null : this.deps.drafterFor(model)
     let floor = info.memoryFloorBytes
     if (drafter) {
       const drafterBytes = await this.deps.drafterBytes(drafter)
@@ -354,11 +469,12 @@ export class EngineSupervisor {
     if (generation !== this.generation) this.fail('Engine start was cancelled.')
 
     const port = await freeLoopbackPort()
+    if (generation !== this.generation) this.fail('Engine start was cancelled.')
     const apiKey = randomBytes(32).toString('hex')
     this.cortheon = cortheonEnabledForRelease(this.deps.cortheon?.())
     const learning = this.deps.learning?.(model)
     this.learning = learning?.enabled === true
-    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
+    const args = ['serve', argument, '--host', '127.0.0.1', '--port', String(port), '--name', model, ...profileArgs, ...(drafterArgument ? ['--drafter', drafterArgument] : []), ...(this.cortheon ? ['--cortheon'] : []), ...(learning ? ['--slide-graph', learning.graphFile, ...(learning.enabled ? ['--slide'] : [])] : [])]
     // Independently reject a stale injected binary prefix as well as the normal serve choice.
     if (!CORTHEON_RELEASE_POLICY.enabled && [...binary.args, ...args].includes('--cortheon')) this.fail(CORTHEON_RELEASE_POLICY.reason)
     const env = { ...this.deps.env(), TENSORFOLD_API_KEY: apiKey, TENSORFOLD_NO_UPDATE_CHECK: '1' }
@@ -405,11 +521,13 @@ export class EngineSupervisor {
     }
     if (exited || generation !== this.generation) this.fail(exited ?? 'Engine start was cancelled.')
     this.contextTokens = await readContextWindow(port, apiKey, model, models)
+    if (generation !== this.generation) this.fail('Engine start was cancelled.')
     this.state = 'ready'
     this.readyAt = Date.now()
     this.message = null
     this.changed()
-    return { model, baseUrl: `http://127.0.0.1:${port}/v1`, apiKey }
+    return { model, baseUrl: `http://127.0.0.1:${port}/v1`, apiKey, ...(this.greedyOnly ? { greedyOnly: true } : {}) }
+    } finally { signal?.removeEventListener('abort', cancel) }
   }
 
   private async stopNow(state: EngineState, message: string | null): Promise<void> {

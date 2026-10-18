@@ -6,10 +6,12 @@ import { contentText } from '../agent/content'
 import { stripIncognitoThreads } from '../agent/incognito'
 import { canRecallThread, searchSessionThreads, type SessionSearchOptions, type SessionSearchResult } from '../agent/session-recall'
 import type { Thread, TimelineItem } from '../agent/types'
+import { indexSearchTokens, MAX_SEARCH_QUERY_CHARS, searchTerms } from '../conversation-search/text'
+export { searchTerms } from '../conversation-search/text'
 
 export type BlindSearchToken = (token: string) => string
 
-const SCHEMA_VERSION = 1
+const SCHEMA_VERSION = 3
 const MAX_UNIQUE_TOKENS_PER_THREAD = 20_000
 const databases = new Map<string, DatabaseSync>()
 
@@ -83,24 +85,8 @@ function openIndex(file: string): DatabaseSync {
   }
 }
 
-export function searchTerms(value: string): string[] {
-  return [...new Set(String(value ?? '')
-    .toLowerCase()
-    .split(/[^a-z0-9_/-]+/)
-    .map((term) => term.trim())
-    .filter((term) => term.length >= 2))]
-}
-
 function searchableTimelineText(item: TimelineItem): string {
-  return [item.title, item.tool, item.text, item.command, item.meta].filter(Boolean).join(' ')
-}
-
-function searchableThreadText(thread: Thread): string {
-  return [
-    thread.title,
-    ...(thread.apiMessages ?? []).map((message) => contentText(message.content)),
-    ...(thread.timeline ?? []).map(searchableTimelineText),
-  ].filter(Boolean).join('\n')
+  return [item.title, item.tool, item.text, item.command, item.meta, item.output].filter(Boolean).join(' ')
 }
 
 // Most-recent-first searchable segments: the per-thread token cap then drops the
@@ -128,10 +114,7 @@ function threadTextFingerprint(thread: Thread): string {
 function indexThreadTokens(thread: Thread, blind: BlindSearchToken) {
   // Index prefixes so normal full-text queries tolerate plural/suffix variants such
   // as "fixture" matching "fixtures" without storing a reversible word list.
-  const tokens = [...new Set(searchTerms(recencyOrderedThreadText(thread)).flatMap((term) => {
-    const capped = term.slice(0, 64)
-    return Array.from({ length: Math.max(0, capped.length - 1) }, (_, index) => capped.slice(0, index + 2))
-  }))].slice(0, MAX_UNIQUE_TOKENS_PER_THREAD)
+  const tokens = indexSearchTokens(recencyOrderedThreadText(thread), MAX_UNIQUE_TOKENS_PER_THREAD)
   return {
     tokenHashes: tokens.map(blind).join(' '),
     projectKey: thread.projectId ? blind(`project:${thread.projectId}`) : '',
@@ -159,7 +142,7 @@ export function syncSessionSearchIndex(file: string, threads: Thread[], blind: B
 
   db.exec('BEGIN IMMEDIATE')
   try {
-    for (const thread of stripIncognitoThreads(threads).filter((thread) => !thread.phoneLocalOnly)) {
+    for (const thread of stripIncognitoThreads(threads).filter((thread) => !thread.phoneLocalOnly && !thread.googleLocalOnly)) {
       liveIds.add(thread.id)
       const fingerprint = threadTextFingerprint(thread)
       if (existing.get(thread.id) === fingerprint) continue
@@ -190,11 +173,28 @@ export function searchSessionIndex(
   options: SessionSearchOptions,
   blind: BlindSearchToken,
 ): SessionSearchResult {
+  const candidates = selectSessionSearchCandidates(file, threads, options, blind, 200, false)
+  return searchSessionThreads(candidates.threads, options)
+}
+
+/** Reusable bounded narrowing only; callers must verify every result against live text/policy. */
+export function selectSessionSearchCandidates(
+  file: string,
+  threads: Thread[],
+  options: SessionSearchOptions,
+  blind: BlindSearchToken,
+  maxCandidates = 200,
+  coverLiveThreads = true,
+): { threads: Thread[]; truncated: boolean } {
   // Live source policy also filters stale index rows and the broken-index fallback.
   // A phone owner's own messages can be scanned directly without a global derived row.
-  const visible = threads.filter((thread) => canRecallThread(thread, options.currentThreadId))
-  const terms = searchTerms(options.query)
-  if (!terms.length) return searchSessionThreads(visible, options)
+  const visible = threads.filter((thread) => canRecallThread(thread, options.currentThreadId)
+    && (!options.projectId || thread.projectId === options.projectId)
+    && (options.includeArchived || !thread.archivedAt)
+    && (options.includeCurrent || !options.currentThreadId || thread.id !== options.currentThreadId))
+  const terms = searchTerms(String(options.query ?? '').slice(0, MAX_SEARCH_QUERY_CHARS))
+  const cap = Math.max(1, Math.min(1000, Math.floor(maxCandidates) || 200))
+  if (!terms.length) return { threads: [], truncated: false }
   try {
     const db = openIndex(file)
     const match = terms.map((term) => `"${blind(term)}"`).join(' OR ')
@@ -209,7 +209,7 @@ export function searchSessionIndex(
       clauses.push('s.thread_id <> ?')
       params.push(options.currentThreadId)
     }
-    params.push(200)
+    params.push(cap + 1)
     const rows = db.prepare(`
       SELECT s.thread_id
       FROM thread_search_fts
@@ -218,10 +218,20 @@ export function searchSessionIndex(
       ORDER BY bm25(thread_search_fts), s.updated_at DESC
       LIMIT ?
     `).all(...params) as Array<{ thread_id: string }>
-    const ids = new Set(rows.map((row) => row.thread_id))
-    return searchSessionThreads(visible.filter((thread) => ids.has(thread.id) || thread.phoneLocalOnly), options)
+    const liveIds = new Set(visible.map((thread) => thread.id))
+    const ids = new Set(rows.slice(0, cap).map((row) => row.thread_id).filter((id) => liveIds.has(id)))
+    if (coverLiveThreads) {
+      // The derived index can be stale or token-capped. Supplement its best candidates
+      // with recent live threads and disclose every remaining unscanned conversation.
+      for (const thread of visible.slice().sort((a, b) => b.updatedAt - a.updatedAt)) {
+        if (ids.size >= cap) break
+        ids.add(thread.id)
+      }
+    }
+    return { threads: visible.filter((thread) => ids.has(thread.id) || thread.phoneLocalOnly || thread.googleLocalOnly),
+      truncated: coverLiveThreads ? ids.size < visible.length : rows.length > cap }
   } catch {
-    return searchSessionThreads(visible, options)
+    return { threads: visible.slice(0, cap), truncated: visible.length > cap }
   }
 }
 

@@ -11,14 +11,7 @@
 // (initialize / session/new / session/prompt / session/cancel) the SDK's `agent()`
 // builder calls into.
 //
-// electron/agent/acp-interop.ts is a pre-existing planning/exploration-spike data
-// structure (never wired to a process) and electron/agent/acp-server-export.ts has
-// some JSON-RPC result-shape builders that predate the real SDK and use an invented
-// envelope (`{jsonrpc, id, result}` built by hand). Neither is reused here: the SDK
-// itself handles JSON-RPC envelopes, so hand-rolling them would fight the SDK rather
-// than use it. Both files are left in place as-is (acp-interop.ts's role/boundary
-// notes remain useful design context; acp-server-export.ts is unused dead code that
-// is out of this task's scope to delete).
+// The SDK owns protocol envelopes. Superseded hand-built planning spikes are retired.
 import { randomUUID } from 'node:crypto'
 import * as acp from '@agentclientprotocol/sdk'
 import { runAgent } from './loop'
@@ -111,6 +104,7 @@ function emptyAcpThread(cwd: string): Thread {
   const now = Date.now()
   return {
     id: randomUUID(),
+    documentSourceIds: [],
     title: 'ACP session',
     kind: 'task',
     cwd,

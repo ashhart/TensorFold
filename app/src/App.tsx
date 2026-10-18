@@ -1,3 +1,7 @@
+import { OriginalDiagnostic } from './components/OriginalDiagnostic'
+import { useAuthoredText } from './lib/preferences/useAuthoredText'
+import { useUiPreferences } from './lib/preferences/hooks'
+import { ConversationSearchHost } from './components/search/ConversationSearchHost'
 import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useStore } from './lib/store'
 import { applyTheme } from './lib/theme'
@@ -18,6 +22,10 @@ import { Button } from './components/ui'
 import type { Provider } from './lib/types'
 import { ALL_SETTINGS_SECTIONS, type SettingsSection } from './components/settings/shared'
 import { fullLayoutStartupChat, simpleFullLayoutActive } from './lib/full-workspace-layout'
+import { useConversationDraftLifecycle } from './lib/use-conversation-draft'
+import { desktopDraftPort } from './lib/desktop-drafts'
+import { forgetComposerFileSources, makeComposerFileSourcesIncognito } from './lib/composer-file-sources'
+import { composerDraftKey } from '../shared/composer-drafts'
 
 // Stable empty-array reference. Returning a fresh `[]` from a zustand selector
 // makes useSyncExternalStore think the snapshot changed every render → infinite
@@ -45,8 +53,23 @@ const WorkspaceDock = lazy(() => import('./components/WorkspaceDock').then((modu
 const MinimalWorkspace = lazy(() => import('./components/MinimalWorkspace').then((module) => ({ default: module.MinimalWorkspace })))
 
 export default function App() {
+  const tx = useAuthoredText()
+  useConversationDraftLifecycle(desktopDraftPort, desktopDraftPort ? api : null)
+  useEffect(() => desktopDraftPort ? api.onComposerDraftReset((scope) => {
+    if (scope?.incognito) makeComposerFileSourcesIncognito(composerDraftKey({ ...scope, incognito: false }), composerDraftKey(scope))
+    else forgetComposerFileSources(scope ? composerDraftKey(scope) : undefined)
+  }) : undefined, [])
   const ready = useStore((s) => s.ready)
   const view = useStore((s) => s.view)
+  useEffect(() => {
+    if (api.platform === 'web-remote') return
+    const id = view.name === 'thread' ? view.id : null
+    const local = id && useStore.getState().threads.find(thread => thread.id === id && !thread.orchestratorHostId)
+    void api.conversationSearchSetActiveThread(local ? id : null).catch(() => {})
+    return () => { void api.conversationSearchSetActiveThread(null).catch(() => {}) }
+  }, [view])
+  const preferences = useStore(state => state.settings?.uiPreferences)
+  useUiPreferences(preferences)
   const theme = useStore((s) => s.resolvedTheme)
   const [settingsDraftDirty, setSettingsDraftDirty] = useState(false)
   const init = useStore((s) => s.init)
@@ -99,7 +122,7 @@ export default function App() {
       }
       if (mod && k === 'n') {
         e.preventDefault()
-        if (e.shiftKey) void newChat().catch(() => useStore.getState().setNotice({ kind: 'error', message: 'Could not open a chat. Your current work is still here; try New chat again.' }))
+        if (e.shiftKey) void newChat().catch(() => useStore.getState().setNotice({ kind: 'error', message: tx("Could not open a chat. Your current work is still here; try New chat again.") }))
         else newTask()
       }
       else if (mod && e.key === ',') { e.preventDefault(); setView({ name: 'settings' }) }
@@ -185,10 +208,10 @@ export default function App() {
           {!sidebarCollapsed && !showOnboarding && !minimal && <div className={simpleFull ? 'hidden' : 'contents'} aria-hidden={simpleFull || undefined} data-full-workspace-sidebar><Sidebar /></div>}
           <div className="content-card relative flex min-w-0 flex-1 flex-col">
             {showOnboarding ? <header className="drag h-11 shrink-0" /> : !minimal && <TitleBar simple={simpleFull} />}
-            <main className="min-h-0 flex-1 overflow-hidden">
+            <main className="min-h-0 flex-1 overflow-clip">
               <Suspense fallback={<ViewFallback />}>
                 {showOnboarding && contentView.name === 'home' ? <Onboarding onDone={() => setOnboardingDone(true)} /> : minimal && !showOnboarding ? <MinimalWorkspace target={minimalTarget} onTarget={setMinimalTarget} /> : <div className="flex h-full min-h-0 flex-col">
-                {showOnboarding && <div className="shrink-0 px-4 py-3"><Button size="sm" icon="back" onClick={() => setView({ name: 'home' })}>Return to setup</Button></div>}
+                {showOnboarding && <div className="shrink-0 px-4 py-3"><Button size="sm" icon="back" onClick={() => setView({ name: 'home' })}>{tx("Return to setup")}</Button></div>}
                 <div className="min-h-0 flex-1">
                 {contentView.name === 'home' && <Home />}
                 {contentView.name === 'thread' && <ThreadView key={contentView.id} threadId={contentView.id} simpleLayout={simpleFull} />}
@@ -210,7 +233,7 @@ export default function App() {
           </div>
         </div>
       )}
-      {!minimal && !showOnboarding && <><NewProjectModal /><CommandPalette /></>}
+      {!minimal && !showOnboarding && <><NewProjectModal /><CommandPalette /><ConversationSearchHost navigationBlocked={settingsDraftDirty} /></>}
       <ExportPanel />
       <ReplayPanel />
       <IncidentCenter />
@@ -222,25 +245,27 @@ export default function App() {
 }
 
 function ViewFallback() {
+  const tx = useAuthoredText()
   return (
     <div className="flex h-full w-full items-center justify-center bg-canvas text-[13px] text-ink-3">
       <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-      <span className="ml-2">Loading view…</span>
+      <span className="ml-2">{tx("Loading view…")}</span>
     </div>
   )
 }
 
 function BootstrapRecovery({ unavailable, onRetry }: { unavailable: boolean; onRetry: () => Promise<void> }) {
+  const tx = useAuthoredText()
   const [retrying, setRetrying] = useState(false)
   return <div className="flex h-full w-full items-center justify-center bg-canvas px-6 text-ink">
     <div role={unavailable ? 'alert' : 'status'} className="w-full max-w-md rounded-xl border border-line bg-card p-6">
-      <h1 className="text-[18px] font-semibold">{unavailable ? 'Could not load your settings' : 'Loading your workspace…'}</h1>
+      <h1 className="text-[18px] font-semibold">{unavailable ? tx("Could not load your settings") : tx("Loading your workspace…")}</h1>
       {unavailable && <>
-        <p className="mt-2 text-[13px] leading-relaxed text-ink-2">Your saved configuration is unavailable, so setup is paused until it can be read.</p>
+        <p className="mt-2 text-[13px] leading-relaxed text-ink-2">{tx("Your saved configuration is unavailable, so setup is paused until it can be read.")}</p>
         <Button variant="primary" disabled={retrying} onClick={() => {
           setRetrying(true)
           void onRetry().finally(() => setRetrying(false)).catch(() => {})
-        }} className="no-drag mt-5">{retrying ? 'Retrying…' : 'Retry loading'}</Button>
+        }} className="no-drag mt-5">{retrying ? tx("Retrying…") : tx("Retry loading")}</Button>
       </>}
     </div>
   </div>
@@ -248,6 +273,7 @@ function BootstrapRecovery({ unavailable, onRetry }: { unavailable: boolean; onR
 
 // Surfaces persistence/save failures (and other notices) so they never fail silently.
 function NoticeToast() {
+  const tx = useAuthoredText()
   const notice = useStore((s) => s.notice)
   const dismiss = useStore((s) => s.dismissNotice)
   useEffect(() => {
@@ -260,8 +286,8 @@ function NoticeToast() {
   return (
     <div className="fixed bottom-4 right-4 z-[100] flex max-w-sm items-start gap-2.5 rounded-xl border border-line bg-card px-4 py-3 text-[13px] shadow-pop fade-in">
       <span className={`mt-1 h-2 w-2 shrink-0 rounded-full ${notice.kind === 'error' ? 'bg-danger' : 'bg-accent'}`} />
-      <span className="min-w-0 flex-1 text-ink">{notice.message}</span>
-      <button onClick={dismiss} aria-label="Dismiss" className="shrink-0 text-ink-3 transition-colors hover:text-ink">×</button>
+      <span className="min-w-0 flex-1 text-ink">{notice.authored ? tx(notice.message) : notice.kind === 'error' ? <><span className="block">{tx("This action could not be completed.")}</span><OriginalDiagnostic>{notice.message}</OriginalDiagnostic></> : notice.message}</span>
+      <button onClick={dismiss} aria-label={tx("Dismiss")} className="shrink-0 text-ink-3 transition-colors hover:text-ink">×</button>
     </div>
   )
 }

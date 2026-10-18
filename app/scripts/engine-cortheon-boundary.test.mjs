@@ -24,7 +24,7 @@ try {
   })
   state.audit = async () => { audits++ }
   const set = (enabled) => state.handlers.get('engine:setCortheon')({}, enabled)
-  await assert.rejects(() => set(true), /temporarily disabled for beta\.6/)
+  await assert.rejects(() => set(true), /temporarily disabled in this beta/)
   assert.deepEqual(calls, [], 'an old renderer cannot reach the service enable API')
   assert.equal(audits, 0, 'release refusal happens before asynchronous audit or operation admission')
   assert.equal(reserved, 0)

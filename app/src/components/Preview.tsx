@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '../lib/icons'
 import { api } from '../lib/ipc'
@@ -44,6 +46,7 @@ function inspectPreviewFrame(frame: HTMLIFrameElement | null, note: string): Bro
 
 // Local preview browser: loads localhost URLs and can attach explicit QA evidence.
 export function Preview({ onClose }: { onClose: () => void }) {
+  const tx = useAuthoredText()
   const view = useStore((s) => s.view)
   const thread = useStore((s) => view.name === 'thread' ? s.threads.find((t) => t.id === view.id) ?? null : null)
   const candidates = useMemo(() => localPreviewCandidates(thread), [thread?.id, thread?.cwd, thread?.updatedAt])
@@ -71,7 +74,7 @@ export function Preview({ onClose }: { onClose: () => void }) {
   const go = () => {
     const u = normalizeLocalPreviewUrl(url)
     if (!u) {
-      setError('Enter a loopback URL on preview port 3000, 4173, or 5173.')
+      setError(tx("Enter a loopback URL on preview port 3000, 4173, or 5173."))
       return
     }
     setError('')
@@ -119,10 +122,10 @@ export function Preview({ onClose }: { onClose: () => void }) {
             setNonce((n) => n + 1)
           }}
           className="h-6 max-w-[140px] rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none transition-colors focus:border-accent"
-          title="Local preview candidates"
+          title={tx("Local preview candidates")}
         >
           {candidates.map((candidate) => <option key={candidate.url} value={candidate.url}>{candidate.label}</option>)}
-          {!candidates.some((candidate) => candidate.url === src) && <option value="">Custom URL</option>}
+          {!candidates.some((candidate) => candidate.url === src) && <option value="">{tx("Custom URL")}</option>}
         </select>
         <input
           value={url}
@@ -132,35 +135,35 @@ export function Preview({ onClose }: { onClose: () => void }) {
           className="h-6 min-w-0 flex-1 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none transition-colors focus:border-accent"
           spellCheck={false}
         />
-        <button onClick={go} className="flex h-6 w-6 items-center justify-center rounded text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title="Go / reload"><Icon name="arrowRight" size={13} /></button>
-        <button onClick={attachEvidence} className="flex h-6 items-center gap-1 rounded px-1.5 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title="Attach browser evidence to composer">
-          <Icon name={attached ? 'check' : 'attach'} size={13} />{attached ? 'Attached' : 'Evidence'}
+        <button onClick={go} className="flex h-6 w-6 items-center justify-center rounded text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title={tx("Go / reload")}><Icon name="arrowRight" size={13} /></button>
+        <button onClick={attachEvidence} className="flex h-6 items-center gap-1 rounded px-1.5 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title={tx("Attach browser evidence to composer")}>
+          <Icon name={attached ? 'check' : 'attach'} size={13} />{attached ? tx("Attached") : tx("Evidence")}
         </button>
-        <button onClick={saveBrowserSource} className="flex h-6 items-center gap-1 rounded px-1.5 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title="Save explicit browser source">
-          <Icon name={saved ? 'check' : 'plus'} size={13} />{saved ? 'Saved' : 'Source'}
+        <button onClick={saveBrowserSource} className="flex h-6 items-center gap-1 rounded px-1.5 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title={tx("Save explicit browser source")}>
+          <Icon name={saved ? 'check' : 'plus'} size={13} />{saved ? tx("Saved") : tx("Source")}
         </button>
-        <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label="Close preview"><Icon name="x" size={13} /></button>
+        <button onClick={onClose} className="flex h-6 w-6 items-center justify-center rounded text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label={tx("Close preview")}><Icon name="x" size={13} /></button>
       </div>
       <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
         <input
           value={note}
           onChange={(e) => setNote(e.target.value)}
-          placeholder="Evidence note or failed click target"
+          placeholder={tx("Evidence note or failed click target")}
           className="h-6 min-w-0 flex-1 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none transition-colors placeholder:text-ink-4 focus:border-accent"
           spellCheck={false}
         />
         <span className="shrink-0 rounded bg-ink-5 px-1.5 text-[12px] text-ink-3">{loadState}</span>
       </div>
-      {error && <div className="border-b border-line px-3 py-1.5 text-[13px] text-danger">{error}</div>}
+      {error && <div className="border-b border-line px-3 py-1.5 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
       <iframe
         key={nonce}
         ref={frameRef}
         src={src}
-        title="Preview"
+        title={tx("Preview")}
         className="min-h-0 w-full flex-1 border-0 bg-white"
         sandbox="allow-scripts allow-forms"
         onLoad={() => setLoadState('loaded')}
-        onError={() => { setLoadState('error'); setError('Preview failed to load this local URL.') }}
+        onError={() => { setLoadState('error'); setError(tx("Preview failed to load this local URL.")) }}
       />
     </div>
   )

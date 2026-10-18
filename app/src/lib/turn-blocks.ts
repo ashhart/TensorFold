@@ -3,6 +3,9 @@
 // text, run bookkeeping) collapses into one row; anything that needs the user, the final
 // answer and the files it edited stay visible. Pure so it is tested without a DOM.
 import { basename } from './format'
+import { authoredText } from './preferences/language-packs'
+import { currentUiLanguage } from './preferences/current-locale'
+import { normalizeLanguage } from '../../shared/languages'
 import type { TimelineItem } from './types'
 
 export interface FileEdit {
@@ -169,7 +172,26 @@ export function buildTurnRows(timeline: TimelineItem[], opts: { running?: boolea
 }
 
 /** Present-tense label for one in-flight work item. */
-export function stepLabel(item: TimelineItem | undefined): string {
+export function stepLabel(item: TimelineItem | undefined, locale: unknown = currentUiLanguage()): string {
+  if (normalizeLanguage(locale) !== 'en') {
+    const tx = (source: string, params = {}) => authoredText(locale, source, params)
+    if (!item) return ''
+    if (item.kind === 'reasoning') return tx('Thinking')
+    if (item.kind === 'assistant') return tx('Writing')
+    if (item.kind === 'visualization') return tx('Drawing a chart')
+    const name = item.path ? basename(item.path) : ''
+    switch (item.tool) {
+      case 'edit_file': return name ? tx('Editing {name}', { name }) : tx('Editing')
+      case 'write_file': return name ? tx('Creating {name}', { name }) : tx('Creating a file')
+      case 'read_file': return name ? tx('Reading {name}', { name }) : tx('Reading')
+      case 'run_command': return item.command ? tx('Running {command}', { command: item.command }) : tx('Running a command')
+      case 'search': return tx('Searching the code')
+      case 'list_dir': return tx('Looking through files')
+      case 'web_search': return tx('Searching the web')
+      case 'web_fetch': return tx('Reading a page')
+      default: return item.title || tx('Working')
+    }
+  }
   if (!item) return ''
   if (item.kind === 'reasoning') return 'Thinking'
   if (item.kind === 'assistant') return 'Writing'
@@ -189,7 +211,16 @@ export function stepLabel(item: TimelineItem | undefined): string {
 }
 
 /** What the live row says it is doing right now. */
-export function currentStepLabel(turn: TurnSummary, status?: string): string {
+export function currentStepLabel(turn: TurnSummary, status?: string, locale: unknown = currentUiLanguage()): string {
+  const tx = (source: string) => authoredText(locale, source)
+  if (normalizeLanguage(locale) !== 'en') {
+    if (status === 'awaiting') return tx(turn.questionPending ? 'Waiting for your answer' : 'Waiting for approval')
+    const item = [...turn.work].reverse().find(item => item.kind === 'tool' && IN_FLIGHT.has(String(item.state ?? '')))
+    if (item) return stepLabel(item, locale)
+    if (status === 'thinking') return tx('Thinking')
+    if (status === 'streaming') return tx('Writing')
+    return stepLabel(turn.work[turn.work.length - 1], locale) || tx('Starting')
+  }
   if (status === 'awaiting') return turn.questionPending ? 'Waiting for your answer' : 'Waiting for approval'
   const inFlight = [...turn.work].reverse().find((item) => item.kind === 'tool' && IN_FLIGHT.has(String(item.state ?? '')))
   if (inFlight) return stepLabel(inFlight)
@@ -211,7 +242,17 @@ export function compactDuration(ms: number): string {
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 /** "Worked for 12s · 4 steps" when done; "Working · 12s · Editing App.tsx" while live. */
-export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string; phaseLabel?: string }): string {
+export function workRowLabel(turn: TurnSummary, opts: { now: number; status?: string; phaseLabel?: string; locale?: string }): string {
+  const locale = normalizeLanguage(opts.locale ?? currentUiLanguage())
+  if (locale !== 'en') {
+    const tx = (source: string, params = {}) => authoredText(locale, source, params)
+    const duration = (ms: number) => new Intl.NumberFormat(locale, { style: 'unit', unit: 'second', unitDisplay: 'short', maximumFractionDigits: 0 }).format(Math.max(0, Math.round(ms / 1000)))
+    if (turn.running) return [opts.phaseLabel || tx('Working'), turn.startedAt == null ? '' : duration(opts.now - turn.startedAt), opts.phaseLabel ? '' : currentStepLabel(turn, opts.status, locale)].filter(Boolean).join(' · ')
+    const elapsed = turn.startedAt != null && turn.endedAt != null && turn.endedAt > turn.startedAt ? duration(turn.endedAt - turn.startedAt) : ''
+    const thought = turn.steps === 0 && turn.work.some(item => item.kind === 'reasoning')
+    const head = elapsed ? tx(thought ? 'Thought for {duration}' : 'Worked for {duration}', { duration: elapsed }) : tx(thought ? 'Thought' : 'Worked')
+    return turn.steps > 0 ? `${head} · ${tx('Steps: {count}', { count: turn.steps })}` : head
+  }
   if (turn.running) {
     const elapsed = turn.startedAt != null ? compactDuration(opts.now - turn.startedAt) : null
     if (opts.phaseLabel) return [opts.phaseLabel, elapsed].filter(Boolean).join(' · ')

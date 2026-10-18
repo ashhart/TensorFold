@@ -15,7 +15,9 @@ const functions = ast.statements.filter(node => ts.isFunctionDeclaration(node) &
 assert.equal(functions.length, 2)
 const body = functions.map(node => printer.printNode(ts.EmitHint.Unspecified, node, ast).replace(/\bexport\s+(?=function\s+)/g, '')).join('\n')
 const compiled = ts.transpileModule(body, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None, jsx: ts.JsxEmit.React } }).outputText
-const Row = new Function('React', 'useState', 'useEffect', 'workRowLabel', 'clsx', 'Icon', 'Spinner', 'WorkItems', `${compiled};return TurnWorkRow;`)(React, React.useState, React.useEffect, workRowLabel, clsx, () => null, () => null, () => null)
+let locale = 'en'
+const useStore = select => select({ settings: { uiPreferences: { locale } } })
+const Row = new Function('React', 'useState', 'useEffect', 'useStore', 'workRowLabel', 'clsx', 'Icon', 'Spinner', 'WorkItems', `${compiled};return TurnWorkRow;`)(React, React.useState, React.useEffect, useStore, workRowLabel, clsx, () => null, () => null, () => null)
 const provider = { id: 'tensorfold', source: 'tensorfold', kind: 'local', transport: 'chat-completions', baseUrl: 'http://127.0.0.1/v1', models: ['fixture-model'], apiKey: '', name: 'TensorFold' }
 const engine = { available: true, state: 'starting', model: 'fixture-model' }
 const timeline = [{ id: 'user', kind: 'user', text: 'Synthetic first message', at: Date.now() - 1000 }]
@@ -29,5 +31,7 @@ assert.doesNotMatch(render(provider, engine, 'thinking', true), /Loading model/)
 assert.doesNotMatch(render(provider, engine, 'thinking', false, 'different-model'), /Loading model/)
 assert.doesNotMatch(render(provider, { ...engine, available: false }), /Loading model/)
 assert.doesNotMatch(render(provider, engine, 'awaiting'), /Loading model/)
+locale = 'zh-Hans'
+assert.doesNotMatch(render(provider, { ...engine, state: 'ready' }), /Thinking|Working/, 'The actual row reads the live profile language for its authored summary')
 assert.equal(JSON.stringify({ provider, engine, turn, timeline }), before, 'display feedback never mutates run status, timeline timestamps or model metrics')
 console.log('Actual TurnWorkRow loading→ready component rendering, matching built-in model guard and unchanged API/CLI/approval/remote states passed')

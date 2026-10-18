@@ -1,96 +1,76 @@
+import { currentIntlLocale } from '../../../lib/preferences/current-locale'
+import { OriginalDiagnostic } from '../../OriginalDiagnostic'
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
+import { useState } from 'react'
 import { shortPath } from '../../../lib/format'
-import { BrandIcon } from '../../../lib/brand'
-import { Icon } from '../../../lib/icons'
-import { Button, Field, Input, Toggle } from '../../ui'
+import { api } from '../../../lib/ipc'
+import { Button, Input, Toggle } from '../../ui'
 import { Section, type SettingsSectionContext } from '../shared'
-import { ConnectorStatusChip } from './ConnectorStatusChip'
+import type { SlackSourceConfig } from '../../../lib/types'
+import { LiveMessagingSource, type LiveMessagingSourceValue } from './LiveMessagingSource'
+import { MessagingSetupGuide } from './MessagingSetupGuide'
 
 export function SlackConnector({ ctx }: { ctx: SettingsSectionContext }) {
-  const {
-    draft,
-    setDraft,
-    commit,
-    slackBusy,
-    connectorStatus,
-    addSlackSource,
-    syncSlack,
-    updateSlackSource,
-    removeSlackSource,
-  } = ctx
-  const connectorStatusMap = connectorStatus ?? {}
-
-  // Slack live + Discord helpers: defined locally (api + commit in scope) so the
-  // big Settings.tsx ctx doesn't have to carry every connector action.
-  const addLiveSlackSource = () => {
-    const id = `slack_${Math.random().toString(36).slice(2, 10)}`
-    const source = { id, label: 'Slack workspace', path: '', kind: 'api_token' as const, token: '', channels: '', enabled: true, createdAt: Date.now(), updatedAt: Date.now(), lastSyncAt: null, lastError: null }
-    setDraft((d) => ({ ...d, slack: { ...d.slack, sources: [source, ...d.slack.sources] } }))
+  const tx = useAuthoredText()
+  const { draft, setDraft } = ctx
+  const [busy, setBusy] = useState('')
+  const [error, setError] = useState('')
+  const edit = (id: string, patch: Partial<SlackSourceConfig>) => setDraft((current) => ({ ...current, slack: { ...current.slack, sources: current.slack.sources.map((source) => source.id === id ? { ...source, ...patch } : source) } }))
+  const save = async (id: string, patch: Partial<SlackSourceConfig> = {}) => {
+    const next = { ...draft, slack: { ...draft.slack, sources: draft.slack.sources.map((source) => source.id === id ? { ...source, ...patch, id: source.id, updatedAt: Date.now() } : source) } }
+    await ctx.save(next)
   }
-
-  return (
-    <Section title="Slack connector" desc="Local Slack exports or a live workspace (bot token). A live token reads channels/threads and can reply, approval-gated.">
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
-          <div>
-            <div className="text-[13px] font-medium text-ink">{draft.slack.sources.length} source{draft.slack.sources.length === 1 ? '' : 's'} configured</div>
-            <div className="mt-0.5 text-[13px] text-ink-3">{draft.slack.lastSyncAt ? `Last sync ${new Date(draft.slack.lastSyncAt).toLocaleString()}` : 'Not synced yet'}</div>
-            <ConnectorStatusChip status={connectorStatusMap.slack} />
-          </div>
-          <div className="flex gap-2">
-            <Button variant="default" size="sm" icon="folder" onClick={addSlackSource} disabled={!!slackBusy}>{slackBusy === 'add' ? 'Adding' : 'Add export'}</Button>
-            <Button variant="default" size="sm" icon="plus" onClick={() => addLiveSlackSource()} disabled={!!slackBusy}>Add live token</Button>
-            <Button variant="primary" size="sm" icon="message" onClick={syncSlack} disabled={!!slackBusy || draft.slack.sources.length === 0}>{slackBusy === 'sync' ? 'Syncing' : 'Sync Slack'}</Button>
-          </div>
-        </div>
-
-        {draft.slack.sources.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line px-3.5 py-5 text-center text-[13px] text-ink-3">
-            Add a local Slack export folder, or a live bot token (api.slack.com app) to read channels and reply.
-          </div>
-        ) : draft.slack.sources.map((source) => source.kind === 'api_token' ? (
-          // Live Slack workspace token: xoxb-... + allowed channels.
-          <div key={source.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
-            <div className="flex items-start gap-3">
-              <BrandIcon brand="slack" size={32} />
-              <div className="min-w-0 flex-1">
-                <Input value={source.label} onChange={(e) => setDraft((d) => ({ ...d, slack: { ...d.slack, sources: d.slack.sources.map((s) => s.id === source.id ? { ...s, label: e.target.value } : s) } }))} onBlur={(e) => updateSlackSource(source.id, { label: e.target.value })} className="h-8" />
-                {source.lastError && <div className="mt-1 text-[13px] text-danger">{source.lastError}</div>}
-              </div>
-              <Toggle label={`Enable ${source.label || "Slack source"}`} checked={source.enabled} onChange={(enabled) => updateSlackSource(source.id, { enabled })} />
-              <button onClick={() => removeSlackSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove Slack source"><Icon name="trash" size={15} /></button>
-            </div>
-            <div className="mt-3 space-y-2.5">
-              <Field label="Bot token" hint="secret"><Input type="password" value={source.token ?? ''} onChange={(e) => setDraft((d) => ({ ...d, slack: { ...d.slack, sources: d.slack.sources.map((s) => s.id === source.id ? { ...s, token: e.target.value } : s) } }))} onBlur={() => commit(draft)} placeholder="xoxb-..." className="h-8" spellCheck={false} /></Field>
-              <Field label="Allowed channels" hint="optional"><Input value={source.channels ?? ''} onChange={(e) => setDraft((d) => ({ ...d, slack: { ...d.slack, sources: d.slack.sources.map((s) => s.id === source.id ? { ...s, channels: e.target.value } : s) } }))} onBlur={(e) => updateSlackSource(source.id, { channels: e.target.value })} placeholder="#general, C0... (blank = all the bot sees)" className="h-8" spellCheck={false} /></Field>
-              <Field label="Channel prompt" hint="optional"><Input value={source.channelPrompt ?? ''} onChange={(e) => setDraft((d) => ({ ...d, slack: { ...d.slack, sources: d.slack.sources.map((s) => s.id === source.id ? { ...s, channelPrompt: e.target.value } : s) } }))} onBlur={(e) => updateSlackSource(source.id, { channelPrompt: e.target.value })} placeholder="Extra guidance applied only to this Slack source (ephemeral)" className="h-8" spellCheck={false} /></Field>
-            </div>
-          </div>
-        ) : (
-          <div key={source.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
-            <div className="flex items-start gap-3">
-              <BrandIcon brand="slack" size={32} />
-              <div className="min-w-0 flex-1">
-                <Input
-                  value={source.label}
-                  onChange={(e) => setDraft((d) => ({ ...d, slack: { ...d.slack, sources: d.slack.sources.map((s) => s.id === source.id ? { ...s, label: e.target.value } : s) } }))}
-                  onBlur={(e) => updateSlackSource(source.id, { label: e.target.value })}
-                  className="h-8"
-                />
-                <div className="mt-1 truncate text-[13px] text-ink-3" title={source.path}>{shortPath(source.path, 5)}</div>
-                {source.lastError && <div className="mt-1 text-[13px] text-danger">{source.lastError}</div>}
-              </div>
-              <Toggle label={`Enable ${source.label || "Slack source"}`} checked={source.enabled} onChange={(enabled) => updateSlackSource(source.id, { enabled })} />
-              <button onClick={() => removeSlackSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove Slack source">
-                <Icon name="trash" size={15} />
-              </button>
-            </div>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <span className="rounded-lg border border-line bg-card-2 px-2.5 py-1.5 text-[13px] text-ink-3">Slack export folder</span>
-              <span className="text-[12px] text-ink-3">{source.lastSyncAt ? `Synced ${new Date(source.lastSyncAt).toLocaleString()}` : 'Not scanned'}</span>
-            </div>
-          </div>
-        ))}
+  const addLive = async () => {
+    setBusy('add'); setError('')
+    try {
+      const now = Date.now()
+      const source: SlackSourceConfig = { id: `slack_${crypto.randomUUID().slice(0, 8)}`, label: tx("Slack workspace"), path: '', kind: 'api_token', token: '', channels: '', enabled: false, createdAt: now, updatedAt: now, lastSyncAt: null, lastError: null }
+      await ctx.save({ ...draft, slack: { ...draft.slack, sources: [source, ...draft.slack.sources] } })
+    } catch { setError(tx("Could not add this connection; retry after saving any pending settings changes.")) }
+    finally { setBusy('') }
+  }
+  const actOnExport = async (id: string, action: () => Promise<unknown>) => {
+    setBusy(id); setError('')
+    try { await action() } catch { setError(tx("The export action failed; check that the folder is available and try again.")) }
+    finally { setBusy('') }
+  }
+  const addExport = async () => {
+    const directory = await api.pickDirectory()
+    if (!directory) return
+    const next = await api.addSlackSource(directory)
+    const priorIds = new Set(draft.slack.sources.map((source) => source.id))
+    const added = next.sources.filter((source) => !priorIds.has(source.id))
+    setDraft((current) => ({ ...current, slack: { ...current.slack, sources: [...added.filter((source) => !current.slack.sources.some((existing) => existing.id === source.id)), ...current.slack.sources] } }))
+  }
+  const remove = async (id: string) => { await api.removeSlackSource(id); setDraft((current) => ({ ...current, slack: { ...current.slack, sources: current.slack.sources.filter((source) => source.id !== id) } })) }
+  const persistedValue = (id: string): LiveMessagingSourceValue | null | undefined => {
+    if (!ctx.persistedSettings) return undefined
+    const source = ctx.persistedSettings.slack.sources.find((candidate) => candidate.id === id)
+    return source ? { ...source, token: source.token ?? '', channels: source.channels ?? '', credentialVersion: source.secretRotations?.token } : null
+  }
+  const asPatch = (patch: Partial<LiveMessagingSourceValue>): Partial<SlackSourceConfig> => {
+    const { channels, ...rest } = patch
+    return { ...rest, ...(channels !== undefined ? { channels } : {}) }
+  }
+  return <Section title={tx("Slack")} desc={tx("Connect a workspace bot or read an export folder; choose channels before enabling live access.")}>
+    <div className="space-y-3">
+      <MessagingSetupGuide steps={[
+        'Create a Slack app for your workspace, then add Bot Token Scopes under OAuth & Permissions.',
+        'For public channel history use channels:read and channels:history; private channels also need groups:read and groups:history; chat:write allows approved replies and files:read allows shared attachments.',
+        'Install the app to your workspace, invite its bot to the selected channels, then save and verify its bot token here.',
+      ]} links={[{ label: tx("Create Slack app"), url: 'https://api.slack.com/apps' }, { label: tx("Permission guide"), url: 'https://docs.slack.dev/authentication/tokens/' }]} />
+      <p className="text-[12px] leading-relaxed text-ink-3">{tx("Slack limits public and private thread history for bot tokens, and workspace policies and rate limits still apply; channel history remains available with the scopes above.")}</p>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card p-3.5">
+        <span className="text-[13px] text-ink-2">{tx("Connections: {count}", { count: draft.slack.sources.length })}</span>
+        <div className="flex flex-wrap gap-2"><Button size="sm" icon="plus" onClick={addLive} disabled={!!busy}>{busy === 'add' ? tx("Adding…") : tx("Add workspace bot")}</Button><Button size="sm" icon="folder" onClick={() => actOnExport('export', addExport)} disabled={!!busy || !!ctx.slackBusy}>{tx("Add export folder")}</Button></div>
       </div>
-    </Section>
-  )
+      {error && <p role="alert" className="text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}
+      {!draft.slack.sources.length && <div className="rounded-xl border border-dashed border-line p-5 text-center text-[13px] text-ink-3">{tx("Connect your first workspace bot, or choose an existing Slack export folder for local reading.")}</div>}
+      {draft.slack.sources.map((source) => source.kind === 'api_token' ? <LiveMessagingSource key={source.id} brand="slack" persistedValue={persistedValue(source.id)} value={{ ...source, token: source.token ?? '', channels: source.channels ?? '', credentialVersion: source.secretRotations?.token }} edit={(patch) => edit(source.id, asPatch(patch))} save={(patch) => save(source.id, patch ? asPatch(patch) : {})} verify={async () => { const result = await api.verifySlack(source.id); return { ok: result.ok, identity: result.team ? `${result.bot || 'bot'} in ${result.team}` : result.bot, error: result.error ? 'Slack rejected this token; check that the app is installed and its token is current.' : undefined } }} listChannels={async () => (await api.listSlackChannels(source.id)).map((channel) => ({ ...channel, detail: channel.isPrivate ? 'Private channel' : 'Public channel' }))} sync={async () => { const result = await api.syncSlack(source.id); const failed = result.sources.find((candidate) => candidate.id === source.id)?.lastError; if (failed) throw new Error(tx("Slack channel read failed")); return `Read ${result.messages ?? 0} messages from this workspace.` }} remove={async () => { await remove(source.id) }} /> : <div key={source.id} className="rounded-xl border border-line bg-card p-3.5">
+        <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><Input aria-label={tx("Slack export label")} value={source.label} disabled={busy === source.id} onChange={(event) => edit(source.id, { label: event.target.value })} onBlur={() => actOnExport(source.id, () => save(source.id))} /><p className="mt-1 break-words text-[13px] text-ink-3">{shortPath(source.path, 5)}</p></div><Toggle label={tx("Enable {value0}", { value0: source.label || tx("Slack export") })} checked={source.enabled} disabled={!!busy} onChange={(enabled) => actOnExport(source.id, () => save(source.id, { enabled }))} /></div>
+        <div className="mt-3 flex flex-wrap gap-2"><Button size="sm" disabled={!!busy || !source.enabled} onClick={() => actOnExport(source.id, async () => { await api.syncSlack(source.id) })}>{tx("Read export")}</Button><Button size="sm" variant="danger" disabled={!!busy} onClick={() => actOnExport(source.id, () => remove(source.id))}>{tx("Remove export")}</Button><span className="self-center text-[12px] text-ink-3">{source.lastSyncAt ? tx("Last read {value0}", { value0: new Date(source.lastSyncAt).toLocaleString(currentIntlLocale()) }) : tx("Not read yet")}</span></div>
+        {source.lastError && <p role="alert" className="mt-2 text-[13px] text-danger">{tx("The last export read failed; check folder access and try again.")}</p>}
+      </div>)}
+    </div>
+  </Section>
 }

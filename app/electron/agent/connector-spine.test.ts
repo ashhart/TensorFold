@@ -276,7 +276,7 @@ function controllerSettings(overrides: Partial<ControllerSettings> = {}): Contro
   assert.equal(whatsapp.lastSyncAt, 5_000)
   assert.equal(whatsapp.permissionStatus, 'degraded')
   assert.equal(whatsapp.error, 'webhook signature failed')
-  assert.ok(whatsapp.tools.some((tool) => tool.name === 'message_compose' && tool.approvalRequired))
+  assert.equal(whatsapp.tools.length, 0, 'Cloud bot-control ingress must not advertise the separate linked-device send adapter')
 }
 
 {

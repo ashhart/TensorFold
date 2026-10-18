@@ -7,6 +7,7 @@ export const LEARNING_MODEL = 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-
 const MANIFEST = 'profile.json'
 const RESERVE = 1024 ** 3
 const UID = process.getuid?.()
+const NATIVE_BACKUPS = new Set(['.tensorfold-original', '.tensorfold-original.partial'])
 
 function within(root: string, file: string): boolean {
   const relative = path.relative(root, file)
@@ -59,7 +60,7 @@ export class LearningCopies {
   async purge(): Promise<{ removedPaths: string[]; files: number }> {
     // Also checks the journal's engine parent authority when no learned model exists yet.
     await this.directories()
-    await validatePrivateTree(this.root)
+    await validatePrivateTree(this.root, path.join(this.folder(LEARNING_MODEL), 'model'))
     const count = async (directory: string): Promise<number> => {
       let files = 0
       for (const entry of await fs.readdir(directory, { withFileTypes: true })) files += entry.isDirectory() ? await count(path.join(directory, entry.name)) : 1
@@ -86,7 +87,7 @@ export class LearningCopies {
     if (doc.version !== 1 || doc.repo !== repo || typeof doc.sourceRevision !== 'string' || !/^[a-f0-9]{40}$/i.test(doc.sourceRevision)) throw new Error('The Living Weights profile is invalid. Preserve it before repairing the app data.')
     const model = path.join(directory, 'model')
     await ownedDirectory(model)
-    await validatePrivateTree(model)
+    await validatePrivateTree(model, model)
     const configFile = path.join(model, 'config.json')
     if ((await fs.stat(configFile)).size > 1024 * 1024) throw new Error('The private model configuration is too large.')
     const config = JSON.parse(await fs.readFile(configFile, 'utf8'))
@@ -175,12 +176,26 @@ async function privateFile(file: string, strictMode = true) {
   return stat
 }
 
-async function validatePrivateTree(directory: string, depth = 0, budget = { files: 0 }): Promise<void> {
+async function nativeBackupDirectory(directory: string, model: string): Promise<void> {
+  // v1.0.12 snapshots use mkdir(0755), then rename .partial to the completed name.
+  // Their only privacy boundary is this verified 0700 private model, never a cache folder.
+  await ownedDirectory(model)
+  const stat = await fs.lstat(directory)
+  const mode = stat.mode & 0o7777
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (UID != null && stat.uid !== UID) || (mode & 0o700) !== 0o700 || (mode & 0o7022) !== 0) throw new Error('A Living Weights native backup is linked, shared or writable by another user.')
+  if (await fs.realpath(directory) !== directory) throw new Error('Living Weights cannot use a redirected backup folder.')
+}
+
+async function validatePrivateTree(directory: string, nativeModel?: string, depth = 0, budget = { files: 0 }): Promise<void> {
   if (depth > 8) throw new Error('The private model has too many nested folders.')
   for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
     if (++budget.files > 20_000) throw new Error('The private model contains too many files.')
     const full = path.join(directory, entry.name)
-    if (entry.isDirectory()) { await ownedDirectory(full); await validatePrivateTree(full, depth + 1, budget) }
+    if (entry.isDirectory()) {
+      if (directory === nativeModel && NATIVE_BACKUPS.has(entry.name)) await nativeBackupDirectory(full, nativeModel)
+      else await ownedDirectory(full)
+      await validatePrivateTree(full, nativeModel, depth + 1, budget)
+    }
     else await privateFile(full, false) // native checkpoint rewrites may use 0644 inside this private 0700 tree.
   }
 }

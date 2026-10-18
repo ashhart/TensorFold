@@ -10,6 +10,7 @@ g.addEventListener = () => {}
 g.removeEventListener = () => {}
 g.window = g
 
+await (await import('./browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('./ipc.ts')
 const { useStore } = await import('./store.ts')
 

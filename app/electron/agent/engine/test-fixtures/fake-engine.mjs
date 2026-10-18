@@ -101,6 +101,9 @@ async function pullCommand(spec) {
       for (let at = 0; at < size; at += chunk) {
         writeSync(fd, Buffer.alloc(Math.min(chunk, size - at), 1), 0, Math.min(chunk, size - at), at)
         await sleep(Number(env.FAKE_PULL_DELAY_MS ?? 0))
+        // Test-only gate: keep a partial sparse download running until cancellation.
+        const holdAfter = Number(env.FAKE_PULL_HOLD_AFTER_BYTES ?? 0)
+        if (holdAfter > 0 && at + chunk >= holdAfter) while (true) await sleep(50)
       }
       closeSync(fd)
       renameSync(`${blob}.ranges`, blob)
@@ -131,19 +134,13 @@ async function serveCommand(args) {
   if (graphFile && existsSync(graphFile)) graph = { ...graph, ...JSON.parse(readFileSync(graphFile, 'utf8')) }
   const saveGraph = () => { if (graphFile) writeFileSync(graphFile, JSON.stringify(graph), { mode: 0o600 }) }
   let learning = false
-  const cacheRoom = env.FAKE_PROMPT_CACHE_ROOM_GIB == null ? null : Number(env.FAKE_PROMPT_CACHE_ROOM_GIB)
-  const cacheArg = flag(args, '--prompt-cache-gib')
-  const requestedCache = cacheArg == null ? null : Number(cacheArg)
-  const promptCacheGiB = requestedCache ?? Math.min(16, cacheRoom ?? 16)
-  record({ kind: 'serve', args, promptCacheGiB, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
-  if (cacheRoom != null && requestedCache != null && requestedCache > cacheRoom) {
-    console.error(`tensorfold: --prompt-cache-gib ${requestedCache} exceeds the ${cacheRoom} GiB left for kept states`)
-    process.exit(1)
-  }
+  record({ kind: 'serve', args, pid: process.pid, hasKey: keys.length > 0, noUpdateCheck: env.TENSORFOLD_NO_UPDATE_CHECK ?? null, secretEnv: Object.keys(env).filter((k) => /API_KEY|TOKEN|SECRET/.test(k) && k !== 'TENSORFOLD_API_KEY') })
   console.error(`[tensorfold] loading ${model}`)
   await sleep(Number(env.FAKE_SERVE_LOAD_MS ?? 50))
-  if (env.FAKE_SERVE_FAIL) { console.error(`tensorfold: ${env.FAKE_SERVE_FAIL}`); process.exit(1) }
+  if (env.FAKE_SERVE_FAIL || env.FAKE_SERVE_FAIL_MODEL === name) { console.error(`tensorfold: ${env.FAKE_SERVE_FAIL}`); process.exit(1) }
   if ((env.FAKE_CORTHEON_FAIL && args.includes('--cortheon')) || (env.FAKE_SLIDE_FAIL && args.includes('--slide'))) { console.error('tensorfold: requested mode failed to load'); process.exit(1) }
+  const retainedBudget = flag(args, '--prompt-cache-gib')
+  if (env.FAKE_PROMPT_CACHE_ROOM_GIB !== undefined && retainedBudget !== null && Number(retainedBudget) > Number(env.FAKE_PROMPT_CACHE_ROOM_GIB) && !args.includes('--prompt-cache-over-cap')) { console.error('tensorfold: requested prompt cache exceeds memory left after load and stream allocation'); process.exit(1) }
   const server = http.createServer((req, res) => {
     if (keys.length && req.headers.authorization !== `Bearer ${keys[0]}`) {
       res.writeHead(401, { 'WWW-Authenticate': 'Bearer', 'Content-Type': 'application/json' })
@@ -152,7 +149,7 @@ async function serveCommand(args) {
     }
     // FAKE_CONTEXT: the served window (default 32768; 'none' = unbounded). FAKE_MODELS_NO_CONTEXT
     // leaves it out of /v1/models so only /tokenize reports it.
-    const context = env.FAKE_CONTEXT === 'none' ? null : Number(env.FAKE_CONTEXT ?? 32768)
+    const context = env.FAKE_CONTEXT === 'none' ? null : Number(env.FAKE_CONTEXT ?? (args.includes('--context') ? args[args.indexOf('--context') + 1] : 32768))
     if (env.FAKE_ENGINE_LEARNING && req.method === 'GET' && req.url === '/v1/slide/graph') {
       res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(graph)); return
     }
@@ -198,7 +195,8 @@ async function serveCommand(args) {
       req.on('data', (c) => { body += c })
       req.on('end', async () => {
         const request = JSON.parse(body || '{}')
-        record({ kind: 'chat', model: request.model, stream: request.stream, messages: request.messages?.length ?? 0 })
+        record({ kind: 'chat', model: request.model, stream: request.stream, messages: request.messages?.length ?? 0, prompt: request.messages?.[0]?.content, temperature: request.temperature, max_tokens: request.max_tokens, top_p: request.top_p, top_k: request.top_k, min_p: request.min_p, draft: request.draft, chat_template_kwargs: request.chat_template_kwargs, tools: request.tools })
+        if (env.FAKE_CHAT_FAIL_MODEL === request.model) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: { message: 'Synthetic model response failed.' } })); return }
         if (!request.stream) {
           res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({ choices: [{ index: 0, message: { role: 'assistant', content: 'Fake title' }, finish_reason: 'stop' }] }))
@@ -211,7 +209,7 @@ async function serveCommand(args) {
         }
         const measured = env.FAKE_REPLY_TIMINGS ? { tensorfold: { tokens_per_second: 200, seconds: 0.01, prefill_seconds: 0.05, time_to_first_token: 0.05 } } : {}
         const cacheUsage = env.FAKE_REPLY_TIMINGS ? { prompt_tokens_details: { cached_tokens: 1 } } : {}
-        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 3, ...cacheUsage }, ...measured })}\n\n`)
+        res.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: {}, finish_reason: env.FAKE_FINISH_REASON ?? 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 3, ...cacheUsage }, ...measured })}\n\n`)
         res.end('data: [DONE]\n\n')
       })
       return

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import { api } from '../../lib/ipc'
 import type { Settings as TSettings } from '../../lib/types'
@@ -10,6 +11,7 @@ const fieldClass = 'w-full rounded-lg border border-line bg-card px-3 py-2 text-
 // Planning-only guard settings: names to withhold from external models, and a test box that
 // shows what an external model would receive (the host runs the real redaction).
 export function ConfidentialTermsSection({ draft, patch }: { draft: TSettings; patch: (p: Partial<TSettings>) => void }) {
+  const tx = useAuthoredText()
   const saved = (draft.confidentialTerms ?? []).join('\n')
   const [termsText, setTermsText] = useState(saved)
   const [sample, setSample] = useState('')
@@ -32,26 +34,26 @@ export function ConfidentialTermsSection({ draft, patch }: { draft: TSettings; p
 
   return (
     <Section
-      title="Confidential terms"
-      desc="Cloud providers and the Codex, Claude and other CLI engines only plan. Before anything is sent, tool results, files and images are withheld, and secrets, personal details (emails, phone numbers, IP addresses, card numbers, IBANs, SSNs, NI numbers, your username, hostname and home folder), the workspace path and these terms become placeholders. Replies are filled back in on this Mac."
+      title={tx("Confidential terms")}
+      desc={tx("Cloud providers and the Codex, Claude and other CLI engines only plan. Before anything is sent, tool results, files and images are withheld, and secrets, personal details (emails, phone numbers, IP addresses, card numbers, IBANs, SSNs, NI numbers, your username, hostname and home folder), the workspace path and these terms become placeholders. Replies are filled back in on this Mac.")}
     >
       <div className="space-y-3 rounded-xl border border-line bg-card p-3.5 shadow-card">
-        <Field label="Terms to withhold" hint={`${terms.length} term${terms.length === 1 ? '' : 's'} · one per line, any case`}>
+        <Field label={tx("Terms to withhold")} hint={tx("Terms: {count} · one per line, any case", { count: terms.length })}>
           <textarea
             value={termsText}
             onChange={(e) => setTermsText(e.target.value)}
             onBlur={commit}
             rows={4}
-            placeholder={'Company name\nClient name\nProject codename'}
+            placeholder={tx("Company name\nClient name\nProject codename")}
             className={fieldClass}
           />
         </Field>
-        <Field label="Test" hint="Paste text to see what an external model would receive">
-          <textarea value={sample} onChange={(e) => setSample(e.target.value)} rows={3} placeholder="e.g. Email the Acme launch plan to someone@example.com" className={fieldClass} />
+        <Field label={tx("Test")} hint={tx("Paste text to see what an external model would receive")}>
+          <textarea value={sample} onChange={(e) => setSample(e.target.value)} rows={3} placeholder={tx("e.g. Email the Acme launch plan to someone@example.com")} className={fieldClass} />
         </Field>
         {preview && (
           <div className="rounded-lg border border-line bg-card-2 px-3 py-2.5">
-            <div className="mb-1 text-[13px] text-ink-3">{preview.total ? `${preview.total} item${preview.total === 1 ? '' : 's'} withheld: ${preview.withheld}` : 'Nothing would be withheld.'}</div>
+            <div className="mb-1 text-[13px] text-ink-3">{preview.total ? tx("Items withheld: {count} · {details}", { count: preview.total, details: preview.withheld }) : tx("Nothing would be withheld.")}</div>
             <pre className="whitespace-pre-wrap break-words font-mono text-[13px] text-ink-2">{preview.text}</pre>
           </div>
         )}

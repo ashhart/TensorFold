@@ -1,3 +1,4 @@
+import { connectorSourceBinding } from './connector-source-binding'
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -279,6 +280,8 @@ export async function syncEmailConnector(settings: EmailConnectorSettings, exist
     const threadKey = `email:${message.id}`
     if (!cursor && known.has(threadKey)) continue // full-resync fallback de-dupes by threadKey
     const event = emailEventFromMessage(message, syncedAt, resolveEmailReply(message, byMessageId))
+    const selectedSource = sources.find(source => source.id === message.sourceId)
+    if (selectedSource) event.sources = event.sources?.map(ref => ({ ...ref, sourceRevision: connectorSourceBinding(selectedSource) }))
     const attachments = (message as EmailReadResult).attachments
     if (attachments?.length) attachmentsByEvent[event.id] = attachments
     events.push(event)
@@ -381,6 +384,7 @@ export function emailDraftEvent(input: EmailDraftInput, now = Date.now(), source
     payloadKeys: ['to', 'subject', 'body', ...(input.threadKey ? ['thread_key'] : []), ...(input.inReplyTo ? ['in_reply_to'] : [])],
     payload: {
       mode: input.mode ?? 'draft',
+      ...(input.accountId ? { accountId: input.accountId } : {}),
       to: input.to,
       subject: input.subject,
       body: input.body,

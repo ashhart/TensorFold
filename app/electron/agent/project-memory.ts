@@ -50,16 +50,57 @@ function sourceLabel(ref: string | null): string {
 }
 
 export function scopeProjectMemoryEntries(entries: ProjectMemoryEntry[], projectId: string): ProjectMemoryEntry[] {
-  return entries.filter((entry) => entry.projectId === projectId).map(normalizeProjectMemoryEntry)
+  return entries.filter((entry) => entry.projectId === projectId && isActiveProjectMemoryEntry(entry)).map(normalizeProjectMemoryEntry)
 }
 
 export function forgetProjectMemoryEntry(entries: ProjectMemoryEntry[], id: string): ProjectMemoryEntry[] {
   return entries.filter((entry) => entry.id !== id)
 }
 
+export function isActiveProjectMemoryEntry(entry: ProjectMemoryEntry): boolean {
+  return entry.trashedAt === undefined || entry.trashedAt === null
+}
+
+export function scopeProjectMemoryTrash(entries: ProjectMemoryEntry[], projectId: string): ProjectMemoryEntry[] {
+  return entries.filter((entry) => entry.projectId === projectId && !isActiveProjectMemoryEntry(entry)).map(normalizeProjectMemoryEntry)
+}
+
+export function projectMemoryStateRevision(entry: ProjectMemoryEntry): number {
+  const revision = entry.stateRevision === undefined ? 1 : entry.stateRevision
+  if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Invalid memory state revision')
+  return revision
+}
+
+export function advanceProjectMemoryStateRevision(entry: ProjectMemoryEntry): number {
+  const revision = projectMemoryStateRevision(entry)
+  if (revision === Number.MAX_SAFE_INTEGER) throw new Error('Memory state revision limit reached')
+  return revision + 1
+}
+
+export interface ProjectMemoryLifecycleInput {
+  projectId: string
+  entryId: string
+  expectedRevision: number
+}
+
+export function changeProjectMemoryTrash(entries: ProjectMemoryEntry[], input: ProjectMemoryLifecycleInput, trash: boolean, now = Date.now()): { entries: ProjectMemoryEntry[]; entry: ProjectMemoryEntry } {
+  if (!input || typeof input.projectId !== 'string' || !input.projectId.trim() || typeof input.entryId !== 'string' || !input.entryId.trim()) throw new Error('Memory action requires projectId and entryId')
+  const current = entries.find((entry) => entry.id === input.entryId && entry.projectId === input.projectId)
+  if (!current) throw new Error('Memory entry not found in this project')
+  normalizeProjectMemoryEntry(current)
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision !== projectMemoryStateRevision(current)) throw new Error('Memory changed; refresh before retrying')
+  if (trash !== isActiveProjectMemoryEntry(current)) throw new Error(trash ? 'Memory is already in Trash' : 'Memory is not in Trash')
+  if (!Number.isFinite(now) || now <= 0) throw new Error('Invalid memory Trash timestamp')
+  const entry = { ...current, trashedAt: trash ? now : null, stateRevision: advanceProjectMemoryStateRevision(current) }
+  return { entries: entries.map((item) => item === current ? entry : item), entry }
+}
+
 export function normalizeProjectMemoryEntry(entry: ProjectMemoryEntry): ProjectMemoryEntry {
+  if (entry.trashedAt !== undefined && entry.trashedAt !== null && (typeof entry.trashedAt !== 'number' || !Number.isFinite(entry.trashedAt) || entry.trashedAt <= 0)) throw new Error('Invalid memory Trash state')
   return {
     ...entry,
+    trashedAt: entry.trashedAt ?? null,
+    stateRevision: projectMemoryStateRevision(entry),
     kind: normalizeMemoryKind(entry.kind),
     privacyScope: normalizeMemoryPrivacyScope(entry.privacyScope),
     sourceIds: normalizeSourceIds(entry.sourceIds, entry.sourceRef),
@@ -113,6 +154,7 @@ export function createProjectMemoryCandidate(input: ProjectMemoryCandidateInput,
 export function projectMemoryCandidateDiff(entries: ProjectMemoryEntry[], candidate: ProjectMemoryCandidate): ProjectMemoryCandidateDiff {
   const target = candidate.targetEntryId ? entries.find((entry) => entry.id === candidate.targetEntryId) ?? null : null
   if (candidate.targetEntryId && !target) throw new Error('memory candidate target entry not found')
+  if (target && !isActiveProjectMemoryEntry(target)) throw new Error('Restore memory from Trash before changing it')
   if (target && target.projectId !== candidate.projectId) throw new Error('memory candidate target belongs to a different project')
   const nextSourceIds = normalizeSourceIds(candidate.sourceIds, candidate.sourceRef)
   const nextSourceThreadId = candidate.sourceThreadId ?? target?.sourceThreadId ?? null
@@ -156,10 +198,13 @@ export function approveProjectMemoryCandidate(
   if (existingIndex >= 0 && entries[existingIndex].projectId !== candidate.projectId) {
     throw new Error('memory candidate target belongs to a different project')
   }
+  if (existingIndex >= 0 && !isActiveProjectMemoryEntry(entries[existingIndex])) throw new Error('Restore memory from Trash before changing it')
+  if (existingIndex < 0 && entries.some((entry) => entry.id === entryId)) throw new Error('Memory identity already exists')
   const sourceIds = normalizeSourceIds(candidate.sourceIds, candidate.sourceRef)
   const entry: ProjectMemoryEntry = existingIndex >= 0
     ? {
       ...entries[existingIndex],
+      stateRevision: advanceProjectMemoryStateRevision(entries[existingIndex]),
       kind: candidate.kind,
       text: candidate.text,
       sourceType: candidate.sourceType,
@@ -178,6 +223,8 @@ export function approveProjectMemoryCandidate(
     }
     : {
       id: entryId,
+      trashedAt: null,
+      stateRevision: 1,
       projectId: candidate.projectId,
       kind: candidate.kind,
       text: candidate.text,
@@ -248,6 +295,7 @@ export function rollbackProjectMemoryEntry(
   const index = entries.findIndex((entry) => entry.id === entryId)
   if (index < 0) throw new Error('memory entry not found')
   const current = entries[index]
+  if (!isActiveProjectMemoryEntry(current)) throw new Error('Restore memory from Trash before rolling it back')
 
   // The newest approved candidate pointing at this entry is the change being reverted.
   const linked = candidates
@@ -270,6 +318,7 @@ export function rollbackProjectMemoryEntry(
   }
   const restored: ProjectMemoryEntry = {
     ...current,
+    stateRevision: advanceProjectMemoryStateRevision(current),
     text: previous.text,
     kind: previous.kind,
     sourceType: previous.sourceType ?? current.sourceType,
@@ -341,6 +390,7 @@ function numberValue(value: number | null | undefined): string | null {
 }
 
 export function formatProjectMemoryEntryForPrompt(entry: ProjectMemoryEntry): string {
+  if (!isActiveProjectMemoryEntry(entry)) return ''
   const normalized = normalizeProjectMemoryEntry(entry)
   const text = normalized.text.replace(/\s+/g, ' ').trim()
   const citations = normalized.sourceIds?.length
@@ -355,6 +405,7 @@ export function detectProjectMemoryWarnings(
 ): ProjectMemoryWarning[] {
   const warnings: ProjectMemoryWarning[] = []
   for (const entry of entries) {
+    if (!isActiveProjectMemoryEntry(entry)) continue
     const sourceRef = entry.sourceRef?.trim() || null
     if (sourceBacked(entry) && !sourceRef) {
       warnings.push({

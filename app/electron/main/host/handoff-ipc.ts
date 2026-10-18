@@ -1,4 +1,5 @@
 import { captureThreadMemoryPolicy, assertThreadMemoryTransport } from '../../../shared/thread-memory-policy'
+import { assertGoogleContextTransport } from '../../../shared/google-workspace-privacy'
 import { randomUUID } from 'node:crypto'
 import { classifyProvider } from '../../../shared/provider-trust'
 import { latestPlanText, runPlanPrompt } from '../../agent/planning-guard'
@@ -50,6 +51,7 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
     if (toProvider.id === source.providerId) throw new Error('Handoff requires a different target engine.')
     const accountId = selectedProviderAccountId(toProvider as Provider, store.settings.activeProviderAccountId ?? undefined)
     const targetProvider = runtimeProvider(toProvider as Provider, accountId)
+    assertGoogleContextTransport(source, targetProvider)
     if (source.phoneLocalOnly && (source.orchestratorHostId || classifyProvider(targetProvider) !== 'trusted-local')) throw new Error('Phone conversations can only hand off to an API model running on this Mac; external, remote and CLI engines cannot receive their copied context.')
     assertThreadMemoryTransport({ ...source, engine: 'native' }, toProvider)
     const runPlan = input?.intent === 'run-plan'
@@ -57,6 +59,7 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
     const plan = runPlan ? latestPlanText(source.apiMessages) : ''
     if (runPlan && !plan) throw new Error('There is no plan in this thread to run yet.')
     const sourceWorkspace = source.workspace ?? sourceProject?.workspace ?? null
+    assertGoogleContextTransport({ ...source, workspace: sourceWorkspace }, targetProvider)
     if (source.phoneLocalOnly && sourceWorkspace?.kind === 'ssh') throw new Error('Phone conversations cannot hand off to an SSH workspace.')
     // Delegated engines run as local processes. Reject an SSH/local-lookalike handoff before a
     // new thread is persisted, even when autoStart is false, so the saved configuration is honest.
@@ -88,9 +91,11 @@ export function registerThreadHandoffIpc(deps: HandoffIpcDeps) {
       id: randomUUID(),
       title: `${source.title} → ${toProvider.name || toProvider.id}`,
       kind: source.kind,
+      documentSourceIds: source.documentSourceIds ? [...source.documentSourceIds] : [],
       memoryPolicy: { ...captureThreadMemoryPolicy(source) },
       memoryPolicyRevision: 0,
       ...(source.phoneLocalOnly ? { phoneLocalOnly: true } : {}),
+      ...(source.googleLocalOnly ? { googleLocalOnly: true } : {}),
       projectId: source.projectId ?? null,
       cwd: source.cwd,
       workspace: sourceWorkspace,

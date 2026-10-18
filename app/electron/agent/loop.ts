@@ -1,3 +1,4 @@
+import { withResponseLanguage } from './response-language'
 import { assertThreadMemoryTransport, captureThreadMemoryPolicy, effectiveThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { createHash, randomUUID } from 'node:crypto'
 import os from 'node:os'
@@ -5,6 +6,7 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { streamChat } from './openai'
 import { isExternalProvider } from '../../shared/provider-trust'
+import { assertGoogleContextTransport } from '../../shared/google-workspace-privacy'
 import { botProviderSupported } from '../../shared/bot-policy'
 import { assertThreadChildSupported } from '../../shared/thread-child-policy'
 import { botToolBlockReason, botUsesGuardedExecution, isRestrictedBot, normalizeBotToolScope } from '../../shared/bot-tool-policy'
@@ -21,10 +23,14 @@ import { delegateTasks, type DelegateTaskInput } from './delegate-task'
 import { parseOracleArgs, buildOracleUserMessage, buildOracleSystemPrompt, type OracleQuery } from './oracle'
 import { hostPluginRuntime, PluginRuntime } from './plugin-runtime'
 import { executeToolExecutionBatches } from './tool-execution-plan'
+import { RunRecoveryTracker } from './run-recovery/tracker'
+import { budgetPauseReason, failedRequestDelivery } from './run-recovery/policy'
+import { runRetryVerdict, type RunRecoverySnapshot, type RunRetryEvidence } from '../../shared/run-recovery'
 import { midRunTodoNudge, normalizePlanSteps, planProgress, renderPlanTree, stopTodoReminder, TODO_MUTATING_TOOLS } from './todo-tracker'
 import { deterministicCompactionSummary, estimateTokens, kfmt, renderTranscript, planCompaction, shouldSkipCompactionForThrash, nextIneffectiveStreak } from './compaction'
 import { getModelContextWindow, recommendedKeepRecent } from './model-context-windows'
-import { boundToolOutput, buildContextFragment, contextEpoch, estimateTextTokens, fragmentStat, toolOutputSpillPath, TOOL_OUTPUT_MAX_CHARS, type ContextFragmentStat } from './context-governance'
+import { buildContextFragment, contextEpoch, estimateTextTokens, fragmentStat, toolOutputSpillPath, TOOL_OUTPUT_MAX_CHARS, type ContextFragmentStat } from './context-governance'
+import { compressToolOutput, rememberPreparedToolOutput } from './tool-output-compression'
 import { prePassCompact } from './compaction-prepass.ts'
 import { contentText } from './content.ts'
 import { harvestMemoryCandidates, authoredMemoryMessages } from './memory-harvest'
@@ -91,6 +97,7 @@ export function cancelledToolMutationPatch(result: Pick<ToolResult, 'changedPath
 export interface RunDeps {
   /** Captured host admission; model/tool/renderer input cannot replace it. */
   assertRequestAllowed?: () => void
+  onRecovery?: (snapshot: RunRecoverySnapshot) => void
   thread: Thread
   provider: Provider
   model: string
@@ -128,6 +135,7 @@ export interface RunDeps {
   // source channelPrompt). Injected as a SEPARATE ephemeral system message — never written
   // into thread.apiMessages nor folded into the persisted system-prompt snapshot.
   channelPrompt?: string
+  responseLocale?: string
   // Durable facts salvaged from the folded middle at auto-compaction — the host files
   // them as pending project-memory candidates the user can approve.
   onMemoryHarvest?: (candidates: string[]) => void
@@ -513,9 +521,9 @@ export function isDelegatedTransport(transport?: string | null): boolean {
 export function streamRetryDecision(
   error: unknown,
   attempt: number,
-  opts: { compactRetries: number; canCompact: boolean; delegated?: boolean; maxRetries?: number; maxCompactRetries?: number; random?: () => number },
+  opts: { compactRetries: number; canCompact: boolean; delegated?: boolean; maxRetries?: number; maxCompactRetries?: number; random?: () => number; acceptance?: RunRetryEvidence },
 ): StreamRetryAction {
-  if (opts.delegated) return { kind: 'fail' }
+  if (opts.delegated || opts.acceptance && !runRetryVerdict(opts.acceptance).allowed) return { kind: 'fail' }
   const maxRetries = opts.maxRetries ?? STREAM_MAX_RETRIES
   const maxCompact = opts.maxCompactRetries ?? STREAM_MAX_COMPACT_RETRIES
   const c = classifyApiError(error)
@@ -733,9 +741,10 @@ async function runDelegateChild(
       // default — delegate_task children can run a different, wider read-only subset.
       const matchedSchema = tools.find((t: any) => t.function?.name === call.function.name)
       if (matchedSchema?.function?.parameters) args = coerceToolArgs(args, matchedSchema.function.parameters as Record<string, unknown>)
-      let out = ''
-      try { const r = await executeTool(call.function.name, args, auxiliaryToolContext(cwd, toolContext, signal)); out = r.output } catch (e: any) { out = `error: ${e?.message ?? e}` }
-      messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, out.slice(0, 8000)) })
+      let result: Pick<ToolResult, 'output' | 'ok' | 'meta'>
+      try { result = await executeTool(call.function.name, args, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
+      const view = compressToolOutput({ tool: call.function.name, ...result, args, maxChars: 8_000, maxBytes: 24_000 })
+      messages.push(rememberPreparedToolOutput({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, view.content) }))
     }
   }
   const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.content)
@@ -777,9 +786,10 @@ async function runOracle(provider: Provider, model: string, cwd: string, query: 
       try { a = JSON.parse(call.function.arguments || '{}') } catch { a = {} }
       const matched = EXPLORE_TOOLS.find((t: any) => t.function?.name === call.function.name)
       if (matched?.function?.parameters) a = coerceToolArgs(a, matched.function.parameters as Record<string, unknown>)
-      let out = ''
-      try { const r = await executeTool(call.function.name, a, auxiliaryToolContext(cwd, toolContext, signal)); out = r.output } catch (e: any) { out = `error: ${e?.message ?? e}` }
-      messages.push({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, out.slice(0, 8000)) })
+      let result: Pick<ToolResult, 'output' | 'ok' | 'meta'>
+      try { result = await executeTool(call.function.name, a, auxiliaryToolContext(cwd, toolContext, signal)) } catch (e: any) { result = { ok: false, output: `error: ${e?.message ?? e}` } }
+      const view = compressToolOutput({ tool: call.function.name, ...result, args: a, maxChars: 8_000, maxBytes: 24_000 })
+      messages.push(rememberPreparedToolOutput({ role: 'tool', tool_call_id: call.id, name: call.function.name, content: wrapUntrustedToolOutput(call.function.name, view.content) }))
     }
   }
   const last = [...messages].reverse().find((m) => m.role === 'assistant' && m.content)
@@ -919,10 +929,11 @@ async function verifyCompactionSummary(
 // system prompt and the most recent messages verbatim. Never splits an
 // assistant(tool_calls)/tool group. Returns folded-message count, or null.
 export async function compactThread(thread: Thread, provider: Provider, model: string, signal: AbortSignal, trigger: 'auto' | 'manual' = 'auto', onHarvest?: (candidates: string[]) => void, memoryPolicy?: import('./types').ThreadMemoryPolicy, assertRequestAllowed?: () => void): Promise<CompactionLedgerEntry | null> {
+  assertGoogleContextTransport(thread, provider)
   assertRequestAllowed?.()
   if (thread.bot?.toolScopeProblem !== undefined) throw new Error('Repair the captured bot tool selection before compacting this chat.')
   normalizeBotToolScope(thread.bot?.toolScope)
-  const localHelpersOnly = botUsesGuardedExecution(thread.bot) || thread.phoneLocalOnly === true
+  const localHelpersOnly = botUsesGuardedExecution(thread.bot) || thread.phoneLocalOnly === true || thread.googleLocalOnly === true
   const msgs = thread.apiMessages
   const tokensBefore = estimateTokens(msgs)
   const keepRecent = keepRecentForModel(model)
@@ -945,7 +956,7 @@ export async function compactThread(thread: Thread, provider: Provider, model: s
   // host turns these into pending project-memory candidates the user can approve.
   // Runs on the pre-pass output: dedup/one-lining only ever shortens tool results, so
   // the durable USER statements harvestMemoryCandidates looks for are unaffected.
-  if (onHarvest && !thread.phoneLocalOnly && effectiveThreadMemoryPolicy(thread, memoryPolicy).contribute) { const harvested = harvestMemoryCandidates(authoredMemoryMessages(thread, prePassed)); if (harvested.length) onHarvest(harvested) }
+  if (onHarvest && !thread.phoneLocalOnly && !thread.googleLocalOnly && effectiveThreadMemoryPolicy(thread, memoryPolicy).contribute) { const harvested = harvestMemoryCandidates(authoredMemoryMessages(thread, prePassed)); if (harvested.length) onHarvest(harvested) }
   const source = renderTranscript(prePassed)
   const fallback = deterministicCompactionSummary(prePassed)
   let candidate = ''
@@ -993,7 +1004,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
   const { thread, provider, model, emit, signal, persist } = deps
   const hostRequestGuard = deps.assertRequestAllowed
   const recallRequestGuard = deps.toolContext?.assertRecallSourcesAllowed
-  const capturedChildBoundary = Object.freeze({ bot: thread.bot, phoneLocalOnly: thread.phoneLocalOnly })
+  const capturedChildBoundary = Object.freeze({ bot: thread.bot, phoneLocalOnly: thread.phoneLocalOnly, googleLocalOnly: thread.googleLocalOnly })
   if (thread.bot !== undefined && (!thread.bot || typeof thread.bot !== 'object' || Array.isArray(thread.bot))) throw new Error('This chat has an invalid captured bot configuration; start a new bot chat.')
   const memoryPolicy = captureThreadMemoryPolicy(thread, deps.memoryPolicy)
   assertThreadMemoryTransport(thread, provider, memoryPolicy)
@@ -1011,6 +1022,8 @@ export async function runAgent(deps: RunDeps): Promise<void> {
     if (thread.bot.executionTarget !== 'vm' && thread.bot.executionTarget !== 'workspace') throw new Error('Invalid bot execution target.')
   }
   const assertPhonePrivacy = () => {
+    assertGoogleContextTransport(thread, provider)
+    if (thread.googleLocalOnly && (!deps.toolContext?.googlePrivacyGuard || deps.toolContext.googlePrivacyGuard())) throw new Error(deps.toolContext?.googlePrivacyGuard?.() || 'The local Google account privacy guard is unavailable.')
     if (restrictedBot) {
       if (!deps.toolContext?.botToolScopeGuard) throw new Error('The restricted bot research guard is unavailable; hidden research cannot bypass its tool scope.')
       deps.toolContext.botToolScopeGuard()
@@ -1030,8 +1043,8 @@ export async function runAgent(deps: RunDeps): Promise<void> {
   const cwd = thread.cwd
   const configuredPluginRuntime = deps.pluginRuntime ?? hostPluginRuntime
   const privatePluginRuntime = new PluginRuntime()
-  const privateCallbacksAtStart = !!thread.incognito || !!thread.phoneLocalOnly || restrictedBot || thread.bot?.executionTarget === 'vm'
-  const callbacksAllowed = () => !privateCallbacksAtStart && !thread.incognito && !thread.phoneLocalOnly && !isRestrictedBot(thread.bot) && thread.bot?.executionTarget !== 'vm'
+  const privateCallbacksAtStart = !!thread.incognito || !!thread.phoneLocalOnly || !!thread.googleLocalOnly || restrictedBot || thread.bot?.executionTarget === 'vm'
+  const callbacksAllowed = () => !privateCallbacksAtStart && !thread.incognito && !thread.phoneLocalOnly && !thread.googleLocalOnly && !isRestrictedBot(thread.bot) && thread.bot?.executionTarget !== 'vm'
   // Resolve at each call: a phone grant/observation may make an ordinary run private
   // after it started. Previously loaded plugin handlers never receive the new output.
   const pluginRuntime = new Proxy(configuredPluginRuntime, {
@@ -1056,6 +1069,8 @@ export async function runAgent(deps: RunDeps): Promise<void> {
     }
   }
 
+  const recovery = new RunRecoveryTracker(runId, deps.onRecovery)
+  const onStopRequested = () => recovery.stopRequested()
   const isChat = thread.kind === 'chat'
   // External providers only plan (planning-guard.ts): no goal or open-todo continuations.
   const planningOnly = isExternalProvider(provider)
@@ -1154,7 +1169,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
     packagedPlugins: deps.toolContext?.packagedPlugins,
     selectedCapabilityIds: [...selectedCapabilityIdsFromMessages(thread.apiMessages), ...(deps.toolContext?.phoneControlAvailable && !planningOnly ? ['phone'] : [])],
     disabledCapabilityIds: deps.toolContext?.disabledCapabilityIds,
-    disabledToolNames: [...deps.toolContext?.disabledToolNames ?? [], ...(thread.phoneLocalOnly ? ['web_search', 'web_fetch'] : []), ...(restrictedBot ? TOOL_SCHEMAS.map((schema) => schema.function.name).filter((name) => !deps.toolContext?.allowedToolNames?.includes(name)) : [])],
+    disabledToolNames: [...deps.toolContext?.disabledToolNames ?? [], ...(thread.phoneLocalOnly || thread.googleLocalOnly ? ['web_search', 'web_fetch'] : []), ...(restrictedBot ? TOOL_SCHEMAS.map((schema) => schema.function.name).filter((name) => !deps.toolContext?.allowedToolNames?.includes(name)) : [])],
   })
   const builtinToolSchemas = () => isChat && !restrictedBot && thread.bot?.executionTarget !== 'vm' ? buildChatToolSchemas({ capabilityRegistry }) : buildToolSchemas(deps.toolContext?.mcpTools, { capabilityRegistry })
   const modelToolSchemas = () => {
@@ -1193,7 +1208,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
     const base = thread.systemPromptSnapshot
       ? messagesWithSystemPromptSnapshot(thread.apiMessages, thread.systemPromptSnapshot)
       : thread.apiMessages
-    return withEphemeralChannelPrompt(base, channelFragment?.text ?? deps.channelPrompt)
+    return withResponseLanguage(withEphemeralChannelPrompt(base, channelFragment?.text ?? deps.channelPrompt), deps.responseLocale)
   }
   // Fragment ledger for this run: replaces the previous run's assembly stats; tool-output
   // spill stats append to it during the run (capped — it is an audit trail, not a payload).
@@ -1205,6 +1220,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
   // approvalMode 'readonly' puts the CLI transports (codex/claude) in plan / read-only sandbox.
   let budgetStop: 'time budget' | 'step budget' | 'repeated action limit' | null = null
   let completedNaturally = false
+  let uncertainActionStop = false
   // Measured facts for the line under the run's final answer (turn-stats.ts); never estimated.
   const turnStats = createTurnStats()
   let lastAssistantId: string | null = null
@@ -1246,9 +1262,13 @@ export async function runAgent(deps: RunDeps): Promise<void> {
       let summaryLoopBroken = false
       let lastLoopCheckLen = 0
       const summaryAbort = new AbortController()
+      const summaryRecoveryId = `summary:${attempt}`
+      recovery.begin(summaryRecoveryId)
+      recovery.requestStarted()
       try {
-        for await (const chunk of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: messagesForModel(), tools: [], temperature: deps.temperature, reasoningEffort: deps.reasoningEffort, approvalMode: 'readonly', cwd, signal: AbortSignal.any([summarySignal, summaryAbort.signal]), assertRequestAllowed })) {
+        for await (const chunk of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, requireProviderFinish: true, messages: messagesForModel(), tools: [], temperature: deps.temperature, reasoningEffort: deps.reasoningEffort, approvalMode: 'readonly', cwd, signal: AbortSignal.any([summarySignal, summaryAbort.signal]), assertRequestAllowed })) {
           if (signal.aborted) break
+          if (chunk.type === 'content' || chunk.type === 'reasoning') recovery.requestOutput()
           if (chunk.type === 'usage') recordModelCall(turnStats, chunk)
           if (chunk.type === 'content') {
             if (!item) { item = { id: randomUUID(), kind: 'assistant', text: '', createdAt: Date.now() }; lastAssistantId = item.id; send({ type: 'item_add', item }); send({ type: 'status', status: 'streaming' }) }
@@ -1266,6 +1286,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
             }
           }
         }
+        if (!signal.aborted && !summaryLoopBroken) recovery.requestComplete()
         if (summaryLoopBroken) {
           text = text.slice(0, 1200)
           send({ type: 'item_add', item: { id: randomUUID(), kind: 'notice', text: 'The model repeated itself in its final summary, so the response was stopped. Try another model or rephrase the request.', createdAt: Date.now() } })
@@ -1283,19 +1304,29 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           persist()
           return
         }
-        if (classifyApiError(e).retryable && attempt <= STREAM_MAX_RETRIES - 1) {
+        const delivery = failedRequestDelivery(e, !!(text || summaryReasoning))
+        recovery.requestFailed(delivery)
+        if (classifyApiError(e).retryable && runRetryVerdict({ delivery, visibleOutput: !!(text || summaryReasoning), delegated: isDelegatedTransport(provider.transport) }).allowed && attempt <= STREAM_MAX_RETRIES - 1) {
           await abortableDelay(jitteredBackoff(attempt, STREAM_RETRY_BASE_MS, STREAM_RETRY_MAX_MS), summarySignal)
           continue
         }
-        return /* best-effort final summary; give up quietly on a non-transient or exhausted error */
-      }
+        if (text) {
+          thread.apiMessages.push({ role: 'assistant', content: text })
+          if (item) send({ type: 'item_update', id: item.id, patch: { text, meta: 'partial response preserved; not replayed' } })
+          persist()
+        }
+        return /* bounded final summary; acceptance-unknown and partial attempts are not replayed */
+      } finally { recovery.end(summaryRecoveryId) }
     }
   }
 
   let runOk = false
-  pluginRuntime.emitSessionStart(thread.id)
-  send({ type: 'lifecycle', phase: 'run_start', ts: Date.now() })
+  signal.addEventListener('abort', onStopRequested, { once: true })
+  recovery.start()
+  if (signal.aborted) recovery.stopRequested()
   try {
+    pluginRuntime.emitSessionStart(thread.id)
+    send({ type: 'lifecycle', phase: 'run_start', ts: Date.now() })
     for (let step = 0; step < maxSteps; step++) {
       if (signal.aborted) break
       assertPhonePrivacy()
@@ -1433,17 +1464,26 @@ export async function runAgent(deps: RunDeps): Promise<void> {
             })
           : undefined
 
+        const recoveryOperationId = `model:${step}:${attempt}`
+        let recoveryOperationStarted = false
+        const apiStartedAt = Date.now()
+        try {
+          const preparedMessages = messagesForModel()
+          const preparedTools = modelToolSchemas()
+          recovery.begin(recoveryOperationId)
+          recoveryOperationStarted = true
+          recovery.requestStarted()
         send({ type: 'lifecycle', phase: 'model_start', ts: Date.now(), step })
         callbacksAllowed() && deps.observe?.('api.request', { provider: provider.id, model, attempt })
-        const apiStartedAt = Date.now()
         const stream = streamChat({
           assertRequestAllowed,
           provider,
           baseUrl: provider.baseUrl,
           apiKey: provider.apiKey,
           model,
-          messages: messagesForModel(),
-          tools: modelToolSchemas(),
+          requireProviderFinish: true,
+          messages: preparedMessages,
+          tools: preparedTools,
           temperature: deps.temperature,
           reasoningEffort: deps.reasoningEffort,
           serviceTier: deps.serviceTier,
@@ -1461,9 +1501,9 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           signal: requestSignal,
         })
 
-        try {
           for await (const chunk of stream) {
             if (signal.aborted) break
+            if (chunk.type === 'content' || chunk.type === 'reasoning' || chunk.type === 'tool_calls') recovery.requestOutput()
             if (streamDeadline?.aborted) { budgetStop = 'time budget'; break }
             if (chunk.type === 'codex_resume_cursor') {
               // Persist so the NEXT turn (or a future app run, after the pooled session has
@@ -1537,6 +1577,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
               }
             }
           }
+          if (!signal.aborted && !loopBroken && !streamDeadline?.aborted) recovery.requestComplete()
           // Stream consumed without throwing → this attempt succeeded; stop retrying.
           // (The finally below retires the steer watcher and harvests its cues.)
           // ok: a user abort breaks the for-await without throwing, so gate on the
@@ -1577,7 +1618,10 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           // A real user abort propagates unchanged.
           if (signal.aborted) throw e
 
-          const action = streamRetryDecision(e, attempt, { compactRetries, canCompact: autoCompact && contextLimit > 0, delegated: isDelegatedTransport(provider.transport) })
+          const delivery = recoveryOperationStarted ? failedRequestDelivery(e, !!(content || reasoning || toolCalls.length)) : 'not_sent'
+          recovery.requestFailed(delivery)
+          if (!recoveryOperationStarted) throw e
+          const action = streamRetryDecision(e, attempt, { compactRetries, canCompact: autoCompact && contextLimit > 0, delegated: isDelegatedTransport(provider.transport), acceptance: { delivery, visibleOutput: !!(content || reasoning || toolCalls.length) } })
           // Context overflow: compact the transcript, then retry the same turn. Capped
           // (inside streamRetryDecision) so an irreducibly-large prompt fails instead of
           // compacting forever.
@@ -1623,6 +1667,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           steerPumpAbort.abort()
           throw e
         } finally {
+          if (recoveryOperationStarted) recovery.end(recoveryOperationId)
           // Retire this attempt's steer watcher on EVERY exit path (success, retry,
           // compact, fail). A live watcher keeps polling the thread's cue seam: it can
           // eat a cue meant for the next attempt (parked in its unclaimed set, already
@@ -1672,6 +1717,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
         if (reasoningItem) send({ type: 'item_update', id: reasoningItem.id, patch: { text: reasoning.slice(0, 1200), meta: 'stopped — repeating itself' } })
         thread.apiMessages.push({ role: 'assistant', content: head || '[stopped: the response began repeating itself]' })
         if (textLoopBreaks >= MAX_TEXT_LOOP_BREAKS) {
+          recovery.pause('repeated_output', 'The model repeatedly emitted the same text; this run is paused and its existing budgets have not been reset.')
           send({ type: 'item_add', item: { id: randomUUID(), kind: 'notice', text: 'The model kept repeating itself, so the run was stopped. Try a different (or larger) model, or rephrase the request.', createdAt: Date.now() } })
           completedNaturally = true; persist(); break
         }
@@ -1784,11 +1830,15 @@ export async function runAgent(deps: RunDeps): Promise<void> {
       const turnSchemas = modelToolSchemas()
       const turnBuiltinToolNames = new Set<string>(builtinToolSchemas().map((schema: any) => schema.function?.name).filter(Boolean))
       const toolResults = new Map<string, ApiMessage>()
-      const recordToolResult = (call: ToolCall, name: string, content: string) => {
-        toolResults.set(call.id, { role: 'tool', tool_call_id: call.id, name, content })
+      const recordToolResult = (call: ToolCall, name: string, content: string, prepared = false) => {
+        const message: ApiMessage = { role: 'tool', tool_call_id: call.id, name, content }
+        toolResults.set(call.id, prepared ? rememberPreparedToolOutput(message) : message)
       }
       const executeRequestedCall = async (call: ToolCall): Promise<void> => {
         if (signal.aborted) return
+        recovery.begin(`tool:${call.id}`)
+        let dispatchedMutation = false
+        let toolConfirmed = false
         send({ type: 'lifecycle', phase: 'tool_start', ts: Date.now(), step, callId: call.id, tool: call.function.name })
         try {
         const matchedSchema = turnSchemas.find((schema: any) => schema.function?.name === call.function.name)
@@ -1862,6 +1912,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           if (repeatedActionStop || priorAttempts >= localRepeatLimit || (failCounts.get(sig) ?? 0) >= THRASH_LIMIT) {
             repeatedActionStop = true
             budgetStop = 'repeated action limit'
+            recovery.pause('repeated_action', 'The repeated-action limit was reached; completed work is preserved and no further tools will run.')
             const output = 'Not run: the model kept requesting the same action after reaching the repeat limit. The run is stopping with a final summary.'
             send({ type: 'item_update', id: item.id, patch: { state: 'error', output } })
             emitGuardWarning('repeated-action-stop', '[guardrail] Stopped the model from repeating the same action again. Wrapping up without more tools.')
@@ -1888,7 +1939,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           // matching the regular tool path's abort guard.
           if (signal.aborted) return
           send({ type: 'item_update', id: item.id, patch: { state: 'ok', title: 'Explore', output: summary } })
-          recordToolResult(call, 'explore', wrapUntrustedToolOutput('explore', summary.slice(0, 8000)))
+          recordToolResult(call, 'explore', wrapUntrustedToolOutput('explore', compressToolOutput({ tool: 'explore', output: summary, maxChars: 8_000, maxBytes: 24_000 }).content), true)
           return
         }
 
@@ -1929,7 +1980,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           // matching the regular tool path's abort guard.
           if (signal.aborted) return
           send({ type: 'item_update', id: item.id, patch: { state: 'ok', title: 'Delegate task', output: summary } })
-          recordToolResult(call, 'delegate_task', wrapUntrustedToolOutput('delegate_task', summary.slice(0, 8000)))
+          recordToolResult(call, 'delegate_task', wrapUntrustedToolOutput('delegate_task', compressToolOutput({ tool: 'delegate_task', output: summary, maxChars: 8_000, maxBytes: 24_000 }).content), true)
           return
         }
 
@@ -1945,7 +1996,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           else { try { summary = await runOracle(provider, model, cwd, q, signal, deps.toolContext, assertRequestAllowed) } catch (e: any) { summary = `Oracle failed: ${e?.message ?? e}` } }
           if (signal.aborted) return
           send({ type: 'item_update', id: item.id, patch: { state: 'ok', title: 'Oracle', output: summary } })
-          recordToolResult(call, 'oracle', wrapUntrustedToolOutput('oracle', summary.slice(0, 8000)))
+          recordToolResult(call, 'oracle', wrapUntrustedToolOutput('oracle', compressToolOutput({ tool: 'oracle', output: summary, maxChars: 8_000, maxBytes: 24_000 }).content), true)
           return
         }
 
@@ -2081,7 +2132,17 @@ export async function runAgent(deps: RunDeps): Promise<void> {
         }
         if (call.function.name === 'ask_user') send({ type: 'status', status: 'awaiting' })
         const toolSignal = call.function.name === 'ask_user' && deadlineAt ? AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, Math.ceil(deadlineAt - Date.now())))]) : signal
+        dispatchedMutation = !isReadOnlyTool(call.function.name, deps.toolContext?.mcpTools, deps.approvalMode)
+        if (dispatchedMutation) recovery.markMutating(`tool:${call.id}`)
         const result = await executeRuntimeTool(pluginRuntime, call.function.name, toolArgs, { cwd, ...deps.toolContext, currentThread: thread, signal: toolSignal, userQuestionRunId: runId, userQuestionItemId: item.id }, turnBuiltinToolNames)
+        toolConfirmed = true
+        const confirmedControlledCommand = call.function.name === 'run_command' && turnBuiltinToolNames.has(call.function.name) && ['read-only', 'git-read', 'test', 'build'].includes(commandClass(String(toolArgs.command ?? ''))) && /^exit -?\d+(?:\s|·|$)/.test(result.meta ?? '')
+        const uncertainFailure = dispatchedMutation && !result.ok && (!turnBuiltinToolNames.has(call.function.name) || !!externalEffectApprovalReason(call.function.name, toolArgs) || call.function.name === 'run_command' && !confirmedControlledCommand && (deps.toolContext?.allowSandboxNetwork === true || deps.toolContext?.backend?.kind === 'ssh'))
+        recovery.toolCompleted(dispatchedMutation, result.ok, uncertainFailure)
+        if (uncertainFailure) {
+          uncertainActionStop = true
+          recovery.pause('tool_uncertain', 'A dispatched action did not confirm its outcome; the run is paused before any replay or further tool action.')
+        }
         // Plugin runtime v1 hook point: observation-only, fire-and-forget in spirit but awaited
         // so a plugin's error can never propagate uncaught (runPostToolCall already isolates
         // each plugin's hook in its own try/catch, per electron/agent/plugin-runtime.ts).
@@ -2093,6 +2154,7 @@ export async function runAgent(deps: RunDeps): Promise<void> {
         if (signal.aborted) {
           const mutationPatch = cancelledToolMutationPatch(result)
           if (mutationPatch) send({ type: 'item_update', id: item.id, patch: mutationPatch })
+          recordToolResult(call, call.function.name, wrapUntrustedToolOutput(call.function.name, `Operation settled after Stop. Confirmed result: ${result.ok ? 'completed' : 'failed or uncertain'}. Do not replay automatically.\n${compressToolOutput({ tool: call.function.name, output: result.output, args: toolArgs, ok: result.ok }).content}`), true)
           return
         }
         if (callbacksAllowed() && deps.auditToolCall) {
@@ -2117,12 +2179,12 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           },
         } : {}
 
-        // Bounded tool output with protected managed spills (VST-016): an over-cap result
-        // is cut head+tail and the FULL text is stored under TensorFold's app-state root, never
-        // in the repository. read_file understands the opaque ref, including for SSH runs.
+        // Model-only excerpts keep diagnostic evidence and exact source spans.
+        // The human timeline, audit callback and loop fingerprints retain raw output.
+        // Managed spills still support paging the full output outside the repository.
         let spillRelPath: string | null = null
         let spillWritten = false
-        if (!thread.incognito && !thread.phoneLocalOnly && result.output.length > TOOL_OUTPUT_MAX_CHARS) {
+        if (!thread.incognito && !thread.phoneLocalOnly && !thread.googleLocalOnly && result.output.length > TOOL_OUTPUT_MAX_CHARS) {
           spillRelPath = toolOutputSpillPath(runId, ++spillSeq, call.function.name)
           try {
             if (deps.toolContext?.writeManagedOutput) {
@@ -2131,13 +2193,13 @@ export async function runAgent(deps: RunDeps): Promise<void> {
             }
           } catch { /* fail-open */ }
         }
-        const bounded = boundToolOutput({ tool: call.function.name, output: result.output, spillRelPath, spillWritten })
-        if (bounded.truncated) {
+        const bounded = compressToolOutput({ tool: call.function.name, output: result.output, args: toolArgs, ok: result.ok, meta: result.meta, spillRef: spillWritten ? spillRelPath : null })
+        if (bounded.compressed) {
           ;(thread.contextFragments ??= []).push({
             source: 'tool_output', priority: 'normal', epoch: contextEpoch(thread),
             chars: bounded.content.length, estTokens: estimateTextTokens(bounded.content),
-            truncated: true, originalChars: bounded.totalChars,
-            ...(bounded.spill ? { note: bounded.spill.relPath } : {}),
+            truncated: true, originalChars: bounded.originalChars,
+            ...(spillWritten && spillRelPath ? { note: spillRelPath } : {}),
           })
           if (thread.contextFragments.length > 50) thread.contextFragments = thread.contextFragments.slice(-50)
         }
@@ -2145,10 +2207,10 @@ export async function runAgent(deps: RunDeps): Promise<void> {
         send({
           type: 'item_update',
           id: item.id,
-          patch: { state: result.ok ? 'ok' : 'error', output: bounded.content, visualization: result.visualization, diff: result.diff, changedPaths: result.changedPaths, meta: result.meta, title: result.title || verb, path: result.path ?? (isVisualization ? undefined : target), command: result.command, appAction: result.appAction, ...(result.artifacts ? { artifacts: result.artifacts } : {}), ...subAgentPatch },
+          patch: { state: result.ok ? 'ok' : 'error', output: result.output, visualization: result.visualization, diff: result.diff, changedPaths: result.changedPaths, meta: result.meta, title: result.title || verb, path: result.path ?? (isVisualization ? undefined : target), command: result.command, appAction: result.appAction, ...(result.artifacts ? { artifacts: result.artifacts } : {}), ...(result.documentEvidence?.length ? { documentEvidence: result.documentEvidence } : {}), ...subAgentPatch },
         })
 
-        // Feed the result back to the model (same bounded view the timeline shows).
+        // Feed the model its bounded view, inside the existing untrusted boundary.
         const truncated = bounded.content
         // Anti-thrash: if this exact call keeps failing, tell the model to stop repeating it.
         let toolContent = truncated
@@ -2206,8 +2268,10 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           emitGuardWarning(`no-progress:${progressKey}`, progressNote)
           if (progressNote) toolContent = `${toolContent}${progressNote}`
         }
-        recordToolResult(call, call.function.name, wrapUntrustedToolOutput(call.function.name, toolContent))
+        recordToolResult(call, call.function.name, wrapUntrustedToolOutput(call.function.name, toolContent), true)
         } finally {
+          if (dispatchedMutation && !toolConfirmed) recovery.toolUncertain()
+          recovery.end(`tool:${call.id}`)
           send({ type: 'lifecycle', phase: 'tool_end', ts: Date.now(), step, callId: call.id, tool: call.function.name })
         }
       }
@@ -2221,20 +2285,23 @@ export async function runAgent(deps: RunDeps): Promise<void> {
           if (result) thread.apiMessages.push(result)
         },
         MAX_PARALLEL_READ_TOOLS,
-        () => signal.aborted,
+        () => signal.aborted || uncertainActionStop,
       )
       // Providers require one tool result per call in the assistant's source order.
       // Parallel completion order affects only live timeline updates. Each batch is
       // committed in source order before the next ordering barrier executes.
       send({ type: 'lifecycle', phase: 'turn_end', ts: Date.now(), step })
       persist()
-      if (repeatedActionStop) break
+      if (repeatedActionStop || uncertainActionStop) break
     }
 
-    // Budget exhausted (time or steps) without finishing → one tool-free grace turn to wrap up.
-    if (!signal.aborted) {
+    // Budget exhausted gets a bounded summary; uncertain action delivery requires user review.
+    if (!signal.aborted && !uncertainActionStop) {
       const reason = budgetStop ?? (!completedNaturally ? 'step budget' : null)
-      if (reason) await graceTurn(reason)
+      if (reason) {
+        recovery.pause(budgetPauseReason(reason), `Run paused after reaching its ${reason}; completed work is preserved and continuing requires an explicit new request.`)
+        await graceTurn(reason)
+      }
     }
 
     attachTurnStats()
@@ -2245,11 +2312,14 @@ export async function runAgent(deps: RunDeps): Promise<void> {
     attachTurnStats()
     if (signal.aborted) { send({ type: 'status', status: 'done' }); send({ type: 'done' }); runOk = true; return }
     const message = e?.message ? String(e.message) : String(e)
+    recovery.fail(message)
     const errItem: TimelineItem = { id: randomUUID(), kind: 'error', text: message, createdAt: Date.now() }
     send({ type: 'item_add', item: errItem })
     send({ type: 'status', status: 'error' })
     send({ type: 'error', message })
   } finally {
+    signal.removeEventListener('abort', onStopRequested)
+    recovery.settle(runOk)
     // A run aborted/thrown mid tool-batch can leave assistant tool_calls without their results;
     // repair before persisting so the thread's next request isn't rejected by the provider.
     thread.apiMessages = reconcileOrphanedToolCalls(thread.apiMessages)

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import type { Dispatch, SetStateAction } from 'react'
 import clsx from 'clsx'
 import { relativeTime } from '../../../lib/format'
@@ -83,6 +84,7 @@ interface MissionControlPanelProps {
 }
 
 export function MissionControlPanel(props: MissionControlPanelProps) {
+  const tx = useAuthoredText()
   const {
     activeMissions,
     missionRows,
@@ -142,14 +144,14 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
 
   return (
     <div id="command-centre-missions">
-      <Panel title="Mission Control" icon="spark" action={activeMissions ? `${activeMissions} active` : 'ready'}>
+      <Panel title={tx("Mission Control")} icon="spark" action={activeMissions ? `${activeMissions} active` : 'ready'}>
         <div className="space-y-3 px-3 py-3">
           <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-card-2 px-2.5 py-2">
             <span className="min-w-0 flex-1 truncate text-[13px] text-ink-3">
-              {missionRows.length ? `${activeMissions} active · ${missionRows.length} total` : 'No missions yet'}
+              {missionRows.length ? tx("{value0} active · {value1} total", { value0: activeMissions, value1: missionRows.length }) : tx("No missions yet")}
             </span>
             <Button variant={missionFormsOpen ? 'default' : 'ghost'} size="xs" icon={missionFormsOpen ? 'chevronDown' : 'plus'} onClick={toggleMissionForms}>
-              {missionFormsOpen ? 'Hide forms' : 'New mission'}
+              {missionFormsOpen ? tx("Hide forms") : tx("New mission")}
             </Button>
           </div>
           {missionFormsOpen && (
@@ -158,20 +160,20 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
             <div className="mb-2 flex items-center gap-2">
               <Icon name="branch" size={13} className="text-accent" />
               <div className="min-w-0 flex-1">
-                <div className="truncate text-[13px] font-semibold text-ink">Local PR review loop</div>
-                <div className="truncate text-[12px] text-ink-4">Build thread, review thread, feedback loop.</div>
+                <div className="truncate text-[13px] font-semibold text-ink">{tx("Local PR review loop")}</div>
+                <div className="truncate text-[12px] text-ink-4">{tx("Build thread, review thread, feedback loop.")}</div>
               </div>
             </div>
             <input
               value={prTitle}
               onChange={(e) => setPrTitle(e.target.value)}
-              placeholder="Local PR title"
+              placeholder={tx("Local PR title")}
               className="h-8 w-full rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
             />
             <textarea
               value={prObjective}
               onChange={(e) => setPrObjective(e.target.value)}
-              placeholder="What should the implementation thread build?"
+              placeholder={tx("What should the implementation thread build?")}
               rows={3}
               className="scroll-thin mt-2 w-full resize-none rounded-lg border border-line bg-card px-2.5 py-2 text-[13px] leading-snug text-ink outline-none placeholder:text-ink-3 focus:border-accent"
             />
@@ -181,13 +183,13 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                 onChange={(e) => setPrProjectId(e.target.value)}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none"
               >
-                <option value="">Default workspace</option>
+                <option value="">{tx("Default workspace")}</option>
                 {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
               </select>
               <input
                 value={prApprovals}
                 onChange={(e) => setPrApprovals(e.target.value)}
-                placeholder="Review passes"
+                placeholder={tx("Review passes")}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
               />
             </div>
@@ -196,18 +198,16 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                 onClick={() => setPrAutoStart((value) => !value)}
                 className={clsx('h-7 rounded-md border px-2 text-[13px] transition-colors', prAutoStart ? 'border-line bg-card text-ink' : 'border-line bg-card-2 text-ink-3')}
               >
-                Auto-start builder
-              </button>
+                {tx("Auto-start builder")}</button>
               <button
                 onClick={() => setPrPublishRemote((value) => !value)}
-                title="After the reviewer approves, push the branch and open a GitHub draft PR (requires the gh CLI)."
+                title={tx("After the reviewer approves, push the branch and open a GitHub draft PR (requires the gh CLI).")}
                 className={clsx('h-7 rounded-md border px-2 text-[13px] transition-colors', prPublishRemote ? 'border-accent bg-accent/15 text-accent' : 'border-line bg-card-2 text-ink-3')}
               >
-                Publish to GitHub
-              </button>
+                {tx("Publish to GitHub")}</button>
               <span className="min-w-0 flex-1" />
               <Button variant="primary" size="xs" icon="branch" onClick={createLocalPrLoop} disabled={!prObjective.trim() || prBusy}>
-                {prBusy ? 'Creating' : 'Create loop'}
+                {prBusy ? tx("Creating") : tx("Create loop")}
               </Button>
             </div>
           </div>
@@ -215,20 +215,20 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
             <input
               value={missionTitle}
               onChange={(e) => setMissionTitle(e.target.value)}
-              placeholder="Mission title"
+              placeholder={tx("Mission title")}
               className="h-8 w-full rounded-lg border border-line bg-card px-2.5 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent"
             />
             <textarea
               value={missionObjective}
               onChange={(e) => setMissionObjective(e.target.value)}
-              placeholder="Task it repeats"
+              placeholder={tx("Task it repeats")}
               rows={3}
               className="scroll-thin mt-2 w-full resize-none rounded-lg border border-line bg-card px-2.5 py-2 text-[13px] leading-snug text-ink outline-none placeholder:text-ink-3 focus:border-accent"
             />
             <textarea
               value={missionStopCondition}
               onChange={(e) => setMissionStopCondition(e.target.value)}
-              placeholder="Stop condition, e.g. no actionable unresolved errors remain."
+              placeholder={tx("Stop condition, e.g. no actionable unresolved errors remain.")}
               rows={2}
               className="scroll-thin mt-2 w-full resize-none rounded-lg border border-line bg-card px-2.5 py-2 text-[13px] leading-snug text-ink outline-none placeholder:text-ink-3 focus:border-accent"
             />
@@ -238,20 +238,20 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                 onChange={(e) => setMissionRepeat(e.target.value as MissionRepeatMode)}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none"
               >
-                <option value="until_condition">Until condition</option>
-                <option value="interval">Interval</option>
-                <option value="self_paced">Self-paced</option>
-                <option value="fixed_count">Fixed count</option>
-                <option value="forever">Forever</option>
+                <option value="until_condition">{tx("Until condition")}</option>
+                <option value="interval">{tx("Interval")}</option>
+                <option value="self_paced">{tx("Self-paced")}</option>
+                <option value="fixed_count">{tx("Fixed count")}</option>
+                <option value="forever">{tx("Forever")}</option>
               </select>
               <select
                 value={missionContext}
                 onChange={(e) => setMissionContext(e.target.value as MissionContextMode)}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none"
               >
-                <option value="fresh">Fresh each run</option>
-                <option value="build_on_previous">Build on previous</option>
-                <option value="fresh_with_notes">Fresh + notes</option>
+                <option value="fresh">{tx("Fresh each run")}</option>
+                <option value="build_on_previous">{tx("Build on previous")}</option>
+                <option value="fresh_with_notes">{tx("Fresh + notes")}</option>
               </select>
             </div>
             <div className="mt-2 grid grid-cols-2 gap-2">
@@ -260,20 +260,20 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                 onChange={(e) => setMissionRoleProfile(e.target.value as AgentRoleProfileId)}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none"
               >
-                {ROLE_PROFILE_OPTIONS.map((profile) => <option key={profile.id} value={profile.id}>{profile.label} profile</option>)}
+                {ROLE_PROFILE_OPTIONS.map((profile) => <option key={profile.id} value={profile.id}>{profile.label} {tx("profile")}</option>)}
               </select>
               <select
                 value={missionFanOut}
                 onChange={(e) => setMissionFanOut(e.target.value as FanOutBudget)}
                 className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none"
               >
-                {FAN_OUT_OPTIONS.map((budget) => <option key={budget.id} value={budget.id}>{budget.label} fan-out</option>)}
+                {FAN_OUT_OPTIONS.map((budget) => <option key={budget.id} value={budget.id}>{budget.label} {tx("fan-out")}</option>)}
               </select>
             </div>
             <div className="mt-2 grid grid-cols-3 gap-2">
-              <input value={missionMaxRuns} onChange={(e) => setMissionMaxRuns(e.target.value)} placeholder="Max runs" className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
-              <input value={missionCostCap} onChange={(e) => setMissionCostCap(e.target.value)} placeholder="Cost cap $" className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
-              <input value={missionExpiresDays} onChange={(e) => setMissionExpiresDays(e.target.value)} placeholder="Expires days" className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+              <input value={missionMaxRuns} onChange={(e) => setMissionMaxRuns(e.target.value)} placeholder={tx("Max runs")} className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+              <input value={missionCostCap} onChange={(e) => setMissionCostCap(e.target.value)} placeholder={tx("Cost cap $")} className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
+              <input value={missionExpiresDays} onChange={(e) => setMissionExpiresDays(e.target.value)} placeholder={tx("Expires days")} className="h-7 rounded-md border border-line bg-card px-2 text-[13px] text-ink outline-none placeholder:text-ink-3 focus:border-accent" />
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2">
               <select
@@ -287,17 +287,16 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                 onClick={() => setMissionGateDestructive((value) => !value)}
                 className={clsx('h-7 rounded-md border px-2 text-[13px] transition-colors', missionGateDestructive ? 'border-line bg-card text-ink' : 'border-line bg-card-2 text-ink-3')}
               >
-                Gate destructive
-              </button>
+                {tx("Gate destructive")}</button>
               <span className="min-w-0 flex-1" />
-              <Button variant="primary" size="xs" icon="plus" onClick={createMissionFromDraft} disabled={!missionObjective.trim()}>Create</Button>
+              <Button variant="primary" size="xs" icon="plus" onClick={createMissionFromDraft} disabled={!missionObjective.trim()}>{tx("Create")}</Button>
             </div>
           </div>
           </>
           )}
 
           {missionRows.length === 0 ? (
-            <EmptyState icon="spark" title="No missions yet" detail="Create a resumable job with heartbeat and checkpoints." />
+            <EmptyState icon="spark" title={tx("No missions yet")} detail="Create a resumable job with heartbeat and checkpoints." />
           ) : missionPreview.visible.map((mission) => (
             <div key={mission.id} className="rounded-lg border border-line bg-card-2 px-3 py-2.5">
               {(() => {
@@ -314,42 +313,42 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                   <div className="mt-1 flex flex-wrap gap-1">
                     <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{missionRepeatLabel(mission.repeatMode)}</span>
                     <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{missionContextLabel(mission.contextMode)}</span>
-                    <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{mission.roleProfileId ?? 'operator'}</span>
-                    <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{mission.fanOutBudget ?? 'single'} fan-out</span>
-                    {mission.metadata?.workflow === 'local_pr_loop' && <span className="rounded-md bg-accent/15 px-1.5 py-0.5 text-[12px] text-accent">Local PR</span>}
+                    <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{mission.roleProfileId ?? tx("operator")}</span>
+                    <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{mission.fanOutBudget ?? tx("single")} {tx("fan-out")}</span>
+                    {mission.metadata?.workflow === 'local_pr_loop' && <span className="rounded-md bg-accent/15 px-1.5 py-0.5 text-[12px] text-accent">{tx("Local PR")}</span>}
                     {typeof mission.metadata?.branch === 'string' && <span className="max-w-[160px] truncate rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{mission.metadata.branch}</span>}
-                    {mission.maxRuns != null && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">Max {mission.maxRuns}x</span>}
-                    {mission.costCapUsd != null && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">Cap ${mission.costCapUsd}</span>}
-                    {mission.destructiveApprovalRequired && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">Gate destructive</span>}
+                    {mission.maxRuns != null && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{tx("Max ")}{mission.maxRuns}{tx("x")}</span>}
+                    {mission.costCapUsd != null && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{tx("Cap $")}{mission.costCapUsd}</span>}
+                    {mission.destructiveApprovalRequired && <span className="rounded-md bg-ink-5 px-1.5 py-0.5 text-[12px] text-ink-3">{tx("Gate destructive")}</span>}
                   </div>
-                  {mission.stopCondition && <div className="mt-1 line-clamp-2 text-[13px] leading-snug text-ink-4">Stop: {mission.stopCondition}</div>}
+                  {mission.stopCondition && <div className="mt-1 line-clamp-2 text-[13px] leading-snug text-ink-4">{tx("Stop: ")}{mission.stopCondition}</div>}
                   <div className="mt-2 flex flex-wrap items-center gap-1.5">
                     <Button variant="default" size="xs" icon="fileText" onClick={() => void inspectMission(mission.id)}>
-                      {missionInspectingId === mission.id ? 'Opening' : inspected ? 'Close' : 'Inspect'}
+                      {missionInspectingId === mission.id ? tx("Opening") : inspected ? tx("Close") : tx("Inspect")}
                     </Button>
-                    {mission.status !== 'running' && mission.status !== 'waiting_approval' && !missionIsTerminal(mission.status) && <Button variant="default" size="xs" icon="play" onClick={() => setMission(mission.id, 'running')}>Start</Button>}
-                    {mission.status === 'running' && <Button variant="ghost" size="xs" icon="clock" onClick={() => beatMission(mission.id)}>Beat</Button>}
-                    {mission.status === 'running' && <Button variant="ghost" size="xs" icon="stop" onClick={() => setMission(mission.id, 'paused')}>Pause</Button>}
-                    {!missionIsTerminal(mission.status) && <Button variant="ghost" size="xs" icon="x" onClick={() => setMission(mission.id, 'cancelled')}>Cancel</Button>}
-                    {!missionIsTerminal(mission.status) && <Button variant="default" size="xs" icon="check" onClick={() => setMission(mission.id, 'completed')}>Complete</Button>}
+                    {mission.status !== 'running' && mission.status !== 'waiting_approval' && !missionIsTerminal(mission.status) && <Button variant="default" size="xs" icon="play" onClick={() => setMission(mission.id, 'running')}>{tx("Start")}</Button>}
+                    {mission.status === 'running' && <Button variant="ghost" size="xs" icon="clock" onClick={() => beatMission(mission.id)}>{tx("Beat")}</Button>}
+                    {mission.status === 'running' && <Button variant="ghost" size="xs" icon="stop" onClick={() => setMission(mission.id, 'paused')}>{tx("Pause")}</Button>}
+                    {!missionIsTerminal(mission.status) && <Button variant="ghost" size="xs" icon="x" onClick={() => setMission(mission.id, 'cancelled')}>{tx("Cancel")}</Button>}
+                    {!missionIsTerminal(mission.status) && <Button variant="default" size="xs" icon="check" onClick={() => setMission(mission.id, 'completed')}>{tx("Complete")}</Button>}
                   </div>
                   {mission.checkpoints.length > 0 && (
                     <div className="mt-2 border-t border-line pt-2 text-[13px] text-ink-3">
-                      Last checkpoint: {mission.checkpoints[mission.checkpoints.length - 1].summary}
+                      {tx("Last checkpoint: ")}{mission.checkpoints[mission.checkpoints.length - 1].summary}
                     </div>
                   )}
                   {inspected && (
                     <div className="mt-3 border-t border-line pt-3 text-[13px] text-ink-3">
                       <div className="flex flex-wrap items-center gap-1.5">
-                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">Opened {relativeTime(inspected.generatedAt)}</span>
-                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.checkpointCount} checkpoints</span>
-                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.journalCount} journal events</span>
-                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.scratchMemoryCount} scratch notes</span>
-                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.rerunRequired ? 'Rerun needed' : 'No rerun needed'}</span>
+                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{tx("Opened ")}{relativeTime(inspected.generatedAt)}</span>
+                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.checkpointCount} {tx("checkpoints")}</span>
+                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.journalCount} {tx("journal events")}</span>
+                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.scratchMemoryCount} {tx("scratch notes")}</span>
+                        <span className="rounded-md bg-ink-5 px-1.5 py-0.5">{inspected.rerunRequired ? tx("Rerun needed") : tx("No rerun needed")}</span>
                       </div>
                       {inspected.mission.checkpoints.length > 0 && (
                         <div className="mt-3">
-                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">Checkpoints</div>
+                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">{tx("Checkpoints")}</div>
                           <div className="space-y-1.5">
                             {inspected.mission.checkpoints.slice(-3).map((checkpoint) => (
                               <div key={checkpoint.id} className="grid grid-cols-[auto,1fr] gap-x-2 gap-y-0.5">
@@ -364,7 +363,7 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                       )}
                       {inspected.mission.journal.length > 0 && (
                         <div className="mt-3">
-                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">Recent journal</div>
+                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">{tx("Recent journal")}</div>
                           <div className="space-y-1.5">
                             {inspected.mission.journal.slice(-4).map((event) => (
                               <div key={event.id} className="grid grid-cols-[88px,1fr] gap-x-2">
@@ -377,7 +376,7 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
                       )}
                       {inspected.mission.scratchMemory.length > 0 && (
                         <div className="mt-3">
-                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">Scratch memory</div>
+                          <div className="mb-1 text-[12px] font-semibold uppercase tracking-[0.14em] text-ink-4">{tx("Scratch memory")}</div>
                           <div className="space-y-1.5">
                             {inspected.mission.scratchMemory.slice(-3).map((entry) => (
                               <div key={entry.id} className="grid grid-cols-[76px,1fr] gap-x-2">
@@ -403,7 +402,7 @@ export function MissionControlPanel(props: MissionControlPanelProps) {
               onClick={toggleShowAllMissions}
               className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-line bg-card-2 px-2.5 py-2 text-[13px] font-medium text-ink-2 transition-colors hover:border-line-strong hover:text-ink"
             >
-              {showAllMissions ? 'Show fewer missions' : `View all missions (${missionPreview.total})`}
+              {showAllMissions ? tx("Show fewer missions") : tx("View all missions ({value0})", { value0: missionPreview.total })}
             </button>
           )}
         </div>

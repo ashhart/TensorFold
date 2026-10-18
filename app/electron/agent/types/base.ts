@@ -34,6 +34,53 @@ export interface Attachment {
   text?: string
   // original size in bytes (for display).
   bytes?: number
+  /** Missing status is a ready legacy attachment; unfinished/failed rows never reach a model. */
+  status?: 'processing' | 'ready' | 'error' | 'needs-reselection' | 'review'
+  error?: string
+  warnings?: string[]
+  /** Display-only session preview after accepting text extraction; never a filesystem path. */
+  previewDataUrl?: string
+  /** Picker metadata only. This never grants access to a path after restart. */
+  source?: { lastModified: number; relativePath?: string }
+  extraction?: AttachmentTextExtraction
+}
+
+export interface AttachmentTextExtraction {
+  method: 'apple-vision'
+  state: 'review' | 'accepted'
+  text: string
+  /** Vision's normalized confidence score; not a probability or accuracy guarantee. */
+  confidence: number | null
+  warnings: string[]
+  pageCount: number
+  processedPages: number
+  truncated: boolean
+}
+
+export interface AttachmentTextCapability {
+  available: boolean
+  method: 'apple-vision'
+  reason?: string
+  maxBytes: number
+  maxPages: number
+}
+
+export interface AttachmentTextRequest {
+  name: string
+  mime: string
+  /** User-selected bytes only. The host never accepts a renderer-supplied filesystem path. */
+  bytes: Uint8Array | number[]
+}
+
+export interface AttachmentTextResult {
+  ok: boolean
+  text?: string
+  confidence?: number | null
+  warnings?: string[]
+  pageCount?: number
+  processedPages?: number
+  truncated?: boolean
+  error?: string
 }
 
 export type ModelSpendBudgetPeriod = 'run' | 'day' | 'week' | 'month'
@@ -60,6 +107,8 @@ export interface Provider {
   apiKey: string
   models: string[]
   kind?: 'cloud' | 'local'
+  /** Transport may be loopback forwarding; computation still leaves this device. */
+  remoteCompute?: true
   source?: 'openai' | 'openrouter' | 'ai-gateway' | 'ollama' | 'lmstudio' | 'omlx' | 'tensorfold' | 'custom'
   cliPath?: string
   cliProfile?: string

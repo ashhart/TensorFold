@@ -1,3 +1,7 @@
+import { currentIntlLocale } from '../lib/preferences/current-locale'
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { inspectThreadMemoryPolicy } from '../../shared/thread-memory-policy'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
@@ -9,7 +13,7 @@ import { resolveThreadInstructionPreview } from '../lib/context-preview'
 import type { Thread, ResolvedInstructionGraph, ProjectMemoryCandidate, ProjectMemoryEntry, Skill, Command } from '../lib/types'
 import { effectiveThreadCwd } from '../lib/thread-workspace'
 
-const KIND_LABEL: Record<string, string> = { shared: 'shared', provider: 'overlay', local: 'local', imported: 'import' }
+const KIND_LABEL: Record<string, string> = { get shared() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "shared") }, get provider() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "overlay") }, get local() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "local") }, get imported() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "import") } }
 const CONNECTOR_TOOL_RE = /^(email_|controller|mcp_|bot_|webhook|connector)/i
 
 function roughTokens(text: string): number {
@@ -34,6 +38,7 @@ type ContextBucket = {
 // graph the model receives — shared AGENTS.md + overlays + imports, cycles, token
 // cost, and the fully-resolved text. Makes hidden context auditable.
 export function ContextPreviewSection({ thread }: { thread: Thread }) {
+  const tx = useAuthoredText()
   const [graph, setGraph] = useState<ResolvedInstructionGraph | null>(null)
   const [instructionUnavailable, setInstructionUnavailable] = useState<string | null>(null)
   const [memoryEntries, setMemoryEntries] = useState<ProjectMemoryEntry[]>([])
@@ -100,30 +105,30 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
     const skillHits = enabledSkills.filter((skill) => new RegExp(`\\$${skill.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(userText))
     const commandHits = enabledCommands.filter((command) => new RegExp(`/${command.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(userText))
     return [
-      { id: 'system', label: 'System', icon: 'shield', count: nodes.length, tokens: graph?.tokenEstimate ?? 0, detail: instructionUnavailable ? 'Remote preview unavailable' : nodes.length ? 'Resolved instructions' : 'No instruction files', active: !!graph?.tokenEstimate },
-      { id: 'user', label: 'User', icon: 'message', count: userItems.length, tokens: roughTokens(userText), detail: 'User turns and Guide notes', active: userItems.length > 0 },
-      { id: 'tools', label: 'Tools', icon: 'terminal', count: toolItems.length, tokens: roughTokens(toolText) + (toolItems.length ? 220 : 0), detail: toolItems.length ? 'Tool calls and outputs' : 'Schemas only', active: toolItems.length > 0 },
-      { id: 'memory', label: 'Memory', icon: 'layers', count: (project?.memory?.trim() ? 1 : 0) + memoryEntries.length, tokens: roughTokens(memoryText), detail: memoryState.problem ? 'Saved-memory choices need review' : !memoryAllowed ? 'Saved-memory recall is off' : !memoryInjected ? 'Available through tools; not injected in chat' : memoryEntries.length ? 'Project memory entries' : 'No typed memory', active: !!memoryText.trim() },
-      { id: 'files', label: 'Files', icon: 'fileText', count: filePaths.size, tokens: nodes.reduce((sum, node) => sum + node.tokenEstimate, 0), detail: filePaths.size ? 'Instruction and touched files' : 'No file context', active: filePaths.size > 0 },
-      { id: 'skills', label: 'Skills', icon: 'spark', count: skillHits.length + commandHits.length, tokens: roughTokens([...skillHits.map((skill) => skill.body), ...commandHits.map((command) => command.prompt)].join('\n')), detail: `${enabledSkills.length} skills, ${enabledCommands.length} commands available`, active: skillHits.length + commandHits.length > 0 },
-      { id: 'connector', label: 'Connector', icon: 'plug', count: connectorItems.length, tokens: roughTokens(connectorText), detail: connectorItems.length ? 'Connector and capability context' : 'No connector context', active: connectorItems.length > 0 },
+      { id: 'system', label: tx("System"), icon: 'shield', count: nodes.length, tokens: graph?.tokenEstimate ?? 0, detail: instructionUnavailable ? 'Remote preview unavailable' : nodes.length ? 'Resolved instructions' : 'No instruction files', active: !!graph?.tokenEstimate },
+      { id: 'user', label: tx("User"), icon: 'message', count: userItems.length, tokens: roughTokens(userText), detail: tx("User turns and Guide notes"), active: userItems.length > 0 },
+      { id: 'tools', label: tx("Tools"), icon: 'terminal', count: toolItems.length, tokens: roughTokens(toolText) + (toolItems.length ? 220 : 0), detail: toolItems.length ? 'Tool calls and outputs' : 'Schemas only', active: toolItems.length > 0 },
+      { id: 'memory', label: tx("Memory"), icon: 'layers', count: (project?.memory?.trim() ? 1 : 0) + memoryEntries.length, tokens: roughTokens(memoryText), detail: memoryState.problem ? 'Saved-memory choices need review' : !memoryAllowed ? 'Saved-memory recall is off' : !memoryInjected ? 'Available through tools; not injected in chat' : memoryEntries.length ? 'Project memory entries' : 'No typed memory', active: !!memoryText.trim() },
+      { id: 'files', label: tx("Files"), icon: 'fileText', count: filePaths.size, tokens: nodes.reduce((sum, node) => sum + node.tokenEstimate, 0), detail: filePaths.size ? 'Instruction and touched files' : 'No file context', active: filePaths.size > 0 },
+      { id: 'skills', label: tx("Skills"), icon: 'spark', count: skillHits.length + commandHits.length, tokens: roughTokens([...skillHits.map((skill) => skill.body), ...commandHits.map((command) => command.prompt)].join('\n')), detail: `${enabledSkills.length} skills, ${enabledCommands.length} commands available`, active: skillHits.length + commandHits.length > 0 },
+      { id: 'connector', label: tx("Connector"), icon: 'plug', count: connectorItems.length, tokens: roughTokens(connectorText), detail: connectorItems.length ? 'Connector and capability context' : 'No connector context', active: connectorItems.length > 0 },
     ]
-  }, [memoryState.problem, memoryAllowed, memoryInjected, thread.timeline, nodes, graph?.tokenEstimate, instructionUnavailable, project?.memory, memoryEntries, skills, commands])
+  }, [memoryState.problem, memoryAllowed, memoryInjected, thread.timeline, nodes, graph?.tokenEstimate, instructionUnavailable, project?.memory, memoryEntries, skills, commands, tx])
   const copy = async () => {
     if (!graph) return
     await api.writeClipboard(graph.resolvedContent)
     setCopied(true)
     window.setTimeout(() => setCopied(false), 1200)
   }
-  const providerName = provider?.name ?? thread.providerId ?? 'No provider'
+  const providerName = provider?.name ?? thread.providerId ?? tx("No provider")
   const displayModel = provider ? (resolveProviderModel(provider, thread.providerAccountId ?? null, thread.model) ?? thread.model) : thread.model
   const staleModel = thread.model && displayModel && thread.model !== displayModel ? thread.model : null
-  const modelTitle = staleModel ? `Saved model unavailable: ${staleModel}. Using ${displayModel}.` : displayModel ?? undefined
+  const modelTitle = staleModel ? tx("Saved model unavailable: {value0}. Using {value1}.", { value0: String(staleModel), value1: String(displayModel) }) : displayModel ?? undefined
 
   return (
     <div className="px-4 py-3.5">
       <div className="mb-2.5 flex items-center justify-between">
-        <span className="text-[13px] font-normal text-ink-3">Context</span>
+        <span className="text-[13px] font-normal text-ink-3">{tx("Context")}</span>
         {nodes.length > 0 && <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{nodes.length}</span>}
       </div>
 
@@ -139,13 +144,13 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
         )}
         <div className="mt-1.5 flex items-center gap-2 text-[13px] text-ink-3">
           <Icon name="folder" size={13} className="text-ink-4" />
-          <span className="truncate">{previewCwd || 'No working directory'}</span>
+          <span className="truncate">{previewCwd || tx("No working directory")}</span>
         </div>
         {graph && (
           <div className="mt-2 flex items-center gap-1.5 text-[12px] text-ink-3">
             <Icon name="layers" size={12} className="text-ink-4" />
-            <span>~{graph.tokenEstimate.toLocaleString()} tok</span>
-            <span className="text-ink-4">· {hasContent ? `${nodes.length} instruction file${nodes.length === 1 ? '' : 's'}` : 'no AGENTS.md found'}</span>
+            <span>~{graph.tokenEstimate.toLocaleString(currentIntlLocale())} {tx("tok")}</span>
+            <span className="text-ink-4">· {hasContent ? tx("Instruction files: {count}", { count: nodes.length }) : tx("no AGENTS.md found")}</span>
           </div>
         )}
         {instructionUnavailable && (
@@ -157,7 +162,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
       </div>
 
       <div className="mb-2.5 mt-3 flex items-center justify-between">
-        <span className="text-[13px] font-normal text-ink-3">Buckets</span>
+        <span className="text-[13px] font-normal text-ink-3">{tx("Buckets")}</span>
         <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">7</span>
       </div>
       <div className="grid grid-cols-2 gap-1.5">
@@ -169,7 +174,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
               <span className="font-mono text-[11px] tabular-nums text-ink-4">{bucket.count}</span>
             </div>
             <div className="mt-0.5 truncate text-[12px] text-ink-4">{bucket.detail}</div>
-            <div className="mt-1 font-mono text-[11px] tabular-nums text-ink-3">~{bucket.tokens.toLocaleString()} tok</div>
+            <div className="mt-1 font-mono text-[11px] tabular-nums text-ink-3">~{bucket.tokens.toLocaleString(currentIntlLocale())} {tx("tok")}</div>
           </div>
         ))}
       </div>
@@ -181,7 +186,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
             <div key={n.id} className="flex items-center gap-2 rounded-md px-1.5 py-1 text-[13px]">
               <Icon name="file" size={12} className="shrink-0 text-ink-4" />
               <span className={clsx('truncate', n.ignored ? 'text-ink-4 line-through' : 'text-ink-2')}>{n.path}</span>
-              <span className="ml-auto shrink-0 font-mono text-[11px] uppercase tracking-wide text-ink-4">{n.ignored ? 'ignored' : KIND_LABEL[n.kind] ?? n.kind}</span>
+              <span className="ml-auto shrink-0 font-mono text-[11px] uppercase tracking-wide text-ink-4">{n.ignored ? tx("ignored") : KIND_LABEL[n.kind] ?? n.kind}</span>
             </div>
           ))}
         </div>
@@ -191,7 +196,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
       {!!graph?.cycles.length && (
         <div className="mt-2 flex items-start gap-1.5 rounded-md bg-warn/10 px-2 py-1.5 text-[12px] text-warn">
           <Icon name="warning" size={12} className="mt-0.5 shrink-0" />
-          <span>Import cycle detected: {graph.cycles.join(', ')}</span>
+          <span>{tx("Import cycle detected: ")}{graph.cycles.join(', ')}</span>
         </div>
       )}
 
@@ -201,8 +206,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
           <div className="mt-2 flex items-center justify-between">
             <button onClick={() => setOpen((o) => !o)} className="flex items-center gap-1 text-[13px] text-ink-3 transition-colors hover:text-ink">
               <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} />
-              {open ? 'Hide' : 'Show'} resolved instructions
-            </button>
+              {open ? tx("Hide") : tx("Show")} {tx("resolved instructions")}</button>
           </div>
           {open && (
             <div className="mt-1.5 overflow-hidden rounded-lg border border-line bg-card-2">
@@ -210,8 +214,8 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
                 {graph!.resolvedContent}
               </pre>
               <div className="flex justify-end border-t border-line bg-card px-2 py-1">
-                <button onClick={copy} className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title="Copy resolved instructions">
-                  <Icon name={copied ? 'check' : 'copy'} size={12} />{copied ? 'Copied' : 'Copy'}
+                <button onClick={copy} className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" title={tx("Copy resolved instructions")}>
+                  <Icon name={copied ? 'check' : 'copy'} size={12} />{copied ? tx("Copied") : tx("Copy")}
                 </button>
               </div>
             </div>
@@ -223,7 +227,7 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
       {!!thread.compactions?.length && (
         <div className="mt-3">
           <div className="mb-1.5 flex items-center justify-between">
-            <span className="text-[13px] font-normal text-ink-3">Compaction</span>
+            <span className="text-[13px] font-normal text-ink-3">{tx("Compaction")}</span>
             <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{thread.compactions.length}</span>
           </div>
           <div className="space-y-1.5">
@@ -231,8 +235,8 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
               <div key={c.id} className="rounded-lg border border-line bg-card p-2 text-[13px]">
                 <div className="flex items-center gap-2 text-ink-3">
                   <Icon name="layers" size={12} className="text-ink-4" />
-                  <span className="tabular-nums">{c.messagesFolded} folded</span>
-                  <span className="text-ink-4">· ~{c.tokensBefore.toLocaleString()} → ~{c.tokensAfter.toLocaleString()} tok</span>
+                  <span className="tabular-nums">{c.messagesFolded} {tx("folded")}</span>
+                  <span className="text-ink-4">· ~{c.tokensBefore.toLocaleString(currentIntlLocale())} → ~{c.tokensAfter.toLocaleString(currentIntlLocale())} {tx("tok")}</span>
                   <span className="ml-auto font-mono text-[11px] uppercase text-ink-4">{c.trigger}</span>
                 </div>
                 {c.summaryExcerpt && <p className="mt-1 line-clamp-3 text-ink-2">{c.summaryExcerpt}</p>}
@@ -249,9 +253,9 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
         <div className="mt-3 border-t border-line pt-3">
           <div className="mb-1.5 flex items-center gap-2">
             <Icon name="layers" size={12} className="text-ink-4" />
-            <span className="text-[13px] font-normal text-ink-3">Memory candidates</span>
+            <span className="text-[13px] font-normal text-ink-3">{tx("Memory candidates")}</span>
             <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{candidates.length}</span>
-            <span className="ml-auto text-[12px] text-ink-4">approve before durable write</span>
+            <span className="ml-auto text-[12px] text-ink-4">{tx("approve before durable write")}</span>
           </div>
           <div className="space-y-1.5">
             {candidates.map((candidate) => (
@@ -261,8 +265,8 @@ export function ContextPreviewSection({ thread }: { thread: Thread }) {
                   <span className="block text-ink-2">{candidate.text}</span>
                   <span className="mt-0.5 block truncate text-[11px] text-ink-4">{candidate.sourceType}{candidate.reason ? ` · ${candidate.reason}` : ''}</span>
                 </div>
-                <button onClick={() => api.approveProjectMemoryCandidate(candidate.id).then(reloadCandidates).catch(() => {})} className="shrink-0 rounded-md bg-positive/15 px-2 py-1 text-[12px] font-medium text-positive hover:bg-positive/25">Approve</button>
-                <button onClick={() => api.rejectProjectMemoryCandidate(candidate.id).then(reloadCandidates).catch(() => {})} className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-3 hover:text-danger">Reject</button>
+                <button onClick={() => api.approveProjectMemoryCandidate(candidate.id).then(reloadCandidates).catch(() => {})} className="shrink-0 rounded-md bg-positive/15 px-2 py-1 text-[12px] font-medium text-positive hover:bg-positive/25">{tx("Approve")}</button>
+                <button onClick={() => api.rejectProjectMemoryCandidate(candidate.id).then(reloadCandidates).catch(() => {})} className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-3 hover:text-danger">{tx("Reject")}</button>
               </div>
             ))}
           </div>

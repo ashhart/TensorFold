@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -28,6 +29,7 @@ function savedWidth(): number {
 
 // The thread's right pane: somewhere to work (changes, terminal, files, preview) plus Details.
 export function ThreadPanel({ thread, git, onChanged }: { thread: Thread; git: GitStatus | null; onChanged: () => void }) {
+  const tx = useAuthoredText()
   const project = useStore((s) => thread.projectId ? s.projects.find((candidate) => candidate.id === thread.projectId) ?? null : null)
   const rightPanelHidden = useStore((s) => s.rightPanelHidden)
   const chatPaneOpenId = useStore((s) => s.chatPaneOpenId)
@@ -71,9 +73,9 @@ export function ThreadPanel({ thread, git, onChanged }: { thread: Thread; git: G
     <aside
       style={{ width: narrow ? `min(${width}px, 88%)` : width }}
       className={clsx('flex h-full shrink-0 flex-col border-l border-line', narrow ? 'absolute inset-y-0 right-0 z-30 bg-canvas shadow-pop' : 'relative')}
-      aria-label="Work pane"
+      aria-label={tx("Work pane")}
     >
-      <div onPointerDown={startResize} className="group absolute left-0 top-0 z-20 h-full w-1.5 -translate-x-1/2 cursor-col-resize" aria-label="Resize work pane">
+      <div onPointerDown={startResize} className="group absolute left-0 top-0 z-20 h-full w-1.5 -translate-x-1/2 cursor-col-resize" aria-label={tx("Resize work pane")}>
         <div className="absolute left-1/2 top-0 h-full w-px bg-transparent transition-colors group-hover:bg-line-strong" />
       </div>
       <div role="tablist" className="flex h-10 shrink-0 items-stretch gap-4 border-b border-line px-4">
@@ -91,7 +93,7 @@ export function ThreadPanel({ thread, git, onChanged }: { thread: Thread; git: G
           </button>
         ))}
         <div className="flex-1" />
-        <button onClick={closeWorkPane} title="Close pane (⌥⌘B)" aria-label="Close pane" className="my-auto flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink">
+        <button onClick={closeWorkPane} title={tx("Close pane (⌥⌘B)")} aria-label={tx("Close pane")} className="my-auto flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink">
           <Icon name="x" size={16} />
         </button>
       </div>

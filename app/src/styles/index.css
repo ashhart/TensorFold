@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "katex/dist/katex.min.css";
 
 /* ----------------------------------------------------------------------------
    TensorFold design system. Every value comes from the TensorFold brand art:
@@ -435,3 +436,61 @@ label,
 .swatch-input { -webkit-appearance: none; appearance: none; border: none; padding: 0; background: none; cursor: pointer; }
 .swatch-input::-webkit-color-swatch-wrapper { padding: 0; }
 .swatch-input::-webkit-color-swatch { border: none; border-radius: 999px; }
+
+/* Profile-owned language, reading scale and density projection. */
+:root[data-ui-preferences="true"] {
+  --tf-chat-scale: 1;
+  --tf-code-scale: 1;
+  --tf-reading-leading: 1.62;
+  --tf-density-gap: 0.875rem;
+  --tf-row-height: 2.5rem;
+}
+:root[data-ui-preferences="true"] .prose-tf {
+  font-size: calc(var(--text-base) * var(--tf-chat-scale));
+  line-height: var(--tf-reading-leading);
+  overflow-wrap: anywhere;
+}
+:root[data-ui-preferences="true"] .select-text.whitespace-pre-wrap {
+  font-size: calc(14px * var(--tf-chat-scale));
+  line-height: var(--tf-reading-leading);
+}
+:root[data-ui-preferences="true"] .prose-tf pre code,
+:root[data-ui-preferences="true"] .syn-code,
+:root[data-ui-preferences="true"] [data-ui-code] {
+  font-size: calc(13px * var(--tf-code-scale));
+  line-height: 1.55;
+}
+:root[data-ui-preferences="true"] .prose-tf :not(pre) > code {
+  font-size: calc(12px * var(--tf-code-scale));
+}
+:root[data-ui-preferences="true"] :is(pre, code, .syn-code, .xterm, [data-ui-code]) {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+}
+:root[data-ui-preferences="true"] :is(.prose-tf, [data-ui-message], textarea, input, .select-text.whitespace-pre-wrap) {
+  unicode-bidi: plaintext;
+  text-align: start;
+}
+:root[data-ui-preferences="true"] [data-ui-row] {
+  min-height: var(--tf-row-height);
+  height: auto;
+  padding-block: calc(var(--tf-density-gap) / 2);
+}
+:root[data-ui-density="compact"] .prose-tf p { margin-block: 0.45em; }
+:root[data-ui-density="comfortable"] .prose-tf p { margin-block: 0.7em; }
+:root[data-ui-preferences="true"] .prose-tf :is(ul, ol) { padding-inline-start: 1.35em; padding-inline-end: 0; }
+:root[data-ui-preferences="true"] .prose-tf blockquote {
+  padding-inline-start: 0.9em;
+  padding-inline-end: 0;
+  border-inline-start: 2.5px solid var(--line-strong);
+  border-inline-end: 0;
+}
+:root[data-ui-preferences="true"] .prose-tf :is(th, td) { text-align: start; }
+:root[data-ui-preferences="true"] :is(button, label, summary) { overflow-wrap: anywhere; }
+
+:root[data-ui-preferences="true"] :is(textarea.font-mono, [contenteditable="true"].font-mono) {
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+}

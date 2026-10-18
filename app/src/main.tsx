@@ -3,6 +3,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { preparePairedSession } from './lib/remote-pairing'
 import './styles/index.css'
+import { prepareBrowserDemo } from './lib/browser-demo-bootstrap'
 
 // Boot order matters (VST-035): the paired-session decision must land BEFORE the app's
 // module graph loads, because src/lib/ipc.ts picks its transport synchronously at import
@@ -20,6 +21,7 @@ async function boot() {
     )
     return
   }
+  if (mode === 'demo') await prepareBrowserDemo()
   const { default: App } = await import('./App')
   root.render(
     <React.StrictMode>

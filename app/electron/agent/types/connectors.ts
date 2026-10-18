@@ -1,3 +1,4 @@
+import type { TelegramRemoteSettings } from '../../../shared/telegram-remote'
 import type { Job, Mission } from './jobs'
 import type { Thread, TraceContext } from './timeline'
 import type { SecretRotationMetadata } from './base'
@@ -164,6 +165,19 @@ export interface ConnectorDefinition {
   error?: string
 }
 
+export interface ConnectorOutboundSnapshot {
+  version: 1
+  connectorId: 'email' | 'whatsapp' | 'telegram' | 'imessage'
+  accountId: string | null
+  /** Host binding changes when the selected transport identity or source scope changes. */
+  accountRevision?: string
+  recipient: string
+  body: string
+  subject?: string
+  threadKey: string
+  inReplyTo?: string
+}
+
 export interface ConnectorEvent {
   id: string
   connectorId: ConnectorId
@@ -193,9 +207,17 @@ export interface ConnectorEvent {
   // tool reads paths, not URLs — so the assistant reads the attachment by this local path.
   // Absent/empty when the message had no media or the downloads failed/were unsafe (SSRF).
   mediaPaths?: string[]
+  /** Exact immutable outbound content shown for a one-time owner approval. */
+  outbound?: ConnectorOutboundSnapshot
+  reviewDigest?: string
+  outboundError?: string
   delivery?: {
     transport: string
-    status: 'delivered' | 'failed'
+    status: 'sending' | 'delivered' | 'failed' | 'uncertain' | 'queued'
+    attemptId?: string
+    reviewDigest?: string
+    attemptedAt?: number
+    sentId?: string | null
     path?: string | null
     deliveredAt?: number | null
     error?: string | null
@@ -206,6 +228,8 @@ export interface ConnectorEvent {
 }
 
 export interface ConnectorSourceRef {
+  /** Host-authored binding for cached account/location scoped material. */
+  sourceRevision?: string
   id: string
   connectorId: ConnectorId
   sourceId?: string | null
@@ -334,10 +358,11 @@ export interface EmailConnectorSettings {
   detectOutlook?: boolean
 }
 
-// ---- Phone bot control (Telegram now, WhatsApp bridge next) ----
+// ---- Phone bot control (Telegram and signed WhatsApp Business Cloud ingress) ----
 export type BotControlChannel = 'telegram' | 'whatsapp'
 
 export interface TelegramBotControlSettings {
+  remote?: TelegramRemoteSettings
   enabled: boolean
   botToken: string
   allowedChatIds: string
@@ -488,7 +513,7 @@ export interface MattermostSource {
   // Explicit opt-in for a deliberately self-hosted RFC1918/loopback server. Metadata and
   // link-local addresses remain blocked even when enabled.
   allowPrivateNetwork?: boolean
-  allowedChannels: string // csv allowlist of channel ids and/or slugs; blank = all visible
+  allowedChannels: string // csv allowlist of channel ids and/or slugs; blank = none; '*' = explicit all visible
   enabled: boolean
   lastSyncAt: number | null
   lastError: string | null
@@ -738,6 +763,10 @@ export interface WhatsAppBridgeSource {
   id: string
   label: string
   enabled: boolean
+  /** Exact conversation JIDs selected by the owner; empty means ingest no contacts. */
+  allowedChatJids?: string[]
+  /** Only the authenticated account's own chat, never arbitrary fromMe messages. */
+  allowSelfChat?: boolean
   phoneNumber: string | null
   paired: boolean
   lastQrAt: number | null
@@ -746,6 +775,19 @@ export interface WhatsAppBridgeSource {
   /** Main-process-authored timestamp of the last actual paired-credential update. */
   credentialRotatedAt?: number | null
   createdAt: number
+  updatedAt: number
+}
+export type WhatsAppBridgePhase = 'disconnected' | 'connecting' | 'pairing' | 'connected' | 'reconnecting' | 'error'
+/** Ephemeral host state; QR material is never persisted in settings. */
+export interface WhatsAppBridgeRuntimeSnapshot {
+  sourceId: string
+  phase: WhatsAppBridgePhase
+  qr: string | null
+  qrExpiresAt: number | null
+  phoneNumber: string | null
+  reconnectAttempt: number
+  nextReconnectAt: number | null
+  lastError: string | null
   updatedAt: number
 }
 export interface WhatsAppBridgeConnectorSettings {
@@ -1207,6 +1249,7 @@ export interface EmailListOptions {
 }
 
 export interface EmailDraftInput {
+  accountId?: string
   mode?: 'draft' | 'send'
   to: string
   subject: string
@@ -1402,6 +1445,8 @@ export interface DocumentSourceConfig {
   updatedAt: number
   lastSyncAt: number | null
   lastError?: string | null
+  lastScan?: import("../../../shared/document-library").DocumentScanSummary
+  lastFileOutcomes?: import("../../../shared/document-library").DocumentFileOutcome[]
 }
 
 export interface DocumentConnectorSettings {
@@ -1426,6 +1471,9 @@ export interface DocumentItem {
 
 export interface DocumentReadResult extends DocumentItem {
   content: string
+  revision?: string
+  sections?: import("../../../shared/document-library").DocumentSection[]
+  locationNote?: string
 }
 
 export interface DocumentListOptions {

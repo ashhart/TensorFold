@@ -13,7 +13,7 @@ import { needsPlanningGuard, planningGuard } from './planning-guard'
 import { classifyProvider } from '../../shared/provider-trust'
 import { readCortheonReport, readEngineTimings, type CortheonReply, type EngineReplyTimings } from './turn-stats'
 import type { EngineSteeringChannel } from './steering'
-import type { ApiMessage, ApprovalMode, Provider, ToolCall } from './types'
+import type { EngineModelGenerationSettings, ApiMessage, ApprovalMode, Provider, ToolCall } from './types'
 
 export interface ChatParams {
   /** Host-owned admission; never supplied by model/tool arguments. */
@@ -22,9 +22,21 @@ export interface ChatParams {
   baseUrl?: string
   apiKey?: string
   model: string
+  /** Bounded host-only override for explicit synthetic probes and helper jobs. */
+  maxOutputTokens?: number
+  /** Reject transport EOF that has no explicit provider finish or protocol terminator. */
+  requireProviderFinish?: boolean
   messages: ApiMessage[]
   tools?: unknown[]
   temperature?: number
+  /** Host-owned settings captured by the built-in engine request lease. */
+  modelSettings?: EngineModelGenerationSettings
+  /** Host-only bounded speed preview with no chat-history effects. */
+  modelPreview?: boolean
+  /** Unforgeable main-process owner of a bounded sequential comparison. */
+  modelComparisonOwner?: symbol
+  /** Host engine capability; the route replaces any caller value. */
+  greedyOnly?: boolean
   reasoningEffort?: string
   serviceTier?: string
   approvalMode?: ApprovalMode
@@ -277,7 +289,7 @@ function assertCredentialFreeToolIdentifiers(calls: ToolCall[], credential?: str
   }
 }
 
-async function* streamJsonCompletion(res: Response, credential?: string): AsyncGenerator<StreamChunk> {
+async function* streamJsonCompletion(res: Response, credential?: string, requireFinish = false): AsyncGenerator<StreamChunk> {
   let json: any
   try {
     json = await readBoundedJsonResponse(res, 'Provider completion', PROVIDER_JSON_MAX_BYTES)
@@ -295,6 +307,7 @@ async function* streamJsonCompletion(res: Response, credential?: string): AsyncG
   const finishReason = providerFinishReason(choice.finish_reason ?? json.finish_reason, credential)
   const privacy = credentialChunkStream(credential)
   for (const chunk of [...privacy.push('reasoning', reasoning), ...privacy.push('content', content), ...privacy.finish()]) yield { type: chunk.kind, text: chunk.text }
+  if (requireFinish && !finishReason) throw new Error('Provider response was unfinished: no explicit complete finish was reported.')
   if (toolCalls.length) yield { type: 'tool_calls', toolCalls }
   yield { type: 'finish', reason: finishReason ?? 'stop' }
 }
@@ -591,7 +604,14 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
       messages: p.messages,
       stream: true,
       ...(wantUsage ? { stream_options: { include_usage: true } } : {}),
-      ...(p.temperature != null ? { temperature: p.temperature } : {}),
+      ...(engine && p.modelSettings ? {
+        temperature: p.modelSettings.temperature, max_tokens: p.modelSettings.maxOutputTokens,
+        top_p: p.modelSettings.topP, top_k: p.modelSettings.topK, min_p: p.modelSettings.minP,
+        ...(p.modelSettings.speculativeDecoding === 'off' ? { draft: false } : {}),
+      } : engine && p.greedyOnly ? { temperature: 0 } : p.temperature != null ? { temperature: p.temperature } : {}),
+      ...(Number.isSafeInteger(p.maxOutputTokens) && p.maxOutputTokens! > 0 && p.maxOutputTokens! <= 1024 ? { max_tokens: p.maxOutputTokens } : {}),
+      ...(engine && p.modelPreview ? { max_tokens: Math.min(p.modelComparisonOwner ? 256 : 96, p.modelSettings?.maxOutputTokens ?? (p.modelComparisonOwner ? 256 : 96)), temperature: p.modelSettings?.temperature ?? 0, chat_template_kwargs: { enable_thinking: false } } : {}),
+      ...(engine && p.reasoningEffort?.trim().toLowerCase() === 'none' ? { chat_template_kwargs: { enable_thinking: false } } : {}),
       ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
       ...(p.tools && p.tools.length ? { tools: p.tools, tool_choice: 'auto' } : {}),
     }),
@@ -610,7 +630,7 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     throw err
   }
   if (!res.headers.get('content-type')?.toLowerCase().includes('text/event-stream')) {
-    yield* streamJsonCompletion(res, p.apiKey)
+    yield* streamJsonCompletion(res, p.apiKey, p.requireProviderFinish)
     return
   }
   if (!res.body) throw new Error('Provider response did not include a stream body.')
@@ -846,11 +866,12 @@ export async function* streamChat(p: ChatParams): AsyncGenerator<StreamChunk> {
     // loop would think the turn ended with no action. Emit them + a terminal finish exactly once.
     if (!finished) {
       yield* flushPrivateText()
+      if (p.requireProviderFinish && !sawDone) throw new Error('Provider stream was unfinished: no explicit complete finish was reported.')
       yield* drainToolCalls()
       yield { type: 'finish', reason: lastFinishReason ?? 'stop' }
     }
     const sample = { requestAt, firstTokenAt, lastTokenAt, completionTokens, promptTokens, cachedTokens, engine: engineTimings, cortheon: cortheonReport }
-    if (engine) recordEnginePerformance(p.model, sample)
+    if (engine && !p.modelPreview) recordEnginePerformance(p.model, sample)
     yield { type: 'usage', ...sample }
   } finally {
     if (!completed) await reader.cancel().catch(() => {})

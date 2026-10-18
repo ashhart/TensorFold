@@ -5,6 +5,7 @@ const globals = globalThis as any
 globals.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
 globals.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} })
 globals.addEventListener = () => {}; globals.removeEventListener = () => {}; globals.window = globals
+await (await import('../../browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('../../ipc')
 const { useStore } = await import('../index')
 const { createRemoteBrowserApi } = await import('../../remote-transport')
@@ -31,11 +32,13 @@ try {
   assert.equal(creates[0][4], true, 'the actual store/helper forwards privacy on the first create call')
   assert.equal(typeof creates[0][3], 'string', 'the launch carries an idempotency command before IPC')
   assert.equal(useStore.getState().threads.find((thread) => thread.id === privateLaunch.threadId)?.incognito, true, 'actual mock API creates the record private, with no later patch')
+  assert.deepEqual(useStore.getState().threads.find(thread => thread.id === privateLaunch.threadId)?.documentSourceIds, [], 'A newly created private chat starts without document collections')
   assert.equal(patches, 0)
   assert.equal(starts.length, 1)
   assert.deepEqual(sequence, ['create:true', 'configure:true', 'start:true'], 'all later model setup/admission sees a thread born private')
   const ordinary = await useStore.getState().launch({ text: 'Synthetic ordinary request', cwd: '/synthetic', providerId: provider.id, model: 'synthetic', approvalMode: 'suggest', persistActiveModel: false })
   assert.equal(ordinary.ok, true)
+  assert.deepEqual(useStore.getState().threads.find(thread => thread.id === ordinary.threadId)?.documentSourceIds, [], 'A newly created ordinary chat never inherits legacy enabled collections')
   assert.notEqual(creates[1][4], true)
   assert.notEqual(useStore.getState().threads.find((thread) => thread.id === ordinary.threadId)?.incognito, true)
   assert.equal(patches, 0)

@@ -149,27 +149,35 @@ export const threadsSlice: Slice = (set, get) => ({
     await get().archiveItem('thread', id)
   },
 
-  async send(text, attachments?: Attachment[]) {
+  async send(text, attachments?: Attachment[], targetThreadId?: string, quotes?: import('../../../../shared/message-quotes').MessageQuote[]) {
     const v = get().view
-    if (v.name !== 'thread') return
-    const id = v.id
+    if (!targetThreadId && v.name !== 'thread') return false
+    const id = targetThreadId ?? (v.name === 'thread' ? v.id : '')
     const st = get().status[id]
     const owner = get().threads.find((thread) => thread.id === id)
+    if (!owner) return false
     if (owner) {
       try { assertThreadMemoryTransport(owner, get().settings?.providers.find((provider) => provider.id === owner.providerId)) }
-      catch (error) { set({ notice: { kind: 'error', message: runErrorMessage(error) } }); return }
+      catch (error) { set({ notice: { kind: 'error', message: runErrorMessage(error) } }); return false }
     }
     const remoteHostId = remoteHostIdForThread(get(), id)
+    if (quotes?.length && remoteHostId) { set({ notice: { kind: 'error', message: 'Quoted replies must be sent on this conversation’s owning desktop.', authored: true } }); return false }
     if (st && BUSY_RUN.has(st)) {
-      const result = await guideThreadRunApi(remoteHostId, { threadId: id, userText: text, attachments })
-      if (result.queued) return
+      if (quotes?.length) { set({ notice: { kind: 'error', message: 'Quotes stay in your draft until the current run finishes.', authored: true } }); return false }
+      if (attachments?.length) { set({ notice: { kind: 'error', message: 'Files stay in your draft until the current run finishes; they cannot be sent as text-only guidance.', authored: true } }); return false }
+      try {
+        const result = await guideThreadRunApi(remoteHostId, { threadId: id, userText: text, attachments })
+        if (result.queued) return true
+      } catch (error) { set({ notice: { kind: 'error', message: runErrorMessage(error) } }); return false }
     }
     set((st) => ({ status: { ...st.status, [id]: 'thinking' } }))
     try {
-      await startThreadRunApi(remoteHostId, { threadId: id, userText: text, attachments })
+      await startThreadRunApi(remoteHostId, { threadId: id, userText: text, attachments, ...(quotes?.length ? { quotes } : {}) })
+      return true
     } catch (e) {
       const message = runErrorMessage(e)
       set((st) => ({ status: { ...st.status, [id]: 'error' }, notice: { kind: 'error', message } }))
+      return false
     }
   },
 
@@ -186,11 +194,9 @@ export const threadsSlice: Slice = (set, get) => ({
     } else {
       await cancelThreadRunApi(hostId, threadId)
     }
-    set((st) => {
-      const approvals = { ...st.approvals }
-      delete approvals[threadId]
-      return { status: { ...st.status, [threadId]: 'idle' }, approvals }
-    })
+    // The reply acknowledges a Stop request; already-started work may still be active.
+    // Keep the current busy state and approval ownership until an authoritative
+    // terminal event or host snapshot confirms settlement, including remote runs.
   },
 
   async approve(threadId, callId, decision) {
@@ -209,6 +215,12 @@ export const threadsSlice: Slice = (set, get) => ({
     if (s) await get().saveSettings({ ...s, activeProviderId: providerId, activeProviderAccountId: accountId, activeModel: safeModel }, { silent: true })
   },
   async patchThread(id, patch) {
+    if (Object.prototype.hasOwnProperty.call(patch, 'documentSourceIds')) {
+      const accepted = await api.patchThread(id, patch)
+      if (!accepted || accepted.id !== id) throw new Error('The document collection change was not accepted for this chat.')
+      set(state => ({ threads: state.threads.map(thread => thread.id === id ? { ...thread, documentSourceIds: accepted.documentSourceIds ? [...accepted.documentSourceIds] : [], updatedAt: accepted.updatedAt } : thread) }))
+      return
+    }
     const prev = get().threads.find((t) => t.id === id)
     set((st) => ({ threads: st.threads.map((t) => (t.id === id ? { ...t, ...patch } : t)) }))
     try {

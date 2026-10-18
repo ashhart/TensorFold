@@ -3,12 +3,17 @@ import path from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { createMobileBridge, validateMobileBridgeConfig } from '../../agent/mobile-bridge'
 import { ensureMobilePrivateDirectory, loadMobileBridgeCertificate } from '../../agent/mobile-bridge-certificate'
+import type { WatchSpeechBroker } from '../../agent/watch-speech'
+import type { WatchSnapshot } from '../../../shared/watch-relay'
 import type { MobileBridgeConfig } from '../../agent/types/mobile-bridge'
 import { requireSecurityRole } from './audit'
 import { handle } from './ipc'
 
 export interface MobileBridgeRuntimeDeps {
   profileRoot: () => string
+  watchSpeech?: WatchSpeechBroker
+  projectWatchSnapshot?: (snapshot: WatchSnapshot, sessionId: string) => WatchSnapshot
+  setWatchSpeech?: (sessionId: string, enabled: boolean) => Promise<boolean>
   remoteServer: {
     status(): { url: string | null }
     syncFromSettings(): Promise<void>
@@ -32,6 +37,8 @@ export function createMobileBridgeRuntime(deps: MobileBridgeRuntimeDeps) {
     loadCertificate: host => loadMobileBridgeCertificate(deps.profileRoot(), host),
     audit: deps.audit,
     reserveRequestOperation: deps.reserveOperation,
+    watchSpeech: deps.watchSpeech,
+    projectWatchSnapshot: deps.projectWatchSnapshot,
   })
   const configPath = () => path.join(deps.profileRoot(), 'mobile-bridge', 'config.json')
   let operations: Promise<unknown> = Promise.resolve(), activeOperations = 0
@@ -70,6 +77,17 @@ export function createMobileBridgeRuntime(deps: MobileBridgeRuntimeDeps) {
   }
 
   function registerIpc(): void {
+    handle('mobile:setDeviceWatchSpeech', async (_event, input: unknown) => {
+      requireSecurityRole('owner', 'allow Kokoro audio for a paired phone and watch')
+      if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Choose a paired device and whether to enable watch speech.')
+      const value = input as Record<string, unknown>
+      if (Object.keys(value).some(key => !['sessionId', 'enabled'].includes(key)) || typeof value.sessionId !== 'string' || !value.sessionId || value.sessionId.length > 256 || typeof value.enabled !== 'boolean') throw new Error('Choose a paired device and whether to enable watch speech.')
+      if (!deps.setWatchSpeech) throw new Error('Kokoro watch permissions are unavailable in this build.')
+      return serial(async () => {
+        if (!value.enabled) deps.watchSpeech?.revoke(value.sessionId as string)
+        return {enabled: await deps.setWatchSpeech!(value.sessionId as string, value.enabled as boolean)}
+      })
+    })
     handle('mobile:bridgeStatus', async () => {
       requireSecurityRole('owner', 'inspect the private mobile connection')
       return bridge.status()

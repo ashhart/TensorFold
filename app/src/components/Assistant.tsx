@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
@@ -7,6 +9,7 @@ import { resolveAssistantModel } from '../lib/assistant-model'
 import { MessageCardView, bubbleToCard } from './assistant/MessageCard'
 import { eventToBubble, mergeBubbles, groupEventsIntoThreads, combineItemsByThread, type BubbleRow } from './assistant/conversation'
 import { PendingApprovalsBar } from './assistant/PendingApprovalsBar'
+import { OutboundApprovalDialog } from './assistant/OutboundApprovalDialog'
 import { itemFromAttention, itemFromEvent, mergeSourceRows, sourceFromConnector, sourceName } from './assistant/mappings'
 import { assistantTaskContext, emailThreadContext, quickActionsFor } from './assistant/task-context'
 import { AssistantHeader } from './assistant/AssistantHeader'
@@ -14,8 +17,13 @@ import { ImessageFdaBanner, WhatsappQrBanner } from './assistant/Banners'
 import { TriageRail } from './assistant/TriageRail'
 import { Composer } from './assistant/Composer'
 import type { AssistantItem, SourceKey } from './assistant/types'
+import { assistantDraftScope } from '../../shared/assistant-drafts'
+import { useConversationDraft } from '../lib/use-conversation-draft'
+import { desktopDraftPort } from '../lib/desktop-drafts'
+import { insertTextareaText } from '../lib/textarea-editing'
 
 export function Assistant() {
+  const tx = useAuthoredText()
   const launch = useStore((s) => s.launch)
   const settings = useStore((s) => s.settings)
 
@@ -26,13 +34,14 @@ export function Assistant() {
   const [snapshot, setSnapshot] = useState<AssistantControlSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  const [taskText, setTaskText] = useState('')
   const [taskBusy, setTaskBusy] = useState(false)
   const [sendingReply, setSendingReply] = useState(false)
   const actionPending = useRef(false)
   const [resolvingEmail, setResolvingEmail] = useState(false)
   const [syncingEmail, setSyncingEmail] = useState(false)
   const [notice, setNotice] = useState('')
+  const [reviewEvent, setReviewEvent] = useState<ConnectorEvent | null>(null)
+  const [reviewBusy, setReviewBusy] = useState(false)
 
   const refresh = async () => {
     setLoading(true)
@@ -77,6 +86,17 @@ export function Assistant() {
 
   const selectedItem = filteredItems.find((item) => item.id === selectedItemId) ?? filteredItems[0] ?? null
   const selectedEvent = selectedItem?.eventId ? snapshot?.events.find((event) => event.id === selectedItem.eventId) ?? null : null
+  const draftContext = useMemo(() => {
+    try {
+      const event = selectedEvent ?? (selectedItem ? { id: selectedItem.eventId ?? selectedItem.id, connectorId: selectedItem.source, threadKey: selectedItem.threadKey, sources: selectedItem.sources } : null)
+      return { scope: assistantDraftScope(selectedSource, event, settings), problem: null }
+    } catch {
+      return { scope: { surface: 'assistant' as const, conversationId: `assistant-unavailable:${selectedSource}:${(selectedEvent?.id ?? selectedItem?.id ?? 'overview').slice(0, 512)}`, hostId: null, incognito: false }, problem: tx("This conversation account is unavailable or changed; this draft stays in this session until you refresh the source.") }
+    }
+  }, [selectedSource, selectedItem, selectedEvent, settings, tx])
+  const draft = useConversationDraft(draftContext.scope, draftContext.problem ? null : desktopDraftPort)
+  const { text: taskText, setText: setTaskText } = draft
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   // A two-way comms thread (not docs/calendar) can take a direct reply (connector:reply).
   const canDirectReply = !!selectedItem?.threadKey && (['email', 'slack', 'discord', 'whatsapp', 'imessage'] as ConnectorId[]).includes(selectedItem.source)
 
@@ -106,9 +126,11 @@ export function Assistant() {
           : snapshot.events.filter((e) => e.connectorId === selectedSource).slice(0, 12)
       for (const e of scoped) rows.push(eventToBubble({
         id: e.id, actor: e.actor, title: e.title, summary: e.summary, detail: e.summary,
+        text: typeof e.payload?.text === 'string' ? e.payload.text : undefined,
         action: e.action, direction: e.direction, connectorId: e.connectorId,
         threadKey: e.threadKey ?? undefined, createdAt: e.createdAt,
         approvalStatus: e.approvalStatus ?? undefined,
+        outbound: e.outbound, delivery: e.delivery,
       }))
     }
     return mergeBubbles(rows)
@@ -122,7 +144,9 @@ export function Assistant() {
   const quickActions = quickActionsFor(selectedSource)
 
   const draftTask = (text: string) => {
-    setTaskText(text)
+    if (!draft.ready) return
+    const textarea = composerRef.current
+    setTaskText(textarea ? insertTextareaText(textarea, text, 0, textarea.value.length) : text)
     setNotice('')
   }
 
@@ -132,17 +156,18 @@ export function Assistant() {
   const sendReply = async () => {
     const text = taskText.trim()
     const key = selectedItem?.threadKey
-    if (!text || !key || actionPending.current) return
-    if (!confirm(`Send this reply to ${selectedItem!.from} via ${sourceName(selectedItem!.source)}?`)) return
+    if (!draft.ready || !text || !key || actionPending.current) return
+    if (!confirm(tx("Send this reply to {value0} via {value1}?", { value0: selectedItem!.from, value1: sourceName(selectedItem!.source) }))) return
     actionPending.current = true
+    const submitted = draft.capture()
     setSendingReply(true)
     setNotice('')
     try {
       const r = await api.replyToThread(key, text)
-      if (r.ok) { setTaskText((current) => current.trim() === text ? '' : current); setNotice(`Sent to ${selectedItem!.from}.`); void refresh() }
-      else setNotice(r.error || 'Could not send the reply.')
+      if (r.ok) { await draft.clearAccepted(submitted); setNotice(tx("Sent to {value0}.", { value0: selectedItem!.from })); void refresh() }
+      else setNotice(r.error || tx("Could not send the reply."))
     } catch (e: any) {
-      setNotice(e?.message ?? 'Could not send the reply.')
+      setNotice(e?.message ?? tx("Could not send the reply."))
     } finally {
       actionPending.current = false
       setSendingReply(false)
@@ -151,13 +176,14 @@ export function Assistant() {
 
   const startTask = async () => {
     const text = taskText.trim()
-    if (!text || actionPending.current) return
+    if (!draft.ready || !text || actionPending.current) return
     const selection = settings ? resolveAssistantModel(settings) : null
     if (!settings || !selection?.providerId || !selection.model) {
-      setNotice('Choose a model in Models before starting an assistant task. Your draft is still here.')
+      setNotice(tx("Choose a model in Models before starting an assistant task. Your draft is still here."))
       return
     }
     actionPending.current = true
+    const submitted = draft.capture()
     setTaskBusy(true)
     setNotice('')
     try {
@@ -196,9 +222,9 @@ export function Assistant() {
           sourceThreadKey: selectedItem?.threadKey,
           persistActiveModel: false,
         })
-        if (!result.ok) throw new Error(result.error || 'The assistant could not start. Your draft is still here.')
+        if (!result.ok) throw new Error(result.error || tx("The assistant could not start. Your draft is still here."))
       }
-      setTaskText((current) => current.trim() === text ? '' : current)
+      await draft.clearAccepted(submitted)
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err))
     } finally {
@@ -214,7 +240,7 @@ export function Assistant() {
     try {
       const result = await api.syncEmail()
       await refresh()
-      setNotice(`Email synced: ${result.messages} messages scanned, ${result.events.length} new events.`)
+      setNotice(tx("Email synced: {value0} messages scanned, {value1} new events.", { value0: result.messages, value1: result.events.length }))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -236,7 +262,7 @@ export function Assistant() {
       if (settings?.imessage.enabled) {
         // Check Full Disk Access before attempting the iMessage sync — without it the
         // read silently fails, so surface the grant-access popup instead.
-        const access = await api.imessageAccess().catch(() => ({ state: 'error', detail: 'Could not check iMessage access.' }))
+        const access = await api.imessageAccess().catch(() => ({ state: 'error', detail: tx("Could not check iMessage access.") }))
         if (access.state === 'needs_full_disk_access') {
           setNeedsFdaAccess(true)
           results.push('iMessage: needs Full Disk Access')
@@ -245,7 +271,7 @@ export function Assistant() {
         }
       }
       await refresh()
-      setNotice(results.length ? `Synced: ${results.join(', ')}.` : 'Nothing to sync — enable a connector in Sources.')
+      setNotice(results.length ? tx("Synced: {value0}.", { value0: results.join(', ') }) : tx("Nothing to sync — enable a connector in Sources."))
     } finally {
       setSyncingSources(false)
     }
@@ -275,7 +301,7 @@ export function Assistant() {
     try {
       await api.resolveEmailThread({ id: selectedItem.threadKey, note: `Resolved from Assistant: ${selectedItem.title}` })
       await refresh()
-      setNotice('Email thread marked resolved locally.')
+      setNotice(tx("Email thread marked resolved locally."))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -286,28 +312,34 @@ export function Assistant() {
   // Draft approval flow for blue (out) bubbles that are agent drafts awaiting you.
   // Approving sends the draft through the connector approval path (e.g. email outbox);
   // discarding drops it. The snapshotted event carries the id to resolve.
-  const approveDraft = async (id: string) => {
+  const approveDraft = (id: string) => {
     const event = snapshot?.events.find((e) => e.id === id && e.requiresApproval)
-    if (!event) { setNotice('This draft has no pending approval to resolve.'); return }
-    setError(''); setNotice('')
+    if (!event) { setNotice(tx("This draft has no pending approval to resolve.")); return }
+    setError(''); setNotice(''); setReviewEvent(event)
+  }
+  const confirmDraft = async (reviewDigest: string) => {
+    if (!reviewEvent || reviewBusy) return
+    setReviewBusy(true); setError(''); setNotice('')
     try {
-      await api.resolveConnectorApproval(event.id, 'approve')
+      const result = await api.resolveConnectorApproval(reviewEvent.id, 'approve', reviewDigest)
+      setReviewEvent(null)
       await refresh()
-      setNotice('Draft approved.')
+      setNotice(result.delivery?.status === 'delivered' ? tx("Message delivered.") : result.delivery?.status === 'uncertain' ? tx("Delivery is uncertain; check the destination before sending again.") : result.delivery?.status === 'failed' ? result.delivery.error || tx("Message delivery failed.") : tx("Draft approved; no delivery receipt yet."))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
-    }
+      await refresh()
+    } finally { setReviewBusy(false) }
   }
   const discardDraft = async (id: string) => {
     const event = snapshot?.events.find((e) => e.id === id && e.requiresApproval)
     if (!event) {
-      setError('This draft has no pending approval to discard.')
+      setError(tx("This draft has no pending approval to discard."))
       return
     }
     setError(''); setNotice('')
     try {
       await discardPendingDraft((eventId) => api.resolveConnectorApproval(eventId, 'deny'), refresh, event.id)
-      setNotice('Draft discarded.')
+      setNotice(tx("Draft discarded."))
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     }
@@ -319,9 +351,9 @@ export function Assistant() {
   }
   const editDraft = (id: string) => {
     const text = draftTextFor(id)
-    if (!text) { setNotice('Nothing to edit in this draft.'); return }
-    setTaskText(text)
-    setNotice('Draft loaded into the composer — revise and send.')
+    if (!text) { setNotice(tx("Nothing to edit in this draft.")); return }
+    draftTask(text)
+    setNotice(tx("Draft loaded into the composer — revise and send."))
   }
   // Ask the assistant to redraft a pending reply in a different register.
   const redraftDraft = (id: string, how: string) => {
@@ -331,6 +363,7 @@ export function Assistant() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-canvas">
+      {reviewEvent && <OutboundApprovalDialog event={reviewEvent} busy={reviewBusy} error={error} onConfirm={(digest) => void confirmDraft(digest)} onClose={() => setReviewEvent(null)} />}
       <main className="flex min-h-0 flex-1 flex-col">
         <AssistantHeader
           snapshot={snapshot}
@@ -348,7 +381,7 @@ export function Assistant() {
           onBriefMe={draftTask}
         />
 
-        {error && <div className="mx-8 mt-4 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{error}</div>}
+        {error && <div className="mx-8 mt-4 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
         {notice && <div className="mx-8 mt-4 rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink-2">{notice}</div>}
 
         {/* WhatsApp QR pairing surfaced inline: scan with your phone to pair. */}
@@ -391,6 +424,13 @@ export function Assistant() {
             />
 
             <Composer
+              sendKey={settings?.uiPreferences?.sendKey}
+              draftKey={draft.scopeKey}
+              textareaRef={composerRef}
+              draftReady={draft.ready && !!snapshot}
+              draftStatus={draftContext.problem ?? draft.error ?? (!draft.ready || !snapshot ? 'Loading this conversation draft…' : !desktopDraftPort ? 'Draft kept for this session; use the desktop app to save across restarts.' : draft.saving || draft.dirty ? 'Saving draft…' : 'Draft saved on this device')}
+              draftProblem={!!(draftContext.problem || draft.error)}
+              onRetryDraft={() => { void draft.retry().catch(() => {}) }}
               taskText={taskText}
               setTaskText={setTaskText}
               canDirectReply={canDirectReply}

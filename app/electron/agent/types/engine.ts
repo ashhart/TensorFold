@@ -154,7 +154,7 @@ export interface ModelPreflight {
   checkedAt: number
 }
 
-export type PullState = 'running' | 'done' | 'failed' | 'cancelled'
+export type PullState = 'queued' | 'running' | 'verifying' | 'done' | 'failed' | 'cancelled'
 
 export interface PullProgress {
   repo: string
@@ -167,6 +167,11 @@ export interface PullProgress {
   message: string | null
   startedAt: number
   finishedAt: number | null
+  queuePosition?: number | null
+  bytesPerSecond?: number | null
+  etaSeconds?: number | null
+  updatedAt?: number
+  companionRepos?: string[]
 }
 
 export interface SuggestedModel {
@@ -186,6 +191,7 @@ export interface EngineSnapshot {
 }
 
 export type EngineEvent =
+  | { kind: 'comparison-cleared' }
   | { kind: 'status'; status: EngineStatus }
   | { kind: 'performance'; performance: EnginePerformance | null }
   | { kind: 'pull'; pull: PullProgress }
@@ -197,7 +203,8 @@ export interface EngineLearningFact {
   text: string
   source: string
   at: number
-  state: 'queued' | 'learning' | 'learned' | 'missed' | 'replaced'
+  state: 'queued' | 'learning' | 'learned' | 'missed' | 'replaced' | 'deleting' | 'deleted'
+  deleted?: number
   links: number[]
   round?: number
   message?: string
@@ -247,3 +254,17 @@ export interface EngineLearningSnapshot {
   } | null
   graph: EngineLearningGraph | null
 }
+
+/** Settings belong to an exact local model identity, independent of chat/tool permissions. */
+export interface EngineModelGenerationSettings {
+  contextTokens: number
+  maxOutputTokens: number
+  temperature: number
+  topP: number
+  topK: number
+  minP: number
+  speculativeDecoding: 'auto' | 'off'
+}
+export interface EngineModelProfile extends EngineModelGenerationSettings { id: string; name: string }
+export interface EngineModelProfileSet { model: string; revision: number; activeProfileId: string | null; profiles: EngineModelProfile[] }
+export interface SaveEngineModelProfilesInput { model: string; expectedRevision: number; activeProfileId: string | null; profiles: EngineModelProfile[] }

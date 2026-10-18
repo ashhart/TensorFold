@@ -6,6 +6,9 @@ import type { Duplex } from 'node:stream'
 import { timingSafeEqual } from 'node:crypto'
 import { PairingAttemptLimiter } from './remote-control'
 import type { MobileBridgeCertificate } from './mobile-bridge-certificate'
+import type { WatchSpeechBroker } from './watch-speech'
+import type { WatchSnapshot } from '../../shared/watch-relay'
+import { createHostWatchCommandRelay } from './watch-command-relay'
 import type { MobileBridgeConfig, MobileBridgeInterface, MobileBridgePairing, MobileBridgeStatus } from './types/mobile-bridge'
 
 export const MOBILE_BRIDGE_REQUEST_BYTES = 64 * 1024
@@ -28,9 +31,9 @@ export function validateMobileBridgeConfig(value: MobileBridgeConfig, interfaces
 }
 
 export function mobileBridgeRouteAllowed(method: string, pathname: string): boolean {
-  if (method === 'GET') return pathname === '/v1/snapshot' || pathname === '/v1/device-status'
+  if (method === 'GET') return pathname === '/v1/snapshot' || pathname === '/v1/device-status' || pathname === '/v1/watch/speech/status' || /^\/v1\/watch\/speech\/[a-zA-Z0-9-]{8,80}\/chunks\/\d{1,5}$/.test(pathname)
   if (method !== 'POST') return false
-  return pathname === '/v1/auth/pair' || /^\/v1\/threads\/[^/]{1,1024}\/(?:start|guide|cancel)$/.test(pathname)
+  return pathname === '/v1/auth/pair' || pathname === '/v1/watch/command' || pathname === '/v1/watch/speech/start' || /^\/v1\/watch\/speech\/[a-zA-Z0-9-]{8,80}\/cancel$/.test(pathname) || /^\/v1\/threads\/[^/]{1,1024}\/(?:start|guide|cancel)$/.test(pathname)
 }
 
 function constantEqual(expected: string, presented: string): boolean {
@@ -102,6 +105,8 @@ export interface MobileBridgeDeps {
   loadCertificate: (host: string) => Promise<MobileBridgeCertificate>
   audit?: (kind: string, data: Record<string, unknown>) => void
   reserveRequestOperation?: () => { release(): void }
+  watchSpeech?: WatchSpeechBroker
+  projectWatchSnapshot?: (snapshot: WatchSnapshot, sessionId: string) => WatchSnapshot
 }
 
 export function createMobileBridge(deps: MobileBridgeDeps) {
@@ -148,6 +153,15 @@ export function createMobileBridge(deps: MobileBridgeDeps) {
     })
   }
 
+  let watchCommands: ReturnType<typeof createHostWatchCommandRelay> | null = null
+  function watchCommandRelay() {
+    if (!server && !pendingServer) fail(503, 'mobile_bridge_stopped')
+    return watchCommands ??= createHostWatchCommandRelay({
+      authorize: deps.authorizeSessionToken, speech: deps.watchSpeech,
+      request: (method, pathname, body, token, signal) => forward(method, pathname, body === undefined ? Buffer.alloc(0) : Buffer.from(JSON.stringify(body)), token, signal),
+    })
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const origin = `https://${config.host}:${config.port}`
     const gate = authorizeMobileBridgeRequest({ target: req.url || '', method: req.method || '', expectedOrigin: origin, hostHeader: req.headers.host, origin: req.headers.origin, remoteAddress: req.socket.remoteAddress || '', authorization: req.headers.authorization, hasCookie: !!req.headers.cookie, hasLegacyToken: !!req.headers['x-vontra-token'] }, deps.ownerToken(), deps.authorizeSessionToken)
@@ -170,6 +184,47 @@ export function createMobileBridge(deps: MobileBridgeDeps) {
         catch { fail(409, 'host_operation_in_progress') }
         activeMutations++
         countedMutation = true
+      }
+      if (req.method === 'POST' && pathname === '/v1/watch/command') {
+        if (body.length > 12_000) fail(413, 'watch_request_too_large')
+        let value = await watchCommandRelay().handle(presented, payload, controller.signal)
+        const current = deps.authorizeSessionToken(presented)
+        if (!current.ok || !current.sessionId || current.scope !== undefined && current.scope !== 'paired' || controller.signal.aborted) fail(401, 'paired_session_required')
+        if (value.snapshot) {
+          if (!deps.projectWatchSnapshot) fail(503, 'watch_projection_unavailable')
+          if (value.snapshot.session !== current.sessionId) fail(401, 'paired_session_required')
+          value = {...value, snapshot: deps.projectWatchSnapshot(value.snapshot, current.sessionId)}
+        }
+        if (typeof payload.action === 'string' && payload.action.startsWith('audio-')) {
+          const speechId = payload.action === 'audio-stop' ? undefined : value.audio?.speechId ?? value.speech?.speechId ?? (typeof payload.speechId === 'string' ? payload.speechId : undefined)
+          if (!deps.watchSpeech?.isAllowed(current.sessionId, speechId)) fail(403, 'watch_speech_permission_required')
+        }
+        // No awaits after current privacy, exact speech, role and identity fences.
+        json(res, 200, value); return
+      }
+      if (pathname.startsWith('/v1/watch/speech/')) {
+        const session = deps.authorizeSessionToken(presented)
+        if (!session.ok || !session.sessionId) fail(401, 'paired_session_required')
+        if (!deps.watchSpeech) fail(501, 'kokoro_watch_unavailable')
+        let value: unknown
+        if (req.method === 'GET' && pathname === '/v1/watch/speech/status') value = await deps.watchSpeech.status(session.sessionId)
+        else if (req.method === 'POST' && pathname === '/v1/watch/speech/start') {
+          if (Object.keys(payload).some(key => !['threadId', 'itemId'].includes(key)) || typeof payload.threadId !== 'string' || typeof payload.itemId !== 'string') fail(400, 'invalid_watch_speech_request')
+          value = await deps.watchSpeech.start(session.sessionId, {threadId: payload.threadId, itemId: payload.itemId})
+        } else {
+          const chunk = /^\/v1\/watch\/speech\/([a-zA-Z0-9-]{8,80})\/chunks\/(\d{1,5})$/.exec(pathname)
+          const cancel = /^\/v1\/watch\/speech\/([a-zA-Z0-9-]{8,80})\/cancel$/.exec(pathname)
+          if (req.method === 'GET' && chunk) value = await deps.watchSpeech.chunk(session.sessionId, chunk[1], Number(chunk[2]))
+          else if (req.method === 'POST' && cancel && !Object.keys(payload).length) value = deps.watchSpeech.cancel(session.sessionId, cancel[1])
+          else fail(400, 'invalid_watch_speech_request')
+        }
+        if (pathname !== '/v1/watch/speech/status') {
+          const speechId = pathname.endsWith('/cancel') ? undefined
+            : value && typeof value === 'object' && 'speechId' in value && typeof value.speechId === 'string' ? value.speechId : undefined
+          if (!deps.watchSpeech.isAllowed(session.sessionId, speechId)) fail(403, 'watch_speech_permission_required')
+        }
+        if (!deps.authorizeSessionToken(presented).ok || controller.signal.aborted) fail(401, 'paired_session_required')
+        json(res, 200, value); return
       }
       let nonce: { expiresAt: number; consumed: boolean } | undefined
       if (claim) {
@@ -199,6 +254,9 @@ export function createMobileBridge(deps: MobileBridgeDeps) {
   async function closeListener(): Promise<void> {
     const current = server || pendingServer; server = null; pendingServer = null; certificate = null
     nonces.clear()
+    const previousWatchCommands = watchCommands; watchCommands = null
+    await previousWatchCommands?.stop()
+    deps.watchSpeech?.stop()
     for (const req of inflight) req.destroy()
     for (const socket of sockets) socket.destroy()
     sockets.clear()

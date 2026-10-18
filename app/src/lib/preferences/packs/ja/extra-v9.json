@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Codex CLI セッション、再開可能なターミナル、OAuth 認証によるコードタスクを実行します。",
+  "Runs Claude Code through your local Claude account and permission surface.": "ローカルの Claude アカウントと権限インターフェイスを通じて Claude Code を実行します。",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "ACP やヘッドレスのコーディングセッション向け Cursor Agent CLI 候補。",
+  "Gemini CLI candidate for code and research sessions.": "コードと調査のセッション向け Gemini CLI 候補。",
+  "Grok CLI candidate for xAI coding sessions.": "xAI のコーディングセッション向け Grok CLI 候補。",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode 互換コーディングセッション向け OpenCode CLI 候補。",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "OpenCode 互換コーディングセッション向け Kilo CLI 候補。",
+  "Pi coding-agent harness for terminal-based agent sessions.": "ターミナルのエージェントセッションで使う Pi コーディングエージェントの実行基盤。",
+  "Broken": "異常",
+  "Not found on PATH or the configured path": "PATH または設定したパスに見つかりません",
+  "--version printed no version": "--version がバージョンを出力しませんでした"
+}

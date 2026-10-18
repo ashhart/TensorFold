@@ -124,7 +124,7 @@ const buildState = (set: SetState, get: GetState): AppState => ({
         updateStatus: live.updateStatus !== updateStatusAtStart ? live.updateStatus : updateStatus,
         archives,
         resolvedTheme: resolveTheme(settings),
-        notice: failed ? { kind: 'error', message: 'Some data failed to load — running with partial state.' } : live.notice,
+        notice: failed ? { kind: 'error', message: 'Some data failed to load — running with partial state.', authored: true } : live.notice,
       })
     } finally {
       // Always render: even on total failure the UI must come up rather than hang on a blank screen.

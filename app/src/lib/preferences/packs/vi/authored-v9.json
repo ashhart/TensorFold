@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Chạy phiên Codex CLI, terminal có thể tiếp tục và tác vụ mã có OAuth.",
+  "Runs Claude Code through your local Claude account and permission surface.": "Chạy Claude Code bằng tài khoản Claude cục bộ và cơ chế quyền riêng của nó.",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "Lựa chọn Cursor Agent CLI cho phiên lập trình ACP hoặc không giao diện.",
+  "Gemini CLI candidate for code and research sessions.": "Lựa chọn Gemini CLI cho phiên lập trình và nghiên cứu.",
+  "Grok CLI candidate for xAI coding sessions.": "Lựa chọn Grok CLI cho phiên lập trình xAI.",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "Lựa chọn OpenCode CLI cho phiên lập trình tương thích OpenCode.",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "Lựa chọn Kilo CLI cho phiên lập trình tương thích OpenCode.",
+  "Pi coding-agent harness for terminal-based agent sessions.": "Môi trường tác nhân lập trình Pi cho phiên tác nhân qua terminal.",
+  "Broken": "Bị lỗi",
+  "Not found on PATH or the configured path": "Không tìm thấy trong PATH hoặc đường dẫn đã cấu hình",
+  "--version printed no version": "--version không báo phiên bản"
+}

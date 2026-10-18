@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Codex CLI सत्र, फिर जारी होने वाले टर्मिनल और OAuth वाले कोड काम चलाता है।",
+  "Runs Claude Code through your local Claude account and permission surface.": "आपके स्थानीय Claude खाते और उसके अपने अनुमति नियंत्रण से Claude Code चलाता है।",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "ACP या बिना इंटरफ़ेस कोड सत्र के लिए Cursor Agent CLI विकल्प।",
+  "Gemini CLI candidate for code and research sessions.": "कोड और शोध सत्रों के लिए Gemini CLI विकल्प।",
+  "Grok CLI candidate for xAI coding sessions.": "xAI कोड सत्रों के लिए Grok CLI विकल्प।",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode-संगत कोड सत्रों के लिए OpenCode CLI विकल्प।",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "OpenCode-संगत कोड सत्रों के लिए Kilo CLI विकल्प।",
+  "Pi coding-agent harness for terminal-based agent sessions.": "टर्मिनल में एजेंट सत्र चलाने के लिए Pi कोड एजेंट ढाँचा।",
+  "Broken": "काम नहीं कर रहा",
+  "Not found on PATH or the configured path": "PATH या तय पथ पर नहीं मिला",
+  "--version printed no version": "--version ने संस्करण नहीं बताया"
+}

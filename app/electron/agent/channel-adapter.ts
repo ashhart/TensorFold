@@ -4,7 +4,7 @@
 // send. Adding a channel = implement one adapter + register it. Pure router + injected
 // adapters (testable with fakes); concrete adapters wrap the existing send fns.
 
-import { splitForPlatform } from './channel-split'
+import { limitForPlatform, splitForPlatform } from './channel-split'
 import { makeDraftEditThrottle, type DraftEditThrottle } from './draft-throttle'
 import { parseThreadAddress, type ThreadAddress } from './thread-address'
 import type { ChannelApprovalRequest, ChannelApprovalResult, ConnectorApprovalDecision } from './types/connectors'
@@ -90,7 +90,7 @@ export function resolveAdapter(adapters: ChannelAdapter[], address: ThreadAddres
  * channel chokepoint so the agent can't post a blank message). Returns a normalized
  * SendResult so callers (approval flow, IPC) handle every channel the same way.
  */
-export async function sendViaChannel(adapters: ChannelAdapter[], threadKey: string, reply: OutboundReply): Promise<SendResult> {
+export async function sendViaChannel(adapters: ChannelAdapter[], threadKey: string, reply: OutboundReply, options?: { preserveText?: boolean }): Promise<SendResult> {
   if (!reply || !reply.text || !reply.text.trim()) return { ok: false, error: 'Refusing to send an empty reply.' }
   const address = parseThreadAddress(threadKey)
   if (!address) return { ok: false, error: 'Unrecognized conversation.' }
@@ -98,7 +98,7 @@ export async function sendViaChannel(adapters: ChannelAdapter[], threadKey: stri
   if (!adapter) return { ok: false, error: `No channel adapter for "${address.platform}".` }
   // Split a long reply at safe boundaries under the platform's per-message cap. Short replies
   // (the common case) yield a single chunk and send exactly as before.
-  const chunks = splitForPlatform(address.platform, reply.text)
+  const chunks = options?.preserveText ? exactMessageChunks(address.platform, reply.text) : splitForPlatform(address.platform, reply.text)
   try {
     if (chunks.length <= 1) {
       return await adapter.send(address, { text: chunks[0] ?? reply.text.trim(), inReplyTo: reply.inReplyTo ?? null })
@@ -121,6 +121,20 @@ export async function sendViaChannel(adapters: ChannelAdapter[], threadKey: stri
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) }
   }
+}
+
+// Reviewed sends retain every character. Ordinary conversational replies keep the
+// existing whitespace-aware splitting behavior; no transport fallback retries a chunk.
+function exactMessageChunks(platform: string, text: string): string[] {
+  const max = limitForPlatform(platform).maxUnits
+  if (!max || text.length <= max) return [text]
+  const chunks: string[] = []
+  for (let start = 0; start < text.length;) {
+    let end = Math.min(start + max, text.length)
+    if (end < text.length && /[\uD800-\uDBFF]/.test(text[end - 1]) && /[\uDC00-\uDFFF]/.test(text[end])) end--
+    chunks.push(text.slice(start, end)); start = end
+  }
+  return chunks
 }
 
 /** Platforms a set of adapters can currently send to (for capability checks / UI). */

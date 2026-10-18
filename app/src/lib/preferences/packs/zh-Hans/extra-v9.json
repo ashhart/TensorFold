@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "运行 Codex CLI 会话、可恢复的终端，以及通过 OAuth 授权的代码任务。",
+  "Runs Claude Code through your local Claude account and permission surface.": "通过你的本地 Claude 账户及其权限界面运行 Claude Code。",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "用于 ACP 或无界面编程会话的 Cursor Agent CLI 候选。",
+  "Gemini CLI candidate for code and research sessions.": "用于代码与研究会话的 Gemini CLI 候选。",
+  "Grok CLI candidate for xAI coding sessions.": "用于 xAI 编程会话的 Grok CLI 候选。",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "用于 OpenCode 兼容编程会话的 OpenCode CLI 候选。",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "用于 OpenCode 兼容编程会话的 Kilo CLI 候选。",
+  "Pi coding-agent harness for terminal-based agent sessions.": "用于终端智能体会话的 Pi 编程智能体运行框架。",
+  "Broken": "故障",
+  "Not found on PATH or the configured path": "在 PATH 或已配置路径中未找到",
+  "--version printed no version": "--version 未输出版本"
+}

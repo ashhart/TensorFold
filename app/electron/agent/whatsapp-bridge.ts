@@ -1,6 +1,8 @@
-import { randomUUID } from 'node:crypto'
+import { randomUUID, randomBytes } from 'node:crypto'
 import path from 'node:path'
-import type { ConnectorEvent } from './types'
+import type { ConnectorEvent, WhatsAppBridgeConnectorSettings, WhatsAppBridgeSource, WhatsAppBridgeRuntimeSnapshot } from './types'
+import { normalizeWhatsAppConversationJid, normalizeWhatsAppJid } from '../../shared/whatsapp-event-scope'
+export { normalizeWhatsAppConversationJid, normalizeWhatsAppJid } from '../../shared/whatsapp-event-scope'
 import { cacheWhatsAppMediaMessage, whatsappMediaCaption, whatsappMediaDescriptor } from './whatsapp-media-ingest.ts'
 
 // Multi-account WhatsApp bridge via the WhatsApp multidevice protocol (the
@@ -66,33 +68,16 @@ async function loadBaileys(): Promise<BaileysModule> {
   return baileysPromise
 }
 
-export interface WhatsAppBridgeSource {
-  id: string
-  label: string
-  enabled: boolean
-  /** Phone number (jid), filled in after first pairing. */
-  phoneNumber: string | null
-  /** Whether the bridge has completed QR pairing and holds valid credentials. */
-  paired: boolean
-  lastQrAt: number | null
-  lastEventAt: number | null
-  lastError: string | null
-  /** Server-authored age marker for the durable linked-device credential. */
-  credentialRotatedAt?: number | null
-  createdAt: number
-  updatedAt: number
-}
-
-export interface WhatsAppBridgeSettings {
-  sources: WhatsAppBridgeSource[]
-  lastSyncAt: number | null
-}
+export type { WhatsAppBridgeSource } from './types'
+export type WhatsAppBridgeSettings = WhatsAppBridgeConnectorSettings
 
 export function makeWhatsAppBridgeSource(label: string, now = Date.now()): WhatsAppBridgeSource {
   return {
     id: `wa_${randomUUID().slice(0, 8)}`,
     label: label || 'WhatsApp account',
     enabled: true,
+    allowedChatJids: [],
+    allowSelfChat: false,
     phoneNumber: null,
     paired: false,
     lastQrAt: null,
@@ -104,33 +89,78 @@ export function makeWhatsAppBridgeSource(label: string, now = Date.now()): Whats
   }
 }
 
-// A live bridge session: one per paired account. Held in-process only.
+// Ephemeral lifecycle belongs to the host, not the durable `paired` credential hint.
 interface BridgeSession {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sock: any
   sourceId: string
-  // Per-session seen message ids: baileys re-delivers messages.upsert on reconnect, and the
-  // store-level dedup only holds within a rolling 500-event window — so a replay of an older
-  // message would slip through. This unbounded-but-trimmed set dedups at the source.
   seen: Set<string>
+  outbound: Set<string>
+  ownJids: Set<string>
+  runtime: WhatsAppBridgeRuntimeSnapshot
+  reconnectTimer: ReturnType<typeof setTimeout> | null
+  qrTimer: ReturnType<typeof setTimeout> | null
+  onRuntime: (snapshot: WhatsAppBridgeRuntimeSnapshot) => void
+  getSource: () => WhatsAppBridgeSource | undefined
+  cancelSchedule: (timer: ReturnType<typeof setTimeout>) => void
 }
-
 const SEEN_CAP = 5000
-
+const MAX_RECONNECTS = 5
+const QR_LIFETIME_MS = 60_000
 const sessions = new Map<string, BridgeSession>()
+const runtimeStates = new Map<string, WhatsAppBridgeRuntimeSnapshot>()
 const sourceLifecycleGenerations = new Map<string, number>()
 let allBridgesGeneration = 0
-
-function sourceLifecycleGeneration(sourceId: string): number {
-  return sourceLifecycleGenerations.get(sourceId) ?? 0
-}
-
+/** Startup preflight uses the same stop/purge generation as socket initialization. */
+export function getWhatsAppBridgeLifecycleEpoch(): number { return allBridgesGeneration }
+function sourceLifecycleGeneration(sourceId: string): number { return sourceLifecycleGenerations.get(sourceId) ?? 0 }
 function assertBridgeStartActive(sourceId: string, sourceGeneration: number, globalGeneration: number): void {
   if (sourceLifecycleGeneration(sourceId) !== sourceGeneration || allBridgesGeneration !== globalGeneration) {
     throw new Error('WhatsApp bridge start was cancelled because its credential session was stopped or purged.')
   }
 }
-
+function publishRuntime(session: BridgeSession, patch: Partial<WhatsAppBridgeRuntimeSnapshot>): void {
+  session.runtime = { ...session.runtime, ...patch, updatedAt: Math.max(Date.now(), session.runtime.updatedAt + 1) }
+  runtimeStates.set(session.sourceId, session.runtime)
+  session.onRuntime({ ...session.runtime })
+}
+export function getWhatsAppBridgeRuntime(sourceId?: string): WhatsAppBridgeRuntimeSnapshot[] {
+  return [...runtimeStates.values()].filter((s) => !sourceId || s.sourceId === sourceId).map((s) => ({
+    ...s,
+    ...(s.qrExpiresAt != null && s.qrExpiresAt <= Date.now() ? { qr: null, qrExpiresAt: null } : {}),
+  }))
+}
+export function validateWhatsAppSourcePatch(patch: unknown): Pick<WhatsAppBridgeSource, 'label' | 'enabled' | 'allowedChatJids' | 'allowSelfChat'> | Partial<Pick<WhatsAppBridgeSource, 'label' | 'enabled' | 'allowedChatJids' | 'allowSelfChat'>> {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) throw new Error('Invalid WhatsApp account settings.')
+  const input = patch as Record<string, unknown>
+  const result: Partial<Pick<WhatsAppBridgeSource, 'label' | 'enabled' | 'allowedChatJids' | 'allowSelfChat'>> = {}
+  if ('label' in input) {
+    if (typeof input.label !== 'string' || !input.label.trim() || input.label.length > 120) throw new Error('Enter an account label of 1–120 characters.')
+    result.label = input.label.trim()
+  }
+  for (const key of ['enabled', 'allowSelfChat'] as const) {
+    if (key in input) {
+      if (typeof input[key] !== 'boolean') throw new Error(`Invalid WhatsApp ${key} setting.`)
+      result[key] = input[key]
+    }
+  }
+  if ('allowedChatJids' in input) {
+    if (!Array.isArray(input.allowedChatJids) || input.allowedChatJids.length > 100) throw new Error('Select at most 100 exact WhatsApp contacts.')
+    const normalized = input.allowedChatJids.map(normalizeWhatsAppConversationJid)
+    if (normalized.some((jid) => !jid)) throw new Error('Use exact international phone numbers or WhatsApp contact/group JIDs; display names and wildcards are not accepted.')
+    result.allowedChatJids = [...new Set(normalized as string[])]
+  }
+  return result
+}
+function selectedConversation(source: WhatsAppBridgeSource | undefined, session: BridgeSession, jid: string, fromMe: boolean): boolean {
+  if (!source?.enabled) return false
+  const normalized = normalizeWhatsAppConversationJid(jid)
+  if (!normalized) return false
+  const self = session.ownJids.has(normalized)
+  if (fromMe) return self && source.allowSelfChat === true
+  if (self) return source.allowSelfChat === true
+  return (source.allowedChatJids ?? []).some((allowed) => normalizeWhatsAppConversationJid(allowed) === normalized)
+}
 // Returns true if this id is new (and records it); false if already seen this session.
 export function markWhatsAppSeen(session: { seen: Set<string> }, messageId: string): boolean {
   if (!messageId) return true // no id to dedup on — let the store-level guard handle it
@@ -181,9 +211,16 @@ export type WhatsAppAuthStateFactory = (
   sourceId: string,
 ) => Promise<WhatsAppAuthStateHandle>
 
-// Start (or resume) a bridge for one account. Emits a QR code string for pairing
-// (the renderer shows it as a scannable code), and `onEvent` for each inbound
-// message. Returns the current source so callers can persist status.
+/** Production keeps all I/O in Baileys and the protected auth adapter; tests inject only protocol/timing seams. */
+export interface WhatsAppBridgeRuntimeDeps {
+  loadBaileys?: () => Promise<BaileysModule>
+  getSource?: () => WhatsAppBridgeSource | undefined
+  onRuntime?: (snapshot: WhatsAppBridgeRuntimeSnapshot) => void
+  schedule?: (callback: () => void, delay: number) => ReturnType<typeof setTimeout>
+  cancelSchedule?: (timer: ReturnType<typeof setTimeout>) => void
+  /** Auto-resume must never create credentials or start QR pairing. */
+  requireRegistered?: boolean
+}
 export async function startWhatsAppBridge(
   source: WhatsAppBridgeSource,
   baseDir: string,
@@ -191,161 +228,165 @@ export async function startWhatsAppBridge(
   onEvent: (event: ConnectorEvent) => void,
   onStatus: (patch: Partial<WhatsAppBridgeSource>) => void,
   authStateFactory?: WhatsAppAuthStateFactory,
+  deps: WhatsAppBridgeRuntimeDeps = {},
 ): Promise<WhatsAppBridgeSource> {
-  if (!authStateFactory) {
-    throw new Error('WhatsApp QR pairing is disabled because a protected credential store is unavailable. Use the signed WhatsApp Cloud connector instead.')
-  }
+  if (!authStateFactory) throw new Error('WhatsApp QR pairing is disabled because a protected credential store is unavailable. Use the signed WhatsApp Cloud connector instead.')
+  if (!source.enabled) throw new Error('Enable this WhatsApp account before connecting.')
+  if (sessions.has(source.id)) return { ...source }
   const sourceGeneration = sourceLifecycleGeneration(source.id)
   const globalGeneration = allBridgesGeneration
-  const B = await loadBaileys()
-  assertBridgeStartActive(source.id, sourceGeneration, globalGeneration)
-  const { DisconnectReason, makeWASocket, fetchLatestBaileysVersion } = B
-  const auth = await authStateFactory(B, baseDir, source.id)
-  assertBridgeStartActive(source.id, sourceGeneration, globalGeneration)
-  const { state, saveCreds } = auth
-  const { version } = await fetchLatestBaileysVersion()
-  assertBridgeStartActive(source.id, sourceGeneration, globalGeneration)
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sock = makeWASocket({
-    version,
-    auth: state,
-    printQRInTerminal: false,
-    // Full pino-shaped silent logger — baileys calls logger.child()/level methods, so a bare
-    // `{ level: 'silent' }` throws "logger.child is not a function" and kills pairing pre-QR.
-    logger: silentBaileysLogger(),
-  })
-  // Reuse the existing seen-set across a reconnect (515/410 re-invokes this function): a
-  // fresh Set() would defeat dedup for exactly the reconnect-replay case it exists for.
-  sessions.set(source.id, { sock, sourceId: source.id, seen: sessions.get(source.id)?.seen ?? new Set<string>() })
-
-  // Baileys mutates `state.creds` before this event. Persist that real credential transition
-  // first, then stamp its server-authored age marker. Status-only edits never call this path.
-  sock.ev.on('creds.update', () => {
-    if (sessions.get(source.id)?.sock !== sock) return
-    void saveCreds()
-      .then((credentialRotatedAt) => {
-        if (credentialRotatedAt != null) onStatus({ credentialRotatedAt })
-      })
-      .catch((error) => {
-        try { sock.end?.() } catch { /* best effort */ }
-        onStatus({
-          paired: false,
-          lastError: `WhatsApp credential update could not be protected on disk: ${String(error instanceof Error ? error.message : error).slice(0, 220)}`,
-        })
-      })
-  })
-
-  // Recover the age marker from protected state or a safely-migrated legacy creds mtime.
-  const existingCredentialTime = auth.credentialUpdatedAt()
-  if (existingCredentialTime != null && existingCredentialTime !== source.credentialRotatedAt) {
-    onStatus({ credentialRotatedAt: existingCredentialTime })
+  const schedule = deps.schedule ?? setTimeout
+  const cancelSchedule = deps.cancelSchedule ?? clearTimeout
+  const currentSource = () => deps.getSource ? deps.getSource() : source
+  const session: BridgeSession = {
+    sourceId: source.id, sock: null, seen: new Set(), outbound: new Set(), ownJids: new Set(),
+    reconnectTimer: null, qrTimer: null, onRuntime: deps.onRuntime ?? (() => {}), getSource: currentSource, cancelSchedule,
+    runtime: { sourceId: source.id, phase: 'connecting', qr: null, qrExpiresAt: null, phoneNumber: null, reconnectAttempt: 0, nextReconnectAt: null, lastError: null, updatedAt: Math.max(Date.now(), (runtimeStates.get(source.id)?.updatedAt ?? 0) + 1) },
   }
-
-  sock.ev.on('connection.update', (update: { qr?: string; connection?: string; lastDisconnect?: { error?: { output?: { statusCode?: number } } } }) => {
-    // A stopped/replaced socket may emit one final close/update event. It no longer owns this
-    // source and must not publish status or launch a reconnect that recreates wiped auth state.
-    if (sessions.get(source.id)?.sock !== sock) return
-    if (update.qr) {
-      onQr(update.qr)
-      onStatus({ lastQrAt: Date.now() })
-    }
-    if (update.connection === 'open') {
-      onStatus({ paired: true, lastError: null, lastEventAt: Date.now() })
-    }
-    if (update.connection === 'close') {
-      const code = update.lastDisconnect?.error?.output?.statusCode
-      // 515 / 410 are reconnectable; 401/403 mean the auth is invalid (logged out).
-      if (code === DisconnectReason.loggedOut) {
-        onStatus({ paired: false, lastError: 'Logged out — re-pair by scanning the QR again.' })
-      } else if (code === 515 || code === 410) {
-        // Reconnect transiently.
-        sessions.delete(source.id)
-        void startWhatsAppBridge(source, baseDir, onQr, onEvent, onStatus, authStateFactory).catch(() => {})
-      } else {
-        onStatus({ lastError: `Connection closed (code ${code ?? 'unknown'}).` })
-      }
-    }
-  })
-
-  // ~/.vontra/cache — the shared media cache the vision tool reads decrypted attachments from.
-  const mediaCacheRoot = path.join(baseDir, 'cache')
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  sock.ev.on('messages.upsert', (payload: { messages: Array<any> }) => {
-    const session = sessions.get(source.id)
-    if (!session || session.sock !== sock) return
-    for (const m of payload.messages ?? []) {
-      if (m.key.fromMe) continue // skip our own outbound messages — don't re-ingest them as inbound
-      // Media (image/document/audio/video) arrives ENCRYPTED; detect it so a caption-less photo
-      // still ingests (the old `if (!text) continue` dropped media-only messages entirely).
-      const media = whatsappMediaDescriptor(m.message)
-      const text = m.message?.conversation ?? m.message?.extendedTextMessage?.text ?? (media ? whatsappMediaCaption(m.message) : '')
-      if (!text && !media) continue
-      const jid = m.key.remoteJid
-      // Stable dedup id: prefer the WhatsApp message id; synthesize a deterministic one when
-      // it's absent (rare) so a no-id message still dedups across replays at both layers.
-      const dedupId = m.key.id || `syn:${jid}:${m.messageTimestamp ?? ''}:${(text || media?.contentKey || '').length}`
-      // Drop replays at the source (reconnect re-delivers), regardless of the store cap.
-      if (session && !markWhatsAppSeen(session, dedupId)) continue
-      const base = {
-        sourceId: source.id,
-        jid,
-        fromMe: Boolean(m.key.fromMe),
-        text,
-        sender: whatsappSenderFor(jid, m.pushName, m.key.participant),
-        ts: Number(m.messageTimestamp) ? Number(m.messageTimestamp) * 1000 : Date.now(),
-        messageId: dedupId,
-      }
-      if (!media) {
-        onEvent(whatsappEventFromMessage(base))
-        continue
-      }
-      // Media message: download (Baileys decrypts the CDN blob internally via downloadMediaMessage)
-      // and write the decrypted bytes to the media cache, then emit with the local path attached.
-      // Best-effort + async so the download never blocks the socket; a failed decrypt still emits
-      // the message as text (the caption) so nothing is silently dropped.
-      void cacheWhatsAppMediaMessage(media, {
-        cacheRoot: mediaCacheRoot,
-        fetchDecryptedBytes: async () => B.downloadMediaMessage(m, 'buffer', {}),
+  sessions.set(source.id, session)
+  publishRuntime(session, {})
+  const active = () => sessions.get(source.id) === session && sourceLifecycleGeneration(source.id) === sourceGeneration && allBridgesGeneration === globalGeneration
+  const assertActive = () => {
+    assertBridgeStartActive(source.id, sourceGeneration, globalGeneration)
+    if (!active() || !currentSource()?.enabled) throw new Error('WhatsApp connection was stopped or disabled.')
+  }
+  const clearQr = () => {
+    if (session.qrTimer) cancelSchedule(session.qrTimer)
+    session.qrTimer = null
+    publishRuntime(session, { qr: null, qrExpiresAt: null })
+  }
+  const fail = (error: unknown) => {
+    if (!active()) return
+    const message = whatsappPairingErrorPatch(error).lastError
+    publishRuntime(session, { phase: 'error', qr: null, qrExpiresAt: null, lastError: message ?? null, nextReconnectAt: null })
+    onStatus({ lastError: message })
+  }
+  const connect = async (): Promise<void> => {
+    assertActive()
+    const B = await (deps.loadBaileys ?? loadBaileys)()
+    assertActive()
+    const auth = await authStateFactory(B, baseDir, source.id)
+    assertActive()
+    if (deps.requireRegistered && auth.state?.creds?.registered !== true) throw new Error('Saved WhatsApp credentials are not registered; link this phone again.')
+    const { version } = await B.fetchLatestBaileysVersion()
+    assertActive()
+    const sock = B.makeWASocket({ version, auth: auth.state, printQRInTerminal: false, logger: silentBaileysLogger() })
+    session.sock = sock
+    const ownsSocket = () => active() && session.sock === sock
+    sock.ev.on('creds.update', () => {
+      if (!ownsSocket()) return
+      void auth.saveCreds().then((credentialRotatedAt) => {
+        if (ownsSocket() && credentialRotatedAt != null) onStatus({ credentialRotatedAt })
+      }).catch((error: unknown) => {
+        if (!ownsSocket()) return
+        session.sock = null
+        try { sock.end?.() } catch { /* best effort */ }
+        fail(new Error(`WhatsApp credential update could not be protected on disk: ${String(error instanceof Error ? error.message : error).slice(0, 220)}`))
       })
-        .then((mediaPath) => {
-          onEvent(whatsappEventFromMessage({ ...base, mediaPaths: mediaPath ? [mediaPath] : [] }))
-        })
-        .catch(() => {
-          onEvent(whatsappEventFromMessage(base)) // download/decrypt failed → still ingest the text
-        })
+    })
+    const existingCredentialTime = auth.credentialUpdatedAt()
+    if (existingCredentialTime != null && existingCredentialTime !== currentSource()?.credentialRotatedAt) onStatus({ credentialRotatedAt: existingCredentialTime })
+    sock.ev.on('connection.update', (update: { qr?: string; connection?: string; lastDisconnect?: { error?: { output?: { statusCode?: number } } } }) => {
+      if (!ownsSocket()) return
+      if (update.qr) {
+        clearQr()
+        if (deps.requireRegistered) {
+          session.sock = null
+          try { sock.end?.() } catch { /* best effort */ }
+          fail(new Error('Saved WhatsApp credentials need a new phone link.'))
+          return
+        }
+        const qrExpiresAt = Date.now() + QR_LIFETIME_MS
+        publishRuntime(session, { phase: 'pairing', qr: update.qr, qrExpiresAt, lastError: null })
+        onQr(update.qr)
+        onStatus({ lastQrAt: Date.now() })
+        session.qrTimer = schedule(() => { if (ownsSocket()) clearQr() }, QR_LIFETIME_MS)
+        session.qrTimer.unref?.()
+      }
+      if (update.connection === 'open') {
+        clearQr()
+        const phoneJid = normalizeWhatsAppJid(sock.user?.id)
+        const lid = normalizeWhatsAppJid(sock.user?.lid)
+        session.ownJids = new Set([phoneJid, lid].filter((jid): jid is string => Boolean(jid)))
+        if (!session.ownJids.size) {
+          session.sock = null
+          try { sock.end?.() } catch { /* best effort */ }
+          fail(new Error('WhatsApp did not provide an authenticated linked-account identity.'))
+          return
+        }
+        const phoneNumber = phoneJid?.endsWith('@s.whatsapp.net') ? `+${phoneJid.split('@')[0]}` : null
+        publishRuntime(session, { phase: 'connected', phoneNumber, lastError: null, nextReconnectAt: null })
+        onStatus({ paired: true, phoneNumber, lastError: null, lastEventAt: Date.now() })
+      }
+      if (update.connection === 'close') {
+        session.sock = null
+        clearQr()
+        const code = update.lastDisconnect?.error?.output?.statusCode
+        if (code === B.DisconnectReason?.loggedOut || code === 401 || code === 403) {
+          publishRuntime(session, { phase: 'disconnected', lastError: 'Logged out — link the phone again.', nextReconnectAt: null })
+          onStatus({ paired: false, lastError: 'Logged out — link the phone again.' })
+        } else if ([515, 410, 408, 428, 503].includes(code ?? -1) && session.runtime.reconnectAttempt < MAX_RECONNECTS && currentSource()?.enabled) {
+          const attempt = session.runtime.reconnectAttempt + 1
+          const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1))
+          publishRuntime(session, { phase: 'reconnecting', reconnectAttempt: attempt, nextReconnectAt: Date.now() + delay, lastError: 'Connection interrupted; reconnecting.' })
+          onStatus({ lastError: 'Connection interrupted; reconnecting.' })
+          session.reconnectTimer = schedule(() => {
+            session.reconnectTimer = null
+            if (!active()) return
+            void connect().catch(fail)
+          }, delay)
+          session.reconnectTimer.unref?.()
+        } else {
+          fail(new Error(session.runtime.reconnectAttempt >= MAX_RECONNECTS ? 'Automatic reconnect limit reached; choose Reconnect to try again.' : `Connection closed (code ${code ?? 'unknown'}). Choose Reconnect.`))
+        }
+      }
+    })
+    const ingest = (messages: unknown[], historical: boolean) => {
+      if (!ownsSocket() || session.runtime.phase !== 'connected') return
+      // A linked-device replay is history, never a remote command or authorization.
+      for (const raw of messages.slice(historical ? -300 : -500)) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const m = raw as any
+          const jid = normalizeWhatsAppConversationJid(m?.key?.remoteJid)
+          const fromMe = m?.key?.fromMe === true
+          if (!jid || !selectedConversation(currentSource(), session, jid, fromMe)) continue
+          const media = whatsappMediaDescriptor(m.message)
+          const text = m.message?.conversation ?? m.message?.extendedTextMessage?.text ?? (media ? whatsappMediaCaption(m.message) : '')
+          if (typeof text !== 'string' || (!text && !media)) continue
+          const dedupId = m.key.id || `syn:${jid}:${m.messageTimestamp ?? ''}:${(text || media?.contentKey || '').length}`
+          if (session.outbound.has(dedupId) || !markWhatsAppSeen(session, dedupId)) continue
+          const base: WhatsAppMessageInput = {
+            // Own PN/LID aliases have already passed selectedConversation against
+            // sock.user identity. Store one canonical self-chat, never a raw LID flag.
+            sourceId: source.id, jid: session.ownJids.has(jid) ? normalizeWhatsAppJid(sock.user?.id) ?? jid : jid, fromMe: false, text: text || '[media]',
+            sender: fromMe ? 'You (linked phone)' : whatsappSenderFor(jid, m.pushName, m.key.participant),
+            ts: Number(m.messageTimestamp) ? Number(m.messageTimestamp) * 1000 : Date.now(),
+            messageId: dedupId, historical, selfChat: session.ownJids.has(jid),
+            authenticatedAccountJid: normalizeWhatsAppJid(sock.user?.id) ?? undefined,
+          }
+          const stillAllowed = () => ownsSocket() && session.runtime.phase === 'connected' && selectedConversation(currentSource(), session, jid, fromMe)
+          if (!media || historical) {
+            if (stillAllowed()) onEvent(whatsappEventFromMessage(base))
+          } else {
+            void cacheWhatsAppMediaMessage(media, {
+              cacheRoot: path.join(baseDir, 'cache'),
+              shouldCache: stillAllowed,
+              fetchDecryptedBytes: async () => {
+                if (!stillAllowed()) throw new Error('WhatsApp contact scope changed.')
+                return B.downloadMediaMessage(m, 'buffer', {})
+              },
+            }).then((mediaPath) => {
+              if (stillAllowed()) onEvent(whatsappEventFromMessage({ ...base, mediaPaths: mediaPath ? [mediaPath] : [] }))
+            }).catch(() => { if (stillAllowed()) onEvent(whatsappEventFromMessage(base)) })
+          }
+        } catch { /* malformed input is untrusted and cannot crash ingestion */ }
+      }
     }
-  })
-
-  // HISTORY BACKFILL: on link, WhatsApp delivers a recent-chats snapshot. The live messages.upsert
-  // above only captures messages that arrive AFTER pairing, so without this a freshly-paired account
-  // shows zero threads until someone messages you. Backfill inbound text messages from the snapshot
-  // through the same dedup + event path (text-only — no media-download burst). Fully guarded so a
-  // malformed history payload can never crash the bridge; the per-message dedup set prevents doubles
-  // when a backfilled message is later re-delivered live.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  sock.ev.on('messaging-history.set', (payload: { messages?: Array<any> }) => {
-    const session = sessions.get(source.id)
-    if (!session || session.sock !== sock) return
-    for (const m of (payload?.messages ?? []).slice(-300)) {
-      try {
-        if (!m?.key || m.key.fromMe) continue
-        const media = whatsappMediaDescriptor(m.message)
-        const text = m.message?.conversation ?? m.message?.extendedTextMessage?.text ?? (media ? whatsappMediaCaption(m.message) : '')
-        if (!text && !media) continue
-        const jid = m.key.remoteJid
-        const dedupId = m.key.id || `syn:${jid}:${m.messageTimestamp ?? ''}:${(text || media?.contentKey || '').length}`
-        if (session && !markWhatsAppSeen(session, dedupId)) continue
-        onEvent(whatsappEventFromMessage({
-          sourceId: source.id, jid, fromMe: false, text: text || '[media]',
-          sender: whatsappSenderFor(jid, m.pushName, m.key.participant),
-          ts: Number(m.messageTimestamp) ? Number(m.messageTimestamp) * 1000 : Date.now(),
-          messageId: dedupId,
-        }))
-      } catch { /* skip a malformed history item */ }
-    }
-  })
-
+    sock.ev.on('messages.upsert', (payload: { messages?: unknown[]; type?: string }) => ingest(payload?.messages ?? [], payload?.type !== 'notify'))
+    sock.ev.on('messaging-history.set', (payload: { messages?: unknown[] }) => ingest(payload?.messages ?? [], true))
+  }
+  try { await connect() } catch (error) { fail(error); throw error }
   return { ...source, updatedAt: Date.now() }
 }
 
@@ -363,33 +404,48 @@ export function stopWhatsAppBridge(sourceId: string): void {
   sourceLifecycleGenerations.set(sourceId, sourceLifecycleGeneration(sourceId) + 1)
   const session = sessions.get(sourceId)
   if (session) {
-    // Revoke ownership before end(): some socket implementations synchronously emit a final
-    // connection.update from end(), and that callback must see itself as stale.
     sessions.delete(sourceId)
-    try { session.sock.end?.() } catch { /* best effort */ }
+    if (session.reconnectTimer) session.cancelSchedule(session.reconnectTimer)
+    if (session.qrTimer) session.cancelSchedule(session.qrTimer)
+    const sock = session.sock
+    session.sock = null
+    publishRuntime(session, { phase: 'disconnected', qr: null, qrExpiresAt: null, nextReconnectAt: null, lastError: null })
+    try { sock?.end?.() } catch { /* best effort */ }
+  } else {
+    const runtime = runtimeStates.get(sourceId)
+    if (runtime) runtimeStates.set(sourceId, { ...runtime, phase: 'disconnected', qr: null, qrExpiresAt: null, nextReconnectAt: null, updatedAt: Math.max(Date.now(), runtime.updatedAt + 1) })
   }
 }
-
 export function stopAllWhatsAppBridges(): void {
   allBridgesGeneration++
   for (const id of [...sessions.keys()]) stopWhatsAppBridge(id)
 }
-
-// Send a text message on a paired account. Only call after approval.
-export async function sendWhatsAppMessage(sourceId: string, to: string, text: string): Promise<{ ok: boolean }> {
+/** Remove an account's non-secret ephemeral metadata after credential removal. */
+export function forgetWhatsAppBridgeRuntime(sourceId: string): void { stopWhatsAppBridge(sourceId); runtimeStates.delete(sourceId) }
+export async function sendWhatsAppMessage(sourceId: string, to: string, text: string): Promise<{ ok: boolean; sentId?: string; authenticatedAccountJid?: string }> {
   const session = sessions.get(sourceId)
-  if (!session) throw new Error('WhatsApp bridge is not connected for this account.')
-  const jid = to.includes('@') ? to : `${to}@s.whatsapp.net`
-  await session.sock.sendMessage(jid, { text })
-  return { ok: true }
+  if (!session || session.runtime.phase !== 'connected' || !session.sock) throw new Error('WhatsApp bridge is not connected for this account.')
+  const jid = normalizeWhatsAppConversationJid(to)
+  if (!jid || typeof text !== 'string' || !text.trim() || text.length > 65_536) throw new Error('A valid WhatsApp recipient and bounded message text are required.')
+  if (!selectedConversation(session.getSource(), session, jid, false)) throw new Error('This WhatsApp recipient is outside the account’s selected contacts or self-chat scope.')
+  // Reserve the protocol id before sendMessage can echo, including synchronous self-chat echoes.
+  const authenticatedAccountJid = normalizeWhatsAppJid(session.runtime.phoneNumber) ?? undefined
+  const messageId = randomBytes(16).toString('hex').toUpperCase()
+  markWhatsAppSeen({ seen: session.outbound }, messageId)
+  const sent = await session.sock.sendMessage(jid, { text }, { messageId })
+  if (sent?.key?.id) markWhatsAppSeen({ seen: session.outbound }, sent.key.id)
+  return { ok: true, authenticatedAccountJid, ...(sent?.key?.id ? { sentId: sent.key.id } : {}) }
 }
-
 export function isWhatsAppBridgeReady(sourceId: string): boolean {
-  return sessions.has(sourceId)
+  const session = sessions.get(sourceId)
+  return Boolean(session?.sock && session.runtime.phase === 'connected' && session.getSource()?.enabled)
 }
 
 export interface WhatsAppMessageInput {
   sourceId: string
+  historical?: boolean
+  selfChat?: boolean
+  authenticatedAccountJid?: string
   jid: string
   fromMe: boolean
   text: string
@@ -437,7 +493,7 @@ export function whatsappEventFromMessage(input: WhatsAppMessageInput, now = Date
     threadKey: `whatsapp:${input.sourceId}:${input.jid}`,
     // messageId rides in the payload so rememberConnectorEvents can dedup replays by it.
     payloadKeys,
-    payload: { text: input.text, jid: input.jid, fromMe: input.fromMe, ...(messageId ? { messageId } : {}) },
+    payload: { text: input.text, jid: input.jid, fromMe: input.fromMe, historical: input.historical === true, selfChat: input.selfChat === true, remoteCommandEligible: false, ...(input.authenticatedAccountJid ? { authenticatedAccountJid: input.authenticatedAccountJid } : {}), ...(messageId ? { messageId } : {}) },
     // Decrypted inbound media lands here so the vision tool reads the image/PDF by local path.
     ...(mediaPaths.length ? { mediaPaths } : {}),
     sources: [{ id: `whatsapp:${input.sourceId}:${input.jid}`, connectorId: 'whatsapp', title: input.sender, createdAt: input.ts }],

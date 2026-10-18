@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useState } from 'react'
 import { useStore } from '../../lib/store'
 import { resolveExecutionTarget } from '../../lib/execution-target'
@@ -26,6 +27,7 @@ const EMPTY_SESSIONS: CliSession[] = []
 // The Terminal tab. Sessions are listed in the left sidebar (renameable, click to open); this view
 // shows the active one, with a compact top row to start a new terminal or split the screen.
 export function TerminalsTab({ projectId }: { projectId: string }) {
+  const tx = useAuthoredText()
   const sessions = useStore((s) => s.terminals[projectId] ?? EMPTY_SESSIONS)
   const activeId = useStore((s) => s.activeTerminalId[projectId] ?? null)
   const project = useStore((s) => s.projects.find((candidate) => candidate.id === projectId) ?? null)
@@ -86,9 +88,8 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
       {sessions.length > 0 && (
         <div className="flex items-center gap-2 border-b border-line px-3 py-1.5">
           <Menu width={200} trigger={() => (
-            <span className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover" title="Split — add another CLI to this terminal window">
-              <Icon name="grid" size={13} /> Split
-            </span>
+            <span className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover" title={tx("Split — add another CLI to this terminal window")}>
+              <Icon name="grid" size={13} /> {tx("Split")}</span>
           )}>
             {(closeMenu) => (
               <>
@@ -103,8 +104,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
                     <div className="my-1 border-t border-line" />
                     <button onClick={() => { closeMenu(); launchCustom() }}
                       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
-                      <Icon name="terminal" size={14} /> Custom command…
-                    </button>
+                      <Icon name="terminal" size={14} /> {tx("Custom command…")}</button>
                   </>
                 )}
               </>
@@ -115,7 +115,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
             <Menu width={180} trigger={() => {
               const current = LAYOUT_PRESETS.find((p) => p.value === layout) ?? LAYOUT_PRESETS[0]
               return (
-                <span className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover" title="Pane layout">
+                <span className="inline-flex items-center gap-1 rounded-md border border-line bg-card px-2 py-1 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover" title={tx("Pane layout")}>
                   <Icon name={current.icon as IconName} size={13} /> {current.label}
                 </span>
               )
@@ -137,7 +137,7 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
           {remoteTerminal && (
             <span className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-accent/25 bg-accent/10 px-2 py-1 text-[13px] text-accent" title={host?.serverUrl ?? undefined}>
               <Icon name="globe" size={12} />
-              {host?.name ?? 'Orchestrator'}
+              {host?.name ?? tx("Orchestrator")}
             </span>
           )}
         </div>
@@ -151,13 +151,13 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
             onChange={(e) => setCustomCmd(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') submitCustom(); else if (e.key === 'Escape') cancelCustom() }}
             onBlur={() => { if (!customCmd.trim()) cancelCustom() }}
-            placeholder="command to run (e.g. pi, gemini)"
+            placeholder={tx("command to run (e.g. pi, gemini)")}
             className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-4"
           />
           <button onMouseDown={(e) => e.preventDefault()} onClick={submitCustom} disabled={!customCmd.trim()}
-            className="inline-flex items-center rounded-md border border-line bg-card px-2 py-0.5 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover disabled:opacity-40">Run</button>
+            className="inline-flex items-center rounded-md border border-line bg-card px-2 py-0.5 text-[13px] text-ink-2 transition-colors hover:bg-surface-hover disabled:opacity-40">{tx("Run")}</button>
           <button onMouseDown={(e) => e.preventDefault()} onClick={cancelCustom}
-            className="rounded-md px-1.5 py-0.5 text-[13px] text-ink-3 transition-colors hover:text-ink">Cancel</button>
+            className="rounded-md px-1.5 py-0.5 text-[13px] text-ink-3 transition-colors hover:text-ink">{tx("Cancel")}</button>
         </div>
       )}
       <div className="min-h-0 flex-1 p-2">
@@ -172,10 +172,11 @@ export function TerminalsTab({ projectId }: { projectId: string }) {
 // First-run: no sessions yet. Offer the installed CLIs as one-click launchers so the user does not
 // have to open the menu to get going.
 function EmptyState({ installed, onPick, onCustom, allowCustom, remoteName }: { installed: Launcher[]; onPick: (l: Launcher) => void; onCustom: () => void; allowCustom: boolean; remoteName?: string | null }) {
+  const tx = useAuthoredText()
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 text-center">
       <div className="text-[13px] text-ink-4">
-        {remoteName ? `No terminals on ${remoteName} yet.` : 'No terminals in this project yet.'}
+        {remoteName ? tx("No terminals on {value0} yet.", { value0: remoteName }) : tx("No terminals in this project yet.")}
       </div>
       <div className="flex max-w-[420px] flex-wrap items-center justify-center gap-1.5">
         {installed.map((l) => (
@@ -186,8 +187,7 @@ function EmptyState({ installed, onPick, onCustom, allowCustom, remoteName }: { 
         ))}
         {allowCustom && (
           <button onClick={onCustom} className="inline-flex items-center gap-1 rounded-md border border-dashed border-line px-2 py-1 text-[13px] text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink-2">
-            <Icon name="plus" size={13} /> Custom…
-          </button>
+            <Icon name="plus" size={13} /> {tx("Custom…")}</button>
         )}
       </div>
     </div>
@@ -199,6 +199,7 @@ function EmptyState({ installed, onPick, onCustom, allowCustom, remoteName }: { 
 // with more sessions than the preset's slots, extras flow into the last cell's stack — no
 // session is ever hidden.
 function SplitGrid({ sessions, onClose, activeId, layout }: { sessions: CliSession[]; onClose: (session: CliSession) => void; activeId: string | null; layout: LayoutPreset }) {
+  const tx = useAuthoredText()
   const effective = sessions.length <= 1 ? 'single' : layout
   const slots = presetSlots(effective)
   // Sessions beyond the last slot share that slot (stacked), so nothing disappears when there
@@ -215,10 +216,10 @@ function SplitGrid({ sessions, onClose, activeId, layout }: { sessions: CliSessi
               <div className="flex items-center justify-between border-b border-line bg-card px-2 py-1">
                 <span className="flex min-w-0 items-center gap-1.5">
                   <span className="truncate text-[12px] text-ink-3">{s.title}</span>
-                  {s.hostLocation === 'orchestrator' && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent" title={s.orchestratorHostId ? `Hosted by ${s.orchestratorHostId}` : 'Origin unavailable; controls are disabled'}>{s.orchestratorHostId ? 'Remote' : 'Remote · read-only'}</span>}
-                  {s.managedBy === 'external' && <span className="rounded bg-ink-5 px-1.5 py-0.5 text-[11px] text-ink-3">External</span>}
+                  {s.hostLocation === 'orchestrator' && <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[11px] font-medium text-accent" title={s.orchestratorHostId ? tx("Hosted by {value0}", { value0: s.orchestratorHostId }) : tx("Origin unavailable; controls are disabled")}>{s.orchestratorHostId ? tx("Remote") : tx("Remote · read-only")}</span>}
+                  {s.managedBy === 'external' && <span className="rounded bg-ink-5 px-1.5 py-0.5 text-[11px] text-ink-3">{tx("External")}</span>}
                 </span>
-                <button onClick={() => onClose(s)} className="flex h-4 w-4 items-center justify-center text-ink-4 transition-colors hover:text-ink" title="Close terminal" aria-label="Close terminal">
+                <button onClick={() => onClose(s)} className="flex h-4 w-4 items-center justify-center text-ink-4 transition-colors hover:text-ink" title={tx("Close terminal")} aria-label={tx("Close terminal")}>
                   <Icon name="x" size={11} />
                 </button>
               </div>

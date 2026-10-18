@@ -1,3 +1,8 @@
+import { selectedResponseLocale } from '../../agent/response-language'
+import { estimateTokens } from '../../agent/compaction'
+import { personalMessageDraftEvent } from '../../agent/tool-labels'
+import { emailDraftEvent } from '../../agent/email-connector'
+import { assertRoutineSources, personalRoutinePrompt, routineSourceRevision } from './personal-routine-context'
 import { randomUUID } from 'node:crypto'
 import { automationTick, completionEvaluationRequest, evaluateCompletion, gateAutomationRun, snapshotAutomationPermissions, EMPTY_LEASE, type CompletionPolicy, type CompletionVerdict, type SchedulableAutomation, type SchedulerLease } from '../../agent/automation-scheduler'
 import { runAgent } from '../../agent/loop'
@@ -10,6 +15,8 @@ import type { JobPatch } from '../../agent/jobs'
 import type { AgentEvent, Automation, AutomationRun, ConnectorEvent, Job, Provider, Thread, TimelineItem } from '../../agent/types'
 import { assertProviderEndpoint, auditPreview } from '../../agent/security'
 import { store } from '../state'
+import { engineService } from './engine-runtime'
+import { isEngineProvider } from '../../agent/engine/provider'
 import { auditEvent, requireSecurityRole } from './audit'
 import { handle } from './ipc'
 import { persistAutomations } from './persistence'
@@ -48,7 +55,7 @@ interface AutomationRuntimeDeps {
   timelineErrorSince(thread: Thread, timelineStart: number): TimelineItem | null
   timelineError(errorItem: TimelineItem): Error
   isHighRiskTool(name: string): boolean
-  rememberConnectorEvents(events: ConnectorEvent[]): void
+  rememberConnectorEvents(events: ConnectorEvent[]): void | Promise<void>
   // Scheduler lease persistence (VST-038): the single-runner lease is saved so a restart
   // (or a second host reading the same shared state) sees who currently owns scheduling and
   // stands down instead of double-firing. Absent → in-memory only (the pre-persistence path).
@@ -107,6 +114,11 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       mode: p.mode || 'chat',
       cwd: p.cwd ?? store.settings?.defaultCwd ?? null,
       deliverTo: p.deliverTo || 'inbox',
+      ...(p.deliveryTarget ? { deliveryTarget: { ...p.deliveryTarget } } : {}),
+      ...(p.previewOnly !== undefined ? { previewOnly: p.previewOnly } : {}),
+      ...(p.botId ? { botId: p.botId } : {}),
+      ...(p.sourceScope ? { sourceScope: p.sourceScope.map(scope => ({ ...scope })) } : {}),
+      ...(p.routineKind ? { routineKind: p.routineKind } : {}),
       enabled: p.enabled ?? false,
       lastRunAt: null,
       nextRunAt: null,
@@ -154,13 +166,14 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
   // run's own output as the transcript excerpt (VST-038). Only 'ai_evaluated' policies call
   // a model; the rest decide deterministically. A model/parse failure degrades to
   // needs_review — never a false "complete".
-  async function evaluateRunCompletion(a: Automation, run: AutomationRun, provider: Provider | null, model: string | null, signal: AbortSignal): Promise<{ verdict: CompletionVerdict; reason: string } | undefined> {
+  async function evaluateRunCompletion(a: Automation, run: AutomationRun, provider: Provider | null, model: string | null, signal: AbortSignal, assertRequestAllowed?: () => void): Promise<{ verdict: CompletionVerdict; reason: string } | undefined> {
     const policy = completionPolicyOf(a)
     if (policy.type === 'none') return undefined
     let aiVerdict: CompletionVerdict | undefined
     const request = completionEvaluationRequest(policy, (run.output || '').slice(-4000))
     if (request && provider && model) {
       try {
+        assertRequestAllowed?.()
         let out = ''
         for await (const ch of streamChat({
           provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model,
@@ -168,7 +181,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
             { role: 'system', content: ensureTensorFoldStudioStylePrompt('You judge whether an automation met its objective. Reply with exactly one word.') },
             { role: 'user', content: request.prompt },
           ],
-          temperature: 0, approvalMode: 'readonly', signal,
+          temperature: 0, approvalMode: 'readonly', tools: [], signal, assertRequestAllowed,
         })) {
           if (ch.type === 'content') out += ch.text
         }
@@ -189,7 +202,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
 
   async function runAutomation(a: Automation, source: AutomationRunSource = {}): Promise<void> {
     if (runningAutomations.has(a.id)) return
-    const trigger = source.trigger ?? (a.scheduleKind === 'manual' ? 'manual' : 'schedule')
+    const definition = structuredClone(a)
+    const trigger = source.trigger ?? (definition.scheduleKind === 'manual' ? 'manual' : 'schedule')
     let job: Job | null = deps.claimJob({
       kind: 'automation',
       owner: a.id,
@@ -197,16 +211,16 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       connectorEventId: source.connectorEventId ?? null,
       projectId: null,
       metadata: {
-        name: a.name,
-        scheduleKind: a.scheduleKind,
+        name: definition.name,
+        scheduleKind: definition.scheduleKind,
         trigger,
         connectorId: source.connectorId ?? null,
         connectorAction: source.connectorAction ?? null,
         threadKey: source.threadKey ?? null,
       },
     })
-    const baseProvider = store.settings.providers.find((p) => p.id === (a.providerId ?? store.settings.activeProviderId))
-    const requestedProviderAccountId = baseProvider ? selectedProviderAccountId(baseProvider, a.providerAccountId) : null
+    const baseProvider = store.settings.providers.find((p) => p.id === (definition.providerId ?? store.settings.activeProviderId))
+    const requestedProviderAccountId = baseProvider ? selectedProviderAccountId(baseProvider, definition.providerAccountId) : null
     let providerAccountId = requestedProviderAccountId
     let provider: Provider | null = null
     let model: string | null = null
@@ -216,9 +230,9 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     // with no sandbox override here; the acknowledged risks + completion-policy version are
     // the audit-relevant part.
     run.permissions = snapshotAutomationPermissions({
-      approvalMode: a.mode === 'agent' ? 'readonly' : 'readonly',
-      acknowledgedRisks: a.acknowledgedRisks ?? [],
-      completionPolicyVersion: a.completionPolicy?.version ?? 0,
+      approvalMode: definition.mode === 'agent' ? 'readonly' : 'readonly',
+      acknowledgedRisks: definition.acknowledgedRisks ?? [],
+      completionPolicyVersion: definition.completionPolicy?.version ?? 0,
     }, run.startedAt)
     job = deps.patchJob(job, {
       currentRunId: `automation:${a.id}:${run.id}`,
@@ -242,20 +256,34 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
     deps.emitAutomation(a)
 
     try {
+      assertRoutineSources(definition, store.settings)
+      const context = baseProvider && definition.model ? deps.effectiveContextLimit(baseProvider, definition.model) : 0
+      const reserve = Math.min(2_048, Math.floor(context / 3))
+      const maxCharacters = Math.max(0, (context - reserve - 512) * 4)
+      const instruction = personalRoutinePrompt(definition, store.settings, store.connectorEvents, definition.routineKind ? { maxCharacters } : undefined)
+      const sourceRevision = routineSourceRevision(definition, store.settings)
+      const assertRoutineRequest = (activeProvider?: Provider) => {
+        if (!definition.routineKind) return
+        assertRoutineSources(definition, store.settings)
+        if (routineSourceRevision(definition, store.settings) !== sourceRevision) throw new Error('A selected routine source or contact scope changed; review the routine before running it again.')
+        const engine = engineService()
+        if (engine?.hasExternalResearchEnabled() || isEngineProvider(activeProvider) && !engine) throw new Error('Personal routines require hidden Cortheon research to be off so selected source and tool boundaries can be enforced.')
+        if (activeProvider && (activeProvider.id !== definition.providerId)) throw new Error('Personal routines keep their reviewed provider and model.')
+      }
       let lastJobBeat = Date.now()
       const beatAutomationJob = () => {
         if (Date.now() - lastJobBeat < deps.threadJobHeartbeatMs) return
         lastJobBeat = Date.now()
         job = deps.heartbeatJob(job) ?? job
       }
-      if (a.mode === 'digest') {
+      if (definition.mode === 'digest') {
         // Digest automations run NO model: compose a deterministic briefing from recent host
         // activity and hand it straight to the same deliver path below.
         run.output = buildHostDigest({ now: Date.now(), jobs: store.jobs, missions: store.missions, rooms: store.rooms, connectorEvents: store.connectorEvents })
       } else {
       if (!baseProvider) throw new Error('No provider configured for this automation.')
       const requestedProvider = await runtimeProviderWithFreshModels(baseProvider, requestedProviderAccountId)
-      model = resolveProviderModel(requestedProvider, null, a.model, store.settings.activeModel)
+      model = resolveProviderModel(requestedProvider, null, definition.model, store.settings.activeModel)
       if (!model) throw new Error('No provider/model configured for this automation.')
       const routeBaseProvider = store.settings.providers.find((p) => p.id === baseProvider.id) ?? baseProvider
       const initialRoute = modelRouter.select({
@@ -263,10 +291,10 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         provider: routeBaseProvider,
         model,
         requestedAccountId: requestedProviderAccountId,
-        allowFailover: modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
+        allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(routeBaseProvider, requestedProviderAccountId),
         contextLimit: deps.effectiveContextLimit(routeBaseProvider, model),
         reasoningEffort: store.settings.reasoningEffort,
-        budget: a.scheduleKind,
+        budget: definition.scheduleKind,
         source: 'automation_initial_route',
       })
       if (!initialRoute.selected) throw new Error(initialRoute.audit.reason)
@@ -293,7 +321,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
             },
           },
         })
-        rememberModelRouteHistory('automation', initialRoute.audit, null, { id: a.id, label: a.name })
+        rememberModelRouteHistory('automation', initialRoute.audit, null, { id: a.id, label: definition.name })
         await auditEvent('model_router.automation_failover', {
           automationId: a.id,
           providerId: routeBaseProvider.id,
@@ -305,30 +333,43 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         })
       }
       const runAutomationWithRoute = async (route: { provider: Provider; providerAccountId: string | null; model: string }, handoff?: string): Promise<string> => {
-        if (a.mode !== 'agent') {
+        assertRoutineRequest(route.provider)
+        if (definition.mode !== 'agent') {
           let out = ''
+          const messages = [
+            { role: 'system' as const, content: ensureTensorFoldStudioStylePrompt('You are an automation worker. Carry out the instruction and return only the finished result, concise and ready to deliver.') },
+            { role: 'user' as const, content: handoff ? `${handoff}\n\nInstruction:\n${instruction}` : instruction },
+          ]
+          const assertScopedRequest = () => {
+            assertRoutineRequest(route.provider)
+            if (definition.routineKind) {
+              const currentContext = deps.effectiveContextLimit(route.provider, route.model)
+              const outputReserve = Math.min(2_048, Math.floor(currentContext / 3))
+              if (estimateTokens(messages) + outputReserve > currentContext) throw new Error('This routine exceeds the selected model context; choose fewer sources or a larger context profile.')
+            }
+          }
+          assertScopedRequest()
           for await (const ch of streamChat({
             provider: route.provider, baseUrl: route.provider.baseUrl, apiKey: route.provider.apiKey, model: route.model,
-            messages: [
-              { role: 'system', content: ensureTensorFoldStudioStylePrompt('You are an automation worker. Carry out the instruction and return only the finished result, concise and ready to deliver.') },
-              { role: 'user', content: handoff ? `${handoff}\n\nInstruction:\n${a.prompt}` : a.prompt },
-            ],
-            temperature: store.settings.temperature, reasoningEffort: store.settings.reasoningEffort, approvalMode: 'readonly', cwd: a.cwd || store.settings.defaultCwd || undefined, signal: controller.signal,
+            messages,
+            temperature: store.settings.temperature, reasoningEffort: store.settings.reasoningEffort, approvalMode: 'readonly', tools: [], cwd: definition.routineKind ? undefined : definition.cwd || store.settings.defaultCwd || undefined, signal: controller.signal, assertRequestAllowed: definition.routineKind ? assertScopedRequest : undefined,
           })) {
             if (ch.type === 'content') out += ch.text
             beatAutomationJob()
           }
           return out.trim() || '(empty response)'
         }
-        const cwd = await resolveWorkspaceCwd(a.cwd || store.settings.defaultCwd, 'automation workspace')
+        const cwd = await resolveWorkspaceCwd(definition.cwd || store.settings.defaultCwd, 'automation workspace')
         const thread: Thread = {
-          id: randomUUID(), title: a.name, kind: 'task', projectId: null,
+    documentSourceIds: [],
+          id: randomUUID(), title: definition.name, kind: 'task', projectId: null,
           cwd,
           providerId: baseProvider.id, providerAccountId: route.providerAccountId, model: route.model, createdAt: Date.now(), updatedAt: Date.now(),
-          status: 'running', apiMessages: [{ role: 'user', content: handoff ? `${handoff}\n\nInstruction:\n${a.prompt}` : a.prompt }], timeline: [],
+          status: 'running', apiMessages: [{ role: 'user', content: handoff ? `${handoff}\n\nInstruction:\n${instruction}` : instruction }], timeline: [],
         }
         const timelineStart = thread.timeline.length
         await runAgent({
+        responseLocale: selectedResponseLocale(store.settings.uiPreferences),
           thread, provider: route.provider, model: route.model, approvalMode: 'readonly', temperature: store.settings.temperature,
           reasoningEffort: store.settings.reasoningEffort, autoCompact: store.settings.autoCompact, contextLimit: deps.effectiveContextLimit(route.provider, route.model),
           toolContext: deps.fullToolContext({ thread, provider: route.provider, model: route.model, signal: controller.signal }) as any,
@@ -357,10 +398,10 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
           accountId: activeRoute.providerAccountId,
           model: activeRoute.model,
           error: err,
-          allowFailover: modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId),
+          allowFailover: !definition.routineKind && modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId),
           contextLimit: deps.effectiveContextLimit(latestBaseProvider, activeRoute.model),
           reasoningEffort: store.settings.reasoningEffort,
-          budget: a.scheduleKind,
+          budget: definition.scheduleKind,
           source: 'automation_recovery',
         })
         if (!routed.signal || !routed.route.selected || routed.route.selectedAccountId === activeRoute.providerAccountId || controller.signal.aborted) throw err
@@ -384,7 +425,7 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
             },
           },
         })
-        rememberModelRouteHistory('automation', routed.route.audit, routed.signal, { id: a.id, label: a.name })
+        rememberModelRouteHistory('automation', routed.route.audit, routed.signal, { id: a.id, label: definition.name })
         await auditEvent('model_router.automation_failover', {
           automationId: a.id,
           providerId: latestBaseProvider.id,
@@ -398,8 +439,8 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
         })
         run.output = await runAutomationWithRoute(activeRoute, [
           '<model_router_handoff>',
-          `Reason: Automation "${routeHandoffPreview(a.name, 160)}" failed over after ${routed.signal.kind.replace(/_/g, ' ')}.`,
-          `Schedule: ${routeHandoffPreview(a.scheduleKind, 80)}`,
+          `Reason: Automation "${routeHandoffPreview(definition.name, 160)}" failed over after ${routed.signal.kind.replace(/_/g, ' ')}.`,
+          `Schedule: ${routeHandoffPreview(definition.scheduleKind, 80)}`,
           `Trigger: ${routeHandoffPreview(trigger, 120)}`,
           '</model_router_handoff>',
         ].join('\n'))
@@ -411,33 +452,34 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       // run's output as the transcript excerpt to a fresh, read-only model call and record
       // its one-word verdict; deterministic policies evaluate without a model. The version
       // guard forces needs_review if the policy was edited after this run started.
-      run.completion = await evaluateRunCompletion(a, run, provider, model, controller.signal)
+      run.completion = await evaluateRunCompletion(definition, run, provider, model, controller.signal, definition.routineKind ? () => assertRoutineRequest(provider ?? undefined) : undefined)
+      if ((a.completionPolicy?.version ?? 0) !== (definition.completionPolicy?.version ?? 0)) run.completion = { verdict: 'needs_review', reason: 'Completion policy changed during this run; review the result.' }
+      assertRoutineRequest(provider ?? undefined)
       if (controller.signal.aborted) throw new Error('Automation cancelled before completion.')
       run.status = 'ok'
       a.lastStatus = 'ok'
       deps.finishJob(job, 'completed')
-      if (a.deliverTo !== 'inbox') {
-        const target = a.deliverTo === 'telegram' ? 'Telegram' : 'Email'
-        const event: ConnectorEvent = {
-          id: randomUUID(),
-          connectorId: a.deliverTo,
-          pluginName: target,
-          action: 'automation_result_ready',
-          direction: 'outbound',
-          classification: 'approval',
-          priority: 'normal',
-          trustLevel: 'suggest',
-          requiresApproval: true,
-          approvalId: `automation-${a.id}-${run.id}`,
-          title: `${a.name} result ready`,
-          summary: run.output.slice(0, 500),
-          actor: target,
-          threadKey: `automation:${a.id}`,
-          payloadKeys: ['automationId', 'runId', 'output'],
-          createdAt: Date.now(),
+      run.deliveryStatus = 'inbox'
+      if (definition.deliverTo !== 'inbox' && !definition.previewOnly) {
+        const target = definition.deliveryTarget
+        if (!target || target.connectorId !== definition.deliverTo || !target.recipient.trim() || (target.connectorId !== 'telegram' && !target.accountId)) {
+          // Existing addressless definitions remain safe/local until a user chooses a
+          // destination. Successful generation is not a claim of message delivery.
+          run.deliveryStatus = 'blocked'
+          run.deliveryError = 'Choose an exact account and recipient before reviewing external delivery; this result remains in the inbox.'
+        } else {
+          const event = target.connectorId === 'email'
+            ? emailDraftEvent({ to: target.recipient, subject: target.subject || `${definition.name} result`, body: run.output, mode: 'send' })
+            : personalMessageDraftEvent({ connectorId: target.connectorId, target: target.recipient, body: run.output, accountId: target.accountId ?? undefined })
+          event.approvalId = `automation-${a.id}-${run.id}`
+          event.payload = { ...event.payload, accountId: target.accountId, automationId: a.id, runId: run.id }
+          event.payloadKeys = [...event.payloadKeys, 'accountId', 'automationId', 'runId']
+          await deps.rememberConnectorEvents([event])
+          run.deliveryEventId = event.id
+          run.deliveryStatus = 'pending_approval'
         }
-        deps.rememberConnectorEvents([event])
       }
+
     } catch (e: any) {
       const settlement = automationRunError(e, controller.signal.aborted)
       run.status = 'error'
@@ -534,6 +576,7 @@ export function registerAutomationIpc(runtime: AutomationRuntime) {
     requireSecurityRole('operator', 'create automations')
     const a = runtime.mkAutomation(sanitizeAutomationCreateInput(p))
     validateAutomationProviderRoute(a, store.settings.providers)
+    assertRoutineSources(a, store.settings)
     a.nextRunAt = runtime.computeNextRun(a)
     store.automations.unshift(a)
     persistAutomations()
@@ -545,6 +588,7 @@ export function registerAutomationIpc(runtime: AutomationRuntime) {
     if (!a) throw new Error('Automation not found')
     const safePatch = sanitizeAutomationUpdatePatch(a, patch)
     validateAutomationProviderRoute({ ...a, ...safePatch }, store.settings.providers)
+    assertRoutineSources({ ...a, ...safePatch }, store.settings)
     const nextRunAt = runtime.computeNextRun({ ...a, ...safePatch })
     Object.assign(a, safePatch, { updatedAt: Date.now(), nextRunAt, scheduleError: null })
     persistAutomations()

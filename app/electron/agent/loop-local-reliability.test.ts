@@ -135,9 +135,9 @@ try {
     const assistant = result.thread.apiMessages.find((message) => message.tool_calls?.length)
     assert.equal(result.thread.apiMessages.filter((message) => message.role === 'tool').length, assistant?.tool_calls?.length, 'all blocked calls retain a protocol result')
   })
-  await check('failed tools cannot repeat forever after the third identical failure', async () => {
+  await check('an opaque failed tool pauses before uncertain side effects can be repeated', async () => {
     const result = await scenario({ result: () => ({ ok: false, output: 'Fixture error.' }) })
-    assert.equal(result.executions, 3)
+    assert.equal(result.executions, 1)
   })
   await check('parallel builtin read batches reserve attempts before execution awaits', async () => {
     const result = await scenario({ maxSteps: 1, builtinRead: true, delta: (body) => body.tools?.length ? { tool_calls: Array.from({ length: 5 }, (_, index) => ({ index, id: `read-${index}`, type: 'function', function: { name: 'read_file', arguments: '{"path":"fixture.txt"}' } })) } : { content: 'Done.' } })

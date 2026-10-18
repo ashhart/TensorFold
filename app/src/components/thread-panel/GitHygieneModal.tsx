@@ -1,3 +1,7 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
 import type { GitHygieneFinding, GitHygieneReport } from '../../lib/types'
@@ -21,6 +25,7 @@ export function GitHygieneModal({
   onCommitAnyway: () => void
   onClose: () => void
 }) {
+  const tx = useAuthoredText()
   const autoFixable = report.findings.filter((f) => f.autoFixable && f.source === 'working_tree').length
   const grouped = report.findings.reduce<Record<string, GitHygieneFinding[]>>((acc, finding) => {
     const key = `${finding.severity}:${finding.source}`
@@ -29,7 +34,7 @@ export function GitHygieneModal({
   }, {})
   const currentBlockers = report.findings.filter((finding) => finding.source !== 'git_history' && ['critical', 'high', 'medium'].includes(finding.severity))
   const historyBlockers = report.findings.filter((finding) => finding.source === 'git_history' && ['critical', 'high', 'medium'].includes(finding.severity))
-  const sourceLabel: Record<string, string> = { working_tree: 'Working tree', git_history: 'Git history', commit_message: 'Commit message' }
+  const sourceLabel: Record<string, string> = { get working_tree() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Working tree") }, get git_history() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Git history") }, get commit_message() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Commit message") } }
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-6">
@@ -39,17 +44,17 @@ export function GitHygieneModal({
             <Icon name="shield" size={17} />
           </div>
           <div className="min-w-0 flex-1">
-            <div className="text-[13px] font-semibold text-ink">Git hygiene preflight</div>
+            <div className="text-[13px] font-semibold text-ink">{tx("Git hygiene preflight")}</div>
             <div className="mt-0.5 flex flex-wrap items-center gap-2 font-mono text-[12px]">
-              <span className="text-ink-3">{report.scannedFiles} files</span>
-              <span className="text-ink-3">{report.scannedCommits} commits</span>
-              <span className="text-danger">{report.summary.critical} critical</span>
-              <span className="text-danger">{report.summary.high} high</span>
-              <span className="text-warn">{report.summary.medium} medium</span>
-              <span className="text-ink-3">{report.summary.low} low</span>
+              <span className="text-ink-3">{report.scannedFiles} {tx("files")}</span>
+              <span className="text-ink-3">{report.scannedCommits} {tx("commits")}</span>
+              <span className="text-danger">{report.summary.critical} {tx("critical")}</span>
+              <span className="text-danger">{report.summary.high} {tx("high")}</span>
+              <span className="text-warn">{report.summary.medium} {tx("medium")}</span>
+              <span className="text-ink-3">{report.summary.low} {tx("low")}</span>
             </div>
           </div>
-          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label="Close hygiene scan">
+          <button onClick={onClose} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink" aria-label={tx("Close hygiene scan")}>
             <Icon name="x" size={15} />
           </button>
         </div>
@@ -57,12 +62,12 @@ export function GitHygieneModal({
         <div className="min-h-0 flex-1 overflow-y-auto p-4 select-text">
           <div className={clsx('mb-3 rounded-xl border px-3.5 py-3 text-[13px] leading-snug', report.blocked ? 'border-danger/30 bg-danger/10 text-danger' : 'border-line bg-card-2 text-ink-2')}>
             {report.blocked
-              ? `${currentBlockers.length} current finding${currentBlockers.length === 1 ? '' : 's'} must be removed or handled before committing.`
+              ? tx("Resolve or handle current findings before committing: {count}.", { count: currentBlockers.length })
               : historyBlockers.length
-                ? `${historyBlockers.length} history finding${historyBlockers.length === 1 ? '' : 's'} still need cleanup before publishing. Current files are clear for a local commit.`
+                ? tx("History findings to clean up before publishing: {count}. Current files are clear for a local commit.", { count: historyBlockers.length })
                 : report.findings.length
-                ? 'Only low current findings remain. Review them before committing.'
-                : 'No sensitive findings detected in the working tree, commit message, or Git history scan.'}
+                ? tx("Only low current findings remain. Review them before committing.")
+                : tx("No sensitive findings detected in the working tree, commit message, or Git history scan.")}
           </div>
 
           {report.notes.length > 0 && (
@@ -72,7 +77,7 @@ export function GitHygieneModal({
           )}
 
           {report.findings.length === 0 ? (
-            <div className="rounded-xl border border-dashed border-line py-10 text-center text-[13px] text-ink-3">Clean scan.</div>
+            <div className="rounded-xl border border-dashed border-line py-10 text-center text-[13px] text-ink-3">{tx("Clean scan.")}</div>
           ) : (
             <div className="space-y-3">
               {Object.entries(grouped).map(([key, findings]) => {
@@ -90,7 +95,7 @@ export function GitHygieneModal({
                             <span className={clsx('font-semibold', HYGIENE_TINT[finding.severity])}>{finding.kind.replace(/_/g, ' ')}</span>
                             {finding.file && <span className="truncate text-ink-2">{finding.file}{finding.line ? `:${finding.line}` : ''}</span>}
                             {finding.commit && <span className="font-mono text-ink-4">{finding.commit.slice(0, 8)}</span>}
-                            {finding.autoFixable && <span className="rounded bg-ink-5 px-1.5 py-0.5 text-[11px] text-ink-3">auto</span>}
+                            {finding.autoFixable && <span className="rounded bg-ink-5 px-1.5 py-0.5 text-[11px] text-ink-3">{tx("auto")}</span>}
                           </div>
                           <div className="mt-1 font-mono text-[12px] leading-snug text-ink-3">{finding.excerpt || finding.match}</div>
                           <div className="mt-1 text-[13px] leading-snug text-ink-3">{finding.suggestion}</div>
@@ -104,19 +109,18 @@ export function GitHygieneModal({
           )}
         </div>
 
-        {error && <div className="border-t border-line px-4 py-2 text-[13px] text-danger">{error}</div>}
+        {error && <div className="border-t border-line px-4 py-2 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
         <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-3">
           <div className="text-[13px] text-ink-3">
-            {pendingMessage ? `Pending commit: ${pendingMessage}` : 'Manual scan only'}
+            {pendingMessage ? tx("Pending commit: {value0}", { value0: pendingMessage }) : tx("Manual scan only")}
           </div>
           <div className="flex gap-2">
             <button onClick={onSanitize} disabled={busy || autoFixable === 0} className="rounded-lg border border-line px-3 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-40">
-              {busy ? 'Working…' : `Sanitize obvious${autoFixable ? ` (${autoFixable})` : ''}`}
+              {busy ? tx("Working…") : tx("Sanitize obvious{value0}", { value0: autoFixable ? ` (${autoFixable})` : '' })}
             </button>
             {pendingMessage && (
               <button onClick={onCommitAnyway} disabled={busy || report.blocked} className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">
-                Commit
-              </button>
+                {tx("Commit")}</button>
             )}
           </div>
         </div>

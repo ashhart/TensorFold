@@ -1,79 +1,54 @@
+import { OriginalDiagnostic } from '../../OriginalDiagnostic'
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import { useState } from 'react'
-import clsx from 'clsx'
 import { api } from '../../../lib/ipc'
-import { BrandIcon } from '../../../lib/brand'
-import { Icon } from '../../../lib/icons'
-import { Button, Field, Input, Toggle } from '../../ui'
+import { Button } from '../../ui'
 import { Section, type SettingsSectionContext } from '../shared'
-import { ConnectorStatusChip } from './ConnectorStatusChip'
 import type { DiscordSource } from '../../../lib/types'
+import { LiveMessagingSource, type LiveMessagingSourceValue } from './LiveMessagingSource'
+import { MessagingSetupGuide } from './MessagingSetupGuide'
 
 export function DiscordConnector({ ctx }: { ctx: SettingsSectionContext }) {
-  const { draft, setDraft, commit, connectorStatus } = ctx
-  const connectorStatusMap = connectorStatus ?? {}
-
-  const [discordBusy, setDiscordBusy] = useState('')
-  const [discordVerify, setDiscordVerify] = useState<{ ok: boolean; bot?: string; guilds?: { id: string; name: string }[]; error?: string } | null>(null)
-  const addDiscordSource = async () => {
-    const next = await api.addDiscordSource('Discord server')
-    setDraft((d) => ({ ...d, discord: next }))
+  const tx = useAuthoredText()
+  const { draft, setDraft } = ctx
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const persistedValue = (id: string): LiveMessagingSourceValue | null | undefined => {
+    if (!ctx.persistedSettings) return undefined
+    const source = ctx.persistedSettings.discord.sources.find((candidate) => candidate.id === id)
+    return source ? { ...source, channels: source.allowedChannels, credentialVersion: source.secretRotations?.token } : null
   }
-  const removeDiscordSource = async (id: string) => {
-    const next = await api.removeDiscordSource(id)
-    setDraft((d) => ({ ...d, discord: next }))
+  const asPatch = (patch: Partial<LiveMessagingSourceValue>): Partial<DiscordSource> => {
+    const { channels, ...rest } = patch
+    return { ...rest, ...(channels !== undefined ? { allowedChannels: channels } : {}) }
   }
-  const commitDiscordSourcePatch = (id: string, patch: Partial<DiscordSource>) => {
-    const next = { ...draft, discord: { ...draft.discord, sources: draft.discord.sources.map((s) => s.id === id ? { ...s, ...patch, id: s.id, updatedAt: Date.now() } : s) } }
-    setDraft(next)
-    void commit(next)
+  const edit = (id: string, patch: Partial<DiscordSource>) => setDraft((current) => ({ ...current, discord: { ...current.discord, sources: current.discord.sources.map((source) => source.id === id ? { ...source, ...patch } : source) } }))
+  const save = async (id: string, patch: Partial<DiscordSource> = {}) => {
+    await ctx.save({ ...draft, discord: { ...draft.discord, sources: draft.discord.sources.map((source) => source.id === id ? { ...source, ...patch, id: source.id, updatedAt: Date.now() } : source) } })
   }
-  const verifyDiscordSource = async (id: string) => {
-    setDiscordBusy('verify-' + id)
-    try { setDiscordVerify(await api.verifyDiscord(id).catch(() => ({ ok: false, error: 'Verification failed' }))) }
-    finally { setDiscordBusy('') }
+  const add = async () => {
+    setBusy(true); setError('')
+    try {
+      const next = await api.addDiscordSource('Discord server')
+      const priorIds = new Set(draft.discord.sources.map((source) => source.id))
+      const added = next.sources.filter((source) => !priorIds.has(source.id))
+      setDraft((current) => ({ ...current, discord: { ...current.discord, sources: [...current.discord.sources, ...added.filter((source) => !current.discord.sources.some((existing) => existing.id === source.id))] } }))
+    }
+    catch { setError(tx("Could not add this bot; retry after saving any pending settings changes.")) }
+    finally { setBusy(false) }
   }
-
-  return (
-    <Section title="Discord connector" desc="Live Discord via bot token. Reads channels/threads and can reply (approval-gated). Create an app at discord.com/developers, invite the bot, then paste the token.">
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
-          <div>
-            <div className="text-[13px] font-medium text-ink">{draft.discord.sources.length} source{draft.discord.sources.length === 1 ? '' : 's'} configured</div>
-            <div className="mt-0.5 text-[13px] text-ink-3">{draft.discord.lastSyncAt ? `Last sync ${new Date(draft.discord.lastSyncAt).toLocaleString()}` : 'Not synced yet'}</div>
-            <ConnectorStatusChip status={connectorStatusMap.discord} />
-          </div>
-          <div className="flex gap-2">
-            <Button variant="default" size="sm" icon="plus" onClick={() => void addDiscordSource()} disabled={!!discordBusy}>Add bot</Button>
-          </div>
-        </div>
-        {draft.discord.sources.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-line px-3.5 py-5 text-center text-[13px] text-ink-3">
-            Add a Discord bot token to read channels/threads and reply.
-          </div>
-        ) : draft.discord.sources.map((source) => (
-          <div key={source.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
-            <div className="flex items-start gap-3">
-              <BrandIcon brand="discord" size={32} />
-              <div className="min-w-0 flex-1">
-                <Input value={source.label} onChange={(e) => setDraft((d) => ({ ...d, discord: { ...d.discord, sources: d.discord.sources.map((s) => s.id === source.id ? { ...s, label: e.target.value } : s) } }))} onBlur={() => commit(draft)} className="h-8" />
-                {source.lastError && <div className="mt-1 text-[13px] text-danger">{source.lastError}</div>}
-              </div>
-              <Toggle label={`Enable ${source.label || "Discord source"}`} checked={source.enabled} onChange={(enabled) => commitDiscordSourcePatch(source.id, { enabled })} />
-              <button onClick={() => void removeDiscordSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove Discord source"><Icon name="trash" size={15} /></button>
-            </div>
-            <div className="mt-3 space-y-2.5">
-              <Field label="Bot token" hint="secret"><Input type="password" value={source.token} onChange={(e) => setDraft((d) => ({ ...d, discord: { ...d.discord, sources: d.discord.sources.map((s) => s.id === source.id ? { ...s, token: e.target.value } : s) } }))} onBlur={() => commit(draft)} placeholder="bot token from the Developer Portal" className="h-8" spellCheck={false} /></Field>
-              <Field label="Allowed channels" hint="optional"><Input value={source.allowedChannels} onChange={(e) => setDraft((d) => ({ ...d, discord: { ...d.discord, sources: d.discord.sources.map((s) => s.id === source.id ? { ...s, allowedChannels: e.target.value } : s) } }))} onBlur={() => commit(draft)} placeholder="#general, channel id (blank = all)" className="h-8" spellCheck={false} /></Field>
-              <Field label="Channel prompt" hint="optional"><Input value={source.channelPrompt ?? ''} onChange={(e) => setDraft((d) => ({ ...d, discord: { ...d.discord, sources: d.discord.sources.map((s) => s.id === source.id ? { ...s, channelPrompt: e.target.value } : s) } }))} onBlur={() => commit(draft)} placeholder="Extra guidance applied only to this Discord source (ephemeral)" className="h-8" spellCheck={false} /></Field>
-              <div className="flex gap-2">
-                <Button variant="default" size="sm" icon="shield" onClick={() => void verifyDiscordSource(source.id)} disabled={!!discordBusy}>{discordBusy === 'verify-' + source.id ? 'Verifying' : 'Verify token'}</Button>
-                <Button variant="primary" size="sm" icon="message" onClick={async () => { setDiscordBusy('sync-' + source.id); try { await api.syncDiscord(source.id) } finally { setDiscordBusy('') } }} disabled={!!discordBusy}>{discordBusy === 'sync-' + source.id ? 'Syncing' : 'Sync Discord'}</Button>
-              </div>
-              {discordVerify && <div className={clsx('text-[13px]', discordVerify.ok ? 'text-positive' : 'text-danger')}>{discordVerify.ok ? `Connected as ${discordVerify.bot}${discordVerify.guilds?.length ? ` (${discordVerify.guilds.length} servers)` : ''}` : discordVerify.error}</div>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </Section>
-  )
+  const remove = async (id: string) => { await api.removeDiscordSource(id); setDraft((current) => ({ ...current, discord: { ...current.discord, sources: current.discord.sources.filter((source) => source.id !== id) } })) }
+  return <Section title={tx("Discord")} desc={tx("Connect a server bot, verify it, then choose the exact channels TensorFold may read and reply in.")}>
+    <div className="space-y-3">
+      <MessagingSetupGuide steps={[
+        'Create an application in the Discord Developer Portal and copy its bot token from the Bot page; personal user tokens are unsupported.',
+        'Enable Message Content Intent on the Bot page when you need ordinary channel message text; Discord may require approval for eligible verified apps.',
+        'Install the bot to your server with the bot scope and only View Channels, Read Message History and Send Messages; add Send Messages in Threads only when needed, without Administrator.',
+      ]} links={[{ label: tx("Discord Developer Portal"), url: 'https://discord.com/developers/applications' }, { label: tx("Bot permissions"), url: 'https://docs.discord.com/developers/topics/permissions' }]} />
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card p-3.5"><span className="text-[13px] text-ink-2">{tx("Connections: {count}", { count: draft.discord.sources.length })}</span><Button size="sm" icon="plus" onClick={add} disabled={busy}>{busy ? tx("Adding…") : tx("Add server bot")}</Button></div>
+      {error && <p role="alert" className="text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}
+      {!draft.discord.sources.length && <div className="rounded-xl border border-dashed border-line p-5 text-center text-[13px] text-ink-3">{tx("Add a server bot, then verify its token and select channels; nothing is read until you connect and request a sync.")}</div>}
+      {draft.discord.sources.map((source) => <LiveMessagingSource key={source.id} brand="discord" persistedValue={persistedValue(source.id)} value={{ ...source, channels: source.allowedChannels, credentialVersion: source.secretRotations?.token }} edit={(patch) => edit(source.id, asPatch(patch))} save={(patch) => save(source.id, patch ? asPatch(patch) : {})} verify={async () => { const result = await api.verifyDiscord(source.id); return { ok: result.ok, identity: result.bot ? `${result.bot}${result.guilds?.length ? ` in ${result.guilds.length} server${result.guilds.length === 1 ? '' : 's'}` : ''}` : undefined, error: result.error ? 'Discord rejected this bot token; check the token and server installation, then retry.' : undefined } }} listChannels={async () => (await api.listDiscordChannels(source.id)).map((channel) => ({ id: channel.id, name: channel.name, detail: `${channel.guildName}${channel.threadId ? ' · Thread' : ''}` }))} sync={async () => { const result = await api.syncDiscord(source.id); return `Read ${result.messages} messages; ${result.events} new inbox items from this connection.` }} remove={() => remove(source.id)} />)}
+    </div>
+  </Section>
 }

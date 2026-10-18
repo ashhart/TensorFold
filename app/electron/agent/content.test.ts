@@ -45,4 +45,20 @@ ok('buildUserContent returns a plain string when there are no attachments')
   ok('buildUserContent builds text + image_url parts when images are attached')
 }
 
+
+// Accepted OCR is a plain document so every transport and history consumer sees the
+// edited transcript; unaccepted and failed rows are never converted into model facts.
+{
+  const transcript = { id: 'ocr', kind: 'document' as const, name: 'handwriting.png', mime: 'image/png', status: 'ready' as const,
+    text: '[User-reviewed OCR transcript. Recognition may contain errors.]\nMeet on Friday',
+    extraction: { method: 'apple-vision' as const, state: 'accepted' as const, text: 'Meet on Friday', confidence: 1, warnings: ['Review every line.'], pageCount: 1, processedPages: 1, truncated: false } }
+  const content = buildUserContent('read this', [transcript])
+  assert.equal(typeof content, 'string')
+  assert.match(content as string, /User-reviewed OCR transcript/)
+  assert.match(content as string, /Meet on Friday/)
+  assert.throws(() => buildUserContent('read this', [{ ...transcript, status: 'review', extraction: { ...transcript.extraction, state: 'review' } }]), /not ready/)
+  assert.throws(() => buildUserContent('read this', [{ ...transcript, status: 'error' }]), /not ready/)
+  ok('only explicitly accepted edited OCR becomes labelled model content')
+}
+
 console.log(`content tests passed (${passed})`)

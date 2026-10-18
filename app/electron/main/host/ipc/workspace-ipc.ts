@@ -1,3 +1,7 @@
+import { validateDocumentSourceIds } from '../../../../shared/document-collections'
+import { createThreadDocumentPolicyHost } from '../thread-document-policy-host'
+import { createThreadMessageEditHost } from '../thread-message-edit-host'
+import type { ThreadMessageEditInput } from '../../../../shared/thread-message-edit'
 import { createThreadMemoryPolicyHost } from '../thread-memory-policy-host'
 import { assertThreadMemoryTransport } from '../../../../shared/thread-memory-policy'
 import { randomUUID } from 'node:crypto'
@@ -27,9 +31,11 @@ import type { WorkspaceMutationGuard } from '../workspace-mutation-guard'
 import { captureBotConfig } from '../../../../shared/bot-policy'
 import { saveThreads } from '../../../store'
 import { assertBotLifecycleIdle } from '../bot-run-boundary'
+import { purgeComposerDraft } from '../../../store/composer-drafts'
+import { sendToRenderer } from '../renderer-events'
 
 const RENDERER_THREAD_PATCH_KEYS = new Set([
-  'goal', 'goalStatus', 'plan', 'notepad', 'annotations', 'diffReviewedAt', 'incognito',
+  'goal', 'goalStatus', 'plan', 'notepad', 'annotations', 'diffReviewedAt', 'incognito', 'documentSourceIds',
 ])
 
 /**
@@ -75,6 +81,10 @@ export function sanitizeRendererThreadPatch(input: unknown): RendererThreadPatch
   if (Object.prototype.hasOwnProperty.call(raw, 'incognito')) {
     if (typeof raw.incognito !== 'boolean') throw new Error('incognito must be boolean.')
     out.incognito = raw.incognito
+  }
+  if (Object.prototype.hasOwnProperty.call(raw, 'documentSourceIds')) {
+    if (raw.documentSourceIds === undefined) throw new Error('Choose document collections explicitly; an empty list permits none.')
+    out.documentSourceIds = validateDocumentSourceIds(raw.documentSourceIds)
   }
   return out
 }
@@ -171,6 +181,7 @@ handle('threads:create', async (_e, { cwd, kind = 'task', projectId = null, comm
   const t: Thread = {
     id: randomUUID(),
     ...(incognito ? { incognito: true } : {}),
+    documentSourceIds: [],
     title: kind === 'chat' ? 'New chat' : 'New task',
     kind,
     projectId: projectId ?? null,
@@ -207,7 +218,7 @@ handle('bots:createChat', async (_e, { presetId }: { presetId: string }) => {
   assertBotLifecycleIdle(preset.id)
   const bot = captureBotConfig(preset, store.settings.providers)
   const t: Thread = {
-    id: randomUUID(), title: `${bot.name} chat`, kind: 'chat', projectId: null,
+    id: randomUUID(), title: `${bot.name} chat`, kind: 'chat', projectId: null, documentSourceIds: [],
     cwd: bot.executionTarget === 'vm' ? '/workspace' : '', workspace: null, bot,
     providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model,
     createdAt: Date.now(), updatedAt: Date.now(), status: 'idle', apiMessages: [], timeline: [],
@@ -254,23 +265,25 @@ handle('threads:rename', async (_e, { id, title }: { id: string; title: string }
 handle('threads:setEngine', async (_e, { id, engine }: { id: string; engine: 'native' | 'omp' }) => {
   requireSecurityRole('operator', 'configure threads')
   if (engine !== 'native' && engine !== 'omp') throw new Error('Engine must be "native" or "omp".')
-  const t = store.threads.find((t) => t.id === id)
-  if (t?.archivedAt) throw new Error('Restore the archived thread before changing its engine.')
-  if (t) {
-    if (t.bot) throw new Error('Bot chats use TensorFold’s permission checks; start a new chat to change engines.')
-    if (engine === 'omp') {
-      const binary = discoverOmpBinary()
-      if (!existsSync(binary)) throw new Error('The omp CLI is not installed. Install @oh-my-pi/pi-coding-agent first.')
+  const lease = workspaceMutationGuard.reserveStart({ threadId: id })
+  try {
+    const t = store.threads.find((t) => t.id === id)
+    if (t?.archivedAt) throw new Error('Restore the archived thread before changing its engine.')
+    if (t) {
+      if (t.bot) throw new Error('Bot chats use TensorFold’s permission checks; start a new chat to change engines.')
+      if (engine === 'omp') {
+        const binary = discoverOmpBinary()
+        if (!existsSync(binary)) throw new Error('The omp CLI is not installed. Install @oh-my-pi/pi-coding-agent first.')
+      }
+      assertThreadMemoryTransport({ ...t, engine }, store.settings.providers.find((p) => p.id === t.providerId))
+      t.engine = engine === 'native' ? undefined : engine
+      t.updatedAt = Date.now()
+      persistThreads()
+      store.win?.webContents.send('thread:update', t)
+      remoteServer.publish({ kind: 'thread', data: t })
     }
-    assertThreadMemoryTransport({ ...t, engine }, store.settings.providers.find((p) => p.id === t.providerId))
-    t.engine = engine === 'native' ? undefined : engine
-    t.updatedAt = Date.now()
-    persistThreads()
-    store.win?.webContents.send('thread:update', t)
-    remoteServer.publish({ kind: 'thread', data: t })
-  }
+  } finally { lease.release() }
 })
-
 handle('omp:status', async () => {
   const binary = discoverOmpBinary()
   if (!existsSync(binary)) return { available: false as const, binary }
@@ -288,31 +301,53 @@ handle('omp:status', async () => {
 
 handle('threads:configure', async (_e, { id, providerId, model, providerAccountId }: { id: string; providerId: string; model: string; providerAccountId?: string | null }) => {
   requireSecurityRole('operator', 'configure threads')
-  const t = store.threads.find((t) => t.id === id)
-  if (t?.archivedAt) throw new Error('Restore the archived thread before configuring it.')
-  if (t) {
-    if (t.bot) throw new Error('This chat keeps its bot’s saved model; edit the bot and start a new chat to change it.')
-    const provider = store.settings.providers.find((p) => p.id === providerId)
-    assertThreadMemoryTransport(t, provider)
-    const accountId = provider ? selectedProviderAccountId(provider, providerAccountId) : providerAccountId ?? null
-    t.providerId = providerId
-    t.providerAccountId = accountId
-    t.model = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
-    t.modelRoute = null
-    persistThreads()
-    store.win?.webContents.send('thread:update', t)
-    remoteServer.publish({ kind: 'thread', data: t })
-  }
+  const lease = workspaceMutationGuard.reserveStart({ threadId: id })
+  try {
+    const t = store.threads.find((t) => t.id === id)
+    if (t?.archivedAt) throw new Error('Restore the archived thread before configuring it.')
+    if (t) {
+      if (t.bot) throw new Error('This chat keeps its bot’s saved model; edit the bot and start a new chat to change it.')
+      const provider = store.settings.providers.find((p) => p.id === providerId)
+      assertThreadMemoryTransport(t, provider)
+      const accountId = provider ? selectedProviderAccountId(provider, providerAccountId) : providerAccountId ?? null
+      t.providerId = providerId
+      t.providerAccountId = accountId
+      t.model = provider ? (resolveProviderModel(provider, accountId, model) ?? model) : model
+      t.modelRoute = null
+      persistThreads()
+      store.win?.webContents.send('thread:update', t)
+      remoteServer.publish({ kind: 'thread', data: t })
+    }
+  } finally { lease.release() }
 })
-
 // Generic thread patch is deliberately narrow: only renderer-owned planning/notes
 // fields cross this seam. Workspace/runtime/timeline state has dedicated host APIs.
+const updateDocumentPolicy = createThreadDocumentPolicyHost({ threads: () => store.threads, settings: () => store.settings, projects: () => store.projects, aborters, guard: workspaceMutationGuard, authorize: () => requireSecurityRole('operator', 'change document collections') })
 const updateMemoryPolicy = createThreadMemoryPolicyHost({
   threads: () => store.threads,
   provider: (thread) => store.settings.providers.find((p) => p.id === thread.providerId),
   aborters, guard: workspaceMutationGuard,
   publish: (thread) => { store.win?.webContents.send('thread:update', thread); remoteServer.publish({ kind: 'thread', data: thread }) },
 })
+const messageEdits = createThreadMessageEditHost({
+  threads: () => store.threads,
+  provider: (thread) => store.settings.providers.find((p) => p.id === (thread.providerId ?? store.settings.activeProviderId)),
+  aborters, guard: workspaceMutationGuard,
+  assertNoPendingWork: (thread) => {
+    if (store.jobs.some((job) => (job.threadId === thread.id || job.currentThreadId === thread.id) && ['queued', 'running', 'waiting_approval', 'paused', 'stalled'].includes(job.status))) throw new Error('Finish or cancel this chat’s pending work before editing its history.')
+    if (store.subAgents.some((agent) => (agent.parent.threadId === thread.id || (agent.parent.kind === 'thread' && agent.parent.id === thread.id)) && ['queued', 'running'].includes(agent.status))) throw new Error('Finish or cancel this chat’s workers before editing its history.')
+  },
+  publish: (thread) => { store.win?.webContents.send('thread:update', thread); remoteServer.publish({ kind: 'thread', data: thread }) },
+})
+handle('threads:prepareMessageEdit', async (_e, { threadId, itemId }: { threadId: string; itemId: string }) => {
+  requireSecurityRole('operator', 'prepare a sent-message edit')
+  return messageEdits.prepare(threadId, itemId)
+})
+handle('threads:editMessage', async (_e, input: ThreadMessageEditInput) => {
+  requireSecurityRole('operator', 'edit sent messages')
+  return messageEdits.edit(input)
+})
+
 handle('threads:setMemoryPolicy', async (_e, { id, policy, expectedRevision }: { id: string; policy: unknown; expectedRevision: number }) => {
   requireSecurityRole('operator', 'change saved-memory choices')
   return updateMemoryPolicy(id, policy, expectedRevision)
@@ -324,10 +359,33 @@ handle('threads:patch', async (_e, { id, patch }: { id: string; patch: RendererT
   if (t?.archivedAt) throw new Error('Restore the archived thread before patching it.')
   if (t) {
     const safe = sanitizeRendererThreadPatch(patch)
+    const changesDocuments = Object.prototype.hasOwnProperty.call(safe, 'documentSourceIds')
+    if (changesDocuments && Object.keys(safe).length !== 1) throw new Error('Change document collections separately from other chat settings.')
     if (safe.incognito === false && t.incognito) throw new Error('An incognito thread cannot be converted into a persisted thread.')
     if (safe.incognito === true && (t.timeline.length > 0 || t.apiMessages.length > 0 || t.status === 'running' || aborters.has(t.id))) throw new Error('Incognito mode must be selected before a thread starts.')
-    Object.assign(t, safe, { updatedAt: Date.now() })
-    persistThreads()
+    if (changesDocuments) {
+      await updateDocumentPolicy(t.id, safe.documentSourceIds)
+    } else if (safe.incognito === true && !t.incognito) {
+      const lease = workspaceMutationGuard.reserveStart({ threadId: t.id })
+      const previous = Object.fromEntries([...Object.keys(safe), 'updatedAt'].map((key) => [key, { exists: Object.prototype.hasOwnProperty.call(t, key), value: (t as any)[key] }]))
+      try {
+        // Close draft ownership synchronously before awaiting the earlier normal-draft writes.
+        Object.assign(t, safe, { updatedAt: Date.now() })
+        const scope = { surface: 'chat' as const, conversationId: t.id, hostId: t.orchestratorHostId ?? null, incognito: false }
+        await purgeComposerDraft(scope)
+        await saveThreads(store.threads)
+        sendToRenderer('composer-drafts:reset', { ...scope, incognito: true })
+      } catch (error) {
+        for (const [key, prior] of Object.entries(previous)) {
+          if (prior.exists) (t as any)[key] = prior.value
+          else delete (t as any)[key]
+        }
+        throw error
+      } finally { lease.release() }
+    } else {
+      Object.assign(t, safe, { updatedAt: Date.now() })
+      persistThreads()
+    }
     store.win?.webContents.send('thread:update', t)
     remoteServer.publish({ kind: 'thread', data: t })
   }
@@ -392,27 +450,30 @@ handle('threads:appendNotice', async (_e, { id, text }: { id: string; text: stri
 // Manual /compact: summarize older turns now and drop a notice in the timeline.
 handle('thread:compact', async (_e, id: string) => {
   requireSecurityRole('operator', 'compact thread history')
-  const thread = store.threads.find((t) => t.id === id)
-  if (!thread) throw new Error('Thread not found')
-  if (thread.archivedAt) throw new Error('Restore the archived thread before compacting it.')
-  // compactThread writes back a snapshot taken before its model call, which would drop
-  // whatever a live run appended meanwhile (and can orphan tool calls).
-  if (aborters.has(thread.id)) throw new Error('Stop the running thread before compacting it.')
-  const baseProvider = store.settings.providers.find((p) => p.id === (thread.providerId ?? store.settings.activeProviderId))
-  if (!baseProvider) throw new Error('Configure a provider and model first.')
-  const compactWorkspace = thread.workspace ?? store.projects.find((project) => project.id === thread.projectId)?.workspace ?? null
-  assertSshThreadTransportSupported(compactWorkspace, baseProvider)
-  const provider = await runtimeProviderWithFreshModels(baseProvider, thread.providerAccountId)
-  const model = resolveProviderModel(provider, null, thread.model, store.settings.activeModel)
-  if (!model) throw new Error('Configure a provider and model first.')
-  const before = estimateTokens(thread.apiMessages)
-  const entry = await compactThread(thread, provider, model, new AbortController().signal, 'manual')
-  const after = estimateTokens(thread.apiMessages)
-  const item = { id: randomUUID(), kind: 'notice' as const, text: entry ? `Context compacted. Folded ${entry.messagesFolded} earlier messages (~${kfmt(before)} -> ~${kfmt(after)} tokens).` : 'Nothing to compact yet.', createdAt: Date.now() }
-  thread.timeline.push(item); thread.updatedAt = Date.now(); persistThreads()
-  emitToRenderer({ runId: '', threadId: id, type: 'item_add', item })
-  remoteServer.publish({ kind: 'thread', data: thread })
-  return { ok: true, thread }
+  const lease = workspaceMutationGuard.reserveStart({ threadId: id })
+  try {
+    const thread = store.threads.find((t) => t.id === id)
+    if (!thread) throw new Error('Thread not found')
+    if (thread.archivedAt) throw new Error('Restore the archived thread before compacting it.')
+    // compactThread writes back a snapshot taken before its model call, which would drop
+    // whatever a live run appended meanwhile (and can orphan tool calls).
+    if (aborters.has(thread.id)) throw new Error('Stop the running thread before compacting it.')
+    const baseProvider = store.settings.providers.find((p) => p.id === (thread.providerId ?? store.settings.activeProviderId))
+    if (!baseProvider) throw new Error('Configure a provider and model first.')
+    const compactWorkspace = thread.workspace ?? store.projects.find((project) => project.id === thread.projectId)?.workspace ?? null
+    assertSshThreadTransportSupported(compactWorkspace, baseProvider)
+    const provider = await runtimeProviderWithFreshModels(baseProvider, thread.providerAccountId)
+    const model = resolveProviderModel(provider, null, thread.model, store.settings.activeModel)
+    if (!model) throw new Error('Configure a provider and model first.')
+    const before = estimateTokens(thread.apiMessages)
+    const entry = await compactThread(thread, provider, model, new AbortController().signal, 'manual')
+    const after = estimateTokens(thread.apiMessages)
+    const item = { id: randomUUID(), kind: 'notice' as const, text: entry ? `Context compacted. Folded ${entry.messagesFolded} earlier messages (~${kfmt(before)} -> ~${kfmt(after)} tokens).` : 'Nothing to compact yet.', createdAt: Date.now() }
+    thread.timeline.push(item); thread.updatedAt = Date.now(); persistThreads()
+    emitToRenderer({ runId: '', threadId: id, type: 'item_add', item })
+    remoteServer.publish({ kind: 'thread', data: thread })
+    return { ok: true, thread }
+  } finally { lease.release() }
 })
 
 handle('threads:setProject', async (_e, { id, projectId }: { id: string; projectId: string | null }) => {

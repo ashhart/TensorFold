@@ -1,9 +1,12 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useState } from 'react'
 import { api } from '../../lib/ipc'
 import { Icon } from '../../lib/icons'
 import { BrandIcon, connectorBrand } from '../../lib/brand'
 import type { ConnectorEvent } from '../../lib/types'
 import { selectPendingApprovals } from './pending-approvals'
+import { OutboundApprovalDialog } from './OutboundApprovalDialog'
 
 // Consolidated approve-from-the-channel bar: every outbound action blocked on your
 // decision, across all connectors, in one urgent-first strip. Approve/Reject resolve
@@ -18,17 +21,24 @@ export function PendingApprovalsBar({
   onResolved: () => void
   onOpen?: (threadKey: string) => void
 }) {
+  const tx = useAuthoredText()
   const queue = selectPendingApprovals(events)
   const [busy, setBusy] = useState<string | null>(null)
+  const [reviewId, setReviewId] = useState<string | null>(null)
+  const [error, setError] = useState('')
   if (queue.length === 0) return null
 
-  const resolve = async (id: string, decision: 'approve' | 'deny') => {
+  const resolve = async (id: string, decision: 'approve' | 'deny', reviewDigest?: string) => {
+    if (busy) return
     setBusy(id)
+    setError('')
     try {
-      await api.resolveConnectorApproval(id, decision)
+      await api.resolveConnectorApproval(id, decision, reviewDigest)
+      setReviewId(null)
       onResolved()
-    } catch {
-      /* best effort — refresh still reconciles state */
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : tx("This decision could not be saved."))
+      onResolved()
     } finally {
       setBusy(null)
     }
@@ -36,11 +46,13 @@ export function PendingApprovalsBar({
 
   return (
     <div className="mx-8 mt-4 overflow-hidden rounded-xl border border-warn/30 bg-warn/[0.06] shadow-card fade-in">
+      {reviewId && events.find((event) => event.id === reviewId) && <OutboundApprovalDialog event={events.find((event) => event.id === reviewId)!} busy={busy === reviewId} error={error} onConfirm={(digest) => void resolve(reviewId, 'approve', digest)} onClose={() => setReviewId(null)} />}
+      {error && !reviewId && <p role="alert" className="px-4 py-3 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}
       <div className="flex items-center gap-2 border-b border-warn/20 px-4 py-2">
         <Icon name="shield" size={14} className="text-warn" />
-        <span className="text-[13px] font-medium text-ink">Needs your approval</span>
+        <span className="text-[13px] font-medium text-ink">{tx("Needs your approval")}</span>
         <span className="rounded-full bg-warn/20 px-1.5 text-[12px] font-medium tabular-nums text-ink-2">{queue.length}</span>
-        <span className="ml-auto text-[12px] text-ink-3">across every channel</span>
+        <span className="ml-auto text-[12px] text-ink-3">{tx("across every channel")}</span>
       </div>
       <div className="divide-y divide-line">
         {queue.map((item) => (
@@ -49,28 +61,26 @@ export function PendingApprovalsBar({
             <button
               onClick={() => onOpen?.(item.threadKey)}
               className="min-w-0 flex-1 text-left"
-              title="Open this conversation"
+              title={tx("Open this conversation")}
             >
               <span className="flex items-center gap-1.5">
                 <span className="truncate text-[13px] font-medium text-ink">{item.title || item.actor}</span>
-                {item.urgent && <span className="shrink-0 rounded bg-warn/20 px-1 text-[11px] font-semibold uppercase tracking-wide text-warn">urgent</span>}
+                {item.urgent && <span className="shrink-0 rounded bg-warn/20 px-1 text-[11px] font-semibold uppercase tracking-wide text-warn">{tx("urgent")}</span>}
               </span>
               <span className="mt-0.5 block truncate text-[13px] text-ink-3">{item.summary || item.actor}</span>
             </button>
             <button
-              disabled={busy === item.id}
-              onClick={() => resolve(item.id, 'approve')}
+              disabled={!!busy}
+              onClick={() => { const event = events.find((candidate) => candidate.id === item.id); if (event?.outbound || event?.outboundError || /send_requested|reply_requested|automation_result_ready/.test(event?.action ?? '')) { setError(''); setReviewId(item.id) } else void resolve(item.id, 'approve') }}
               className="shrink-0 rounded-md bg-positive/15 px-2.5 py-1 text-[13px] font-medium text-positive transition-colors hover:bg-positive/25 disabled:opacity-50"
             >
-              Approve
-            </button>
+              {tx("Review")}</button>
             <button
-              disabled={busy === item.id}
+              disabled={!!busy}
               onClick={() => resolve(item.id, 'deny')}
               className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger disabled:opacity-50"
             >
-              Reject
-            </button>
+              {tx("Reject")}</button>
           </div>
         ))}
       </div>

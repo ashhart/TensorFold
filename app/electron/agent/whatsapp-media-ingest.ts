@@ -109,6 +109,8 @@ export interface CacheWhatsAppMediaOptions {
    * primitive path (downloadViaPrimitive) when it holds a raw encrypted buffer instead.
    */
   fetchDecryptedBytes: () => Promise<Uint8Array>
+  /** Recheck current account/scope ownership after asynchronous decryption and before cache admission. */
+  shouldCache?: () => boolean
 }
 
 /**
@@ -123,7 +125,9 @@ export async function cacheWhatsAppMediaMessage(
   opts: CacheWhatsAppMediaOptions,
 ): Promise<string | null> {
   try {
+    if (opts.shouldCache && !opts.shouldCache()) return null
     const bytes = await opts.fetchDecryptedBytes()
+    if (opts.shouldCache && !opts.shouldCache()) return null
     if (!bytes || bytes.byteLength === 0) return null
     const result: MediaCacheResult = await cacheBytes(
       { data: bytes, filename: descriptor.fileName ?? null, contentType: descriptor.mimetype ?? null },

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../../lib/icons'
 import type { Thread, Room, CliSession } from '../../lib/types'
@@ -25,6 +26,7 @@ function HoverAction({ icon, label, onClick }: { icon: IconName; label: string; 
 
 // A thread: title and age, then where it runs and what it changed or that it needs you.
 export function ThreadRow({ t, indent, active, state, meta, diff, age, pinned, editing, onOpen, onStartEdit, onCommit, onCancel, onArchive, onTogglePin }: ThreadRowView & { t: Thread; indent?: boolean }) {
+  const tx = useAuthoredText()
   return (
     <div
       onClick={() => { if (!editing) onOpen() }}
@@ -42,15 +44,15 @@ export function ThreadRow({ t, indent, active, state, meta, diff, age, pinned, e
             onCancel={onCancel}
             className="min-w-0 flex-1 truncate text-[13px] leading-[18px] text-ink"
           />
-          {!editing && t.incognito && <Icon name="incognito" size={14} className="shrink-0 text-ink-4" aria-label="Incognito, not saved" />}
+          {!editing && t.incognito && <Icon name="incognito" size={14} className="shrink-0 text-ink-4" aria-label={tx("Incognito, not saved")} />}
           {!editing && <span className="shrink-0 text-[13px] leading-4 tabular-nums text-ink-3 group-hover:invisible">{age}</span>}
         </div>
         <div className="flex items-center gap-2 text-[13px] leading-4 text-ink-3">
           <span className="min-w-0 flex-1 truncate">{meta}</span>
           {state === 'needs-you'
-            ? <span className="shrink-0 text-accent">Needs you</span>
+            ? <span className="shrink-0 text-accent">{tx("Needs you")}</span>
             : diff && (
-              <span className="shrink-0 tabular-nums" title={`${diff.files} file${diff.files === 1 ? '' : 's'} changed`}>
+              <span className="shrink-0 tabular-nums" title={tx("Files changed: {count}", { count: diff.files })}>
                 <span className="text-positive">+{diff.additions}</span> <span className="text-danger">−{diff.deletions}</span>
               </span>
             )}
@@ -58,8 +60,8 @@ export function ThreadRow({ t, indent, active, state, meta, diff, age, pinned, e
       </div>
       {!editing && (
         <div className="absolute right-1.5 top-[3px] hidden items-center group-hover:flex">
-          <HoverAction icon={pinned ? 'starFilled' : 'star'} label={pinned ? 'Unpin' : 'Pin'} onClick={onTogglePin} />
-          <HoverAction icon="archive" label="Archive" onClick={onArchive} />
+          <HoverAction icon={pinned ? 'starFilled' : 'star'} label={pinned ? tx("Unpin") : tx("Pin")} onClick={onTogglePin} />
+          <HoverAction icon="archive" label={tx("Archive")} onClick={onArchive} />
         </div>
       )}
     </div>
@@ -83,13 +85,14 @@ export function TerminalRow({ session, active, editing, onOpen, onStartEdit, onC
   onCancel: () => void
   onClose: () => void
 }) {
+  const tx = useAuthoredText()
   const running = session.status === 'busy' || session.status === 'attention'
   return (
     <div onClick={() => { if (!editing) onOpen() }} className={rowClass(active)}>
       <Icon name="terminal" size={16} className="shrink-0 text-ink-3" />
       <InlineEditable value={session.title} editing={editing} onStartEdit={onStartEdit} onCommit={onCommit} onCancel={onCancel} className="min-w-0 flex-1 truncate" />
       {!editing && running && <span className="size-1.5 shrink-0 animate-pulse rounded-full bg-ink-3 group-hover:opacity-0" />}
-      {!editing && <span className="absolute right-1.5 hidden group-hover:flex"><HoverAction icon="x" label="Close terminal" onClick={onClose} /></span>}
+      {!editing && <span className="absolute right-1.5 hidden group-hover:flex"><HoverAction icon="x" label={tx("Close terminal")} onClick={onClose} /></span>}
     </div>
   )
 }
@@ -106,6 +109,7 @@ export function RoomRow({ room, active, running, state, editing, onOpen, onStart
   onCancel: () => void
   onArchive: () => void
 }) {
+  const tx = useAuthoredText()
   return (
     <div onClick={() => { if (!editing) onOpen() }} className={rowClass(active)}>
       <Icon name="layers" size={16} className="shrink-0 text-ink-3" />
@@ -113,7 +117,7 @@ export function RoomRow({ room, active, running, state, editing, onOpen, onStart
       {!editing && (running
         ? <span className="flex shrink-0 text-ink-3 group-hover:opacity-0"><SidebarSpinner size={12} /></span>
         : (state === 'failed' || state === 'error') && <span className="size-1.5 shrink-0 rounded-full bg-danger group-hover:opacity-0" />)}
-      {!editing && <span className="absolute right-1.5 hidden group-hover:flex"><HoverAction icon="archive" label="Archive room" onClick={onArchive} /></span>}
+      {!editing && <span className="absolute right-1.5 hidden group-hover:flex"><HoverAction icon="archive" label={tx("Archive room")} onClick={onArchive} /></span>}
     </div>
   )
 }

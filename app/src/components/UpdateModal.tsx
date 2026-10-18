@@ -1,3 +1,6 @@
+import { currentIntlLocale } from '../lib/preferences/current-locale'
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useLayoutEffect, useMemo, useRef } from 'react'
 import { useStore } from '../lib/store'
 import { Icon } from '../lib/icons'
@@ -61,13 +64,14 @@ function parseChangelog(notes: string | null): ChangelogSection[] {
 function formatDate(ms: number | null): string | null {
   if (!ms) return null
   try {
-    return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+    return new Date(ms).toLocaleDateString(currentIntlLocale(), { year: 'numeric', month: 'short', day: 'numeric' })
   } catch {
     return null
   }
 }
 
 export function UpdateModal() {
+  const tx = useAuthoredText()
   const open = useStore((s) => s.updateModalOpen)
   const status = useStore((s) => s.updateStatus)
   const close = useStore((s) => s.closeUpdateModal)
@@ -141,27 +145,27 @@ export function UpdateModal() {
             <div className="min-w-0">
               <div className="flex items-center gap-2">
                 <h2 id="update-modal-title" className="truncate text-[15px] font-semibold tracking-[-0.01em] text-ink">
-                  {available ? 'Update available' : 'App updates'}
+                  {available ? tx("Update available") : tx("App updates")}
                 </h2>
                 {available && (
                   <span className="shrink-0 rounded-full bg-accent/12 px-2 py-0.5 text-[12px] font-semibold text-accent">
-                    v{status.latestVersion}
+                    {tx("v")}{status.latestVersion}
                   </span>
                 )}
               </div>
               <div className="mt-0.5 flex items-center gap-2 text-[13px] text-ink-2">
-                <span>Current v{status.currentVersion}</span>
+                <span>{tx("Current v")}{status.currentVersion}</span>
                 {status.latestVersion && (
                   <>
                     <span className="text-ink-5">→</span>
-                    <span className="font-medium text-ink-2">v{status.latestVersion}</span>
+                    <span className="font-medium text-ink-2">{tx("v")}{status.latestVersion}</span>
                   </>
                 )}
                 {date && <><span className="text-ink-5">·</span><span>{date}</span></>}
               </div>
             </div>
           </div>
-          <button onClick={close} disabled={installing} aria-label="Close" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-40">
+          <button onClick={close} disabled={installing} aria-label={tx("Close")} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-40">
             <Icon name="x" size={15} />
           </button>
         </div>
@@ -198,7 +202,7 @@ export function UpdateModal() {
 
           {status.error && (
             <div className="mt-3 rounded-lg border border-danger/30 bg-danger/8 px-3 py-2 text-[13px] text-danger">
-              {status.error}
+              {<OriginalDiagnostic>{status.error}</OriginalDiagnostic>}
             </div>
           )}
         </div>
@@ -208,11 +212,11 @@ export function UpdateModal() {
           {available && (
             <div className="mb-2.5 flex items-center gap-2 text-[12px] text-ink-2">
               <Icon name="shield" size={12} />
-              <span>{status.integrity === 'artifact_verified' ? 'Downloaded update verified.' : 'The signed release is verified again after download.'}</span>
+              <span>{status.integrity === 'artifact_verified' ? tx("Downloaded update verified.") : tx("The signed release is verified again after download.")}</span>
             </div>
           )}
           <UpdateActions status={status} />
-          <div className="mt-2 flex justify-end"><Button variant="ghost" size="sm" onClick={close} disabled={installing}>Close</Button></div>
+          <div className="mt-2 flex justify-end"><Button variant="ghost" size="sm" onClick={close} disabled={installing}>{tx("Close")}</Button></div>
         </div>
       </div>
     </div>

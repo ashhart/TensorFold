@@ -1,3 +1,7 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
+import { ALL_SETTINGS_SECTIONS, type SettingsSection } from './shared'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../../lib/ipc'
@@ -8,20 +12,20 @@ import { Button } from '../ui'
 import { Section, SettingsPane, Spinner, type SettingsSectionContext } from './shared'
 
 const AREA_LABELS: Record<DoctorArea, string> = {
-  models: 'Models',
-  connectors: 'Connectors',
-  remote: 'Remote',
-  terminals: 'Terminals',
-  security: 'Security',
+  get models() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Models") },
+  get connectors() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Connectors") },
+  get remote() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Remote") },
+  get terminals() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Terminals") },
+  get security() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Security") },
 }
 
 const AREA_ORDER: DoctorArea[] = ['models', 'remote', 'connectors', 'terminals', 'security']
 
 const STATUS_META: Record<DoctorStatus, { label: string; icon: 'check' | 'warning' | 'refresh' | 'x'; className: string }> = {
-  ok: { label: 'Ready', icon: 'check', className: 'border-positive/30 bg-positive/10 text-positive' },
-  warning: { label: 'Needs review', icon: 'warning', className: 'border-warn/40 bg-warn/10 text-warn' },
-  error: { label: 'Blocked', icon: 'x', className: 'border-danger/35 bg-danger/10 text-danger' },
-  checking: { label: 'Checking', icon: 'refresh', className: 'border-line bg-ink-5 text-ink-3' },
+  ok: { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ready") }, icon: 'check', className: 'border-positive/30 bg-positive/10 text-positive' },
+  warning: { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Needs review") }, icon: 'warning', className: 'border-warn/40 bg-warn/10 text-warn' },
+  error: { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Blocked") }, icon: 'x', className: 'border-danger/35 bg-danger/10 text-danger' },
+  checking: { get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Checking") }, icon: 'refresh', className: 'border-line bg-ink-5 text-ink-3' },
 }
 
 function areaGroups(checks: DoctorCheck[]) {
@@ -39,6 +43,7 @@ function statusPill(status: DoctorStatus) {
 }
 
 export function ReadinessSettings({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const [providerReadiness, setProviderReadiness] = useState<Record<string, ProbeState<Readiness>>>({})
   const [localClis, setLocalClis] = useState<ProbeState<Array<CliDefinition | CliToolStatus>>>({ status: 'checking' })
   const [remoteProbes, setRemoteProbes] = useState<Record<string, ProbeState<RemoteSnapshotProbeValue>>>({})
@@ -50,7 +55,7 @@ export function ReadinessSettings({ ctx }: { ctx: SettingsSectionContext }) {
   const [persistenceFailure, setPersistenceFailure] = useState<PersistenceFailure | null>(ctx.securityControls?.lastPersistenceFailure ?? null)
   const [refreshNonce, setRefreshNonce] = useState(0)
 
-  const providerEntries = useMemo(() => listReadinessProviderProbes(ctx.draft), [ctx.draft.providers])
+  const providerEntries = useMemo(() => listReadinessProviderProbes(ctx.draft), [ctx.draft.providers, tx])
   const remoteHosts = ctx.draft.remoteOrchestrators ?? []
 
   useEffect(() => {
@@ -133,28 +138,27 @@ export function ReadinessSettings({ ctx }: { ctx: SettingsSectionContext }) {
     webhooks,
     persistenceFailure,
     securityControls,
-  }), [ctx.draft, providerReadiness, providerStatus, localClis, remoteProbes, ctx.studioStatus, connectors, connectorEvents, webhooks, persistenceFailure, securityControls])
+  }), [ctx.draft, providerReadiness, providerStatus, localClis, remoteProbes, ctx.studioStatus, connectors, connectorEvents, webhooks, persistenceFailure, securityControls, tx])
   const summary = summarizeDoctor(checks)
   const grouped = areaGroups(checks)
 
   const jump = (section?: string) => {
-    if (section && typeof ctx.goToSection === 'function') ctx.goToSection(section)
+    if (section && ALL_SETTINGS_SECTIONS.some((item) => item.id === section)) ctx.goToSection(section as SettingsSection)
   }
 
   return (
     <SettingsPane>
-      <Section title="Readiness" desc="Live checks for the runtime pieces TensorFold depends on.">
+      <Section title={tx("Readiness")} desc={tx("Live checks for the runtime pieces TensorFold depends on.")}>
         <div className="mb-4 grid gap-2 sm:grid-cols-4">
-          <SummaryCell label="Ready" value={summary.ok} status="ok" />
-          <SummaryCell label="Review" value={summary.warning} status="warning" />
-          <SummaryCell label="Blocked" value={summary.error} status="error" />
-          <SummaryCell label="Checking" value={summary.checking} status="checking" />
+          <SummaryCell label={tx("Ready")} value={summary.ok} status="ok" />
+          <SummaryCell label={tx("Review")} value={summary.warning} status="warning" />
+          <SummaryCell label={tx("Blocked")} value={summary.error} status="error" />
+          <SummaryCell label={tx("Checking")} value={summary.checking} status="checking" />
         </div>
         <div className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-line bg-card px-3 py-2.5">
           <div className="min-w-0 text-[13px] text-ink-2">
-            {summary.total} checks across models, connectors, remote orchestration, terminals, and security.
-          </div>
-          <Button variant="default" size="sm" icon="refresh" onClick={() => setRefreshNonce((value) => value + 1)}>Refresh</Button>
+            {summary.total} {tx("checks across models, connectors, remote orchestration, terminals, and security.")}</div>
+          <Button variant="default" size="sm" icon="refresh" onClick={() => setRefreshNonce((value) => value + 1)}>{tx("Refresh")}</Button>
         </div>
         <div className="space-y-5">
           {grouped.map((group) => (
@@ -186,6 +190,7 @@ export function ReadinessSettings({ ctx }: { ctx: SettingsSectionContext }) {
 }
 
 function SummaryCell({ label, value, status }: { label: string; value: number; status: DoctorStatus }) {
+  const tx = useAuthoredText()
   const meta = STATUS_META[status]
   return (
     <div className={clsx('rounded-lg border px-3 py-2.5', meta.className)}>

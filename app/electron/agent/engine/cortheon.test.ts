@@ -10,7 +10,7 @@ for (const supported of [false, true]) {
   try {
     assert.deepEqual((await svc.status()).cortheon, { supported, enabled: false, active: false, disabledReason: CORTHEON_RELEASE_POLICY.reason }, 'the engine capability remains factual while the desktop release is paused')
     const before = await h.records()
-    await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
+    await assert.rejects(svc.setCortheon(true), /temporarily disabled in this beta/)
     assert.deepEqual(await h.records(), before, 'the refused enable does not probe or restart the engine')
     await seedModel(h.hub, MODEL)
     await svc.load(MODEL)

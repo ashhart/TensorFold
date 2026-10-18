@@ -1,0 +1,27 @@
+{
+  "status": "unwired-prototype",
+  "modules": [
+    "prompt-registry",
+    "evidence-bundles",
+    "semantic-code-index",
+    "ambient-reactions",
+    "memory-consolidate",
+    "managed-tunnel",
+    "provider-session",
+    "approval-queue",
+    "difficulty-router",
+    "trajectory-regression",
+    "guided-decoding",
+    "semantic-recall",
+    "procedural-distiller",
+    "online-evals",
+    "mcp-oauth-registry",
+    "env-snapshots",
+    "kg-memory",
+    "tmux-session",
+    "mcp-sampling-elicitation",
+    "calendar-ics"
+  ],
+  "testsIncluded": true,
+  "productionEntryPoints": false
+}

@@ -1,0 +1,14 @@
+{
+  "This action could not be completed.": "この操作を完了できませんでした。",
+  "Some data failed to load — running with partial state.": "一部のデータを読み込めなかったため、不完全な状態で動作しています。",
+  "That room is not available for this project.": "そのルームはこのプロジェクトで使えません。",
+  "That room and ticket belong to different hosts. Choose a room on the ticket owner.": "ルームとチケットの所有ホストが異なります。チケット所有者のホスト上のルームを選んでください。",
+  "Room ownership changed before dispatch. Refresh the project and try again.": "送信前にルームの所有元が変わりました。プロジェクトを更新して再試行してください。",
+  "Settings saved": "設定を保存しました",
+  "Custom terminal commands are not available on Orchestrator projects.": "Orchestrator のプロジェクトではカスタムターミナルコマンドは使えません。",
+  "TensorFold cannot safely identify that terminal session.": "このターミナルセッションを安全に識別できません。",
+  "This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.": "このリモートターミナルは出典追跡の導入前に作成されたため、所有ホストを安全に判断できません。対応する Orchestrator から開き直してください。",
+  "Files stay in your draft until the current run finishes; they cannot be sent as text-only guidance.": "ファイルは現在の実行が終わるまで下書きに残り、テキストだけの指示として送ることはできません。",
+  "This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode.": "このチケットはローカル所有です。リモート実行で既存チケットを暗黙に移動することはできません。Orchestrator に新規作成するか別の実行モードを選んでください。",
+  "Layout changed for this session, but the preference could not be saved on this device.": "このセッションのレイアウトは変更しましたが、このデバイスに設定を保存できませんでした。"
+}

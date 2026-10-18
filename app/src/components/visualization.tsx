@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../lib/icons'
 import type {
@@ -259,7 +260,8 @@ function FlowVisualization({ spec }: { spec: VisualizationSpec }) {
 }
 
 function BarVisualization({ bars }: { bars: VisualizationBar[] }) {
-  const rows = bars.length ? bars : [{ label: 'No data', value: 0 }]
+  const tx = useAuthoredText()
+  const rows: VisualizationBar[] = bars.length ? bars : [{ label: tx("No data"), value: 0 }]
   const max = Math.max(1, ...rows.map((b) => b.max ?? b.value))
   return (
     <div className="space-y-3">
@@ -285,7 +287,8 @@ function BarVisualization({ bars }: { bars: VisualizationBar[] }) {
 }
 
 function StatsVisualization({ metrics }: { metrics: VisualizationMetric[] }) {
-  const rows = metrics.length ? metrics : [{ label: 'Metric', value: '0' }]
+  const tx = useAuthoredText()
+  const rows: VisualizationMetric[] = metrics.length ? metrics : [{ label: tx("Metric"), value: '0' }]
   return (
     <div className="grid grid-cols-2 gap-2.5 md:grid-cols-4">
       {rows.map((metric, i) => (
@@ -339,6 +342,7 @@ function Legend({ spec }: { spec: VisualizationSpec }) {
 }
 
 export function VisualizationCard({ item, spec: rawSpec }: { item?: TimelineItem; spec?: VisualizationSpec }) {
+  const tx = useAuthoredText()
   const spec = normalizeVisualizationSpec(rawSpec ?? item?.visualization ?? item?.args)
   const failed = item?.state === 'error'
   const loading = item?.state === 'pending' || item?.state === 'running'
@@ -346,8 +350,7 @@ export function VisualizationCard({ item, spec: rawSpec }: { item?: TimelineItem
   if (!spec) {
     return (
       <div className="fade-in rounded-xl border border-danger/25 bg-danger/8 px-3.5 py-3 text-[13px] text-ink">
-        Unable to render visualization.
-      </div>
+        {tx("Unable to render visualization.")}</div>
     )
   }
 
@@ -355,7 +358,7 @@ export function VisualizationCard({ item, spec: rawSpec }: { item?: TimelineItem
     <div className={clsx('fade-in overflow-hidden rounded-xl border bg-card shadow-card', failed ? 'border-danger/25' : 'border-line')}>
       <div className="flex items-center gap-2 border-b border-line bg-card-2 px-3.5 py-2.5">
         <Icon name="grid" size={14} className="text-ink-3" />
-        <span className="text-[13px] font-medium text-ink-2">Widget from {item?.tool || 'assistant'}</span>
+        <span className="text-[13px] font-medium text-ink-2">{tx("Widget from ")}{item?.tool || tx("assistant")}</span>
         <code className="rounded-md border border-line bg-card px-1.5 py-0.5 font-mono text-[12px] text-ink-3">{spec.kind}</code>
         <span className="min-w-0 flex-1 truncate text-[12px] text-ink-3">{item?.meta}</span>
         {loading && <span className="h-3 w-3 animate-spin rounded-full border-2 border-ink-5 border-t-accent" />}

@@ -16,6 +16,7 @@ g.removeEventListener = () => {}
 g.window = g
 
 // Loaded after the shims so module-init-time reads succeed.
+await (await import('./browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('./ipc.ts')
 const { useStore } = await import('./store.ts')
 
@@ -121,9 +122,9 @@ api.cancelRun = (async () => {}) as typeof api.cancelRun
 await (async () => {
   useStore.setState({ status: { th1: 'awaiting' } as any, approvals: { th1: [{ callId: 'call-1', itemId: 'item-1' }] } })
   await useStore.getState().cancel('th1')
-  assert.equal(useStore.getState().status.th1, 'idle')
-  assert.equal(useStore.getState().approvals.th1, undefined, 'cancel clears pending approvals for the thread')
-  ok('cancel clears renderer approvals')
+  assert.equal(useStore.getState().status.th1, 'awaiting')
+  assert.equal(useStore.getState().approvals.th1?.length, 1, 'cancel acknowledgement preserves approval ownership until a terminal event')
+  ok('cancel acknowledgement preserves pending work until the host settles')
 })()
 
 await (async () => {

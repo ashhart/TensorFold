@@ -1,3 +1,13 @@
+import { clusterPreload } from './preload/cluster'
+import { inputHistoryPreload } from './preload/input-history'
+import { modelQualificationPreload } from './preload/model-qualification'
+import { workspaceBackupPreload } from './preload/workspace-backup'
+import { readableExportPreload } from './preload/readable-export'
+import { conversationSearchPreload } from './preload/conversation-search'
+import { documentLibraryPreload } from './preload/document-library'
+import { googleWorkspacePreload } from './preload/google-workspace'
+import { modelBenchmarkPreload } from './preload/model-benchmark'
+import type { TelegramRemoteConfigInput } from '../shared/telegram-remote'
 import type { ThreadMemoryPolicy } from './agent/types'
 import { contextBridge, ipcRenderer } from 'electron'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, Attachment, CueRunPayload, CueRunResult, Settings, StartRunPayload, Thread, RendererThreadPatch, Project, Room, RoomStreamEvent, Ticket, TicketRemoteLifecycleCommand, TicketWorkOptions, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitRepositoryState, GitStatus, TokenUsageSnapshot, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, ChannelApprovalRequest, ChannelApprovalResult, AppUpdateStatus, Provider, OmlxDiscovery, ProviderDiscovery, ProviderDiscoveryKind, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, EmailConnectorSettings, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSummaryResult, EmailSyncResult, EmailThreadResult, Skill, ProjectSkillView, SkillSuggestionDiff, Artifact, Command, SkillSuggestion, McpServerConfig, McpSnapshot, McpToolCallResult, BotControlPollResult, ControllerSnapshot, ControllerStatus, ResolvedInstructionGraph, ProjectMemoryCandidate, ProjectMemoryCandidateDiff, ProjectMemoryEntry, WebhookEndpoint, WebhookSnapshot, RemoteControlPairingInfo, RemoteControlStatus, RemoteConnectionTestResult, RemoteDirectoryListResult, RemoteOrchestratorSnapshotResult, PersistenceFailure, SecurityControlSnapshot, SecurityPurgeResult, SshHost, SshConnectionState, SshSecretPrompt, SshTrustPrompt, WorkspaceLocation, CliDefinition, CliSession, CliToolStatus, ImportableSession, ImportSessionSource, SpineAggregate, ReadSinceResult, CommandReceipt, TurnCheckpoint, PersistedProviderStatus } from './agent/types'
@@ -11,7 +21,7 @@ import type { KokoroStatus, KokoroSynthesisInput } from './agent/types'
 import type { OrchestrationEvent } from './agent/types'
 import type { ArtifactPreview } from './agent/types'
 import type { RoomManualMemoryCommand, RoomMergeResult } from './agent/types'
-import type { EngineConnection, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
+import type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelPreviewResult, SaveEngineModelProfilesInput, EngineConnection, EngineEvent, EngineLearningSnapshot, EngineInstalledModel, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress } from './agent/types'
 import type { MobileBridgePairing, MobileBridgeStatus } from './agent/types/mobile-bridge'
 
 import type { EngineModelLibrarySnapshot, EngineLibraryScanOptions } from './agent/types'
@@ -20,7 +30,39 @@ import type { BotVmStatus, BotVmSetupStatus } from './agent/types'
 import type { UserQuestion, UserQuestionAnswer } from './agent/types'
 import type { BotRecipePreview, BotRecipeImportInput, BotRecipeExportInput } from '../shared/bot-recipe'
 
+import type { TensorFoldStudioApi as StudioApiContract } from '../shared/studio-api'
+import type { ComposerDraftScope, ComposerDraftWrite } from '../shared/composer-drafts'
+import type { ThreadMessageEditInput } from '../shared/thread-message-edit'
+import type { AttachmentTextRequest } from './agent/types'
+
 const api = {
+  ...clusterPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...inputHistoryPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  prepareMessageQuote: input => ipcRenderer.invoke('threads:prepareMessageQuote', input),
+  ...googleWorkspacePreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  modelHelperRun: input => ipcRenderer.invoke('modelHelper:run', input),
+  modelHelperCancel: requestId => ipcRenderer.invoke('modelHelper:cancel', requestId),
+  reviewRunOutcome: (input) => ipcRenderer.invoke('runRecovery:review', input),
+  ...modelQualificationPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...workspaceBackupPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...readableExportPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...conversationSearchPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...documentLibraryPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  ...modelBenchmarkPreload((channel, ...args) => ipcRenderer.invoke(channel, ...args)),
+  verifyTelegram: () => ipcRenderer.invoke('bot:verifyTelegram'),
+  configureTelegramRemote: (input: TelegramRemoteConfigInput) => ipcRenderer.invoke('bot:configureTelegramRemote', input),
+  listTelegramRemoteTargets: () => ipcRenderer.invoke('bot:listTelegramRemoteTargets'),
+  getComposerDraft: (scope: ComposerDraftScope) => ipcRenderer.invoke('composer-drafts:get', scope),
+  saveComposerDraft: (input: ComposerDraftWrite) => ipcRenderer.invoke('composer-drafts:save', input),
+  clearComposerDraft: (input: { scope: ComposerDraftScope; expectedRevision: number }) => ipcRenderer.invoke('composer-drafts:clear', input),
+  onComposerDraftFlush: (cb: (requestId: string) => void) => { const h = (_e: unknown, requestId: string) => cb(requestId); ipcRenderer.on('composer-drafts:flush', h); return () => ipcRenderer.removeListener('composer-drafts:flush', h) },
+  onComposerDraftReset: (cb: (scope: ComposerDraftScope | null) => void) => { const h = (_e: unknown, scope: ComposerDraftScope | null) => cb(scope); ipcRenderer.on('composer-drafts:reset', h); return () => ipcRenderer.removeListener('composer-drafts:reset', h) },
+  acknowledgeComposerDraftFlush: (input: { requestId: string; error?: string }): Promise<void> => ipcRenderer.invoke('composer-drafts:flushed', input),
+  setDeviceWatchSpeech: (input: { sessionId: string; enabled: boolean }): Promise<{ enabled: boolean }> => ipcRenderer.invoke('mobile:setDeviceWatchSpeech', input),
+  getAttachmentTextCapability: () => ipcRenderer.invoke('attachments:textCapability'),
+  extractAttachmentText: (input: AttachmentTextRequest) => ipcRenderer.invoke('attachments:extractText', input),
+  prepareMessageEdit: (input: { threadId: string; itemId: string }) => ipcRenderer.invoke('threads:prepareMessageEdit', input),
+  editMessage: (input: ThreadMessageEditInput): Promise<Thread> => ipcRenderer.invoke('threads:editMessage', input),
   botRecipePreview: (input: { kind: 'import' | 'export'; value: string }): Promise<BotRecipePreview> => ipcRenderer.invoke('botRecipe:preview', input),
   botRecipeImport: (input: BotRecipeImportInput): Promise<Settings> => ipcRenderer.invoke('botRecipe:import', input),
   botRecipeExport: (input: BotRecipeExportInput): Promise<{ saved: boolean }> => ipcRenderer.invoke('botRecipe:export', input),
@@ -71,7 +113,7 @@ const api = {
   regenerateRemoteToken: (): Promise<RemoteControlPairingInfo> => ipcRenderer.invoke('remote:regenerateToken'),
   // Per-device pairing (VST-035): one-time credential → device session; list/revoke devices.
   issueDevicePairing: (label?: string): Promise<{ credential: string; expiresAt: number; url: string | null }> => ipcRenderer.invoke('remote:issuePairing', label),
-  listDeviceSessions: (): Promise<Array<{ id: string; label: string; createdAt: number; lastSeenAt: number; revoked: boolean; clientInfo?: string | null }>> => ipcRenderer.invoke('remote:listDeviceSessions'),
+  listDeviceSessions: (): Promise<Array<{ id: string; label: string; createdAt: number; lastSeenAt: number; revoked: boolean; clientInfo?: string | null; watchSpeech?: boolean }>> => ipcRenderer.invoke('remote:listDeviceSessions'),
   revokeDeviceSession: (sessionId: string): Promise<{ revoked: boolean }> => ipcRenderer.invoke('remote:revokeDeviceSession', sessionId),
   testRemoteClient: (input?: Partial<Settings['remoteClient']>): Promise<RemoteConnectionTestResult> => ipcRenderer.invoke('remote:testClient', input),
   getRemoteSnapshot: (hostId?: string | null): Promise<RemoteOrchestratorSnapshotResult> => ipcRenderer.invoke('remote:snapshot', hostId),
@@ -191,7 +233,7 @@ const api = {
   getModelRouterSnapshot: (): Promise<ModelRouterSnapshot> => ipcRenderer.invoke('modelRouter:snapshot'),
   getAssistantSnapshot: (): Promise<AssistantControlSnapshot> => ipcRenderer.invoke('assistant:snapshot'),
   recordConnectorInteraction: (input: ConnectorInteractionInput): Promise<ConnectorEvent> => ipcRenderer.invoke('assistant:interaction', input),
-  resolveConnectorApproval: (eventId: string, decision: 'approve' | 'deny'): Promise<ConnectorEvent> => ipcRenderer.invoke('assistant:resolveApproval', { eventId, decision }),
+  resolveConnectorApproval: (eventId: string, decision: 'approve' | 'deny', reviewDigest?: string | null): Promise<ConnectorEvent> => ipcRenderer.invoke('assistant:resolveApproval', { eventId, decision, reviewDigest }),
   getControllerStatus: (): Promise<ControllerStatus> => ipcRenderer.invoke('controller:status'),
   enableController: (): Promise<ControllerStatus> => ipcRenderer.invoke('controller:enable'),
   captureController: (): Promise<ControllerSnapshot> => ipcRenderer.invoke('controller:capture'),
@@ -215,7 +257,7 @@ const api = {
   addSlackSource: (dir: string): Promise<SlackConnectorSettings> => ipcRenderer.invoke('slack:addSource', dir),
   updateSlackSource: (id: string, patch: Partial<SlackSourceConfig>): Promise<SlackConnectorSettings> => ipcRenderer.invoke('slack:updateSource', { id, patch }),
   removeSlackSource: (id: string): Promise<SlackConnectorSettings> => ipcRenderer.invoke('slack:removeSource', id),
-  syncSlack: (): Promise<SlackSyncResult> => ipcRenderer.invoke('slack:sync'),
+  syncSlack: (id?: string): Promise<SlackSyncResult> => ipcRenderer.invoke('slack:sync', id ? { id } : undefined),
   listSlack: (opts?: SlackListOptions): Promise<SlackMessage[]> => ipcRenderer.invoke('slack:list', opts),
   readSlack: (id: string): Promise<SlackReadResult> => ipcRenderer.invoke('slack:read', id),
   summarizeSlack: (opts?: SlackListOptions): Promise<SlackSummaryResult> => ipcRenderer.invoke('slack:summary', opts),
@@ -284,11 +326,14 @@ const api = {
   openFullDiskAccess: (): Promise<void> => ipcRenderer.invoke('system:openFullDiskAccess'),
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('system:openExternal', url),
   addWhatsAppSource: (label: string): Promise<WhatsAppBridgeConnectorSettings> => ipcRenderer.invoke('whatsapp:addSource', label),
+  updateWhatsAppSource: (id: string, patch: { label?: string; enabled?: boolean; allowedChatJids?: string[]; allowSelfChat?: boolean }): Promise<WhatsAppBridgeConnectorSettings> => ipcRenderer.invoke('whatsapp:updateSource', { id, patch }),
+  whatsappRuntime: (): Promise<import('./agent/types').WhatsAppBridgeRuntimeSnapshot[]> => ipcRenderer.invoke('whatsapp:runtime'),
+  onWhatsAppRuntime: (cb: (snapshot: import('./agent/types').WhatsAppBridgeRuntimeSnapshot) => void) => { const h = (_e: unknown, p: import('./agent/types').WhatsAppBridgeRuntimeSnapshot) => cb(p); ipcRenderer.on('whatsapp:runtime', h); return () => ipcRenderer.removeListener('whatsapp:runtime', h) },
   removeWhatsAppSource: (id: string): Promise<WhatsAppBridgeConnectorSettings> => ipcRenderer.invoke('whatsapp:removeSource', id),
   startWhatsAppPairing: (id: string): Promise<{ started: boolean }> => ipcRenderer.invoke('whatsapp:startPairing', id),
   disconnectWhatsApp: (id: string): Promise<{ ok: boolean }> => ipcRenderer.invoke('whatsapp:disconnect', id),
   onWhatsAppQr: (cb: (payload: { sourceId: string; qr: string }) => void) => { const h = (_e: unknown, p: { sourceId: string; qr: string }) => cb(p); ipcRenderer.on('whatsapp:qr', h); return () => ipcRenderer.removeListener('whatsapp:qr', h) },
-  onWhatsAppStatus: (cb: (payload: { sourceId: string; paired?: boolean; lastError?: string | null }) => void) => { const h = (_e: unknown, p: { sourceId: string; paired?: boolean; lastError?: string | null }) => cb(p); ipcRenderer.on('whatsapp:status', h); return () => ipcRenderer.removeListener('whatsapp:status', h) },
+  onWhatsAppStatus: (cb: (payload: { sourceId: string; paired?: boolean; phoneNumber?: string | null; credentialRotatedAt?: number | null; enabled?: boolean; lastQrAt?: number | null; lastEventAt?: number | null; lastError?: string | null }) => void) => { const h = (_e: unknown, p: { sourceId: string; paired?: boolean; phoneNumber?: string | null; credentialRotatedAt?: number | null; enabled?: boolean; lastQrAt?: number | null; lastEventAt?: number | null; lastError?: string | null }) => cb(p); ipcRenderer.on('whatsapp:status', h); return () => ipcRenderer.removeListener('whatsapp:status', h) },
   pollTelegram: (): Promise<BotControlPollResult> => ipcRenderer.invoke('bot:pollTelegram'),
   getMissionSnapshot: (): Promise<MissionRuntimeSnapshot> => ipcRenderer.invoke('missions:snapshot'),
   inspectMission: (id: string): Promise<MissionInspectionSnapshot> => ipcRenderer.invoke('missions:inspect', id),
@@ -495,6 +540,9 @@ const api = {
   dismissSuggestion: (id: string): Promise<void> => ipcRenderer.invoke('suggestions:dismiss', id),
   onSuggestionsUpdate: (cb: (list: SkillSuggestion[]) => void) => { const h = (_e: unknown, list: SkillSuggestion[]) => cb(list); ipcRenderer.on('suggestions:update', h); return () => ipcRenderer.removeListener('suggestions:update', h) },
   getProjectMemory: (projectId: string): Promise<ProjectMemoryEntry[]> => ipcRenderer.invoke('memory:get', projectId),
+  getProjectMemoryTrash: (projectId: string): Promise<ProjectMemoryEntry[]> => ipcRenderer.invoke('memory:trashList', projectId),
+  trashProjectMemory: (input: { projectId: string; entryId: string; expectedRevision: number }): Promise<ProjectMemoryEntry> => ipcRenderer.invoke('memory:trash', input),
+  restoreProjectMemory: (input: { projectId: string; entryId: string; expectedRevision: number }): Promise<ProjectMemoryEntry> => ipcRenderer.invoke('memory:restore', input),
   getProjectMemoryCandidates: (projectId: string): Promise<ProjectMemoryCandidate[]> => ipcRenderer.invoke('memory:candidates', projectId),
   proposeProjectMemory: (m: Partial<ProjectMemoryCandidate>): Promise<ProjectMemoryCandidate> => ipcRenderer.invoke('memory:propose', m),
   approveProjectMemoryCandidate: (id: string): Promise<ProjectMemoryEntry> => ipcRenderer.invoke('memory:approveCandidate', id),
@@ -503,7 +551,7 @@ const api = {
   memoryCandidateDiff: (id: string): Promise<ProjectMemoryCandidateDiff> => ipcRenderer.invoke('memory:candidateDiff', id),
   rollbackMemoryEntry: (id: string): Promise<{ action: 'restored_previous' | 'removed'; entry: ProjectMemoryEntry | null }> => ipcRenderer.invoke('memory:rollbackEntry', id),
   saveProjectMemory: (m: Partial<ProjectMemoryEntry>): Promise<ProjectMemoryEntry> => ipcRenderer.invoke('memory:save', m),
-  deleteProjectMemory: (id: string): Promise<void> => ipcRenderer.invoke('memory:delete', id),
+  deleteProjectMemory: (id: string, guard?: { projectId: string; expectedRevision: number }): Promise<void> => ipcRenderer.invoke('memory:delete', id, guard),
   getWebhooks: (): Promise<WebhookSnapshot> => ipcRenderer.invoke('webhooks:get'),
   saveWebhook: (w: Partial<WebhookEndpoint>): Promise<WebhookSnapshot> => ipcRenderer.invoke('webhooks:save', w),
   approveWebhook: (id: string): Promise<WebhookSnapshot> => ipcRenderer.invoke('webhooks:approve', id),
@@ -559,6 +607,12 @@ const api = {
   enginePreflight: (repo: string, revision?: string | null): Promise<ModelPreflight> => ipcRenderer.invoke('engine:preflight', { repo, revision }),
   enginePull: (repo: string, revision?: string | null): Promise<PullProgress> => ipcRenderer.invoke('engine:pull', { repo, revision }),
   engineCancelPull: (repo: string): Promise<{ cancelled: boolean }> => ipcRenderer.invoke('engine:cancelPull', repo),
+  engineCompareModels: (input: EngineModelComparisonInput): Promise<EngineModelComparisonSnapshot> => ipcRenderer.invoke('engine:compareModels', input),
+  engineComparisonStatus: (id: string): Promise<EngineModelComparisonSnapshot | null> => ipcRenderer.invoke('engine:comparisonStatus', id),
+  engineCancelComparison: (id: string): Promise<boolean> => ipcRenderer.invoke('engine:cancelComparison', id),
+  engineTryModel: (model: string): Promise<EngineModelPreviewResult> => ipcRenderer.invoke('engine:tryModel', model),
+  engineCancelTryModel: (): Promise<boolean> => ipcRenderer.invoke('engine:cancelTryModel'),
+  engineSaveModelProfiles: (input: SaveEngineModelProfilesInput): Promise<Settings> => ipcRenderer.invoke('engine:profilesSave', input),
   engineLoad: (repo: string): Promise<EngineStatus> => ipcRenderer.invoke('engine:load', repo),
   engineUnload: (): Promise<EngineStatus> => ipcRenderer.invoke('engine:unload'),
   engineSetCortheon: (enabled: boolean): Promise<EngineStatus> => ipcRenderer.invoke('engine:setCortheon', enabled),
@@ -568,7 +622,7 @@ const api = {
   engineCancelTeach: (): Promise<EngineLearningSnapshot> => ipcRenderer.invoke('engine:cancelTeach'),
   engineDelete: (repo: string): Promise<EngineInstalledModel[]> => ipcRenderer.invoke('engine:delete', repo),
   onEngineEvent: (cb: (event: EngineEvent) => void) => { const h = (_e: unknown, event: EngineEvent) => cb(event); ipcRenderer.on('engine:event', h); return () => ipcRenderer.removeListener('engine:event', h) },
-}
+} satisfies StudioApiContract
 
 contextBridge.exposeInMainWorld('tensorfoldStudio', api)
 // Compatibility aliases for existing integrations.

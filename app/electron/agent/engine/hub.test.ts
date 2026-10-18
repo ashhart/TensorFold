@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { HF_ORIGIN, parseSearchResults, preflightRepo, searchHub, type PreflightContext } from './hub'
+import { parseCapabilities } from './cli'
 
 const GIB = 1024 ** 3
 
@@ -82,6 +83,20 @@ async function main() {
   assert.equal(good.family, 'Qwen3.5-2B or Qwen3.8-27B')
   assert.equal(good.fileCount, 2)
 
+  const declared = parseCapabilities(JSON.stringify({ schema: 1, engine: 'zig', version: '1.1.0', backends: ['metal'], families: { lfm2_moe: ['mlx-q6g64'], gemma4: ['mlx-q3g64'], gemma4_unified: ['mlx-q8g64'], step5_vl: ['mlx-q2g128'], fish_omni: ['fp8-block128'], glm_moe_dsa: ['exlr8'] }, serve: { flags: {} }, env: [] }))
+  for (const [modelType, bits, group] of [['lfm2_moe', 6, 64], ['gemma4', 3, 64], ['gemma4_unified', 8, 64], ['step5_vl', 2, 128]] as const) {
+    const repo = `Example/Declared-${modelType}`, hub = mockHub(repoRoutes(repo, { modelType, quant: { bits, group_size: group } }))
+    const checked = await preflightRepo(repo, null, context(hub.fetchImpl, { families: declared.families }))
+    assert.equal(checked.verdict, 'ok', 'engine-reported affine families do not require an app family-title entry')
+    assert.equal(checked.family, modelType); assert.equal(checked.format, `mlx-q${bits}g${group}`)
+  }
+  for (const modelType of ['fish_omni', 'glm_moe_dsa']) {
+    const repo = `Example/Unverified-${modelType}`, hub = mockHub(repoRoutes(repo, { modelType, quant: null }))
+    const checked = await preflightRepo(repo, null, context(hub.fetchImpl, { families: declared.families }))
+    assert.equal(checked.supported, true); assert.equal(checked.verdict, 'format', 'a reported family cannot infer an unimplemented checkpoint format or media operation')
+    assert.equal(checked.formatOk, false)
+  }
+
   // Real HF resolve URLs redirect to their same-origin config cache before serving JSON.
   const redirectedRoutes = repoRoutes('Org/Redirected')
   const redirectedConfig = redirectedRoutes[`/Org/Redirected/resolve/${SHA}/config.json`]
@@ -108,10 +123,10 @@ async function main() {
   assert.equal(installed.verdict, 'installed')
 
   // Unsupported family, and a drafter on its own.
-  const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4_unified' }))
+  const gemma = mockHub(repoRoutes('google/gemma-9', { modelType: 'gemma4' }))
   const unsupported = await preflightRepo('google/gemma-9', null, context(gemma.fetchImpl))
   assert.equal(unsupported.verdict, 'unsupported')
-  assert.match(unsupported.reasons[0], /serves no gemma4_unified family/)
+  assert.match(unsupported.reasons[0], /serves no gemma4 family/)
   const drafterOnly = mockHub(repoRoutes('z-lab/Qwen3.8-27B-DFlash2', { dflash: true }))
   assert.equal((await preflightRepo('z-lab/Qwen3.8-27B-DFlash2', null, context(drafterOnly.fetchImpl))).verdict, 'unsupported')
 

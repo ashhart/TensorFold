@@ -137,8 +137,8 @@ export function createConnectorChannels(deps: {
     { platform: 'whatsapp', send: async (addr, reply) => {
       if (!addr.account) return { ok: false, error: 'WhatsApp account missing from the conversation address.' }
       const r = await sendWhatsAppMessage(addr.account, addr.conversation, reply.text)
-      rememberConnectorEvents([whatsappEventFromMessage({ sourceId: addr.account, jid: addr.conversation, fromMe: true, text: reply.text, sender: 'You', ts: Date.now() })])
-      return { ok: r.ok }
+      if (r.ok) await rememberConnectorEvents([whatsappEventFromMessage({ sourceId: addr.account, jid: addr.conversation, fromMe: true, text: reply.text, sender: 'You', ts: Date.now(), messageId: r.sentId, authenticatedAccountJid: r.authenticatedAccountJid })])
+      return { ok: r.ok, sentId: r.sentId }
     } },
     { platform: 'slack', supportsInlineApproval: true,
       // Slack can edit a sent message (chat.update), so it streams a draft: sendDraft posts the

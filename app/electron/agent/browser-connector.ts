@@ -1,3 +1,4 @@
+import { connectorSourceBinding } from './connector-source-binding'
 import { createHash, randomUUID } from 'node:crypto'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
@@ -127,7 +128,10 @@ export async function syncBrowserConnector(settings: BrowserConnectorSettings, e
   for (const item of items.slice(0, 50)) {
     const threadKey = browserSourceId(item)
     if (known.has(threadKey)) continue
-    events.push(browserEventFromItem(item, syncedAt))
+    const event = browserEventFromItem(item, syncedAt)
+    const selectedSource = sources.find(source => source.id === item.sourceId)
+    if (selectedSource) event.sources = event.sources?.map(ref => ({ ...ref, sourceRevision: connectorSourceBinding(selectedSource) }))
+    events.push(event)
   }
   return { items, sources, events, syncedAt }
 }

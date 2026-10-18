@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { formatDuration } from '../../../lib/format'
 import type { AssistantControlSnapshot } from '../../../lib/types'
@@ -21,12 +22,13 @@ interface ConnectorHealthPanelProps {
 }
 
 export function ConnectorHealthPanel(props: ConnectorHealthPanelProps) {
+  const tx = useAuthoredText()
   const { connectorHealthRows, connectorActionCount, connectedCount, connectorRows, loading, syncEmailAndRefresh, setView } = props
 
   return (
-    <Panel title="Connector Health" icon="plug" action={connectorActionCount ? `${connectorActionCount} actions` : `${connectedCount}/${connectorRows.length || 0}`}>
+    <Panel title={tx("Connector Health")} icon="plug" action={connectorActionCount ? `${connectorActionCount} actions` : `${connectedCount}/${connectorRows.length || 0}`}>
       <div className="divide-y divide-line">
-        {connectorHealthRows.length === 0 ? <EmptyState icon="plug" title="No connectors" detail={loading ? 'Loading connector snapshot.' : 'Connector contracts are unavailable.'} /> : connectorHealthRows.map(({ connector, health }) => (
+        {connectorHealthRows.length === 0 ? <EmptyState icon="plug" title={tx("No connectors")} detail={loading ? 'Loading connector snapshot.' : 'Connector contracts are unavailable.'} /> : connectorHealthRows.map(({ connector, health }) => (
           <div key={connector.id} className="px-3 py-2.5">
             <div className="flex items-start gap-2.5">
               <span className="relative shrink-0">
@@ -40,9 +42,9 @@ export function ConnectorHealthPanel(props: ConnectorHealthPanelProps) {
                 </div>
                 <div className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-ink-3">{connector.description}</div>
                 <div className="mt-2 grid grid-cols-3 gap-1 text-[12px] text-ink-4">
-                  <span>{connector.unread} unread</span>
-                  <span>{connector.pendingApprovals} approvals</span>
-                  <span>{connector.tools.length} tools</span>
+                  <span>{connector.unread} {tx("unread")}</span>
+                  <span>{connector.pendingApprovals} {tx("approvals")}</span>
+                  <span>{connector.tools.length} {tx("tools")}</span>
                 </div>
                 <div className="mt-2 rounded-md bg-card px-2 py-1.5 text-[13px] text-ink-3">
                   <div className="flex items-center gap-1.5">
@@ -50,10 +52,10 @@ export function ConnectorHealthPanel(props: ConnectorHealthPanelProps) {
                     <span className="min-w-0 flex-1 truncate">{health.detail}</span>
                   </div>
                   <div className="mt-1 flex items-center gap-2">
-                    <span className="min-w-0 flex-1 truncate text-ink-4">Next: {health.nextAction}</span>
-                    {health.action === 'sync-email' && <Button variant="default" size="xs" icon="mail" onClick={syncEmailAndRefresh} disabled={loading}>Sync email</Button>}
-                    {health.action === 'open-sources' && <Button variant="ghost" size="xs" icon="plug" onClick={() => setView({ name: 'plugins' })}>Sources</Button>}
-                    {health.action === 'review-approvals' && <Button variant="ghost" size="xs" icon="shield" onClick={() => document.getElementById('command-centre-approvals')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>Review</Button>}
+                    <span className="min-w-0 flex-1 truncate text-ink-4">{tx("Next: ")}{health.nextAction}</span>
+                    {health.action === 'sync-email' && <Button variant="default" size="xs" icon="mail" onClick={syncEmailAndRefresh} disabled={loading}>{tx("Sync email")}</Button>}
+                    {health.action === 'open-sources' && <Button variant="ghost" size="xs" icon="plug" onClick={() => setView({ name: 'plugins' })}>{tx("Sources")}</Button>}
+                    {health.action === 'review-approvals' && <Button variant="ghost" size="xs" icon="shield" onClick={() => document.getElementById('command-centre-approvals')?.scrollIntoView({ behavior: 'smooth', block: 'start' })}>{tx("Review")}</Button>}
                   </div>
                 </div>
               </div>
@@ -71,12 +73,13 @@ interface ControlGapsPanelProps {
 }
 
 export function ControlGapsPanel(props: ControlGapsPanelProps) {
+  const tx = useAuthoredText()
   const { gapCount, snapshot } = props
 
   return (
-    <Panel title="Control Gaps" icon="warning" action={gapCount ? `${gapCount} open` : 'clear'}>
+    <Panel title={tx("Control Gaps")} icon="warning" action={gapCount ? `${gapCount} open` : 'clear'}>
       <div className="divide-y divide-line">
-        {(snapshot?.gaps ?? []).length === 0 ? <EmptyState icon="check" title="No gaps detected" detail="Connector transport and policy gaps will be tracked here." /> : snapshot!.gaps.slice(0, 5).map((gap) => (
+        {(snapshot?.gaps ?? []).length === 0 ? <EmptyState icon="check" title={tx("No gaps detected")} detail="Connector transport and policy gaps will be tracked here." /> : snapshot!.gaps.slice(0, 5).map((gap) => (
           <div key={gap.id} className="px-3 py-2.5">
             <div className={clsx('text-[13px] font-semibold', gap.severity === 'error' ? 'text-danger' : gap.severity === 'warning' ? 'text-warn' : 'text-ink')}>{gap.title}</div>
             <div className="mt-0.5 line-clamp-2 text-[13px] leading-snug text-ink-3">{gap.detail}</div>
@@ -92,16 +95,17 @@ interface RunClassesPanelProps {
 }
 
 export function RunClassesPanel(props: RunClassesPanelProps) {
+  const tx = useAuthoredText()
   const { snapshot } = props
 
   return (
-    <Panel title="Run Classes" icon="cpu" action={`${snapshot?.budgets.length ?? 0} budgets`}>
+    <Panel title={tx("Run Classes")} icon="cpu" action={`${snapshot?.budgets.length ?? 0} budgets`}>
       <div className="grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-line bg-line">
         {(snapshot?.budgets ?? []).slice(0, 6).map((budget) => (
           <div key={budget.executionClass} className="bg-card px-2.5 py-2">
             <div className="truncate text-[13px] font-semibold text-ink">{budget.label}</div>
             <div className="mt-0.5 text-[12px] text-ink-3">{formatDuration(budget.maxWallSeconds * 1000)}</div>
-            <div className="mt-0.5 text-[12px] text-ink-4">{budget.requiresHeartbeat ? `${budget.heartbeatIntervalSeconds}s heartbeat` : 'no heartbeat'}</div>
+            <div className="mt-0.5 text-[12px] text-ink-4">{budget.requiresHeartbeat ? tx("{value0}s heartbeat", { value0: budget.heartbeatIntervalSeconds }) : tx("no heartbeat")}</div>
           </div>
         ))}
       </div>

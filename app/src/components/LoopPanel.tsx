@@ -1,3 +1,6 @@
+import { statusText } from '../lib/preferences/display'
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -25,6 +28,7 @@ function upsert(list: LoopRecord[], rec: LoopRecord): LoopRecord[] {
  * it advances (phase, cycle, the independent critic's verdict, blockers, log).
  */
 export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; source: 'solo' | 'room' | 'ticket'; surfaceId: string; projectId?: string | null }) {
+  const tx = useAuthoredText()
   const [goal, setGoal] = useState('')
   const [mode, setMode] = useState<'build' | 'ship'>('build')
   const [loops, setLoops] = useState<LoopRecord[]>([])
@@ -49,7 +53,7 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
       setGoal('')
       setLoops((prev) => upsert(prev, rec))
     } catch (e: any) {
-      setErr(e?.message || 'Could not start loop')
+      setErr(e?.message || tx("Could not start loop"))
     } finally {
       setBusy(false)
     }
@@ -57,15 +61,15 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
 
   return (
     <div className="space-y-2">
-      {!cwd && <div className="px-1 text-[12px] text-ink-4">Pick a folder to run a loop.</div>}
+      {!cwd && <div className="px-1 text-[12px] text-ink-4">{tx("Pick a folder to run a loop.")}</div>}
       <textarea
         value={goal}
         onChange={(e) => setGoal(e.target.value)}
-        placeholder="Goal — what should the loop build &amp; verify?"
+        placeholder={tx("Goal — what should the loop build & verify?")}
         rows={2}
         className="w-full resize-none rounded-md border border-line bg-card px-2 py-1.5 text-[13px] text-ink placeholder:text-ink-4 focus:border-ink-3 focus:outline-none"
       />
-      {err && <div className="rounded-md bg-danger/10 px-2 py-1 text-[12px] leading-snug text-danger">{err}</div>}
+      {err && <div className="rounded-md bg-danger/10 px-2 py-1 text-[12px] leading-snug text-danger">{<OriginalDiagnostic>{err}</OriginalDiagnostic>}</div>}
       <div className="flex items-center gap-1.5">
         <div className="flex overflow-hidden rounded-md border border-line">
           {(['build', 'ship'] as const).map((m) => (
@@ -79,10 +83,10 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
         <button
           onClick={start}
           disabled={!goal.trim() || !cwd || busy}
-          title="Start an autonomous self-verifying loop (roles → gates → independent critic → retry)."
+          title={tx("Start an autonomous self-verifying loop (roles → gates → independent critic → retry).")}
           className="flex flex-1 items-center justify-center gap-1 rounded-md bg-ink px-2 py-1.5 text-[13px] font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-40"
         >
-          <Icon name="play" size={11} /> {busy ? 'Starting…' : 'Start loop'}
+          <Icon name="play" size={11} /> {busy ? tx("Starting…") : tx("Start loop")}
         </button>
       </div>
 
@@ -96,6 +100,7 @@ export function LoopPanel({ cwd, source, surfaceId, projectId }: { cwd: string; 
 }
 
 function LoopCard({ loop }: { loop: LoopRecord }) {
+  const tx = useAuthoredText()
   const [open, setOpen] = useState(false)
   const running = loop.status === 'running'
   const v = loop.lastVerdict
@@ -106,21 +111,21 @@ function LoopCard({ loop }: { loop: LoopRecord }) {
           ? <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent" />
           : <Icon name={loop.status === 'shipped' ? 'check' : loop.status === 'failed' ? 'warning' : 'stop'} size={12} className={clsx('shrink-0', STATUS_TINT[loop.status])} />}
         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-ink">{loop.goal}</span>
-        {running && <button onClick={() => api.stopLoop(loop.id)} className="shrink-0 rounded px-1.5 py-0.5 text-[12px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-danger">Stop</button>}
+        {running && <button onClick={() => api.stopLoop(loop.id)} className="shrink-0 rounded px-1.5 py-0.5 text-[12px] text-ink-3 transition-colors hover:bg-ink-5 hover:text-danger">{tx("Stop")}</button>}
       </div>
       <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 px-0.5 font-mono text-[12px] text-ink-3">
-        <span className={clsx('capitalize', STATUS_TINT[loop.status])}>{loop.status}</span>
+        <span className={clsx('capitalize', STATUS_TINT[loop.status])}>{statusText(loop.status, tx)}</span>
         <span>·</span>
         <span>{loop.phase ? loop.phase : '—'}</span>
         <span>·</span>
-        <span>cycle {loop.cycle}/{loop.maxCycles}</span>
-        {loop.checkpoints > 0 && <><span>·</span><span>{loop.checkpoints} cp</span></>}
+        <span>{tx("cycle ")}{loop.cycle}/{loop.maxCycles}</span>
+        {loop.checkpoints > 0 && <><span>·</span><span>{loop.checkpoints} {tx("cp")}</span></>}
         <span>·</span>
         <span className="capitalize">{loop.mode}</span>
       </div>
       {v && (
         <div className={clsx('mt-1 rounded-md px-2 py-1 text-[12px] leading-snug', v.passed ? 'bg-positive/10 text-positive' : 'bg-danger/10 text-danger')}>
-          {v.passed ? '✓ verified' : '✗ not verified'} ({Math.round(v.confidence * 100)}%) — {v.summary}
+          {v.passed ? tx("✓ verified") : tx("✗ not verified")} ({Math.round(v.confidence * 100)}%) — {v.summary}
         </div>
       )}
       {loop.blockers.length > 0 && (
@@ -131,11 +136,11 @@ function LoopCard({ loop }: { loop: LoopRecord }) {
         </div>
       )}
       <button onClick={() => setOpen((o) => !o)} className="mt-1 flex items-center gap-1 px-0.5 text-[12px] text-ink-4 transition-colors hover:text-ink-3">
-        <Icon name="chevronDown" size={10} className={clsx('transition-transform', open && 'rotate-180')} /> {loop.log.length} log line{loop.log.length === 1 ? '' : 's'}
+        <Icon name="chevronDown" size={10} className={clsx('transition-transform', open && 'rotate-180')} /> {tx("Log lines: {count}", { count: loop.log.length })}
       </button>
       {open && (
         <div className="scroll-thin mt-1 max-h-32 overflow-y-auto whitespace-pre-wrap rounded-md border border-line bg-card px-2 py-1 font-mono text-[11px] leading-snug text-ink-3">
-          {loop.log.slice(-40).join('\n') || '(no log yet)'}
+          {loop.log.slice(-40).join('\n') || tx("(no log yet)")}
         </div>
       )}
     </div>

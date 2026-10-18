@@ -1,0 +1,8 @@
+import type { ModelBenchmarkReceipt } from '../../../../shared/model-benchmark'
+import { BENCHMARK_SUITE_SHA } from './receipt'
+import { BENCHMARK_ENGINE_VERSION } from './version'
+
+/** Synthetic receipt factory for regression tests, with no user or model output. */
+export function syntheticBenchmarkReceipt(model = 'example-org/synthetic-model'): ModelBenchmarkReceipt {
+  return { schema_version: 1, suite: { id: 'community-v1', sha256: BENCHMARK_SUITE_SHA }, run_id: '00000000-0000-4000-8000-000000000001', created_at: '2026-01-01T00:00:00Z', runtime: { tensorfold_version: BENCHMARK_ENGINE_VERSION, backend: 'mlx', python_version: 'none', platform: 'macos', dependencies: {} }, model: { repo_id: model, revision: 'a'.repeat(40), family: 'qwen3_5', config_sha256: 'b'.repeat(64), tokenizer_sha256: 'c'.repeat(64), quantization: 'mlx-affine-4bit-g64', drafter_repo_id: null, local: false }, hardware: { cpu_model: 'Synthetic CPU', system_memory_bytes: 16 * 1024 ** 3, memory_type: 'unified', gpus: [{ name: 'Synthetic GPU', memory_bytes: null, cores: 8 }], gpu_count: 1, source: 'detected' }, settings: { tokens: 256, repetitions: 5, temperatures: [1, 0], serial: false, context_tokens: 4096, managed: true, rank_count: 1 }, samples: [1, 0].flatMap(temperature => (['code', 'chat'] as const).flatMap(fixture_id => Array.from({ length: 5 }, (_, repeat) => ({ fixture_id, temperature, repeat, seed: 1234 + repeat, status: 'ok' as const, prompt_tokens: 24, completion_tokens: 256, cached_tokens: 0, delivery_seconds: 2.55, delivery_tps: 100, ttft_seconds: 0.1 + repeat * 0.1, end_to_end_seconds: 2.8, server_decode_tps: 110, server_decode_seconds: null, prefill_seconds: null, token_sha: 'd'.repeat(12), error_code: null })))) }
+}

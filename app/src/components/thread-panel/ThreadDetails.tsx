@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useMemo } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -26,6 +27,7 @@ import { DoomPlan } from './DoomPlan'
 
 // The work pane's Details tab: everything the old right panel showed, moved here unchanged.
 export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git: GitStatus | null; onChanged: () => void }) {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)
   const status = useStore((s) => s.status[thread.id])
   const approvals = useStore((s) => s.approvals[thread.id])
@@ -42,7 +44,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
   const done = plan.filter((p) => p.done).length
   const tokens = estTokens(thread)
   const duration = formatDuration(Math.max(0, thread.updatedAt - thread.createdAt))
-  const goalStatus = thread.goalStatus ?? 'active'
+  const goalStatus = thread.goalStatus ?? tx("active")
   const agentTree = buildThreadAgentTree(thread)
   const subAgentCount = countThreadAgentNodes(agentTree)
   const runContract = buildAgenticRunContract({ thread, git, status, settings, pendingApprovals: approvals?.length ?? 0 })
@@ -59,7 +61,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
       <EngineSection thread={thread} />
 
       <div className="mx-3.5 border-t border-line" />
-      <PanelSection title="Activity">
+      <PanelSection title={tx("Activity")}>
         <div className="flex items-center gap-2.5 rounded-lg border border-line bg-card-2 px-2.5 py-2 shadow-card">
           {busy
             ? <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-accent" />
@@ -67,12 +69,12 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
           <span className="min-w-0 flex-1 truncate text-[13px] text-ink">{workingLine(status, thread)}</span>
         </div>
         {commands > 0 && (
-          <div className="mt-1.5 flex items-center gap-1.5 px-1 text-[13px] text-ink-3"><Icon name="terminal" size={12} />Ran {commands} command{commands === 1 ? '' : 's'}</div>
+          <div className="mt-1.5 flex items-center gap-1.5 px-1 text-[13px] text-ink-3"><Icon name="terminal" size={12} />{tx("Commands run: {count}", { count: commands })}</div>
         )}
       </PanelSection>
 
       <div className="mx-4 border-t border-line" />
-      <PanelSection title="Run contract" right={<span className={clsx('text-[12px] font-medium capitalize', SESSION_TINT[runContract.session.state])}>{labelize(runContract.session.state)}</span>}>
+      <PanelSection title={tx("Run contract")} right={<span className={clsx('text-[12px] font-medium capitalize', SESSION_TINT[runContract.session.state])}>{labelize(runContract.session.state)}</span>}>
         <RunContractSummary contract={runContract} />
         <WorkbenchDoneGate thread={thread} contract={runContract} reviewState={prReviewState} />
       </PanelSection>
@@ -80,7 +82,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
       {subAgentCount > 0 && (
         <>
           <div className="mx-4 border-t border-line" />
-          <PanelSection title="Sub-agents" right={<span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{subAgentCount}</span>}>
+          <PanelSection title={tx("Sub-agents")} right={<span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{subAgentCount}</span>}>
             <ThreadAgentTreeView tree={agentTree} />
           </PanelSection>
         </>
@@ -89,16 +91,16 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
       {isTask && (
         <>
           <div className="mx-4 border-t border-line" />
-          <PanelSection title="Outputs" right={outputs.length > 0 ? <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{outputs.length}</span> : undefined}>
+          <PanelSection title={tx("Outputs")} right={outputs.length > 0 ? <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{outputs.length}</span> : undefined}>
             {outputs.length === 0
-              ? <div className="px-1 text-[13px] text-ink-4">Nothing created or edited yet.</div>
+              ? <div className="px-1 text-[13px] text-ink-4">{tx("Nothing created or edited yet.")}</div>
               : <div className="space-y-0.5">{outputs.map((o) => <FileRow key={o.path} path={o.path} tag={o.verb} tagClass={o.verb === 'Created' ? 'text-positive' : 'text-warn'} />)}</div>}
           </PanelSection>
 
           <div className="mx-4 border-t border-line" />
-          <PanelSection title="Sources" right={sources.length > 0 ? <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{sources.length}</span> : undefined}>
+          <PanelSection title={tx("Sources")} right={sources.length > 0 ? <span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{sources.length}</span> : undefined}>
             {sources.length === 0
-              ? <div className="px-1 text-[13px] text-ink-4">No files read yet.</div>
+              ? <div className="px-1 text-[13px] text-ink-4">{tx("No files read yet.")}</div>
               : <div className="space-y-0.5">{sources.map((s) => <FileRow key={s} path={s} tag="Read" tagClass="text-ink-4" />)}</div>}
           </PanelSection>
         </>
@@ -123,7 +125,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
       {thread.goal && (
         <>
           <div className="mx-4 border-t border-line" />
-          <PanelSection title="Goal" right={<span className="text-[12px] font-medium capitalize text-ink-3">{goalStatus}</span>}>
+          <PanelSection title={tx("Goal")} right={<span className="text-[12px] font-medium capitalize text-ink-3">{goalStatus}</span>}>
             <div className="flex gap-2.5 px-1">
               <Icon name="grid" size={15} className="mt-0.5 shrink-0 text-ink-3" />
               <div className="min-w-0">
@@ -133,7 +135,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
                       {plan.length > 0 && <span>·</span>}
                       <span>{duration}</span>
                       <span>·</span>
-                      <span>{kfmt(tokens)} tokens</span>
+                      <span>{kfmt(tokens)} {tx("tokens")}</span>
                     </div>
                     {plan.length > 0 && settings?.doomTodos !== false && (
                       <div className="mt-1.5 font-mono text-[11px] leading-none tracking-tighter">
@@ -150,7 +152,7 @@ export function ThreadDetails({ thread, git, onChanged }: { thread: Thread; git:
       {plan.length > 0 && (
         <>
           <div className="mx-4 border-t border-line" />
-          <PanelSection title="Progress" right={<span className="font-mono text-[12px] font-medium text-ink-3">{done}/{plan.length}</span>}>
+          <PanelSection title={tx("Progress")} right={<span className="font-mono text-[12px] font-medium text-ink-3">{done}/{plan.length}</span>}>
             {settings?.doomTodos === false ? (
               <div className="space-y-3">
                 {plan.map((step) => (

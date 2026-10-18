@@ -12,8 +12,9 @@
 // saveSettings refuses. No unimplemented API method inherits mock behavior; the UI carries
 // a persistent paired-session banner (platform 'web-remote').
 
-import { createMockApi } from './mock'
-import type { TensorFoldStudioApi } from './ipc'
+import { STUDIO_API_SCHEMA } from '../../shared/studio-api-schema'
+import { pairedSettingsDefaults } from './paired-settings'
+import type { TensorFoldStudioApi } from '../../shared/studio-api'
 import type { AgentEvent, ArchiveSnapshot, Attachment, Automation, CliDefinition, CliSession, CueRunPayload, CueRunResult, Job, Project, Provider, Room, Settings, StartRunPayload, Thread, Ticket } from './types'
 
 export interface RemoteSseEvent {
@@ -327,7 +328,6 @@ function providersFromSnapshot(raw: unknown): Provider[] {
 }
 
 export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFoldStudioApi {
-  const base = createMockApi()
   const fetchImpl = config.fetchImpl ?? ((...args: Parameters<typeof fetch>) => fetch(...args))
   const origin = (config.baseUrl ?? '').replace(/\/$/, '')
   const openEventStream = config.openEventStream
@@ -572,15 +572,15 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
     }
   })
 
-  // Read-only settings for a paired device: the mock's defaults for look-and-feel, the
+  // Read-only settings for a paired device: inert appearance defaults and the
   // HOST's redacted providers for labels/pickers, and every host-config surface blanked
   // so demo accounts can never masquerade as real ones.
   async function pairedSettings(): Promise<Settings> {
     await ensureSnapshot()
-    const mockSettings = await base.getSettings()
-    const activeProvider = state.providers.find((provider) => provider.id === mockSettings.activeProviderId) ?? state.providers[0] ?? null
+    const defaults = pairedSettingsDefaults()
+    const activeProvider = state.providers.find((provider) => provider.id === defaults.activeProviderId) ?? state.providers[0] ?? null
     return {
-      ...mockSettings,
+      ...defaults,
       providers: state.providers,
       activeProviderId: activeProvider?.id ?? null,
       activeProviderAccountId: null,
@@ -588,23 +588,23 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
       sshHosts: [],
       trustedSshHostKeys: [],
       approvalRules: [],
-      email: { ...mockSettings.email, sources: [] },
-      slack: { ...mockSettings.slack, sources: [] },
-      calendar: { ...mockSettings.calendar, sources: [] },
-      documents: { ...mockSettings.documents, sources: [] },
-      browser: { ...mockSettings.browser, sources: [] },
-      whatsapp: { ...mockSettings.whatsapp, sources: [] },
-      discord: { ...mockSettings.discord, sources: [] },
-      mattermost: { ...mockSettings.mattermost, sources: [] },
-      matrix: { ...mockSettings.matrix, sources: [] },
-      googlechat: { ...mockSettings.googlechat, sources: [] },
-      imessage: { ...mockSettings.imessage, enabled: false, lastSyncAt: null, lastError: null },
+      email: { ...defaults.email, sources: [] },
+      slack: { ...defaults.slack, sources: [] },
+      calendar: { ...defaults.calendar, sources: [] },
+      documents: { ...defaults.documents, sources: [] },
+      browser: { ...defaults.browser, sources: [] },
+      whatsapp: { ...defaults.whatsapp, sources: [] },
+      discord: { ...defaults.discord, sources: [] },
+      mattermost: { ...defaults.mattermost, sources: [] },
+      matrix: { ...defaults.matrix, sources: [] },
+      googlechat: { ...defaults.googlechat, sources: [] },
+      imessage: { ...defaults.imessage, enabled: false, lastSyncAt: null, lastError: null },
       botControl: {
-        telegram: { ...mockSettings.botControl.telegram, enabled: false, botToken: '', allowedChatIds: '', allowedUserIds: '', lastError: null },
-        whatsapp: { ...mockSettings.botControl.whatsapp, enabled: false, accessToken: '', verifyToken: '', appSecret: '', allowedChatIds: '', lastError: null },
+        telegram: { ...defaults.botControl.telegram, enabled: false, botToken: '', allowedChatIds: '', allowedUserIds: '', lastError: null },
+        whatsapp: { ...defaults.botControl.whatsapp, enabled: false, accessToken: '', verifyToken: '', appSecret: '', allowedChatIds: '', lastError: null },
       },
       remoteControl: {
-        ...mockSettings.remoteControl,
+        ...defaults.remoteControl,
         enabled: false,
         serverName: state.serverName,
         authToken: '',
@@ -615,7 +615,7 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
         lastClientAt: null,
         lastError: null,
       },
-      remoteClient: { ...mockSettings.remoteClient, enabled: false, serverUrl: '', authToken: '', lastConnectedAt: null, lastError: null },
+      remoteClient: { ...defaults.remoteClient, enabled: false, serverUrl: '', authToken: '', lastConnectedAt: null, lastError: null },
       remoteOrchestrators: [],
       defaultExecutionTarget: 'local',
       defaultOrchestratorId: null,
@@ -748,14 +748,11 @@ export function createRemoteBrowserApi(config: RemoteTransportConfig): TensorFol
     purgeLocalMemory: unavailable('Purging host memory') as TensorFoldStudioApi['purgeLocalMemory'],
   }
 
-  // Use the demo API only as a runtime key schema and for appearance defaults above.
-  // Every unimplemented function is replaced with a paired-session refusal; subscriptions
-  // become inert unsubscribable streams. This prevents a newly-added TensorFoldStudioApi method from
-  // silently inheriting a convincing mock success or demo Assistant data.
+  // Exhaustive typed policy: new contract methods require an explicit schema entry.
+  // Unsupported calls reject and subscriptions are inert, without loading demo fixtures.
   const failClosed: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(base as unknown as Record<string, unknown>)) {
-    if (typeof value === 'function') failClosed[key] = key.startsWith('on') ? noSubscription : unavailable(key)
-    else failClosed[key] = value
+  for (const [key, kind] of Object.entries(STUDIO_API_SCHEMA)) {
+    failClosed[key] = kind === 'subscription' ? noSubscription : kind === 'property' ? 'web-remote' : unavailable(key)
   }
   return Object.assign(failClosed, overrides) as unknown as TensorFoldStudioApi
 }

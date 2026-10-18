@@ -1,0 +1,13 @@
+{
+  "--version printed no version" : "--version 未輸出版本",
+  "Broken" : "故障",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions." : "用於 ACP 或無界面編程會話的 Cursor Agent CLI 候選。",
+  "Gemini CLI candidate for code and research sessions." : "用於代碼與研究會話的 Gemini CLI 候選。",
+  "Grok CLI candidate for xAI coding sessions." : "用於 xAI 編程會話的 Grok CLI 候選。",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions." : "用於 OpenCode 兼容編程會話的 Kilo CLI 候選。",
+  "Not found on PATH or the configured path" : "在 PATH 或已配置路徑中未找到",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions." : "用於 OpenCode 兼容編程會話的 OpenCode CLI 候選。",
+  "Pi coding-agent harness for terminal-based agent sessions." : "用於終端智能體會話的 Pi 編程智能體運行框架。",
+  "Runs Claude Code through your local Claude account and permission surface." : "通過你的本地 Claude 賬戶及其權限界面運行 Claude Code。",
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks." : "運行 Codex CLI 會話、可恢復的終端，以及通過 OAuth 授權的代碼任務。"
+}

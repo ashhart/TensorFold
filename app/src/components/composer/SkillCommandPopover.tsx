@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 
 export interface SkillCommandPopoverProps {
@@ -23,6 +24,7 @@ export function SkillCommandPopover({
   onHoverIndex,
   onSelect,
 }: SkillCommandPopoverProps) {
+  const tx = useAuthoredText()
   return (
     <div
       className={clsx(
@@ -31,7 +33,7 @@ export function SkillCommandPopover({
       )}
       style={{ boxShadow: 'var(--shadow-pop)' }}
     >
-      <div className="px-2.5 pb-1 pt-1.5 text-[13px] font-medium text-ink-3">{kind === '$' ? 'Skills' : 'Commands'}</div>
+      <div className="px-2.5 pb-1 pt-1.5 text-[13px] font-medium text-ink-3">{kind === '$' ? tx("Skills") : tx("Commands")}</div>
       {pickItems.map((it, i) => (
         <button
           type="button"

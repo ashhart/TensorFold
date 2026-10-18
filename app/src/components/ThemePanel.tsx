@@ -1,9 +1,10 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useStore } from '../lib/store'
 import { swatchTextColor } from '../lib/theme'
 import { highlight } from '../lib/highlight'
 import { Icon } from '../lib/icons'
 import { Menu, MenuItem, Segmented, Toggle } from './ui'
-import { PRESETS, PRESET_LABELS } from '../../electron/agent/theme-presets'
+import { PRESETS, PRESET_LABELS } from '../../shared/theme-presets'
 import type { Settings, ThemePalette, ThemePreset } from '../lib/types'
 import clsx from 'clsx'
 
@@ -52,14 +53,15 @@ function FontRow({ label, value, onChange }: { label: string; value: string; onC
 }
 
 function PresetDropdown({ accent, preset, onPick }: { accent: string; preset: ThemePreset; onPick: (p: Exclude<ThemePreset, 'custom'>) => void }) {
-  const label = preset === 'custom' ? 'Custom' : PRESET_LABELS[preset]
+  const tx = useAuthoredText()
+  const label = preset === 'custom' ? tx("Custom") : PRESET_LABELS[preset]
   return (
     <Menu
       width={180}
       align="end"
       trigger={(open) => (
         <button className={clsx('flex h-8 items-center gap-2 rounded-lg border border-line px-2 text-[13px] transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-2 hover:bg-ink-5')}>
-          <span className="flex h-5 w-5 items-center justify-center rounded-md text-[11px] font-bold" style={{ background: accent, color: swatchTextColor(accent) }}>Aa</span>
+          <span className="flex h-5 w-5 items-center justify-center rounded-md text-[11px] font-bold" style={{ background: accent, color: swatchTextColor(accent) }}>{"Aa"}</span>
           <span className="font-medium">{label}</span>
           <Icon name="chevronDown" size={13} className="text-ink-3" />
         </button>
@@ -84,24 +86,25 @@ function ThemeCard({
   onPreset: (p: Exclude<ThemePreset, 'custom'>) => void
   onImport: () => void; onCopy: () => void
 }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-2xl border border-line bg-card-2/50 p-1.5">
       <div className="flex items-center justify-between px-2.5 pb-1.5 pt-1">
         <span className="text-[13px] font-medium text-ink-2">{title}</span>
         <div className="flex items-center gap-2.5 text-[13px] text-ink-3">
-          <button onClick={onImport} className="transition-colors hover:text-ink">Import</button>
-          <button onClick={onCopy} className="transition-colors hover:text-ink">Copy theme</button>
+          <button onClick={onImport} className="transition-colors hover:text-ink">{tx("Import")}</button>
+          <button onClick={onCopy} className="transition-colors hover:text-ink">{tx("Copy theme")}</button>
           <PresetDropdown accent={palette.accent} preset={preset} onPick={onPreset} />
         </div>
       </div>
       <div className="rounded-xl bg-card px-3 shadow-card">
-        <ColorRow label="Accent" value={palette.accent} onChange={(v) => onChange({ accent: v })} />
-        <ColorRow label="Background" value={palette.background} onChange={(v) => onChange({ background: v })} />
-        <ColorRow label="Foreground" value={palette.foreground} onChange={(v) => onChange({ foreground: v })} />
-        <FontRow label="UI font" value={palette.uiFont} onChange={(v) => onChange({ uiFont: v })} />
-        <FontRow label="Code font" value={palette.codeFont} onChange={(v) => onChange({ codeFont: v })} />
-        <Row label="Translucent sidebar"><Toggle label="Translucent sidebar" checked={palette.translucent} onChange={(v) => onChange({ translucent: v })} /></Row>
-        <Row label="Contrast">
+        <ColorRow label={tx("Accent")} value={palette.accent} onChange={(v) => onChange({ accent: v })} />
+        <ColorRow label={tx("Background")} value={palette.background} onChange={(v) => onChange({ background: v })} />
+        <ColorRow label={tx("Foreground")} value={palette.foreground} onChange={(v) => onChange({ foreground: v })} />
+        <FontRow label={tx("UI font")} value={palette.uiFont} onChange={(v) => onChange({ uiFont: v })} />
+        <FontRow label={tx("Code font")} value={palette.codeFont} onChange={(v) => onChange({ codeFont: v })} />
+        <Row label={tx("Translucent sidebar")}><Toggle label={tx("Translucent sidebar")} checked={palette.translucent} onChange={(v) => onChange({ translucent: v })} /></Row>
+        <Row label={tx("Contrast")}>
           <input type="range" min={0} max={100} value={palette.contrast} onChange={(e) => onChange({ contrast: +e.target.value })}
             className="h-1.5 w-[180px] cursor-pointer appearance-none rounded-full bg-ink-5 accent-[var(--accent)]" />
           <span className="w-7 text-right font-mono text-[13px] tabular-nums text-ink-2">{palette.contrast}</span>
@@ -152,6 +155,7 @@ function DiffPreview({ base, cur }: { base: ThemePalette; cur: ThemePalette }) {
 }
 
 export function ThemePanel() {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)!
   const save = useStore((s) => s.saveSettings)
   const resolved = useStore((s) => s.resolvedTheme)
@@ -163,7 +167,7 @@ export function ThemePanel() {
 
   const copyTheme = (mode: 'light' | 'dark') => { navigator.clipboard?.writeText(JSON.stringify(settings[mode], null, 2))?.catch(() => {}) }
   const importTheme = (mode: 'light' | 'dark') => {
-    const raw = window.prompt(`Paste ${mode} theme JSON`)
+    const raw = window.prompt(tx("Paste {value0} theme JSON", { value0: mode }))
     if (!raw) return
     try {
       const p = JSON.parse(raw)
@@ -178,13 +182,13 @@ export function ThemePanel() {
     <section className="mb-9">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Theme</h2>
-          <p className="mt-0.5 text-[13px] text-ink-3">Use light, dark, or match your system.</p>
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{tx("Theme")}</h2>
+          <p className="mt-0.5 text-[13px] text-ink-3">{tx("Use light, dark, or match your system.")}</p>
         </div>
         <Segmented
           value={settings.theme}
           onChange={(v) => commit({ theme: v })}
-          options={[{ value: 'light', label: 'Light', icon: 'sun' }, { value: 'dark', label: 'Dark', icon: 'moon' }, { value: 'system', label: 'System', icon: 'monitor' }]}
+          options={[{ value: 'light', label: tx("Light"), icon: 'sun' }, { value: 'dark', label: tx("Dark"), icon: 'moon' }, { value: 'system', label: tx("System"), icon: 'monitor' }]}
         />
       </div>
 
@@ -194,12 +198,12 @@ export function ThemePanel() {
 
       <div className="mt-3 space-y-3">
         <ThemeCard
-          title="Light theme" palette={settings.light} preset={settings.preset}
+          title={tx("Light theme")} palette={settings.light} preset={settings.preset}
           onChange={(p) => editPalette('light', p)} onPreset={applyPreset}
           onImport={() => importTheme('light')} onCopy={() => copyTheme('light')}
         />
         <ThemeCard
-          title="Dark theme" palette={settings.dark} preset={settings.preset}
+          title={tx("Dark theme")} palette={settings.dark} preset={settings.preset}
           onChange={(p) => editPalette('dark', p)} onPreset={applyPreset}
           onImport={() => importTheme('dark')} onCopy={() => copyTheme('dark')}
         />
@@ -207,18 +211,18 @@ export function ThemePanel() {
 
       <div className="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-3.5 py-2.5 shadow-card">
         <div>
-          <div className="text-[13px] text-ink">Use pointer cursors</div>
-          <div className="text-[13px] text-ink-3">Show a hand cursor over clickable elements.</div>
+          <div className="text-[13px] text-ink">{tx("Use pointer cursors")}</div>
+          <div className="text-[13px] text-ink-3">{tx("Show a hand cursor over clickable elements.")}</div>
         </div>
-        <Toggle label="Use pointer cursors" checked={settings.pointerCursors} onChange={(v) => commit({ pointerCursors: v })} />
+        <Toggle label={tx("Use pointer cursors")} checked={settings.pointerCursors} onChange={(v) => commit({ pointerCursors: v })} />
       </div>
 
       <div className="mt-3 flex items-center justify-between rounded-xl border border-line bg-card px-3.5 py-2.5 shadow-card">
         <div>
-          <div className="text-[13px] text-ink">Bold plan progress</div>
-          <div className="text-[13px] text-ink-3">Render the plan panel with block progress bars and status glyphs.</div>
+          <div className="text-[13px] text-ink">{tx("Bold plan progress")}</div>
+          <div className="text-[13px] text-ink-3">{tx("Render the plan panel with block progress bars and status glyphs.")}</div>
         </div>
-        <Toggle label="Bold plan progress" checked={settings.doomTodos !== false} onChange={(v) => commit({ doomTodos: v })} />
+        <Toggle label={tx("Bold plan progress")} checked={settings.doomTodos !== false} onChange={(v) => commit({ doomTodos: v })} />
       </div>
     </section>
   )

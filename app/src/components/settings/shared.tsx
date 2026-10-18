@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import { useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../../lib/icons'
@@ -6,14 +9,27 @@ import { CODEX_CLI_MODELS, CLAUDE_CLI_MODELS, OPENCODE_MODELS, KILO_MODELS, PI_C
 import { modelDisplayName, providerModelGroups } from '../../lib/provider-accounts'
 import { agentBuilderModelSourceCount } from '../../lib/agent-builder'
 import type { AgentPreset, ModelSpendBudget, ModelSpendBudgetPeriod, Provider, ProviderDiscoveryKind, RoomSeatLane, Settings as TSettings } from '../../lib/types'
+import type { AppUpdateStatus } from '../../lib/types'
+import type { SettingsHookDeps } from './types'
+import type { useProviderSettings } from './useProviderSettings'
+import type { useConnectorSources } from './useConnectorSources'
+import type { useBotConnectors } from './useBotConnectors'
+import type { useRemoteSecurity } from './useRemoteSecurity'
 
-export interface SettingsSectionContext extends Record<string, any> {
-  draft: TSettings
-  setDraft: Dispatch<SetStateAction<TSettings>>
+export type SettingsSectionContext = Pick<SettingsHookDeps, 'draft' | 'setDraft' | 'commit' | 'patch'> & ReturnType<typeof useProviderSettings> & ReturnType<typeof useConnectorSources> & ReturnType<typeof useBotConnectors> & ReturnType<typeof useRemoteSecurity> & {
+  save: (next: TSettings) => void | Promise<void>
+  /** Last host-persisted public settings, distinct from the editable local draft. */
+  persistedSettings?: TSettings
   voiceNames: string[]
+  commitVoice: (voice: TSettings['voice']) => void
+  goToSection: (section: SettingsSection) => void
+  updateStatus: AppUpdateStatus | null
+  checkForUpdates: () => Promise<void>
+  openUpdateDownload: () => Promise<void>
 }
 
 export function Spinner({ size = 13 }: { size?: number }) {
+  const tx = useAuthoredText()
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="animate-spin">
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="3" strokeOpacity="0.25" />
@@ -70,34 +86,34 @@ export interface ProviderSetupDraft {
 }
 
 export const CLOUD_PROVIDER_PRESETS: CloudProviderPreset[] = [
-  { key: 'openai', label: 'OpenAI', desc: 'Frontier API with GPT and reasoning models.', auth: 'api-key', provider: { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', kind: 'cloud', source: 'openai', models: ['gpt-4o', 'gpt-4o-mini', 'o4-mini'] } },
-  { key: 'openrouter', label: 'OpenRouter', desc: 'Router, free models, GLM, Nemotron, Qwen, and model fan-out experiments.', auth: 'api-key', provider: { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', kind: 'cloud', source: 'openrouter', models: ['openrouter/free', 'openrouter/auto', 'openrouter/fusion', 'z-ai/glm-5.2', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'qwen/qwen3-coder:free', 'openai/gpt-oss-120b:free'] } },
-  { key: 'ai-gateway', label: 'Vercel AI Gateway', desc: 'OpenAI-compatible gateway path for one key across routed providers and gateway model ids.', auth: 'api-key', provider: { name: 'Vercel AI Gateway', baseUrl: 'https://ai-gateway.vercel.sh/v1', kind: 'cloud', source: 'ai-gateway', models: ['openai/gpt-5.4', 'openai/gpt-5.5', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.1', 'xai/grok-4.1-fast-reasoning'] } },
-  { key: 'codex-cli', label: 'Codex CLI OAuth', desc: 'Use existing Codex CLI subscription logins, including GPT 5.4/5.5 with reasoning effort.', auth: 'cli-oauth', provider: { name: 'Codex CLI OAuth', transport: 'codex-cli', auth: 'codex-oauth', baseUrl: '', apiKey: '', kind: 'cloud', models: CODEX_CLI_MODELS, cliPath: 'codex', cliSandbox: 'workspace-write', cliApprovalPolicy: 'on-request' } },
-  { key: 'claude-cli', label: 'Claude CLI OAuth', desc: 'Use Claude Code subscriptions with supported Opus and Sonnet model aliases.', auth: 'cli-oauth', provider: { name: 'Claude CLI OAuth', transport: 'claude-cli', auth: 'claude-oauth', baseUrl: '', apiKey: '', kind: 'cloud', models: CLAUDE_CLI_MODELS, cliPath: 'claude', cliPermissionMode: 'default' } },
-  { key: 'opencode', label: 'OpenCode server', desc: 'Drive an `opencode serve` HTTP session. Defaults to http://127.0.0.1:4096; models are providerID/modelID.', auth: 'api-key', provider: { name: 'OpenCode', transport: 'opencode', baseUrl: '', apiKey: '', kind: 'cloud', models: OPENCODE_MODELS, serverUrl: 'http://127.0.0.1:4096' } },
-  { key: 'kilo', label: 'Kilo server', desc: 'Drive a `kilo serve` HTTP session (OpenCode-protocol fork). Set the serverUrl to your Kilo server; models are providerID/modelID.', auth: 'api-key', provider: { name: 'Kilo', transport: 'kilo', baseUrl: '', apiKey: '', kind: 'cloud', models: KILO_MODELS, serverUrl: 'http://127.0.0.1:4096' } },
-  { key: 'pi-cli', label: 'Pi CLI', desc: 'Drive the installed `pi` coding agent (RPC mode, resumable sessions). Authenticate in Pi itself or expose a provider-specific key environment such as OPENAI_API_KEY; TensorFold never passes a generic key in argv.', auth: 'cli-local', provider: { name: 'Pi', transport: 'pi-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: PI_CLI_MODELS, cliPath: 'pi' } },
-  { key: 'cursor-cli', label: 'Cursor Agent CLI', desc: 'Drive `cursor-agent` headless (stream-json, resumable chats). API key optional (CURSOR_API_KEY / --api-key).', auth: 'api-key', provider: { name: 'Cursor Agent', transport: 'cursor-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: CURSOR_CLI_MODELS, cliPath: 'cursor-agent' } },
-  { key: 'gemini-cli', label: 'Gemini CLI', desc: 'Drive `gemini` headless (json mode, one-shot turns). Auth via its own login or env in CLI env settings.', auth: 'api-key', provider: { name: 'Gemini CLI', transport: 'gemini-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: GEMINI_CLI_MODELS, cliPath: 'gemini' } },
-  { key: 'anthropic', label: 'Anthropic', desc: 'Claude via API key for cloud seats and assistant work.', auth: 'api-key', provider: { name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', kind: 'cloud', models: ['claude-sonnet-4', 'claude-opus-4'] } },
-  { key: 'groq', label: 'Groq', desc: 'Fast hosted OpenAI-compatible inference.', auth: 'api-key', provider: { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', kind: 'cloud' } },
-  { key: 'together', label: 'Together', desc: 'Hosted open models behind an OpenAI-compatible API.', auth: 'api-key', provider: { name: 'Together', baseUrl: 'https://api.together.xyz/v1', kind: 'cloud' } },
-  { key: 'zai', label: 'z.ai GLM', desc: 'GLM models as first-class cloud seats.', auth: 'api-key', provider: { name: 'z.ai GLM', baseUrl: 'https://api.z.ai/api/paas/v4', kind: 'cloud', models: ['glm-5.2', 'glm-5.1', 'glm-4.6', 'glm-4-flash'] } },
-  { key: 'deepseek', label: 'DeepSeek', desc: 'DeepSeek API endpoint.', auth: 'api-key', provider: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', kind: 'cloud' } },
-  { key: 'xai', label: 'xAI Grok', desc: 'Grok API endpoint.', auth: 'api-key', provider: { name: 'xAI Grok', baseUrl: 'https://api.x.ai/v1', kind: 'cloud' } },
+  { key: 'openai', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "OpenAI") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Frontier API with GPT and reasoning models.") }, auth: 'api-key', provider: { name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', kind: 'cloud', source: 'openai', models: ['gpt-4o', 'gpt-4o-mini', 'o4-mini'] } },
+  { key: 'openrouter', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "OpenRouter") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Router, free models, GLM, Nemotron, Qwen, and model fan-out experiments.") }, auth: 'api-key', provider: { name: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', kind: 'cloud', source: 'openrouter', models: ['openrouter/free', 'openrouter/auto', 'openrouter/fusion', 'z-ai/glm-5.2', 'nvidia/nemotron-3-ultra-550b-a55b:free', 'qwen/qwen3-coder:free', 'openai/gpt-oss-120b:free'] } },
+  { key: 'ai-gateway', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Vercel AI Gateway") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "OpenAI-compatible gateway path for one key across routed providers and gateway model ids.") }, auth: 'api-key', provider: { name: 'Vercel AI Gateway', baseUrl: 'https://ai-gateway.vercel.sh/v1', kind: 'cloud', source: 'ai-gateway', models: ['openai/gpt-5.4', 'openai/gpt-5.5', 'anthropic/claude-sonnet-4.6', 'anthropic/claude-opus-4.1', 'xai/grok-4.1-fast-reasoning'] } },
+  { key: 'codex-cli', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Codex CLI OAuth") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Use existing Codex CLI subscription logins, including GPT 5.4/5.5 with reasoning effort.") }, auth: 'cli-oauth', provider: { name: 'Codex CLI OAuth', transport: 'codex-cli', auth: 'codex-oauth', baseUrl: '', apiKey: '', kind: 'cloud', models: CODEX_CLI_MODELS, cliPath: 'codex', cliSandbox: 'workspace-write', cliApprovalPolicy: 'on-request' } },
+  { key: 'claude-cli', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Claude CLI OAuth") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Use Claude Code subscriptions with supported Opus and Sonnet model aliases.") }, auth: 'cli-oauth', provider: { name: 'Claude CLI OAuth', transport: 'claude-cli', auth: 'claude-oauth', baseUrl: '', apiKey: '', kind: 'cloud', models: CLAUDE_CLI_MODELS, cliPath: 'claude', cliPermissionMode: 'default' } },
+  { key: 'opencode', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "OpenCode server") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Drive an `opencode serve` HTTP session. Defaults to http://127.0.0.1:4096; models are providerID/modelID.") }, auth: 'api-key', provider: { name: 'OpenCode', transport: 'opencode', baseUrl: '', apiKey: '', kind: 'cloud', models: OPENCODE_MODELS, serverUrl: 'http://127.0.0.1:4096' } },
+  { key: 'kilo', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Kilo server") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Drive a `kilo serve` HTTP session (OpenCode-protocol fork). Set the serverUrl to your Kilo server; models are providerID/modelID.") }, auth: 'api-key', provider: { name: 'Kilo', transport: 'kilo', baseUrl: '', apiKey: '', kind: 'cloud', models: KILO_MODELS, serverUrl: 'http://127.0.0.1:4096' } },
+  { key: 'pi-cli', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Pi CLI") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Drive the installed `pi` coding agent (RPC mode, resumable sessions). Authenticate in Pi itself or expose a provider-specific key environment such as OPENAI_API_KEY; TensorFold never passes a generic key in argv.") }, auth: 'cli-local', provider: { name: 'Pi', transport: 'pi-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: PI_CLI_MODELS, cliPath: 'pi' } },
+  { key: 'cursor-cli', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Cursor Agent CLI") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Drive `cursor-agent` headless (stream-json, resumable chats). API key optional (CURSOR_API_KEY / --api-key).") }, auth: 'api-key', provider: { name: 'Cursor Agent', transport: 'cursor-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: CURSOR_CLI_MODELS, cliPath: 'cursor-agent' } },
+  { key: 'gemini-cli', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Gemini CLI") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Drive `gemini` headless (json mode, one-shot turns). Auth via its own login or env in CLI env settings.") }, auth: 'api-key', provider: { name: 'Gemini CLI', transport: 'gemini-cli', baseUrl: '', apiKey: '', kind: 'cloud', models: GEMINI_CLI_MODELS, cliPath: 'gemini' } },
+  { key: 'anthropic', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Anthropic") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Claude via API key for cloud seats and assistant work.") }, auth: 'api-key', provider: { name: 'Anthropic', baseUrl: 'https://api.anthropic.com/v1', kind: 'cloud', models: ['claude-sonnet-4', 'claude-opus-4'] } },
+  { key: 'groq', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Groq") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Fast hosted OpenAI-compatible inference.") }, auth: 'api-key', provider: { name: 'Groq', baseUrl: 'https://api.groq.com/openai/v1', kind: 'cloud' } },
+  { key: 'together', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Together") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Hosted open models behind an OpenAI-compatible API.") }, auth: 'api-key', provider: { name: 'Together', baseUrl: 'https://api.together.xyz/v1', kind: 'cloud' } },
+  { key: 'zai', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "z.ai GLM") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "GLM models as first-class cloud seats.") }, auth: 'api-key', provider: { name: 'z.ai GLM', baseUrl: 'https://api.z.ai/api/paas/v4', kind: 'cloud', models: ['glm-5.2', 'glm-5.1', 'glm-4.6', 'glm-4-flash'] } },
+  { key: 'deepseek', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "DeepSeek") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "DeepSeek API endpoint.") }, auth: 'api-key', provider: { name: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', kind: 'cloud' } },
+  { key: 'xai', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "xAI Grok") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Grok API endpoint.") }, auth: 'api-key', provider: { name: 'xAI Grok', baseUrl: 'https://api.x.ai/v1', kind: 'cloud' } },
 ]
 
 export const LOCAL_RUNTIME_PRESETS: LocalRuntimePreset[] = [
-  { key: 'omlx', label: 'oMLX', desc: 'MLX local server. This Mac can read ~/.omlx/settings.json.', defaultPort: '9000', defaultApiKey: '', defaultModels: ['local-model'], source: 'omlx' },
-  { key: 'lmstudio', label: 'LM Studio', desc: 'LM Studio local server or LAN node.', defaultPort: '1234', defaultApiKey: 'lm-studio', defaultModels: ['local-model'], source: 'lmstudio' },
-  { key: 'ollama', label: 'Ollama', desc: 'Ollama OpenAI-compatible endpoint.', defaultPort: '11434', defaultApiKey: 'ollama', defaultModels: ['qwen2.5-coder:14b', 'llama3.1:8b'], source: 'ollama' },
-  { key: 'custom', label: 'vLLM / llama.cpp', desc: 'Any OpenAI-compatible local or network endpoint.', defaultPort: '8000', defaultApiKey: '', defaultModels: ['local-model'], source: 'custom' },
+  { key: 'omlx', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "oMLX") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "MLX local server. This Mac can read ~/.omlx/settings.json.") }, defaultPort: '9000', defaultApiKey: '', defaultModels: ['local-model'], source: 'omlx' },
+  { key: 'lmstudio', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "LM Studio") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "LM Studio local server or LAN node.") }, defaultPort: '1234', defaultApiKey: 'lm-studio', defaultModels: ['local-model'], source: 'lmstudio' },
+  { key: 'ollama', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ollama") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Ollama OpenAI-compatible endpoint.") }, defaultPort: '11434', defaultApiKey: 'ollama', defaultModels: ['qwen2.5-coder:14b', 'llama3.1:8b'], source: 'ollama' },
+  { key: 'custom', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "vLLM / llama.cpp") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Any OpenAI-compatible local or network endpoint.") }, defaultPort: '8000', defaultApiKey: '', defaultModels: ['local-model'], source: 'custom' },
 ]
 
 // HTTP-endpoint cloud presets only (CLI providers are picked via the
 // transport-type radio at add-time, not this dropdown — #44).
-export const HTTP_CLOUD_PROVIDER_PRESETS = CLOUD_PROVIDER_PRESETS.filter((preset) => preset.auth !== 'cli-oauth')
+export const HTTP_CLOUD_PROVIDER_PRESETS = CLOUD_PROVIDER_PRESETS.filter((preset) => {  return (preset.auth !== 'cli-oauth') })
 
 export function providerPresetNeedsApiKey(preset: Pick<CloudProviderPreset, 'auth'>): boolean {
   return preset.auth === 'api-key'
@@ -122,10 +138,10 @@ export const DEFAULT_PROVIDER_SETUP: ProviderSetupDraft = {
 
 export const SELECT_CLASS = 'no-drag h-9 w-full cursor-pointer rounded-lg border border-line bg-card px-3 text-[13px] text-ink outline-none transition-colors focus:border-accent focus:ring-2 focus:ring-accent/15'
 export const SPEND_BUDGET_PERIODS: Array<{ value: ModelSpendBudgetPeriod; label: string }> = [
-  { value: 'run', label: 'Per run' },
-  { value: 'day', label: 'Daily' },
-  { value: 'week', label: 'Weekly' },
-  { value: 'month', label: 'Monthly' },
+  { value: 'run', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Per run") } },
+  { value: 'day', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Daily") } },
+  { value: 'week', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Weekly") } },
+  { value: 'month', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Monthly") } },
 ]
 
 export function newProviderId() {
@@ -176,46 +192,46 @@ export interface SettingsGroup {
 export const SETTINGS_GROUPS: SettingsGroup[] = [
   {
     id: 'ai',
-    label: 'AI & Models',
+    get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "AI & Models") },
     sections: [
-      { id: 'readiness', label: 'Readiness', desc: 'Providers, CLIs, connectors', icon: 'check' },
-      { id: 'models', label: 'Models & Accounts', desc: 'Sources for chats and agents', icon: 'cpu' },
-      { id: 'library', label: 'Model folders', desc: 'Find existing Hugging Face and local models', icon: 'folder' },
-      { id: 'agents', label: 'Bots', desc: 'Saved instructions, models and permissions', icon: 'spark' },
+      { id: 'readiness', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Readiness") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Providers, CLIs, connectors") }, icon: 'check' },
+      { id: 'models', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Models & Accounts") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Sources for chats and agents") }, icon: 'cpu' },
+      { id: 'library', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Model folders") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Find existing Hugging Face and local models") }, icon: 'folder' },
+      { id: 'agents', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Bots") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Saved instructions, models and permissions") }, icon: 'spark' },
     ],
   },
   {
     id: 'assistant',
-    label: 'Assistant',
+    get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Assistant") },
     sections: [
-      { id: 'connectors', label: 'Connectors', desc: 'Email, documents, calendar, bots', icon: 'plug' },
-      { id: 'persona', label: 'Persona', desc: 'The assistant’s voice + your profile', icon: 'spark' },
-      { id: 'voice', label: 'Voice', desc: 'Speech in and readback', icon: 'speaker' },
-      { id: 'phone', label: 'Phone control', desc: 'Connect Android or iPhone using USB or Wi-Fi', icon: 'monitor' },
+      { id: 'connectors', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Connectors") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Email, documents, calendar, bots") }, icon: 'plug' },
+      { id: 'persona', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Persona") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "The assistant’s voice + your profile") }, icon: 'spark' },
+      { id: 'voice', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Voice") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Speech in and readback") }, icon: 'speaker' },
+      { id: 'phone', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Phone control") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Connect Android or iPhone using USB or Wi-Fi") }, icon: 'monitor' },
     ],
   },
   {
     id: 'behavior',
-    label: 'Behavior',
+    get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Behavior") },
     sections: [
-      { id: 'agent', label: 'Runtime', desc: 'Approvals, folders, context', icon: 'spark' },
-      { id: 'security', label: 'Security', desc: 'Confidential terms, controller and permissions', icon: 'shield' },
-      { id: 'orchestrator', label: 'Orchestrator', desc: 'Host and remote control', icon: 'monitor' },
+      { id: 'agent', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Runtime") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Approvals, folders, context") }, icon: 'spark' },
+      { id: 'security', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Security") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Confidential terms, controller and permissions") }, icon: 'shield' },
+      { id: 'orchestrator', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Orchestrator") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Host and remote control") }, icon: 'monitor' },
     ],
   },
   {
     id: 'preferences',
-    label: 'Preferences',
+    get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Preferences") },
     sections: [
-      { id: 'app', label: 'App & onboarding', desc: 'Minimal or Full, and your welcome guide', icon: 'monitor' },
-      { id: 'appearance', label: 'Appearance', desc: 'Theme and display', icon: 'sun' },
-      { id: 'skills', label: 'Skills', desc: '$ skills and / commands', icon: 'list' },
+      { id: 'app', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "App & onboarding") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Minimal or Full, and your welcome guide") }, icon: 'monitor' },
+      { id: 'appearance', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Appearance") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Theme and display") }, icon: 'sun' },
+      { id: 'skills', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Skills") }, get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "$ skills and / commands") }, icon: 'list' },
     ],
   },
 ]
 
 // Flattened view for lookups (active-section header meta, deep-link resolution).
-export const ALL_SETTINGS_SECTIONS: SettingsSectionMeta[] = SETTINGS_GROUPS.flatMap((g) => g.sections)
+export const ALL_SETTINGS_SECTIONS: SettingsSectionMeta[] = SETTINGS_GROUPS.flatMap((g) => {  return (g.sections) })
 
 /** @deprecated use ALL_SETTINGS_SECTIONS — kept for any external readers. */
 export const SETTINGS_SECTIONS = ALL_SETTINGS_SECTIONS
@@ -226,6 +242,7 @@ export function groupOfSection(section: SettingsSection): SettingsGroup | undefi
 }
 
 export function Section({ title, desc, children }: { title: string; desc?: string; children: ReactNode }) {
+  const tx = useAuthoredText()
   return (
     <section className="mb-8 last:mb-0">
       <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{title}</h2>
@@ -236,6 +253,7 @@ export function Section({ title, desc, children }: { title: string; desc?: strin
 }
 
 export function SettingsPane({ children }: { children: ReactNode }) {
+  const tx = useAuthoredText()
   return <div className="mx-auto w-full max-w-[760px]">{children}</div>
 }
 
@@ -247,7 +265,7 @@ export function SettingsPane({ children }: { children: ReactNode }) {
  * matches so the refactor there is behavior-neutral.
  */
 export function AdvancedSection({
-  title = 'Advanced',
+  title,
   icon = 'sliders',
   children,
 }: {
@@ -255,10 +273,11 @@ export function AdvancedSection({
   icon?: IconName
   children: ReactNode
 }) {
+  const tx = useAuthoredText()
   return (
     <details className="group rounded-xl border border-line bg-card shadow-card">
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 px-3.5 py-3 text-[13px] font-medium text-ink-2 [&::-webkit-details-marker]:hidden">
-        <span className="flex items-center gap-2"><Icon name={icon} size={15} className="text-ink-3" />{title}</span>
+        <span className="flex items-center gap-2"><Icon name={icon} size={15} className="text-ink-3" />{title ?? tx("Advanced")}</span>
         <Icon name="chevronDown" size={15} className="text-ink-3 transition-transform group-open:rotate-180" />
       </summary>
       <div className="space-y-4 border-t border-line px-3.5 py-3.5">{children}</div>
@@ -279,6 +298,7 @@ export function SpendGuardControls({
   desc: string
   scope: string
 }) {
+  const tx = useAuthoredText()
   const current = spendBudgetDefaults(budget)
   return (
     <div className="rounded-lg border border-line bg-card-2 px-3 py-2.5">
@@ -287,11 +307,11 @@ export function SpendGuardControls({
           <div className="text-[13px] font-medium text-ink-2">{title}</div>
           <div className="truncate text-[12px] text-ink-3">{desc}</div>
         </div>
-        <Toggle label={`${title} for ${scope}`} checked={current.enabled === true} onChange={(enabled) => onChange({ enabled })} />
+        <Toggle label={tx("{value0} for {value1}", { value0: title, value1: scope })} checked={current.enabled === true} onChange={(enabled) => onChange({ enabled })} />
       </div>
       {current.enabled && (
         <div className="mt-2.5 grid grid-cols-1 gap-2 sm:grid-cols-5">
-          <Field label="Period">
+          <Field label={tx("Period")}>
             <select
               value={current.period ?? 'month'}
               onChange={(e) => onChange({ period: e.target.value as ModelSpendBudgetPeriod })}
@@ -300,7 +320,7 @@ export function SpendGuardControls({
               {SPEND_BUDGET_PERIODS.map((period) => <option key={period.value} value={period.value}>{period.label}</option>)}
             </select>
           </Field>
-          <Field label="Limit" hint="USD">
+          <Field label={tx("Limit")} hint="USD">
             <Input
               type="number"
               min="0"
@@ -310,7 +330,7 @@ export function SpendGuardControls({
               placeholder="25"
             />
           </Field>
-          <Field label="Spent" hint="USD">
+          <Field label={tx("Spent")} hint="USD">
             <Input
               type="number"
               min="0"
@@ -320,7 +340,7 @@ export function SpendGuardControls({
               placeholder="0"
             />
           </Field>
-          <Field label="Warn" hint="%">
+          <Field label={tx("Warn")} hint="%">
             <Input
               type="number"
               min="0"
@@ -331,10 +351,10 @@ export function SpendGuardControls({
               placeholder="80"
             />
           </Field>
-          <Field label="Hard stop">
+          <Field label={tx("Hard stop")}>
             <div className="flex h-9 items-center justify-between rounded-lg border border-line bg-card px-2.5">
-              <span className="text-[13px] text-ink-3">Block</span>
-              <Toggle label={`${title} hard stop for ${scope}`} checked={current.hardStop === true} onChange={(hardStop) => onChange({ hardStop })} />
+              <span className="text-[13px] text-ink-3">{tx("Block")}</span>
+              <Toggle label={tx("{value0} hard stop for {value1}", { value0: title, value1: scope })} checked={current.hardStop === true} onChange={(hardStop) => onChange({ hardStop })} />
             </div>
           </Field>
         </div>
@@ -344,11 +364,11 @@ export function SpendGuardControls({
 }
 
 const AGENT_LANES: Array<{ id: RoomSeatLane; label: string; name: string; role: string; desc: string; icon: IconName; target: 'cloud' | 'local' }> = [
-  { id: 'planning', label: 'Planner', name: 'Planner', role: 'Planner', desc: 'Breaks goals into tickets, checks, and handoffs.', icon: 'list', target: 'cloud' },
-  { id: 'development', label: 'Builder', name: 'Builder', role: 'Engineer', desc: 'Implements changes with repo and terminal context.', icon: 'code', target: 'local' },
-  { id: 'review', label: 'Reviewer', name: 'Reviewer', role: 'Reviewer', desc: 'Looks for risks, gaps, regressions, and test evidence.', icon: 'shield', target: 'cloud' },
-  { id: 'research', label: 'Researcher', name: 'Researcher', role: 'Researcher', desc: 'Investigates docs, APIs, and outside constraints.', icon: 'search', target: 'cloud' },
-  { id: 'operations', label: 'Operator', name: 'Operator', role: 'Operator', desc: 'Runs commands, checks services, and handles environment work.', icon: 'terminal', target: 'local' },
+  { id: 'planning', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Planner") }, name: 'Planner', role: 'Planner', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Breaks goals into tickets, checks, and handoffs.") }, icon: 'list', target: 'cloud' },
+  { id: 'development', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Builder") }, name: 'Builder', role: 'Engineer', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Implements changes with repo and terminal context.") }, icon: 'code', target: 'local' },
+  { id: 'review', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Reviewer") }, name: 'Reviewer', role: 'Reviewer', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Looks for risks, gaps, regressions, and test evidence.") }, icon: 'shield', target: 'cloud' },
+  { id: 'research', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Researcher") }, name: 'Researcher', role: 'Researcher', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Investigates docs, APIs, and outside constraints.") }, icon: 'search', target: 'cloud' },
+  { id: 'operations', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Operator") }, name: 'Operator', role: 'Operator', get desc() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Runs commands, checks services, and handles environment work.") }, icon: 'terminal', target: 'local' },
 ]
 
 function agentLaneMeta(lane: RoomSeatLane) {
@@ -356,7 +376,7 @@ function agentLaneMeta(lane: RoomSeatLane) {
 }
 
 function agentInitials(name: string): string {
-  return name.replace(/[^a-zA-Z0-9]/g, ' ').trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || 'A'
+  return name.replace(/[^a-zA-Z0-9]/g, ' ').trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase()).join('') || authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "A")
 }
 
 function uniqueAgentName(base: string, presets: AgentPreset[]): string {
@@ -400,6 +420,7 @@ function firstAgentModelChoice(providers: Provider[], lane: RoomSeatLane = 'deve
 }
 
 export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; onSave: (next: TSettings) => void }) {
+  const tx = useAuthoredText()
   const presets = settings.agentPresets ?? []
   const providers = settings.providers
   const modelGroups = providers.flatMap((provider) => providerModelGroups(provider).filter((group) => group.models.length).map((group) => ({ provider, group })))
@@ -487,16 +508,16 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
   const providerCount = agentBuilderModelSourceCount(providers)
 
   return (
-    <Section title="Agent builder" desc="Create named seats from your model suite. These are light room roles, not deep persona prompts.">
+    <Section title={tx("Agent builder")} desc={tx("Create named seats from your model suite. These are light room roles, not deep persona prompts.")}>
       <div className="mb-4 overflow-hidden rounded-xl border border-line bg-card shadow-card">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line bg-card-2/70 px-4 py-3.5">
           <div>
-            <div className="flex items-center gap-2 text-[14px] font-semibold text-ink"><Icon name="layers" size={15} className="text-ink-3" />Room team canvas</div>
-            <div className="mt-0.5 text-[13px] text-ink-3">{presets.length} saved agent{presets.length === 1 ? '' : 's'} · {providerCount || 0} model source{providerCount === 1 ? '' : 's'}</div>
+            <div className="flex items-center gap-2 text-[14px] font-semibold text-ink"><Icon name="layers" size={15} className="text-ink-3" />{tx("Room team canvas")}</div>
+            <div className="mt-0.5 text-[13px] text-ink-3">{tx("Saved agents: {agents} · Model sources: {sources}", { agents: presets.length, sources: providerCount || 0 })}</div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <Button variant="default" size="sm" icon="spark" onClick={addStarterTeam} disabled={modelGroups.length === 0}>Starter trio</Button>
-            <Button variant="primary" size="sm" icon="plus" onClick={() => addPreset()} disabled={modelGroups.length === 0}>Add agent</Button>
+            <Button variant="default" size="sm" icon="spark" onClick={addStarterTeam} disabled={modelGroups.length === 0}>{tx("Starter trio")}</Button>
+            <Button variant="primary" size="sm" icon="plus" onClick={() => addPreset()} disabled={modelGroups.length === 0}>{tx("Add agent")}</Button>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-px bg-line/70 sm:grid-cols-5">
@@ -510,7 +531,7 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
               <span className="flex items-center gap-2 text-[13px] font-medium text-ink"><Icon name={lane.icon} size={14} className="text-ink-3" />{lane.label}</span>
               <span className="max-h-[30px] overflow-hidden text-[12px] leading-snug text-ink-3">{lane.desc}</span>
               <span className="mt-2 inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[12px] text-ink-3 group-hover:text-ink">
-                {lane.count ? `${lane.count} saved` : `Add ${lane.target}`}
+                {lane.count ? tx("{value0} saved", { value0: lane.count }) : tx("Add {value0}", { value0: lane.target })}
               </span>
             </button>
           ))}
@@ -520,23 +541,23 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
       {modelGroups.length === 0 ? (
         <div className="rounded-xl border border-dashed border-line px-4 py-10 text-center">
           <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-ink-5 text-ink-3"><Icon name="cpu" size={22} /></div>
-          <div className="mt-3 text-[13px] font-medium text-ink">Connect a model source first</div>
-          <div className="mx-auto mt-1 max-w-[360px] text-[13px] leading-relaxed text-ink-3">Agent seats are named wrappers around your available models. Add a local node or cloud account, then come back and build the team.</div>
+          <div className="mt-3 text-[13px] font-medium text-ink">{tx("Connect a model source first")}</div>
+          <div className="mx-auto mt-1 max-w-[360px] text-[13px] leading-relaxed text-ink-3">{tx("Agent seats are named wrappers around your available models. Add a local node or cloud account, then come back and build the team.")}</div>
         </div>
       ) : presets.length === 0 ? (
         <div className="rounded-xl border border-dashed border-line px-4 py-10 text-center">
           <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-ink-5 text-ink-3"><Icon name="message" size={22} /></div>
-          <div className="mt-3 text-[13px] font-medium text-ink">No room agents yet</div>
-          <div className="mx-auto mt-1 max-w-[360px] text-[13px] leading-relaxed text-ink-3">Planner, builder, and reviewer make a balanced default room team.</div>
+          <div className="mt-3 text-[13px] font-medium text-ink">{tx("No room agents yet")}</div>
+          <div className="mx-auto mt-1 max-w-[360px] text-[13px] leading-relaxed text-ink-3">{tx("Planner, builder, and reviewer make a balanced default room team.")}</div>
           <div className="mt-4 flex justify-center gap-2">
-            <Button variant="default" size="sm" icon="spark" onClick={addStarterTeam}>Starter trio</Button>
-            <Button variant="primary" size="sm" icon="plus" onClick={() => addPreset()}>Add agent</Button>
+            <Button variant="default" size="sm" icon="spark" onClick={addStarterTeam}>{tx("Starter trio")}</Button>
+            <Button variant="primary" size="sm" icon="plus" onClick={() => addPreset()}>{tx("Add agent")}</Button>
           </div>
         </div>
       ) : (
         <div className="grid gap-3 md:grid-cols-[250px_minmax(0,1fr)]">
           <div className="max-h-[520px] space-y-2 overflow-y-auto pr-1 scroll-thin">
-            <div className="px-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">Roster</div>
+            <div className="px-1 text-[12px] font-semibold uppercase tracking-[0.06em] text-ink-3">{tx("Roster")}</div>
             {presets.map((preset) => {
               const provider = providers.find((item) => item.id === preset.providerId)
               const meta = agentLaneMeta(preset.lane)
@@ -558,7 +579,7 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
                     <span className="mt-0.5 block truncate text-[13px] text-ink-3">{preset.role || meta.role}</span>
                     <span className="mt-2 flex items-center gap-1.5 text-[12px] text-ink-4">
                       <Icon name={provider?.kind === 'local' ? 'cpu' : 'globe'} size={11} />
-                      <span className="truncate">{provider?.name ?? 'Missing provider'}</span>
+                      <span className="truncate">{provider?.name ?? tx("Missing provider")}</span>
                     </span>
                   </span>
                 </button>
@@ -575,30 +596,30 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
                     <div className="truncate text-[14px] font-semibold text-ink">{selectedPreset.name || agentLaneMeta(selectedPreset.lane).name}</div>
                     <div className="mt-0.5 flex items-center gap-1.5 text-[13px] text-ink-3">
                       <Icon name={agentLaneMeta(selectedPreset.lane).icon} size={12} />
-                      {agentLaneMeta(selectedPreset.lane).label} · {selectedProvider?.name ?? 'Provider missing'}
+                      {agentLaneMeta(selectedPreset.lane).label} · {selectedProvider?.name ?? tx("Provider missing")}
                     </div>
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center gap-1">
-                  <Button variant="ghost" size="xs" icon="copy" onClick={() => duplicatePreset(selectedPreset)}>Duplicate</Button>
-                  <Button variant="danger" size="xs" icon="trash" onClick={() => deletePreset(selectedPreset.id)}>Delete</Button>
+                  <Button variant="ghost" size="xs" icon="copy" onClick={() => duplicatePreset(selectedPreset)}>{tx("Duplicate")}</Button>
+                  <Button variant="danger" size="xs" icon="trash" onClick={() => deletePreset(selectedPreset.id)}>{tx("Delete")}</Button>
                 </div>
               </div>
 
               <div className="space-y-4 p-4">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <Field label="Name" hint="Shown in rooms">
-                    <Input value={selectedPreset.name} onChange={(e) => updatePreset(selectedPreset.id, { name: e.target.value })} placeholder="Builder" />
+                  <Field label={tx("Name")} hint={tx("Shown in rooms")}>
+                    <Input value={selectedPreset.name} onChange={(e) => updatePreset(selectedPreset.id, { name: e.target.value })} placeholder={tx("Builder")} />
                   </Field>
-                  <Field label="Room role" hint="How the room uses it">
-                    <Input value={selectedPreset.role} onChange={(e) => updatePreset(selectedPreset.id, { role: e.target.value })} placeholder="Engineer" />
+                  <Field label={tx("Room role")} hint={tx("How the room uses it")}>
+                    <Input value={selectedPreset.role} onChange={(e) => updatePreset(selectedPreset.id, { role: e.target.value })} placeholder={tx("Engineer")} />
                   </Field>
                 </div>
 
                 <div>
                   <div className="mb-2 flex items-center justify-between gap-2">
-                    <div className="text-[13px] font-medium text-ink-2">Role lane</div>
-                    <div className="text-[12px] text-ink-3">Planner · Builder · Reviewer</div>
+                    <div className="text-[13px] font-medium text-ink-2">{tx("Role lane")}</div>
+                    <div className="text-[12px] text-ink-3">{tx("Planner · Builder · Reviewer")}</div>
                   </div>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-5">
                     {AGENT_LANES.map((lane) => (
@@ -615,7 +636,7 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
                   </div>
                 </div>
 
-                <Field label="Model" hint={selectedProvider?.kind === 'local' ? 'local seat' : selectedProvider ? 'cloud seat' : 'missing'}>
+                <Field label={tx("Model")} hint={selectedProvider?.kind === 'local' ? tx("local seat") : selectedProvider ? tx("cloud seat") : tx("missing")}>
                   <select
                     value={modelValue(selectedPreset)}
                     onChange={(e) => {
@@ -624,7 +645,7 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
                     }}
                     className={SELECT_CLASS}
                   >
-                    {selectedModelMissing && <option value={modelValue(selectedPreset)}>Missing · {selectedPreset.model}</option>}
+                    {selectedModelMissing && <option value={modelValue(selectedPreset)}>{tx("Missing · ")}{selectedPreset.model}</option>}
                     {modelGroups.map(({ provider, group }) => (
                       <optgroup key={group.id} label={group.detail ? `${group.label} · ${group.detail}` : group.label}>
                         {group.models.map((model) => <option key={`${group.id}:${model}`} value={agentModelChoiceValue(provider.id, group.accountId, model)}>{modelDisplayName(provider, model)}</option>)}
@@ -635,15 +656,15 @@ export function AgentBuilderPanel({ settings, onSave }: { settings: TSettings; o
 
                 <div className="grid gap-2 sm:grid-cols-3">
                   <div className="rounded-lg border border-line bg-card-2/60 px-3 py-2">
-                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">Provider</div>
-                    <div className="mt-1 flex items-center gap-1.5 truncate text-[13px] font-medium text-ink"><Icon name={selectedProvider?.kind === 'local' ? 'cpu' : 'globe'} size={13} className="text-ink-3" />{selectedProvider?.name ?? 'Missing'}</div>
+                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">{tx("Provider")}</div>
+                    <div className="mt-1 flex items-center gap-1.5 truncate text-[13px] font-medium text-ink"><Icon name={selectedProvider?.kind === 'local' ? 'cpu' : 'globe'} size={13} className="text-ink-3" />{selectedProvider?.name ?? tx("Missing")}</div>
                   </div>
                   <div className="rounded-lg border border-line bg-card-2/60 px-3 py-2">
-                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">Lane</div>
+                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">{tx("Lane")}</div>
                     <div className="mt-1 truncate text-[13px] font-medium text-ink">{agentLaneMeta(selectedPreset.lane).label}</div>
                   </div>
                   <div className="rounded-lg border border-line bg-card-2/60 px-3 py-2">
-                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">Model</div>
+                    <div className="text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">{tx("Model")}</div>
                     <div className="mt-1 truncate text-[13px] font-medium text-ink">{modelDisplayName(selectedProvider ?? undefined, selectedPreset.model)}</div>
                   </div>
                 </div>

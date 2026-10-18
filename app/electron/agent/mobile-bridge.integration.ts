@@ -37,7 +37,7 @@ if (!address) {
   const corePort = await port('127.0.0.1'), mobilePort = await port(address)
   const settings: RemoteControlSettings = { enabled: true, serverName: 'Fixture Studio', bindHost: '127.0.0.1', port: corePort, allowLan: false, authToken: ownerToken, lastStartedAt: null, lastClientAt: null, lastError: null }
   const mutations: unknown[] = []
-  const snapshot = { serverName: 'Fixture Studio', appVersion: '1.0.0', generatedAt: 1, activeThreadIds: [], threads: [], projects: [], work: { jobs: { running: 0, queued: 0 }, approvals: { pending: 0 } } }
+  const snapshot = { serverName: 'Fixture Studio', appVersion: '1.0.0', generatedAt: 1, activeThreadIds: [], threads: [{id: 'task/one', title: 'Synthetic watch job', kind: 'task', providerId: 'example', model: 'example-model', status: 'idle', updatedAt: 1, timeline: [{id: 'assistant-one', kind: 'assistant', text: 'PRIVATE_REPLY', path: '/private/example', output: 'PRIVATE_OUTPUT'}]}, {id: 'incognito-job', title: 'PRIVATE_INCOGNITO', kind: 'task', providerId: 'example', model: 'example-model', status: 'idle', updatedAt: 1, timeline: [], incognito: true}], projects: [], work: { jobs: { running: 0, queued: 0 }, approvals: { pending: 0 } } }
   const core = createRemoteControlServer({
     getSettings: () => settings,
     getSnapshot: () => ({ ...snapshot, privateOwnerField: 'fixture-owner-secret' }),
@@ -56,6 +56,7 @@ if (!address) {
     authorizeSessionToken: token => badScope ? { ok: true, sessionId: 'fixture', scope: 'owner' } : registry.authorizeSessionToken(token),
     issuePairingLink: label => core.issuePairingLink(label),
     loadCertificate: host => loadMobileBridgeCertificate(profile, host),
+    projectWatchSnapshot: snapshot => snapshot, // This low-level synthetic host supplies its own projection.
   })
   let cert: Awaited<ReturnType<typeof loadMobileBridgeCertificate>>
   async function call(route: string, options: { method?: string; token?: string; body?: unknown; headers?: Record<string, string>; pin?: string } = {}): Promise<{ status: number; value: any }> {
@@ -121,7 +122,27 @@ if (!address) {
     assert.equal((await call('/v1/threads/one/start', { token, body: { userText: 'Cannot bypass role' } })).status, 403)
     assert.equal(mutations.length, 3)
     process.env.VONTRA_SECURITY_ROLE = 'owner'
+    const watchCommand = {version: 1, id: 'watch-command-one', session: pair.value.sessionId, generatedAt: Date.now(), action: 'reply', threadId: 'task/one', text: 'Continue from my watch.'}
+    const watch = await call('/v1/watch/command', {token, body: watchCommand})
+    assert.equal(watch.status, 200); assert.equal(watch.value.ok, true, 'Host accepts watch without an iPhone React runtime')
+    assert.equal(mutations.length, 4)
+    const duplicate = await call('/v1/watch/command', {token, body: watchCommand})
+    assert.equal(duplicate.value.ok, true); assert.equal(duplicate.value.snapshot, undefined); assert.equal(mutations.length, 4)
+    assert.equal((await call('/v1/watch/command', {token, body: {...watchCommand, text: 'Changed request body'}})).value.ok, false)
+    const watchRefresh = await call('/v1/watch/command', {token, body: {...watchCommand, id: 'watch-refresh-one', action: 'refresh'}})
+    assert.equal(watchRefresh.value.ok, true); assert.equal(watchRefresh.value.snapshot.jobs.length, 1)
+    assert.doesNotMatch(JSON.stringify(watchRefresh.value), /PRIVATE_|fixture-owner-secret|private\/example/)
+    assert.equal((await call('/v1/watch/command', {token, body: {...watchCommand, id: 'watch-other-session', session: 'different-session'}})).value.ok, false)
+    assert.equal((await call('/v1/watch/command', {token, body: {...watchCommand, id: 'watch-stale-request', generatedAt: Date.now() - 50_000}})).value.ok, false)
+    assert.equal((await call('/v1/watch/command', {token, body: {...watchCommand, id: 'watch-extra-field', url: 'https://untrusted.example.test'}})).value.ok, false)
+    assert.equal((await call('/v1/watch/command', {token, body: {...watchCommand, id: 'watch-oversized', text: 'x'.repeat(13 * 1024)}})).status, 413)
+    assert.equal((await call('/v1/watch/command', {token: ownerToken, body: watchCommand})).status, 403)
+    process.env.VONTRA_SECURITY_ROLE = 'viewer'
+    assert.equal((await call('/v1/watch/command', {token, body: watchCommand})).value.ok, false, 'Cached receipts obey current role')
+    assert.equal(mutations.length, 4)
+    process.env.VONTRA_SECURITY_ROLE = 'owner'
     registry.revokeSession(pair.value.sessionId)
+    assert.equal((await call('/v1/watch/command', {token, body: watchCommand})).status, 401)
     assert.equal((await call('/v1/snapshot', { token })).status, 401)
     ownerAllowed = false
     await assert.rejects(() => bridge.issuePairing('Another phone'), /owner_required/)

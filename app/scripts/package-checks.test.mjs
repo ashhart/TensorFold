@@ -25,7 +25,9 @@ assert.deepEqual(pkg.build?.extraResources, [
   { from: 'build/engine', to: 'engine', filter: ['**/*'] },
   { from: 'build/computer-use', to: 'computer-use', filter: ['tensorfold-computer'] },
   { from: 'build/voice', to: 'voice-notices', filter: ['*.txt'] },
-], 'the engine, computer helper and offline voice notices have explicit packaging destinations')
+  { from: 'build/licenses', to: 'third-party-notices', filter: ['*.txt'] },
+], 'the engine, computer helper, voice and rendering notices have explicit packaging destinations')
+assert.equal(await readFile(path.join(root, 'build', 'licenses', 'KATEX-MIT.txt'), 'utf8'), await readFile(path.join(root, 'node_modules', 'katex', 'LICENSE'), 'utf8'), 'the shipped math renderer notice preserves upstream license bytes')
 assert.match(await readFile(path.join(root, 'build', 'voice', 'NOTICE.txt'), 'utf8'), /HeadTTS 1\.2\.0/)
 assert.match(await readFile(path.join(root, 'build', 'voice', 'CMU-DICTIONARY-BSD.txt'), 'utf8'), /Redistribution and use in source and binary forms/)
 assert.match(await readFile(path.join(root, 'build', 'voice', 'HEADTTS-MIT.txt'), 'utf8'), /MIT License/)
@@ -38,9 +40,9 @@ for (const script of ['pack:mac:dev', 'pack:mac', 'dist:mac']) {
   assert.match(pkg.scripts[script], /node scripts\/fetch-engine\.mjs && node scripts\/build-computer-helper\.mjs && node scripts\/package-mac\.mjs/, `${script} stages the pinned engine and builds the computer-use helper before packaging`)
 }
 const engineManifest = JSON.parse(await readFile(path.join(root, 'build', 'engine.json'), 'utf8'))
-assert.equal(engineManifest.version, '1.0.10')
-assert.equal(engineManifest.sha256, '85987885bd3ba11a41ea0e9aea94f6207b09f0df9b1c38d992753e494c06c806')
-assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.0.10/tensorfold-1.0.10-macos-arm64.tar.gz')
+assert.equal(engineManifest.version, '1.1.0')
+assert.equal(engineManifest.sha256, '99c66f56fcde07a7dd8df6ea555bcbd406d0537b7d92a453112a54bef5a72707')
+assert.equal(engineManifest.url, 'https://github.com/ashhart/TensorFold/releases/download/v1.1.0/tensorfold-1.1.0-macos-arm64.tar.gz')
 const ignore = await readFile(path.join(root, '.gitignore'), 'utf8')
 assert.match(ignore, /^build\/engine\/$/m, 'the staged engine is never committed')
 

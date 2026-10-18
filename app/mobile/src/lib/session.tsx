@@ -1,8 +1,10 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AppState, Linking, Platform } from 'react-native'
 import * as SecureStore from 'expo-secure-store'
-import { HostError, StudioClient, validateHost, type DeviceSession, type MobileHost } from './client'
+import { HostError, StudioClient, type DeviceSession, type MobileHost } from './client'
 import { fetchForPin } from './pinned-fetch'
+import { readSavedSession } from './session-restore'
+import { disableBackgroundWatch } from './watch-native'
 
 const KEY = 'tensorfold.mobile.device.v1'
 interface SessionState {
@@ -24,18 +26,34 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const failures = useRef(0)
   const inflight = useRef<Promise<void> | null>(null)
   const generation = useRef(0)
+  // Identity changes are separate from foreground polling cancellations.
+  const identityGeneration = useRef(0)
+  const restoreDeferred = useRef(false)
+  const secureWrites = useRef<Promise<unknown>>(Promise.resolve())
+  const mutateSecure = useCallback((operation: () => Promise<unknown>) => {
+    const next = secureWrites.current.catch(() => {}).then(operation)
+    secureWrites.current = next
+    return next
+  }, [])
   const controller = useRef<AbortController | null>(null)
   const client = useMemo(() => session ? new StudioClient(session, fetchForPin(session.certificatePin)) : null, [session])
   const invalidate = useCallback(() => { generation.current++; controller.current?.abort(); inflight.current = null }, [])
+  const cancelIdentity = useCallback(() => { identityGeneration.current++ }, [])
 
   const forget = useCallback(async () => {
-    invalidate()
-    setSession(null); setHost(null); setLastSynced(null); setError(null); failures.current = 0
-    if (Platform.OS !== 'web') {
-      try { await SecureStore.deleteItemAsync(KEY) }
-      catch { setError('This device could not clear its saved token; revoke the device in TensorFold.') }
-    }
-  }, [invalidate])
+    const current = ++identityGeneration.current
+    restoreDeferred.current = false; invalidate()
+    setSession(null); setHost(null); setLastSynced(null); setSyncing(false); setReady(true); setError(null); failures.current = 0
+    // Always attempt both revocations. A native Keychain failure must not prevent
+    // clearing the ordinary phone token, or disappear behind a polling error.
+    const results = await Promise.allSettled([
+      disableBackgroundWatch(),
+      Platform.OS === 'web' ? Promise.resolve() : mutateSecure(() => SecureStore.deleteItemAsync(KEY)),
+    ])
+    if (identityGeneration.current !== current) return
+    if (results[0].status === 'rejected') setError('Watch access could not be cleared on this phone; revoke this device in TensorFold on your Mac.')
+    else if (results[1].status === 'rejected') setError('This device could not clear its saved token; revoke the device in TensorFold.')
+  }, [invalidate, mutateSecure])
 
   useEffect(() => {
     let alive = true
@@ -49,22 +67,39 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
     void Linking.getInitialURL().then(receive)
     const linkSub = Linking.addEventListener('url', ({ url }) => receive(url))
-    const appSub = AppState.addEventListener('change', (state) => { setForeground(state === 'active'); if (state !== 'active') controller.current?.abort() })
-    void (async () => {
-      try {
-        const raw = Platform.OS === 'web' ? null : await SecureStore.getItemAsync(KEY)
-        if (raw && alive) {
-          const value = JSON.parse(raw) as DeviceSession
-          if (typeof value.token !== 'string' || !value.token || typeof value.sessionId !== 'string' || !value.sessionId) throw new Error('Invalid device session')
-          value.baseUrl = validateHost(value.baseUrl, Platform.OS === 'android' && __DEV__)
-          if (value.certificatePin && !/^[a-fA-F0-9]{64}$/.test(value.certificatePin)) throw new Error('Invalid certificate pin')
-          setSession(value)
+    let restoring = false
+    const restore = async () => {
+      if (restoring) return
+      restoring = true
+      const current = identityGeneration.current
+      const result = await readSavedSession(() => Platform.OS === 'web' ? Promise.resolve(null) : SecureStore.getItemAsync(KEY), Platform.OS === 'android' && __DEV__)
+      restoring = false
+      if (!alive || identityGeneration.current !== current) return
+      if (result.kind === 'deferred') {
+        restoreDeferred.current = true
+        setError('The saved connection is temporarily unavailable; unlock your phone and open TensorFold to restore it.')
+      } else {
+        restoreDeferred.current = false
+        if (result.kind === 'restored') { setSession(result.session); setError(null) }
+        else {
+          // Successful absent/invalid reads fail closed, but retain invalid bytes
+          // until the user explicitly pairs or forgets this device.
+          setSession(null)
+          if (result.kind === 'invalid') setError('The saved connection could not be restored; pair this device again.')
+          try { await disableBackgroundWatch() }
+          catch { if (alive && identityGeneration.current === current) setError('Watch access could not be cleared on this phone; revoke this device in TensorFold on your Mac.') }
         }
-      } catch { if (alive) { setError('The saved connection could not be restored; pair this device again.'); if (Platform.OS !== 'web') { try { await SecureStore.deleteItemAsync(KEY) } catch { /* Remain signed out when secure storage is unavailable. */ } } } }
-      finally { if (alive) setReady(true) }
-    })()
-    return () => { alive = false; invalidate(); linkSub.remove(); appSub.remove() }
-  }, [invalidate])
+      }
+      if (alive && identityGeneration.current === current) setReady(true)
+    }
+    const appSub = AppState.addEventListener('change', (state) => {
+      setForeground(state === 'active')
+      if (state !== 'active') controller.current?.abort()
+      else if (restoreDeferred.current) void restore()
+    })
+    void restore()
+    return () => { alive = false; cancelIdentity(); invalidate(); linkSub.remove(); appSub.remove() }
+  }, [invalidate, cancelIdentity])
 
   const refresh = useCallback(async () => {
     if (!session || !foreground) return
@@ -79,7 +114,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         setHost(next); setLastSynced(Date.now()); setError(null); failures.current = 0
       } catch (failure) {
         if (generation.current !== current || aborter.signal.aborted) return
-        if (failure instanceof HostError && failure.status === 401) { await forget(); setError(failure.message) }
+        if (failure instanceof HostError && failure.status === 401) {
+          const revokedGeneration = identityGeneration.current + 1
+          await forget()
+          if (identityGeneration.current === revokedGeneration) setError(previous => previous ?? failure.message)
+        }
         else { failures.current++; setError((failure as Error).message || 'Could not reach TensorFold.') }
       } finally { if (generation.current === current) { setSyncing(false); inflight.current = null } }
     })()
@@ -97,14 +136,34 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [session, foreground, refresh, invalidate])
 
   const pair = useCallback(async (baseUrl: string, credential: string, certificatePin?: string) => {
-    const next = await StudioClient.pair(baseUrl, credential, `TensorFold mobile ${Platform.OS}`, fetchForPin(certificatePin), certificatePin)
-    // Persist only the revocable device session, never the one-time pairing code.
-    if (Platform.OS !== 'web') {
-      try { await SecureStore.setItemAsync(KEY, JSON.stringify(next), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }) }
-      catch { throw new Error('TensorFold paired this device, but secure storage is unavailable; revoke this device in TensorFold and generate a new pairing code.') }
+    const current = ++identityGeneration.current
+    restoreDeferred.current = false; invalidate()
+    const assertCurrent = () => { if (identityGeneration.current !== current) throw new Error('The device connection changed; pairing was cancelled.') }
+    try { await disableBackgroundWatch() }
+    catch {
+      const message = 'Watch access could not be cleared on this phone; revoke this device in TensorFold on your Mac before pairing again.'
+      if (identityGeneration.current === current) setError(message)
+      throw new Error(message)
     }
-    generation.current++; setHost(null); setSession(next); setPairingLink(''); setError(null); failures.current = 0
-  }, [])
+    assertCurrent()
+    setSession(null); setHost(null); setLastSynced(null); setSyncing(false)
+    const next = await StudioClient.pair(baseUrl, credential, `TensorFold mobile ${Platform.OS}`, fetchForPin(certificatePin), certificatePin)
+    assertCurrent()
+    // Persist only the revocable device session, never the one-time pairing code.
+    // The native watch relay owns its separate AfterFirstUnlock consent store.
+    if (Platform.OS !== 'web') {
+      try { await mutateSecure(async () => {
+        assertCurrent()
+        await SecureStore.setItemAsync(KEY, JSON.stringify(next), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY })
+      }) }
+      catch {
+        assertCurrent()
+        throw new Error('TensorFold paired this device, but secure storage is unavailable; revoke this device in TensorFold and generate a new pairing code.')
+      }
+    }
+    assertCurrent()
+    setHost(null); setSession(next); setReady(true); setPairingLink(''); setError(null); failures.current = 0
+  }, [invalidate, mutateSecure])
 
   return <Context.Provider value={{ session, host, ready, syncing, error, lastSynced, pairingLink, setPairingLink, pair, forget, refresh, client }}>{children}</Context.Provider>
 }

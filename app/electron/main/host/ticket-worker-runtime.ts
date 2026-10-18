@@ -1,3 +1,4 @@
+import { selectedResponseLocale } from '../../agent/response-language'
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 import { runAgent } from '../../agent/loop'
@@ -191,6 +192,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
   const isNewThread = !thread
   if (!thread) {
     thread = {
+      documentSourceIds: [],
       id: randomUUID(), title: ticket.title, kind: 'task', projectId: ticket.projectId ?? null,
       cwd,
       providerId: baseProvider.id, providerAccountId, model,
@@ -298,6 +300,7 @@ async function startTicketWork(input: TicketWorkerInput): Promise<Thread> {
       allowedCapabilities,
     )
     await runAgent({
+        responseLocale: selectedResponseLocale(store.settings.uiPreferences),
       thread: t,
       provider: route.provider,
       model: route.model,

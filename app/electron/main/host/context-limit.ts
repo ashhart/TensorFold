@@ -1,4 +1,5 @@
-import type { Provider } from '../../agent/types'
+import { activeEngineModelSettings, engineProfileWorkingLimit } from '../../../shared/model-profiles'
+import type { EngineModelGenerationSettings, EngineModelProfileSet, Provider } from '../../agent/types'
 import { getModelContextWindow, recommendedCompactionThreshold } from '../../agent/model-context-windows'
 import { store } from '../state'
 import { isEngineProvider } from '../../agent/engine/provider'
@@ -30,6 +31,8 @@ export interface ContextLimitInputs {
   localLimit: number
   /** Optional explicit per-run override (store.settings.contextLimitOverride). */
   override?: number
+  modelSettings?: EngineModelGenerationSettings | null
+  engineModelProfiles?: EngineModelProfileSet[]
 }
 
 /**
@@ -53,6 +56,11 @@ export interface ContextLimitInputs {
 export function computeContextLimit(provider: Provider, model: string | null, inputs: ContextLimitInputs): number {
   // The built-in engine reports its served window once a model is loaded; that replaces the local guess.
   const engineWindow = isEngineProvider(provider) ? engineContextWindow(model) : null
+  const selected = inputs.modelSettings ?? (isEngineProvider(provider) && model ? activeEngineModelSettings({ engineModelProfiles: inputs.engineModelProfiles }, model) : null)
+  if (isEngineProvider(provider) && selected) {
+    const working = engineProfileWorkingLimit(selected, engineWindow)
+    return inputs.override && inputs.override > 0 ? Math.min(inputs.override, working) : working
+  }
   if (engineWindow != null) {
     const trigger = recommendedCompactionThreshold(engineWindow)
     return inputs.override && inputs.override > 0 ? Math.min(inputs.override, trigger) : trigger
@@ -84,6 +92,7 @@ export function effectiveContextLimit(provider: Provider, model: string | null):
     cloudLimit: store.settings.contextLimit,
     localLimit: store.settings.localContextLimit,
     override: store.settings.contextLimitOverride,
+    modelSettings: isEngineProvider(provider) && model ? activeEngineModelSettings(store.settings, model) : null,
   })
 }
 

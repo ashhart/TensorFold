@@ -68,6 +68,10 @@ export function mergeThreadRecord(base: Thread, live: Thread): Thread {
     memoryPolicy: memoryOwner.memoryPolicy,
     memoryPolicyRevision: memoryOwner.memoryPolicyRevision,
     conversationRevision: Math.max(baseConversationRevision, liveConversationRevision),
+    // Superseded evidence belongs to the same authoritative history epoch as its
+    // API/timeline; a future-dated stale renderer snapshot cannot hide it.
+    messageEditRevisions: authoritativeConversation ? base.messageEditRevisions : staleConversation ? live.messageEditRevisions : (newer ? live.messageEditRevisions : base.messageEditRevisions),
+    messageEditSource: authoritativeConversation ? base.messageEditSource : staleConversation ? live.messageEditSource : (newer ? live.messageEditSource : base.messageEditSource),
     // A checkpoint revert deliberately SHORTENS both arrays. Accept that exact host
     // conversation only when its monotonic epoch advances; ordinary same-epoch snapshots
     // still union with live deltas so an in-flight persistence reply cannot erase streaming.

@@ -29,6 +29,8 @@ export interface DeviceSession {
   lastSeenAt: number
   revokedAt: number | null
   clientInfo?: string | null
+  /** Owner opt-in for Kokoro audio on this paired phone/watch only; default denied. */
+  watchSpeech?: boolean
 }
 
 // Renderer/API-safe projection: identifies a session without exposing its token.
@@ -39,6 +41,8 @@ export interface DeviceSessionView {
   lastSeenAt: number
   revoked: boolean
   clientInfo?: string | null
+  /** Owner opt-in for Kokoro audio on this paired phone/watch only; default denied. */
+  watchSpeech?: boolean
 }
 
 export interface PairingRegistryState {
@@ -155,7 +159,19 @@ export class PairingRegistry {
       lastSeenAt: session.lastSeenAt,
       revoked: session.revokedAt != null,
       clientInfo: session.clientInfo ?? null,
+      watchSpeech: session.watchSpeech === true,
     }))
+  }
+
+  isWatchSpeechAllowed(id: string): boolean {
+    return this.sessions.some((session) => session.id === id && session.revokedAt == null && session.watchSpeech === true)
+  }
+
+  setWatchSpeechAllowed(id: string, enabled: boolean): boolean {
+    const session = this.sessions.find((entry) => entry.id === id && entry.revokedAt == null)
+    if (!session) throw new Error('This paired device is unavailable or revoked.')
+    session.watchSpeech = enabled === true
+    return session.watchSpeech
   }
 
   // Revoke one device (a lost phone). Idempotent; returns true if a live session flipped.

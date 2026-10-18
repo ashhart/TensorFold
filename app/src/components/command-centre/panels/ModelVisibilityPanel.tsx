@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import { relativeTime } from '../../../lib/format'
 import type { ModelRouterSnapshot } from '../../../lib/types'
 import { Icon } from '../../../lib/icons'
@@ -12,13 +13,14 @@ interface ModelVisibilityPanelProps {
 }
 
 export function ModelVisibilityPanel(props: ModelVisibilityPanelProps) {
+  const tx = useAuthoredText()
   const { providerVisibilityRows, activeProviderCount, modelRouterSnapshot } = props
 
   return (
-    <Panel title="Model Visibility" icon="cpu" action={activeProviderCount ? `${activeProviderCount} active` : 'default'}>
+    <Panel title={tx("Model Visibility")} icon="cpu" action={activeProviderCount ? `${activeProviderCount} active` : 'default'}>
       <div className="space-y-2 px-3 py-3">
         {providerVisibilityRows.length === 0 ? (
-          <EmptyState icon="cpu" title="No model route" detail="Choose a provider and model in Settings to populate this view." />
+          <EmptyState icon="cpu" title={tx("No model route")} detail="Choose a provider and model in Settings to populate this view." />
         ) : providerVisibilityRows.map((row) => (
           <div key={row.id} className="rounded-lg border border-line bg-card-2 px-3 py-2.5">
             <div className="flex items-start gap-2.5">
@@ -49,8 +51,8 @@ export function ModelVisibilityPanel(props: ModelVisibilityPanelProps) {
           <div className="rounded-lg border border-line bg-card px-3 py-2.5">
             <div className="flex items-center gap-2">
               <Icon name="arrowRight" size={13} className="text-ink-3" />
-              <div className="text-[13px] font-semibold text-ink">Recent failovers</div>
-              <span className="ml-auto text-[12px] text-ink-4">{modelRouterSnapshot?.history.length ?? 0} recorded</span>
+              <div className="text-[13px] font-semibold text-ink">{tx("Recent failovers")}</div>
+              <span className="ml-auto text-[12px] text-ink-4">{modelRouterSnapshot?.history.length ?? 0} {tx("recorded")}</span>
             </div>
             <div className="mt-2 space-y-1.5">
               {modelRouterSnapshot!.history.slice(0, 4).map((entry) => (
@@ -68,7 +70,7 @@ export function ModelVisibilityPanel(props: ModelVisibilityPanelProps) {
                   </div>
                   <div className="mt-1 flex items-center gap-2 text-[12px] text-ink-4">
                     <span className="min-w-0 flex-1 truncate">{entry.reason}</span>
-                    <span className="shrink-0">{entry.resetAt ? `reset ${entry.resetAt > Date.now() ? scheduleTime(entry.resetAt) : relativeTime(entry.resetAt)}` : 'no reset'}</span>
+                    <span className="shrink-0">{entry.resetAt ? tx("reset {value0}", { value0: entry.resetAt > Date.now() ? scheduleTime(entry.resetAt) : relativeTime(entry.resetAt) }) : tx("no reset")}</span>
                   </div>
                 </div>
               ))}

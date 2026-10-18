@@ -27,7 +27,7 @@ const require = createRequire(import.meta.url)
 const jitiPackage = require.resolve('jiti/package.json')
 const jitiCli = path.join(path.dirname(jitiPackage), 'lib', 'jiti-cli.mjs')
 
-const testRoots = ['electron', 'src', 'scripts']
+const testRoots = ['electron', 'src', 'scripts', 'experiments']
 const tests = testRoots.flatMap((dir) => walk(path.join(root, dir))).sort()
 const total = tests.length
 let passed = 0

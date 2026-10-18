@@ -1,3 +1,5 @@
+import { currentUiLanguage, localDateText } from './preferences/current-locale'
+import { authoredText } from './preferences/language-packs'
 import { basename } from './format'
 import type { Job, Project, Thread } from './types'
 
@@ -47,7 +49,7 @@ export function threadDiffStats(thread: Pick<Thread, 'timeline'>): DiffStats | n
 export function threadPlace(thread: Pick<Thread, 'kind' | 'cwd' | 'projectId'>, project: Pick<Project, 'id' | 'name'> | null | undefined): string {
   if (project && thread.projectId === project.id) return project.name
   if (thread.kind === 'task' && thread.cwd) return basename(thread.cwd)
-  return 'Chat'
+  return authoredText(currentUiLanguage(), 'Chat')
 }
 
 export type ThreadGroupKey = 'pinned' | 'today' | 'yesterday' | 'earlier'
@@ -71,11 +73,22 @@ export function groupThreads<T extends Pick<Thread, 'id' | 'updatedAt'>>(threads
   }
   return (Object.keys(buckets) as ThreadGroupKey[])
     .filter((key) => buckets[key].length > 0)
-    .map((key) => ({ key, label: GROUP_LABEL[key], threads: buckets[key] }))
+    .map((key) => ({ key, label: authoredText(currentUiLanguage(), GROUP_LABEL[key]), threads: buckets[key] }))
 }
 
 // Short age for a row: "now", "4m", "3h", "2d", "3w", then a date.
 export function compactAge(ts: number, now = Date.now()): string {
+  const locale = currentUiLanguage()
+  if (locale !== 'en') {
+    if (locale === 'la') return localDateText(ts)
+    const seconds = Math.max(0, Math.floor((now - ts) / 1000)), format = new Intl.RelativeTimeFormat(locale, { numeric: 'auto', style: 'narrow' })
+    if (seconds < 60) return format.format(0, 'second')
+    if (seconds < 3600) return format.format(-Math.floor(seconds / 60), 'minute')
+    if (seconds < 86400) return format.format(-Math.floor(seconds / 3600), 'hour')
+    if (seconds < 604800) return format.format(-Math.floor(seconds / 86400), 'day')
+    if (seconds < 3024000) return format.format(-Math.floor(seconds / 604800), 'week')
+    return localDateText(ts, { month: 'short', day: 'numeric' })
+  }
   const s = Math.max(0, Math.floor((now - ts) / 1000))
   if (s < 60) return 'now'
   const m = Math.floor(s / 60)

@@ -1,6 +1,10 @@
 // Type-only bridge to the shared agent types (erased at build time).
 export type {
   Attachment,
+  AttachmentTextExtraction,
+  AttachmentTextCapability,
+  AttachmentTextRequest,
+  AttachmentTextResult,
   ContentBlock,
   Settings,
   ReasoningEffortSetting,
@@ -108,6 +112,8 @@ export type {
   TicketRisk,
   TicketStatus,
   Automation,
+  AutomationSourceScope,
+  AutomationDeliveryTarget,
   AutomationRun,
   AutomationSchedule,
   AutomationMode,
@@ -356,6 +362,8 @@ export type {
   IMessageSyncResult,
   WhatsAppBridgeConnectorSettings,
   WhatsAppBridgeSource,
+  WhatsAppBridgeRuntimeSnapshot,
+  WhatsAppBridgePhase,
   DiscordConnectorSettings,
   DiscordChannel,
   DiscordSource,
@@ -454,3 +462,5 @@ export type {
 export type { PhonePlatform, PhoneTransport, PhoneDevice, PhoneBounds, PhoneNode, PhoneObservation, PhoneSession, PhoneSnapshot, PhoneConnectInput, PhoneDeveloperConnectInput, PhonePairInput, PhoneAction, PhoneActionInput, PhoneToolInput } from '../../electron/agent/types'
 export type { EngineModelLibrarySnapshot, EngineLibraryFolder, EngineLibraryModel, EngineLibraryScanOptions } from '../../electron/agent/types'
 export type { EngineState, EngineHardware, EngineConnection, EnginePerformance, EngineStatus, EngineInstalledModel, EngineCapabilities, EngineSnapshot, EngineEvent, EngineLearningSnapshot, EngineLearningFact, EngineLearningGraph, HubGated, HubModelSummary, ModelPreflight, PreflightVerdict, PullProgress, PullState, SuggestedModel } from '../../electron/agent/types'
+
+export type { EngineModelComparisonInput, EngineModelComparisonSnapshot, EngineModelComparisonRow, EngineModelGenerationSettings, EngineModelProfile, EngineModelProfileSet, SaveEngineModelProfilesInput, EngineModelPreviewResult } from '../../electron/agent/types'

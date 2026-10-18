@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../../lib/ipc'
@@ -101,6 +102,7 @@ function patchToolBinary(draft: Settings, tool: CliToolStatus, value: string): S
 const STATE_TONE = { installed: 'text-ink-3', missing: 'text-ink-4', broken: 'text-danger' } as const
 
 export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const [tools, setTools] = useState<CliToolStatus[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -128,8 +130,8 @@ export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
   const summary = useMemo(() => {
     const count = (state: string) => tools.filter((tool) => cliToolState(tool) === state).length
     const broken = count('broken')
-    return `${count('installed')} installed · ${count('missing')} missing${broken ? ` · ${broken} broken` : ''}`
-  }, [tools])
+    return `${tx('Installed')}: ${count('installed')} · ${tx('Missing')}: ${count('missing')}${broken ? ` · ${tx('Broken')}: ${broken}` : ''}`
+  }, [tools, tx])
 
   const saveBinary = (tool: CliToolStatus, value: string) => {
     const next = patchToolBinary(ctx.draft, tool, value)
@@ -153,23 +155,23 @@ export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
     <section className="mb-8">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">Provider tools</h2>
-          <p className="mt-0.5 text-[13px] text-ink-3">Installed CLIs, versions, docs, and binary overrides for local agent harnesses.</p>
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{tx("Provider tools")}</h2>
+          <p className="mt-0.5 text-[13px] text-ink-3">{tx("Installed CLIs, versions, docs, and binary overrides for local agent harnesses.")}</p>
         </div>
         <Button variant="default" size="sm" icon="refresh" onClick={() => setRefreshNonce((nonce) => nonce + 1)} disabled={loading}>
-          {loading ? 'Checking' : 'Refresh'}
+          {loading ? tx("Checking") : tx("Refresh")}
         </Button>
       </div>
       <div className="mt-3.5 rounded-xl border border-line bg-card shadow-card">
         <div className="border-b border-line px-3.5 py-3">
-          <div className="text-[14px] font-semibold text-ink">Installed CLIs</div>
+          <div className="text-[14px] font-semibold text-ink">{tx("Installed CLIs")}</div>
           <div className="mt-1 text-[13px] leading-snug text-ink-3">
-            {loading ? 'Reviewing provider versions and local binaries.' : error ? error : summary}
+            {loading ? tx("Reviewing provider versions and local binaries.") : error ? error : summary}
           </div>
         </div>
         <div className="divide-y divide-line">
           {loading && tools.length === 0 ? (
-            <div className="flex items-center gap-2 px-3.5 py-4 text-[13px] text-ink-3"><Spinner size={13} /> Checking provider tools</div>
+            <div className="flex items-center gap-2 px-3.5 py-4 text-[13px] text-ink-3"><Spinner size={13} /> {tx("Checking provider tools")}</div>
           ) : tools.map((tool) => {
             const open = expanded === tool.id
             const links = TOOL_LINKS[tool.id]
@@ -179,11 +181,11 @@ export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
             const state = cliToolState(tool)
             const status = cliToolStatusText(tool)
             // A broken CLI's error stands in for its description; opened, the full error sits below.
-            const description = state === 'broken' && tool.problem && !open ? tool.problem : links?.detail ?? 'Provider CLI tool.'
+            const description = state === 'broken' && tool.problem && !open ? tool.problem : links?.detail ? tx(links.detail) : tx("Provider CLI tool.")
             const linkButtons = links ? [
-              { label: 'Docs', icon: 'arrowRight' as const, url: links.docsUrl },
-              { label: 'Headless', icon: 'terminal' as const, url: links.headlessUrl },
-              { label: 'Config', icon: 'settings' as const, url: links.configUrl },
+              { label: tx("Docs"), icon: 'arrowRight' as const, url: links.docsUrl },
+              { label: tx("Headless"), icon: 'terminal' as const, url: links.headlessUrl },
+              { label: tx("Config"), icon: 'settings' as const, url: links.configUrl },
             ].filter((link) => link.url) : []
             return (
               <div key={tool.id}>
@@ -206,7 +208,7 @@ export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
                   <div className="min-w-0 space-y-3 px-3.5 pb-3.5">
                     {state === 'broken' && (
                       <div className="break-words text-[13px] leading-relaxed text-ink-3">
-                        <span className="font-mono text-ink-2">{fallback || tool.short} --version</span> failed: {tool.problem || 'it printed no version'}
+                        <span className="font-mono text-ink-2">{fallback || tool.short} --version</span> {tx("failed: ")}{tool.problem || tx("it printed no version")}
                       </div>
                     )}
                     {(linkButtons.length > 0 || links?.installCommand) && (
@@ -215,28 +217,27 @@ export function ProviderToolsPanel({ ctx }: { ctx: SettingsSectionContext }) {
                           <Button key={link.label} variant="ghost" size="xs" icon={link.icon} onClick={() => openLink(link.url)}>{link.label}</Button>
                         ))}
                         {links?.installCommand && (
-                          <Button variant="ghost" size="xs" icon={copied === tool.id ? 'check' : 'copy'} onClick={() => void copyInstall(tool)} title={links.installCommand}>{copied === tool.id ? 'Copied' : 'Copy install command'}</Button>
+                          <Button variant="ghost" size="xs" icon={copied === tool.id ? 'check' : 'copy'} onClick={() => void copyInstall(tool)} title={links.installCommand}>{copied === tool.id ? tx("Copied") : tx("Copy install command")}</Button>
                         )}
                       </div>
                     )}
                     <div className="grid grid-cols-1 gap-3 sm:grid-cols-[1fr_auto]">
-                      <Field label={`${tool.name} binary path`}>
+                      <Field label={tx("{value0} binary path", { value0: tool.name })}>
                         <Input
                           value={configured}
                           onChange={(e) => ctx.setDraft((draft: Settings) => patchToolBinary(draft, tool, e.target.value))}
-                          placeholder={fallback ? `${fallback} binary path` : 'No binary path'}
+                          placeholder={fallback ? tx("{value0} binary path", { value0: fallback }) : tx("No binary path")}
                           spellCheck={false}
                           disabled={disabled}
                         />
                       </Field>
                       <div className="flex items-end gap-2">
-                        <Button variant="default" size="sm" icon="x" onClick={() => saveBinary(tool, '')} disabled={disabled || !configured}>Reset</Button>
-                        <Button variant="default" size="sm" icon="check" onClick={() => saveBinary(tool, configured)} disabled={disabled}>Save</Button>
+                        <Button variant="default" size="sm" icon="x" onClick={() => saveBinary(tool, '')} disabled={disabled || !configured}>{tx("Reset")}</Button>
+                        <Button variant="default" size="sm" icon="check" onClick={() => saveBinary(tool, configured)} disabled={disabled}>{tx("Save")}</Button>
                       </div>
                     </div>
                     <div className="break-words text-[13px] leading-relaxed text-ink-3">
-                      Leave blank to use <span className="font-mono text-ink-2">{fallback || tool.short}</span> from your PATH.
-                      {tool.configuredPath && <span> Current effective command: <span className="font-mono text-ink-2">{tool.effectiveCommand}</span>.</span>}
+                      {tx("Leave blank to use ")}<span className="font-mono text-ink-2">{fallback || tool.short}</span> {tx("from your PATH.")}{tool.configuredPath && <span> {tx("Current effective command: ")}<span className="font-mono text-ink-2">{tool.effectiveCommand}</span>.</span>}
                     </div>
                   </div>
                 )}

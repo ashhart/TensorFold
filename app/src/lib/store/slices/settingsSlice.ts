@@ -20,7 +20,7 @@ export const settingsSlice: Slice = (set, get) => ({
       // Confirm every successful *explicit* save so settings edits never feel like a no-op (#48).
       // Silent saves (launch / model switch persist the active provider as a side-effect — the
       // user never touched Settings, so a "Settings saved" toast would be misleading).
-      set({ settings: saved, resolvedTheme: resolveTheme(saved), ...(opts?.silent ? {} : { notice: { kind: 'info', message: 'Settings saved' } }) })
+      set({ settings: saved, resolvedTheme: resolveTheme(saved), ...(opts?.silent ? {} : { notice: { kind: 'info', message: 'Settings saved', authored: true } }) })
     } catch (e) {
       // Never let a persistence failure fail silently — surface it.
       set({ notice: { kind: 'error', message: `Couldn't save settings — ${String((e as any)?.message ?? e)}` } })

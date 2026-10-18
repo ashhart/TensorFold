@@ -1,6 +1,7 @@
+import { documentLibrary } from '../document-library-runtime'
 import { makeDocumentSource, readDocumentItem, scanDocumentItems, summarizeDocuments, syncDocumentConnector } from '../../../agent/document-connector'
 import { mergeConnectorSyncSources } from '../../../agent/connector-sync-state'
-import { saveSettings } from '../../../store'
+import { saveSettings, vontraHomeDir } from '../../../store'
 import { requireSecurityRole } from '../audit'
 import { handle as defaultHandle } from '../ipc'
 import { store } from '../../state'
@@ -18,6 +19,7 @@ export function registerDocumentIpc(deps: ConnectorIpcDeps): void {
     const source = makeDocumentSource(target)
     store.settings = { ...store.settings, documents: { ...store.settings.documents, sources: [source, ...store.settings.documents.sources] } }
     await saveSettings(store.settings)
+    await documentLibrary().reconcile()
     return publicConnectorSettings().documents
   })
 
@@ -31,6 +33,7 @@ export function registerDocumentIpc(deps: ConnectorIpcDeps): void {
       },
     }
     await saveSettings(store.settings)
+    await documentLibrary().reconcile()
     return publicConnectorSettings().documents
   })
 
@@ -38,15 +41,23 @@ export function registerDocumentIpc(deps: ConnectorIpcDeps): void {
     requireSecurityRole('operator', 'remove document sources')
     store.settings = { ...store.settings, documents: { ...store.settings.documents, sources: store.settings.documents.sources.filter((source) => source.id !== id) } }
     await saveSettings(store.settings)
+    await documentLibrary().reconcile()
     return publicConnectorSettings().documents
   })
 
   handle('documents:sync', async () => {
     requireSecurityRole('operator', 'sync documents')
+    const profile = vontraHomeDir()
+    const assertCurrent = () => { requireSecurityRole('operator', 'sync documents'); if (vontraHomeDir() !== profile) throw new Error('Document profile changed while processing; try again in the selected profile.') }
     return syncQueue.run('documents', async () => {
-      const result = await syncDocumentConnector(store.settings.documents, store.connectorEvents)
+      assertCurrent()
+      await documentLibrary().sync()
+      assertCurrent()
+      const result = await syncDocumentConnector(store.settings.documents, store.connectorEvents, await documentLibrary().connectorItems())
+      assertCurrent()
       store.settings = { ...store.settings, documents: { ...store.settings.documents, sources: mergeConnectorSyncSources(store.settings.documents.sources, result.sources), lastSyncAt: result.syncedAt } }
       await saveSettings(store.settings)
+      assertCurrent()
       rememberConnectorEvents(result.events)
       return { ...result, sources: publicConnectorSettings().documents.sources }
     })

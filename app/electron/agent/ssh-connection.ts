@@ -8,6 +8,7 @@
 // held only for the lifetime of the connect attempt — never persisted.
 
 import { createHash } from 'node:crypto'
+import type { Duplex } from 'node:stream'
 import os from 'node:os'
 import { readOpenedTextFile, withFileReadBudget, type WorkspaceReadOptions, type WorkspaceRangeOptions, type WorkspaceTextRange } from './bounded-file-read'
 import type { SshHost, SshConnectionState, TrustedSshHostKey } from './types'
@@ -26,6 +27,8 @@ export interface SshExecOptions {
   timeoutMs?: number
   /** Abort the remote channel when the owning agent run is cancelled. */
   signal?: AbortSignal
+  /** Main-process setup payload over SSH stdin; never included in command text. */
+  input?: string | Buffer
 }
 
 /** Default cap for SSH exec output, matching the local backend's cpExec maxBuffer. */
@@ -227,11 +230,31 @@ export interface SshConnectionDeps {
 export class SshConnectionError extends Error {}
 
 export class SshSession {
+  readonly host: SshHost
   constructor(
-    readonly host: SshHost,
+    host: SshHost,
     private readonly client: SshClientLike,
     private readonly now: () => number,
-  ) {}
+  ) { this.host = Object.freeze({ ...host, identityFiles: Object.freeze([...host.identityFiles]) }) as unknown as SshHost; client.on('close', () => { this.closed = true; for (const listener of this.closeListeners) { try { listener() } catch {} }; this.closeListeners.clear() }) }
+
+  private closed = false
+  private readonly closeListeners = new Set<() => void>()
+  onClosed(listener: () => void): () => void { if (this.closed) { listener(); return () => {} }; this.closeListeners.add(listener); return () => { this.closeListeners.delete(listener) } }
+  forwardLoopback(port: number, signal?: AbortSignal, timeoutMs = 10_000): Promise<Duplex> {
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) return Promise.reject(new Error('Choose a valid remote loopback port.'))
+    if (!this.client.forwardOut || this.closed || signal?.aborted) return Promise.reject(new Error('The verified SSH connection is unavailable for forwarding.'))
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const finish = (error: Error | null, channel?: Duplex) => { if (settled) { channel?.destroy(); return }; settled = true; clearTimeout(timer); signal?.removeEventListener('abort', abort); removeClosed(); if (error) { channel?.destroy(); reject(error) } else resolve(channel!) }
+      const abort = () => finish(new Error('SSH forwarding was cancelled.'))
+      const timer = setTimeout(() => finish(new Error('SSH loopback forwarding timed out.')), Math.max(1, Math.min(30_000, timeoutMs)))
+      let removeClosed = () => {}
+      removeClosed = this.onClosed(() => finish(new Error('The SSH connection closed during forwarding.')))
+      if (settled) return
+      signal?.addEventListener('abort', abort, { once: true }); if (signal?.aborted) { abort(); return }
+      this.client.forwardOut!('127.0.0.1', 0, '127.0.0.1', port, (error, channel) => { if (error || !channel?.pipe || !channel?.destroy) finish(error ?? new Error('SSH forwarding returned an invalid channel.')); else finish(null, channel) })
+    })
+  }
 
   exec(command: string, options: SshExecOptions = {}): Promise<SshExecResult> {
     if (options.signal?.aborted) {
@@ -239,6 +262,7 @@ export class SshSession {
       error.name = 'AbortError'
       return Promise.reject(error)
     }
+    if (options.input !== undefined && Buffer.byteLength(options.input) > 8 * 1024 * 1024) return Promise.reject(new Error('SSH setup input exceeds its bounded transfer limit.'))
     const composed = composeRemoteCommand(command, options)
     const maxBuffer = options.maxBuffer ?? SSH_EXEC_MAX_BUFFER
     return new Promise((resolve, reject) => {
@@ -304,6 +328,7 @@ export class SshSession {
           options.signal?.removeEventListener('abort', onAbort)
           reject(e)
         })
+        if (options.input !== undefined) { try { stream.end(options.input) } catch (error) { try { stream.destroy?.() } catch {}; if (!settled) { settled = true; if (timer) clearTimeout(timer); options.signal?.removeEventListener('abort', onAbort); reject(error) } } }
       })
     })
   }
@@ -461,6 +486,7 @@ async function connectBastion(
  * the transport is ready.
  */
 export async function connectSsh(host: SshHost, deps: SshConnectionDeps): Promise<SshSession> {
+  host = { ...host, identityFiles: [...host.identityFiles] }
   const emit = (phase: SshConnectionState['phase'], extra: Partial<SshConnectionState> = {}) =>
     deps.emitState({ hostId: host.id, phase, ...extra })
 

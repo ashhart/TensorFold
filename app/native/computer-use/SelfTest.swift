@@ -244,6 +244,21 @@ func phoneChecks(_ c: Checks) {
     catch { c.expect(false, "phone absent token threw unexpected error") }
 }
 
+func attachmentTextChecks(_ c: Checks) {
+    let capability = attachmentOcrCapability()
+    c.expect(capability["available"] as? Bool == true, "byte-only OCR capability is available on the supported Mac target")
+    c.expect(capability["method"] as? String == "apple-vision", "OCR capability names its local engine")
+    c.expect(capability["maxBytes"] as? Int == 20 * 1024 * 1024, "OCR bytes are bounded independently")
+    c.expect(capability["maxPages"] as? Int == 8, "OCR pages are bounded independently")
+    c.expect(attachmentTextReviewWarning.contains("even when its confidence score is high"), "high OCR confidence never suppresses review uncertainty")
+    do { _ = try extractAttachmentText(Data(), mime: "image/png"); c.expect(false, "empty OCR bytes must fail") }
+    catch let error as HelperError { c.expect(error.code == "attachment_size", "empty OCR bytes fail before decode") }
+    catch { c.expect(false, "empty OCR bytes return a supported error") }
+    do { _ = try extractAttachmentText(Data("not PDF".utf8), mime: "application/pdf"); c.expect(false, "bad PDF must fail") }
+    catch let error as HelperError { c.expect(error.code == "attachment_pdf", "invalid PDF bytes fail visibly") }
+    catch { c.expect(false, "invalid PDF returns a supported error") }
+}
+
 func runSelfTest() -> Int32 {
     let checks = Checks()
     keyChecks(checks)
@@ -253,6 +268,7 @@ func runSelfTest() -> Int32 {
     textChecks(checks)
     miscChecks(checks)
     phoneChecks(checks)
+    attachmentTextChecks(checks)
     if checks.failures.isEmpty {
         writeLine(["ok": true, "checks": checks.count])
         return 0

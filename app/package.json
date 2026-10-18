@@ -1,6 +1,6 @@
 {
   "name": "tensorfold-studio",
-  "version": "1.0.0-beta.6",
+  "version": "1.0.0-beta.8",
   "private": true,
   "packageManager": "npm@10.9.8",
   "engines": {
@@ -29,7 +29,7 @@
     "deps:trusted-scripts": "node node_modules/electron/install.js && npm rebuild --ignore-scripts=false @lydell/node-pty",
     "dev": "npm run install:check && vite",
     "dev:web": "npm run install:check && VONTRA_NO_ELECTRON=1 vite",
-    "build": "npm run install:check && node scripts/clean-build-output.mjs && vite build",
+    "build": "npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs",
     "engine:fetch": "node scripts/fetch-engine.mjs",
     "pack:mac:dev": "npm run build && node scripts/fetch-engine.mjs && node scripts/build-computer-helper.mjs && node scripts/package-mac.mjs --mode dev --targets dir",
     "smoke:mac:packaged": "node scripts/smoke-packaged-mac.mjs",
@@ -48,7 +48,8 @@
     "start": "npm run install:check && electron .",
     "start:headless": "npm run build && electron . --headless-server",
     "start:orchestrator": "npm run start:headless",
-    "verify:mobile": "npm --prefix mobile run verify"
+    "verify:mobile": "npm --prefix mobile run verify",
+    "languages:index": "node scripts/build-language-pack-index.mjs"
   },
   "build": {
     "appId": "dev.tensorfold.studio",
@@ -65,7 +66,16 @@
       "!node_modules/kokoro-js/dist/kokoro.web.js",
       "!node_modules/kokoro-js/dist/kokoro.web.js.map",
       "!node_modules/**/pino/pretty-demo.png",
-      "!node_modules/**/.claude{,/**/*}"
+      "!node_modules/**/.claude{,/**/*}",
+      "!node_modules/kokoro-js/dist/*.map",
+      "!node_modules/@huggingface/transformers/dist/*.map",
+      "!node_modules/onnxruntime-web/dist/*.map",
+      "!node_modules/onnxruntime-node/dist/*.map",
+      "!node_modules/@met4citizen/headtts/dictionaries/fi.txt",
+      "!node_modules/@met4citizen/headtts/modules/language-fi.mjs",
+      "!node_modules/@met4citizen/headtts/modules/headtts.mjs",
+      "!node_modules/@met4citizen/headtts/modules/headtts-node.mjs",
+      "!node_modules/@met4citizen/headtts/modules/worker-tts.mjs"
     ],
     "extraResources": [
       {
@@ -85,6 +95,13 @@
       {
         "from": "build/voice",
         "to": "voice-notices",
+        "filter": [
+          "*.txt"
+        ]
+      },
+      {
+        "from": "build/licenses",
+        "to": "third-party-notices",
         "filter": [
           "*.txt"
         ]
@@ -112,7 +129,10 @@
       "icon": "build/icon.icns",
       "extendInfo": {
         "NSAppleEventsUsageDescription": "TensorFold can control local developer tools when you enable controller actions.",
-        "NSLocalNetworkUsageDescription": "TensorFold connects with your paired phone on a private network when you enable the mobile connection.",
+        "NSBonjourServices": [
+          "_tensorfold-cluster._tcp"
+        ],
+        "NSLocalNetworkUsageDescription": "TensorFold discovers and connects to the TensorFold machines and paired phones you choose on your local network.",
         "NSMicrophoneUsageDescription": "TensorFold uses the microphone only when you start voice input in the composer.",
         "NSDesktopFolderUsageDescription": "TensorFold can read or write files in selected project folders.",
         "NSDocumentsFolderUsageDescription": "TensorFold can read or write files in selected project folders.",
@@ -156,14 +176,13 @@
     "@agentclientprotocol/sdk": "^1.1.0",
     "@lydell/node-pty": "^1.2.0-beta.12",
     "@met4citizen/headtts": "1.2.0",
-    "@types/diff": "^7.0.2",
-    "@types/qrcode": "^1.5.6",
     "@whiskeysockets/baileys": "^7.0.0-rc13",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
     "diff": "^5.2.2",
     "imapflow": "^1.7.8",
+    "katex": "0.19.0",
     "kokoro-js": "1.2.1",
     "nodemailer": "^10.1.0",
     "phonemizer": "file:mobile/vendor/tensorfold-kokoro-phonemizer",
@@ -179,8 +198,10 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
+    "@types/diff": "^7.0.2",
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^8.0.1",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "@types/ssh2": "^1.15.5",

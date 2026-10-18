@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -111,6 +112,7 @@ function doctorStatusTone(status: DoctorStatus): Tone {
 }
 
 export function CommandCentre() {
+  const tx = useAuthoredText()
   const threads = useStore((s) => s.threads)
   const projects = useStore((s) => s.projects)
   const rooms = useStore((s) => s.rooms)
@@ -201,7 +203,7 @@ export function CommandCentre() {
         try {
           await syncRemoteProjects(hostId, result.projects)
         } catch (err: any) {
-          setError(err?.message ?? 'Could not sync remote projects.')
+          setError(err?.message ?? tx("Could not sync remote projects."))
         }
       }
     } finally {
@@ -264,7 +266,7 @@ export function CommandCentre() {
   const parseOptionalPositiveNumber = (label: string, raw: string): number | null => {
     if (!raw.trim()) return null
     const value = Number(raw)
-    if (!Number.isFinite(value) || value <= 0) throw new Error(`${label} must be a positive number.`)
+    if (!Number.isFinite(value) || value <= 0) throw new Error(tx("{value0} must be a positive number.", { value0: label }))
     return value
   }
   const parseOptionalPositiveInteger = (label: string, raw: string): number | null => {
@@ -283,7 +285,7 @@ export function CommandCentre() {
       costCapUsd = parseOptionalPositiveNumber('Cost cap', missionCostCap)
       expiresDays = parseOptionalPositiveInteger('Expires days', missionExpiresDays)
     } catch (err: any) {
-      setError(err?.message ?? 'Mission limits are invalid.')
+      setError(err?.message ?? tx("Mission limits are invalid."))
       return
     }
     await api.createMission({
@@ -322,7 +324,7 @@ export function CommandCentre() {
     try {
       requiredApprovals = parseOptionalPositiveInteger('Review passes', prApprovals) ?? 1
     } catch (err: any) {
-      setError(err?.message ?? 'Review pass count is invalid.')
+      setError(err?.message ?? tx("Review pass count is invalid."))
       return
     }
     setPrBusy(true)
@@ -344,7 +346,7 @@ export function CommandCentre() {
       await refreshMissions()
       openThread(result.implementationThread.id)
     } catch (err: any) {
-      setError(err?.message ?? 'Failed to create local PR loop.')
+      setError(err?.message ?? tx("Failed to create local PR loop."))
     } finally {
       setPrBusy(false)
     }
@@ -582,7 +584,7 @@ export function CommandCentre() {
     try {
       await revokeApprovalRule(rule.id)
     } catch (err: any) {
-      setError(err?.message ?? 'Could not revoke approval policy.')
+      setError(err?.message ?? tx("Could not revoke approval policy."))
     } finally {
       setRevokingRuleId(null)
     }

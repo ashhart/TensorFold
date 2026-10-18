@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useRef } from 'react'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
@@ -12,6 +13,7 @@ export function Bubble({ row, onApprove, onEdit, onDiscard }: {
   onEdit?: (id: string) => void
   onDiscard?: (id: string) => void
 }) {
+  const tx = useAuthoredText()
   const out = row.direction === 'out'
   return (
     <div className={clsx('flex w-full fade-in', out ? 'justify-end' : 'justify-start')}>
@@ -36,16 +38,16 @@ export function Bubble({ row, onApprove, onEdit, onDiscard }: {
         {/* Status + approval affordances for an agent draft awaiting the user. */}
         {out && row.status === 'draft' && (
           <div className="mt-1.5 flex items-center gap-1.5 pr-1">
-            <button onClick={() => onApprove?.(row.id)} className="rounded-lg bg-accent px-2.5 py-1 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">Approve</button>
-            <button onClick={() => onEdit?.(row.id)} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">Edit</button>
-            <button onClick={() => onDiscard?.(row.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">Discard</button>
+            <button onClick={() => onApprove?.(row.id)} className="rounded-lg bg-accent px-2.5 py-1 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">{tx("Approve")}</button>
+            <button onClick={() => onEdit?.(row.id)} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">{tx("Edit")}</button>
+            <button onClick={() => onDiscard?.(row.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">{tx("Discard")}</button>
           </div>
         )}
         {out && row.status === 'sent' && (
-          <div className="mt-1 flex items-center gap-1 pr-1 text-[12px] text-ink-4"><Icon name="check" size={11} /> Sent</div>
+          <div className="mt-1 flex items-center gap-1 pr-1 text-[12px] text-ink-4"><Icon name="check" size={11} /> {tx("Sent")}</div>
         )}
         {out && row.status === 'failed' && (
-          <div className="mt-1 pr-1 text-[12px] text-danger">Failed to send</div>
+          <div className="mt-1 pr-1 text-[12px] text-danger">{tx("Failed to send")}</div>
         )}
       </div>
     </div>

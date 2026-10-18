@@ -20,23 +20,24 @@ export function validateLiveSlackSource(source: SlackSourceConfig): string | nul
   return null
 }
 
-// Allowlist of channels the bot may read + reply in. Blank = every channel the
-// bot is a member of. Accepts channel IDs (C...) or #names.
+// An empty list grants no channel access; only a standalone * explicitly grants all.
 function allowedChannelFilter(source: SlackSourceConfig): ((id: string, name: string) => boolean) | null {
   const raw = source.channels?.trim()
-  if (!raw) return null
+  if (raw === '*') return null
+  if (!raw) return () => false
   const allowed = new Set(raw.split(/[\s,;]+/).map((s) => s.replace(/^#/, '').trim().toLowerCase()).filter(Boolean))
   return (id, name) => allowed.has(id.toLowerCase()) || allowed.has(name.toLowerCase())
 }
 
-// The synchronous fast-path: allowed only when there's no allowlist or the id is explicitly
+// The synchronous fast-path: allowed only with explicit * or when the id is explicitly
 // listed. A name-based allowlist returns false here so the caller resolves names -> ids before
 // allowing — it must NOT be permissive at send time, or the agent could harvest a restricted
 // channel's id (e.g. from a prompt-injected message) and post to it. Mirrors
 // isDiscordChannelAllowed / isMattermostChannelAllowed.
 export function isSlackChannelAllowed(allowed: string | undefined, channelId: string): boolean {
   const raw = allowed?.trim()
-  if (!raw) return true
+  if (raw === '*') return true
+  if (!raw) return false
   const entries = raw.split(/[\s,;]+/).map((s) => s.replace(/^#/, '').trim().toLowerCase()).filter(Boolean)
   return entries.includes(channelId.trim().toLowerCase())
 }
@@ -46,7 +47,9 @@ export function isSlackChannelAllowed(allowed: string | undefined, channelId: st
 // ensureMattermostChannelAllowed — the allowlist was enforced on reads (allowedChannelFilter)
 // but not on sends, so a prompt-injected reply could target any channel the bot token can reach.
 async function ensureSlackChannelAllowed(source: SlackSourceConfig, channelId: string, deps: ConnectorHttpDeps = {}): Promise<void> {
-  if (isSlackChannelAllowed(source.channels, channelId)) return // no allowlist or id listed
+  if (!source.enabled) throw new Error('Slack connection is disconnected.')
+  if (!source.channels?.trim()) throw new Error('Choose allowed Slack channels before reading or sending messages.')
+  if (isSlackChannelAllowed(source.channels, channelId)) return
   const filter = allowedChannelFilter(source)
   const channels = await listSlackChannels(source.token!.trim(), deps)
   const allowedIds = new Set((filter ? channels.filter((c) => filter(c.id, c.name)) : channels).map((c) => c.id.toLowerCase()))
@@ -82,13 +85,17 @@ export async function listSlackChannels(token: string, deps: ConnectorHttpDeps =
 // Fetch recent messages across the allowed channels of one workspace. Each top-level
 // message and each threaded reply becomes a SlackMessage; threadTs links replies to roots.
 export async function fetchSlackMessages(source: SlackSourceConfig, deps: ConnectorHttpDeps = {}): Promise<SlackReadResult[]> {
+  if (!source.enabled) throw new Error('Slack connection is disconnected.')
   const validation = validateLiveSlackSource(source)
   if (validation) throw new Error(validation)
+  if (!source.channels?.trim()) return []
   const token = source.token!.trim()
   const filter = allowedChannelFilter(source)
   const channels = await listSlackChannels(token, deps)
   const visible = filter ? channels.filter((c) => filter(c.id, c.name)) : channels
+  if (filter && !visible.length) throw new Error('None of the selected Slack channels are available; invite the bot and refresh channel permissions.')
   const out: SlackReadResult[] = []
+  let failedChannels = 0
   // User cache for readable names (best-effort; failures fall back to IDs).
   const users = new Map<string, string>()
 
@@ -102,27 +109,31 @@ export async function fetchSlackMessages(source: SlackSourceConfig, deps: Connec
       for (const m of recent) {
         out.push(toSlackMessage(source, channel, m, users, token, deps))
         // Fetch thread replies for parent messages that have them.
-        if (m.thread_ts && m.thread_ts === m.ts && m.reply_count) {
+        // Slack bot tokens cannot read public/private channel threads through replies.
+        // The setup UI states this capability limit; supported user-token sources retain it.
+        if (!token.startsWith('xoxb-') && m.thread_ts && m.thread_ts === m.ts && m.reply_count) {
           const replies = await threadReplies(token, channel.id, m.thread_ts, deps)
           for (const r of replies) out.push(toSlackMessage(source, channel, r, users, token, deps))
         }
       }
     } catch {
-      // Skip this channel for this sync; the next sync retries it from the same cursor.
+      failedChannels++
     }
   }
+  if (failedChannels) throw new Error(`Slack could not read ${failedChannels} selected channel(s); check channel membership, history scopes and service rate limits, then retry.`)
   return out.sort((a, b) => Number(b.ts) - Number(a.ts))
 }
 
 // Read one thread (a root + its replies) by its threadTs.
 export async function readSlackThread(source: SlackSourceConfig, channel: string, threadTs: string, deps: ConnectorHttpDeps = {}): Promise<SlackReadResult[]> {
+  await ensureSlackChannelAllowed(source, channel, deps)
   const token = source.token!.trim()
   const users = new Map<string, string>()
   const root = await channelHistory(token, channel, 1, threadTs, deps)
   const chName = await resolveChannelName(token, channel, deps)
   const ch = { id: channel, name: chName, isPrivate: false }
   const out = root.map((m) => toSlackMessage(source, ch, m, users, token, deps))
-  const replies = await threadReplies(token, channel, threadTs, deps)
+  const replies = token.startsWith('xoxb-') ? [] : await threadReplies(token, channel, threadTs, deps)
   for (const r of replies) out.push(toSlackMessage(source, ch, r, users, token, deps))
   return out.sort((a, b) => Number(a.ts) - Number(b.ts))
 }

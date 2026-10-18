@@ -1,0 +1,13 @@
+{
+  "Runs Codex CLI sessions, resumable terminals, and OAuth-backed code tasks.": "Запускает сеансы Codex CLI, возобновляемые терминалы и задачи программирования с OAuth.",
+  "Runs Claude Code through your local Claude account and permission surface.": "Запускает Claude Code через локальную учётную запись Claude и её систему разрешений.",
+  "Cursor Agent CLI candidate for ACP/headless coding sessions.": "Cursor Agent CLI — кандидат для сеансов программирования через ACP или без интерфейса.",
+  "Gemini CLI candidate for code and research sessions.": "Gemini CLI — кандидат для сеансов программирования и исследования.",
+  "Grok CLI candidate for xAI coding sessions.": "Grok CLI — кандидат для сеансов программирования xAI.",
+  "OpenCode CLI candidate for OpenCode-compatible coding sessions.": "OpenCode CLI — кандидат для сеансов программирования, совместимых с OpenCode.",
+  "Kilo CLI candidate for OpenCode-compatible coding sessions.": "Kilo CLI — кандидат для сеансов программирования, совместимых с OpenCode.",
+  "Pi coding-agent harness for terminal-based agent sessions.": "Среда агента программирования Pi для сеансов агентов в терминале.",
+  "Broken": "Неисправен",
+  "Not found on PATH or the configured path": "Не найден в PATH или по настроенному пути",
+  "--version printed no version": "--version не вывел номер версии"
+}

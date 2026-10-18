@@ -29,7 +29,7 @@ async function main() {
     await svc.load(LEARNING_MODEL)
     const originalConnection = await svc.connection()
     const reply = await svc.supervisor.acquire(LEARNING_MODEL, { start: false })
-    await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
+    await assert.rejects(svc.setCortheon(true), /temporarily disabled in this beta/)
     assert.equal((await svc.status()).cortheon?.enabled, false, 'a busy refusal cannot persist Cortheon')
     await assert.rejects(svc.setLearning(true, LEARNING_MODEL), /active TensorFold requests/)
     assert.equal((await svc.learningSnapshot()).enabled, false, 'a busy refusal cannot persist learning')
@@ -54,7 +54,7 @@ async function main() {
     const job = await svc.teach('The synthetic QA beacon is amber.')
     assert.equal(job.job?.state, 'running')
     await assert.rejects(svc.unload(), /active TensorFold requests/)
-    await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
+    await assert.rejects(svc.setCortheon(true), /temporarily disabled in this beta/)
     await assert.rejects(svc.setLearning(false), /current lesson/)
     const during = await svc.supervisor.acquire(LEARNING_MODEL, { start: false })
     during.release() // normal same-model chat stays available while the native learner yields.
@@ -158,7 +158,7 @@ async function main() {
     const svc = service(h)
     try {
       await svc.load(LEARNING_MODEL)
-      await assert.rejects(svc.setCortheon(true), /temporarily disabled for beta\.6/)
+      await assert.rejects(svc.setCortheon(true), /temporarily disabled in this beta/)
       assert.equal((await svc.status()).cortheon?.enabled, false)
       assert.equal((await svc.status()).state, 'ready', 'refused research leaves the previous server running')
       await assert.rejects(svc.setLearning(true, LEARNING_MODEL), /requested mode failed/)

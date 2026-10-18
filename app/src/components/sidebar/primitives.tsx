@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import { Icon, type IconName } from '../../lib/icons'
@@ -5,8 +6,9 @@ import { BrandIcon, connectorBrand } from '../../lib/brand'
 import { ACTIVE_ROW, HOVER_ROW } from './constants'
 
 export function SidebarSpinner({ size = 14 }: { size?: number }) {
+  const tx = useAuthoredText()
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="animate-spin" aria-label="Running">
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" className="animate-spin" aria-label={tx("Running")}>
       <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="2.5" strokeOpacity="0.2" />
       <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
     </svg>
@@ -85,6 +87,7 @@ export function InlineEditable({
   className?: string
   inputClassName?: string
 }) {
+  const tx = useAuthoredText()
   const [draft, setDraft] = useState(value)
   const inputRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -109,7 +112,7 @@ export function InlineEditable({
         }}
         onBlur={() => onCommit(draft)}
         className={clsx('min-w-0 flex-1 rounded-md border border-line-strong bg-card px-1 py-0 text-[13px] leading-[18px] text-ink outline-none', inputClassName)}
-        aria-label="Rename"
+        aria-label={tx("Rename")}
       />
     )
   }
@@ -120,7 +123,7 @@ export function InlineEditable({
       // the row's single-click navigation. select-text re-enables user-select (the
       // body sets it to none) so the dblclick path can also fire.
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); onStartEdit() }}
-      title="Double-click or right-click to rename"
+      title={tx("Double-click or right-click to rename")}
       className={clsx('select-text', className)}
     >
       {value}

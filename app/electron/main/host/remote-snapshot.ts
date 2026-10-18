@@ -22,7 +22,7 @@ const REMOTE_RETRYABLE_JOB_STATUSES = new Set<Job['status']>(['failed', 'stalled
 const REMOTE_LEASE_EXPIRING_SOON_MS = 2 * 60_000
 
 export function isIncognitoThreadId(id: unknown): boolean {
-  return typeof id === 'string' && store.threads.some((thread) => thread.id === id && thread.incognito)
+  return typeof id === 'string' && store.threads.some((thread) => thread.id === id && (thread.incognito || thread.googleLocalOnly))
 }
 
 export function assertRemoteThreadVisible(id: string | null | undefined): void {
@@ -53,14 +53,14 @@ export function isRemoteEventVisible(event: Pick<RemoteControlEvent, 'kind' | 'd
   const data = event.data as any
   if (!data) return true
   if (event.kind === 'agent') return !isIncognitoThreadId(data.threadId)
-  if (event.kind === 'thread') return !data.incognito && !isIncognitoThreadId(data.id)
+  if (event.kind === 'thread') return !data.incognito && !data.googleLocalOnly && !isIncognitoThreadId(data.id)
   if (event.kind === 'job') return !isPrivateJob(data as Job)
   if (event.kind === 'ticket') return !isPrivateTicket(data as Ticket)
   return true
 }
 
 export function remoteArchiveSnapshot(snapshot: ArchiveSnapshot): ArchiveSnapshot {
-  return { ...snapshot, threads: snapshot.threads.filter((thread) => !thread.incognito), tickets: snapshot.tickets.filter((ticket) => !isPrivateTicket(ticket)) }
+  return { ...snapshot, threads: snapshot.threads.filter((thread) => !thread.incognito && !thread.googleLocalOnly), tickets: snapshot.tickets.filter((ticket) => !isPrivateTicket(ticket)) }
 }
 
 export interface RemoteSnapshotRuntime {
@@ -134,7 +134,7 @@ export function remoteControlSnapshot(runtime: RemoteSnapshotRuntime): RemoteCon
     serverName: store.settings.remoteControl.serverName,
     appVersion: runtime.appVersion,
     headless: runtime.headless,
-    threads: store.threads.filter((thread) => isActive(thread) && !thread.incognito),
+    threads: store.threads.filter((thread) => isActive(thread) && !thread.incognito && !thread.googleLocalOnly),
     projects: store.projects.filter(isActive),
     rooms: store.rooms.filter(isActive),
     tickets: store.tickets.filter((ticket) => isActive(ticket) && !isPrivateTicket(ticket)),
@@ -176,8 +176,13 @@ function redactProjectForPaired(project: Project): Project {
 }
 
 function redactThreadForPaired(thread: Thread): Thread {
+  // Edit evidence contains complete superseded model/tool history. The linked source
+  // may itself be private, so neither archive evidence nor source IDs enter a paired
+  // operational projection, including reconnect snapshots and live thread events.
+  const { messageEditRevisions: _protectedRevisions, messageEditSource: _protectedSource, ...visible } = thread
   return {
-    ...thread,
+    ...visible,
+    documentSourceIds: [],
     cwd: '',
     workspace: null,
     providerAccountId: null,

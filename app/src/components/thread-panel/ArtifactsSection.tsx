@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { useEffect, useState } from 'react'
 import { api } from '../../lib/ipc'
@@ -9,6 +11,7 @@ import { PanelSection } from './primitives'
 // status. Preview expands textual artifacts inline; Redact makes a safe masked copy inside
 // the record (the original file is never edited).
 export function ArtifactsSection({ thread }: { thread: Thread }) {
+  const tx = useAuthoredText()
   const [artifacts, setArtifacts] = useState<Artifact[]>([])
   const [openPreview, setOpenPreview] = useState<{ id: string; preview: ArtifactPreview } | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -22,7 +25,7 @@ export function ArtifactsSection({ thread }: { thread: Thread }) {
     if (openPreview?.id === artifact.id) { setOpenPreview(null); return }
     try {
       setOpenPreview({ id: artifact.id, preview: await api.previewArtifact(artifact.id) })
-    } catch (e) { setError(e instanceof Error ? e.message : 'Preview failed.') }
+    } catch (e) { setError(e instanceof Error ? e.message : tx("Preview failed.")) }
   }
   const redact = async (artifact: Artifact) => {
     setError(null)
@@ -30,13 +33,13 @@ export function ArtifactsSection({ thread }: { thread: Thread }) {
       await api.redactArtifact(artifact.id)
       setOpenPreview(null)
       reload()
-    } catch (e) { setError(e instanceof Error ? e.message : 'Redaction failed.') }
+    } catch (e) { setError(e instanceof Error ? e.message : tx("Redaction failed.")) }
   }
 
   return (
     <>
       <div className="mx-4 border-t border-line" />
-      <PanelSection title="Artifacts" right={<span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{artifacts.length}</span>}>
+      <PanelSection title={tx("Artifacts")} right={<span className="rounded bg-ink-5 px-1.5 text-[12px] tabular-nums text-ink-3">{artifacts.length}</span>}>
         <div className="space-y-0.5">
           {artifacts.map((artifact) => (
             <div key={artifact.id}>
@@ -46,12 +49,11 @@ export function ArtifactsSection({ thread }: { thread: Thread }) {
                   {artifact.title}
                 </button>
                 <span className={clsx('shrink-0 text-[11px]', artifact.redaction === 'redacted' ? 'text-positive' : artifact.redaction === 'not_required' ? 'text-ink-4' : 'text-warn')}>
-                  {artifact.redaction === 'redacted' ? 'redacted' : artifact.redaction === 'not_required' ? 'binary' : 'unredacted'}
+                  {artifact.redaction === 'redacted' ? tx("redacted") : artifact.redaction === 'not_required' ? tx("binary") : tx("unredacted")}
                 </span>
                 {artifact.redaction === 'unredacted' && (
-                  <button onClick={() => void redact(artifact)} title="Make a masked safe copy inside the record (the original file is untouched)." className="shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-medium text-ink-3 opacity-0 transition-all hover:bg-ink-5 hover:text-ink group-hover:opacity-100">
-                    Redact
-                  </button>
+                  <button onClick={() => void redact(artifact)} title={tx("Make a masked safe copy inside the record (the original file is untouched).")} className="shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-medium text-ink-3 opacity-0 transition-all hover:bg-ink-5 hover:text-ink group-hover:opacity-100">
+                    {tx("Redact")}</button>
                 )}
               </div>
               {openPreview?.id === artifact.id && (
@@ -59,13 +61,13 @@ export function ArtifactsSection({ thread }: { thread: Thread }) {
                   <div className="mb-1 text-[11px] text-ink-4">{openPreview.preview.meta}</div>
                   {openPreview.preview.excerpt != null
                     ? <pre className="scroll-thin max-h-32 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-snug text-ink-2">{openPreview.preview.excerpt}{openPreview.preview.truncated ? '\n…' : ''}</pre>
-                    : <div className="text-[12px] text-ink-4">No inline preview for this kind.</div>}
+                    : <div className="text-[12px] text-ink-4">{tx("No inline preview for this kind.")}</div>}
                 </div>
               )}
             </div>
           ))}
         </div>
-        {error && <p className="mt-1 px-1.5 text-[12px] text-danger">{error}</p>}
+        {error && <p className="mt-1 px-1.5 text-[12px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</p>}
       </PanelSection>
     </>
   )

@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import type { DoctorSummary } from '../../../lib/readiness-doctor'
 import type { Automation } from '../../../lib/types'
 import { CommandStatusSummary, Metric } from '../ui'
@@ -34,6 +35,7 @@ interface StatusMetricsProps {
 }
 
 export function StatusMetrics(props: StatusMetricsProps) {
+  const tx = useAuthoredText()
   const {
     statusSummary,
     statusExpanded,
@@ -59,13 +61,13 @@ export function StatusMetrics(props: StatusMetricsProps) {
   return (
     <CommandStatusSummary summary={statusSummary} expanded={statusExpanded} onToggle={toggleStatusExpanded}>
       <div className="grid grid-cols-2 gap-2 lg:grid-cols-4 min-[1500px]:grid-cols-7">
-        <Metric icon="bell" label="Attention" value={String(attentionRows.length)} detail={`${unreadSignals} unread signals`} tone={attentionRows.some((r) => r.tone === 'critical') ? 'critical' : 'normal'} />
-        <Metric icon="shield" label="Approvals" value={String(pendingApprovals)} detail={pendingApprovals ? 'Waiting on you' : 'Queue clear'} tone={pendingApprovals ? 'high' : 'good'} />
-        <Metric icon="terminal" label="Live Jobs" value={String(liveJobs.length)} detail={`${runningWorkSummary.statusCounts.queued} queued / ${runningWorkSummary.statusCounts.stalled + runningWorkSummary.statusCounts.failed + runningWorkSummary.statusCounts.dead_letter} blocked`} tone={runningWorkSummary.statusCounts.failed || runningWorkSummary.statusCounts.dead_letter ? 'critical' : runningWorkSummary.statusCounts.stalled ? 'high' : liveJobs.length ? 'normal' : 'good'} />
-        <Metric icon="plug" label="Connectors" value={`${connectedCount}/${connectorRows.length || 0}`} detail={connectorActionCount ? `${connectorActionCount} actions` : `${gapCount} gaps`} tone={connectorHealthRows.some((row) => row.health.tone === 'critical') ? 'critical' : connectorActionCount ? 'high' : gapCount ? 'high' : 'good'} />
-        <Metric icon="clock" label="Next Brief" value={nextBrief ? scheduleTime(nextBrief) : 'None'} detail={primaryBrief?.name ?? 'No daily run'} tone={nextBrief ? 'normal' : 'low'} />
-        <Metric icon="spark" label="Missions" value={String(activeMissions)} detail={`${missionRows.length} total`} tone={activeMissions ? 'normal' : 'low'} />
-        <Metric icon="check" label="Readiness" value={readinessSummary.error ? 'Blocked' : readinessSummary.warning ? 'Review' : readinessSummary.checking ? 'Checking' : 'Ready'} detail={`${readinessSummary.ok}/${readinessSummary.total || 0} ready`} tone={readinessTone} />
+        <Metric icon="bell" label={tx("Attention")} value={String(attentionRows.length)} detail={`${unreadSignals} unread signals`} tone={attentionRows.some((r) => r.tone === 'critical') ? 'critical' : 'normal'} />
+        <Metric icon="shield" label={tx("Approvals")} value={String(pendingApprovals)} detail={pendingApprovals ? 'Waiting on you' : 'Queue clear'} tone={pendingApprovals ? 'high' : 'good'} />
+        <Metric icon="terminal" label={tx("Live Jobs")} value={String(liveJobs.length)} detail={`${runningWorkSummary.statusCounts.queued} queued / ${runningWorkSummary.statusCounts.stalled + runningWorkSummary.statusCounts.failed + runningWorkSummary.statusCounts.dead_letter} blocked`} tone={runningWorkSummary.statusCounts.failed || runningWorkSummary.statusCounts.dead_letter ? 'critical' : runningWorkSummary.statusCounts.stalled ? 'high' : liveJobs.length ? 'normal' : 'good'} />
+        <Metric icon="plug" label={tx("Connectors")} value={`${connectedCount}/${connectorRows.length || 0}`} detail={connectorActionCount ? `${connectorActionCount} actions` : `${gapCount} gaps`} tone={connectorHealthRows.some((row) => row.health.tone === 'critical') ? 'critical' : connectorActionCount ? 'high' : gapCount ? 'high' : 'good'} />
+        <Metric icon="clock" label={tx("Next Brief")} value={nextBrief ? scheduleTime(nextBrief) : 'None'} detail={primaryBrief?.name ?? 'No daily run'} tone={nextBrief ? 'normal' : 'low'} />
+        <Metric icon="spark" label={tx("Missions")} value={String(activeMissions)} detail={`${missionRows.length} total`} tone={activeMissions ? 'normal' : 'low'} />
+        <Metric icon="check" label={tx("Readiness")} value={readinessSummary.error ? 'Blocked' : readinessSummary.warning ? 'Review' : readinessSummary.checking ? 'Checking' : 'Ready'} detail={`${readinessSummary.ok}/${readinessSummary.total || 0} ready`} tone={readinessTone} />
       </div>
     </CommandStatusSummary>
   )

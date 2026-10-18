@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -10,6 +12,7 @@ import { TAG_COLORS, TAG_PRESETS, addTag, collectTags, normalizeTag, tagTone, to
 import type { GitRepositoryState, ProjectExecutionTarget, RemoteDirectoryListResult, RemoteOrchestratorSnapshotResult } from '../lib/types'
 
 export function NewProjectModal() {
+  const tx = useAuthoredText()
   const open = useStore((s) => s.newProjectOpen)
   const modalIntent = useStore((s) => s.newProjectIntent)
   const close = useStore((s) => s.closeNewProject)
@@ -163,7 +166,7 @@ export function NewProjectModal() {
 
   const loadRemoteDir = async (dir?: string | null) => {
     if (!selectedOrchestrator) {
-      setError('Choose an Orchestrator before browsing host folders.')
+      setError(tx("Choose an Orchestrator before browsing host folders."))
       return
     }
     setRemoteBrowseOpen(true)
@@ -172,14 +175,14 @@ export function NewProjectModal() {
     setError('')
     try {
       const result = await api.listRemoteOrchestratorDir(selectedOrchestrator.id, dir ?? '')
-      if (!result.ok) throw new Error(result.error || 'Could not list folders on the Orchestrator.')
+      if (!result.ok) throw new Error(result.error || tx("Could not list folders on the Orchestrator."))
       setRemoteBrowse(result)
       if (dir) {
         setCwd(result.path)
         if (!name) setName(result.path.split('/').filter(Boolean).pop() || 'Remote project')
       }
     } catch (e: any) {
-      setRemoteBrowseError(e?.message ?? 'Could not list folders on the Orchestrator.')
+      setRemoteBrowseError(e?.message ?? tx("Could not list folders on the Orchestrator."))
     } finally {
       setRemoteBrowseBusy(false)
     }
@@ -213,7 +216,7 @@ export function NewProjectModal() {
       setGitState(state)
       setGitPromptDismissed(false)
     } catch (e: any) {
-      setError(e?.message ?? 'Could not initialize Git.')
+      setError(e?.message ?? tx("Could not initialize Git."))
     } finally {
       setGitInitBusy(false)
     }
@@ -233,22 +236,22 @@ export function NewProjectModal() {
     if (busy || creating.current) return
     const finalName = name.trim()
     if (!finalName) {
-      setError('Enter a project name.')
+      setError(tx("Enter a project name."))
       return
     }
     const requestIntent = modalIntent
     const finalCwd = executionTarget === 'orchestrator' ? cwd.trim() : cwd
     if (executionTarget === 'orchestrator' && !finalCwd) {
-      setError('Choose a folder on the Orchestrator before creating the project.')
+      setError(tx("Choose a folder on the Orchestrator before creating the project."))
       return
     }
     const needsGitSetup = executionTarget === 'local' && !!cwd && !!gitState && (!gitState.exists || !gitState.hasCommits)
     if (executionTarget === 'local' && cwd && (gitBusy || !gitState)) {
-      setError('Still checking this folder. Wait for the Git check to finish before creating the project.')
+      setError(tx("Still checking this folder. Wait for the Git check to finish before creating the project."))
       return
     }
     if (gitPromptEnabled && needsGitSetup && !gitPromptDismissed) {
-      setError('Initialize Git first, or choose Not now before creating the project.')
+      setError(tx("Initialize Git first, or choose Not now before creating the project."))
       return
     }
     creating.current = true
@@ -260,7 +263,7 @@ export function NewProjectModal() {
       }
       await newProject({ name: finalName, cwd: finalCwd, mode: 'solo', executionTarget, orchestratorId: executionTarget === 'orchestrator' ? (orchestratorId || orchestrators[0]?.id || null) : null, tags: selectedTags }, requestIntent)
     } catch (e: any) {
-      if (useStore.getState().newProjectOpen && useStore.getState().newProjectIntent === requestIntent) setError(e?.message ?? 'Could not create project.')
+      if (useStore.getState().newProjectOpen && useStore.getState().newProjectIntent === requestIntent) setError(e?.message ?? tx("Could not create project."))
     } finally {
       creating.current = false
       setBusy(false)
@@ -276,16 +279,16 @@ export function NewProjectModal() {
       <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" />
       <div onClick={(e) => e.stopPropagation()} className="relative w-full max-w-[430px] rounded-2xl border border-line bg-card p-5 shadow-pop">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">New project</h2>
+          <h2 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{tx("New project")}</h2>
           <button onClick={close} className="flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink"><Icon name="x" size={15} /></button>
         </div>
 
         <div className="space-y-4">
-          <Field label="Name">
-            <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Secure Automations" onKeyDown={(e) => { if (e.key === 'Enter') void create() }} />
+          <Field label={tx("Name")}>
+            <Input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder={tx("Secure Automations")} onKeyDown={(e) => { if (e.key === 'Enter') void create() }} />
           </Field>
 
-          <Field label="Tags" hint="optional">
+          <Field label={tx("Tags")} hint={tx("optional")}>
             <div className="flex flex-wrap items-center gap-1.5">
               {knownTags.map((tag) => {
                 const active = selectedTags.includes(tag)
@@ -310,7 +313,7 @@ export function NewProjectModal() {
                       if (e.key === 'Enter') { e.preventDefault(); commitTag() }
                       else if (e.key === 'Escape') { e.preventDefault(); setTagAdding(false); setTagDraft('') }
                     }}
-                    placeholder="tag name"
+                    placeholder={tx("tag name")}
                     className="h-5 w-24 bg-transparent text-[12px] text-ink outline-none placeholder:text-ink-4"
                   />
                   {TAG_COLORS.map((color) => (
@@ -323,46 +326,45 @@ export function NewProjectModal() {
                       className={clsx('h-4 w-4 rounded-full transition-transform', color.swatch, tagColor === color.name ? 'ring-2 ring-ink/70 ring-offset-1 ring-offset-card' : 'opacity-60 hover:opacity-100')}
                     />
                   ))}
-                  <button type="button" onClick={commitTag} disabled={!normalizeTag(tagDraft)} className="rounded bg-accent px-1.5 py-0.5 text-[12px] font-medium text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">Add</button>
+                  <button type="button" onClick={commitTag} disabled={!normalizeTag(tagDraft)} className="rounded bg-accent px-1.5 py-0.5 text-[12px] font-medium text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">{tx("Add")}</button>
                 </span>
               ) : (
                 <button type="button" onClick={() => { setTagAdding(true); setTagDraft(''); setTagColor('neutral') }} className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink">
-                  <Icon name="plus" size={11} />Tag
-                </button>
+                  <Icon name="plus" size={11} />{tx("Tag")}</button>
               )}
             </div>
           </Field>
 
-          <Field label="Folder" hint="optional">
+          <Field label={tx("Folder")} hint={tx("optional")}>
             <div className="flex gap-2">
-              <Input readOnly value={cwd ? shortPath(cwd, 3) : ''} placeholder={executionTarget === 'orchestrator' ? 'Choose a host folder' : 'Start from scratch'} />
-              <Button variant="default" icon="folder" onClick={browse}>Browse</Button>
+              <Input readOnly value={cwd ? shortPath(cwd, 3) : ''} placeholder={executionTarget === 'orchestrator' ? tx("Choose a host folder") : tx("Start from scratch")} />
+              <Button variant="default" icon="folder" onClick={browse}>{tx("Browse")}</Button>
             </div>
             {executionTarget === 'orchestrator' && (
               <div className="mt-2 rounded-lg border border-line bg-card-2/60 px-2.5 py-2 text-[13px] leading-snug text-ink-3">
                 <div className="flex items-center justify-between gap-2 text-ink-2">
                   <div className="flex min-w-0 items-center gap-1.5">
                     <Icon name="globe" size={12} className="shrink-0 text-accent" />
-                    <span className="truncate">{selectedOrchestrator ? `Folders on ${selectedOrchestrator.name}` : 'Choose an Orchestrator first'}</span>
+                    <span className="truncate">{selectedOrchestrator ? tx("Folders on {value0}", { value0: selectedOrchestrator.name }) : tx("Choose an Orchestrator first")}</span>
                   </div>
-                  {cwd && <span className={clsx('shrink-0 rounded-full border px-1.5 py-0.5 text-[11px]', remoteFolderVerified ? 'border-positive/30 bg-positive/10 text-positive' : 'border-line bg-card text-ink-4')}>{remoteFolderVerified ? 'Reachable' : 'Selected'}</span>}
+                  {cwd && <span className={clsx('shrink-0 rounded-full border px-1.5 py-0.5 text-[11px]', remoteFolderVerified ? 'border-positive/30 bg-positive/10 text-positive' : 'border-line bg-card text-ink-4')}>{remoteFolderVerified ? tx("Reachable") : tx("Selected")}</span>}
                 </div>
                 {cwd && <div className="mt-1 truncate font-mono text-[12px] text-ink-4">{cwd}</div>}
-                {remoteFolderVerified && <div className="mt-1 text-[12px] text-ink-4">{remoteBrowse?.entries.length ?? 0} child folder{remoteBrowse?.entries.length === 1 ? '' : 's'} visible.</div>}
+                {remoteFolderVerified && <div className="mt-1 text-[12px] text-ink-4">{tx("Child folders visible: {count}", { count: remoteBrowse?.entries.length ?? 0 })}</div>}
               </div>
             )}
             {remoteBrowseOpen && executionTarget === 'orchestrator' && (
               <div className="mt-2 overflow-hidden rounded-xl border border-line bg-card-2">
                 <div className="flex items-center gap-2 border-b border-line px-2.5 py-2">
                   <Icon name="globe" size={13} className="shrink-0 text-accent" />
-                  <div className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-3">{remoteBrowse?.path || 'Loading host folders...'}</div>
-                  <Button size="xs" variant="ghost" icon="back" onClick={() => remoteBrowse?.parent && void loadRemoteDir(remoteBrowse.parent)} disabled={!remoteBrowse?.parent || remoteBrowseBusy}>Up</Button>
-                  <Button size="xs" variant="default" icon="check" onClick={chooseRemoteDir} disabled={!remoteBrowse?.path || remoteBrowseBusy}>Use</Button>
+                  <div className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink-3">{remoteBrowse?.path || tx("Loading host folders...")}</div>
+                  <Button size="xs" variant="ghost" icon="back" onClick={() => remoteBrowse?.parent && void loadRemoteDir(remoteBrowse.parent)} disabled={!remoteBrowse?.parent || remoteBrowseBusy}>{tx("Up")}</Button>
+                  <Button size="xs" variant="default" icon="check" onClick={chooseRemoteDir} disabled={!remoteBrowse?.path || remoteBrowseBusy}>{tx("Use")}</Button>
                 </div>
                 {remoteBrowseError && <div className="border-b border-line px-2.5 py-2 text-[13px] text-danger">{remoteBrowseError}</div>}
                 <div className="scroll-thin max-h-48 overflow-y-auto p-1.5">
                   {remoteBrowseBusy ? (
-                    <div className="px-2 py-3 text-[13px] text-ink-3">Loading folders...</div>
+                    <div className="px-2 py-3 text-[13px] text-ink-3">{tx("Loading folders...")}</div>
                   ) : remoteBrowse?.entries.length ? (
                     remoteBrowse.entries.map((entry) => (
                       <button
@@ -376,14 +378,14 @@ export function NewProjectModal() {
                       </button>
                     ))
                   ) : (
-                    <div className="px-2 py-3 text-[13px] text-ink-3">No child folders here. Use this folder or go up.</div>
+                    <div className="px-2 py-3 text-[13px] text-ink-3">{tx("No child folders here. Use this folder or go up.")}</div>
                   )}
                 </div>
               </div>
             )}
           </Field>
 
-          <Field label="Run location" hint="where rooms & tasks execute">
+          <Field label={tx("Run location")} hint={tx("where rooms & tasks execute")}>
             <Segmented<ProjectExecutionTarget>
               value={executionTarget}
               onChange={(target) => {
@@ -398,11 +400,11 @@ export function NewProjectModal() {
                   setRemoteBrowseError('')
                 }
               }}
-              options={[{ value: 'local', label: 'This Mac', icon: 'monitor' }, { value: 'orchestrator', label: 'Orchestrator', icon: 'globe' }]}
+              options={[{ value: 'local', label: tx("This Mac"), icon: 'monitor' }, { value: 'orchestrator', label: tx("Orchestrator"), icon: 'globe' }]}
             />
             {executionTarget === 'orchestrator' && (
               orchestrators.length === 0
-                ? <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2 text-[13px] leading-snug text-warn">No paired Orchestrator yet — add one in Settings → Orchestrator. The folder stays on this Mac; jobs spool up on the host and you drive the room from here.</div>
+                ? <div className="mt-2 rounded-lg border border-warn/30 bg-warn/10 px-2.5 py-2 text-[13px] leading-snug text-warn">{tx("No paired Orchestrator yet — add one in Settings → Orchestrator. The folder stays on this Mac; jobs spool up on the host and you drive the room from here.")}</div>
                 : <select
                     value={orchestratorId ?? orchestrators[0].id}
                     onChange={(e) => {
@@ -424,21 +426,20 @@ export function NewProjectModal() {
                     <Icon name={remoteCheckBusy ? 'clock' : remoteCheck?.ok ? 'check' : remoteCheck && !remoteCheck.ok ? 'warning' : 'globe'} size={12} className="shrink-0" />
                     <span className="truncate">
                       {remoteCheckBusy
-                        ? `Checking ${selectedOrchestrator.name}...`
+                        ? tx("Checking {value0}...", { value0: selectedOrchestrator.name })
                         : remoteCheck?.ok
-                          ? `${remoteCheck.name || selectedOrchestrator.name} is reachable`
+                          ? tx("{value0} is reachable", { value0: remoteCheck.name || selectedOrchestrator.name })
                           : remoteCheck && !remoteCheck.ok
-                            ? remoteCheck.error || 'Connection failed'
-                            : 'Host not checked yet'}
+                            ? remoteCheck.error || tx("Connection failed")
+                            : tx("Host not checked yet")}
                     </span>
                   </div>
                   <Button size="xs" variant="ghost" icon="refresh" onClick={() => void refreshSelectedOrchestrator()} disabled={remoteCheckBusy}>
-                    Check
-                  </Button>
+                    {tx("Check")}</Button>
                 </div>
                 {remoteCheck?.ok && (
                   <div className="mt-1 text-[12px]">
-                    {(remoteCheck.totalProjects ?? 0)} project{remoteCheck.totalProjects === 1 ? '' : 's'} · {(remoteCheck.totalRooms ?? 0)} room{remoteCheck.totalRooms === 1 ? '' : 's'} · {(remoteCheck.activeThreadIds?.length ?? 0)} active task{remoteCheck.activeThreadIds?.length === 1 ? '' : 's'}
+                    {tx("Projects: {projects} · Rooms: {rooms} · Active tasks: {tasks}", { projects: remoteCheck.totalProjects ?? 0, rooms: remoteCheck.totalRooms ?? 0, tasks: remoteCheck.activeThreadIds?.length ?? 0 })}
                   </div>
                 )}
               </div>
@@ -453,17 +454,17 @@ export function NewProjectModal() {
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="text-[13px] font-medium text-ink">
-                    {gitBusy ? 'Checking Git...' : needsGitSetup ? 'Git setup needed' : 'Git ready'}
+                    {gitBusy ? tx("Checking Git...") : needsGitSetup ? tx("Git setup needed") : tx("Git ready")}
                   </div>
                   <div className="mt-0.5 text-[13px] leading-snug text-ink-3">
                     {gitState?.exists && gitState.hasCommits
                       ? `${gitState.branch ? `Branch ${gitState.branch}` : 'Detached HEAD'}`
-                      : 'Rooms use isolated worktrees when this folder is a Git repo with an initial commit.'}
+                      : tx("Rooms use isolated worktrees when this folder is a Git repo with an initial commit.")}
                   </div>
                   {gitPromptEnabled && needsGitSetup && !gitPromptDismissed && (
                     <div className="mt-3 flex flex-wrap gap-2">
-                      <Button size="sm" variant="primary" icon="branch" onClick={initializeGit} disabled={gitInitBusy}>{gitInitBusy ? 'Initializing...' : 'Initialize Git'}</Button>
-                      <Button size="sm" variant="ghost" onClick={() => { setGitPromptDismissed(true); setError('') }}>Not now</Button>
+                      <Button size="sm" variant="primary" icon="branch" onClick={initializeGit} disabled={gitInitBusy}>{gitInitBusy ? tx("Initializing...") : tx("Initialize Git")}</Button>
+                      <Button size="sm" variant="ghost" onClick={() => { setGitPromptDismissed(true); setError('') }}>{tx("Not now")}</Button>
                     </div>
                   )}
                 </div>
@@ -472,11 +473,11 @@ export function NewProjectModal() {
           )}
         </div>
 
-        {error && <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] leading-snug text-danger">{error}</div>}
+        {error && <div className="mt-4 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] leading-snug text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
 
         <div className="mt-5 flex justify-end gap-2">
-          <Button variant="ghost" onClick={close}>Cancel</Button>
-          <Button variant="primary" icon="plus" onClick={create} disabled={busy || !name.trim() || gitCreateBlocked || (executionTarget === 'orchestrator' && (orchestrators.length === 0 || !cwd.trim()))}>{busy ? 'Creating...' : 'Create project'}</Button>
+          <Button variant="ghost" onClick={close}>{tx("Cancel")}</Button>
+          <Button variant="primary" icon="plus" onClick={create} disabled={busy || !name.trim() || gitCreateBlocked || (executionTarget === 'orchestrator' && (orchestrators.length === 0 || !cwd.trim()))}>{busy ? tx("Creating...") : tx("Create project")}</Button>
         </div>
       </div>
     </div>

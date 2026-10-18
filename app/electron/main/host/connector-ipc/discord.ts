@@ -32,7 +32,10 @@ export function registerDiscordIpc(deps: ConnectorIpcDeps): void {
     requireSecurityRole('owner', 'verify a Discord token')
     const source = store.settings.discord.sources.find((s) => s.id === id)
     if (!source?.token) throw new Error('Discord source not found or has no token.')
-    return verifyDiscordToken(source.token)
+    const result = await verifyDiscordToken(source.token)
+    const current = store.settings.discord.sources.find((candidate) => candidate.id === id)
+    if (!current || current.token !== source.token) throw new Error('Discord credentials changed during verification; verify the current connection again.')
+    return result
   })
   handle('discord:listChannels', async (_e, { id }: { id: string }) => {
     requireSecurityRole('operator', 'list Discord channels')

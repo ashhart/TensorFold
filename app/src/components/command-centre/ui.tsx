@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import { relativeTime } from '../../lib/format'
@@ -8,6 +11,7 @@ import { approvalRiskLabel } from './attention'
 import { toneBadge, toneBg, toneDot, toneText } from './styles'
 
 export function Panel({ title, icon, action, children }: { title: string; icon: IconName; action?: string; children: ReactNode }) {
+  const tx = useAuthoredText()
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-card shadow-card">
       <div className="flex items-center gap-2 border-b border-line bg-card-2 px-3 py-2.5">
@@ -35,6 +39,7 @@ export function DisclosurePanel({
   onToggle: () => void
   children: ReactNode
 }) {
+  const tx = useAuthoredText()
   return (
     <section className="overflow-hidden rounded-lg border border-line bg-card shadow-card">
       <button
@@ -64,6 +69,7 @@ export function CommandStatusSummary({
   onToggle: () => void
   children: ReactNode
 }) {
+  const tx = useAuthoredText()
   const blocked = summary.jobsStatus.stalled + summary.jobsStatus.failed + summary.jobsStatus.deadLetter
   const parts = [
     `${summary.attentionCount} attention`,
@@ -72,10 +78,10 @@ export function CommandStatusSummary({
     `${summary.missionCount} missions`,
   ]
   const headline = summary.maxTone === 'critical'
-    ? 'Action needed'
+    ? tx("Action needed")
     : summary.maxTone === 'high'
-      ? 'Needs attention'
-      : 'Systems operational'
+      ? tx("Needs attention")
+      : tx("Systems operational")
   return (
     <div className="rounded-lg border border-line bg-card shadow-card">
       <button
@@ -95,6 +101,7 @@ export function CommandStatusSummary({
 }
 
 export function Metric({ icon, label, value, detail, tone }: { icon: IconName; label: string; value: string; detail: string; tone: Tone }) {
+  const tx = useAuthoredText()
   return (
     <div className="rounded-lg border border-line bg-card px-3 py-2.5 shadow-card">
       <div className="flex items-center justify-between gap-2">
@@ -110,6 +117,7 @@ export function Metric({ icon, label, value, detail, tone }: { icon: IconName; l
 }
 
 export function RunStat({ label, value, tone }: { label: string; value: number; tone: Tone }) {
+  const tx = useAuthoredText()
   return (
     <div className="bg-card px-2 py-2 text-center">
       <div className={clsx('text-[17px] font-semibold leading-none', toneText(tone))}>{value}</div>
@@ -119,6 +127,7 @@ export function RunStat({ label, value, tone }: { label: string; value: number; 
 }
 
 export function RunFact({ icon, label, value, detail, tone }: { icon: IconName; label: string; value: string; detail: string; tone: Tone }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0 rounded-lg bg-card-2 px-2.5 py-2">
       <div className="flex items-center gap-1.5 text-[12px] font-medium uppercase tracking-[0.05em] text-ink-4">
@@ -132,6 +141,7 @@ export function RunFact({ icon, label, value, detail, tone }: { icon: IconName; 
 }
 
 export function ProviderSignalBlock({ signal }: { signal: ProviderSignal }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0 rounded-md bg-card px-2 py-1.5">
       <div className="flex items-center justify-between gap-2">
@@ -145,6 +155,7 @@ export function ProviderSignalBlock({ signal }: { signal: ProviderSignal }) {
 }
 
 export function EmptyState({ icon, title, detail }: { icon: IconName; title: string; detail: string }) {
+  const tx = useAuthoredText()
   return (
     <div className="px-3 py-5 text-center">
       <div className="mx-auto flex h-8 w-8 items-center justify-center rounded-lg bg-ink-5 text-ink-3">
@@ -157,6 +168,7 @@ export function EmptyState({ icon, title, detail }: { icon: IconName; title: str
 }
 
 export function ApprovalRowItem({ row }: { row: ApprovalRow }) {
+  const tx = useAuthoredText()
   return (
     <div className="px-3 py-3">
       <div className="flex items-start gap-3">
@@ -182,6 +194,7 @@ export function ApprovalRowItem({ row }: { row: ApprovalRow }) {
 }
 
 export function StatusIcon({ icon, tone, pulse }: { icon: IconName; tone: Tone; pulse?: boolean }) {
+  const tx = useAuthoredText()
   return (
     <span className={clsx('relative mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg', toneBg(tone), toneText(tone))}>
       <Icon name={icon} size={15} />
@@ -191,7 +204,8 @@ export function StatusIcon({ icon, tone, pulse }: { icon: IconName; tone: Tone; 
 }
 
 export function ToneBadge({ tone }: { tone: Tone }) {
+  const tx = useAuthoredText()
   if (tone === 'normal') return null
-  const label: Record<Tone, string> = { critical: 'critical', high: 'high', normal: 'normal', low: 'low', good: 'ready' }
+  const label: Record<Tone, string> = { get critical() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "critical") }, get high() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "high") }, get normal() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "normal") }, get low() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "low") }, get good() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "ready") } }
   return <span className={clsx('shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-medium', toneBadge(tone))}>{label[tone]}</span>
 }

@@ -53,10 +53,14 @@ export function registerSlackIpc(deps: ConnectorIpcDeps): void {
     return publicConnectorSettings().slack
   })
 
-  handle('slack:sync', async () => {
+  handle('slack:sync', async (_e, input?: { id?: string }) => {
     requireSecurityRole('operator', 'sync Slack')
+    if (input !== undefined && (!input || typeof input !== 'object' || Array.isArray(input))) throw new Error('Slack sync input must identify a source or be omitted.')
     return syncQueue.run('slack', async () => {
-      const result = await syncSlackConnector(store.settings.slack, store.connectorEvents)
+      const id = input?.id
+      if (id !== undefined && (typeof id !== 'string' || !store.settings.slack.sources.some((source) => source.id === id))) throw new Error('Slack source not found.')
+      const settings = id ? { ...store.settings.slack, sources: store.settings.slack.sources.filter((source) => source.id === id) } : store.settings.slack
+      const result = await syncSlackConnector(settings, store.connectorEvents)
       store.settings = { ...store.settings, slack: { ...store.settings.slack, sources: mergeConnectorSyncSources(store.settings.slack.sources, result.sources), lastSyncAt: result.syncedAt } }
       await saveSettings(store.settings)
       // CONTACT NAMES: learn Slack user id -> display-name from this batch so "reply to <name>"
@@ -72,7 +76,7 @@ export function registerSlackIpc(deps: ConnectorIpcDeps): void {
       // per event from its source. Best-effort; a bad/expired file never blocks ingest.
       await attachAuthedMediaPaths(enriched.events, (event) => slackMediaItemsFor(event))
       rememberConnectorEvents(enriched.events)
-      return { ...result, sources: publicConnectorSettings().slack.sources, events: enriched.events }
+      return { ...result, sources: publicConnectorSettings().slack.sources.filter((source) => !id || source.id === id), events: enriched.events }
     })
   })
 
@@ -96,7 +100,10 @@ export function registerSlackIpc(deps: ConnectorIpcDeps): void {
     requireSecurityRole('owner', 'verify a Slack token')
     const source = store.settings.slack.sources.find((s) => s.id === id && s.kind === 'api_token')
     if (!source?.token) throw new Error('Slack source not found or has no token.')
-    return verifySlackToken(source.token)
+    const result = await verifySlackToken(source.token)
+    const current = store.settings.slack.sources.find((candidate) => candidate.id === id && candidate.kind === 'api_token')
+    if (!current || current.token !== source.token) throw new Error('Slack credentials changed during verification; verify the current connection again.')
+    return result
   })
   handle('slack:listChannels', async (_e, { id }: { id: string }) => {
     requireSecurityRole('operator', 'list Slack channels')

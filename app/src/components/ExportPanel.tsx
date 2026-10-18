@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -9,12 +12,13 @@ import type { ExportMode, ExportResult } from '../lib/types'
 // command palette. Secret redaction is ON by default; share/eval packets also
 // anonymize identifiers. The bundle is built in the main process (export.ts).
 const MODES: { id: ExportMode; label: string; icon: IconName; blurb: string }[] = [
-  { id: 'full', label: 'Full run', icon: 'archive', blurb: 'Everything — prompts, tool calls, diffs, outcomes. Secrets redacted; identifiers kept.' },
-  { id: 'share', label: 'Share packet', icon: 'send', blurb: 'Anonymized for sharing — thread id, cwd, provider, paths and IPs stripped.' },
-  { id: 'eval', label: 'Eval replay', icon: 'spark', blurb: 'Replay skeleton — prompts, tool calls and outcomes only; reasoning dropped, anonymized.' },
+  { id: 'full', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Full run") }, icon: 'archive', blurb: 'Everything — prompts, tool calls, diffs, outcomes. Secrets redacted; identifiers kept.' },
+  { id: 'share', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Share packet") }, icon: 'send', blurb: 'Anonymized for sharing — thread id, cwd, provider, paths and IPs stripped.' },
+  { id: 'eval', get label() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Eval replay") }, icon: 'spark', blurb: 'Replay skeleton — prompts, tool calls and outcomes only; reasoning dropped, anonymized.' },
 ]
 
 export function ExportPanel() {
+  const tx = useAuthoredText()
   const [threadId, setThreadId] = useState<string | null>(null)
   const [mode, setMode] = useState<ExportMode>('full')
   const [redact, setRedact] = useState(true)
@@ -72,10 +76,10 @@ export function ExportPanel() {
         <div className="flex items-center gap-2.5 border-b border-line px-4 py-3">
           <Icon name="archive" size={16} className="text-ink-2" />
           <div className="min-w-0 flex-1">
-            <div className="text-[14px] font-medium text-ink">Export run</div>
-            <div className="truncate text-[13px] text-ink-3">{bundle?.thread.title || 'Building bundle…'}</div>
+            <div className="text-[14px] font-medium text-ink">{tx("Export run")}</div>
+            <div className="truncate text-[13px] text-ink-3">{bundle?.thread.title || tx("Building bundle…")}</div>
           </div>
-          <button onClick={close} className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-ink-4 hover:text-ink">esc</button>
+          <button onClick={close} className="rounded-md border border-line px-1.5 py-0.5 text-[11px] text-ink-4 hover:text-ink">{tx("esc")}</button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto scroll-thin p-4">
@@ -93,24 +97,24 @@ export function ExportPanel() {
           <label className="mt-3 flex items-start gap-2.5 rounded-lg border border-line bg-card-2 px-3 py-2.5">
             <input type="checkbox" checked={redact} onChange={(e) => setRedact(e.target.checked)} className="mt-0.5 accent-[var(--ink)]" />
             <span className="min-w-0 flex-1">
-              <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="shield" size={13} className={redact ? 'text-positive' : 'text-warn'} />Redact secrets &amp; PII</span>
-              <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-3">{redact ? 'Scans every value for API keys, tokens, private keys, JWTs, emails and home paths before export.' : 'Off — the bundle may contain raw secrets. Only disable for a local, trusted destination.'}</span>
+              <span className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="shield" size={13} className={redact ? 'text-positive' : 'text-warn'} />{tx("Redact secrets & PII")}</span>
+              <span className="mt-0.5 block text-[12px] leading-relaxed text-ink-3">{redact ? tx("Scans every value for API keys, tokens, private keys, JWTs, emails and home paths before export.") : tx("Off — the bundle may contain raw secrets. Only disable for a local, trusted destination.")}</span>
             </span>
-            {redact && <span className="shrink-0 rounded-full bg-positive/10 px-2 py-0.5 text-[12px] font-medium text-positive">{totalRedactions} masked</span>}
+            {redact && <span className="shrink-0 rounded-full bg-positive/10 px-2 py-0.5 text-[12px] font-medium text-positive">{totalRedactions} {tx("masked")}</span>}
           </label>
-          {!redact && <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-warn"><Icon name="warning" size={12} />Unredacted export — handle the file as a secret.</div>}
+          {!redact && <div className="mt-1.5 flex items-center gap-1.5 text-[12px] text-warn"><Icon name="warning" size={12} />{tx("Unredacted export — handle the file as a secret.")}</div>}
 
           {/* stats + redaction breakdown */}
           {bundle && (
             <div className="mt-3 flex flex-wrap gap-1.5 text-[12px]">
-              <Stat label="messages" value={bundle.stats.messages} />
-              <Stat label="tool calls" value={bundle.stats.toolCalls} />
-              <Stat label="diffs" value={bundle.stats.diffs} />
-              <Stat label="evidence" value={evidenceItems} />
-              {bundle.stats.denied > 0 && <Stat label="denied" value={bundle.stats.denied} tone="warn" />}
-              {bundle.stats.errors > 0 && <Stat label="errors" value={bundle.stats.errors} tone="danger" />}
-              {!!evidence?.gaps.length && <Stat label="gaps" value={evidence.gaps.length} tone="warn" />}
-              {bundle.anonymized && <span className="rounded-md border border-line bg-card-2 px-2 py-0.5 text-ink-3">anonymized</span>}
+              <Stat label={tx("messages")} value={bundle.stats.messages} />
+              <Stat label={tx("tool calls")} value={bundle.stats.toolCalls} />
+              <Stat label={tx("diffs")} value={bundle.stats.diffs} />
+              <Stat label={tx("evidence")} value={evidenceItems} />
+              {bundle.stats.denied > 0 && <Stat label={tx("denied")} value={bundle.stats.denied} tone="warn" />}
+              {bundle.stats.errors > 0 && <Stat label={tx("errors")} value={bundle.stats.errors} tone="danger" />}
+              {!!evidence?.gaps.length && <Stat label={tx("gaps")} value={evidence.gaps.length} tone="warn" />}
+              {bundle.anonymized && <span className="rounded-md border border-line bg-card-2 px-2 py-0.5 text-ink-3">{tx("anonymized")}</span>}
             </div>
           )}
           {redact && bundle && bundle.redactionReport.length > 0 && (
@@ -124,8 +128,7 @@ export function ExportPanel() {
           {bundle?.chronicle && (
             <div className="mt-3 rounded-lg border border-line bg-card-2 px-3 py-2.5">
               <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
-                <Icon name="list" size={13} className="text-ink-3" />Run chronicle
-              </div>
+                <Icon name="list" size={13} className="text-ink-3" />{tx("Run chronicle")}</div>
               <div className="mt-1 text-[13px] leading-snug text-ink-3">{bundle.chronicle.summary}</div>
             </div>
           )}
@@ -133,14 +136,13 @@ export function ExportPanel() {
           {evidence && (
             <div className="mt-3 rounded-lg border border-line bg-card-2 px-3 py-2.5">
               <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink">
-                <Icon name="archive" size={13} className="text-ink-3" />Evidence bundle
-              </div>
+                <Icon name="archive" size={13} className="text-ink-3" />{tx("Evidence bundle")}</div>
               <div className="mt-2 grid grid-cols-2 gap-1.5 text-[12px] text-ink-3 sm:grid-cols-4">
-                <Badge label="files" value={evidence.touchedFiles.length} />
-                <Badge label="commands" value={evidence.commandOutputs.length} />
-                <Badge label="citations" value={evidence.citations.length} />
-                <Badge label="approvals" value={evidence.approvals.length} />
-                <Badge label="claims" value={evidence.assistantClaims?.length ?? 0} />
+                <Badge label={tx("files")} value={evidence.touchedFiles.length} />
+                <Badge label={tx("commands")} value={evidence.commandOutputs.length} />
+                <Badge label={tx("citations")} value={evidence.citations.length} />
+                <Badge label={tx("approvals")} value={evidence.approvals.length} />
+                <Badge label={tx("claims")} value={evidence.assistantClaims?.length ?? 0} />
               </div>
               {(evidence.touchedFiles.length > 0 || evidence.gaps.length > 0) && (
                 <div className="mt-2 space-y-1.5">
@@ -159,21 +161,20 @@ export function ExportPanel() {
 
           {/* json preview */}
           <div className="mt-3 overflow-hidden rounded-lg border border-line bg-canvas">
-            <div className="border-b border-line px-3 py-1.5 text-[12px] uppercase tracking-wide text-ink-4">Preview · {bundle?.schema ?? 'vontra.run-export/1'}</div>
+            <div className="border-b border-line px-3 py-1.5 text-[12px] uppercase tracking-wide text-ink-4">{tx("Preview · ")}{bundle?.schema ?? 'vontra.run-export/1'}</div>
             <pre className="scroll-thin max-h-[28vh] overflow-auto px-3 py-2 text-[12px] leading-relaxed text-ink-2">{building ? 'Building…' : (result ? result.json.slice(0, 6000) + (result.json.length > 6000 ? '\n… (truncated in preview; full bundle is saved/copied)' : '') : 'Nothing to export.')}</pre>
           </div>
         </div>
 
         {/* footer */}
         <div className="flex items-center gap-2 border-t border-line px-4 py-2.5">
-          {saved && <span className="flex items-center gap-1.5 text-[13px] text-positive"><Icon name="check" size={13} />Saved</span>}
+          {saved && <span className="flex items-center gap-1.5 text-[13px] text-positive"><Icon name="check" size={13} />{tx("Saved")}</span>}
           <div className="flex-1" />
           <button onClick={onCopy} disabled={!result} className="flex items-center gap-1.5 rounded-md border border-line px-2.5 py-1.5 text-[13px] text-ink-2 transition-colors hover:border-line-strong hover:text-ink disabled:opacity-40">
-            <Icon name="copy" size={13} />{copied ? 'Copied' : 'Copy JSON'}
+            <Icon name="copy" size={13} />{copied ? tx("Copied") : tx("Copy JSON")}
           </button>
           <button onClick={onSave} disabled={!result} className="flex items-center gap-1.5 rounded-md bg-accent px-3 py-1.5 text-[13px] text-accent-ink transition-colors hover:bg-accent-strong disabled:opacity-40">
-            <Icon name="archive" size={13} />Save…
-          </button>
+            <Icon name="archive" size={13} />{tx("Save…")}</button>
         </div>
       </div>
     </div>
@@ -181,6 +182,7 @@ export function ExportPanel() {
 }
 
 function Badge({ label, value }: { label: string; value: number }) {
+  const tx = useAuthoredText()
   return (
     <span className="rounded-md border border-line bg-card px-2 py-1">
       <span className="font-medium tabular-nums text-ink">{value}</span>{' '}
@@ -190,6 +192,7 @@ function Badge({ label, value }: { label: string; value: number }) {
 }
 
 function Stat({ label, value, tone }: { label: string; value: number; tone?: 'warn' | 'danger' }) {
+  const tx = useAuthoredText()
   return (
     <span className="rounded-md border border-line bg-card-2 px-2 py-0.5">
       <span className={clsx('font-medium tabular-nums', tone === 'danger' ? 'text-danger' : tone === 'warn' ? 'text-warn' : 'text-ink')}>{value}</span>{' '}

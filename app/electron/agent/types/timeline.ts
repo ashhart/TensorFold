@@ -94,6 +94,9 @@ export type TimelineKind = 'user' | 'cue' | 'assistant' | 'reasoning' | 'tool' |
 export type ToolState = 'pending' | 'awaiting' | 'running' | 'ok' | 'error' | 'denied'
 
 export interface TimelineItem {
+  quotedMessages?: import('../../../shared/message-quotes').MessageQuote[]
+  /** Host-only exact user-message mapping; never sent to the provider. */
+  apiMessageRef?: { ordinal: number; fingerprint: string; compactionCount: number }
   /** Host provenance for conservative reviewed-memory proposals; absent legacy text is unclassified. */
   memorySource?: 'user' | 'external'
   question?: import('./user-question').UserQuestion
@@ -128,6 +131,7 @@ export interface TimelineItem {
   runReceipt?: AgentRunReceiptSnapshot
   createdAt?: number
   appAction?: AppAction // #42 — natural-language app control (create/navigate/setting)
+  documentEvidence?: import('../../../shared/document-library').DocumentEvidenceRequest[]
   attachments?: Attachment[] // user message: documents + images attached from the composer
   /** run_command: what the sandbox captured, kept out of the model-visible output. */
   artifacts?: ToolArtifactSummary
@@ -309,6 +313,10 @@ export interface ThreadMemoryPolicy {
 }
 
 export interface Thread {
+  /** Local collection allowlist; undefined is retained only for legacy chats, [] permits none. */
+  documentSourceIds?: string[]
+  runRecoveryReviewedId?: string
+  runRecovery?: import('../../../shared/run-recovery').RunRecoverySnapshot
   /** TensorFold saved-memory access, independent of encrypted conversation retention. */
   memoryPolicy?: ThreadMemoryPolicy
   /** Host-owned monotonic revision for durable user changes. */
@@ -316,6 +324,8 @@ export interface Thread {
   bot?: import('./settings').BotThreadConfig
   // Once phone access is granted, its derived conversation stays on a local model.
   phoneLocalOnly?: boolean
+  /** Host-owned monotonic boundary once Google account data enters this history. */
+  googleLocalOnly?: boolean
   id: string
   title: string
   kind: 'task' | 'chat'
@@ -368,6 +378,10 @@ export interface Thread {
   // checkpoint revert). Ordinary streaming updates keep the same epoch and are merged
   // defensively in the renderer; a higher epoch tells projections to accept truncation.
   conversationRevision?: number
+  /** Superseded branches are encrypted with this thread and excluded from API context. */
+  messageEditRevisions?: import('../../../shared/thread-message-edit').ThreadMessageEditRevision[]
+  /** An edited task starts an independent history/checkpoint identity. */
+  messageEditSource?: { threadId: string; itemId: string; editedAt: number }
   systemPromptSnapshot?: SystemPromptSnapshot | null
   timeline: TimelineItem[]
   activeRunContract?: AgentRunContractSnapshot | null
@@ -405,7 +419,7 @@ export interface Thread {
 
 /** Fields the renderer is allowed to edit through the generic thread patch IPC. */
 export type RendererThreadPatch = Partial<Pick<Thread,
-  'goal' | 'goalStatus' | 'plan' | 'notepad' | 'annotations' | 'diffReviewedAt' | 'incognito'
+  'goal' | 'goalStatus' | 'plan' | 'notepad' | 'annotations' | 'diffReviewedAt' | 'incognito' | 'documentSourceIds'
 >>
 
 export interface ModelRouteMemory {

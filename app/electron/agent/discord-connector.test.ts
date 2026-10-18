@@ -12,7 +12,8 @@ console.log('discord-connector tests:')
   // The synchronous fast-path: allowed only when there's no allowlist or the id is explicitly
   // listed. A name-based allowlist returns false here so the caller resolves names->ids — it
   // must NOT be permissive (verifier bypass: agent harvests a restricted id and posts to it).
-  assert.equal(isDiscordChannelAllowed('', '123456789012345678'), true, 'no allowlist => unrestricted')
+  assert.equal(isDiscordChannelAllowed('', '123456789012345678'), false, 'empty allowlist grants no access')
+  assert.equal(isDiscordChannelAllowed('*', '123456789012345678'), true, 'standalone wildcard explicitly grants all')
   assert.equal(isDiscordChannelAllowed('123456789012345678', '123456789012345678'), true, 'id in allowlist')
   assert.equal(isDiscordChannelAllowed('123456789012345678, 999', '424242424242424242'), false, 'id NOT in id-allowlist rejected')
   assert.equal(isDiscordChannelAllowed('#general, #random', '424242424242424242'), false, 'name-only allowlist is NOT permissive at send time')
@@ -20,14 +21,14 @@ console.log('discord-connector tests:')
 }
 
 {
-  // A fresh source is enabled with a stable id and an empty token.
+  // A fresh source stays disconnected with a stable id and an empty token.
   const s = makeDiscordSource('My server', 1000)
   assert.match(s.id, /^discord_/)
-  assert.equal(s.enabled, true)
+  assert.equal(s.enabled, false)
   assert.equal(s.token, '')
   assert.equal(s.label, 'My server')
   assert.equal(s.allowedChannels, '')
-  ok('makeDiscordSource creates an enabled source with a stable id')
+  ok('makeDiscordSource creates a disconnected source with a stable id')
 }
 
 {
@@ -125,7 +126,7 @@ await (async () => {
     return undefined
   })
   try {
-    const source = { ...makeDiscordSource('Acme', 1000), token: 'tok' }
+    const source = { ...makeDiscordSource('Acme', 1000), enabled: true, allowedChannels: '*', token: 'tok' }
     const messages = await fetchDiscordMessages(source, TEST_HTTP_DEPS)
     assert.equal(messages.length, 50, 'no cursor => bounded to the newest 50 (unchanged behaviour)')
     ok('fetchDiscordMessages with no cursor stays bounded to the newest 50, no after= sent')
@@ -149,8 +150,8 @@ await (async () => {
       const after = query.get('after')
       seenAfter.push(after)
       const floor = after ? Number(after) : 0
-      // Discord's after= semantics: messages strictly newer than `after`, ascending, capped at limit.
-      const page = all.filter((m) => Number(m.id) > floor).slice(0, 50)
+      // The requested after-window is returned newest-to-oldest, as documented.
+      const page = all.filter((m) => Number(m.id) > floor).slice(0, 50).reverse()
       return page
     }
     return undefined
@@ -158,7 +159,7 @@ await (async () => {
   try {
     const source = {
       ...makeDiscordSource('Acme', 1000),
-      token: 'tok',
+      enabled: true, allowedChannels: '*', token: 'tok',
       cursor: { position: 10_000, lastId: '10', updatedAt: 1000 },
     }
     const messages = await fetchDiscordMessages(source, TEST_HTTP_DEPS)
@@ -167,10 +168,36 @@ await (async () => {
     assert.deepEqual(ids, Array.from({ length: 70 }, (_, i) => i + 11), 'every backlog id 11..80 present, none dropped')
     assert.ok(seenAfter.length > 1, 'paginated across more than one request')
     assert.equal(seenAfter[0], '10', 'first page requested after= the prior cursor id')
+    assert.equal(seenAfter[1], '60', 'second page advances to the greatest snowflake rather than the oldest returned message')
+    assert.equal(seenAfter.length, 2, 'the descending response order does not cause overlapping requests')
     ok('fetchDiscordMessages paginates with after= when a cursor is present, recovering a full backlog burst')
   } finally {
     restoreFetch()
   }
+})()
+
+await (async () => {
+  const base = 90_071_992_547_409_930n
+  const all = Array.from({ length: 80 }, (_, i) => ({ ...fakeMessage(i + 1), id: String(base + BigInt(i + 1)) }))
+  const seenAfter: string[] = []
+  stubFetch((path, query) => {
+    if (path === '/users/@me/guilds') return [{ id: 'guild1', name: 'Example server' }]
+    if (path === '/guilds/guild1/channels') return [{ id: 'chan1', name: 'general', type: 0 }]
+    if (path === '/guilds/guild1/threads/active') return { threads: [] }
+    if (path === '/channels/chan1/messages') {
+      const after = query.get('after')!
+      seenAfter.push(after)
+      return all.filter((message) => BigInt(message.id) > BigInt(after)).slice(0, 50).reverse()
+    }
+  })
+  try {
+    const messages = await fetchDiscordMessages({ ...makeDiscordSource('Example server'), enabled: true, allowedChannels: '*', token: 'fixture-token', cursor: { position: 0, lastId: String(base + 10n), updatedAt: 0 } }, TEST_HTTP_DEPS)
+    assert.equal(messages.length, 70)
+    assert.equal(new Set(messages.map((message) => message.id)).size, 70)
+    assert.equal(seenAfter[1], String(base + 60n), 'pagination preserves neighboring snowflakes beyond Number precision')
+    assert.equal(seenAfter.length, 2)
+    ok('descending Discord pages advance exactly with high-precision snowflakes')
+  } finally { restoreFetch() }
 })()
 
 console.log(`\n${passed} checks passed.`)

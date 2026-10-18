@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -7,6 +8,7 @@ import type { Skill, Command, SkillSuggestion, SkillSuggestionDiff } from '../li
 
 // Settings management for $ skills and / custom commands.
 export function SkillsCommands() {
+  const tx = useAuthoredText()
   const [skills, setSkills] = useState<Skill[]>([])
   const [commands, setCommands] = useState<Command[]>([])
   const [suggestions, setSuggestions] = useState<SkillSuggestion[]>([])
@@ -38,14 +40,14 @@ export function SkillsCommands() {
       {pending.length > 0 && (
         <div>
           <div className="mb-2">
-            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="spark" size={14} className="text-accent" />Suggestions</div>
-            <div className="text-[13px] text-ink-3">Reusable workflows TensorFold noticed. Nothing is saved until you accept.</div>
+            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><Icon name="spark" size={14} className="text-accent" />{tx("Suggestions")}</div>
+            <div className="text-[13px] text-ink-3">{tx("Reusable workflows TensorFold noticed. Nothing is saved until you accept.")}</div>
           </div>
           <div className="space-y-1.5">
             {pending.map((s) => (
               <div key={s.id} className="rounded-xl border border-line bg-card p-3 shadow-card">
                 <div className="flex items-start gap-2">
-                  <span className="mt-0.5 shrink-0 rounded-md bg-ink-5 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{s.targetSkillId ? 'update' : s.kind}</span>
+                  <span className="mt-0.5 shrink-0 rounded-md bg-ink-5 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-3">{s.targetSkillId ? tx("update") : s.kind}</span>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-[13px] font-medium text-ink">{s.kind === 'command' ? '/' : ''}{s.name}</div>
                     {s.description && <div className="truncate text-[13px] text-ink-2">{s.description}</div>}
@@ -54,7 +56,7 @@ export function SkillsCommands() {
                         accepting overwrites — old body struck through, new below. */}
                     {diffs[s.id]?.action === 'update' && diffs[s.id].changes.filter((c) => c.field === 'body').map((c) => (
                       <div key="body-diff" className="mt-1.5 rounded-md border border-line bg-card-2 p-2">
-                        <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-wide text-warn">replaces the current instructions</div>
+                        <div className="mb-0.5 text-[11px] font-semibold uppercase tracking-wide text-warn">{tx("replaces the current instructions")}</div>
                         <div className="max-h-16 overflow-y-auto scroll-thin whitespace-pre-wrap text-[12px] leading-snug text-ink-4 line-through decoration-danger/50">{c.before}</div>
                         <div className="mt-1 max-h-24 overflow-y-auto scroll-thin whitespace-pre-wrap text-[13px] leading-snug text-ink-2">{c.after}</div>
                       </div>
@@ -62,9 +64,9 @@ export function SkillsCommands() {
                   </div>
                 </div>
                 <div className="mt-2 flex items-center gap-1.5">
-                  <Button variant="primary" size="sm" icon="check" onClick={() => acceptSuggestion(s.id)}>Save {s.kind}</Button>
-                  <button onClick={() => { setEditSkill(null); s.kind === 'command' ? setEditCmd({ name: s.name, description: s.description, prompt: s.body, argHint: s.argHint }) : setEditSkill({ name: s.name, description: s.description, body: s.body, enabled: true }); dismissSuggestion(s.id) }} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">Edit first</button>
-                  <button onClick={() => dismissSuggestion(s.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">Dismiss</button>
+                  <Button variant="primary" size="sm" icon="check" onClick={() => acceptSuggestion(s.id)}>{tx("Save ")}{s.kind}</Button>
+                  <button onClick={() => { setEditSkill(null); s.kind === 'command' ? setEditCmd({ name: s.name, description: s.description, prompt: s.body, argHint: s.argHint }) : setEditSkill({ name: s.name, description: s.description, body: s.body, enabled: true }); dismissSuggestion(s.id) }} className="rounded-lg border border-line px-2.5 py-1 text-[13px] font-medium text-ink-2 transition-colors hover:bg-surface-hover">{tx("Edit first")}</button>
+                  <button onClick={() => dismissSuggestion(s.id)} className="rounded-lg px-2 py-1 text-[13px] text-ink-3 transition-colors hover:text-danger">{tx("Dismiss")}</button>
                 </div>
               </div>
             ))}
@@ -75,10 +77,10 @@ export function SkillsCommands() {
       <div>
         <div className="mb-2 flex items-center justify-between">
           <div>
-            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><span className="font-mono text-accent">$</span>Skills</div>
-            <div className="text-[13px] text-ink-3">Reusable instructions you invoke with <span className="font-mono">$</span> in the composer.</div>
+            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><span className="font-mono text-accent">$</span>{tx("Skills")}</div>
+            <div className="text-[13px] text-ink-3">{tx("Reusable instructions you invoke with ")}<span className="font-mono">$</span> {tx("in the composer.")}</div>
           </div>
-          <Button variant="default" size="sm" icon="plus" onClick={() => setEditSkill({ name: '', description: '', body: '', enabled: true })}>New skill</Button>
+          <Button variant="default" size="sm" icon="plus" onClick={() => setEditSkill({ name: '', description: '', body: '', enabled: true })}>{tx("New skill")}</Button>
         </div>
         <div className="space-y-1.5">
           {skills.map((s) => (
@@ -87,19 +89,19 @@ export function SkillsCommands() {
                 <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><span className="font-mono text-ink-3">${s.name}</span></div>
                 <div className="truncate text-[13px] text-ink-3">{s.description || s.body.slice(0, 80)}</div>
               </div>
-              <Toggle label={`Enable ${s.name} skill`} checked={s.enabled} onChange={(v) => api.saveSkill({ id: s.id, enabled: v }).then(reload)} />
+              <Toggle label={tx("Enable {value0} skill", { value0: s.name })} checked={s.enabled} onChange={(v) => api.saveSkill({ id: s.id, enabled: v }).then(reload)} />
               <button onClick={() => setEditSkill({ id: s.id, name: s.name, description: s.description, body: s.body, enabled: s.enabled, trigger: s.trigger })} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink"><Icon name="edit" size={14} /></button>
               <button onClick={() => api.deleteSkill(s.id).then(reload)} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-all hover:text-danger group-hover:opacity-100"><Icon name="trash" size={14} /></button>
             </div>
           ))}
-          {skills.length === 0 && !editSkill && <div className="rounded-lg border border-dashed border-line px-3 py-4 text-center text-[13px] text-ink-3">No skills yet.</div>}
+          {skills.length === 0 && !editSkill && <div className="rounded-lg border border-dashed border-line px-3 py-4 text-center text-[13px] text-ink-3">{tx("No skills yet.")}</div>}
         </div>
         {editSkill && (
-          <Editor onCancel={() => setEditSkill(null)} onSave={saveSkill} title={editSkill.id ? 'Edit skill' : 'New skill'}>
-            <Input value={editSkill.name || ''} onChange={(e) => setEditSkill({ ...editSkill, name: e.target.value })} placeholder="Name (e.g. code-review)" />
-            <Input value={editSkill.description || ''} onChange={(e) => setEditSkill({ ...editSkill, description: e.target.value })} placeholder="Short description" />
-            <Input value={editSkill.trigger || ''} onChange={(e) => setEditSkill({ ...editSkill, trigger: e.target.value })} placeholder="Use when… (helps the agent pick this skill at the right moment)" />
-            <textarea value={editSkill.body || ''} onChange={(e) => setEditSkill({ ...editSkill, body: e.target.value })} rows={4} placeholder="Instructions. Markdown headings ## References, ## Scripts, ## Templates, ## Examples, ## Tests become structured sections." className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none focus:border-accent" />
+          <Editor onCancel={() => setEditSkill(null)} onSave={saveSkill} title={editSkill.id ? tx("Edit skill") : tx("New skill")}>
+            <Input value={editSkill.name || ''} onChange={(e) => setEditSkill({ ...editSkill, name: e.target.value })} placeholder={tx("Name (e.g. code-review)")} />
+            <Input value={editSkill.description || ''} onChange={(e) => setEditSkill({ ...editSkill, description: e.target.value })} placeholder={tx("Short description")} />
+            <Input value={editSkill.trigger || ''} onChange={(e) => setEditSkill({ ...editSkill, trigger: e.target.value })} placeholder={tx("Use when… (helps the agent pick this skill at the right moment)")} />
+            <textarea value={editSkill.body || ''} onChange={(e) => setEditSkill({ ...editSkill, body: e.target.value })} rows={4} placeholder={tx("Instructions. Markdown headings ## References, ## Scripts, ## Templates, ## Examples, ## Tests become structured sections.")} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none focus:border-accent" />
           </Editor>
         )}
       </div>
@@ -108,10 +110,10 @@ export function SkillsCommands() {
       <div>
         <div className="mb-2 flex items-center justify-between">
           <div>
-            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><span className="font-mono text-accent">/</span>Custom commands</div>
-            <div className="text-[13px] text-ink-3">Saved prompts you run with <span className="font-mono">/name</span> in the composer.</div>
+            <div className="flex items-center gap-1.5 text-[13px] font-medium text-ink"><span className="font-mono text-accent">/</span>{tx("Custom commands")}</div>
+            <div className="text-[13px] text-ink-3">{tx("Saved prompts you run with ")}<span className="font-mono">/name</span> {tx("in the composer.")}</div>
           </div>
-          <Button variant="default" size="sm" icon="plus" onClick={() => setEditCmd({ name: '', description: '', prompt: '' })}>New command</Button>
+          <Button variant="default" size="sm" icon="plus" onClick={() => setEditCmd({ name: '', description: '', prompt: '' })}>{tx("New command")}</Button>
         </div>
         <div className="space-y-1.5">
           {commands.map((c) => (
@@ -124,16 +126,16 @@ export function SkillsCommands() {
               <button onClick={() => api.deleteCommand(c.id).then(reload)} className="flex h-7 w-7 items-center justify-center rounded-md text-ink-3 opacity-0 transition-all hover:text-danger group-hover:opacity-100"><Icon name="trash" size={14} /></button>
             </div>
           ))}
-          {commands.length === 0 && !editCmd && <div className="rounded-lg border border-dashed border-line px-3 py-4 text-center text-[13px] text-ink-3">No custom commands yet.</div>}
+          {commands.length === 0 && !editCmd && <div className="rounded-lg border border-dashed border-line px-3 py-4 text-center text-[13px] text-ink-3">{tx("No custom commands yet.")}</div>}
         </div>
         {editCmd && (
-          <Editor onCancel={() => setEditCmd(null)} onSave={saveCmd} title={editCmd.id ? 'Edit command' : 'New command'}>
+          <Editor onCancel={() => setEditCmd(null)} onSave={saveCmd} title={editCmd.id ? tx("Edit command") : tx("New command")}>
             <div className="flex gap-2">
-              <Input value={editCmd.name || ''} onChange={(e) => setEditCmd({ ...editCmd, name: e.target.value.replace(/^\/+/, '') })} placeholder="name (used as /name)" />
-              <Input value={editCmd.argHint || ''} onChange={(e) => setEditCmd({ ...editCmd, argHint: e.target.value })} placeholder="arg hint (optional)" />
+              <Input value={editCmd.name || ''} onChange={(e) => setEditCmd({ ...editCmd, name: e.target.value.replace(/^\/+/, '') })} placeholder={tx("name (used as /name)")} />
+              <Input value={editCmd.argHint || ''} onChange={(e) => setEditCmd({ ...editCmd, argHint: e.target.value })} placeholder={tx("arg hint (optional)")} />
             </div>
-            <Input value={editCmd.description || ''} onChange={(e) => setEditCmd({ ...editCmd, description: e.target.value })} placeholder="Short description" />
-            <textarea value={editCmd.prompt || ''} onChange={(e) => setEditCmd({ ...editCmd, prompt: e.target.value })} rows={3} placeholder="The prompt to send (your typed args are appended)…" className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none focus:border-accent" />
+            <Input value={editCmd.description || ''} onChange={(e) => setEditCmd({ ...editCmd, description: e.target.value })} placeholder={tx("Short description")} />
+            <textarea value={editCmd.prompt || ''} onChange={(e) => setEditCmd({ ...editCmd, prompt: e.target.value })} rows={3} placeholder={tx("The prompt to send (your typed args are appended)…")} className="scroll-thin w-full resize-none rounded-lg border border-line bg-card px-3 py-2 text-[13px] text-ink outline-none focus:border-accent" />
           </Editor>
         )}
       </div>
@@ -142,13 +144,14 @@ export function SkillsCommands() {
 }
 
 function Editor({ title, children, onSave, onCancel }: { title: string; children: React.ReactNode; onSave: () => void; onCancel: () => void }) {
+  const tx = useAuthoredText()
   return (
     <div className={clsx('mt-2 space-y-2 rounded-xl border border-accent/40 bg-card p-3 shadow-card')}>
       <div className="text-[13px] font-medium text-ink-2">{title}</div>
       {children}
       <div className="flex justify-end gap-2">
-        <Button variant="ghost" size="sm" onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" size="sm" icon="check" onClick={onSave}>Save</Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>{tx("Cancel")}</Button>
+        <Button variant="primary" size="sm" icon="check" onClick={onSave}>{tx("Save")}</Button>
       </div>
     </div>
   )

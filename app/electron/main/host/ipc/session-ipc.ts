@@ -86,6 +86,7 @@ handle('sessions:import', async (_e, input: { sessionId: string; source: ImportS
   const title = (input?.title ?? '').trim() || `Imported ${source === 'codex' ? 'Codex' : 'Claude'} session`
   const sourceName = source === 'codex' ? 'Codex' : 'Claude Code'
   const t: Thread = {
+    documentSourceIds: [],
     id: randomUUID(),
     title,
     kind: 'task',

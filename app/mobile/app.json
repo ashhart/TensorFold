@@ -60,7 +60,8 @@
             "backgroundColor": "#181818"
           }
         }
-      ]
+      ],
+      "./plugins/with-tensorfold-watch.cjs"
     ]
   }
 }

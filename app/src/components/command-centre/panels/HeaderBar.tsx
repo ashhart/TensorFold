@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../../OriginalDiagnostic'
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import { relativeTime } from '../../../lib/format'
 import type { AssistantControlSnapshot, Automation, Thread } from '../../../lib/types'
 import { Icon } from '../../../lib/icons'
@@ -23,6 +25,7 @@ interface HeaderBarProps {
 }
 
 export function HeaderBar(props: HeaderBarProps) {
+  const tx = useAuthoredText()
   const {
     snapshot,
     attentionRows,
@@ -47,34 +50,34 @@ export function HeaderBar(props: HeaderBarProps) {
         <div>
           <div className="mb-1 flex items-center gap-2 text-[13px] text-ink-3">
             <Icon name="bell" size={14} />
-            <span>Operations</span>
+            <span>{tx("Operations")}</span>
             <span className="text-ink-5">/</span>
-            <span>{snapshot ? `Snapshot ${relativeTime(snapshot.generatedAt)}` : 'Loading snapshot'}</span>
+            <span>{snapshot ? tx("Snapshot {value0}", { value0: relativeTime(snapshot.generatedAt) }) : tx("Loading snapshot")}</span>
           </div>
-          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">Assistant</h1>
+          <h1 className="text-[20px] font-semibold tracking-[-0.02em] text-ink">{tx("Assistant")}</h1>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[13px] text-ink-3">
-            <span>{attentionRows.length} attention items</span>
+            <span>{attentionRows.length} {tx("attention items")}</span>
             <span className="text-ink-5">/</span>
-            <span>{pendingApprovals} approvals</span>
+            <span>{pendingApprovals} {tx("approvals")}</span>
             <span className="text-ink-5">/</span>
-            <span>{liveJobs.length} live jobs</span>
+            <span>{liveJobs.length} {tx("live jobs")}</span>
             <span className="text-ink-5">/</span>
-            <span>{activeMissions} missions</span>
+            <span>{activeMissions} {tx("missions")}</span>
             <span className="text-ink-5">/</span>
-            <span>{connectedCount}/{connectorRows.length} connectors active</span>
+            <span>{connectedCount}/{connectorRows.length} {tx("connectors active")}</span>
             <span className="text-ink-5">/</span>
             <span>{readinessLabel}</span>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="default" size="sm" icon="clock" onClick={refresh} disabled={loading}>{loading ? 'Refreshing' : 'Refresh'}</Button>
-          <Button variant="default" size="sm" icon="archive" onClick={() => latestThread && window.dispatchEvent(new CustomEvent('vontra:export', { detail: { threadId: latestThread.id } }))} disabled={!latestThread}>Export Latest</Button>
-          <Button variant="default" size="sm" icon="play" onClick={() => window.dispatchEvent(new CustomEvent('vontra:replay'))}>Replay Bundle</Button>
-          <Button variant="default" size="sm" icon="plug" aria-label="Open Sources" onClick={() => setView({ name: 'plugins' })}>Sources</Button>
-          <Button variant="primary" size="sm" icon="spark" onClick={() => primaryBrief ? void runAutomation(primaryBrief.id) : setView({ name: 'automations' })}>Run Brief</Button>
+          <Button variant="default" size="sm" icon="clock" onClick={refresh} disabled={loading}>{loading ? tx("Refreshing") : tx("Refresh")}</Button>
+          <Button variant="default" size="sm" icon="archive" onClick={() => latestThread && window.dispatchEvent(new CustomEvent('vontra:export', { detail: { threadId: latestThread.id } }))} disabled={!latestThread}>{tx("Export Latest")}</Button>
+          <Button variant="default" size="sm" icon="play" onClick={() => window.dispatchEvent(new CustomEvent('vontra:replay'))}>{tx("Replay Bundle")}</Button>
+          <Button variant="default" size="sm" icon="plug" aria-label={tx("Open Sources")} onClick={() => setView({ name: 'plugins' })}>{tx("Sources")}</Button>
+          <Button variant="primary" size="sm" icon="spark" onClick={() => primaryBrief ? void runAutomation(primaryBrief.id) : setView({ name: 'automations' })}>{tx("Run Brief")}</Button>
         </div>
       </div>
-      {error && <div className="mt-3 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{error}</div>}
+      {error && <div className="mt-3 rounded-lg border border-danger/25 bg-danger/10 px-3 py-2 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
     </div>
   )
 }

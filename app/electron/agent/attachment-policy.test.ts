@@ -66,4 +66,12 @@ assert.throws(
   /aggregate host payload limit/,
 )
 
+
+for (const status of ['processing', 'error', 'needs-reselection', 'review', 'unknown']) {
+  assert.throws(() => normalizeAttachments([{ kind: 'document', text: 'not ready', status }]), /not ready/, `the trusted host must reject ${status} rows`)
+}
+assert.throws(() => normalizeAttachments([{ kind: 'document', text: 'unreviewed OCR', extraction: { state: 'review', text: 'unreviewed OCR' } }]), /not been accepted/)
+assert.throws(() => normalizeAttachments([{ kind: 'image', dataUrl, extraction: { state: 'accepted', text: 'OCR' } }]), /must be attached as a document/)
+assert.equal(normalizeAttachments([{ kind: 'document', status: 'ready', text: '[User-reviewed OCR transcript. Recognition may contain errors.]\ncorrected handwriting', extraction: { state: 'accepted', method: 'apple-vision', text: 'corrected handwriting' } }])![0].text?.includes('corrected handwriting'), true)
+
 console.log('host attachment policy tests passed')

@@ -14,6 +14,7 @@ export interface ProviderTrustInput {
   name?: string
   source?: string
   kind?: string
+  remoteCompute?: boolean
   transport?: string
   baseUrl?: string
 }
@@ -40,6 +41,7 @@ export function isBuiltInProvider(provider: ProviderTrustInput | null | undefine
 
 /** Classify a provider; `baseUrl` is the endpoint a call will actually use, when it differs. */
 export function classifyProvider(provider: ProviderTrustInput | null | undefined, baseUrl?: string | null): ProviderTrust {
+  if (provider?.remoteCompute || provider?.id?.startsWith('cluster:')) return 'external'
   const transport = provider?.transport || 'chat-completions'
   if (transport !== 'chat-completions') return 'external'
   const urls = [provider?.baseUrl, baseUrl].map((url) => String(url ?? '').trim()).filter(Boolean)
@@ -60,4 +62,9 @@ export function pickPlanRunner<P extends ProviderTrustInput>(providers: readonly
   const list = providers ?? []
   const builtIn = list.find((provider) => isBuiltInProvider(provider) && classifyProvider(provider) === 'trusted-local')
   return builtIn ?? list.find((provider) => classifyProvider(provider) === 'trusted-local') ?? null
+}
+
+/** This opt-in changes transport reachability, never the privacy classification. */
+export function isManagedComputeProvider(provider: ProviderTrustInput): boolean {
+  return provider.remoteCompute === true && provider.kind === 'cloud' && !!provider.id?.startsWith('cluster:') && provider.source === 'custom' && (!provider.transport || provider.transport === 'chat-completions')
 }

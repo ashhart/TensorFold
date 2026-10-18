@@ -1,3 +1,6 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { useUiText } from '../lib/preferences/hooks'
+import { requestConversationSearch } from './search/search-events'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../lib/store'
@@ -38,6 +41,8 @@ function diffStatsFor(t: Thread): DiffStats | null {
 // One workspace: New task and search, pinned threads, projects with their threads, threads without
 // a project by day, a compact More group, then the engine, Models and Settings.
 export function Sidebar() {
+  const tx = useAuthoredText()
+  const text = useUiText()
   const threads = useStore((st) => st.threads)
   const projects = useStore((st) => st.projects)
   const rooms = useStore((st) => st.rooms)
@@ -146,7 +151,7 @@ export function Sidebar() {
       looseGroups: showLoose ? groupThreads(loose.filter((t) => folderOf(t).hasFolder), new Set()) : [],
       chats: showLoose ? loose.filter((t) => !folderOf(t).hasFolder) : [],
     }
-  }, [sortedThreads, projects, projectsById, rooms, tickets, query, effectiveFilter, pinned])
+  }, [sortedThreads, projects, projectsById, rooms, tickets, query, effectiveFilter, pinned, tx])
 
   const reviewTickets = useMemo(() => tickets.filter((t) => NEEDS_ATTENTION.has(t.status)).length, [tickets])
   const runningAutomations = useMemo(() => automations.filter((a) => a.runs[0]?.status === 'running').length, [automations])
@@ -220,16 +225,17 @@ export function Sidebar() {
       <div className="drag flex h-[52px] shrink-0 items-center gap-3 px-4">
         <div className="h-3 w-[58px] shrink-0" aria-hidden="true" />
         <div className="ml-auto flex items-center gap-0.5">
-          <button onClick={cycleTheme} className="no-drag flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface hover:text-ink" aria-label="Theme" title="Theme"><Icon name={themeIcon} size={16} /></button>
-          <button disabled className="no-drag flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-ink-4 opacity-45" aria-label="Back"><Icon name="back" size={16} /></button>
-          <button disabled className="no-drag flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-ink-4 opacity-45" aria-label="Forward"><Icon name="arrowRight" size={16} /></button>
+          <button onClick={cycleTheme} className="no-drag flex h-7 w-7 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-surface hover:text-ink" aria-label={tx("Theme")} title={tx("Theme")}><Icon name={themeIcon} size={16} /></button>
+          <button disabled className="no-drag flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-ink-4 opacity-45" aria-label={tx("Back")}><Icon name="back" size={16} /></button>
+          <button disabled className="no-drag flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-lg text-ink-4 opacity-45" aria-label={tx("Forward")}><Icon name="arrowRight" size={16} /></button>
         </div>
       </div>
 
       <div className="space-y-0.5 px-2 pb-1">
-        <NavRow icon="pencil" label="New task" hint="⌘N" active={view.name === 'home'} onClick={s.newTask} />
-        <NavRow icon="message" label="New chat" hint="⇧⌘N" onClick={() => void s.newChat(null)} />
-        <NavRow icon="spark" label="Bots" active={view.name === 'bots'} onClick={() => s.setView({ name: 'bots' })} />
+        <NavRow icon="pencil" label={text('common.newTask')} hint={"⌘N"} active={view.name === 'home'} onClick={s.newTask} />
+        <NavRow icon="message" label={text('common.newChat')} hint={tx("⇧⌘N")} onClick={() => void s.newChat(null)} />
+        <NavRow icon="search" label={text('common.search')} hint={tx("⇧⌘F")} onClick={() => requestConversationSearch()} />
+        <NavRow icon="spark" label={tx("Bots")} active={view.name === 'bots'} onClick={() => s.setView({ name: 'bots' })} />
         <label className="no-drag flex h-8 items-center gap-2 rounded-[10px] px-2.5 text-ink-3 transition-colors focus-within:bg-surface hover:bg-surface">
           <Icon name="search" size={16} className="shrink-0" />
           <input
@@ -237,7 +243,8 @@ export function Sidebar() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Escape') setQuery('') }}
-            placeholder="Search"
+            placeholder={tx("Filter chats by title")}
+            aria-label={tx("Filter chats by title or folder")}
             className="min-w-0 flex-1 bg-transparent text-[13px] text-ink outline-none placeholder:text-ink-3"
           />
         </label>
@@ -246,7 +253,7 @@ export function Sidebar() {
       <nav className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {pinnedThreads.length > 0 && (
           <>
-            <SectionTitle>Pinned</SectionTitle>
+            <SectionTitle>{tx("Pinned")}</SectionTitle>
             {pinnedThreads.map((t) => <ThreadRow key={t.id} t={t} {...threadRowProps(t)} />)}
           </>
         )}
@@ -289,12 +296,12 @@ export function Sidebar() {
         ))}
         {chats.length > 0 && (
           <div>
-            <SectionTitle>Chats</SectionTitle>
+            <SectionTitle>{tx("Chats")}</SectionTitle>
             {chats.map((t) => <ThreadRow key={t.id} t={t} {...threadRowProps(t)} />)}
           </div>
         )}
         {query.trim() && pinnedThreads.length === 0 && projectGroups.length === 0 && looseGroups.length === 0 && chats.length === 0 && (
-          <div className="px-2.5 py-2 text-[13px] text-ink-3">Nothing matches "{query.trim()}".</div>
+          <div className="px-2.5 py-2 text-[13px] text-ink-3">{tx("Nothing matches \"")}{query.trim()}".</div>
         )}
 
         <MoreSection
@@ -315,13 +322,13 @@ export function Sidebar() {
         <UpdatePrompt />
         {engineReady && <EngineChip active={view.name === 'models'} onOpen={() => s.setView({ name: 'models' })} />}
         <div className="flex items-center gap-0.5">
-          <div className="min-w-0 flex-1"><NavRow icon="cpu" label="Models" active={view.name === 'models'} onClick={() => s.setView({ name: 'models' })} /></div>
-          <div className="min-w-0 flex-1"><NavRow icon="settings" label="Settings" active={false} onClick={() => s.setView({ name: 'settings' })} /></div>
-          <IconButton name="sidebar" label="Collapse sidebar" onClick={() => s.toggleSidebar()} />
+          <div className="min-w-0 flex-1"><NavRow icon="cpu" label={tx("Models")} active={view.name === 'models'} onClick={() => s.setView({ name: 'models' })} /></div>
+          <div className="min-w-0 flex-1"><NavRow icon="settings" label={text('common.settings')} active={false} onClick={() => s.setView({ name: 'settings' })} /></div>
+          <IconButton name="sidebar" label={tx("Collapse sidebar")} onClick={() => s.toggleSidebar()} />
         </div>
       </div>
 
-      <div onPointerDown={startResize} className={clsx('no-drag group absolute right-0 top-0 z-20 h-full w-1.5 translate-x-1/2 cursor-col-resize')} aria-label="Resize sidebar">
+      <div onPointerDown={startResize} className={clsx('no-drag group absolute right-0 top-0 z-20 h-full w-1.5 translate-x-1/2 cursor-col-resize')} aria-label={tx("Resize sidebar")}>
         <div className="absolute right-1/2 top-0 h-full w-px bg-transparent transition-colors group-hover:bg-line-strong" />
       </div>
     </aside>

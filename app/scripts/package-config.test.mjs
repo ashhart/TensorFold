@@ -8,6 +8,8 @@ const root = fileURLToPath(new URL('..', import.meta.url))
 
 async function main() {
   const pkg = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8'))
+  assert.deepEqual(pkg.build.mac.extendInfo.NSBonjourServices, ['_tensorfold-cluster._tcp'], 'Packaged discovery declares its exact service without broad network browsing');
+  assert.match(pkg.build.mac.extendInfo.NSLocalNetworkUsageDescription, /TensorFold machines.*paired phones/, 'The OS prompt explains both reviewed local-network uses');
   assert.equal(pkg.main, 'dist-electron/main.js')
   assert.equal(pkg.packageManager, 'npm@10.9.8')
   assert.deepEqual(pkg.engines, { node: '>=22 <23', npm: '10.9.8' })
@@ -18,7 +20,11 @@ async function main() {
   assert.equal(pkg.build?.directories?.buildResources, 'build')
   assert.equal(pkg.build?.directories?.output, 'release')
   assert.equal(pkg.scripts?.preinstall, 'node scripts/check-package-manager.mjs')
-  assert.equal(pkg.scripts?.build, 'npm run install:check && node scripts/clean-build-output.mjs && vite build', 'build directly refuses hybrid dependencies and removes stale output even when npm lifecycle hooks are disabled')
+  assert.equal(pkg.scripts?.build, 'npm run install:check && node scripts/clean-build-output.mjs && vite build && node scripts/build-cluster-node.mjs', 'build directly refuses hybrid dependencies, removes stale output and builds the separate headless node even when npm lifecycle hooks are disabled')
+  const headlessBuilder = await readFile(path.join(root, 'scripts/build-cluster-node.mjs'), 'utf8')
+  assert.match(headlessBuilder, /entryPoints:\s*\['electron\/cluster-node-main\.ts'\]/)
+  assert.match(headlessBuilder, /target:\s*'node22'.*format:\s*'cjs'/s)
+  assert.match(headlessBuilder, /item\.external\s*&&\s*!item\.path\.startsWith\('node:'\)/, 'headless build refuses runtime dependencies outside Node builtins')
   assert.ok(pkg.scripts?.dev?.startsWith('npm run install:check &&'), 'dev directly enforces the package-manager guard')
   assert.ok(pkg.scripts?.start?.startsWith('npm run install:check &&'), 'start directly enforces the package-manager guard')
   assert.equal(pkg.scripts?.prebuild, undefined, 'security checks do not rely on suppressed npm pre-hooks')
@@ -30,7 +36,24 @@ async function main() {
   assert.ok(pkg.scripts?.['start:headless']?.includes('npm run build && electron . --headless-server'))
   assert.ok(pkg.scripts?.['release:manifest']?.includes('scripts/make-update-manifest.mjs'))
   assert.equal(pkg.scripts?.['deps:trusted-scripts'], 'node node_modules/electron/install.js && npm rebuild --ignore-scripts=false @lydell/node-pty', 'only the reviewed Electron downloader and package-scoped native rebuild may run explicitly')
-  assert.deepEqual(pkg.build?.files, ['dist/**/*', 'dist-electron/**/*', 'package.json', '!node_modules/kokoro-js/dist/kokoro.web.js', '!node_modules/kokoro-js/dist/kokoro.web.js.map', '!node_modules/**/pino/pretty-demo.png', '!node_modules/**/.claude{,/**/*}'])
+  assert.deepEqual(pkg.build?.files, [
+    'dist/**/*',
+    'dist-electron/**/*',
+    'package.json',
+    '!node_modules/kokoro-js/dist/kokoro.web.js',
+    '!node_modules/kokoro-js/dist/kokoro.web.js.map',
+    '!node_modules/**/pino/pretty-demo.png',
+    '!node_modules/**/.claude{,/**/*}',
+    '!node_modules/kokoro-js/dist/*.map',
+    '!node_modules/@huggingface/transformers/dist/*.map',
+    '!node_modules/onnxruntime-web/dist/*.map',
+    '!node_modules/onnxruntime-node/dist/*.map',
+    '!node_modules/@met4citizen/headtts/dictionaries/fi.txt',
+    '!node_modules/@met4citizen/headtts/modules/language-fi.mjs',
+    '!node_modules/@met4citizen/headtts/modules/headtts.mjs',
+    '!node_modules/@met4citizen/headtts/modules/headtts-node.mjs',
+    '!node_modules/@met4citizen/headtts/modules/worker-tts.mjs',
+  ], 'packaging uses only the explicitly reviewed runtime files and narrow optional dependency exclusions')
   assert.equal(pkg.name, 'tensorfold-studio')
   assert.equal(pkg.build?.asar, true)
   assert.equal(pkg.build?.forceCodeSigning, true)

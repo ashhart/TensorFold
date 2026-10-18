@@ -1,3 +1,4 @@
+import { activeEngineModelSettings } from '../../../shared/model-profiles'
 import { app } from 'electron'
 import os from 'node:os'
 import { EngineService } from '../../agent/engine/service'
@@ -37,6 +38,7 @@ export function createEngineRuntime(): EngineService {
   const binaryPath = resolveEngineBinaryPath({ packaged: app.isPackaged, resourcesPath: process.resourcesPath, appRoot: app.getAppPath(), env: process.env })
   service = new EngineService({
     binaryPath,
+    modelSettings: (model) => activeEngineModelSettings(store.settings, model),
     appHome: vontraHomeDir(),
     memoryBudgetBytes: loweredEngineMemoryBudget(os.totalmem(), process.env.TENSORFOLD_STUDIO_MEMORY_BUDGET_BYTES),
     emit: (event: EngineEvent) => { sendToRenderer('engine:event', event) },

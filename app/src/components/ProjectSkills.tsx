@@ -1,3 +1,6 @@
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 // Project-local skills with trust prompts (VST-010): repo-authored SKILL.md folders under
 // `.vontra/skills/` are listed with their review state. Untrusted and changed-since-review
 // skills never reach a run until the user trusts the CURRENT content — repo content is not
@@ -13,12 +16,13 @@ const TRUST_TINT: Record<ProjectSkillView['trust'], string> = {
   changed: 'text-warn',
 }
 const TRUST_LABEL: Record<ProjectSkillView['trust'], string> = {
-  trusted: 'trusted',
-  untrusted: 'untrusted',
-  changed: 'changed since review',
+  get trusted() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "trusted") },
+  get untrusted() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "untrusted") },
+  get changed() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "changed since review") },
 }
 
 export function ProjectSkills({ projectId }: { projectId: string }) {
+  const tx = useAuthoredText()
   const [views, setViews] = useState<ProjectSkillView[]>([])
   const [busy, setBusy] = useState<string | null>(null)
 
@@ -27,7 +31,7 @@ export function ProjectSkills({ projectId }: { projectId: string }) {
 
   const setTrust = async (view: ProjectSkillView, trusted: boolean) => {
     const bare = view.skill.id.replace(`ps_${projectId}_`, '')
-    if (trusted && !confirm(`Trust "${view.skill.name}"?\n\nThis skill lives in the repo — anyone who can commit can change it. Trusting it lets agents in THIS project follow its instructions until the content changes again.`)) return
+    if (trusted && !confirm(tx("Trust \"{value0}\"?\n\nThis skill lives in the repo — anyone who can commit can change it. Trusting it lets agents in THIS project follow its instructions until the content changes again.", { value0: view.skill.name }))) return
     setBusy(view.skill.id)
     try {
       const next = await api.trustProjectSkill({ projectId, skillId: bare, trusted })
@@ -41,7 +45,7 @@ export function ProjectSkills({ projectId }: { projectId: string }) {
   return (
     <div className="mt-4">
       <div className="mb-1.5 text-[13px] font-medium text-ink-2">
-        Project skills <span className="text-ink-4">· from .vontra/skills — repo content, trusted per version</span>
+        {tx("Project skills ")}<span className="text-ink-4">{tx("· from .vontra/skills — repo content, trusted per version")}</span>
       </div>
       <div className="space-y-1">
         {views.map((view) => (
@@ -52,8 +56,8 @@ export function ProjectSkills({ projectId }: { projectId: string }) {
               {view.skill.description && <span className="block truncate text-[13px] text-ink-3">{view.skill.description}</span>}
               <span className={`block text-[12px] ${TRUST_TINT[view.trust]}`}>
                 {TRUST_LABEL[view.trust]}
-                {view.trust === 'changed' ? ' — the file was edited after you trusted it; it stays out of runs until re-trusted' : ''}
-                {view.trust === 'untrusted' ? ' — not used by runs' : ''}
+                {view.trust === 'changed' ? tx(" — the file was edited after you trusted it; it stays out of runs until re-trusted") : ''}
+                {view.trust === 'untrusted' ? tx(" — not used by runs") : ''}
               </span>
             </span>
             {view.trust === 'trusted' ? (
@@ -62,15 +66,14 @@ export function ProjectSkills({ projectId }: { projectId: string }) {
                 disabled={busy === view.skill.id}
                 className="shrink-0 rounded-md border border-line px-2 py-1 text-[12px] text-ink-3 hover:text-danger disabled:opacity-45"
               >
-                Revoke
-              </button>
+                {tx("Revoke")}</button>
             ) : (
               <button
                 onClick={() => void setTrust(view, true)}
                 disabled={busy === view.skill.id}
                 className="shrink-0 rounded-md bg-positive/15 px-2 py-1 text-[12px] font-medium text-positive hover:bg-positive/25 disabled:opacity-45"
               >
-                {view.trust === 'changed' ? 'Re-trust' : 'Trust'}
+                {view.trust === 'changed' ? tx("Re-trust") : tx("Trust")}
               </button>
             )}
           </div>

@@ -1,3 +1,4 @@
+import { selectedResponseLocale } from '../../agent/response-language'
 import { randomUUID } from 'node:crypto'
 import { runAgent } from '../../agent/loop'
 import {
@@ -49,12 +50,14 @@ async function runReadonlyAgentScan(deps: IncidentIpcDeps, cwd: string, objectiv
   const timeoutMs = opts?.timeoutMs ?? 4 * 60_000
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   const thread: Thread = {
+    documentSourceIds: [],
     id: randomUUID(), title: 'Incident scan', kind: 'task', projectId: null,
     cwd: safeCwd, providerId: provider.id, model, createdAt: Date.now(), updatedAt: Date.now(),
     status: 'running', apiMessages: [{ role: 'user', content: objective }], timeline: [],
   }
   try {
     await runAgent({
+      responseLocale: selectedResponseLocale(store.settings.uiPreferences),
       thread, provider, model,
       approvalMode: 'readonly',
       temperature: store.settings.temperature, reasoningEffort: store.settings.reasoningEffort,

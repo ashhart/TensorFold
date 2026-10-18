@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { CONNECTOR_CATALOG } from '../../shared/connector-catalog'
+import { isWhatsAppEventInCurrentScope } from '../../shared/whatsapp-event-scope'
 import type {
   AssistantControlSnapshot,
   ConnectorDefinition,
@@ -19,6 +21,7 @@ import type {
   CalendarConnectorSettings,
   SlackConnectorSettings,
   WhatsAppBridgeConnectorSettings,
+  WhatsAppBridgeRuntimeSnapshot,
   DiscordConnectorSettings,
   MattermostConnectorSettings,
   MatrixConnectorSettings,
@@ -84,20 +87,20 @@ export const RUN_BUDGETS: RunBudgetDefinition[] = [
 ]
 
 const BASE_CONNECTORS: ConnectorDefinition[] = [
-  connector('email', 'Email', 'communication', 'pending', 'Local inbox triage, summaries, drafts, replies, and send requests with approval.', 'email', EMAIL_TOOLS),
-  connector('slack', 'Slack', 'communication', 'pending', 'Local Slack export or live workspace channels and direct messages.', 'slack', SLACK_TOOLS),
-  connector('discord', 'Discord', 'communication', 'pending', 'Live Discord channels and threads via bot token.', 'discord', []),
-  connector('mattermost', 'Mattermost', 'communication', 'pending', 'Live Mattermost channels and threads via Personal Access / bot token.', 'mattermost', MESSAGE_TOOLS),
-  connector('matrix', 'Matrix', 'communication', 'pending', 'Live Matrix rooms and threads via a homeserver access token.', 'matrix', MESSAGE_TOOLS),
-  connector('googlechat', 'Google Chat', 'communication', 'pending', 'Google Chat spaces via an incoming webhook (send) and an optional service-account token (read).', 'googlechat', MESSAGE_TOOLS),
-  connector('whatsapp', 'WhatsApp', 'communication', 'pending', 'Opt-in personal WhatsApp bridge with allowlisted senders and approval-gated replies.', 'whatsapp', []),
-  connector('imessage', 'iMessage', 'communication', 'pending', 'Opt-in local iMessage bridge contract; unavailable until an explicit bridge and contact allowlist exist.', null, []),
-  connector('telegram', 'Telegram', 'communication', 'pending', 'Opt-in Telegram bot command and delivery channel with allowlisted chats.', 'telegram', []),
-  connector('controller', 'Controller', 'system', 'pending', 'Attach current app/window context through local Accessibility capture.', null, CONTROLLER_TOOLS),
-  connector('webhook', 'Webhooks', 'communication', 'pending', 'Inbound signed localhost routes normalized into connector events.', null, []),
-  connector('docs', 'Documents', 'document', 'mock', 'Local files, PDFs, notes, and source-backed summaries.', null, DOCUMENT_TOOLS),
-  connector('browser', 'Browser', 'document', 'pending', 'Explicit current-tab snapshots and user-provided browser history exports for source-backed reads and summaries.', null, BROWSER_TOOLS),
-  connector('calendar', 'Calendar', 'calendar', 'pending', 'Schedule changes, meeting reminders, and planning signals.', 'calendar', [
+  connector('email', 'communication', 'pending', 'Local inbox triage, summaries, drafts, replies, and send requests with approval.', 'email', EMAIL_TOOLS),
+  connector('slack', 'communication', 'pending', 'Local Slack export or live workspace channels and direct messages.', 'slack', SLACK_TOOLS),
+  connector('discord', 'communication', 'pending', 'Live Discord channels and threads via bot token.', 'discord', []),
+  connector('mattermost', 'communication', 'pending', 'Live Mattermost channels and threads via Personal Access / bot token.', 'mattermost', MESSAGE_TOOLS),
+  connector('matrix', 'communication', 'pending', 'Live Matrix rooms and threads via a homeserver access token.', 'matrix', MESSAGE_TOOLS),
+  connector('googlechat', 'communication', 'pending', 'Google Chat spaces via an incoming webhook (send) and an optional service-account token (read).', 'googlechat', MESSAGE_TOOLS),
+  connector('whatsapp', 'communication', 'pending', 'Opt-in personal WhatsApp bridge with allowlisted senders and approval-gated replies.', 'whatsapp', []),
+  connector('imessage', 'communication', 'pending', 'Opt-in local iMessage bridge contract; unavailable until an explicit bridge and contact allowlist exist.', null, []),
+  connector('telegram', 'communication', 'pending', 'Opt-in Telegram bot command and delivery channel with allowlisted chats.', 'telegram', []),
+  connector('controller', 'system', 'pending', 'Attach current app/window context through local Accessibility capture.', null, CONTROLLER_TOOLS),
+  connector('webhook', 'communication', 'pending', 'Inbound signed localhost routes normalized into connector events.', null, []),
+  connector('docs', 'document', 'mock', 'Local files, PDFs, notes, and source-backed summaries.', null, DOCUMENT_TOOLS),
+  connector('browser', 'document', 'pending', 'Explicit current-tab snapshots and user-provided browser history exports for source-backed reads and summaries.', null, BROWSER_TOOLS),
+  connector('calendar', 'calendar', 'pending', 'Schedule changes, meeting reminders, and planning signals.', 'calendar', [
     tool('calendar_list', 'List upcoming calendar events.'),
     tool('calendar_summary', 'Summarise schedule changes and commitments.'),
     tool('calendar_create', 'Create a calendar event.', true),
@@ -142,12 +145,15 @@ export interface AssistantControlSnapshotOptions {
   existingMemoryCandidates?: ProjectMemoryCandidate[]
   defaultProjectId?: string | null
   now?: number
+  whatsappRuntime?: readonly WhatsAppBridgeRuntimeSnapshot[]
 }
 
 export function buildAssistantControlSnapshot(events: ConnectorEvent[], email?: EmailConnectorSettings, botControl?: BotControlSettings, controllerSettings?: ControllerSettings, calendar?: CalendarConnectorSettings, documents?: DocumentConnectorSettings, slack?: SlackConnectorSettings, browser?: BrowserConnectorSettings, imessage?: IMessageConnectorSettings, whatsapp?: WhatsAppBridgeConnectorSettings, discord?: DiscordConnectorSettings, mattermost?: MattermostConnectorSettings, matrix?: MatrixConnectorSettings, googlechat?: GoogleChatConnectorSettings, options: AssistantControlSnapshotOptions = {}): AssistantControlSnapshot {
-  const latest = [...events].sort((a, b) => b.createdAt - a.createdAt)
+  // Reapply current QR source grants to cached incoming content. Pending exact
+  // outbound review cards remain visible so their author can approve or discard.
+  const latest = events.filter((event) => event.connectorId !== 'whatsapp' || !event.threadKey.startsWith('whatsapp:') || event.direction !== 'inbound' || isWhatsAppEventInCurrentScope(event, whatsapp?.sources ?? [])).sort((a, b) => b.createdAt - a.createdAt)
   const snapshotEvents = latest.slice(0, 40)
-  const connectors = connectorDefinitions(email, botControl, controllerSettings, calendar, documents, slack, browser, imessage, whatsapp, discord, mattermost, matrix, googlechat).map((connector) => {
+  const connectors = connectorDefinitions(email, botControl, controllerSettings, calendar, documents, slack, browser, imessage, whatsapp, discord, mattermost, matrix, googlechat, options.whatsappRuntime).map((connector) => {
     const sourceEvents = latest.filter((event) => event.connectorId === connector.id)
     return {
       ...connector,
@@ -178,10 +184,10 @@ export function buildAssistantControlSnapshot(events: ConnectorEvent[], email?: 
   }
 }
 
-function connector(id: ConnectorId, name: string, kind: ConnectorDefinition['kind'], status: ConnectorDefinition['status'], description: string, transport: string | null, tools: ConnectorToolSchema[]): ConnectorDefinition {
+function connector(id: ConnectorId, kind: ConnectorDefinition['kind'], status: ConnectorDefinition['status'], description: string, transport: string | null, tools: ConnectorToolSchema[]): ConnectorDefinition {
   return {
     id,
-    name,
+    name: CONNECTOR_CATALOG[id].name,
     kind,
     status,
     description,
@@ -210,7 +216,7 @@ function personalBridgeConnector(connector: ConnectorDefinition, policy: Persona
   }
 }
 
-function connectorDefinitions(email?: EmailConnectorSettings, botControl?: BotControlSettings, controllerSettings?: ControllerSettings, calendar?: CalendarConnectorSettings, documents?: DocumentConnectorSettings, slack?: SlackConnectorSettings, browser?: BrowserConnectorSettings, imessage?: IMessageConnectorSettings, whatsapp?: WhatsAppBridgeConnectorSettings, discord?: DiscordConnectorSettings, mattermost?: MattermostConnectorSettings, matrix?: MatrixConnectorSettings, googlechat?: GoogleChatConnectorSettings): ConnectorDefinition[] {
+function connectorDefinitions(email?: EmailConnectorSettings, botControl?: BotControlSettings, controllerSettings?: ControllerSettings, calendar?: CalendarConnectorSettings, documents?: DocumentConnectorSettings, slack?: SlackConnectorSettings, browser?: BrowserConnectorSettings, imessage?: IMessageConnectorSettings, whatsapp?: WhatsAppBridgeConnectorSettings, discord?: DiscordConnectorSettings, mattermost?: MattermostConnectorSettings, matrix?: MatrixConnectorSettings, googlechat?: GoogleChatConnectorSettings, whatsappRuntime: readonly WhatsAppBridgeRuntimeSnapshot[] = []): ConnectorDefinition[] {
   const emailSettings = email ?? { sources: [], maxMessages: 0, lastSyncAt: null }
   const enabledSources = emailSettings.sources.filter((source) => source.enabled)
   const sourceErrors = enabledSources.filter((source) => source.lastError)
@@ -243,11 +249,29 @@ function connectorDefinitions(email?: EmailConnectorSettings, botControl?: BotCo
   return BASE_CONNECTORS.map((connector) => {
     if (connector.id === 'telegram') return personalBridgeConnector(connector, telegramPolicy, botControl?.telegram.polling ? 'Local polling is enabled.' : 'Local polling is off.')
     if (connector.id === 'whatsapp') {
-      const paired = (whatsapp?.sources ?? []).filter((s) => s.paired && s.enabled).length
-      const detail = paired > 0
-        ? `${paired} WhatsApp account${paired === 1 ? '' : 's'} paired via the local bridge.`
-        : 'Pair an account by scanning the QR code (WhatsApp → Linked Devices). Experimental.'
-      return personalBridgeConnector(connector, whatsappPolicy, detail)
+      const enabled = (whatsapp?.sources ?? []).filter((source) => source.enabled)
+      const runtime = whatsappRuntime.filter((state) => enabled.some((source) => source.id === state.sourceId))
+      const connected = runtime.filter((state) => state.phase === 'connected')
+      if (connected.length) {
+        const degraded = runtime.some((state) => state.phase === 'error' || state.phase === 'reconnecting')
+        return {
+          ...connector, status: 'connected', transport: 'whatsapp', tools: MESSAGE_TOOLS.filter((item) => item.name === 'message_compose'),
+          permissionStatus: degraded ? 'degraded' : 'granted',
+          permissionDetail: 'Linked device connected. Reads and sends are limited to the selected chats.',
+          description: `${connected.length} linked WhatsApp account${connected.length === 1 ? '' : 's'} connected. Experimental phone bridge.`,
+          lastEventAt: Math.max(...enabled.map((source) => source.lastEventAt ?? 0)) || null,
+        }
+      }
+      if (whatsappPolicy.optedIn) return { ...personalBridgeConnector(connector, whatsappPolicy, 'Business Cloud bot-control route configured; the phone bridge is separate.'), tools: [] }
+      const error = runtime.find((state) => state.phase === 'error')
+      const connecting = runtime.some((state) => ['connecting', 'pairing', 'reconnecting'].includes(state.phase))
+      return {
+        ...connector, status: error ? 'error' : 'pending', tools: [],
+        permissionStatus: error ? 'degraded' : 'not_configured',
+        permissionDetail: error?.lastError || (connecting ? 'Connecting the linked device.' : enabled.some((source) => source.paired) ? 'Saved device credentials; reconnect to use this account.' : 'Link your phone in Connections.'),
+        description: 'Link WhatsApp through Linked Devices without a Business API key. Experimental.',
+        error: error?.lastError ?? undefined,
+      }
     }
     if (connector.id === 'imessage') {
       const detail = imessage?.enabled

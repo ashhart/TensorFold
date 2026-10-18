@@ -1,0 +1,14 @@
+{
+  "Custom terminal commands are not available on Orchestrator projects." : "Orchestrator 項目不支持自定義終端命令。",
+  "Files stay in your draft until the current run finishes; they cannot be sent as text-only guidance." : "文件會留在草稿中，直到當前運行結束；無法作為純文本指導發送。",
+  "Layout changed for this session, but the preference could not be saved on this device." : "此會話的佈局已更改，但無法在此設備保存偏好。",
+  "Room ownership changed before dispatch. Refresh the project and try again." : "派發前房間歸屬已更改。請刷新項目並重試。",
+  "Settings saved" : "設置已保存",
+  "Some data failed to load — running with partial state." : "部分數據加載失敗 — 當前使用不完整狀態運行。",
+  "TensorFold cannot safely identify that terminal session." : "TensorFold 無法安全識別此終端會話。",
+  "That room and ticket belong to different hosts. Choose a room on the ticket owner." : "房間與工單屬於不同主機。請選擇工單所屬主機上的房間。",
+  "That room is not available for this project." : "此房間不可用於此項目。",
+  "This action could not be completed." : "無法完成此操作。",
+  "This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator." : "此遠程終端早於來源追蹤功能，TensorFold 無法安全判斷其所屬主機。請從對應 Orchestrator 重新打開。",
+  "This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode." : "此工單歸本地所有。遠程執行不能隱式移動現有工單；請在 Orchestrator 上創建，或選擇其他運行模式。"
+}

@@ -1,3 +1,5 @@
+import { OriginalDiagnostic } from '../OriginalDiagnostic'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useState } from 'react'
 import { api } from '../../lib/ipc'
 import { Icon } from '../../lib/icons'
@@ -5,6 +7,7 @@ import { Button } from '../ui'
 import type { GitRepositoryState, Project } from '../../lib/types'
 
 export function RoomGitBanner({ project, running, onReady }: { project: Project | null | undefined; running: boolean; onReady: () => void }) {
+  const tx = useAuthoredText()
   const [state, setState] = useState<GitRepositoryState | null>(null)
   const [busy, setBusy] = useState(false)
   const [initBusy, setInitBusy] = useState(false)
@@ -19,7 +22,7 @@ export function RoomGitBanner({ project, running, onReady }: { project: Project 
     setBusy(true)
     api.inspectGitRepository(project.cwd)
       .then((next) => { if (live) setState(next) })
-      .catch((e) => { if (live) setError(e?.message ?? 'Could not inspect Git repository.') })
+      .catch((e) => { if (live) setError(e?.message ?? tx("Could not inspect Git repository.")) })
       .finally(() => { if (live) setBusy(false) })
     return () => { live = false }
   }, [project?.cwd, remoteProject])
@@ -35,7 +38,7 @@ export function RoomGitBanner({ project, running, onReady }: { project: Project 
       setState(next)
       if (next.exists && next.hasCommits) onReady()
     } catch (e: any) {
-      setError(e?.message ?? 'Could not initialize Git.')
+      setError(e?.message ?? tx("Could not initialize Git."))
     } finally {
       setInitBusy(false)
     }
@@ -46,14 +49,13 @@ export function RoomGitBanner({ project, running, onReady }: { project: Project 
       <div className="flex items-start gap-2.5">
         <Icon name={busy ? 'clock' : 'warning'} size={16} className="mt-0.5 shrink-0 text-warn" />
         <div className="min-w-0 flex-1">
-          <div className="text-[13px] font-medium text-ink">{busy ? 'Checking Git...' : state?.exists ? 'Initial commit needed' : 'Initialize this repo'}</div>
+          <div className="text-[13px] font-medium text-ink">{busy ? tx("Checking Git...") : state?.exists ? tx("Initial commit needed") : tx("Initialize this repo")}</div>
           <div className="mt-0.5 text-[13px] leading-snug text-ink-3">
-            Rooms use isolated Git worktrees. This folder needs Git and an initial commit before the room can start.
-          </div>
-          {error && <div className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[13px] text-danger">{error}</div>}
+            {tx("Rooms use isolated Git worktrees. This folder needs Git and an initial commit before the room can start.")}</div>
+          {error && <div className="mt-2 rounded-lg border border-danger/30 bg-danger/10 px-2.5 py-1.5 text-[13px] text-danger">{<OriginalDiagnostic>{error}</OriginalDiagnostic>}</div>}
         </div>
         <Button size="sm" variant="primary" icon="branch" onClick={initialize} disabled={running || busy || initBusy}>
-          {initBusy ? 'Initializing...' : 'Initialize Git'}
+          {initBusy ? tx("Initializing...") : tx("Initialize Git")}
         </Button>
       </div>
     </div>

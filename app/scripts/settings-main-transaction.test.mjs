@@ -14,7 +14,7 @@ const previous = process.env.VONTRA_HOME;
 process.env.VONTRA_HOME = path.join(tmp, 'profile');
 if (!process.argv[2]) {
   try {
-    for (const mode of ['primary', 'models', 'concurrent', 'admission', 'metadata', 'apply', 'bot-pause']) {
+    for (const mode of ['primary', 'models', 'concurrent', 'admission', 'metadata', 'apply', 'bot-pause', 'remote-boundary', 'profile-prepare', 'profile-commit']) {
       const child = spawnSync(process.execPath, [import.meta.filename, mode, tmp], {
         cwd: studio,
         encoding: 'utf8',
@@ -74,11 +74,13 @@ if (!process.argv[2]) {
   };
   globalThis.__coreSettingsFixture = state;
   const fixture = path.join(tmp, 'fixture.mjs');
-  await fs.writeFile(fixture, `import path from 'node:path';export const store=globalThis.__coreSettingsFixture.store;export const saveSettings=(s)=>globalThis.__coreSettingsFixture.saveSettings(s);export const vontraPath=(...p)=>path.join(globalThis.__coreSettingsFixture.root,...p);export const makeRemoteControlToken=()=>'synthetic-token';export const handle=(c,cb)=>globalThis.__coreSettingsFixture.handlers.set(c,cb);export const requireSecurityRole=()=>{};export const auditEvent=async()=>{};export const shell={};export const getBotVmHost=()=>globalThis.__coreSettingsFixture.vmHost;`);
+  await fs.writeFile(fixture, `import path from 'node:path';export const store=globalThis.__coreSettingsFixture.store;export const saveSettings=(s,options)=>globalThis.__coreSettingsFixture.saveSettings(s,options);export const vontraHomeDir=()=>globalThis.__coreSettingsFixture.root;export const vontraPath=(...p)=>path.join(vontraHomeDir(),...p);export const makeRemoteControlToken=()=>'synthetic-token';export const handle=(c,cb)=>globalThis.__coreSettingsFixture.handlers.set(c,cb);export const requireSecurityRole=()=>{};export const auditEvent=async()=>{};export const shell={};export const getBotVmHost=()=>globalThis.__coreSettingsFixture.vmHost;`);
   const noops = path.join(tmp, 'noops.mjs');
-  const names = ['RemoteControl', 'Ssh', 'Workspace', 'Session', 'Spine', 'Mcp', 'Provider', 'Controller', 'Missions', 'Bot'];
+  const names = ['RemoteControl', 'Ssh', 'Workspace', 'Session', 'Spine', 'Mcp', 'Provider', 'GoogleWorkspace', 'Controller', 'Missions', 'Bot'];
   await fs.writeFile(noops, names.map(n => `export const register${n}Ipc=()=>{};`).join('\n') + `export const syncRemoteEventStreams=()=>{};export const sanitizeRendererThreadPatch=(x)=>x;export const openExternalSafely=async()=>{};export const modelRouterCooldownSnapshot=()=>({});export const securityControlSnapshot=()=>({});`);
   const alias = {
+    '../../store/ui-preferences': path.join(studio, 'electron/store/ui-preferences.ts'),
+    '../../store/model-helper-defaults': path.join(studio, 'electron/store/model-helper-defaults.ts'),
     '../../store': fixture,
     '../state': fixture,
     './audit': fixture,
@@ -89,7 +91,7 @@ if (!process.argv[2]) {
     './provider-runtime': noops,
     './security-controls': noops
   };
-  for (const n of ['remote-control', 'ssh', 'workspace', 'session', 'spine', 'mcp', 'provider', 'controller', 'missions', 'bot']) alias['./ipc/' + n + '-ipc'] = noops;
+  for (const n of ['remote-control', 'ssh', 'workspace', 'session', 'spine', 'mcp', 'provider', 'google-workspace', 'controller', 'missions', 'bot']) alias['./ipc/' + n + '-ipc'] = noops;
   const jiti = createJiti(path.join(studio, 'package.json'), {
     alias,
     moduleCache: false,
@@ -123,7 +125,33 @@ if (!process.argv[2]) {
     ...current,
     activeModel: name
   });
-  if (mode === 'bot-pause') {
+  if (mode === 'profile-prepare' || mode === 'profile-commit') {
+    const firstRoot = state.root, secondRoot = path.join(tmp, 'other-profile');
+    process.env.VONTRA_HOME = secondRoot;
+    await saveSettings({ ...current, activeModel: 'other-profile-model' });
+    process.env.VONTRA_HOME = firstRoot;
+    const changeProfile = () => { state.root = secondRoot; process.env.VONTRA_HOME = secondRoot; };
+    if (mode === 'profile-prepare') state.normalize = async n => { changeProfile(); return n; };
+    else state.saveSettings = async (n, options) => { assert.equal(typeof options?.validateCommit, 'function', 'IPC passes its profile fence to the protected writer'); changeProfile(); return saveSettings(n, options); };
+    await assert.rejects(() => commit(next('cross-profile-write')), /settings(?: profile)? changed/i);
+    assert.equal(state.store.settings, current, 'stale profile save never replaces the live snapshot');
+    assert.equal(state.effects, 0, 'stale profile save never applies runtime effects');
+    assert.equal((await loadSettings()).activeModel, 'other-profile-model', 'other profile settings remain untouched');
+    process.env.VONTRA_HOME = firstRoot; state.root = firstRoot;
+    assert.equal((await loadSettings()).activeModel, 'before', 'original profile settings remain untouched');
+  } else if (mode === 'remote-boundary') {
+    const remote = { enabled: true, scope: 'selected', threadIds: ['allowed-chat'], roomIds: [], revision: 3, sessions: [{ ownerKey: 'synthetic-owner', authorizationRevision: '3', target: { kind: 'chat', id: 'allowed-chat' }, lastUpdateId: 12, updatedAt: 1, recentMessageTimes: [] }] };
+    current.botControl.telegram.remote = remote;
+    state.store.settings = current;
+    const { redactSettings } = await actual.import(path.join(studio, 'electron/agent/security.ts'));
+    const renderer = redactSettings(current);
+    assert.deepEqual(renderer.botControl.telegram.remote.sessions, [], 'renderer receives no remote session state');
+    assert.deepEqual(current.botControl.telegram.remote.sessions, remote.sessions, 'redaction does not clear host sessions');
+    await commit({ ...renderer, activeModel: 'saved-other-setting', botControl: { ...renderer.botControl, telegram: { ...renderer.botControl.telegram, remote: { enabled: true, scope: 'all-eligible', threadIds: [], roomIds: [], revision: 999, sessions: [] } } } });
+    assert.deepEqual(state.store.settings.botControl.telegram.remote, remote, 'generic settings cannot expand remote access or erase replay state');
+    assert.deepEqual((await loadSettings()).botControl.telegram.remote, remote, 'owner-scoped remote policy remains durable');
+    assert.equal(state.store.settings.activeModel, 'saved-other-setting');
+  } else if (mode === 'bot-pause') {
     const preset = { id: 'bot_fixture', name: 'Fixture bot', role: 'Review', lane: 'review', providerId: 'synthetic-provider', model: 'model', executionTarget: 'vm', createdAt: 1, updatedAt: 1 };
     await commit({ ...current, agentPresets: [preset] });
     const controller = new AbortController();
@@ -207,10 +235,10 @@ if (!process.argv[2]) {
     let resume, entered;
     const gate = new Promise(r => resume = r),
       start = new Promise(r => entered = r);
-    state.saveSettings = async n => {
+    state.saveSettings = async (n, options) => {
       entered();
       await gate;
-      return saveSettings(n);
+      return saveSettings(n, options);
     };
     const pending = commit(next('after'));
     await start;
@@ -232,7 +260,7 @@ if (!process.argv[2]) {
     };
     await saveSettings(state.store.settings);
     resume();
-    await assert.rejects(() => pending, /settings changed/i);
+    await assert.rejects(() => pending, /settings(?: profile)? changed/i);
     assert.equal(state.store.settings.activeModel, 'before');
     const persisted = await loadSettings();
     assert.equal(persisted.activeModel, 'before');

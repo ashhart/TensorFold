@@ -1,5 +1,6 @@
 import { contentText } from './content.ts'
 import type { ApiMessage, Thread, TimelineItem } from './types'
+import { matchingTerms, MAX_SEARCH_QUERY_CHARS, searchExcerpt, searchTerms } from '../conversation-search/text'
 
 export interface SessionSearchOptions {
   query: string
@@ -36,7 +37,7 @@ export interface SessionReadOptions {
 
 /** Phone context must stay in its original guarded chat rather than lose its privacy marker. */
 export function canRecallThread(thread: Thread, currentThreadId?: string | null): boolean {
-  return !thread.incognito && (!thread.phoneLocalOnly || thread.id === currentThreadId)
+  return !thread.incognito && (!(thread.phoneLocalOnly || thread.googleLocalOnly) || thread.id === currentThreadId)
 }
 
 export interface SessionReadMessage {
@@ -52,8 +53,8 @@ export interface SessionReadResult {
 }
 
 export function searchSessionThreads(threads: Thread[], options: SessionSearchOptions): SessionSearchResult {
-  const query = compact(options.query)
-  const terms = queryTerms(query)
+  const query = compact(options.query).slice(0, MAX_SEARCH_QUERY_CHARS)
+  const terms = searchTerms(query)
   const limit = clampLimit(options.limit, 12, 1, 50)
   if (!terms.length) return { query, matches: [], omitted: 0 }
 
@@ -137,8 +138,7 @@ function scoreThread(thread: Thread, terms: string[]): SessionSearchMatch | null
   const sourceIds: string[] = []
   const excerpts: string[] = []
   for (const snippet of snippets) {
-    const haystack = snippet.text.toLowerCase()
-    const hits = terms.filter((term) => haystack.includes(term)).length
+    const hits = matchingTerms(snippet.text, terms).length
     if (!hits) continue
     score += hits * snippet.weight
     sourceIds.push(snippet.sourceId)
@@ -182,17 +182,8 @@ function timelineText(item: TimelineItem): string {
   ].filter(Boolean).join(' '))
 }
 
-function queryTerms(query: string): string[] {
-  return [...new Set(query.toLowerCase().split(/[^a-z0-9_/-]+/).map((term) => term.trim()).filter((term) => term.length >= 2))]
-}
-
 function excerpt(text: string, terms: string[], max = 220): string {
-  const compacted = compact(text)
-  const lower = compacted.toLowerCase()
-  const firstHit = terms.map((term) => lower.indexOf(term)).filter((index) => index >= 0).sort((a, b) => a - b)[0] ?? 0
-  const start = Math.max(0, firstHit - 60)
-  const slice = compacted.slice(start, start + max)
-  return `${start > 0 ? '…' : ''}${slice}${start + max < compacted.length ? '…' : ''}`
+  return searchExcerpt(compact(text), terms, max).excerpt
 }
 
 function compact(value: string): string {

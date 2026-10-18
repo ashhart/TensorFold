@@ -1,4 +1,6 @@
-import { memo, useMemo, useState } from 'react'
+import { MessageQuoteAction } from './composer/MessageQuotes'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { memo, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -6,6 +8,7 @@ import { remarkCitationAutolinks } from '../lib/markdown-citations'
 import { Icon, type IconName } from '../lib/icons'
 import { FileGlyph } from '../lib/fileicon'
 import { mdComponents } from '../lib/highlight'
+import { remarkBoundedMath } from './reading/math-markdown'
 import { useStore } from '../lib/store'
 import { reasoningDisplayState } from '../lib/activity-grouping'
 import { api } from '../lib/ipc'
@@ -47,7 +50,8 @@ export function StateGlyph({ state }: { state?: ToolState }) {
   return null
 }
 
-function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) {
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const tx = useAuthoredText()
   const [copied, setCopied] = useState(false)
   const copy = async () => {
     try {
@@ -61,7 +65,7 @@ function CopyButton({ text, label = 'Copy' }: { text: string; label?: string }) 
   }
   return (
     <button onClick={copy} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
-      <Icon name={copied ? 'check' : 'copy'} size={12} />{copied ? 'Copied' : label}
+      <Icon name={copied ? 'check' : 'copy'} size={12} />{copied ? tx("Copied") : label ?? tx("Copy")}
     </button>
   )
 }
@@ -75,12 +79,12 @@ function diffText(diff: DiffLine[]): string {
   }).join('\n')
 }
 
-export function UserBubble({ text, attachments }: { text: string; attachments?: Attachment[] }) {
+export function UserBubble({ text, attachments, contentRef }: { text: string; attachments?: Attachment[]; contentRef?: React.Ref<HTMLDivElement> }) {
   return (
-    <div className="flex flex-col items-end gap-1.5 fade-in">
+    <div className="flex w-full flex-col items-end gap-1.5 fade-in">
       <AttachmentChips items={attachments} />
       {text && (
-        <div className="max-w-[82%] whitespace-pre-wrap rounded-[0.8rem] bg-bubble-out px-3.5 py-2 text-[14px] leading-relaxed text-bubble-out-ink">
+        <div ref={contentRef} className="max-w-[82%] select-text whitespace-pre-wrap break-words rounded-[0.8rem] bg-bubble-out px-3.5 py-2 text-[14px] leading-relaxed text-bubble-out-ink">
           {text}
         </div>
       )}
@@ -89,6 +93,7 @@ export function UserBubble({ text, attachments }: { text: string; attachments?: 
 }
 
 export function CueBubble({ text, state }: { text: string; state?: ToolState }) {
+  const tx = useAuthoredText()
   const applied = state === 'ok'
   return (
     <div className="flex justify-end fade-in">
@@ -96,8 +101,8 @@ export function CueBubble({ text, state }: { text: string; state?: ToolState }) 
         applied ? 'border-line bg-card text-ink-2' : 'border-accent/30 bg-accent-soft text-ink')}>
         <div className="mb-1 flex items-center justify-end gap-1.5 text-[13px] font-medium text-ink-3">
           <Icon name="spark" size={11} className={applied ? 'text-ink-3' : 'text-accent'} />
-          <span>Guide</span>
-          <span className="font-normal">{applied ? 'applied' : 'queued'}</span>
+          <span>{tx("Guide")}</span>
+          <span className="font-normal">{applied ? tx("applied") : tx("queued")}</span>
         </div>
         <div className="whitespace-pre-wrap">{text}</div>
       </div>
@@ -105,7 +110,9 @@ export function CueBubble({ text, state }: { text: string; state?: ToolState }) 
   )
 }
 
-export const AssistantMessage = memo(function AssistantMessage({ text, active, meta, footer }: { text: string; active?: boolean; meta?: string; footer?: React.ReactNode }) {
+export const AssistantMessage = memo(function AssistantMessage({ text, active, meta, footer, onQuote }: { text: string; active?: boolean; meta?: string; footer?: React.ReactNode; onQuote?(selection?: string): void }) {
+  const tx = useAuthoredText()
+  const contentRef = useRef<HTMLDivElement>(null)
   const voice = useStore((s) => s.settings?.voice)
   const [speaking, setSpeaking] = useState(false)
   const segments = splitVisualizationMarkdown(text || '')
@@ -123,11 +130,11 @@ export const AssistantMessage = memo(function AssistantMessage({ text, active, m
   const stop = () => { stopSpeaking(); setSpeaking(false) }
   return (
     <div className={clsx('group relative fade-in max-w-none', simple ? 'prose-tf' : 'space-y-4')}>
-      {segments.map((segment, i) => (
+      <div ref={contentRef}>{segments.map((segment, i) => (
         segment.type === 'markdown'
-          ? <div key={i} className={simple ? undefined : 'prose-tf'}><ReactMarkdown remarkPlugins={[remarkGfm, remarkCitationAutolinks]} components={mdComponents}>{segment.text}</ReactMarkdown></div>
+          ? <div key={i} className={simple ? undefined : 'prose-tf'}><ReactMarkdown remarkPlugins={[remarkGfm, remarkCitationAutolinks, remarkBoundedMath]} components={mdComponents}>{segment.text}</ReactMarkdown></div>
           : <VisualizationCard key={i} spec={segment.spec} />
-      ))}
+      ))}</div>
       {!active && meta && !isEstimatedThroughputMeta(meta) && <div className="mt-1.5 text-[13px] leading-4 text-ink-4">{meta}</div>}
       {!active && footer && text.trim().length === 0 && <div className="mt-2">{footer}</div>}
       {!active && text.trim().length > 0 && (
@@ -135,18 +142,16 @@ export const AssistantMessage = memo(function AssistantMessage({ text, active, m
           {footer && <div className="mr-2 min-w-0 flex-1">{footer}</div>}
           <div className="flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
           <CopyButton text={text} />
+          {onQuote && <MessageQuoteAction contentRef={contentRef} onQuote={onQuote} label={tx('Quote assistant message')} />}
           {speaking ? (
             <button onClick={stop} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
-              <Icon name="stop" size={12} />Stop
-            </button>
+              <Icon name="stop" size={12} />{tx("Stop")}</button>
           ) : canSpeak ? (
             <>
               <button onClick={() => read(false)} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
-                <Icon name="speaker" size={12} />Read
-              </button>
+                <Icon name="speaker" size={12} />{tx("Read")}</button>
               <button onClick={() => read(true)} className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-line bg-card px-2 text-[13px] font-medium text-ink-2 shadow-card transition-colors hover:bg-ink-5 hover:text-ink">
-                <Icon name="spark" size={12} />Brief
-              </button>
+                <Icon name="spark" size={12} />{tx("Brief")}</button>
             </>
           ) : null}
           </div>
@@ -161,13 +166,14 @@ export const AssistantMessage = memo(function AssistantMessage({ text, active, m
 // streaming reasoning collapses to a compact "Thinking" indicator until the
 // user clicks. Undefined keeps the legacy always-expand-while-active behaviour.
 export function Reasoning({ text, active, forceExpanded }: { text: string; active?: boolean; forceExpanded?: boolean }) {
+  const tx = useAuthoredText()
   const [open, setOpen] = useState(false)
   const { expanded } = reasoningDisplayState({ open, active, forceExpanded })
   return (
     <div className="fade-in">
       <button onClick={() => setOpen((o) => !o)} aria-expanded={expanded} className="group flex items-center gap-1.5 text-[13px] text-ink-3 transition-colors hover:text-ink-2">
         <Icon name="spark" size={13} className={active ? 'text-accent' : 'text-ink-3'} />
-        <span className={active ? 'shimmer font-medium' : 'font-medium'}>{active ? 'Thinking' : 'Thought process'}</span>
+        <span className={active ? 'shimmer font-medium' : 'font-medium'}>{active ? tx("Thinking") : tx("Thought process")}</span>
         <Icon name={expanded ? 'chevronDown' : 'chevronRight'} size={13} className="opacity-60" />
       </button>
       {expanded && (
@@ -180,6 +186,7 @@ export function Reasoning({ text, active, forceExpanded }: { text: string; activ
 }
 
 export function ErrorBlock({ text }: { text: string }) {
+  const tx = useAuthoredText()
   const setView = useStore((s) => s.setView)
   const recovery = runRecovery(text)
   return (
@@ -189,7 +196,7 @@ export function ErrorBlock({ text }: { text: string }) {
         <div className="font-medium text-ink">{recovery.title}</div>
         <p className="mt-1 leading-relaxed text-ink-2">{recovery.guidance}</p>
         <details className="mt-2 text-ink-3">
-          <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">Technical details</summary>
+          <summary className="w-fit cursor-pointer rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent">{tx("Technical details")}</summary>
           <div className="mt-1.5 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-card p-2 font-mono text-[12px]">{text}</div>
         </details>
         <div className="mt-3 flex flex-wrap gap-2">
@@ -197,7 +204,7 @@ export function ErrorBlock({ text }: { text: string }) {
             if (recovery.destination === 'models') setView({ name: 'models' })
             else setView({ name: 'settings', section: recovery.destination === 'security' ? 'security' : 'models' })
           }}>{recovery.action}</button>}
-          <CopyButton text={text} label="Copy details" />
+          <CopyButton text={text} label={tx("Copy details")} />
         </div>
       </div>
     </div>
@@ -263,12 +270,14 @@ function DiffView({ diff }: { diff: DiffLine[] }) {
 // A tool call reads as a single dim line — icon · title · target ·
 // state — that expands to its diff/output inline. No card chrome; the transcript
 // stays prose-first and the tool runs recede until you want them.
-export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: boolean }) {
+export function ToolCard({ item, foldDiff, forceExpanded = false }: { item: TimelineItem; foldDiff?: boolean; forceExpanded?: boolean }) {
+  const tx = useAuthoredText()
   const isDiff = !!item.diff?.length
   const isCmd = item.tool === 'run_command'
   // Diffs (the edits you care about) open by default unless a turn's edits card already
   // lists them; noisy command output stays folded until clicked.
   const [open, setOpen] = useState(isDiff && !foldDiff)
+  const effectiveOpen = open || forceExpanded
   const resolveAppAction = useStore((s) => s.resolveAppAction)
   const view = useStore((s) => s.view)
   const threadId = view.name === 'thread' ? view.id : ''
@@ -281,6 +290,7 @@ export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: bo
     <div className="fade-in">
       <button
         onClick={() => hasBody && setOpen((o) => !o)}
+        aria-expanded={hasBody ? effectiveOpen : undefined}
         className={clsx('group flex w-full items-center gap-2 py-[3px] text-left', !hasBody && 'cursor-default')}
       >
         {FILE_TOOLS.has(item.tool || '') && item.path
@@ -290,7 +300,7 @@ export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: bo
         <code className="min-w-0 flex-1 truncate font-mono text-[13px] text-ink-3">{item.command || item.path}</code>
         {shortToolMeta(item.meta) && <span className="shrink-0 font-mono text-[12px] text-ink-4">{shortToolMeta(item.meta)}</span>}
         <span className="flex w-4 shrink-0 items-center justify-center"><StateGlyph state={item.state} /></span>
-        {hasBody && <Icon name={open ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
+        {hasBody && <Icon name={effectiveOpen ? 'chevronDown' : 'chevronRight'} size={13} className="shrink-0 text-ink-4 opacity-0 transition-opacity group-hover:opacity-100" />}
       </button>
 
       {item.approval && item.state !== 'awaiting' && (
@@ -300,7 +310,7 @@ export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: bo
         </div>
       )}
 
-      {open && hasBody && (
+      {effectiveOpen && hasBody && (
         // Opaque recessed surface (not a translucent tint): on the frosted glass
         // panels a see-through body lets the wallpaper bleed under the mono diff/
         // output text and muddies it, so the tool body stays a solid card-2.
@@ -309,7 +319,7 @@ export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: bo
             <>
               <DiffView diff={item.diff!} />
               <div className="flex justify-end border-t border-line bg-card px-2.5 py-1.5">
-                <CopyButton text={diffText(item.diff!)} label="Copy diff" />
+                <CopyButton text={diffText(item.diff!)} label={tx("Copy diff")} />
               </div>
             </>
           ) : (
@@ -335,13 +345,13 @@ export function ToolCard({ item, foldDiff }: { item: TimelineItem; foldDiff?: bo
       {settingProposal && (!settingProposal.state || settingProposal.state === 'pending') && threadId && (
         <div className="ml-[22px] mt-1.5 flex items-center gap-2 rounded-xl border border-line-strong bg-card px-3 py-2.5 shadow-card">
           <Icon name="settings" size={14} className="text-ink-2" />
-          <span className="flex-1 text-[13px] text-ink-2">Set <span className="font-medium text-ink">{String(settingProposal.payload?.key)}</span> to <span className="font-mono text-ink">{String(settingProposal.payload?.value)}</span>?</span>
-          <button onClick={() => resolveAppAction(threadId, item.id, 'dismiss')} className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">Dismiss</button>
-          <button onClick={() => resolveAppAction(threadId, item.id, 'apply')} className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">Apply</button>
+          <span className="flex-1 text-[13px] text-ink-2">{tx("Set ")}<span className="font-medium text-ink">{String(settingProposal.payload?.key)}</span> {tx("to ")}<span className="font-mono text-ink">{String(settingProposal.payload?.value)}</span>?</span>
+          <button onClick={() => resolveAppAction(threadId, item.id, 'dismiss')} className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">{tx("Dismiss")}</button>
+          <button onClick={() => resolveAppAction(threadId, item.id, 'apply')} className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-accent-ink transition-colors hover:bg-accent-strong">{tx("Apply")}</button>
         </div>
       )}
       {settingProposal && (settingProposal.state === 'applied' || settingProposal.state === 'dismissed') && (
-        <div className="ml-[22px] mt-1 text-[12px] text-ink-4">{settingProposal.state === 'applied' ? 'Applied.' : 'Dismissed.'}</div>
+        <div className="ml-[22px] mt-1 text-[12px] text-ink-4">{settingProposal.state === 'applied' ? tx("Applied.") : tx("Dismissed.")}</div>
       )}
     </div>
   )

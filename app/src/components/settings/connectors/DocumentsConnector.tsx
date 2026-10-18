@@ -1,11 +1,17 @@
+import { currentIntlLocale } from '../../../lib/preferences/current-locale'
+import { statusText } from '../../../lib/preferences/display'
+import { OriginalDiagnostic } from '../../OriginalDiagnostic'
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import { shortPath } from '../../../lib/format'
 import { BrandIcon } from '../../../lib/brand'
 import { Icon } from '../../../lib/icons'
 import { Button, Input, Segmented, Toggle } from '../../ui'
 import { Section, type SettingsSectionContext } from '../shared'
 import { ConnectorStatusChip } from './ConnectorStatusChip'
+import { DocumentLibraryPanel } from '../../documents/DocumentLibraryPanel'
 
 export function DocumentsConnector({ ctx }: { ctx: SettingsSectionContext }) {
+  const tx = useAuthoredText()
   const {
     draft,
     setDraft,
@@ -19,24 +25,23 @@ export function DocumentsConnector({ ctx }: { ctx: SettingsSectionContext }) {
   const connectorStatusMap = connectorStatus ?? {}
 
   return (
-    <Section title="Documents connector" desc="Index local documents, PDFs, and CSV/TSV/XLSX tables for source-backed reads and citation-aware summaries.">
+    <Section title={tx("Documents connector")} desc={tx("Index local documents, PDFs, and CSV/TSV/XLSX tables for source-backed reads and citation-aware summaries.")}>
       <div className="space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-line bg-card px-3.5 py-3 shadow-card">
           <div>
-            <div className="text-[13px] font-medium text-ink">{draft.documents.sources.length} source{draft.documents.sources.length === 1 ? '' : 's'} configured</div>
-            <div className="mt-0.5 text-[13px] text-ink-3">{draft.documents.lastSyncAt ? `Last sync ${new Date(draft.documents.lastSyncAt).toLocaleString()}` : 'Not synced yet'}</div>
+            <div className="text-[13px] font-medium text-ink">{tx("Configured sources: {count}", { count: draft.documents.sources.length })}</div>
+            <div className="mt-0.5 text-[13px] text-ink-3">{draft.documents.lastSyncAt ? tx("Last sync {value0}", { value0: new Date(draft.documents.lastSyncAt).toLocaleString(currentIntlLocale()) }) : tx("Not synced yet")}</div>
             <ConnectorStatusChip status={connectorStatusMap.documents} />
           </div>
           <div className="flex gap-2">
-            <Button variant="default" size="sm" icon="folder" onClick={addDocumentSource} disabled={!!documentBusy}>{documentBusy === 'add' ? 'Adding' : 'Add folder'}</Button>
-            <Button variant="primary" size="sm" icon="fileText" onClick={syncDocuments} disabled={!!documentBusy || draft.documents.sources.length === 0}>{documentBusy === 'sync' ? 'Syncing' : 'Sync documents'}</Button>
+            <Button variant="default" size="sm" icon="folder" onClick={addDocumentSource} disabled={!!documentBusy}>{documentBusy === 'add' ? tx("Adding") : tx("Add folder")}</Button>
+            <Button variant="primary" size="sm" icon="fileText" onClick={syncDocuments} disabled={!!documentBusy || draft.documents.sources.length === 0}>{documentBusy === 'sync' ? tx("Syncing") : tx("Sync documents")}</Button>
           </div>
         </div>
 
         {draft.documents.sources.length === 0 ? (
           <div className="rounded-xl border border-dashed border-line px-3.5 py-5 text-center text-[13px] text-ink-3">
-            Add a folder of PDFs, CSV/TSV/XLSX tables, text files, Markdown, JSON, or notes to make Documents available to Assistant and agent tools.
-          </div>
+            {tx("Add a folder of PDFs, CSV/TSV/XLSX tables, text files, Markdown, JSON, or notes to make Documents available to Assistant and agent tools.")}</div>
         ) : draft.documents.sources.map((source) => (
           <div key={source.id} className="rounded-xl border border-line bg-card p-3.5 shadow-card">
             <div className="flex items-start gap-3">
@@ -49,10 +54,11 @@ export function DocumentsConnector({ ctx }: { ctx: SettingsSectionContext }) {
                   className="h-8"
                 />
                 <div className="mt-1 truncate text-[13px] text-ink-3" title={source.path}>{shortPath(source.path, 5)}</div>
-                {source.lastError && <div className="mt-1 text-[13px] text-danger">{source.lastError}</div>}
+                {source.lastScan && <div className="mt-1 text-[12px] text-ink-3">{tx("Last scan: ")}{statusText(source.lastScan.status, tx)} · {source.lastScan.ready} {tx("ready · ")}{source.lastScan.failed} {tx("failed · ")}{source.lastScan.unsupported} {tx("unsupported · ")}{source.lastScan.skipped} {tx("skipped")}</div>}
+                {source.lastError && <div className="mt-1 text-[13px] text-danger">{<OriginalDiagnostic>{source.lastError}</OriginalDiagnostic>}</div>}
               </div>
-              <Toggle label={`Enable ${source.label || "document source"}`} checked={source.enabled} onChange={(enabled) => updateDocumentSource(source.id, { enabled })} />
-              <button onClick={() => removeDocumentSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label="Remove document source">
+              <Toggle label={tx("Enable {value0}", { value0: source.label || tx("document source") })} checked={source.enabled} onChange={(enabled) => updateDocumentSource(source.id, { enabled })} />
+              <button onClick={() => removeDocumentSource(source.id)} className="flex h-8 w-8 items-center justify-center rounded-lg text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger" aria-label={tx("Remove document source")}>
                 <Icon name="trash" size={15} />
               </button>
             </div>
@@ -60,12 +66,17 @@ export function DocumentsConnector({ ctx }: { ctx: SettingsSectionContext }) {
               <Segmented
                 value={source.kind}
                 onChange={(kind) => updateDocumentSource(source.id, { kind })}
-                options={[{ value: 'dir', label: 'Folder', icon: 'folder' }, { value: 'file', label: 'File', icon: 'fileText' }]}
+                options={[{ value: 'dir', label: tx("Folder"), icon: 'folder' }, { value: 'file', label: tx("File"), icon: 'fileText' }]}
               />
-              <span className="text-[12px] text-ink-3">{source.lastSyncAt ? `Synced ${new Date(source.lastSyncAt).toLocaleString()}` : 'Not indexed'}</span>
+              <span className="text-[12px] text-ink-3">{source.lastSyncAt ? tx("Synced {value0}", { value0: new Date(source.lastSyncAt).toLocaleString(currentIntlLocale()) }) : tx("Not indexed")}</span>
             </div>
           </div>
         ))}
+        <DocumentLibraryPanel
+          refreshKey={draft.documents.sources.map(source => `${source.id}:${source.path}:${source.kind}:${source.enabled}:${source.lastSyncAt ?? 0}`).join('|') + `:${draft.documents.lastSyncAt ?? 0}:${documentBusy}`}
+          busy={!!documentBusy}
+          onRetry={syncDocuments}
+        />
       </div>
     </Section>
   )

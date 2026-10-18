@@ -1,3 +1,8 @@
+import { statusText } from '../lib/preferences/display'
+import { OriginalDiagnostic } from './OriginalDiagnostic'
+import { authoredText } from '../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../lib/store'
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -7,11 +12,11 @@ import { formatUsageTokens } from '../lib/provider-usage'
 import { Button } from './ui'
 
 const ACTION_LABEL: Record<ContextPressureAction, string> = {
-  continue: 'Continue',
-  summarize_next: 'Summarize next',
-  compact_now: 'Compact now',
-  reduce_pins: 'Reduce pins',
-  split_thread: 'Split thread',
+  get continue() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Continue") },
+  get summarize_next() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Summarize next") },
+  get compact_now() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Compact now") },
+  get reduce_pins() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Reduce pins") },
+  get split_thread() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Split thread") },
 }
 
 const STATUS_CLASS: Record<ContextPressureStatus, string> = {
@@ -23,6 +28,7 @@ const STATUS_CLASS: Record<ContextPressureStatus, string> = {
 }
 
 export function ContextPressure() {
+  const tx = useAuthoredText()
   const [snapshot, setSnapshot] = useState<ContextPressureSnapshot | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -43,7 +49,7 @@ export function ContextPressure() {
     void refresh()
   }, [])
 
-  const localThreads = useMemo(() => snapshot?.threads.filter((thread) => thread.kind === 'local') ?? [], [snapshot])
+  const localThreads = useMemo(() => snapshot?.threads.filter((thread) => thread.kind === 'local') ?? [], [snapshot, tx])
   const primary = localThreads[0] ?? snapshot?.threads[0] ?? null
   const registry = snapshot?.registry ?? []
 
@@ -53,49 +59,48 @@ export function ContextPressure() {
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-[13px] font-semibold text-ink">
             <Icon name="cpu" size={15} className="text-ink-3" />
-            <span>Context pressure</span>
+            <span>{tx("Context pressure")}</span>
           </div>
           <div className="mt-1 text-[13px] text-ink-3">
-            {snapshot ? `${snapshot.totals.localThreads} local threads / ${formatTokens(snapshot.totals.estimatedTokens)} estimated` : 'Local model telemetry'}
+            {snapshot ? tx("{value0} local threads / {value1} estimated", { value0: snapshot.totals.localThreads, value1: formatTokens(snapshot.totals.estimatedTokens) }) : tx("Local model telemetry")}
           </div>
         </div>
         <Button size="xs" variant="ghost" icon="clock" onClick={refresh} disabled={loading}>
-          {loading ? 'Refreshing' : 'Refresh'}
+          {loading ? tx("Refreshing") : tx("Refresh")}
         </Button>
       </div>
 
       {error && (
         <div className="mt-3 rounded-lg border border-danger/25 bg-danger/10 p-2.5 text-[13px] leading-snug text-danger">
-          {error}
+          {<OriginalDiagnostic>{error}</OriginalDiagnostic>}
         </div>
       )}
 
       {!snapshot && !error && (
         <div className="mt-3 rounded-lg bg-ink-5 px-3 py-2.5 text-[13px] text-ink-3">
-          {loading ? 'Estimating context pressure...' : 'No pressure snapshot loaded.'}
+          {loading ? tx("Estimating context pressure...") : tx("No pressure snapshot loaded.")}
         </div>
       )}
 
       {snapshot && (
         <>
           <div className="mt-3 grid grid-cols-3 gap-2">
-            <PressureStat label="Max pressure" value={formatPercent(snapshot.totals.maxPressureRatio)} detail={primary?.model ?? 'No local model'} />
-            <PressureStat label="Pinned" value={formatTokens(snapshot.totals.pinnedTokens)} detail="Pinned + recent" />
-            <PressureStat label="Summarizable" value={formatTokens(snapshot.totals.summarizableTokens)} detail="Foldable middle" />
+            <PressureStat label={tx("Max pressure")} value={formatPercent(snapshot.totals.maxPressureRatio)} detail={primary?.model ?? 'No local model'} />
+            <PressureStat label={tx("Pinned")} value={formatTokens(snapshot.totals.pinnedTokens)} detail="Pinned + recent" />
+            <PressureStat label={tx("Summarizable")} value={formatTokens(snapshot.totals.summarizableTokens)} detail="Foldable middle" />
           </div>
 
           {primary ? (
             <PrimaryThread thread={primary} />
           ) : (
             <div className="mt-3 rounded-lg bg-ink-5 px-3 py-2.5 text-[13px] text-ink-3">
-              No local-model thread history yet.
-            </div>
+              {tx("No local-model thread history yet.")}</div>
           )}
 
           <div className="mt-4">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[13px] font-medium text-ink-2">Model registry</div>
-              <div className="text-[12px] text-ink-4">{registry.length} local profiles</div>
+              <div className="text-[13px] font-medium text-ink-2">{tx("Model registry")}</div>
+              <div className="text-[12px] text-ink-4">{registry.length} {tx("local profiles")}</div>
             </div>
             <div className="space-y-1.5">
               {registry.slice(0, 4).map((profile) => (
@@ -110,8 +115,7 @@ export function ContextPressure() {
               ))}
               {registry.length === 0 && (
                 <div className="rounded-lg bg-ink-5 px-3 py-2.5 text-[13px] text-ink-3">
-                  Add a local provider to populate the registry.
-                </div>
+                  {tx("Add a local provider to populate the registry.")}</div>
               )}
             </div>
           </div>
@@ -122,6 +126,7 @@ export function ContextPressure() {
 }
 
 function PrimaryThread({ thread }: { thread: ContextPressureThread }) {
+  const tx = useAuthoredText()
   const pct = Math.min(100, Math.round(thread.pressureRatio * 100))
   return (
     <div className="mt-3 rounded-lg bg-card-2 p-3">
@@ -130,11 +135,11 @@ function PrimaryThread({ thread }: { thread: ContextPressureThread }) {
           <div className="flex items-center gap-2">
             <div className="truncate text-[13px] font-medium text-ink">{thread.title}</div>
             <span className={clsx('shrink-0 rounded-md px-1.5 py-0.5 text-[12px] font-medium capitalize', STATUS_CLASS[thread.status])}>
-              {thread.status}
+              {statusText(thread.status, tx)}
             </span>
           </div>
           <div className="mt-0.5 truncate text-[13px] text-ink-4">
-            {thread.providerName} / {thread.model ?? 'default'} / {timeAgo(thread.updatedAt)}
+            {thread.providerName} / {thread.model ?? tx("default")} / {timeAgo(thread.updatedAt)}
           </div>
         </div>
         <div className="shrink-0 text-right">
@@ -148,14 +153,14 @@ function PrimaryThread({ thread }: { thread: ContextPressureThread }) {
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-2 text-[13px]">
-        <GuidanceBlock title="Pinned" value={formatTokens(thread.guidance.pinnedTokens + thread.guidance.recentTokens)} items={thread.guidance.pinned} />
-        <GuidanceBlock title="Summarizable" value={formatTokens(thread.guidance.summarizableTokens)} items={thread.guidance.summarizable} />
+        <GuidanceBlock title={tx("Pinned")} value={formatTokens(thread.guidance.pinnedTokens + thread.guidance.recentTokens)} items={thread.guidance.pinned} />
+        <GuidanceBlock title={tx("Summarizable")} value={formatTokens(thread.guidance.summarizableTokens)} items={thread.guidance.summarizable} />
       </div>
 
       <div className="mt-3 rounded-lg bg-ink-5 px-3 py-2.5">
         <div className="flex items-center justify-between gap-2">
           <span className="text-[13px] font-medium text-ink">{ACTION_LABEL[thread.guidance.recommendedAction]}</span>
-          <span className="text-[12px] text-ink-4">Tools {formatTokens(thread.guidance.toolTokens)}</span>
+          <span className="text-[12px] text-ink-4">{tx("Tools ")}{formatTokens(thread.guidance.toolTokens)}</span>
         </div>
         <div className="mt-1 text-[13px] leading-snug text-ink-3">{thread.guidance.reason}</div>
         <div className="mt-1 text-[13px] leading-snug text-ink-4">{thread.guidance.cacheHint}</div>
@@ -165,6 +170,7 @@ function PrimaryThread({ thread }: { thread: ContextPressureThread }) {
 }
 
 function GuidanceBlock({ title, value, items }: { title: string; value: string; items: string[] }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0 rounded-lg bg-ink-5 px-2.5 py-2">
       <div className="flex items-center justify-between gap-2">
@@ -181,6 +187,7 @@ function GuidanceBlock({ title, value, items }: { title: string; value: string; 
 }
 
 function PressureStat({ label, value, detail }: { label: string; value: string; detail: string }) {
+  const tx = useAuthoredText()
   return (
     <div className="min-w-0 rounded-lg bg-ink-5 px-2.5 py-2">
       <div className="truncate text-[12px] text-ink-4">{label}</div>
@@ -199,10 +206,10 @@ const formatTokens = formatUsageTokens
 function timeAgo(ts: number) {
   const delta = Math.max(0, Date.now() - ts)
   const minutes = Math.floor(delta / 60_000)
-  if (minutes < 1) return 'now'
-  if (minutes < 60) return `${minutes}m ago`
+  if (minutes < 1) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "now")
+  if (minutes < 60) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}m ago", { value0: String(minutes) })
   const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours}h ago`
+  if (hours < 24) return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}h ago", { value0: String(hours) })
   const days = Math.floor(hours / 24)
-  return `${days}d ago`
+  return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "{value0}d ago", { value0: String(days) })
 }

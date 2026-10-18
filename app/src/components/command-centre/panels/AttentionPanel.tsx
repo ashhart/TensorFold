@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../../lib/preferences/useAuthoredText'
 import type { Dispatch, SetStateAction } from 'react'
 import clsx from 'clsx'
 import { relativeTime } from '../../../lib/format'
@@ -15,13 +16,14 @@ interface AttentionPanelProps {
 }
 
 export function AttentionPanel(props: AttentionPanelProps) {
+  const tx = useAuthoredText()
   const { attentionRows, selected, setSelectedId, awayBriefRows, awayOpen, toggleAwayOpen } = props
 
   return (
     <>
-      <Panel title="Attention Inbox" icon="bell" action={`${attentionRows.length} open`}>
+      <Panel title={tx("Attention Inbox")} icon="bell" action={`${attentionRows.length} open`}>
         <div className="divide-y divide-line">
-          {attentionRows.length === 0 ? <EmptyState icon="check" title="Inbox clear" detail="No connector, ticket, or automation signals need action." /> : attentionRows.map((row) => (
+          {attentionRows.length === 0 ? <EmptyState icon="check" title={tx("Inbox clear")} detail="No connector, ticket, or automation signals need action." /> : attentionRows.map((row) => (
             <button
               key={row.id}
               onClick={() => { setSelectedId(row.id); row.onOpen?.() }}
@@ -43,10 +45,10 @@ export function AttentionPanel(props: AttentionPanelProps) {
         </div>
       </Panel>
 
-      <DisclosurePanel title="Since You Were Away" icon="clock" badge={awayBriefRows.length ? `24h / ${awayBriefRows.length}` : 'quiet'} isOpen={awayOpen} onToggle={toggleAwayOpen}>
+      <DisclosurePanel title={tx("Since You Were Away")} icon="clock" badge={awayBriefRows.length ? `24h / ${awayBriefRows.length}` : 'quiet'} isOpen={awayOpen} onToggle={toggleAwayOpen}>
         <div className="divide-y divide-line">
           {awayBriefRows.length === 0 ? (
-            <EmptyState icon="check" title="No notable changes" detail="No failures, approvals, connector events, or active work changed in the last 24 hours." />
+            <EmptyState icon="check" title={tx("No notable changes")} detail="No failures, approvals, connector events, or active work changed in the last 24 hours." />
           ) : awayBriefRows.map((row) => (
             <div key={row.id} className="px-3 py-3">
               <div className="flex items-start gap-3">
@@ -60,7 +62,7 @@ export function AttentionPanel(props: AttentionPanelProps) {
                   <div className="mt-1.5 line-clamp-2 text-[13px] leading-snug text-ink-2">{row.detail}</div>
                   {row.onOpen && (
                     <div className="mt-2 flex justify-end">
-                      <Button variant={row.tone === 'critical' ? 'default' : 'ghost'} size="xs" icon="arrowRight" onClick={row.onOpen}>{row.actionLabel ?? 'Open'}</Button>
+                      <Button variant={row.tone === 'critical' ? 'default' : 'ghost'} size="xs" icon="arrowRight" onClick={row.onOpen}>{row.actionLabel ?? tx("Open")}</Button>
                     </div>
                   )}
                 </div>

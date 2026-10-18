@@ -1,4 +1,5 @@
 import { CHAT_TOOL_SCHEMAS, TOOL_SCHEMAS } from './tool-schemas'
+import { GOOGLE_WORKSPACE_READ_TOOL_NAMES } from './google-workspace-tools'
 
 export type ToolRegistryScope = 'agent' | 'chat'
 
@@ -29,6 +30,7 @@ export interface BuildStaticToolRegistryOptions {
 // renderer) are safe to auto-run. create_project/create_room/create_kanban_ticket
 // mutate app state and stay approval-gated.
 export const READ_ONLY_TOOL_NAMES = new Set([
+  ...GOOGLE_WORKSPACE_READ_TOOL_NAMES,
   'ask_user',
   'phone_observe',
   'list_dir',

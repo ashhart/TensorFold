@@ -1,3 +1,12 @@
+import { createMockClusterApi } from './clusters'
+import { validateDocumentSourceIds } from '../../../shared/document-collections'
+import { createMockModelQualificationApi } from './model-qualification'
+import { createMockWorkspaceBackupApi } from './workspace-backup'
+import { createMockReadableExportApi } from './readable-export'
+import { createMockConversationSearchApi } from './conversation-search'
+import { createMockDocumentLibraryApi } from './document-library'
+import { createMockGoogleWorkspaceApi } from './google-workspace'
+import { createMockTelegramRemoteApi } from './telegram-remote'
 import { parseThreadMemoryPolicy, threadMemoryPolicyRevision, assertThreadMemoryTransport } from '../../../shared/thread-memory-policy'
 import { modelForReadiness } from '../../../shared/model-readiness'
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, DiffLine, Settings, StartRunPayload, Thread, TimelineItem, Project, Room, RoomEventItem, RoomMemoryEntry, RoomStreamEvent, Ticket, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitStatus, TokenUsageSnapshot, TokenUsageWindow, TokenUsageWindowKey, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, AppUpdateStatus, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSyncResult, EmailThreadResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, Skill, Command, McpServerConfig, McpServerSnapshot, McpSnapshot, McpToolCallResult, McpToolDefinition, ControllerSnapshot, ControllerStatus, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookDeliveryRecord, WebhookEndpoint, WebhookSnapshot, RemoteControlPairingInfo, RemoteControlStatus, RemoteControlWorkSnapshot, SecurityControlSnapshot, SecurityPurgeResult, CliDefinition, CliSession, CliToolStatus } from '../types'
@@ -14,6 +23,7 @@ import { filterMockBrowser, filterMockCalendar, filterMockDocuments, filterMockE
 import { activeOnly, createMockLocalPrLoop, mockArchive, mockArchiveSnapshot, mockBlockedCommandReason, mockGitHygieneReport, mockLocalMemoryCounts, mockMcpSnapshot, mockMissionInspection, mockMissionSnapshot, mockRemotePairingInfo, mockRemoteStatus, mockRemoteWorkSnapshot, mockRestore, mockSecurityControls, mockWebhookSnapshot, redactedMockSettings, updateMockMission } from './runtime'
 import { createMockKnowledgeApi } from './api-knowledge'
 import { createMockEngineApi } from './engine'
+import { createMockModelBenchmarkApi } from './model-benchmark'
 import { createMockPhoneApi } from './phone'
 import { createMockWorktreeApi } from './worktrees'
 import { demoApprovalThread, demoRunStateEvents, mockGitDiff, mockGitStatus } from './workspace-fixtures'
@@ -21,10 +31,11 @@ import { captureBotConfig } from '../../../shared/bot-policy'
 import { createMockBotVmApi } from './bot-vm'
 import { createMockUserQuestionApi } from './user-question'
 import { createMockBotRecipeApi } from './bot-recipes'
+import { createMockWhatsAppApi } from './whatsapp'
 
 function mockDiscordSource(label: string): DiscordSource {
   const now = Date.now()
-  return { id: uid(), label: label || 'Discord server', token: '', allowedChannels: '', enabled: true, lastSyncAt: null, lastError: null, createdAt: now, updatedAt: now }
+  return { id: uid(), label: label || 'Discord server', token: '', allowedChannels: '', enabled: false, lastSyncAt: null, lastError: null, createdAt: now, updatedAt: now }
 }
 
 function mockMattermostSource(label: string): MattermostSource {
@@ -65,14 +76,28 @@ function preserveMaskedSourceSecrets<T extends { id: string }>(incoming: T[], cu
 
 export function createMockApi(): TensorFoldStudioApi {
   const { mockEngineReadiness, ...engineApi } = createMockEngineApi()
-  // Demo-mode WhatsApp status subscribers, so startWhatsAppPairing can push a "not available in
-  // the browser" status that clears the renderer's transient "Connecting…" pairing state.
   let demoRunStatesSent = false
-  const whatsappStatusSubs = new Set<(payload: { sourceId: string; paired?: boolean; lastError?: string | null }) => void>()
   const remoteTerminalSessions: CliSession[] = []
   const desktopModeSubs = new Set<(settings: Settings) => void>()
   return {
+    modelHelperRun: async () => { throw new Error('Local helper jobs require an eligible desktop model; browser preview does not run them.') },
+    modelHelperCancel: async () => {},
+    reviewRunOutcome: async () => { throw new Error('Outcome review requires a completed desktop run.') },
+    getComposerDraft: async () => { throw new Error('Persistent drafts require the desktop app.') },
+    saveComposerDraft: async () => { throw new Error('Persistent drafts require the desktop app.') },
+    clearComposerDraft: async () => { throw new Error('Persistent drafts require the desktop app.') },
+    onComposerDraftFlush: () => () => {},
+    onComposerDraftReset: () => () => {},
+    acknowledgeComposerDraftFlush: async () => {},
+    setDeviceWatchSpeech: async () => { throw new Error('Watch speech permissions require the desktop app.') },
+    getAttachmentTextCapability: async () => ({ available: false, method: 'apple-vision', reason: 'Local text extraction requires the macOS desktop app.', maxBytes: 20 * 1024 * 1024, maxPages: 8 }),
+    extractAttachmentText: async () => ({ ok: false, error: 'Local text extraction requires the macOS desktop app.' }),
+    prepareMessageEdit: async () => { throw new Error('Editing saved messages requires the desktop app.') },
+    editMessage: async () => { throw new Error('Editing saved messages requires the desktop app.') },
     ...createMockBotRecipeApi(),
+    ...createMockWhatsAppApi(() => mockState.settings, uid),
+    ...createMockGoogleWorkspaceApi(uid),
+    ...createMockTelegramRemoteApi(() => mockState.settings, () => mockState.threads, () => mockState.mockRooms),
     ...createMockBotVmApi(),
     ...createMockUserQuestionApi(),
     ...createMockPhoneApi(),
@@ -519,6 +544,7 @@ export function createMockApi(): TensorFoldStudioApi {
     createThread: async (cwd, kind = 'task', projectId = null, _commandId, incognito = false) => {
       const proj = projectId ? mockState.projects.find((p) => p.id === projectId) : null
       const t = thread(kind === 'chat' ? 'New chat' : 'New task', cwd || proj?.cwd || mockState.settings.defaultCwd || '~', 0, 'idle', [], kind, projectId)
+      t.documentSourceIds = []
       if (incognito) t.incognito = true
       mockState.threads = [t, ...mockState.threads]
       return t
@@ -528,7 +554,7 @@ export function createMockApi(): TensorFoldStudioApi {
       if (!preset) throw new Error('Bot not found.')
       const bot = captureBotConfig(preset, mockState.settings.providers)
       const t = thread(`${bot.name} chat`, bot.executionTarget === 'vm' ? '/workspace' : '', 0, 'idle', [], 'chat', null)
-      Object.assign(t, { bot, providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model, workspace: null })
+      Object.assign(t, { documentSourceIds: [], bot, providerId: bot.providerId, providerAccountId: bot.providerAccountId, model: bot.model, workspace: null })
       mockState.threads = [t, ...mockState.threads]
       return t
     },
@@ -551,7 +577,16 @@ export function createMockApi(): TensorFoldStudioApi {
       Object.assign(thread, { memoryPolicy: requested, memoryPolicyRevision: expectedRevision + 1 })
       return thread
     },
-    patchThread: async (id, patch) => { const t = mockState.threads.find((x) => x.id === id)!; if (t) Object.assign(t, patch); return t },
+    patchThread: async (id, patch) => {
+      const t = mockState.threads.find((x) => x.id === id)!
+      if (t && Object.prototype.hasOwnProperty.call(patch, 'documentSourceIds')) {
+        const ids = validateDocumentSourceIds(patch.documentSourceIds)
+        if (!ids || t.status === 'running' || t.archivedAt || t.bot || t.orchestratorHostId || t.workspace?.kind === 'ssh' || t.phoneLocalOnly || t.googleLocalOnly) throw new Error('Stop the eligible local chat before choosing document collections.')
+        if (ids.some(id => !mockState.settings.documents.sources.some(source => source.id === id && source.enabled))) throw new Error('Choose enabled document collections configured in this profile.')
+      }
+      if (t) Object.assign(t, patch)
+      return t
+    },
     setThreadWorkspace: async (id, workspace, cwd) => {
       const t = mockState.threads.find((x) => x.id === id)!
       if (t) { t.workspace = workspace; t.cwd = workspace?.path ?? cwd ?? t.cwd }
@@ -812,13 +847,13 @@ export function createMockApi(): TensorFoldStudioApi {
       mockState.settings.slack = { ...mockState.settings.slack, sources: mockState.settings.slack.sources.filter((source) => source.id !== id) }
       return mockState.settings.slack
     },
-    syncSlack: async (): Promise<SlackSyncResult> => {
+    syncSlack: async (id?: string): Promise<SlackSyncResult> => {
       const syncedAt = Date.now()
-      mockState.settings.slack = { ...mockState.settings.slack, lastSyncAt: syncedAt, sources: mockState.settings.slack.sources.map((source) => ({ ...source, lastSyncAt: syncedAt, updatedAt: syncedAt, lastError: null })) }
-      const messages = filterMockSlack({ limit: mockState.settings.slack.maxMessages })
+      mockState.settings.slack = { ...mockState.settings.slack, lastSyncAt: syncedAt, sources: mockState.settings.slack.sources.map((source) => !id || source.id === id ? { ...source, lastSyncAt: syncedAt, updatedAt: syncedAt, lastError: null } : source) }
+      const messages = filterMockSlack({ limit: mockState.settings.slack.maxMessages }).filter((message) => !id || message.sourceId === id)
       const events: ConnectorEvent[] = messages.slice(0, 6).map((message) => ({ id: uid(), connectorId: 'slack', pluginName: 'Slack', action: 'message_received', direction: 'inbound', classification: 'communication', priority: 'normal', trustLevel: 'notify', requiresApproval: false, approvalId: null, approvalStatus: null, resolvedAt: null, resolvedBy: null, title: `#${message.channelName} ${message.senderName || 'Unknown'}`, summary: message.snippet, actor: `#${message.channelName}`, threadKey: mockSlackSourceId(message), payloadKeys: ['channel', 'message', 'source'], sources: [mockSlackSourceRef(message)], createdAt: syncedAt }))
       mockState.mockConnectorEvents = [...events, ...mockState.mockConnectorEvents].slice(0, 80)
-      return { events, messages: messages.length, sources: mockState.settings.slack.sources, syncedAt }
+      return { events, messages: messages.length, sources: mockState.settings.slack.sources.filter((source) => !id || source.id === id), syncedAt }
     },
     listSlack: async (opts) => filterMockSlack(opts),
     readSlack: async (id) => {
@@ -1026,17 +1061,6 @@ export function createMockApi(): TensorFoldStudioApi {
     listImessage: async () => [],
     readImessage: async () => null,
     openFullDiskAccess: async () => {},
-    addWhatsAppSource: async () => ({ sources: [], lastSyncAt: null }),
-    removeWhatsAppSource: async () => ({ sources: [], lastSyncAt: null }),
-    // Browser demo mode can't run the WhatsApp bridge, so pairing reports a clear status back to
-    // any onWhatsAppStatus subscriber instead of leaving the UI stuck on "Connecting…" forever.
-    startWhatsAppPairing: async (id: string) => {
-      setTimeout(() => { for (const cb of whatsappStatusSubs) cb({ sourceId: id, paired: false, lastError: 'WhatsApp pairing is unavailable in browser demo mode.' }) }, 300)
-      return { started: false }
-    },
-    disconnectWhatsApp: async () => ({ ok: true }),
-    onWhatsAppQr: () => () => {},
-    onWhatsAppStatus: (cb) => { whatsappStatusSubs.add(cb); return () => whatsappStatusSubs.delete(cb) },
     pollTelegram: async () => {
       mockState.settings.botControl.telegram = { ...mockState.settings.botControl.telegram, lastPollAt: Date.now(), lastError: null }
       return { ok: true, processed: 0, skipped: 0, error: null, lastUpdateId: mockState.settings.botControl.telegram.lastUpdateId }
@@ -1540,6 +1564,17 @@ export function createMockApi(): TensorFoldStudioApi {
     onIncident: () => () => {},
     ...createMockKnowledgeApi(),
     ...engineApi,
+    ...createMockModelBenchmarkApi(),
+    ...createMockReadableExportApi(),
+    ...createMockWorkspaceBackupApi(),
+    ...createMockClusterApi(),
+    ...createMockModelQualificationApi(),
+    ...createMockConversationSearchApi(() => mockState.threads),
+    ...createMockDocumentLibraryApi(() => mockState.settings),
+    getInputHistory: async () => ({ revision: 0, entries: [], partial: false }),
+    clearInputHistory: async () => ({ revision: 0, entries: [], partial: false }),
+    recallInputHistory: async () => { throw new Error('Input history needs a local desktop conversation.') },
+    prepareMessageQuote: async () => { throw new Error('Quoting needs a local desktop conversation.') },
     // Browser demo: pretend the plain shell + Claude Code CLIs are installed (no real PATH probe here).
     listClis: async () => [
       { id: 'shell', name: 'Shell', short: 'zsh', command: null, resumeCommand: null, color: '#8B8B97', icon: 'terminal', builtin: true },

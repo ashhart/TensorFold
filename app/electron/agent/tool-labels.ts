@@ -23,7 +23,7 @@ export function normalizePersonalMessageConnector(value: unknown): PersonalMessa
     : null
 }
 
-export function personalMessageDraftEvent(input: { connectorId: PersonalMessageConnectorId; target: string; body: string; threadKey?: string }): ConnectorEvent {
+export function personalMessageDraftEvent(input: { connectorId: PersonalMessageConnectorId; target: string; body: string; threadKey?: string; accountId?: string }): ConnectorEvent {
   const wantsReply = Boolean(input.threadKey)
   const action = wantsReply ? 'message_reply_requested' : 'message_send_requested'
   return {
@@ -44,11 +44,12 @@ export function personalMessageDraftEvent(input: { connectorId: PersonalMessageC
     summary: `${wantsReply ? 'Reply request' : 'Send request'} to ${input.target}: ${compactToolText(input.body, 220)}. No external message is sent until approval.`,
     actor: input.target,
     threadKey: input.threadKey || `${input.connectorId}:message:${input.target}`,
-    payloadKeys: ['connector_id', 'target', 'body', ...(input.threadKey ? ['thread_key'] : [])],
+    payloadKeys: ['connector_id', 'target', 'body', ...(input.accountId ? ['account_id'] : []), ...(input.threadKey ? ['thread_key'] : [])],
     payload: {
       connectorId: input.connectorId,
       target: input.target,
       body: input.body,
+      ...(input.accountId ? { accountId: input.accountId } : {}),
       ...(input.threadKey ? { threadKey: input.threadKey } : {}),
     },
     createdAt: Date.now(),

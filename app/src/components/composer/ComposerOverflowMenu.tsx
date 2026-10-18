@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { MemorySettings, type MemorySettingsProps } from './MemorySettings'
 import { useState } from 'react'
 import clsx from 'clsx'
@@ -42,10 +43,11 @@ function Row({ icon, label, value, onClick, nav, active, disabled }: { icon: Ico
 }
 
 function Panel({ workspace, voice, incognito, memory, onUseSkill, modes, close }: ComposerOverflowProps & { close: () => void }) {
+  const tx = useAuthoredText()
   const [view, setView] = useState<View>('main')
-  if (view === 'memory' && memory) return <div><button type="button" onClick={() => setView('main')} className="mb-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-ink-2 hover:bg-ink-5"><Icon name="back" size={14} />Memory</button><MemorySettings {...memory} /></div>
+  if (view === 'memory' && memory) return <div><button type="button" onClick={() => setView('main')} className="mb-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-ink-2 hover:bg-ink-5"><Icon name="back" size={14} />{tx("Memory")}</button><MemorySettings {...memory} /></div>
   if (view !== 'main' && workspace) {
-    const title = view === 'project' ? 'Project' : view === 'folder' ? 'Folder' : 'Runs on'
+    const title = view === 'project' ? tx("Project") : view === 'folder' ? tx("Folder") : tx("Runs on")
     return (
       <div>
         <button type="button" onClick={() => setView('main')} className="mb-1 flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
@@ -62,26 +64,26 @@ function Panel({ workspace, voice, incognito, memory, onUseSkill, modes, close }
     <div>
       {workspace && (
         <>
-          <Row icon="layers" label="Project" value={workspace.projectLabel} nav onClick={() => setView('project')} />
-          <Row icon="folder" label="Folder" value={workspace.folderLabel ?? 'None'} nav onClick={() => setView('folder')} />
+          <Row icon="layers" label={tx("Project")} value={workspace.projectLabel} nav onClick={() => setView('project')} />
+          <Row icon="folder" label={tx("Folder")} value={workspace.folderLabel ?? 'None'} nav onClick={() => setView('folder')} />
           {workspace.orchestratorLabel
-            ? <Row icon="globe" label="Runs on" value={workspace.orchestratorLabel} disabled />
-            : <Row icon={host ? 'globe' : 'monitor'} label="Runs on" value={host ? host.label : 'This Mac'} nav onClick={() => setView('workspace')} />}
-          {workspace.branch && <Row icon="branch" label="Branch" value={workspace.branch} disabled />}
+            ? <Row icon="globe" label={tx("Runs on")} value={workspace.orchestratorLabel} disabled />
+            : <Row icon={host ? 'globe' : 'monitor'} label={tx("Runs on")} value={host ? host.label : 'This Mac'} nav onClick={() => setView('workspace')} />}
+          {workspace.branch && <Row icon="branch" label={tx("Branch")} value={workspace.branch} disabled />}
           <div className="my-1 border-t border-line" />
         </>
       )}
-      <Row icon="mic" label={voice.dictating ? 'Stop voice input' : 'Voice input'} value={voice.available ? null : 'Off in Settings'} disabled={!voice.available} onClick={() => { voice.onToggle(); close() }} />
-      {incognito && <Row icon="incognito" label="Incognito" value={incognito.on ? null : 'Not saved'} active={incognito.on} onClick={() => incognito.onToggle()} />}
-      {incognito?.on && <p className="px-2.5 pb-2 text-[12px] leading-relaxed text-ink-3">Chat history stays in TensorFold memory while the app is open; providers and tools you use may retain their own records.</p>}
-      {memory && <Row icon="layers" label="Memory" nav value={memory.problem || !memory.policy ? 'Review choices' : memory.unsupported ? 'Unavailable' : `${memory.policy.useExisting ? 'Recall on' : 'Recall off'} · ${!memory.incognito && memory.policy.contribute ? 'Proposals on' : 'Proposals off'}`} onClick={() => setView('memory')} />}
-      <Row icon="spark" label="Use a skill" onClick={() => { close(); onUseSkill() }} />
+      <Row icon="mic" label={voice.dictating ? tx("Stop voice input") : tx("Voice input")} value={voice.available ? null : 'Off in Settings'} disabled={!voice.available} onClick={() => { voice.onToggle(); close() }} />
+      {incognito && <Row icon="incognito" label={tx("Incognito")} value={incognito.on ? null : 'Not saved'} active={incognito.on} onClick={() => incognito.onToggle()} />}
+      {incognito?.on && <p className="px-2.5 pb-2 text-[12px] leading-relaxed text-ink-3">{tx("Chat history stays in TensorFold memory while the app is open; providers and tools you use may retain their own records.")}</p>}
+      {memory && <Row icon="layers" label={tx("Memory")} nav value={memory.problem || !memory.policy ? 'Review choices' : memory.unsupported ? 'Unavailable' : `${memory.policy.useExisting ? 'Recall on' : 'Recall off'} · ${!memory.incognito && memory.policy.contribute ? 'Proposals on' : 'Proposals off'}`} onClick={() => setView('memory')} />}
+      <Row icon="spark" label={tx("Use a skill")} onClick={() => { close(); onUseSkill() }} />
       {modes && (
         <>
           <div className="my-1 border-t border-line" />
-          <Row icon="refresh" label="Start a mission" onClick={() => { close(); modes.onMission() }} />
-          <Row icon="layers" label="Rooms" onClick={() => { close(); modes.onRooms() }} />
-          <Row icon="bell" label="Missions and loops" onClick={() => { close(); modes.onMonitor() }} />
+          <Row icon="refresh" label={tx("Start a mission")} onClick={() => { close(); modes.onMission() }} />
+          <Row icon="layers" label={tx("Rooms")} onClick={() => { close(); modes.onRooms() }} />
+          <Row icon="bell" label={tx("Missions and loops")} onClick={() => { close(); modes.onMonitor() }} />
         </>
       )}
     </div>
@@ -101,9 +103,10 @@ export interface ComposerOverflowProps {
 
 // The single "…" menu: everything the composer used to show as chips and toggles.
 export function ComposerOverflowMenu(props: ComposerOverflowProps) {
+  const tx = useAuthoredText()
   return (
     <Menu width={300} align="end" placement="top" trigger={(open) => (
-      <button type="button" aria-label="More options" title="More options" className={clsx('flex h-8 w-8 items-center justify-center rounded-full transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
+      <button type="button" aria-label={tx("More options")} title={tx("More options")} className={clsx('flex h-8 w-8 items-center justify-center rounded-full transition-colors', open ? 'bg-ink-5 text-ink' : 'text-ink-3 hover:bg-ink-5 hover:text-ink')}>
         <Icon name="dots" size={16} />
       </button>
     )}>

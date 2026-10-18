@@ -4,6 +4,10 @@ import {
   fileToAttachment,
   filesToAttachments,
   appendAttachments,
+  attachmentsForSend,
+  replaceAttachment,
+  reviewAttachmentExtraction,
+  acceptAttachmentExtraction,
   imageDimensionsFromHeader,
   MAX_ATTACHMENT_FILES,
   MAX_DOC_CHARS,
@@ -22,6 +26,20 @@ function fakeSize(file: File, size: number): File {
 }
 
 console.log('attachment ingestion safety tests:')
+{
+  const first = new File(['first'], 'first.txt', { type: 'text/plain' })
+  const broken = new File(['bad'], 'unreadable.txt', { type: 'text/plain' })
+  Object.defineProperty(broken, 'slice', { value: () => { throw new Error('selected file is unreadable') } })
+  const third = new File(['third'], 'third.txt', { type: 'text/plain' })
+  const attachments = await filesToAttachments([first, broken, third])
+  assert.deepEqual(attachments.map((item) => item.name), ['first.txt', 'unreadable.txt', 'third.txt'], 'every selected file needs its own visible row')
+  assert.equal((attachments[1] as any).status, 'error')
+  assert.match((attachments[1] as any).error, /unreadable/)
+  assert.equal(attachments[0].text, 'first')
+  assert.equal(attachments[2].text, 'third')
+  ok('one unreadable selection stays visible and cannot discard successful siblings')
+}
+
 
 {
   const file = new File(['x'.repeat(MAX_DOC_READ_BYTES + 100)], 'large.txt', { type: 'text/plain' })
@@ -131,12 +149,14 @@ console.log('attachment ingestion safety tests:')
 
 {
   const files = Array.from({ length: MAX_ATTACHMENT_FILES + 3 }, (_, index) =>
-    new File(['x'], `file-${index}.bin`, { type: 'application/octet-stream' }),
+    new File(['x'], `file-${index}.txt`, { type: 'text/plain' }),
   )
   const attachments = await filesToAttachments(files)
-  assert.equal(attachments.length, MAX_ATTACHMENT_FILES)
-  assert.match(attachments.at(-1)?.text ?? '', /4 attachments not attached/)
-  ok('batch ingestion caps file count without materializing or processing the overflow')
+  assert.equal(attachments.length, files.length)
+  assert.deepEqual(attachments.map((item) => item.name), files.map((file) => file.name))
+  assert.equal(attachmentsForSend(attachments).length, MAX_ATTACHMENT_FILES)
+  assert.ok(attachments.slice(MAX_ATTACHMENT_FILES).every((item) => item.status === 'error' && /file limit/.test(item.error ?? '')))
+  ok('batch ingestion bounds file reads while keeping each overflow filename and error visible')
 }
 
 {
@@ -144,9 +164,72 @@ console.log('attachment ingestion safety tests:')
   const current = Array.from({ length: 15 }, (_, index) => make(index))
   const next = Array.from({ length: 15 }, (_, index) => make(index + 15))
   const merged = appendAttachments(current, next)
-  assert.equal(merged.length, MAX_ATTACHMENT_FILES)
+  assert.equal(merged.length, current.length + next.length)
+  assert.equal(attachmentsForSend(merged).length, MAX_ATTACHMENT_FILES)
   assert.deepEqual(merged.slice(0, current.length), current)
-  ok('repeated picker operations cannot bypass the cumulative attachment-count limit')
+  assert.ok(merged.slice(MAX_ATTACHMENT_FILES).every((item) => item.status === 'error'))
+  ok('repeated selections preserve every filename while enforcing the cumulative send limit')
+}
+
+
+{
+  const states: Array<{ id: string; name: string; status: string | undefined }> = []
+  const selected = [new File(['one'], 'one.txt', { type: 'text/plain' }), new File(['two'], 'two.txt', { type: 'text/plain' }), new File(['three'], 'three.txt', { type: 'text/plain' })]
+  const attachments = await filesToAttachments(selected, { onUpdate: (item) => states.push({ id: item.id, name: item.name, status: item.status }) })
+  assert.deepEqual(states.slice(0, 3).map((item) => item.status), ['processing', 'processing', 'processing'])
+  for (const item of attachments) assert.equal(states.find((state) => state.name === item.name)?.id, item.id)
+  assert.deepEqual(attachments.map((item) => item.text), ['one', 'two', 'three'])
+  ok('all selected rows are published before reads with stable IDs across completion')
+}
+
+{
+  const image = { id: 'ocr', name: 'handwriting.png', mime: 'image/png', kind: 'image' as const, dataUrl: 'data:image/png;base64,AA', status: 'ready' as const }
+  const review = reviewAttachmentExtraction(image, { ok: true, text: 'meet on Fridoy', confidence: 0.81, warnings: ['Review handwriting against the original.'], pageCount: 1, processedPages: 1 })
+  assert.equal(review.status, 'review')
+  assert.equal(attachmentsForSend([review]).length, 0, 'unaccepted OCR never reaches model content')
+  assert.equal(review.text, undefined)
+  assert.throws(() => acceptAttachmentExtraction(review, '  '), /No readable text/)
+  const accepted = acceptAttachmentExtraction(review, 'meet on Friday')
+  assert.equal(accepted.kind, 'document')
+  assert.equal(accepted.dataUrl, undefined, 'accepted transcript is usable by text-only transports')
+  assert.equal(accepted.extraction?.text, 'meet on Friday')
+  assert.match(accepted.text ?? '', /User-reviewed OCR transcript/)
+  assert.match(accepted.text ?? '', /meet on Friday/)
+  assert.doesNotMatch(accepted.text ?? '', /Fridoy/)
+  assert.equal(attachmentsForSend([accepted]).length, 1)
+  ok('OCR remains editable review-only until explicitly accepted and is labelled uncertain in model history')
+}
+
+{
+  const abort = new AbortController()
+  abort.abort()
+  const files = [new File(['first'], 'first.txt', { type: 'text/plain' }), new File(['second'], 'second.txt', { type: 'text/plain' })]
+  const attachments = await filesToAttachments(files, { signal: abort.signal })
+  assert.equal(attachments.length, 2)
+  assert.ok(attachments.every((item) => item.status === 'error' && /cancelled/.test(item.error ?? '')))
+  ok('cancelled ingestion reports individual named failures instead of dropping them')
+}
+
+{
+  const current = Array.from({ length: MAX_ATTACHMENT_FILES }, (_, index) => ({ id: `ready-${index}`, kind: 'document' as const, name: `ready-${index}.txt`, mime: 'text/plain', text: 'ready', status: 'ready' as const }))
+  const processing = { id: 'pending', kind: 'document' as const, name: 'pending.txt', mime: 'text/plain', status: 'processing' as const }
+  const all = appendAttachments(current, [processing])
+  const resolved = replaceAttachment(all, { ...processing, status: 'ready', text: 'later' })
+  assert.equal(resolved.length, MAX_ATTACHMENT_FILES + 1)
+  assert.equal(resolved.at(-1)?.status, 'error')
+  assert.equal(attachmentsForSend(resolved).length, MAX_ATTACHMENT_FILES)
+  assert.equal(replaceAttachment(current, { ...processing, status: 'ready', text: 'removed' }), current, 'a late result cannot recreate a removed row')
+  ok('late processing completions enforce draft limits and cannot recreate removed files')
+}
+
+{
+  const largeImage = (id: string) => ({ id, kind: 'image' as const, name: `${id}.png`, mime: 'image/png', dataUrl: `data:image/png;base64,${'A'.repeat(Math.ceil(4 * 1024 * 1024 / 3) * 4)}`, status: 'ready' as const })
+  const largeUnicodeDoc = (index: number) => ({ id: `unicode-${index}`, kind: 'document' as const, name: `unicode-${index}.txt`, mime: 'text/plain', text: '界'.repeat(200_000), status: 'ready' as const })
+  const merged = appendAttachments([], [largeImage('one'), largeImage('two'), ...Array.from({ length: 18 }, (_, index) => largeUnicodeDoc(index))])
+  assert.ok(attachmentsForSend(merged).length < 20, 'mixed images and UTF-8 documents must obey the host byte limit, not only a character count')
+  assert.equal(merged.length, 20, 'excess payloads stay individually visible')
+  assert.equal(merged.at(-1)?.status, 'error')
+  ok('mixed image and non-ASCII payloads are rejected per file before the host aggregate limit')
 }
 
 console.log(`\n${passed} passed`)

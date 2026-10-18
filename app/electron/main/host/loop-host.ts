@@ -370,6 +370,7 @@ export function createLoopHost(deps: LoopHostDeps) {
 
   function makeRoleThread(cwd: string, projectId: string | null | undefined, m: LoopModelRef, systemPrompt: string, kind: 'task' | 'chat'): { id: string } {
     const t: Thread = {
+    documentSourceIds: [],
       id: randomUUID(),
       title: 'loop role',
       kind,

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { Attachment } from './types'
+import type { Attachment, AttachmentTextExtraction } from './types'
 
 export const HOST_MAX_ATTACHMENT_FILES = 20
 export const HOST_MAX_DOCUMENT_CHARS = 200_020
@@ -112,6 +112,17 @@ function normalizeImageDataUrl(raw: unknown): { dataUrl: string; mime: string; b
   return { dataUrl: `data:${canonicalMime};base64,${match[2]}`, mime: canonicalMime, bytes }
 }
 
+function normalizeAcceptedExtraction(raw: unknown, text: string): AttachmentTextExtraction | undefined {
+  if (raw === undefined) return undefined
+  const value = raw as Record<string, unknown>
+  if (value.method !== 'apple-vision' || value.state !== 'accepted' || typeof value.text !== 'string' || !value.text.trim() || value.text.length > 199_800 || !text.endsWith(`\n${value.text}`)) rejectAttachment('The accepted OCR transcript does not match the attached document text.')
+  const confidence = typeof value.confidence === 'number' && Number.isFinite(value.confidence) && value.confidence >= 0 && value.confidence <= 1 ? value.confidence : null
+  const pageCount = Number.isSafeInteger(value.pageCount) && Number(value.pageCount) >= 1 ? Number(value.pageCount) : 1
+  const processedPages = Number.isSafeInteger(value.processedPages) && Number(value.processedPages) >= 1 && Number(value.processedPages) <= Math.min(8, pageCount) ? Number(value.processedPages) : 1
+  const warnings = Array.isArray(value.warnings) ? value.warnings.filter((item): item is string => typeof item === 'string').slice(0, 20).map((item) => item.slice(0, 500)) : []
+  return { method: 'apple-vision', state: 'accepted', text: value.text, confidence, warnings, pageCount, processedPages, truncated: value.truncated === true }
+}
+
 /** Fail-closed normalization at the trusted host boundary (IPC, REST, and internal callers). */
 export function normalizeAttachments(input: unknown): Attachment[] | undefined {
   if (input === undefined) return undefined
@@ -124,6 +135,11 @@ export function normalizeAttachments(input: unknown): Attachment[] | undefined {
     if (!value || typeof value !== 'object' || Array.isArray(value)) rejectAttachment(`Attachment ${index + 1} is invalid.`)
     const item = value as Record<string, unknown>
     const kind = item.kind
+    if (item.status !== undefined && item.status !== 'ready') rejectAttachment(`Attachment ${index + 1} is not ready; finish processing, review it, select it again or remove it.`)
+    if (item.extraction !== undefined) {
+      if (!item.extraction || typeof item.extraction !== 'object' || Array.isArray(item.extraction) || (item.extraction as Record<string, unknown>).state !== 'accepted') rejectAttachment(`Attachment ${index + 1} extracted text has not been accepted.`)
+      if (kind !== 'document') rejectAttachment(`Attachment ${index + 1} accepted text must be attached as a document.`)
+    }
     const name = cleanFilename(item.name, `attachment-${index + 1}`)
     const id = cleanString(item.id, 160) || `att_host_${randomUUID()}`
     if (kind === 'document') {
@@ -132,7 +148,9 @@ export function normalizeAttachments(input: unknown): Attachment[] | undefined {
       if (bytes > HOST_MAX_DOCUMENT_BYTES) rejectAttachment(`Attachment ${index + 1} document bytes exceed the host safety limit.`)
       payloadBytes += bytes
       if (payloadBytes > HOST_MAX_ATTACHMENT_PAYLOAD_BYTES) rejectAttachment('Attachments exceed the aggregate host payload limit.')
-      output.push({ id, kind: 'document', name, mime: cleanDocumentMime(item.mime), text: item.text, bytes })
+      const extraction = normalizeAcceptedExtraction(item.extraction, item.text)
+      const warnings = Array.isArray(item.warnings) ? item.warnings.filter((value): value is string => typeof value === 'string').slice(0, 20).map((value) => value.slice(0, 500)) : undefined
+      output.push({ id, kind: 'document', name, mime: cleanDocumentMime(item.mime), text: item.text, bytes, ...(extraction ? { extraction } : {}), ...(warnings?.length ? { warnings } : {}) })
       continue
     }
     if (kind === 'image') {

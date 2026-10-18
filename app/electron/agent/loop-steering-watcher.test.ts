@@ -85,9 +85,9 @@ const originalFetch = globalThis.fetch
 globalThis.fetch = (async (_input: any, init: any) => {
   fetchCalls++
   requests.push(JSON.parse(init.body))
-  // Attempt 1: transient provider failure so the loop enters the retry backoff.
+  // Attempt 1: an explicit rate-limit refusal before output enters safe retry backoff.
   if (fetchCalls === 1) {
-    return new Response('boom', { status: 500, statusText: 'Internal Server Error' })
+    return new Response('rate limited', { status: 429, statusText: 'Too Many Requests' })
   }
   // Attempt 2: hangs until the fresh steer watcher aborts it (the cue is already
   // queued by then). Falls back to a normal finish after 3s so a regression fails

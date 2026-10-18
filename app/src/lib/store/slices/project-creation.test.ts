@@ -5,6 +5,7 @@ globals.matchMedia = () => ({ matches: false, addEventListener: () => {}, remove
 globals.addEventListener = () => {}
 globals.removeEventListener = () => {}
 globals.window = globals
+await (await import('../../browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('../../ipc')
 const { useStore } = await import('../index')
 const settings = await api.getSettings()

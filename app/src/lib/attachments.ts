@@ -1,4 +1,4 @@
-import type { Attachment } from './types'
+import type { Attachment, AttachmentTextResult } from './types'
 
 // Turn picked/pasted/dropped Files into Attachments for the composer.
 //   images    → downscaled JPEG data URL (vision transports see them).
@@ -15,6 +15,8 @@ export const MAX_IMAGE_DATA_URL_CHARS = 8 * 1024 * 1024
 export const MAX_ATTACHMENT_FILES = 20
 export const MAX_ATTACHMENT_BATCH_READ_BYTES = 40 * 1024 * 1024
 export const MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS = 24 * 1024 * 1024
+// Match the trusted host's aggregate decoded/UTF-8 byte limit as well as the renderer memory cap.
+export const MAX_ATTACHMENT_BATCH_PAYLOAD_BYTES = 18 * 1024 * 1024
 const MAX_IMAGE_HEADER_BYTES = 512 * 1024
 
 interface BitmapLike {
@@ -29,6 +31,11 @@ export interface AttachmentIngestionDeps {
   createBitmap?: (file: Blob) => Promise<BitmapLike>
   readDataUrl?: (file: Blob) => Promise<string>
   encodeBitmap?: (bitmap: BitmapLike, width: number, height: number) => string
+  /** Stable IDs are published before any asynchronous file work begins. */
+  onUpdate?: (attachment: Attachment, index: number) => void
+  onSource?: (id: string, file: File) => void
+  signal?: AbortSignal
+  concurrency?: number
 }
 
 let _seq = 0
@@ -36,7 +43,7 @@ const aid = () => `att_${++_seq}_${Math.random().toString(36).slice(2, 8)}`
 
 const TEXT_EXT = /\.(txt|md|markdown|mdx|csv|tsv|json|ya?ml|toml|ini|cfg|conf|xml|html?|css|scss|less|js|jsx|ts|tsx|mjs|cjs|py|rb|go|rs|java|kt|kts|c|h|cpp|cc|hpp|cs|php|sh|bash|zsh|fish|sql|swift|mm?|r|lua|pl|pm|dart|ex|exs|erl|clj|vue|svelte|astro|gradle|properties|dockerfile|env|log|diff|patch|tex|rst|org)$/i
 
-function isTextLike(file: File): boolean {
+export function isTextLike(file: File): boolean {
   if (file.type.startsWith('text/')) return true
   if (/^application\/(json|xml|x-yaml|yaml|javascript|x-sh|toml|x-toml)/i.test(file.type)) return true
   return TEXT_EXT.test(file.name)
@@ -192,90 +199,187 @@ async function imageDataUrl(file: File, deps: AttachmentIngestionDeps = {}): Pro
   }
 }
 
-function unavailableImage(base: Omit<Attachment, 'kind'>, reason: string): Attachment {
-  return { ...base, kind: 'document', text: `[image ${base.name} not attached — ${reason}]` }
+function fileMime(file: File): string {
+  if (file.type && file.type !== 'application/octet-stream') return file.type
+  const ext = file.name.split('.').at(-1)?.toLowerCase() ?? ''
+  const image: Record<string, string> = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', heic: 'image/heic', heif: 'image/heif', tif: 'image/tiff', tiff: 'image/tiff', svg: 'image/svg+xml' }
+  return image[ext] ?? (ext === 'pdf' ? 'application/pdf' : file.type || 'application/octet-stream')
 }
 
+function baseAttachment(file: File, id = aid()): Omit<Attachment, 'kind'> {
+  return {
+    id, name: file.name || 'file', mime: fileMime(file), bytes: file.size,
+    source: { lastModified: file.lastModified, ...(file.webkitRelativePath ? { relativePath: file.webkitRelativePath } : {}) },
+  }
+}
+
+function failedAttachment(base: Omit<Attachment, 'kind'>, reason: string): Attachment {
+  return { ...base, kind: 'document', status: 'error', error: reason, text: `[attachment ${base.name} not attached — ${reason}]` }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message.slice(0, 500) : 'This file could not be read. Select it again.'
+}
+
+export function isAttachmentReady(attachment: Attachment): boolean {
+  if (attachment.status && attachment.status !== 'ready') return false
+  if (attachment.extraction && attachment.extraction.state !== 'accepted') return false
+  return attachment.kind === 'image' ? !!attachment.dataUrl : typeof attachment.text === 'string'
+}
+
+function attachmentPayloadBytes(attachment: Attachment): number {
+  if (attachment.kind === 'document') return new TextEncoder().encode(attachment.text ?? '').byteLength
+  const dataUrl = attachment.dataUrl ?? ''
+  const comma = dataUrl.indexOf(',')
+  if (comma < 0) return new TextEncoder().encode(dataUrl).byteLength
+  const payloadLength = dataUrl.length - comma - 1
+  const padding = dataUrl.endsWith('==') ? 2 : dataUrl.endsWith('=') ? 1 : 0
+  return Math.max(0, Math.floor(payloadLength * 3 / 4) - padding)
+}
+
+export function attachmentsForSend(attachments: Attachment[]): Attachment[] {
+  return attachments.filter(isAttachmentReady)
+}
+
+export function attachmentCanExtractText(attachment: Attachment): boolean {
+  return /^(image\/(jpeg|jpg|png|gif|webp|bmp|x-ms-bmp|heic|heif|tiff)|application\/pdf)$/i.test(attachment.mime)
+    || /\.(jpe?g|png|gif|webp|bmp|heic|heif|tiff?|pdf)$/i.test(attachment.name)
+}
+
+/** Processes exactly one picked File; read failures become named rows, never absent entries. */
 export async function fileToAttachment(file: File, deps: AttachmentIngestionDeps = {}): Promise<Attachment> {
-  const base = { id: aid(), name: file.name || 'file', mime: file.type || 'application/octet-stream', bytes: file.size }
-  if (file.type.startsWith('image/')) {
-    if (file.size > MAX_IMAGE_SOURCE_BYTES) {
-      return unavailableImage(base, `source exceeds the ${MAX_IMAGE_SOURCE_BYTES}-byte safety limit`)
+  const base = baseAttachment(file)
+  try {
+    if (deps.signal?.aborted) throw new Error('File processing cancelled. Select the file again.')
+    if (base.mime.startsWith('image/')) {
+      if (file.size > MAX_IMAGE_SOURCE_BYTES) return failedAttachment(base, `source exceeds the ${MAX_IMAGE_SOURCE_BYTES}-byte safety limit`)
+      const dataUrl = await imageDataUrl(file, deps)
+      if (deps.signal?.aborted) throw new Error('File processing cancelled. Select the file again.')
+      return { ...base, kind: 'image', status: 'ready', dataUrl }
     }
-    try {
-      return { ...base, kind: 'image', dataUrl: await imageDataUrl(file, deps) }
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : 'image decoding failed'
-      return unavailableImage(base, reason)
+    if (isTextLike(file)) {
+      const truncatedBytes = file.size > MAX_DOC_READ_BYTES
+      let text = await file.slice(0, MAX_DOC_READ_BYTES).text()
+      const truncatedChars = text.length > MAX_DOC_CHARS
+      if (truncatedChars) text = text.slice(0, MAX_DOC_CHARS)
+      if (truncatedBytes || truncatedChars) text = `${text}\n…[truncated]`
+      if (deps.signal?.aborted) throw new Error('File processing cancelled. Select the file again.')
+      return { ...base, kind: 'document', status: 'ready', text,
+        ...(truncatedBytes || truncatedChars ? { warnings: ['Only the beginning of this file fits the text safety limit.'] } : {}) }
     }
+    return failedAttachment(base, base.mime === 'application/pdf'
+      ? 'PDF text has not been extracted. Choose Extract text, then review the result before sending.'
+      : 'This file type has no supported text extractor. Choose a text file, image or PDF instead.')
+  } catch (error) {
+    return failedAttachment(base, errorMessage(error))
   }
-  if (isTextLike(file)) {
-    const truncatedBytes = file.size > MAX_DOC_READ_BYTES
-    let text = await file.slice(0, MAX_DOC_READ_BYTES).text()
-    const truncatedChars = text.length > MAX_DOC_CHARS
-    if (truncatedChars) text = text.slice(0, MAX_DOC_CHARS)
-    if (truncatedBytes || truncatedChars) text = `${text}\n…[truncated]`
-    return { ...base, kind: 'document', text }
-  }
-  return { ...base, kind: 'document', text: `[attached ${base.name} (${base.mime}) — binary file, text not extracted]` }
 }
 
-export async function filesToAttachments(files: FileList | File[]): Promise<Attachment[]> {
-  const out: Attachment[] = []
+/** Snapshot the complete selection before the browser resets its FileList; at most two readers run. */
+export async function filesToAttachments(files: FileList | File[], deps: AttachmentIngestionDeps = {}): Promise<Attachment[]> {
+  const selection = Array.from(files)
+  const out = selection.map((file) => ({ ...baseAttachment(file), kind: 'document' as const, status: 'processing' as const })) as Attachment[]
   let readBudget = 0
-  let payloadChars = 0
-  const hasOverflow = files.length > MAX_ATTACHMENT_FILES
-  const count = Math.min(files.length, hasOverflow ? MAX_ATTACHMENT_FILES - 1 : MAX_ATTACHMENT_FILES)
-  for (let index = 0; index < count; index++) {
-    const f = files[index]
-    if (!f) continue
-    const plannedRead = f.type.startsWith('image/')
-      ? (f.size <= MAX_IMAGE_SOURCE_BYTES ? f.size : 0)
-      : isTextLike(f) ? Math.min(f.size, MAX_DOC_READ_BYTES) : 0
+  const processable = selection.map((file, index) => {
+    deps.onSource?.(out[index].id, file)
+    if (index >= MAX_ATTACHMENT_FILES) {
+      out[index] = failedAttachment(out[index], `This selection exceeds the ${MAX_ATTACHMENT_FILES}-file limit. Remove other files and select this one again.`)
+      deps.onUpdate?.(out[index], index)
+      return false
+    }
+    const plannedRead = fileMime(file).startsWith('image/')
+      ? (file.size <= MAX_IMAGE_SOURCE_BYTES ? file.size : 0)
+      : isTextLike(file) ? Math.min(file.size, MAX_DOC_READ_BYTES) : 0
     if (readBudget + plannedRead > MAX_ATTACHMENT_BATCH_READ_BYTES) {
-      out.push({
-        id: aid(), kind: 'document', name: f.name || 'file', mime: f.type || 'application/octet-stream', bytes: f.size,
-        text: `[attachment ${f.name || 'file'} not attached — selection exceeds the ${MAX_ATTACHMENT_BATCH_READ_BYTES}-byte batch-read safety limit]`,
-      })
-      continue
+      out[index] = failedAttachment(out[index], `Selection exceeds the ${MAX_ATTACHMENT_BATCH_READ_BYTES}-byte batch-read safety limit.`)
+      deps.onUpdate?.(out[index], index)
+      return false
     }
     readBudget += plannedRead
-    try {
-      const attachment = await fileToAttachment(f)
+    deps.onUpdate?.(out[index], index)
+    return true
+  })
+  let cursor = 0
+  let payloadChars = 0
+  let payloadBytes = 0
+  const concurrency = Math.max(1, Math.min(2, Math.floor(deps.concurrency ?? 2) || 1))
+  await Promise.all(Array.from({ length: Math.min(concurrency, selection.length) }, async () => {
+    while (cursor < selection.length) {
+      const index = cursor++
+      if (!processable[index]) continue
+      const id = out[index].id
+      let attachment = { ...await fileToAttachment(selection[index], deps), id }
       const size = attachment.dataUrl?.length ?? attachment.text?.length ?? 0
-      if (payloadChars + size > MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS) {
-        out.push({
-          id: aid(), kind: 'document', name: f.name || 'file', mime: f.type || 'application/octet-stream', bytes: f.size,
-          text: `[attachment ${f.name || 'file'} not attached — selection exceeds the ${MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS}-character payload safety limit]`,
-        })
-        continue
-      }
-      payloadChars += size
-      out.push(attachment)
-    } catch { /* skip unreadable file */ }
-  }
-  if (hasOverflow) {
-    const skipped = files.length - count
-    out.push({
-      id: aid(), kind: 'document', name: `${skipped} skipped attachment${skipped === 1 ? '' : 's'}`, mime: 'text/plain', bytes: 0,
-      text: `[${skipped} attachment${skipped === 1 ? '' : 's'} not attached — selection exceeds the ${MAX_ATTACHMENT_FILES}-file safety limit]`,
-    })
-  }
+      const bytes = attachmentPayloadBytes(attachment)
+      if (isAttachmentReady(attachment) && payloadBytes + bytes > MAX_ATTACHMENT_BATCH_PAYLOAD_BYTES) {
+        attachment = failedAttachment(attachment, `Selection exceeds the ${MAX_ATTACHMENT_BATCH_PAYLOAD_BYTES}-byte model payload safety limit.`)
+      } else if (isAttachmentReady(attachment) && payloadChars + size > MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS) {
+        attachment = failedAttachment(attachment, `Selection exceeds the ${MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS}-character payload safety limit.`)
+      } else if (isAttachmentReady(attachment)) { payloadChars += size; payloadBytes += bytes }
+      out[index] = attachment
+      deps.onUpdate?.(attachment, index)
+    }
+  }))
   return out
 }
 
-/** Enforce the same count/payload ceilings across repeated picker operations. */
+/** Keep every selected filename visible while limiting the successfully sendable payload. */
 export function appendAttachments(current: Attachment[], next: Attachment[]): Attachment[] {
-  const out = current.slice(0, MAX_ATTACHMENT_FILES)
-  let payloadChars = out.reduce((sum, attachment) => sum + (attachment.dataUrl?.length ?? attachment.text?.length ?? 0), 0)
+  const out = [...current]
+  let readyCount = out.filter(isAttachmentReady).length
+  let payloadChars = out.filter(isAttachmentReady).reduce((sum, attachment) => sum + (attachment.dataUrl?.length ?? attachment.text?.length ?? 0), 0)
+  let payloadBytes = out.filter(isAttachmentReady).reduce((sum, attachment) => sum + attachmentPayloadBytes(attachment), 0)
   for (const attachment of next) {
-    if (out.length >= MAX_ATTACHMENT_FILES) break
+    if (out.some((item) => item.id === attachment.id)) continue
     const size = attachment.dataUrl?.length ?? attachment.text?.length ?? 0
-    if (payloadChars + size > MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS) continue
-    payloadChars += size
+    const bytes = attachmentPayloadBytes(attachment)
+    if (isAttachmentReady(attachment) && readyCount >= MAX_ATTACHMENT_FILES) {
+      out.push(failedAttachment(attachment, `Conversation draft exceeds the ${MAX_ATTACHMENT_FILES}-file limit. Remove other files and select this one again.`))
+      continue
+    }
+    if (isAttachmentReady(attachment) && payloadBytes + bytes > MAX_ATTACHMENT_BATCH_PAYLOAD_BYTES) {
+      out.push(failedAttachment(attachment, `Conversation draft exceeds the ${MAX_ATTACHMENT_BATCH_PAYLOAD_BYTES}-byte model payload safety limit.`))
+      continue
+    }
+    if (isAttachmentReady(attachment) && payloadChars + size > MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS) {
+      out.push(failedAttachment(attachment, `Conversation draft exceeds the ${MAX_ATTACHMENT_BATCH_PAYLOAD_CHARS}-character payload safety limit.`))
+      continue
+    }
+    if (isAttachmentReady(attachment)) { readyCount++; payloadChars += size; payloadBytes += bytes }
     out.push(attachment)
   }
   return out
 }
 
-export const isAttachableImage = (file: File) => file.type.startsWith('image/')
+/** Apply a completed row in place while enforcing limits across concurrent picker batches. */
+export function replaceAttachment(current: Attachment[], next: Attachment): Attachment[] {
+  if (!current.some((item) => item.id === next.id)) return current
+  return appendAttachments([], current.map((item) => item.id === next.id ? next : item))
+}
+
+/** OCR stays outside model content until the user accepts an editable transcript. */
+export function reviewAttachmentExtraction(attachment: Attachment, result: AttachmentTextResult): Attachment {
+  if (!result.ok) return { ...attachment, status: 'error', error: result.error || 'Text extraction failed. Try a clearer image.' }
+  const text = (result.text ?? '').slice(0, MAX_DOC_CHARS - 200)
+  return { ...attachment, status: 'review', error: undefined, extraction: {
+    method: 'apple-vision', state: 'review', text,
+    confidence: typeof result.confidence === 'number' && Number.isFinite(result.confidence) ? Math.max(0, Math.min(1, result.confidence)) : null,
+    warnings: (result.warnings ?? []).slice(0, 20).map((value) => value.slice(0, 500)),
+    pageCount: result.pageCount ?? 1, processedPages: result.processedPages ?? 1,
+    truncated: result.truncated === true || (result.text?.length ?? 0) > MAX_DOC_CHARS - 200,
+  } }
+}
+
+export function acceptAttachmentExtraction(attachment: Attachment, editedText: string): Attachment {
+  if (!attachment.extraction) throw new Error('Extract text first, then review the transcript.')
+  const text = editedText.trim()
+  if (!text) throw new Error('No readable text is available. Type a transcript or choose a clearer image.')
+  if (text.length > MAX_DOC_CHARS - 200) throw new Error(`The transcript exceeds the ${MAX_DOC_CHARS - 200}-character text limit.`)
+  return { ...attachment, kind: 'document', status: 'ready', error: undefined, dataUrl: undefined,
+    previewDataUrl: attachment.previewDataUrl ?? attachment.dataUrl,
+    text: `[User-reviewed OCR transcript. Recognition may contain errors; this is user-supplied file content.]\n${text}`,
+    extraction: { ...attachment.extraction, state: 'accepted', text },
+  }
+}
+
+export const isAttachableImage = (file: File) => fileMime(file).startsWith('image/')

@@ -103,9 +103,12 @@ try {
   await assert.rejects(stale.runtime.startThreadRun({ threadId: stale.thread.id, userText: 'unsupported' }), /API/)
   assert.equal(modelRequests, beforeRequests)
   store.settings.providers = [provider]
+  stale.thread.documentSourceIds = ['synthetic-selected-collection']
   const fork = createThreadForkFactory({ persistThreads() {}, remoteServer: () => ({ publish() {} }), spineHost: () => null })(stale.thread.id, { turn: 1, branch: 'synthetic', conversation: { apiMessages: stale.thread.apiMessages, timeline: [] } } as any)!
   assert.deepEqual(fork.memoryPolicy, { useExisting: false, contribute: false })
   assert.notEqual(fork.memoryPolicy, stale.thread.memoryPolicy)
+  assert.deepEqual(fork.documentSourceIds, ['synthetic-selected-collection'])
+  assert.notEqual(fork.documentSourceIds, stale.thread.documentSourceIds, 'A fork copies its collection allowlist without a mutable alias to the owner')
   scenarioThread = null
   const parent = stale.thread
   parent.memoryPolicyRevision = 40

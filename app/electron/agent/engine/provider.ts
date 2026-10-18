@@ -1,6 +1,7 @@
 import type { ChatParams } from '../openai'
 import type { ModelCallSample } from '../turn-stats'
-import type { Provider } from '../types'
+import { validateEngineModelGeneration } from '../../../shared/model-profiles'
+import type { EngineModelGenerationSettings, Provider } from '../types'
 
 // The built-in provider and the hook streamChat uses to reach the running engine. Kept free of
 // Electron and child-process imports so the agent loop and its tests can load it.
@@ -45,9 +46,11 @@ export interface LiveEndpoint {
   baseUrl: string
   apiKey: string
   release?: () => void
+  generation?: EngineModelGenerationSettings | null
+  greedyOnly?: boolean
 }
 
-export type EngineServeHook = (model: string, options: { start: boolean; signal?: AbortSignal }) => Promise<LiveEndpoint>
+export type EngineServeHook = (model: string, options: { start: boolean; signal?: AbortSignal; exclusive?: boolean; owner?: symbol }) => Promise<LiveEndpoint>
 
 let serveHook: EngineServeHook | null = null
 let performanceRecorder: ((model: string, sample: ModelCallSample) => void) | null = null
@@ -119,11 +122,11 @@ export async function engineRoute(p: ChatParams, options: { start: boolean } = {
   if (!isEngineProvider(p.provider)) return null
   if (!serveHook) throw new Error('The built-in TensorFold engine is not available in this process.')
   if (p.signal?.aborted) throw p.signal.reason ?? new Error('Aborted.')
-  const live = await raceAbort(serveHook(p.model, { ...options, signal: p.signal }), p.signal)
+  const live = await raceAbort(serveHook(p.model, { ...options, signal: p.signal, ...(p.modelPreview ? { exclusive: true } : {}), ...(p.modelComparisonOwner ? { owner: p.modelComparisonOwner } : {}) }), p.signal)
   try {
     const provider = { ...p.provider!, baseUrl: live.baseUrl, apiKey: live.apiKey }
     return {
-      params: { ...p, provider, baseUrl: live.baseUrl, apiKey: live.apiKey },
+      params: { ...p, provider, baseUrl: live.baseUrl, apiKey: live.apiKey, modelSettings: live.generation ? validateEngineModelGeneration(live.generation) : undefined, greedyOnly: live.greedyOnly === true },
       fetch: engineFetch(live.baseUrl, p.assertRequestAllowed),
       firstByteMs: ENGINE_FIRST_BYTE_MS,
       idleMs: ENGINE_IDLE_MS,

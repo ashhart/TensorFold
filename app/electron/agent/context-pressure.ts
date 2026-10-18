@@ -1,3 +1,4 @@
+import { activeEngineModelSettings, engineProfileContextWindow, engineProfileWorkingLimit } from '../../shared/model-profiles'
 import { estimateTokens, planCompaction } from './compaction'
 import { getModelContextWindow, recommendedCompactionThreshold } from './model-context-windows'
 import { engineContextWindow } from './engine/context'
@@ -245,6 +246,15 @@ function cacheHintFor(action: ContextPressureAction): string {
 
 function modelContextProfile(settings: Settings, provider: Provider, model: string): ModelContextProfile {
   const engineWindow = provider.source === 'tensorfold' ? engineContextWindow(model) : null
+  const selected = provider.source === 'tensorfold' ? activeEngineModelSettings(settings, model) : null
+  if (selected) {
+    const window = engineProfileContextWindow(selected, engineWindow)
+    const working = engineProfileWorkingLimit(selected, engineWindow)
+    return { id: `${provider.id}:${model}`, providerId: provider.id, providerName: provider.name, model, kind: 'local',
+      nominalContextTokens: window, recommendedWorkingTokens: Math.min(working, settings.contextLimitOverride && settings.contextLimitOverride > 0 ? settings.contextLimitOverride : working),
+      kvCacheTokens: Math.max(1, Math.floor(working * 0.25)), source: 'settings',
+      note: `Selected model profile; ${selected.maxOutputTokens.toLocaleString()} reply tokens reserved.${engineWindow ? ' Bounded by the engine-reported window.' : ' Engine verifies capacity when loading.'}` }
+  }
   if (engineWindow != null) {
     const working = recommendedCompactionThreshold(engineWindow)
     return {

@@ -5,6 +5,7 @@ const globals = globalThis as any
 globals.localStorage = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
 globals.matchMedia = () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} })
 globals.addEventListener = () => {}; globals.removeEventListener = () => {}; globals.window = globals
+await (await import('../browser-demo-bootstrap')).prepareBrowserDemo()
 const { api } = await import('../ipc')
 const { useStore } = await import('./index')
 

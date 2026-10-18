@@ -1,3 +1,5 @@
+import { useAuthoredText } from '../lib/preferences/useAuthoredText'
+import { WorkspaceBackupPanel } from './workspace-backup/WorkspaceBackupPanel'
 import { useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { SETTINGS_SECTION_REQUEST_EVENT, useStore, consumeSettingsSection } from '../lib/store'
@@ -31,6 +33,7 @@ function consumeRequestedSettingsSection(): SettingsSection | null {
 }
 
 export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onClose?: () => void; initialSection?: SettingsSection; onDraftDirtyChange?: (dirty: boolean) => void } = {}) {
+  const tx = useAuthoredText()
   const settings = useStore((s) => s.settings)!
   const save = useStore((s) => s.saveSettings)
   const purgeLocalMemory = useStore((s) => s.purgeLocalMemory)
@@ -82,7 +85,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
   }, [activeSection, expandedGroups])
   const close = () => {
     if (dirtyRef.current) {
-      useStore.getState().setNotice({ kind: 'info', message: 'Save or discard your settings changes before closing.' })
+      useStore.getState().setNotice({ kind: 'info', message: tx("Save or discard your settings changes before closing.") })
       return
     }
     if (onClose) onClose(); else setView({ name: 'home' })
@@ -138,6 +141,8 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
 
   const activeMeta = ALL_SETTINGS_SECTIONS.find((section) => section.id === activeSection) ?? ALL_SETTINGS_SECTIONS[0]
   const sectionCtx = {
+    save: persistDraft,
+    persistedSettings: settings,
     draft,
     setDraft: editDraft,
     goToSection: setActiveSection,
@@ -168,8 +173,7 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
             className="no-drag flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-[13px] text-ink/85 transition-colors hover:bg-surface-hover hover:text-ink"
           >
             <Icon name="back" size={14} className="text-ink-2" />
-            Back to app
-          </button>
+            {tx("Back to app")}</button>
         </div>
         <nav className="scroll-thin min-h-0 flex-1 overflow-y-auto px-2 pb-2">
           {SETTINGS_GROUPS.map((group) => {
@@ -203,24 +207,23 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
           })}
         </nav>
         <div className="px-4 py-3 text-[12px] leading-relaxed text-ink-4">
-          Settings and conversations are stored locally on your machine.
-        </div>
+          {tx("Settings and conversations are stored locally on your machine.")}</div>
       </aside>
       <section className="content-card relative flex min-w-0 flex-1 flex-col">
         <div className="drag flex min-h-11 shrink-0 items-center justify-between gap-3 px-3 py-1">
           <label className="no-drag flex min-w-0 flex-1 items-center sm:hidden">
-            <span className="sr-only">Settings section</span>
-            <select aria-label="Settings section" value={activeSection} onChange={(event) => setActiveSection(event.target.value as SettingsSection)} className="h-9 w-full min-w-0 rounded-lg border border-line bg-card px-2 text-[13px] text-ink outline-none focus:border-accent">
+            <span className="sr-only">{tx("Settings section")}</span>
+            <select aria-label={tx("Settings section")} value={activeSection} onChange={(event) => setActiveSection(event.target.value as SettingsSection)} className="h-9 w-full min-w-0 rounded-lg border border-line bg-card px-2 text-[13px] text-ink outline-none focus:border-accent">
               {SETTINGS_GROUPS.map((group) => <optgroup key={group.id} label={group.label}>{group.sections.map((section) => <option key={section.id} value={section.id}>{section.label}</option>)}</optgroup>)}
             </select>
           </label>
-          <Button variant="ghost" size="sm" icon="x" onClick={close} className="no-drag sm:ml-auto">Close</Button>
+          <Button variant="ghost" size="sm" icon="x" onClick={close} className="no-drag sm:ml-auto">{tx("Close")}</Button>
         </div>
         {draftState.dirty && <div role="status" className="no-drag mx-6 mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-line bg-card px-4 py-3 text-[13px]">
-          <span className={draftState.failed ? 'text-danger' : 'text-ink-2'}>{draftState.pending ? 'Saving changes…' : draftState.failed ? 'Changes were not saved. Retry or discard this draft.' : 'You have unsaved changes.'}</span>
+          <span className={draftState.failed ? 'text-danger' : 'text-ink-2'}>{draftState.pending ? tx("Saving changes…") : draftState.failed ? tx("Changes were not saved. Retry or discard this draft.") : tx("You have unsaved changes.")}</span>
           <div className="flex gap-2">
-            <Button size="sm" disabled={draftState.pending} onClick={() => draftPersistence.current!.discard(useStore.getState().settings ?? settings)}>Discard draft</Button>
-            <Button size="sm" variant="primary" disabled={draftState.pending} onClick={() => commit(draftRef.current)}>{draftState.failed ? 'Retry save' : 'Save draft'}</Button>
+            <Button size="sm" disabled={draftState.pending} onClick={() => draftPersistence.current!.discard(useStore.getState().settings ?? settings)}>{tx("Discard draft")}</Button>
+            <Button size="sm" variant="primary" disabled={draftState.pending} onClick={() => commit(draftRef.current)}>{draftState.failed ? tx("Retry save") : tx("Save draft")}</Button>
           </div>
         </div>}
         <div className="scroll-thin min-h-0 flex-1 overflow-y-auto px-4 pb-8 sm:px-8">
@@ -241,9 +244,9 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
 
             {activeSection === 'agents' && (
               <SettingsPane>
-                <Section title="Your bots" desc="Save each bot’s instructions, model and permissions in one place; the same bots can fill room roles.">
-                  <Button icon="spark" disabled={draftState.dirty} onClick={() => setView({ name: 'bots' })}>Open bots</Button>
-                  {draftState.dirty && <p className="mt-2 text-[13px] text-ink-3">Save or discard your settings draft first.</p>}
+                <Section title={tx("Your bots")} desc={tx("Save each bot’s instructions, model and permissions in one place; the same bots can fill room roles.")}>
+                  <Button icon="spark" disabled={draftState.dirty} onClick={() => setView({ name: 'bots' })}>{tx("Open bots")}</Button>
+                  {draftState.dirty && <p className="mt-2 text-[13px] text-ink-3">{tx("Save or discard your settings draft first.")}</p>}
                 </Section>
               </SettingsPane>
             )}
@@ -258,14 +261,14 @@ export function Settings({ onClose, initialSection, onDraftDirtyChange }: { onCl
 
             {activeSection === 'models' && <ModelsSettings ctx={sectionCtx} />}
 
-            {activeSection === 'security' && <SecuritySettings ctx={sectionCtx} />}
+            {activeSection === 'security' && <><SecuritySettings ctx={sectionCtx} /><div className="mx-auto max-w-[900px] px-6 pb-8"><WorkspaceBackupPanel disabled={draftState.dirty} /></div></>}
 
             {activeSection === 'connectors' && <ConnectorsSettings ctx={sectionCtx} />}
             {activeSection === 'persona' && <PersonaSettings ctx={sectionCtx} />}
 
             {activeSection === 'skills' && (
               <SettingsPane>
-        <Section title="Skills & commands" desc="Reusable instructions and saved prompts. Invoke them in the composer with $ for skills and / for commands.">
+        <Section title={tx("Skills & commands")} desc={tx("Reusable instructions and saved prompts. Invoke them in the composer with $ for skills and / for commands.")}>
           <SkillsCommands />
         </Section>
               </SettingsPane>

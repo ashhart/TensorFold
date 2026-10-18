@@ -19,7 +19,7 @@ let writeCounter = 0
 // Crash-safe write: stage to a temp file, fdatasync it, then rename over the target. rename is atomic
 // on the same filesystem, so a crash/full-disk mid-write leaves the OLD file intact instead of a
 // truncated/empty one — replacing the previous truncate-in-place that could zero a whole collection.
-async function atomicWriteJson(p: string, data: unknown): Promise<void> {
+async function atomicWriteJson(p: string, data: unknown, validateCommit?: () => void): Promise<void> {
   await fs.mkdir(path.dirname(p), { recursive: true, mode: 0o700 })
   await fs.chmod(path.dirname(p), 0o700).catch(() => {})
   const tmp = `${p}.tmp-${process.pid}-${++writeCounter}`
@@ -34,6 +34,7 @@ async function atomicWriteJson(p: string, data: unknown): Promise<void> {
     await handle.datasync()
     await handle.close()
     handle = null
+    validateCommit?.()
     await fs.rename(tmp, p)
     await fs.chmod(p, 0o600).catch(() => {})
   } catch (e) {
@@ -43,14 +44,14 @@ async function atomicWriteJson(p: string, data: unknown): Promise<void> {
   }
 }
 
-function writeJson(p: string, data: unknown): Promise<void> {
+function writeJson(p: string, data: unknown, validateCommit?: () => void): Promise<void> {
   const prev = writeChains.get(p) ?? Promise.resolve()
   const next = prev.catch(() => {}).then(() => {
     const quarantine = quarantinedProtectedFiles.get(p)
     if (quarantine) {
       throw new Error(`Refusing to overwrite quarantined state ${p}. Restore or explicitly purge it first. Recovery copy: ${quarantine.backupPath}`)
     }
-    return atomicWriteJson(p, data)
+    return atomicWriteJson(p, data, validateCommit)
   })
   writeChains.set(p, next)
   void next.catch(() => {}).finally(() => { if (writeChains.get(p) === next) writeChains.delete(p) })
@@ -131,7 +132,7 @@ export async function writeArchiveRecord(kind: 'project' | 'thread' | 'room' | '
   await writeTensorFoldStudioProtectedJson(['archives', folder, `${safeSegment(id)}.json`], data)
 }
 
-export async function readProtectedJson<T>(p: string, fallback: T, migratePlaintext = true): Promise<T> {
+export async function readProtectedJson<T>(p: string, fallback: T, migratePlaintext = true, requireEncrypted = false): Promise<T> {
   let rawText = ''
   try {
     rawText = await fs.readFile(p, 'utf8')
@@ -152,6 +153,9 @@ export async function readProtectedJson<T>(p: string, fallback: T, migratePlaint
     await quarantineMalformedProtectedFile(p, 'parse')
     return fallback
   }
+  // New credential collections can forbid legacy plaintext without changing migration
+  // behavior for older app state; inspect the exact bytes this read will decrypt.
+  if (requireEncrypted && !isProtectedJsonEnvelope(raw)) throw new Error('Connection storage must contain an encrypted protected collection; restore its protected file before reconnecting.')
   // If this is a protected envelope we genuinely cannot decode (lost/rotated app key,
   // not a recoverable legacy safeStorage blob), back it up before we fall through to
   // defaults — otherwise the re-save below would encrypt defaults over it and make the
@@ -202,6 +206,8 @@ export async function writeProtectedJson(
     prepareData?: () => unknown
     /** Publish the staged state synchronously after rename, before later writes advance. */
     onCommitted?: () => void
+    /** Recheck admission and ownership after disk IO, immediately before atomic rename. */
+    validateCommit?: () => void
   } = {},
 ): Promise<void> {
   // Reserve this write's place in the per-path queue SYNCHRONOUSLY — see writeJsonState's identical
@@ -253,7 +259,7 @@ export async function writeProtectedJson(
       }
     }
     const prepared = opts.prepareData ? opts.prepareData() : data
-    await atomicWriteJson(p, protectJsonPayload(prepared))
+    await atomicWriteJson(p, protectJsonPayload(prepared), opts.validateCommit)
     opts.onCommitted?.()
   })
   writeChains.set(p, next)

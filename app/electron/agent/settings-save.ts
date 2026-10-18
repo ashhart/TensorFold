@@ -1,4 +1,5 @@
 import type { RemoteOrchestratorProfile, Settings } from './types'
+import { validateWhatsAppSourcePatch } from './whatsapp-bridge'
 
 type RemoteUrlNormalizer = (raw: string) => Promise<string>
 
@@ -9,6 +10,19 @@ export function assertDedicatedWhatsAppSourceRemoval(next: Settings, current: Se
   if (removed.length) {
     throw new Error('WhatsApp accounts must be removed with the dedicated Remove account control so linked-device credentials are confirmed and shredded.')
   }
+}
+
+/** Whole-settings drafts never own linked-device identity, lifecycle, or contact grants. */
+export function normalizeWhatsAppSettingsForSave(next: Settings, current: Settings): Settings['whatsapp'] {
+  assertDedicatedWhatsAppSourceRemoval(next, current)
+  const existing = new Set(current.whatsapp.sources.map((source) => source.id))
+  for (const source of next.whatsapp?.sources ?? []) {
+    if (!existing.has(source.id)) throw new Error('WhatsApp accounts must be added with the dedicated Add account control.')
+    validateWhatsAppSourcePatch({ label: source.label, enabled: source.enabled, ...(source.allowedChatJids !== undefined ? { allowedChatJids: source.allowedChatJids } : {}), ...(source.allowSelfChat !== undefined ? { allowSelfChat: source.allowSelfChat } : {}) })
+  }
+  // Preserve the latest complete rows, including saved contact scopes and disconnect intent.
+  // All editable account fields now have a dedicated owner-gated patch transaction.
+  return current.whatsapp
 }
 
 function remoteClientNeedsValidation(next: Settings, current: Settings): boolean {

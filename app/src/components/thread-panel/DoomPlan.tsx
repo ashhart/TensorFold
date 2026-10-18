@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { planProgress, type PlanStepLike } from '../../../shared/plan-progress'
 
@@ -39,6 +40,7 @@ export function DoomPlan({ plan }: { plan: PlanStepLike[] }) {
 }
 
 function PlanRow({ step }: { step: PlanStepLike }) {
+  const tx = useAuthoredText()
   const dropped = step.status === 'dropped'
   const blocked = step.status === 'blocked'
   const active = step.status === 'in_progress'
@@ -65,7 +67,7 @@ function PlanRow({ step }: { step: PlanStepLike }) {
           {step.depth ? <span className="text-ink-4">{'· '}</span> : null}
           {step.text}
         </span>
-        {blocked && step.blocker ? <span className="mt-0.5 block break-words text-[12px] text-danger">waiting on {step.blocker}</span> : null}
+        {blocked && step.blocker ? <span className="mt-0.5 block break-words text-[12px] text-danger">{tx("waiting on ")}{step.blocker}</span> : null}
       </span>
     </div>
   )

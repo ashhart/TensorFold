@@ -1,3 +1,5 @@
+import { documentPolicySignature } from '../../../shared/document-collections'
+import { selectedResponseLocale } from '../../agent/response-language'
 import { captureThreadMemoryPolicy, assertThreadMemoryTransport, threadMemoryPolicyRevision } from '../../../shared/thread-memory-policy'
 import { assertThreadChildSupported } from '../../../shared/thread-child-policy'
 import { randomUUID } from 'node:crypto'
@@ -84,7 +86,7 @@ export function registerMissionApprovalResolver(
 
 type MissionWorkspaceState = {
   projects: Array<Pick<Project, 'id' | 'workspace' | 'archivedAt'>>
-  threads: Array<Pick<Thread, 'id' | 'projectId' | 'workspace' | 'archivedAt' | 'bot' | 'phoneLocalOnly'>>
+  threads: Array<Pick<Thread, 'id' | 'projectId' | 'workspace' | 'archivedAt' | 'bot' | 'phoneLocalOnly' | 'googleLocalOnly'>>
 }
 
 export interface MissionArchiveTarget {
@@ -238,6 +240,7 @@ const MISSION_ATTEMPT_STRATEGIES = [
 function cloneMissionAttemptThread(source: Thread, cwd: string, attemptId: string, strategy: string): Thread {
   const clone: Thread = {
     ...source,
+    documentSourceIds: source.documentSourceIds ? [...source.documentSourceIds] : [],
     id: randomUUID(),
     title: `${source.title} · ${attemptId}`,
     cwd,
@@ -325,10 +328,12 @@ async function runMission(mission: Mission): Promise<void> {
   mission = ownedMission
   const sourceThreadId = mission.threadId ?? null
   const sourceProjectId = mission.projectId ?? null
+  const sourceDocumentPolicy = documentPolicySignature(store.threads.find(thread => thread.id === sourceThreadId)?.documentSourceIds)
   const assertRequestAllowed = () => {
     const live = getMission(mission.id)
     if ((live.threadId ?? null) !== sourceThreadId || (live.projectId ?? null) !== sourceProjectId) throw new Error('The mission source changed; stop and restart it with its current owner.')
     assertMissionWorkspaceSupported(live)
+    if (sourceThreadId && documentPolicySignature(store.threads.find(thread => thread.id === sourceThreadId)?.documentSourceIds) !== sourceDocumentPolicy) throw new Error('The mission owner document collections changed; restart with its current sources.')
   }
   const requestGuards = new Map<string, () => void>()
   assertRequestAllowed()
@@ -472,6 +477,7 @@ async function runMission(mission: Mission): Promise<void> {
       const prompt = continuationPrompt ?? buildMissionRunPrompt(current, nextRunIndex, missionCheckpointNotes(current))
       if (!thread || shouldStartFreshMissionThread(current, nextRunIndex)) {
         thread = {
+          documentSourceIds: memoryParent?.documentSourceIds ? [...memoryParent.documentSourceIds] : [],
           memoryPolicy: { ...memoryPolicy },
           id: randomUUID(), title: `${current.title} · pass ${nextRunIndex}`, kind: 'task', projectId: current.projectId ?? null,
           cwd, providerId: baseProvider.id, providerAccountId: activeRoute.providerAccountId, model: activeRoute.model, createdAt: Date.now(), updatedAt: Date.now(),
@@ -509,6 +515,7 @@ async function runMission(mission: Mission): Promise<void> {
         const requestGuard = () => { assertRequestAllowed(); recallGuard?.() }
         requestGuards.set(targetThread.id, requestGuard)
         await runAgent({
+        responseLocale: selectedResponseLocale(store.settings.uiPreferences),
           assertRequestAllowed: requestGuard,
           thread: targetThread, provider: route.provider, model: route.model,
           approvalMode: allowMutations ? 'suggest' : 'readonly',

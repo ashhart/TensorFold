@@ -10,6 +10,7 @@ import { emailSourceRef, scanEmailMessages } from './email-connector.ts'
 import { scanSlackMessages, slackSourceRef } from './slack-connector.ts'
 import { contentText } from './content.ts'
 import { canRecallThread } from './session-recall'
+import { isActiveProjectMemoryEntry } from './project-memory'
 import type {
   BrowserConnectorSettings,
   CalendarConnectorSettings,
@@ -109,6 +110,7 @@ export interface RetrievalIndexInput {
 export interface WorkspaceRetrievalIndexInput extends RetrievalIndexInput {
   /** Host-owned live sources, refreshed after asynchronous workspace collection. */
   recallThreads?: () => Thread[]
+  recallProjectMemory?: () => ProjectMemoryEntry[]
   cwd: string
   path?: string | null
   query?: string | null
@@ -142,7 +144,7 @@ function visibleThreadRecord(record: Partial<RetrievalRecord>, visibleThreadIds:
   const missionSources = [record.id, ...record.sourceIds ?? []].filter((id): id is string => typeof id === 'string' && id.startsWith('mission:'))
   return threadSources.every((id) => visibleThreadIds.has(id.split(':')[1]))
     && (!visibleMissionIds || missionSources.every((id) => visibleMissionIds.has(id.split(':')[1])))
-    && !(record.metadata?.phoneLocalOnly === true && record.metadata.threadId !== currentThreadId)
+    && !((record.metadata?.phoneLocalOnly === true || record.metadata?.googleLocalOnly === true) && record.metadata.threadId !== currentThreadId)
 }
 
 /** Revalidate after the collection promise settles, before exposing any source text. */
@@ -150,6 +152,27 @@ export function filterRetrievalThreadSources(index: RetrievalIndex, threads: Thr
   const ids = new Set(threads.filter((thread) => canRecallThread(thread, currentThreadId)).map((thread) => thread.id))
   const missionIds = new Set(missions.filter((mission) => !mission.threadId || ids.has(mission.threadId)).map((mission) => mission.id))
   const records = index.records.filter((record) => visibleThreadRecord(record, ids, currentThreadId, missionIds))
+  return { ...index, records, stats: indexStats(records) }
+}
+
+function projectMemorySourceId(memory: Pick<ProjectMemoryEntry, 'projectId' | 'id'>): string {
+  return `project-memory:${encodeURIComponent(memory.projectId)}:${encodeURIComponent(memory.id)}`
+}
+
+function projectMemoryRecordVisible(record: Partial<RetrievalRecord>, entries: ProjectMemoryEntry[]): boolean {
+  const sources = [record.id, ...record.sourceIds ?? []].filter((id): id is string => typeof id === 'string' && /^(?:project-memory|memory):/.test(id))
+  return sources.every((source) => {
+    const matches = source.startsWith('project-memory:')
+      ? entries.filter((entry) => projectMemorySourceId(entry) === source)
+      : entries.filter((entry) => `memory:${entry.id}` === source && (typeof record.metadata?.projectId !== 'string' || entry.projectId === record.metadata.projectId))
+    // Old id-only records are unsafe if the id exists in more than one project.
+    return matches.length === 1 && isActiveProjectMemoryEntry(matches[0])
+  })
+}
+
+/** Cached/prebuilt records retain memory provenance and must pass the current store. */
+export function filterRetrievalProjectMemorySources(index: RetrievalIndex, entries: ProjectMemoryEntry[]): RetrievalIndex {
+  const records = index.records.filter((record) => projectMemoryRecordVisible(record, entries))
   return { ...index, records, stats: indexStats(records) }
 }
 
@@ -162,6 +185,7 @@ export function buildRetrievalIndex(input: RetrievalIndexInput = {}, now = Date.
     // Prebuilt artifacts retain source provenance. Unknown or hidden thread sources
     // cannot bypass the live policy by changing a record's kind to artifact/summary.
     if (!visibleThreadRecord(record, visibleThreadIds, input.currentThreadId, visibleMissionIds)) return
+    if (!projectMemoryRecordVisible(record, input.projectMemory ?? [])) return
     if (input.savedMemoryAllowed === false && [record.id, ...record.sourceIds ?? []].some((id) => typeof id === 'string' && (/^(?:project-memory|memory):/.test(id) || /^room:[^:]+:memory(?:-|:)/.test(id) || /^room:[^:]+:event:/.test(id) && !isOperationalRoomEventKind(record.metadata?.roomEventKind) || /^thread:/.test(id) && !id.startsWith(`thread:${input.currentThreadId}:`)))) return
     const normalized = normalizeRetrievalRecord(record)
     if (!normalized) return
@@ -177,7 +201,7 @@ export function buildRetrievalIndex(input: RetrievalIndexInput = {}, now = Date.
   for (const mission of visibleMissions) addMissionRecords(mission, (record) => add({ ...record, sourceIds: [...record.sourceIds ?? [], ...(mission.threadId ? [`thread:${mission.threadId}:mission:${mission.id}`] : [])] }))
   for (const room of input.rooms ?? []) addRoomRecords(input.savedMemoryAllowed === false ? roomWithoutSavedRecall(room) : room, add, input.savedMemoryAllowed !== false)
   for (const ticket of input.tickets ?? []) addTicketRecords(ticket, add)
-  if (input.savedMemoryAllowed !== false) for (const memory of input.projectMemory ?? []) add(projectMemoryRecord(memory))
+  if (input.savedMemoryAllowed !== false) for (const memory of input.projectMemory ?? []) if (isActiveProjectMemoryEntry(memory)) add(projectMemoryRecord(memory))
   for (const artifact of input.artifacts ?? []) add(artifactRecord(artifact))
 
   const list = [...records.values()].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0) || a.kind.localeCompare(b.kind) || a.title.localeCompare(b.title))
@@ -253,6 +277,7 @@ export async function buildWorkspaceRetrievalIndex(input: WorkspaceRetrievalInde
   }
 
   if (input.recallThreads) data.threads = input.recallThreads()
+  if (input.recallProjectMemory) data.projectMemory = input.savedMemoryAllowed === false ? [] : input.recallProjectMemory()
   return buildRetrievalIndex(data)
 }
 
@@ -485,12 +510,13 @@ function connectorEventRecord(event: ConnectorEvent): Partial<RetrievalRecord> {
 }
 
 function projectMemoryRecord(memory: ProjectMemoryEntry): Partial<RetrievalRecord> {
+  const sourceId = projectMemorySourceId(memory)
   return {
-    id: `memory:${memory.id}`,
+    id: sourceId,
     kind: 'summary',
     title: `${memory.kind} memory`,
     text: memory.text,
-    sourceIds: normalizeSourceIds(memory.sourceIds, memory.sourceRef ? [memory.sourceRef] : [`memory:${memory.id}`]),
+    sourceIds: normalizeSourceIds([sourceId, ...(memory.sourceIds ?? []), ...(memory.sourceRef ? [memory.sourceRef] : [])], [sourceId]),
     path: memory.sourceType === 'file' ? memory.sourceRef : null,
     createdAt: memory.updatedAt,
     metadata: { projectId: memory.projectId, sourceType: memory.sourceType, confidence: memory.confidence, privacyScope: memory.privacyScope },

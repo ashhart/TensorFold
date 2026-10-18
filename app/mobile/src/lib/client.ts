@@ -1,6 +1,6 @@
 export interface DeviceSession { baseUrl: string; token: string; sessionId: string; label: string; certificatePin?: string }
 export interface MobileItem { id: string; kind: string; tool?: string; state?: string; status?: string; title?: string; text?: string; command?: string; path?: string; output?: string; diff?: { type: string; text: string }[]; createdAt?: number }
-export interface MobileThread { id: string; title: string; kind: 'task' | 'chat'; projectId?: string | null; providerId: string | null; model: string | null; status: string; updatedAt: number; timeline: MobileItem[]; goal?: string; lastRunReceipt?: { verdict: string; summary: string; changedFiles?: string[] } | null }
+export interface MobileThread { incognito?: boolean; phoneLocalOnly?: boolean; id: string; title: string; kind: 'task' | 'chat'; projectId?: string | null; providerId: string | null; model: string | null; status: string; updatedAt: number; timeline: MobileItem[]; goal?: string; lastRunReceipt?: { verdict: string; summary: string; changedFiles?: string[] } | null }
 export interface MobileSnapshot {
   serverName: string; appVersion: string; generatedAt: number; activeThreadIds: string[];
   threads: MobileThread[]; projects: { id: string; name: string }[];
@@ -125,6 +125,18 @@ export class StudioClient {
     if (active ? !capabilities.taskGuide : !capabilities.taskStart) throw new HostError('Sending is disabled by this host session.', 403)
     const text = userText.trim(); if (!text || text.length > 8_000) throw new HostError('Enter a message of up to 8,000 characters.')
     await this.request(`v1/threads/${encodeURIComponent(threadId)}/${active ? 'guide' : 'start'}`, { userText: text })
+  }
+  async watchSpeechStatus(): Promise<{available: boolean; provider: 'kokoro'; reason: string | null}> { return this.request('v1/watch/speech/status') }
+  async startWatchSpeech(threadId: string, itemId: string): Promise<{speechId: string; provider: 'kokoro'; sampleRate: number}> {
+    return this.request('v1/watch/speech/start', {threadId, itemId})
+  }
+  async readWatchSpeech(speechId: string, sequence: number): Promise<{speechId: string; sequence: number; state: 'pending' | 'audio' | 'done' | 'error'; audioBase64?: string; sampleRate?: number; error?: string}> {
+    if (!/^[a-zA-Z0-9-]{8,80}$/.test(speechId) || !Number.isInteger(sequence) || sequence < 0 || sequence > 10_000) throw new HostError('Invalid speech request.')
+    return this.request(`v1/watch/speech/${speechId}/chunks/${sequence}`)
+  }
+  async cancelWatchSpeech(speechId: string): Promise<{cancelled: boolean}> {
+    if (!/^[a-zA-Z0-9-]{8,80}$/.test(speechId)) throw new HostError('Invalid speech request.')
+    return this.request(`v1/watch/speech/${speechId}/cancel`, {})
   }
   async stop(threadId: string, capabilities: DeviceStatus['capabilities']): Promise<void> {
     if (!capabilities.taskStop) throw new HostError('Stopping is disabled by this host session.', 403)

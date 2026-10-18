@@ -14,6 +14,7 @@ const {
   authFolderFor,
   beginWhatsAppAuthStatePurge,
   createProtectedWhatsAppAuthState,
+  hasProtectedRegisteredWhatsAppAuthState,
   endWhatsAppAuthStatePurge,
   protectedAuthFileFor,
   shredWhatsAppAuthState,
@@ -29,12 +30,17 @@ const deps = {
   now: () => now,
 }
 
+assert.equal(await hasProtectedRegisteredWhatsAppAuthState(home, 'wa_never_created'), false)
+assert.equal(existsSync(authFolderFor(home, 'wa_never_created')), false, 'resume preflight cannot create a credential directory')
+
 const auth = await createProtectedWhatsAppAuthState(B, home, sourceId, deps)
+assert.equal(await hasProtectedRegisteredWhatsAppAuthState(home, sourceId), false, 'an unregistered protected envelope cannot auto-resume')
 auth.state.creds.registered = true
 auth.state.creds.me = { id: jid, name: 'Protected test' }
 const secretSession = Buffer.from('SESSION-PLAINTEXT-SENTINEL')
 await auth.state.keys.set({ session: { 'device:1': secretSession } })
 assert.equal(await auth.saveCreds(), now, 'a real paired credential update receives the host timestamp')
+assert.equal(await hasProtectedRegisteredWhatsAppAuthState(home, sourceId), true, 'only registered protected credentials pass startup preflight')
 
 const protectedFile = protectedAuthFileFor(home, sourceId)
 const raw = readFileSync(protectedFile, 'utf8')

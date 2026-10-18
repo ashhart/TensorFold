@@ -4,7 +4,10 @@
 // instructions render as blue bubbles (right). Kept framework-free so it can be
 // unit-tested directly.
 
+import type { ConnectorEvent } from '../../lib/types'
+
 export type BubbleDirection = 'in' | 'out'
+export type MessageDeliveryStatus = 'draft' | 'approved' | 'sending' | 'sent' | 'failed' | 'uncertain'
 
 export interface BubbleRow {
   id: string
@@ -15,7 +18,7 @@ export interface BubbleRow {
   source?: string
   // Outbound bubbles that are agent drafts awaiting approval carry a status the
   // ConversationView renders as an Approve/Edit/Discard affordance.
-  status?: 'draft' | 'sent' | 'failed'
+  status?: MessageDeliveryStatus
   /** Stable sort key (createdAt or a synthesized index) for ordering the column. */
   sort: number
 }
@@ -57,19 +60,21 @@ export function eventToBubble(event: {
   createdAt?: number
   isFromMe?: boolean
   approvalStatus?: string
+  delivery?: ConnectorEvent['delivery']
+  outbound?: ConnectorEvent['outbound']
 }): BubbleRow {
   const direction = eventDirection(event)
-  const text = (event.text ?? event.summary ?? event.detail ?? event.title ?? '').trim()
-  const status: BubbleRow['status'] | undefined =
-    direction === 'out'
-      ? event.approvalStatus === 'approved'
-        ? 'sent'
-        : event.approvalStatus === 'denied'
-          ? 'failed'
-          : event.action && OUTBOUND_ACTIONS.test(event.action) && event.approvalStatus !== 'approved'
-            ? 'draft'
-            : undefined
-      : undefined
+  const text = (event.outbound?.body ?? event.text ?? event.summary ?? event.detail ?? event.title ?? '').trim()
+  let status: BubbleRow['status']
+  if (direction === 'out') {
+    if (event.delivery?.status === 'delivered') status = 'sent'
+    else if (event.delivery?.status === 'uncertain') status = 'uncertain'
+    else if (event.delivery?.status === 'failed' || event.approvalStatus === 'denied') status = 'failed'
+    else if (event.delivery?.status === 'sending') status = 'sending'
+    else if (event.approvalStatus === 'approved') status = 'approved'
+    else if (event.action && OUTBOUND_ACTIONS.test(event.action)) status = 'draft'
+  }
+
   return {
     id: event.id,
     direction,

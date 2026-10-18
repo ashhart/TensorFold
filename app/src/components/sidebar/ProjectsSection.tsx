@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
 import { Menu, MenuItem } from '../ui'
@@ -48,28 +49,30 @@ export interface ProjectsSectionProps {
 }
 
 function TagFilter({ allTags, showUntagged, effectiveFilter, setTag }: Pick<ProjectsSectionProps, 'allTags' | 'showUntagged' | 'effectiveFilter' | 'setTag'>) {
+  const tx = useAuthoredText()
   const tab = (id: string, label: string) => (
     <button key={id} onClick={() => setTag(id)} className={clsx('rounded-md px-1.5 py-0.5 text-[13px] capitalize transition-colors', effectiveFilter === id ? 'bg-surface-hover text-ink' : 'text-ink-3 hover:text-ink')}>{label}</button>
   )
   return (
     <div className="flex flex-wrap gap-1 px-2 pb-1">
-      {tab('all', 'All')}
+      {tab('all', tx("All"))}
       {allTags.map((t) => tab(t, t))}
-      {showUntagged && tab(UNTAGGED_FILTER, 'Untagged')}
+      {showUntagged && tab(UNTAGGED_FILTER, tx("Untagged"))}
     </div>
   )
 }
 
 // Projects, each expandable to its Kanban, terminals, rooms and threads.
 export function ProjectsSection(props: ProjectsSectionProps) {
+  const tx = useAuthoredText()
   const { view, editingKey, setEditingKey, effectiveFilter, projectGroups, collapsed, forceOpen, toggleCollapsed, terminals, settings, threadRowProps, roomRowProps, terminalRowProps } = props
   return (
     <>
-      <SectionTitle action={<button onClick={props.openNewProject} title="New project" className="no-drag flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink" aria-label="New project"><Icon name="plus" size={16} /></button>}>Projects</SectionTitle>
+      <SectionTitle action={<button onClick={props.openNewProject} title={tx("New project")} className="no-drag flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink" aria-label={tx("New project")}><Icon name="plus" size={16} /></button>}>{tx("Projects")}</SectionTitle>
       {props.allTags.length > 0 && <TagFilter {...props} />}
       {projectGroups.length === 0 && (
         <div className="px-2.5 py-1.5 text-[13px] text-ink-3">
-          {effectiveFilter === UNTAGGED_FILTER ? 'No untagged projects.' : effectiveFilter !== 'all' ? `No "${effectiveFilter}" projects.` : 'No projects yet.'}
+          {effectiveFilter === UNTAGGED_FILTER ? tx("No untagged projects.") : effectiveFilter !== 'all' ? tx("No \"{value0}\" projects.", { value0: effectiveFilter }) : tx("No projects yet.")}
         </div>
       )}
       {projectGroups.map(({ project, threads, rooms, ticketCount }) => {
@@ -85,7 +88,7 @@ export function ProjectsSection(props: ProjectsSectionProps) {
               <div onClick={() => { if (!editing) props.openProject(project.id) }} className={clsx('no-drag relative flex h-8 w-full cursor-default items-center gap-2 rounded-[10px] pl-2.5 pr-16 text-[13px] transition-colors', overview ? ACTIVE_ROW : clsx('text-ink', HOVER_ROW))}>
                 <button
                   onClick={(e) => { e.stopPropagation(); toggleCollapsed(project.id) }}
-                  aria-label={open ? 'Collapse project' : 'Expand project'}
+                  aria-label={open ? tx("Collapse project") : tx("Expand project")}
                   aria-expanded={open}
                   className="no-drag flex h-4 w-4 shrink-0 items-center justify-center text-ink-3 hover:text-ink"
                 >
@@ -101,23 +104,23 @@ export function ProjectsSection(props: ProjectsSectionProps) {
                   className="min-w-0 flex-1 truncate text-left font-medium"
                 />
                 {project.executionTarget === 'orchestrator' && (
-                  <span title={`Runs on ${props.orchestratorName(project.orchestratorId)}`} className="flex shrink-0 text-ink-3 group-hover:hidden"><Icon name="globe" size={14} /></span>
+                  <span title={tx("Runs on {value0}", { value0: props.orchestratorName(project.orchestratorId) })} className="flex shrink-0 text-ink-3 group-hover:hidden"><Icon name="globe" size={14} /></span>
                 )}
                 {!editing && !open && count > 0 && <span className="shrink-0 text-[13px] tabular-nums text-ink-3 group-hover:hidden">{count}</span>}
               </div>
               {!editing && (
                 <div className="no-drag absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center">
                   <Menu align="end" width={176} trigger={(menuOpen) => (
-                    <button className={clsx('flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink', menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100')} aria-label="Add to project" title="Add a task, room, Kanban, terminal or tag"><Icon name="plus" size={16} /></button>
+                    <button className={clsx('flex h-6 w-6 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink', menuOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100')} aria-label={tx("Add to project")} title={tx("Add a task, room, Kanban, terminal or tag")}><Icon name="plus" size={16} /></button>
                   )}>
                     {(close) => (
                       <>
-                        <MenuItem icon="file" onClick={() => { close(); void props.onNewThread(project.id) }}>Task</MenuItem>
-                        <MenuItem icon="layers" onClick={() => { close(); void props.createRoom(project.id, 'New room') }}>Room</MenuItem>
-                        <MenuItem icon="grid" onClick={() => { close(); props.setView({ name: 'project', id: project.id, tab: 'board' }) }}>Kanban</MenuItem>
-                        <MenuItem icon="terminal" onClick={async () => { close(); const s = await props.startTerminal(project.id, 'shell'); if (s) props.openTerminal(project.id, terminalSessionKey(s)) }}>Terminal</MenuItem>
+                        <MenuItem icon="file" onClick={() => { close(); void props.onNewThread(project.id) }}>{tx("Task")}</MenuItem>
+                        <MenuItem icon="layers" onClick={() => { close(); void props.createRoom(project.id, 'New room') }}>{tx("Room")}</MenuItem>
+                        <MenuItem icon="grid" onClick={() => { close(); props.setView({ name: 'project', id: project.id, tab: 'board' }) }}>{tx("Kanban")}</MenuItem>
+                        <MenuItem icon="terminal" onClick={async () => { close(); const s = await props.startTerminal(project.id, 'shell'); if (s) props.openTerminal(project.id, terminalSessionKey(s)) }}>{tx("Terminal")}</MenuItem>
                         <div className="my-1 border-t border-line" />
-                        <div className="px-2.5 pb-1 pt-0.5 text-[13px] text-ink-3">Tags</div>
+                        <div className="px-2.5 pb-1 pt-0.5 text-[13px] text-ink-3">{tx("Tags")}</div>
                         {TAG_PRESETS.map((t) => {
                           const on = (project.tags ?? []).includes(t)
                           return (
@@ -128,16 +131,16 @@ export function ProjectsSection(props: ProjectsSectionProps) {
                             </button>
                           )
                         })}
-                        <MenuItem icon="plus" onClick={() => { close(); props.openProject(project.id) }}>Custom tag…</MenuItem>
+                        <MenuItem icon="plus" onClick={() => { close(); props.openProject(project.id) }}>{tx("Custom tag…")}</MenuItem>
                         {(project.tags ?? []).filter((t) => !(TAG_PRESETS as readonly string[]).includes(t)).map((t) => (
                           <button key={t} onClick={() => { void props.updateProject(project.id, { tags: toggleTag(project.tags, t) }) }} className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] capitalize text-ink-3 transition-colors hover:bg-danger/10 hover:text-danger">
-                            <Icon name="x" size={14} />Remove "{t}"
+                            <Icon name="x" size={14} />{tx("Remove \"")}{t}"
                           </button>
                         ))}
                       </>
                     )}
                   </Menu>
-                  <button onClick={(e) => { e.stopPropagation(); props.archiveItem('project', project.id) }} className="flex h-6 w-6 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-surface-hover hover:text-ink group-hover:opacity-100" aria-label="Archive project" title="Archive project"><Icon name="archive" size={16} /></button>
+                  <button onClick={(e) => { e.stopPropagation(); props.archiveItem('project', project.id) }} className="flex h-6 w-6 items-center justify-center rounded-md text-ink-3 opacity-0 transition-opacity hover:bg-surface-hover hover:text-ink group-hover:opacity-100" aria-label={tx("Archive project")} title={tx("Archive project")}><Icon name="archive" size={16} /></button>
                 </div>
               )}
             </div>
@@ -146,7 +149,7 @@ export function ProjectsSection(props: ProjectsSectionProps) {
                 {ticketCount > 0 && (
                   <button onClick={() => props.setView({ name: 'project', id: project.id, tab: 'board' })} className={rowClass(boardActive)}>
                     <Icon name="grid" size={16} className="shrink-0 text-ink-3" />
-                    <span className="min-w-0 flex-1 truncate">Kanban</span>
+                    <span className="min-w-0 flex-1 truncate">{tx("Kanban")}</span>
                     <span className="shrink-0 text-[13px] tabular-nums text-ink-3">{ticketCount}</span>
                   </button>
                 )}

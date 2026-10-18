@@ -1,3 +1,6 @@
+import { authoredText } from '../../lib/preferences/language-packs'
+import { useStore as useLocaleStore } from '../../lib/store'
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -9,7 +12,7 @@ import type { DiffLine, Thread, WorkspaceLocation } from '../../lib/types'
 import { DiffView } from './DiffView'
 
 const BIG_DIFF_LINES = 600
-const STATUS_LABEL: Record<string, string> = { A: 'Added', M: 'Modified', D: 'Deleted', R: 'Renamed', '?': 'New' }
+const STATUS_LABEL: Record<string, string> = { get A() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Added") }, get M() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Modified") }, get D() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Deleted") }, get R() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Renamed") }, get '?'() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "New") } }
 
 function splitPath(path: string): { dir: string; name: string } {
   const at = path.lastIndexOf('/')
@@ -25,6 +28,7 @@ function matchFile(turns: ChangeTurn[], wanted: string): string | null {
 
 // This thread's changed files, newest turn first, each with its diff from the working tree.
 export function ChangesTab({ thread, cwd, workspace, turns }: { thread: Thread; cwd: string; workspace: WorkspaceLocation | null; turns: ChangeTurn[] }) {
+  const tx = useAuthoredText()
   const focus = useStore((s) => s.workPaneFocus)
   const [diffs, setDiffs] = useState<Map<string, DiffLine[]> | null>(null)
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
@@ -32,7 +36,7 @@ export function ChangesTab({ thread, cwd, workspace, turns }: { thread: Thread; 
   const [active, setActive] = useState<string | null>(null)
   const listRef = useRef<HTMLDivElement>(null)
   const totals = changeTotals(turns)
-  const gitPaths = useMemo(() => turns.flatMap((t) => t.files.filter((f) => f.status).map((f) => f.path)), [turns])
+  const gitPaths = useMemo(() => turns.flatMap((t) => t.files.filter((f) => f.status).map((f) => f.path)), [turns, tx])
   const gitKey = turns.map((t) => t.files.map((f) => `${f.path}:${f.additions}:${f.deletions}`).join(',')).join('|')
 
   useEffect(() => {
@@ -58,19 +62,18 @@ export function ChangesTab({ thread, cwd, workspace, turns }: { thread: Thread; 
   }, [focus?.nonce]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (turns.length === 0) {
-    return <div className="px-4 py-8 text-center text-[13px] text-ink-3">No changes yet.</div>
+    return <div className="px-4 py-8 text-center text-[13px] text-ink-3">{tx("No changes yet.")}</div>
   }
 
   const toggle = (path: string) => setCollapsed((c) => { const next = new Set(c); if (next.has(path)) next.delete(path); else next.add(path); return next })
 
   const fileBody = (file: ChangedFile) => {
     const diff = diffs?.get(file.path) ?? file.editDiff
-    if (!diff) return <div className="px-4 py-3 text-[13px] text-ink-3">{diffs ? 'No text diff for this file.' : 'Loading diff…'}</div>
+    if (!diff) return <div className="px-4 py-3 text-[13px] text-ink-3">{diffs ? tx("No text diff for this file.") : tx("Loading diff…")}</div>
     if (diff.length > BIG_DIFF_LINES && !expandedBig.has(file.path)) {
       return (
         <button onClick={() => setExpandedBig((s) => new Set(s).add(file.path))} className="w-full px-4 py-3 text-left text-[13px] text-ink-3 transition-colors hover:text-ink">
-          Show {diff.length} lines
-        </button>
+          {tx("Show ")}{diff.length} {tx("lines")}</button>
       )
     }
     return <DiffView diff={diff} />
@@ -79,7 +82,7 @@ export function ChangesTab({ thread, cwd, workspace, turns }: { thread: Thread; 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-4 text-[13px]">
-        <span className="text-ink-2">{totals.files} file{totals.files === 1 ? '' : 's'}</span>
+        <span className="text-ink-2">{tx("Files changed: {count}", { count: totals.files })}</span>
         <span className="tabular-nums text-positive">+{totals.additions}</span>
         <span className="tabular-nums text-danger">−{totals.deletions}</span>
         <div className="flex-1" />
@@ -87,14 +90,14 @@ export function ChangesTab({ thread, cwd, workspace, turns }: { thread: Thread; 
           onClick={() => setCollapsed((c) => (c.size ? new Set() : new Set(turns.flatMap((t) => t.files.map((f) => f.path)))))}
           className="rounded-md px-1.5 py-0.5 text-ink-3 transition-colors hover:bg-surface-hover hover:text-ink"
         >
-          {collapsed.size ? 'Expand all' : 'Collapse all'}
+          {collapsed.size ? tx("Expand all") : tx("Collapse all")}
         </button>
       </div>
       <div ref={listRef} className="scroll-thin min-h-0 flex-1 overflow-y-auto pb-6">
         {turns.map((turn) => (
           <section key={turn.key}>
             <div className="flex items-baseline gap-1.5 px-4 pb-1 pt-4 text-[13px] leading-4 text-ink-3">
-              <span className="shrink-0 text-ink-2">{turn.turn === null ? 'Other changes in this folder' : `Turn ${turn.turn}`}</span>
+              <span className="shrink-0 text-ink-2">{turn.turn === null ? tx("Other changes in this folder") : tx("Turn {value0}", { value0: turn.turn })}</span>
               {turn.prompt && <span className="min-w-0 truncate">{turn.prompt}</span>}
             </div>
             {turn.files.map((file) => {

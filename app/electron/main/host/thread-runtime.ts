@@ -1,13 +1,18 @@
+import { resolveMessageQuotes } from '../../agent/conversation-quotation'
+import { selectedResponseLocale } from '../../agent/response-language'
+import { RunRecoveryTracker } from '../../agent/run-recovery/tracker'
+import { assertRecoveryAllowsNewRun } from '../../agent/run-outcome-review'
+import { apiUserMessageRef } from '../../agent/message-edit'
 import { assertThreadMemoryTransport, captureThreadMemoryPolicy, canContributeThreadMemory, threadMemoryPolicyRevision } from '../../../shared/thread-memory-policy'
+import { assertGoogleContextTransport } from '../../../shared/google-workspace-privacy'
 import { saveThreadMemoryPolicy } from '../../store'
-import { authoredMemoryMessages } from '../../agent/memory-harvest'
 import { randomUUID } from 'node:crypto'
 import { restartResumeApprovalMode, claimJobLease } from '../../agent/jobs'
 import type { JobPatch } from '../../agent/jobs'
 import { runAgent } from '../../agent/loop'
 import { runOmpThread } from '../../agent/omp-engine'
 import { assertOmpEngineAllowed } from '../../agent/planning-guard'
-import { executeTool } from '../../agent/tools'
+import { executeTool, isReadOnlyTool } from '../../agent/tools'
 import { createSubAgentFromLaunch, parentForThread, updateSubAgent } from '../../agent/subagents'
 import { saveSubAgents, vontraPath } from '../../store'
 import { selectChannelPrompt } from '../../agent/channel-prompt'
@@ -24,7 +29,8 @@ import { assertLocalEndpointAvailable } from '../../agent/local-endpoint'
 import { routeSpendStatus } from '../../agent/model-router'
 import { ensureTensorFoldStudioStylePrompt } from '../../agent/prompt-style'
 import { resolvePersona, personaSystemBlock } from '../../agent/persona'
-import { createProjectMemoryCandidate } from '../../agent/project-memory'
+import { createProjectMemoryCandidate, scopeProjectMemoryEntries } from '../../agent/project-memory'
+import { projectMemoryAutoCandidateTurn, projectMemoryAutoMessages } from './project-memory-auto-policy'
 import { persistProjectMemoryCandidates, persistSuggestions } from './persistence'
 import { assertProviderEndpointResolved, auditPreview } from '../../agent/security'
 import { ensureAgentEventTrace, ensureTimelineItemTrace } from '../../agent/trace'
@@ -119,6 +125,12 @@ interface JobHandle {
   set(job: Job | null): void
 }
 
+/** Main-process admission only; renderer/model payloads never supply these hooks. */
+export interface ThreadRunAdmission {
+  assertAllowed(): void
+  onController(controller: AbortController): void
+}
+
 export interface ThreadRuntime {
   addThreadNotice(thread: Thread, runId: string, text: string): void
   applyEventToThread(thread: Thread, event: AgentEvent): void
@@ -130,7 +142,7 @@ export interface ThreadRuntime {
   markRouteErrorRecovered(thread: Thread, err: unknown, runId: string, text: string): void
   markUndrainedCues(thread: Thread, meta?: string): void
   roomRouteHandoff(room: Room, seat: Seat, reason: string): string
-  startThreadRun(payload: StartRunPayload, existingJob?: Job): Promise<{ runId: string }>
+  startThreadRun(payload: StartRunPayload, existingJob?: Job, admission?: ThreadRunAdmission): Promise<{ runId: string }>
   timelineError(errorItem: TimelineItem): Error
   timelineErrorSince(thread: Thread, timelineStart: number): TimelineItem | null
   waitForThreadCue(threadId: string, timeoutMs: number, signal: AbortSignal): Promise<void>
@@ -139,6 +151,7 @@ export interface ThreadRuntime {
 interface ThreadRuntimeDeps {
   aborters: Map<string, AbortController>
   workspaceMutationGuard: Pick<WorkspaceMutationGuard, 'assertThreadStartAllowed' | 'reserveStart'>
+  assertLocalEngineAdmission?: () => void
   pendingApprovalMeta: Map<string, { threadId: string; itemId: string; tool: string; policy: ApprovalPolicyScope }>
   jobLeaseOwner: string
   threadJobHeartbeatMs: number
@@ -378,6 +391,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const thread = store.threads.find((t) => t.id === payload.threadId)
     if (!thread) throw new Error('Thread not found')
     if (thread.archivedAt) throw new Error('Restore this archived thread before starting it.')
+    if ('quotes' in payload) throw new Error('Quotes stay in the saved draft until the current run finishes.')
     botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, store.settings.approvalMode)
     if (thread.bot) assertBotLifecycleIdle(thread.bot.presetId)
     const attachments = normalizeAttachments(payload.attachments)
@@ -425,7 +439,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   // ask the same backend whether the skill body could be sharper, and FILE any improvement as
   // a pending suggestion (deduped per target). Best-effort and fully detached from the run.
   async function reviewViewedSkills(args: { provider: Provider; model: string; thread: Thread; userText: string; viewed: string[]; signal: AbortSignal; memoryPolicy: import('../../agent/types').ThreadMemoryPolicy; memoryRevision: number }): Promise<void> {
-    const allowed = () => store.threads.includes(args.thread) && canContributeThreadMemory(args.thread, args.memoryPolicy, args.memoryRevision, args.signal)
+    const allowed = () => !args.thread.googleLocalOnly && store.threads.includes(args.thread) && canContributeThreadMemory(args.thread, args.memoryPolicy, args.memoryRevision, args.signal)
     if (!allowed()) return
     try {
       const { provider, model } = args
@@ -433,7 +447,8 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       const complete = async (messages: { role: string; content: string }[]): Promise<string> => {
         if (!allowed()) throw new Error('Memory proposal review is no longer allowed.')
         let out = ''
-        for await (const ch of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: messages as ApiMessage[], temperature: 0.2, approvalMode: 'readonly', cwd: args.thread.cwd, signal: args.signal })) {
+        for await (const ch of streamChat({ provider, baseUrl: provider.baseUrl, apiKey: provider.apiKey, model, messages: messages as ApiMessage[], temperature: 0.2, approvalMode: 'readonly', cwd: args.thread.cwd, signal: args.signal,
+          assertRequestAllowed: () => { if (!allowed()) throw new Error('Memory proposal review is no longer allowed.'); assertGoogleContextTransport(args.thread, provider) } })) {
           if (ch.type === 'content') out += ch.text
         }
         return out
@@ -454,34 +469,39 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   }
 
   function proposePostRunMemory(thread: Thread, memoryPolicy: import('../../agent/types').ThreadMemoryPolicy, memoryRevision: number, signal: AbortSignal): void {
-    if (!store.threads.includes(thread) || !canContributeThreadMemory(thread, memoryPolicy, memoryRevision, signal) || !thread.projectId) return
+    if (thread.googleLocalOnly || !store.threads.includes(thread) || !canContributeThreadMemory(thread, memoryPolicy, memoryRevision, signal) || !thread.projectId) return
+    const activeEntries = scopeProjectMemoryEntries(store.projectMemory, thread.projectId)
     const existingTexts = [
-      ...store.projectMemory.filter((entry) => entry.projectId === thread.projectId).map((entry) => entry.text),
-      ...store.projectMemoryCandidates.filter((candidate) => candidate.projectId === thread.projectId && candidate.status === 'pending').map((candidate) => candidate.text),
+      ...activeEntries.map((entry) => entry.text),
+      ...store.projectMemoryCandidates.filter((candidate) => candidate.projectId === thread.projectId && candidate.status === 'pending' && (!candidate.targetEntryId || activeEntries.some((entry) => entry.id === candidate.targetEntryId))).map((candidate) => candidate.text),
     ]
-    const candidates = harvestPostRunMemoryCandidates(authoredMemoryMessages(thread), { existingTexts, cap: 3 })
+    const authored = projectMemoryAutoMessages(store.projectMemory, thread)
+    const candidates = harvestPostRunMemoryCandidates(authored, { existingTexts, cap: 3 })
     if (!candidates.length) return
     for (const text of candidates) {
       store.projectMemoryCandidates = [
         // Provenance (VST-009): the review UI links each proposal back to the exact
         // conversation turn that surfaced the pattern.
-        createProjectMemoryCandidate({ projectId: thread.projectId, text, sourceType: 'agent', reason: 'Proposed after a completed run.', sourceThreadId: thread.id, sourceTurn: threadTurnNumber(thread.timeline) }),
+        createProjectMemoryCandidate({ projectId: thread.projectId, text, sourceType: 'agent', reason: 'Proposed after a completed run.', sourceThreadId: thread.id, sourceTurn: projectMemoryAutoCandidateTurn(authored, text) }),
         ...store.projectMemoryCandidates,
       ]
     }
     persistProjectMemoryCandidates()
   }
 
-  async function startThreadRun(payload: StartRunPayload, existingJob?: Job): Promise<{ runId: string }> {
+  async function startThreadRun(payload: StartRunPayload, existingJob?: Job, admission?: ThreadRunAdmission): Promise<{ runId: string }> {
     requireSecurityRole('operator', 'start agent runs')
+    admission?.assertAllowed()
     if (Object.prototype.hasOwnProperty.call(payload, 'memoryPolicy')) throw new Error('Memory choices must be saved before starting a run.')
     const thread = store.threads.find((t) => t.id === payload.threadId)
     if (!thread) throw new Error('Thread not found')
     if (thread.archivedAt) throw new Error('Restore this archived thread before starting it.')
+    const quotes = resolveMessageQuotes(thread, payload.quotes)
+    if (quotes.length && (payload.sourceThreadKey || thread.engine === 'omp')) throw new Error('Quoted replies need a local TensorFold chat API conversation.')
     const runApprovalMode = botRunApprovalMode(thread, store.settings.agentPresets, store.settings.providers, payload.approvalMode ?? restartResumeApprovalMode(existingJob?.resumeAfterRestart, store.settings.approvalMode))
     const botVm = thread.bot?.executionTarget === 'vm'
     const restrictedBot = isRestrictedBot(thread.bot)
-    const localHelpersOnly = botUsesGuardedExecution(thread.bot) || thread.phoneLocalOnly === true
+    const localHelpersOnly = botUsesGuardedExecution(thread.bot) || thread.phoneLocalOnly === true || thread.googleLocalOnly === true
     const assertBotResearchOff = (provider: Provider | undefined) => {
       const engine = engineService()
       // Also cover custom API aliases of the built-in server, including startup races.
@@ -500,6 +520,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     // controller (breaking cancel + cue queueing) and both runs would interleave apiMessages.
     // Checked here (before any thread mutation) so a rejected start leaves state untouched.
     if (aborters.has(thread.id)) throw new Error('Thread already running')
+    assertRecoveryAllowsNewRun(thread)
     const project = thread.projectId ? store.projects.find((p) => p.id === thread.projectId) ?? null : null
     if (thread.projectId && (!project || project.archivedAt)) throw new Error('Restore or choose an active project before starting this thread.')
     const workspace = thread.workspace ?? project?.workspace ?? null
@@ -508,6 +529,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const attachments = normalizeAttachments(payload.attachments)
     const surfaceRoute = thread.providerId ? null : surfaceModelOverride(store.settings, thread.kind === 'chat' ? 'chat' : 'code')
     const baseProvider = store.settings.providers.find((p) => p.id === (thread.providerId ?? surfaceRoute?.providerId ?? store.settings.activeProviderId))
+    assertGoogleContextTransport(thread, baseProvider)
     assertIncognitoThreadTransportSupported(thread, baseProvider)
     assertThreadMemoryTransport(thread, baseProvider)
     if (thread.incognito && existingJob && (existingJob.incognito !== true || existingJob.threadId !== thread.id || existingJob.currentThreadId !== thread.id)) throw new Error('An Incognito task cannot resume a saved or unrelated job; start a new private turn.')
@@ -515,6 +537,10 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const initialWorkspaceKey = workspace?.kind === 'ssh'
       ? sshWorkspaceKey(workspace.hostId, workspace.path)
       : thread.kind === 'chat' || botVm ? null : lexicalLocalWorkspaceKey(workspace?.kind === 'local' ? workspace.path : thread.cwd)
+    // Admission and publishing aborters below are synchronous: a comparison cannot start
+    // between the local engine check and this run owning its host reservation.
+    admission?.assertAllowed()
+    if (isEngineProvider(baseProvider)) (deps.assertLocalEngineAdmission ?? (() => engineService()?.assertLocalWorkAdmission()))()
     deps.workspaceMutationGuard.assertThreadStartAllowed(thread.id, initialWorkspaceKey)
     const runLease = deps.workspaceMutationGuard.reserveStart({ threadId: thread.id, workspaceKeys: [initialWorkspaceKey] })
     let releaseBotVmRun = () => {}
@@ -522,6 +548,8 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     const controller = new AbortController()
     aborters.set(thread.id, controller)
     try {
+    admission?.onController(controller)
+    admission?.assertAllowed()
     const memoryPolicy = captureThreadMemoryPolicy(thread)
     if (botVm || restrictedBot) assertBotResearchOff(baseProvider)
     if (botVm) {
@@ -669,9 +697,14 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
     // Publish the durable startup CAS pair before a possible Stop returns control to the UI.
     emitToRenderer({ runId: '', threadId: thread.id, type: 'thread_update', patch: { memoryPolicy: { ...captureThreadMemoryPolicy(acceptedMemoryThread) }, memoryPolicyRevision: memoryRevision } })
     if (controller.signal.aborted) throw new Error('Run cancelled after memory choices were accepted.')
-    const userItem = { id: randomUUID(), kind: 'user' as const, memorySource: payload.sourceThreadKey ? 'external' as const : 'user' as const, text: payload.userText, attachments, createdAt: Date.now() }
+    assertGoogleContextTransport(thread, provider)
+    admission?.assertAllowed()
+    if (quotes.length && provider.transport && provider.transport !== 'chat-completions') throw new Error('Quoted replies need a model using the TensorFold chat API.')
+    resolveMessageQuotes(thread, quotes)
+    const userContent = buildUserContent(payload.userText, attachments, quotes)
+    const userItem = { id: randomUUID(), kind: 'user' as const, apiMessageRef: apiUserMessageRef(thread.apiMessages, userContent, thread.compactions?.length ?? 0), memorySource: payload.sourceThreadKey ? 'external' as const : 'user' as const, text: payload.userText, attachments, ...(quotes.length ? { quotedMessages: quotes } : {}), createdAt: Date.now() }
     thread.timeline.push(userItem)
-    thread.apiMessages.push({ role: 'user', content: buildUserContent(payload.userText, attachments) })
+    thread.apiMessages.push({ role: 'user', content: userContent })
     thread.status = 'running'
     thread.updatedAt = Date.now()
     emitToRenderer({ runId: '', threadId: thread.id, type: 'item_add', item: userItem })
@@ -770,14 +803,16 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       emit({ runId, threadId: thread.id, type: 'item_add', item: { id: randomUUID(), kind: 'notice', title: 'Budget', text: initialSpend.warning, state: 'ok', createdAt: Date.now() } })
     }
 
-    if (!localHelpersOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
+    if (!localHelpersOnly && !thread.googleLocalOnly && (thread.title === 'New task' || thread.title === 'New chat')) maybeAutoTitle(thread, provider, model, payload.userText)
 
     const routeProviderForModel = (routeProvider: Provider, routeModel: string, runModel: string) =>
       runModel === routeModel ? routeProvider : { ...routeProvider, models: [runModel, ...routeProvider.models.filter((candidate) => candidate !== runModel)] }
 
     const runWithRoute = async (route: { provider: Provider; providerAccountId: string | null; model: string }, runModel = route.model) => {
+      admission?.assertAllowed()
       const timelineStart = thread.timeline.length
       const activeProvider = routeProviderForModel(route.provider, route.model, runModel)
+      assertGoogleContextTransport(thread, activeProvider)
       assertIncognitoThreadTransportSupported(thread, activeProvider)
       if (thread.bot) {
         assertBotLifecycleIdle(thread.bot.presetId)
@@ -822,7 +857,17 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       // subagents, and Guide steering. The native loop below stays the default.
       if (thread.engine === 'omp') {
         assertOmpEngineAllowed()
-        await runOmpThread({
+        const delegated = new RunRecoveryTracker(runId, snapshot => {
+          if (aborters.get(thread.id) !== controller) return
+          thread.runRecovery = snapshot; persistThreads()
+          emitToRenderer({ runId, threadId: thread.id, type: 'thread_update', patch: { runRecovery: snapshot } })
+        })
+        const activeTools = new Set<Promise<unknown>>()
+        let acceptingTools = true, delegatedComplete = false
+        const stopDelegated = () => delegated.stopRequested()
+        delegated.start(); delegated.begin('delegated'); delegated.requestStarted()
+        controller.signal.addEventListener('abort', stopDelegated, { once: true })
+        try { await runOmpThread({
           thread,
           runId,
           emit: (event) => { emit(event); beatThreadJob() },
@@ -836,7 +881,16 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
           // Host-tools bridge: omp's model plans, TensorFold's approval gate and executor
           // own every mutation (write_file/edit_file/apply_patch/run_command).
           requestApproval: approvalResolver(controller, jobHandle),
-          executeTool: async (name, args) => executeTool(name, args, { ...toolContext, currentThread: thread, signal: controller.signal }),
+          executeTool: async (name, args) => {
+            if (!acceptingTools) throw new Error('The delegated run is stopping; no further tools can start.')
+            const operation = randomUUID(), mutating = !isReadOnlyTool(name)
+            delegated.begin(operation, mutating)
+            const pending = executeTool(name, args, { ...toolContext, currentThread: thread, signal: controller.signal })
+            activeTools.add(pending)
+            try { const result = await pending; delegated.toolCompleted(mutating, result.ok); return result }
+            catch (error) { if (mutating) delegated.toolUncertain(); throw error }
+            finally { activeTools.delete(pending); delegated.end(operation) }
+          },
           updateSubAgent: (record) => {
             const existing = store.subAgents.find((agent) => agent.id === record.id)
             if (existing) {
@@ -861,9 +915,24 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
             }
             void saveSubAgents(store.subAgents)
           },
-        })
+        }); delegated.requestComplete(); delegatedComplete = true
+        } catch (error) { delegated.requestFailed('unknown'); throw error }
+        finally {
+          acceptingTools = false
+          await Promise.allSettled([...activeTools])
+          delegated.end('delegated'); delegated.settle(delegatedComplete)
+          controller.signal.removeEventListener('abort', stopDelegated)
+        }
       } else {
       await runAgent({
+        responseLocale: selectedResponseLocale(store.settings.uiPreferences),
+        onRecovery: snapshot => {
+          if (aborters.get(thread.id) !== controller) return
+          thread.runRecovery = snapshot
+          persistThreads()
+          emitToRenderer({ runId, threadId: thread.id, type: 'thread_update', patch: { runRecovery: snapshot } })
+        },
+        assertRequestAllowed: () => { admission?.assertAllowed(); assertGoogleContextTransport(thread, activeProvider) },
         thread,
         provider: activeProvider,
         model: runModel,
@@ -892,9 +961,12 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         // File durable facts salvaged at compaction as pending project-memory candidates
         // (project-scoped; skipped for project-less chat threads).
         onMemoryHarvest: (candidates) => {
-          if (!canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) || !store.threads.includes(thread) || !thread.projectId || !candidates.length) return
+          if (thread.googleLocalOnly || !canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) || !store.threads.includes(thread) || !thread.projectId || !candidates.length) return
+          const authored = projectMemoryAutoMessages(store.projectMemory, thread)
           for (const text of candidates) {
-            store.projectMemoryCandidates = [createProjectMemoryCandidate({ projectId: thread.projectId, text, sourceType: 'agent', reason: 'Salvaged from the conversation at compaction.', sourceThreadId: thread.id, sourceTurn: threadTurnNumber(thread.timeline) }), ...store.projectMemoryCandidates]
+            const sourceTurn = projectMemoryAutoCandidateTurn(authored, text)
+            if (sourceTurn === null) continue
+            store.projectMemoryCandidates = [createProjectMemoryCandidate({ projectId: thread.projectId, text, sourceType: 'agent', reason: 'Salvaged from the conversation at compaction.', sourceThreadId: thread.id, sourceTurn }), ...store.projectMemoryCandidates]
           }
           persistProjectMemoryCandidates()
         },
@@ -960,7 +1032,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
       .catch(async (err) => {
         const liveModels = availableModelsFromProviderError(err)
         const fallbackModel = liveModels.find((candidate) => candidate !== activeRoute.model)
-        if (fallbackModel && !thread.bot && !controller.signal.aborted) {
+        if (fallbackModel && thread.runRecovery?.runId === runId && thread.runRecovery.retry === 'safe' && !thread.bot && !controller.signal.aborted) {
           const rejectedModel = activeRoute.model
           markRouteErrorRecovered(thread, err, runId, `Model "${rejectedModel}" was rejected by ${baseProvider.name}; retrying with "${fallbackModel}".`)
           rememberProviderModels(baseProvider.id, activeRoute.providerAccountId, liveModels)
@@ -1002,7 +1074,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
             accountId: activeRoute.providerAccountId,
             model: activeRoute.model,
             error: err,
-            allowFailover: !thread.bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || thread.modelRoute?.resetPolicy === 'rotate_on_limit'),
+            allowFailover: thread.runRecovery?.runId === runId && thread.runRecovery.retry === 'safe' && !thread.bot && (modelRouteAutoFailoverEnabled(latestBaseProvider, activeRoute.providerAccountId) || thread.modelRoute?.resetPolicy === 'rotate_on_limit'),
             localOnly: project?.localOnly === true,
             contextLimit: effectiveContextLimit(latestBaseProvider, activeRoute.model),
             reasoningEffort: store.settings.reasoningEffort,
@@ -1012,7 +1084,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
           if (routed.signal) {
             for (const audit of routed.audit) await auditModelRoute(thread, audit, routed.signal)
           }
-          if (routed.signal && routed.route.selected && routed.route.selectedAccountId !== activeRoute.providerAccountId && !controller.signal.aborted) {
+          if (thread.runRecovery?.runId === runId && thread.runRecovery.retry === 'safe' && routed.signal && routed.route.selected && routed.route.selectedAccountId !== activeRoute.providerAccountId && !controller.signal.aborted) {
             markRouteErrorRecovered(thread, err, runId, `Recovered provider limit on ${modelRouteAccountLabel(latestBaseProvider, activeRoute.providerAccountId)} for ${activeRoute.model}; retrying on ${modelRouteAccountLabel(latestBaseProvider, routed.route.selectedAccountId)}.`)
             const exhaustedAccountId = activeRoute.providerAccountId
             providerAccountId = routed.route.selectedAccountId
@@ -1063,12 +1135,13 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
             executionVerifiedAt: Date.now(),
           })
         }
+        const recoveryPaused = thread.runRecovery?.runId === runId && ['paused', 'needs_review'].includes(thread.runRecovery.state)
         const receipt = buildAgentRunReceipt({ thread, contract: runContract, timelineStart: runTimelineStart, aborted: controller.signal.aborted })
         const turnReceipt = buildEventReceipt({
           kind: 'turn_complete',
           runId,
           threadId: thread.id,
-          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview ? 'blocked' : 'ok',
+          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview || recoveryPaused ? 'blocked' : 'ok',
           summary: receipt.summary,
           evidenceRefs: [receipt.id],
         })
@@ -1076,7 +1149,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
           kind: 'job_complete',
           runId,
           threadId: thread.id,
-          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview ? 'blocked' : 'ok',
+          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview || recoveryPaused ? 'blocked' : 'ok',
           summary: `Thread job finished with ${receipt.verdict}.`,
           evidenceRefs: [receipt.id],
         })
@@ -1084,7 +1157,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
           kind: 'run_receipt_saved',
           runId,
           threadId: thread.id,
-          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview ? 'blocked' : 'ok',
+          state: controller.signal.aborted ? 'cancelled' : failed ? 'error' : receipt.needsReview || recoveryPaused ? 'blocked' : 'ok',
           summary: 'Run receipt saved at run end.',
           evidenceRefs: [receipt.id],
         })
@@ -1114,10 +1187,10 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         settleThreadRunJob(
           job,
           thread,
-          controller.signal.aborted || transportUnverifiable ? 'paused' : failed ? 'failed' : 'completed',
+          controller.signal.aborted || transportUnverifiable || recoveryPaused ? 'paused' : failed ? 'failed' : 'completed',
           transportUnverifiable
             ? 'Remote transport disconnected; execution is unverifiable and must be reconciled after reconnecting.'
-            : failed ? 'Thread agent run ended with an error.' : undefined,
+            : recoveryPaused ? thread.runRecovery?.message : failed ? 'Thread agent run ended with an error.' : undefined,
         )
         persistThreads()
         // Bound the per-thread NDJSON journal: high-frequency item_delta chunks make it grow
@@ -1129,10 +1202,10 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
         // Skill self-improvement (opt-in): on a successful run that consulted a skill, let an
         // aux model review those skills and FILE improvement suggestions (consent-first; never
         // auto-applied). Fully fire-and-forget — it must never disturb the settled run.
-        if (!localHelpersOnly && !thread.phoneLocalOnly && canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) && store.settings.skillSelfImprovement && !failed && !controller.signal.aborted && viewedSkillNames.size && reviewProvider) {
+        if (!localHelpersOnly && !thread.phoneLocalOnly && !thread.googleLocalOnly && canContributeThreadMemory(thread, memoryPolicy, memoryRevision, controller.signal) && store.settings.skillSelfImprovement && !failed && !recoveryPaused && !controller.signal.aborted && viewedSkillNames.size && reviewProvider) {
           void reviewViewedSkills({ provider: reviewProvider, model: reviewModel, thread, userText: payload.userText, viewed: [...viewedSkillNames], signal: controller.signal, memoryPolicy, memoryRevision })
         }
-        if (!failed && !controller.signal.aborted) {
+        if (!failed && !recoveryPaused && !controller.signal.aborted) {
           try { proposePostRunMemory(thread, memoryPolicy, memoryRevision, controller.signal) } catch { /* best effort — never disturb the settled run */ }
         }
       })
@@ -1197,7 +1270,7 @@ export function createThreadRuntime(deps: ThreadRuntimeDeps): ThreadRuntime {
   const maybeAutoTitle = createThreadTitleGenerator({
     completeTitle: quickComplete,
     reserveOperation: () => deps.workspaceMutationGuard.reserveStart({ workspaceKeys: ['title:background'] }),
-    isCurrentThread: (thread) => store.threads.includes(thread),
+    isCurrentThread: (thread) => !thread.googleLocalOnly && store.threads.includes(thread),
     persistThreads, emitToRenderer,
   })
 

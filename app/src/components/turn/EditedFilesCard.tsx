@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useState } from 'react'
 import { useStore } from '../../lib/store'
 import { api } from '../../lib/ipc'
@@ -25,6 +26,7 @@ function dirname(path: string): string {
 
 // "Edited 3 files +43 −3" under a turn's answer, with Review and Undo.
 export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: Thread; turn: TurnSummary; canUndo: boolean; onChanged: () => void }) {
+  const tx = useAuthoredText()
   const project = useStore((s) => thread.projectId ? s.projects.find((candidate) => candidate.id === thread.projectId) ?? null : null)
   const [review, setReview] = useState<{ files: GitDiffFile[]; active: string | null; loading: boolean; error: string | null } | null>(null)
   const [undoing, setUndoing] = useState(false)
@@ -44,7 +46,7 @@ export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: 
       const files = await api.gitDiff(cwd, turn.edits.map((edit) => edit.path), workspace)
       setReview({ files, active: path ?? files[0]?.path ?? null, loading: false, error: null })
     } catch (err) {
-      setReview({ files: [], active: null, loading: false, error: err instanceof Error ? err.message : 'Could not load the diff.' })
+      setReview({ files: [], active: null, loading: false, error: err instanceof Error ? err.message : tx("Could not load the diff.") })
     }
   }
 
@@ -67,7 +69,7 @@ export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: 
   return (
     <div className="fade-in overflow-hidden rounded-[12px] border border-line bg-card">
       <div className="flex items-center gap-2 px-3 py-2">
-        <span className="text-[13px] font-medium leading-[18px] text-ink">Edited {totals.files} file{totals.files === 1 ? '' : 's'}</span>
+        <span className="text-[13px] font-medium leading-[18px] text-ink">{tx("Files changed: {count}", { count: totals.files })}</span>
         {(totals.additions > 0 || totals.deletions > 0) && (
           <span className="flex items-center gap-1.5 font-mono text-[13px] leading-4">
             <span className="text-positive">+{totals.additions}</span>
@@ -76,17 +78,16 @@ export function EditedFilesCard({ thread, turn, canUndo, onChanged }: { thread: 
         )}
         <div className="flex-1" />
         {canUndo && !guestFiles && (
-          <button type="button" onClick={() => void undo()} disabled={undoing} title="Restore the files and the conversation to before this turn" className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-50">
-            <Icon name="back" size={14} />{undoing ? 'Undoing' : 'Undo'}
+          <button type="button" onClick={() => void undo()} disabled={undoing} title={tx("Restore the files and the conversation to before this turn")} className="flex h-7 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium text-ink-3 transition-colors hover:bg-ink-5 hover:text-ink disabled:opacity-50">
+            <Icon name="back" size={14} />{undoing ? tx("Undoing") : tx("Undo")}
           </button>
         )}
-        {guestFiles ? <span className="text-[12px] text-ink-3">Saved in bot VM</span> : <button type="button" onClick={() => void openReview()} className="flex h-7 items-center rounded-md border border-line px-2.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
-          Review
-        </button>}
+        {guestFiles ? <span className="text-[12px] text-ink-3">{tx("Saved in bot VM")}</span> : <button type="button" onClick={() => void openReview()} className="flex h-7 items-center rounded-md border border-line px-2.5 text-[13px] font-medium text-ink-2 transition-colors hover:bg-ink-5 hover:text-ink">
+          {tx("Review")}</button>}
       </div>
       <div className="border-t border-line py-1">
         {turn.edits.map((edit) => (
-          <button key={edit.path} type="button" disabled={guestFiles} onClick={() => void openReview(edit.path)} title={guestFiles ? `${edit.path} inside the isolated bot VM` : `Review ${edit.path}`} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors enabled:hover:bg-ink-5">
+          <button key={edit.path} type="button" disabled={guestFiles} onClick={() => void openReview(edit.path)} title={guestFiles ? tx("{value0} inside the isolated bot VM", { value0: edit.path }) : tx("Review {value0}", { value0: edit.path })} className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left transition-colors enabled:hover:bg-ink-5">
             <FileGlyph path={edit.path} size={16} />
             <span className="min-w-0 flex-1 truncate text-[13px] leading-[18px]">
               <span className="text-ink-2">{basename(edit.path)}</span>

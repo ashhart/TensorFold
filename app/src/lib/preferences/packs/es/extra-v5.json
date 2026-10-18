@@ -1,0 +1,14 @@
+{
+  "This action could not be completed.": "No se pudo completar esta acción.",
+  "Some data failed to load — running with partial state.": "Algunos datos no se cargaron; se usa un estado parcial.",
+  "That room is not available for this project.": "Esa sala no está disponible para este proyecto.",
+  "That room and ticket belong to different hosts. Choose a room on the ticket owner.": "La sala y el ticket pertenecen a anfitriones distintos. Elige una sala del propietario del ticket.",
+  "Room ownership changed before dispatch. Refresh the project and try again.": "El propietario de la sala cambió antes del envío. Actualiza el proyecto e inténtalo de nuevo.",
+  "Settings saved": "Ajustes guardados",
+  "Custom terminal commands are not available on Orchestrator projects.": "Los comandos de terminal personalizados no están disponibles en proyectos de orquestador.",
+  "TensorFold cannot safely identify that terminal session.": "TensorFold no puede identificar con seguridad esa sesión de terminal.",
+  "This remote terminal predates origin tracking, so TensorFold cannot safely determine which host owns it. Reopen it from its Orchestrator.": "Este terminal remoto es anterior al seguimiento de origen y no puede determinarse su anfitrión con seguridad. Vuelve a abrirlo desde su orquestador.",
+  "Files stay in your draft until the current run finishes; they cannot be sent as text-only guidance.": "Los archivos permanecen en el borrador hasta que termine la ejecución; no pueden enviarse como indicaciones de solo texto.",
+  "This ticket is locally owned. Remote execution cannot move an existing ticket implicitly; create it on an Orchestrator or pick another run mode.": "Este ticket pertenece al anfitrión local. Una ejecución remota no lo traslada automáticamente; créalo en un orquestador o elige otro modo.",
+  "Layout changed for this session, but the preference could not be saved on this device.": "El diseño cambió para esta sesión, pero no se pudo guardar la preferencia en este dispositivo."
+}

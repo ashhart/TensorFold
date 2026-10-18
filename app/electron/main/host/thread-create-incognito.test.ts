@@ -10,6 +10,7 @@ import { resolveProviderModel } from '../../agent/provider-accounts'
 const home = await mkdtemp(path.join(os.tmpdir(), 'tensorfold-private-create-'))
 process.env.VONTRA_HOME = home
 const { saveThreads, loadThreads, defaultSettings } = await import('../../store')
+const { writeComposerDraft, readComposerDraft, purgeComposerDraft, composerDraftFile } = await import('../../store/composer-drafts')
 const source = await readFile(new URL('./ipc/workspace-ipc.ts', import.meta.url), 'utf8')
 const tree = ts.createSourceFile('workspace-ipc.ts', source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS)
 const printer = ts.createPrinter()
@@ -58,6 +59,9 @@ const dependencies = {
   selectedProviderAccountId: () => null, resolveProviderModel,
   persistThreads: () => { calls.persist++; writes.push(saveThreads(store.threads)) },
   remoteServer: { publish: ({ data }: any) => { calls.remote.push({ id: data.id, incognito: data.incognito === true }) } },
+  saveThreads, purgeComposerDraft,
+  workspaceMutationGuard: { reserveStart: () => ({ release() {} }) },
+  sendToRenderer: (channel: string, value: any) => { assert.equal(channel, 'composer-drafts:reset'); assert.equal(value.incognito, true) },
 }
 const create = compile('threads:create', dependencies)
 const patch = compile('threads:patch', dependencies)
@@ -111,6 +115,13 @@ try {
   await assert.rejects(() => patch(null, { id: a.id, patch: { incognito: false } }), /cannot be converted/)
   await assert.rejects(() => patch(null, { id: normal.id, patch: { incognito: 'true' } }), /boolean/)
   assert.equal(calls.persist, persistBeforePatch, 'refused late or invalid toggles make no durable mutation')
+  const ordinaryDraftScope = { surface: 'chat' as const, conversationId: normal.id, hostId: null, incognito: false }
+  await writeComposerDraft({ scope: ordinaryDraftScope, expectedRevision: 0, text: 'Unsent normal draft before choosing Incognito', attachments: [] })
+  assert.equal((await readComposerDraft(ordinaryDraftScope)).text, 'Unsent normal draft before choosing Incognito')
+  await patch(null, { id: normal.id, patch: { incognito: true } })
+  assert.equal(normal.incognito, true)
+  await assert.rejects(() => readFile(composerDraftFile(ordinaryDraftScope)), /ENOENT/, 'Choosing Incognito removes the previously persisted normal draft')
+  assert.equal((await loadThreads()).some((thread) => thread.id === normal.id), false, 'Transition completes protected thread omission before returning')
   console.log('Exact native creation/patch handlers: atomic private flag, async retry dedup, real protected-store omission/no spine receipt, ordinary persistence and late/invalid privacy refusals pass; Electron sender validation remains separately tested.')
 } finally {
   await Promise.allSettled(writes); await spineHost.flush()

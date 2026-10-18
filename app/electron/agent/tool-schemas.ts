@@ -1,6 +1,7 @@
 import { BROWSER_AUTOMATION_ACTIONS } from './browser-automation'
 import { CONTROLLER_ACTIONS } from './controller-actions'
 import { COMPUTER_ACTIONS } from './computer-use/actions'
+import { GOOGLE_WORKSPACE_CHAT_TOOL_SCHEMAS, GOOGLE_WORKSPACE_TOOL_SCHEMAS } from './google-workspace-tools'
 
 const ASK_USER_SCHEMA = { type: 'function', function: {
   name: 'ask_user',
@@ -353,6 +354,7 @@ const APP_CONTROL_SCHEMAS = [
 ]
 
 export const TOOL_SCHEMAS = [
+  ...GOOGLE_WORKSPACE_TOOL_SCHEMAS,
   ASK_USER_SCHEMA,
   PHONE_OBSERVE_SCHEMA, PHONE_CONTROL_SCHEMA,
   ...APP_CONTROL_SCHEMAS,
@@ -432,6 +434,7 @@ export const TOOL_SCHEMAS = [
       parameters: {
         type: 'object',
         properties: {
+          accountId: { type: 'string', description: 'Exact configured email source ID; omitted without reply context queues only a local outbox file.' },
           mode: { type: 'string', enum: ['draft', 'send'], description: 'draft logs a draft; send creates an approval-gated send request.' },
           to: { type: 'string' },
           subject: { type: 'string' },
@@ -509,7 +512,8 @@ export const TOOL_SCHEMAS = [
         type: 'object',
         properties: {
           connectorId: { type: 'string', enum: ['telegram', 'whatsapp', 'imessage'] },
-          target: { type: 'string', description: 'Allowlisted chat/contact id or label.' },
+          target: { type: 'string', description: 'Exact chat/contact ID in the selected account scope; labels are not resolved automatically.' },
+          accountId: { type: 'string', description: 'Exact linked account source ID; required for WhatsApp unless a matching account-qualified threadKey is supplied.' },
           body: { type: 'string' },
           threadKey: { type: 'string', description: 'Optional connector thread key to reply within.' },
         },
@@ -1130,4 +1134,4 @@ export const TOOL_SCHEMAS = [
   },
 ]
 
-export const CHAT_TOOL_SCHEMAS = [...APP_CONTROL_SCHEMAS, ASK_USER_SCHEMA, VISUALIZE_SCHEMA, WEB_SEARCH_SCHEMA, WEB_FETCH_SCHEMA, PHONE_OBSERVE_SCHEMA, PHONE_CONTROL_SCHEMA]
+export const CHAT_TOOL_SCHEMAS = [...GOOGLE_WORKSPACE_CHAT_TOOL_SCHEMAS, ...APP_CONTROL_SCHEMAS, ASK_USER_SCHEMA, VISUALIZE_SCHEMA, WEB_SEARCH_SCHEMA, WEB_FETCH_SCHEMA, PHONE_OBSERVE_SCHEMA, PHONE_CONTROL_SCHEMA]

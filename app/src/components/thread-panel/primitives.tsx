@@ -1,3 +1,4 @@
+import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import type { ReactNode } from 'react'
 import clsx from 'clsx'
 import { useStore } from '../../lib/store'
@@ -44,9 +45,10 @@ export function deriveActivity(thread: Thread) {
 }
 
 export function FileRow({ path, tag, tagClass }: { path: string; tag?: string; tagClass?: string }) {
+  const tx = useAuthoredText()
   const addFileMention = useStore((s) => s.addFileMention)
   return (
-    <button onClick={() => addFileMention(path)} title={`${path} — click to reference in the composer`} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-ink-5">
+    <button onClick={() => addFileMention(path)} title={tx("{value0} — click to reference in the composer", { value0: path })} className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors hover:bg-ink-5">
       <FileGlyph path={path} size={15} />
       <span className="min-w-0 flex-1 truncate text-ink-2">{basename(path)}</span>
       {tag && <span className={clsx('shrink-0 text-[12px] font-medium', tagClass)}>{tag}</span>}

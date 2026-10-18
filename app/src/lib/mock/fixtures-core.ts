@@ -1,7 +1,7 @@
 import type { AgentEvent, ArchiveKind, ArchiveSnapshot, DiffLine, Settings, StartRunPayload, Thread, TimelineItem, Project, Room, RoomEventItem, RoomMemoryEntry, RoomStreamEvent, Ticket, Automation, Job, GitCommitResult, GitDiffFile, GitHygieneFinding, GitHygieneReport, GitHygieneSanitizeResult, GitStatus, TokenUsageSnapshot, TokenUsageWindow, TokenUsageWindowKey, ContextPressureSnapshot, ModelRouterSnapshot, AssistantControlSnapshot, ConnectorEvent, ConnectorInteractionInput, AppUpdateStatus, CreateMissionInput, CreatePrLoopInput, CreatePrLoopResult, EmailDraftInput, EmailListOptions, EmailMessage, EmailReadResult, EmailResolveInput, EmailSourceConfig, EmailSyncResult, EmailThreadResult, Mission, MissionCheckpoint, MissionInspectionSnapshot, MissionJournalEvent, MissionPendingApproval, MissionRuntimeSnapshot, MissionStatus, Skill, Command, McpServerConfig, McpServerSnapshot, McpSnapshot, McpToolCallResult, McpToolDefinition, ControllerSnapshot, ControllerStatus, ProjectMemoryCandidate, ProjectMemoryEntry, WebhookDeliveryRecord, WebhookEndpoint, WebhookSnapshot, RemoteControlPairingInfo, RemoteControlStatus, RemoteControlWorkSnapshot, SecurityControlSnapshot, SecurityPurgeResult } from '../types'
 import type { BrowserConnectorSettings, BrowserItem, BrowserListOptions, BrowserReadResult, BrowserSnapshotInput, BrowserSourceConfig, BrowserSummaryResult, BrowserSyncResult, CalendarEvent, CalendarListOptions, CalendarMutationInput, CalendarReadResult, CalendarSourceConfig, CalendarSummaryResult, CalendarSyncResult, DocumentItem, DocumentListOptions, DocumentReadResult, DocumentSourceConfig, DocumentSummaryResult, DocumentSyncResult, SlackMessage, SlackListOptions, SlackReadResult, SlackSourceConfig, SlackSummaryResult, SlackSyncResult } from '../types'
 import type { Incident, RunExportBundle } from '../types'
-import { PRESETS } from '../../../electron/agent/theme-presets'
+import { PRESETS } from '../../../shared/theme-presets'
 import { CODEX_CLI_MODELS, CLAUDE_CLI_MODELS } from '../cli-models'
 import { ago, mockState, uid } from './state'
 
@@ -329,7 +329,7 @@ export function demoTimeline(): TimelineItem[] {
 }
 
 export function thread(title: string, cwd: string, min: number, status: Thread['status'], timeline: TimelineItem[], kind: Thread['kind'] = 'task', projectId: string | null = null): Thread {
-  return { id: uid(), title, kind, projectId, cwd, providerId: 'openai', model: 'gpt-4o', createdAt: ago(min + 30), updatedAt: ago(min), status, apiMessages: [], timeline }
+  return { id: uid(), documentSourceIds: [], title, kind, projectId, cwd, providerId: 'openai', model: 'gpt-4o', createdAt: ago(min + 30), updatedAt: ago(min), status, apiMessages: [], timeline }
 }
 
 mockState.threads = [

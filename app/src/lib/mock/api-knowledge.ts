@@ -1,8 +1,9 @@
-import type { Command, ConnectorEvent, ProjectMemoryCandidate, ProjectMemoryEntry, Skill, WebhookDeliveryRecord, WebhookEndpoint } from '../types'
+import type { Command, ConnectorEvent, Skill, WebhookDeliveryRecord, WebhookEndpoint } from '../types'
 import type { Incident, RunExportBundle } from '../types'
 import type { TensorFoldStudioApi } from '../ipc'
 import { ago, mockState, uid } from './state'
 import { mockWebhookSnapshot } from './runtime'
+import { createMockProjectMemoryApi } from './project-memory'
 
 type KnowledgeMockApi = Pick<
   TensorFoldStudioApi,
@@ -19,6 +20,9 @@ type KnowledgeMockApi = Pick<
   | 'deleteArtifact'
   | 'getObserverStatus'
   | 'getProjectMemory'
+  | 'getProjectMemoryTrash'
+  | 'trashProjectMemory'
+  | 'restoreProjectMemory'
   | 'getProjectMemoryCandidates'
   | 'proposeProjectMemory'
   | 'approveProjectMemoryCandidate'
@@ -145,88 +149,7 @@ export function createMockKnowledgeApi(): KnowledgeMockApi {
     },
     deleteArtifact: async (id) => { mockState.mockArtifacts = mockState.mockArtifacts.filter((x) => x.id !== id) },
     getObserverStatus: async () => ({ hooks: [], recent: [] }),
-    getProjectMemory: async (projectId) => mockState.mockProjectMemory.filter((m) => m.projectId === projectId),
-    getProjectMemoryCandidates: async (projectId) => mockState.mockProjectMemoryCandidates.filter((m) => m.projectId === projectId && m.status === 'pending'),
-    proposeProjectMemory: async (m) => {
-      const now = Date.now()
-      const candidate: ProjectMemoryCandidate = { id: m.id || uid(), projectId: m.projectId!, kind: m.kind || 'summary', text: (m.text || '').trim(), sourceType: m.sourceType || 'manual', sourceRef: m.sourceRef ?? null, confidence: m.confidence || 'medium', privacyScope: m.privacyScope || 'project', owner: m.owner ?? null, reason: m.reason ?? null, status: 'pending', targetEntryId: m.targetEntryId ?? null, reviewedAt: null, reviewedBy: null, durableEntryId: null, createdAt: now, updatedAt: now }
-      mockState.mockProjectMemoryCandidates = [candidate, ...mockState.mockProjectMemoryCandidates]
-      return candidate
-    },
-    approveProjectMemoryCandidate: async (id) => {
-      const now = Date.now()
-      const candidate = mockState.mockProjectMemoryCandidates.find((m) => m.id === id)
-      if (!candidate || candidate.status !== 'pending') throw new Error('memory candidate not found')
-      const existing = candidate.targetEntryId ? mockState.mockProjectMemory.find((m) => m.id === candidate.targetEntryId) : null
-      const entry: ProjectMemoryEntry = existing
-        ? Object.assign(existing, {
-          kind: candidate.kind, text: candidate.text, sourceType: candidate.sourceType, sourceRef: candidate.sourceRef, confidence: candidate.confidence, privacyScope: candidate.privacyScope || 'project', owner: candidate.owner, updatedAt: now,
-          // Reversible overwrite (VST-009): the superseded state becomes a revision.
-          revisions: [{ text: existing.text, kind: existing.kind, confidence: existing.confidence, privacyScope: existing.privacyScope || 'project', sourceRef: existing.sourceRef, replacedAt: now, replacedBy: 'user' }, ...(existing.revisions ?? [])].slice(0, 5),
-        })
-        : { id: uid(), projectId: candidate.projectId, kind: candidate.kind, text: candidate.text, sourceType: candidate.sourceType, sourceRef: candidate.sourceRef, confidence: candidate.confidence, privacyScope: candidate.privacyScope || 'project', owner: candidate.owner, lastVerifiedAt: candidate.sourceRef ? now : null, createdAt: now, updatedAt: now }
-      if (!existing) mockState.mockProjectMemory = [entry, ...mockState.mockProjectMemory]
-      mockState.mockProjectMemoryCandidates = mockState.mockProjectMemoryCandidates.map((m) => m.id === id ? { ...m, status: 'approved', reviewedAt: now, reviewedBy: 'user', durableEntryId: entry.id, updatedAt: now } : m)
-      return entry
-    },
-    // VST-009: what approving would DO — create vs per-field update (demo parity).
-    memoryCandidateDiff: async (id) => {
-      const candidate = mockState.mockProjectMemoryCandidates.find((m) => m.id === id)
-      if (!candidate) throw new Error('memory candidate not found')
-      const target = candidate.targetEntryId ? mockState.mockProjectMemory.find((m) => m.id === candidate.targetEntryId) ?? null : null
-      const fields = [
-        { field: 'text' as const, before: target?.text ?? null, after: candidate.text },
-        { field: 'kind' as const, before: target?.kind ?? null, after: candidate.kind },
-        { field: 'confidence' as const, before: target?.confidence ?? null, after: candidate.confidence },
-        { field: 'privacyScope' as const, before: (target?.privacyScope ?? null) as string | null, after: (candidate.privacyScope || 'project') as string },
-        { field: 'sourceRef' as const, before: target?.sourceRef ?? null, after: candidate.sourceRef },
-      ]
-      return {
-        candidateId: candidate.id,
-        action: target ? 'update' as const : 'create' as const,
-        targetEntryId: target?.id ?? null,
-        changes: fields.filter(({ before, after }) => (target ? before !== after : after != null)),
-      }
-    },
-    rollbackMemoryEntry: async (id) => {
-      const now = Date.now()
-      const entry = mockState.mockProjectMemory.find((m) => m.id === id)
-      if (!entry) throw new Error('memory entry not found')
-      mockState.mockProjectMemoryCandidates = mockState.mockProjectMemoryCandidates.map((m) =>
-        m.durableEntryId === id && m.status === 'approved' ? { ...m, status: 'rolled_back', reviewedAt: now, updatedAt: now } : m)
-      const [previous, ...older] = entry.revisions ?? []
-      if (!previous) {
-        mockState.mockProjectMemory = mockState.mockProjectMemory.filter((m) => m.id !== id)
-        return { action: 'removed' as const, entry: null }
-      }
-      Object.assign(entry, { text: previous.text, kind: previous.kind, confidence: previous.confidence, privacyScope: previous.privacyScope, sourceRef: previous.sourceRef, revisions: older, lastVerifiedAt: null, updatedAt: now })
-      return { action: 'restored_previous' as const, entry }
-    },
-    rejectProjectMemoryCandidate: async (id) => {
-      const now = Date.now()
-      const candidate = mockState.mockProjectMemoryCandidates.find((m) => m.id === id)
-      if (!candidate || candidate.status !== 'pending') throw new Error('memory candidate not found')
-      const rejected: ProjectMemoryCandidate = { ...candidate, status: 'rejected', reviewedAt: now, reviewedBy: 'user', updatedAt: now }
-      mockState.mockProjectMemoryCandidates = mockState.mockProjectMemoryCandidates.map((m) => m.id === id ? rejected : m)
-      return rejected
-    },
-    saveProjectMemory: async (m) => {
-      const existing = m.id ? mockState.mockProjectMemory.find((x) => x.id === m.id) : null
-      const now = Date.now()
-      const candidate: ProjectMemoryCandidate = { id: uid(), projectId: existing?.projectId ?? m.projectId!, kind: m.kind ?? existing?.kind ?? 'summary', text: m.text ?? existing?.text ?? '', sourceType: m.sourceType ?? existing?.sourceType ?? 'manual', sourceRef: Object.prototype.hasOwnProperty.call(m, 'sourceRef') ? m.sourceRef ?? null : existing?.sourceRef ?? null, confidence: m.confidence ?? existing?.confidence ?? 'medium', privacyScope: m.privacyScope ?? existing?.privacyScope ?? 'project', owner: Object.prototype.hasOwnProperty.call(m, 'owner') ? m.owner ?? null : existing?.owner ?? null, reason: 'Manual save reviewed in demo mode.', status: 'pending', targetEntryId: existing?.id ?? null, reviewedAt: null, reviewedBy: null, durableEntryId: null, createdAt: now, updatedAt: now }
-      mockState.mockProjectMemoryCandidates = [candidate, ...mockState.mockProjectMemoryCandidates]
-      const entry: ProjectMemoryEntry = existing
-        ? Object.assign(existing, {
-          kind: candidate.kind, text: candidate.text, sourceType: candidate.sourceType, sourceRef: candidate.sourceRef, confidence: candidate.confidence, privacyScope: candidate.privacyScope || 'project', owner: candidate.owner, updatedAt: now,
-          // Same reversibility as the host path (VST-009): manual edits are rollbackable too.
-          revisions: [{ text: existing.text, kind: existing.kind, confidence: existing.confidence, privacyScope: existing.privacyScope || 'project', sourceRef: existing.sourceRef, replacedAt: now, replacedBy: 'user' }, ...(existing.revisions ?? [])].slice(0, 5),
-        })
-        : { id: uid(), projectId: candidate.projectId, kind: candidate.kind, text: candidate.text, sourceType: candidate.sourceType, sourceRef: candidate.sourceRef, confidence: candidate.confidence, privacyScope: candidate.privacyScope || 'project', owner: candidate.owner, lastVerifiedAt: candidate.sourceRef ? now : null, createdAt: now, updatedAt: now }
-      if (!existing) mockState.mockProjectMemory = [entry, ...mockState.mockProjectMemory]
-      mockState.mockProjectMemoryCandidates = mockState.mockProjectMemoryCandidates.map((item) => item.id === candidate.id ? { ...item, status: 'approved', reviewedAt: now, reviewedBy: 'user', durableEntryId: entry.id, updatedAt: now } : item)
-      return entry
-    },
-    deleteProjectMemory: async (id) => { mockState.mockProjectMemory = mockState.mockProjectMemory.filter((m) => m.id !== id) },
+    ...createMockProjectMemoryApi(),
     getWebhooks: async () => mockWebhookSnapshot(),
     saveWebhook: async (requested) => {
       const w = strictMockConfig<WebhookEndpoint>(requested, ['id', 'name', 'direction', 'enabled', 'scope', 'url', 'path', 'secretRef', 'replayWindowSeconds', 'capturePolicy', 'triggerPolicy', 'runAutomationId', 'eventKinds', 'approvalRequired'], 'webhook save')

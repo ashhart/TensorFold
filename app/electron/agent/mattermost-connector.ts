@@ -8,9 +8,7 @@ import type {
 } from './types'
 import { advanceSyncCursor, injectReplyContext, isNewerThanCursor, makeReplyContext } from './connector-sync'
 import { assertConnectorBaseUrl } from './security'
-import { fetchWithRetry } from './connector-retry.ts'
-import { createConnectorFetch } from './secure-fetch'
-import { readBoundedConnectorJson } from './connector-http'
+import { fetchConnectorResponse, readBoundedConnectorJson } from './connector-http'
 
 export type { MattermostChannel, MattermostConnectorSettings, MattermostMessage, MattermostReadResult, MattermostSource } from './types'
 
@@ -234,9 +232,7 @@ function authHeaders(token: string): Record<string, string> {
 }
 
 function mattermostFetch(baseUrl: string, allowPrivateNetwork: boolean | undefined, url: string, init: RequestInit = {}): Promise<Response> {
-  return fetchWithRetry(url, init, {
-    fetchImpl: createConnectorFetch(baseUrl, 'Mattermost server', { allowPrivateNetwork: allowPrivateNetwork === true }),
-  })
+  return fetchConnectorResponse(baseUrl, 'Mattermost server', url, init, { allowPrivateNetwork })
 }
 
 // Build the `${origin}/api/v4` root from a per-source base URL. Returns '' for a

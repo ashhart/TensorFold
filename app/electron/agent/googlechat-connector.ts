@@ -11,7 +11,7 @@ import type {
 import { advanceSyncCursor, injectReplyContext, isNewerThanCursor, makeReplyContext } from './connector-sync'
 import { fetchWithRetry } from './connector-retry.ts'
 import { createConnectorFetch } from './secure-fetch'
-import { readBoundedConnectorJson } from './connector-http'
+import { fetchConnectorResponse, readBoundedConnectorJson } from './connector-http'
 
 export type { GoogleChatConnectorSettings, GoogleChatMessage, GoogleChatReadResult, GoogleChatSource, GoogleChatSpace } from './types'
 
@@ -324,9 +324,7 @@ function apiBase(source: GoogleChatSource): string {
 
 function googleChatApiFetch(source: GoogleChatSource, url: string, init: RequestInit = {}): Promise<Response> {
   const base = apiBase(source)
-  return fetchWithRetry(url, init, {
-    fetchImpl: createConnectorFetch(base, 'Google Chat server'),
-  })
+  return fetchConnectorResponse(base, 'Google Chat server', url, init)
 }
 
 function bearerHeaders(token: string): Record<string, string> {

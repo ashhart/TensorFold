@@ -199,6 +199,19 @@ export class KokoroService {
   }
 
   async synthesize(input: KokoroSynthesisInput): Promise<VoiceSynthesisResult> {
+    return this.generate(input)
+  }
+
+  async stream(input: KokoroSynthesisInput, onChunk: (wav: Buffer, index: number) => Promise<void>, signal: AbortSignal): Promise<VoiceSynthesisResult> {
+    if (signal.aborted) return { ok: false, error: 'Speech cancelled.' }
+    if (this.active) return { ok: false, error: 'Kokoro is already reading. Wait for playback to finish.' }
+    const abort = () => this.cancelSpeech(input.requestId)
+    signal.addEventListener('abort', abort, { once: true })
+    try { return await this.generate(input, onChunk, signal) }
+    finally { signal.removeEventListener('abort', abort) }
+  }
+
+  private async generate(input: KokoroSynthesisInput, onChunk?: (wav: Buffer, index: number) => Promise<void>, signal?: AbortSignal): Promise<VoiceSynthesisResult> {
     if (!input || typeof input.text !== 'string' || !input.text.trim()) return { ok: false, error: 'Nothing to read.' }
     if (input.text.length > 5000) return { ok: false, error: 'Read up to 5,000 characters at a time, or turn on Brief before reading.' }
     if (typeof input.requestId !== 'string' || !/^[a-zA-Z0-9-]{1,80}$/.test(input.requestId)) return { ok: false, error: 'Invalid speech request.' }
@@ -206,6 +219,9 @@ export class KokoroService {
     if (!KOKORO_VOICES.some((item) => item.id === voice)) return { ok: false, error: 'Choose a supported Kokoro voice in Voice settings.' }
     if (this.removing || this.installTask || !await this.checkInstalled()) return { ok: false, error: 'Download or repair Kokoro in Settings > Voice before reading.' }
     if (this.cancelledRequests.delete(input.requestId)) return { ok: false, error: 'Speech cancelled.' }
+    if (signal?.aborted) return { ok: false, error: 'Speech cancelled.' }
+    // A watch read never interrupts desktop playback, including an overlapping install check.
+    if (onChunk && this.active) return { ok: false, error: 'Kokoro is already reading. Wait for playback to finish.' }
     this.stopWorker()
     const rate = Number.isFinite(input.rate) ? Math.max(0.7, Math.min(2.5, input.rate!)) : 1
     return new Promise((resolve) => {
@@ -223,11 +239,29 @@ export class KokoroService {
         resolve(result)
       }
       this.active = { id: input.requestId, finish }
-      worker.on('message', (result: VoiceSynthesisResult & { requestId?: string }) => { if (result.requestId === input.requestId) finish(result) })
+      let chunkInFlight = false, nextChunk = 0
+      worker.on('message', (result: VoiceSynthesisResult & { requestId?: string; chunk?: boolean; index?: number }) => {
+        if (result.requestId !== input.requestId || this.active?.finish !== finish) return
+        if (result.chunk) {
+          if (!onChunk || chunkInFlight || result.index !== nextChunk || typeof result.audioBase64 !== 'string' || result.audioBase64.length > 4 * 1024 * 1024) {
+            finish({ ok: false, error: 'Kokoro returned an invalid audio chunk.' }); return
+          }
+          const wav = Buffer.from(result.audioBase64, 'base64')
+          if (wav.length < 44 || wav.length > 3 * 1024 * 1024 || wav.toString('ascii', 0, 4) !== 'RIFF') { finish({ ok: false, error: 'Kokoro returned an invalid audio chunk.' }); return }
+          chunkInFlight = true
+          void onChunk(wav, nextChunk).then(() => {
+            if (this.active?.finish !== finish || signal?.aborted) return
+            chunkInFlight = false; nextChunk++
+            worker.postMessage({ requestId: input.requestId, ack: result.index })
+          }).catch(() => finish({ ok: false, error: 'Speech playback stopped.' }))
+          return
+        }
+        finish(result)
+      })
       worker.once('error', () => finish({ ok: false, error: 'Kokoro could not start. Reinstall its model and retry.' }))
       worker.once('exit', () => finish({ ok: false, error: 'Kokoro stopped before speech was ready. Retry the read.' }))
       timeout = setTimeout(() => { finish({ ok: false, error: 'Kokoro took too long. Try a shorter passage.' }) }, this.options.synthesisTimeoutMs ?? 120_000)
-      worker.postMessage({ ...input, text: input.text.trim(), voice, rate })
+      worker.postMessage({ ...input, text: input.text.trim(), voice, rate, ...(onChunk ? { stream: true } : {}) })
     })
   }
 

@@ -49,6 +49,19 @@ async function main() {
   } finally { await new Promise<void>((resolve) => server.close(() => resolve())) }
   assert.throws(() => parseLearningGraph({ next: 1, facts: new Array(4097).fill({}) }), /oversized/)
   assert.throws(() => parseLearningGraph({ next: 1, facts: [{ id: 1, at: 1, text: 'Fact.', state: 'invented' }] }), /invalid learning fact/)
+  const deletedFacts = parseLearningGraph({ next: 4, facts: [
+    { id: 1, at: 1, text: 'Synthetic active fact.', state: 'learned', recalled: true, links: [2] },
+    { id: 2, at: 2, text: 'Synthetic deletion in progress.', state: 'deleting', recalled: true, links: [1], privatePath: 'untrusted' },
+    { id: 3, at: 3, text: 'Synthetic deleted fact.', state: 'deleted', recalled: true, deleted: 1234, links: [] },
+  ] })
+  assert.deepEqual(deletedFacts.facts.map((fact) => fact.state), ['learned', 'deleting', 'deleted'], 'valid 1.0.12 deletion states cannot invalidate the entire learning graph')
+  assert.equal(deletedFacts.facts[2].deleted, 1234, 'the native deletion timestamp is retained as bounded numeric evidence')
+  assert.ok(!JSON.stringify(deletedFacts).includes('untrusted'))
+  for (const state of ['deleting', 'deleted']) {
+    assert.throws(() => parseLearningGraph({ next: 1, facts: [{ id: 1, at: 1, text: 'x'.repeat(8193), state }] }), /invalid learning fact/, 'new native states cannot bypass field limits')
+    const safeDate = parseLearningGraph({ next: 1, facts: [{ id: 1, at: 1, text: 'Synthetic fact.', state, deleted: Infinity }] })
+    assert.equal(safeDate.facts[0].deleted, undefined, 'non-finite optional deletion metadata never reaches the renderer')
+  }
   const safe = parseLearningGraph({ next: 1, facts: [], apiKey: 'untrusted', model: { layers: 1, kinds: 'M', privatePath: 'untrusted', pocket: { neurons: 64, layers: [0], used: [0] }, shards: [] } })
   assert.ok(!JSON.stringify(safe).includes('untrusted'), 'only documented graph fields enter the renderer')
   console.log('Living Weights client: authenticated loopback-only requests, bounded JSON/SSE, split frames, malformed/unknown events, cancel and no credential-bearing redirects')

@@ -152,6 +152,9 @@ export interface ProjectMemoryEntry {
   // Provenance to the exact conversation that noticed the pattern (VST-009).
   sourceThreadId?: string | null
   sourceTurn?: number | null
+  // Host-owned lifecycle state; absent in legacy records means active, revision 1.
+  trashedAt?: number | null
+  stateRevision?: number
   // Superseded states, newest first, bounded — the rollback ledger (VST-009).
   revisions?: ProjectMemoryRevision[]
   createdAt: number
@@ -388,7 +391,19 @@ export type AutomationSchedule = 'interval' | 'daily' | 'manual'
 // 'chat'/'agent' run a model; 'digest' composes a deterministic daily briefing from recent
 // host activity (no model call) and delivers it via deliverTo.
 export type AutomationMode = 'chat' | 'agent' | 'digest'
-export type AutomationDeliver = 'inbox' | 'telegram' | 'email'
+export type AutomationDeliver = 'inbox' | 'telegram' | 'email' | 'whatsapp'
+
+export interface AutomationDeliveryTarget {
+  connectorId: Exclude<AutomationDeliver, 'inbox'>
+  accountId: string | null
+  recipient: string
+  subject?: string
+}
+
+export interface AutomationSourceScope {
+  connectorId: import('./connectors').ConnectorId
+  sourceId: string
+}
 
 // The safety-relevant posture frozen at a run's START (VST-038): a later edit to the
 // automation definition can't change what an in-flight run was permitted to do.
@@ -412,6 +427,9 @@ export interface AutomationRun {
   status: 'running' | 'ok' | 'error'
   output: string
   error?: string
+  deliveryEventId?: string
+  deliveryStatus?: 'inbox' | 'pending_approval' | 'blocked'
+  deliveryError?: string
   // Frozen permission posture + completion verdict (VST-038; optional → older runs lack them).
   permissions?: AutomationPermissionSnapshot
   completion?: { verdict: AutomationCompletionVerdict; reason: string }
@@ -552,6 +570,12 @@ export interface Automation {
   mode: AutomationMode // chat = one completion · agent = full tool loop in cwd
   cwd: string | null
   deliverTo: AutomationDeliver
+  deliveryTarget?: AutomationDeliveryTarget
+  /** Personal routines are inbox-first previews until explicitly configured otherwise. */
+  previewOnly?: boolean
+  botId?: string
+  sourceScope?: AutomationSourceScope[]
+  routineKind?: 'morning-brief' | 'meeting-prep' | 'follow-up'
   enabled: boolean
   // bookkeeping
   lastRunAt: number | null

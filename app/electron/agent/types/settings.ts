@@ -1,3 +1,4 @@
+import type { UiPreferences } from '../../../shared/ui-preferences'
 import type { ApprovalMode, ApprovalRule, Provider, ThemePalette, ThemePreset } from './base'
 import type { CapabilitySettings } from './capabilities'
 import type {
@@ -19,6 +20,7 @@ import type {
   MatrixConnectorSettings,
   GoogleChatConnectorSettings,
 } from './connectors'
+import type { EngineModelProfileSet } from './engine'
 import type { RoomSeatLane, SshHost, TrustedSshHostKey } from './workspace'
 
 export type ReasoningEffortSetting =
@@ -46,10 +48,13 @@ export interface PersonaProfile {
 }
 
 export interface Settings {
+  /** Display choices persisted with the active profile settings. */
+  uiPreferences?: UiPreferences
   // A completed Minimal setup keeps the local model manager in the menu bar.
   desktopMode?: 'minimal' | 'full'
   desktopOnboardingComplete?: boolean
   providers: Provider[]
+  modelHelperDefaults?: import('../../../shared/model-fit').ModelHelperDefaults
   cliToolOverrides?: Record<string, { binaryPath?: string }>
   activeProviderId: string | null
   activeProviderAccountId: string | null
@@ -80,6 +85,10 @@ export interface Settings {
   approvalRules: ApprovalRule[]
   defaultCwd: string | null
   temperature: number
+  engineModelProfiles?: EngineModelProfileSet[]
+  /** Malformed legacy rows are kept for recovery and never applied to the engine. */
+  engineModelProfilesRecovery?: unknown
+  engineModelProfilesProblem?: string
   reasoningEffort: ReasoningEffortSetting
   serviceTier?: 'fast' | 'flex' // CLI "speed" knob (Codex service tier); fast = priority, flex = cheaper
   // long-running tasks

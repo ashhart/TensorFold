@@ -18,7 +18,7 @@ const ignoredDirs = new Set([
   'release',
   '__pycache__',
 ])
-const scannedDirs = ['electron', 'src', 'scripts']
+const scannedDirs = ['electron', 'src', 'scripts', 'experiments']
 
 function walk(dir) {
   const out = []

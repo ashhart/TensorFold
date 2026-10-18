@@ -6,6 +6,7 @@ import { createConnectorEventSpine, connectorPolicyForEvent, resolveSavedConnect
 import { createEmailTransport } from './connector-email-transport'
 import { createConnectorChannels } from './connector-channels'
 import { registerAllConnectorIpc } from './connector-ipc'
+import { resumeSavedWhatsAppAccounts } from './connector-ipc/whatsapp'
 import type { ApprovalPolicyScope } from '../../agent/approval-policy'
 import type { ChannelApprovalRequest } from '../../agent/channel-adapter'
 import type { ConnectorApprovalDecision } from '../../agent/types'
@@ -107,6 +108,7 @@ export async function removeWhatsAppSourceWithNativeConfirmation(
 }
 
 export interface ConnectorRuntime {
+  resumeWhatsAppAccounts(): Promise<void>
   connectorPolicyForEvent: (event: ConnectorEvent) => ApprovalPolicyScope
   rememberConnectorEvents: (events: ConnectorEvent[]) => Promise<void>
   recordEmailDraft: (input: EmailDraftInput, sources?: ConnectorEvent['sources']) => Promise<ConnectorEvent>
@@ -114,7 +116,6 @@ export interface ConnectorRuntime {
   recordCalendarEvent: (event: ConnectorEvent) => Promise<ConnectorEvent>
   recordMessageEvent: (event: ConnectorEvent) => Promise<ConnectorEvent>
   registerConnectorIpc: () => void
-  transportApprovedEmailEvent: (event: ConnectorEvent) => Promise<void>
   // In-channel approval gate (Feature A): prompt in the channel and block until answered;
   // resolvers let inbound button callbacks / "/approve" replies unblock a parked request.
   requestChannelApproval: (threadKey: string, request: ChannelApprovalRequest) => Promise<import('../../agent/channel-adapter').ChannelApprovalResult>
@@ -150,7 +151,7 @@ export function createConnectorRuntime(callbacks: ConnectorRuntimeCallbacks): Co
     recordCalendarEvent: spine.recordCalendarEvent,
     recordMessageEvent: spine.recordMessageEvent,
     registerConnectorIpc,
-    transportApprovedEmailEvent: emailTransport.transportApprovedEmailEvent,
+    resumeWhatsAppAccounts: () => resumeSavedWhatsAppAccounts({ channels }),
     requestChannelApproval: channels.requestChannelApproval,
     resolveChannelApproval: channels.resolveChannelApproval,
     resolveChannelApprovalByThread: channels.resolveChannelApprovalByThread,
