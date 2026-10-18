@@ -153,7 +153,7 @@ pub const Metal = struct {
     }
 
     pub fn forward(self: *Metal) fwd.Forward {
-        return .{ .c = self.m.config, .k = &self.m.kernels, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
+        return .{ .c = self.m.config, .k = &self.m.kernels, .p = &self.m.prefill, .w = &self.m.weights, .s = &self.scratch, .pool = &self.pool, .geometry = self.geometry, .members = self.members, .masks = if (self.masks) |*m| m else null };
     }
 
     pub fn cacheOf(self: *Metal, s: *lanes.Stream) !*st.Cache {
