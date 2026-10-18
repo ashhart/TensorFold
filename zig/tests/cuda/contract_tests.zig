@@ -26,6 +26,10 @@ const latent_k = @import("contract_latent.zig");
 
 const round_k = @import("contract_tree_round.zig");
 
+const act_k = @import("contract_act.zig");
+const gdn_k = @import("contract_gdn.zig");
+const qk_k = @import("contract_qk.zig");
+
 const contract = core.contract;
 const g = contract.gates;
 const limits = contract.limits;
@@ -43,7 +47,7 @@ const h3_image = struct {
 /// The embedded image a registration names (the controls' only when this binary was built with -Dnvcc).
 fn image(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     return if (options.controls) &controls.bytes else &.{};
 }
 
@@ -237,6 +241,24 @@ pub fn run(gpu: check.Gpu) !void {
     for (std.enums.values(round_k.Which), &rounds) |w, *r| r.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &round_fns };
     defer for (&rounds) |*r| r.deinit();
     for (&rounds) |*r| try kernels.append(a, r.kernel());
+    var act_rows = try cuda.act_rows.ActRows.load(gpu.d);
+    defer act_rows.unload();
+    var acts: [std.enums.values(act_k.Which).len]act_k.Act = undefined;
+    for (std.enums.values(act_k.Which), &acts) |w, *x| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .which = w, .k = &act_rows, .arena = .init(a) };
+    defer for (&acts) |*x| x.deinit();
+    for (&acts) |*x| try kernels.append(a, x.kernel());
+    var gdn_prep = try cuda.gdn_prep.GdnPrep.load(gpu.d);
+    defer gdn_prep.unload();
+    var gdns: [9]gdn_k.Gdn = undefined;
+    for (&gdns, 0..) |*x, i| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .dk = @as(usize, 64) << @intCast(i / 3), .part = @fromBackingInt(@intCast(i % 3)), .k = &gdn_prep, .arena = .init(a) };
+    defer for (&gdns) |*x| x.deinit();
+    for (&gdns) |*x| try kernels.append(a, x.kernel());
+    var qk_rows = try cuda.qk_rows.QkRows.load(gpu.d);
+    defer qk_rows.unload();
+    var qks: [qk_k.forms.len]qk_k.Qk = undefined;
+    for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
+    defer for (&qks) |*x| x.deinit();
+    for (&qks) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
