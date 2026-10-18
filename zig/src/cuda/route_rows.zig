@@ -17,8 +17,8 @@ pub const most_picks = 128;
 /// tf_route_logits' staged rows (16 inputs and 32 experts, padded by 8): two stages of 128, or three of 256.
 const many_shared: u32 = 2 * 48 * (128 + 8) * 2;
 const few_shared: u32 = 3 * 48 * (256 + 8) * 2;
-/// tf_route_logits_wide's: 64 inputs and 32 experts, two stages of 128.
-const wide_shared: u32 = 2 * 96 * (128 + 8) * 2;
+/// tf_route_logits_wide's: 128 inputs and 64 experts, two stages of 64.
+const wide_shared: u32 = 2 * 192 * (64 + 8) * 2;
 
 pub const RouteRows = struct {
     mod: Module,
@@ -54,8 +54,8 @@ pub const RouteRows = struct {
         // up to 16 rows, deeper staging (the same sums: the router rows' reads set the time)
         const few = rows <= 16;
         if (rows >= 64) {
-            // 64 rows a block: each router row read once per 64 input rows (the same sums)
-            try launch_.launch(g.wide_fn, .{ .grid = .{ .x = @intCast((rows + 63) / 64), .y = @intCast((e + 31) / 32), .z = 1 }, .block = .{ .x = 128 }, .shared = wide_shared }, s, &a);
+            // 128 rows and 64 experts a block: each router row read once per 128 input rows (the same sums)
+            try launch_.launch(g.wide_fn, .{ .grid = .{ .x = @intCast((rows + 127) / 128), .y = @intCast((e + 63) / 64), .z = 1 }, .block = .{ .x = 256 }, .shared = wide_shared }, s, &a);
             return;
         }
         try launch_.launch(if (few) g.few_fn else g.logits_fn, .{ .grid = .{ .x = @intCast((rows + 15) / 16), .y = @intCast((e + 31) / 32), .z = 1 }, .block = .{ .x = 128 }, .shared = if (few) few_shared else many_shared }, s, &a);
