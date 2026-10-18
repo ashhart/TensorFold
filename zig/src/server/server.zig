@@ -332,7 +332,7 @@ pub const Server = struct {
         const keys = srv.keys orelse return true;
         if (std.mem.eql(u8, conn.method, "OPTIONS") or !keys.enabled()) return true;
         conn.key_label = keys.match(a, single(conn, "Authorization"), single(conn, "x-api-key"));
-        if (!auth.gated(conn.path, keys.metrics_open) or conn.key_label != null) return true;
+        if (!auth.gatedRequest(conn.method, conn.path, keys.metrics_open) or conn.key_label != null) return true;
         const path = auth.routePath(conn.path);
         const messages = for ([_][]const u8{ "/v1/messages", "/v1/messages/count_tokens", "/messages", "/messages/count_tokens" }) |p| {
             if (std.mem.eql(u8, path, p)) break true;
@@ -348,7 +348,7 @@ pub const Server = struct {
         var len: [24]u8 = undefined;
         conn.addHeader("Content-Length", std.fmt.bufPrint(&len, "{d}", .{body.len}) catch unreachable) catch return false;
         conn.addHeader("Connection", "close") catch return false;
-        conn.finish(body) catch {};
+        conn.finish(if (std.mem.eql(u8, conn.method, "HEAD")) "" else body) catch {};
         return false;
     }
 };

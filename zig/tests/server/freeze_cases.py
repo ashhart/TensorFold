@@ -11,7 +11,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import corpus  # noqa: E402
-import parity  # noqa: E402
 from fake_text import FakeTokenizer  # noqa: E402
 from wire import request  # noqa: E402
 
@@ -111,6 +110,10 @@ def main() -> int:
         ("alt-models", "GET", "/alt/models", None, {}),
         ("options", "OPTIONS", "/v1/models", None, {}),
     ]
+    decision = {"state": None, "questions": {"q": {"type": "choice", "instructions": "i", "criteria": {"A": "a", "B": "b"}}}}
+    for stem, path in (("systemone", "/systemone"), ("v1-systemone", "/v1/systemone"), ("x-systemone", "/x/systemone")):
+        key_cases.append((stem + "-none", "POST", path, decision, {}))
+        key_cases.append((stem + "-with-key", "POST", path, decision, {"x-api-key": "sk-cli"}))
     chat = corpus.chat("plain")
     key_steps: list[dict] = [{
         "kind": "cases",

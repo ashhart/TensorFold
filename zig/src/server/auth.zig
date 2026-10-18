@@ -88,8 +88,8 @@ pub const Store = struct {
         const fd = openKeys(pathz) catch return error.Unsafe;
         defer _ = platform.c.close(fd);
         const st = meta(fd, null) orelse return error.Unsafe;
-        if ((st.mode & platform.c.S.IFMT) != platform.c.S.IFREG or st.mode & 0o044 != 0) {
-            problem.* = "API key file must be a regular file unreadable by other users; use chmod 600";
+        if ((st.mode & platform.c.S.IFMT) != platform.c.S.IFREG or st.mode & 0o066 != 0) {
+            problem.* = "API key file must be a regular file unreadable and unwritable by other users; use chmod 600";
             return error.Invalid;
         }
         if (st.size > 1 << 20) {
@@ -234,15 +234,12 @@ fn isSpace(cp: u21) bool {
     };
 }
 
-/// The paths only a key opens (``auth_http.gated``).
+/// Every route needs a key except the explicit public page, health and opened metrics paths.
 pub fn gated(raw_path: []const u8, metrics_open: bool) bool {
     const path = routePath(raw_path);
+    if (path.len == 0 or std.mem.eql(u8, path, "/health") or std.mem.eql(u8, path, "/slide") or publicAsset(path)) return false;
     if (metrics_open and (std.mem.eql(u8, path, "/metrics") or std.mem.eql(u8, path, "/v1/metrics"))) return false;
-    if (std.mem.eql(u8, path, "/v1") or std.mem.startsWith(u8, path, "/v1/")) return true;
-    for ([_][]const u8{ "/metrics", "/dashboard", "/stats", "/memory", "/tokenize", "/detokenize", "/models", "/messages", "/messages/count_tokens", "/chat/completions", "/completions", "/decisions", "/responses" }) |p| if (std.mem.eql(u8, path, p)) return true;
-    if (std.mem.startsWith(u8, path, "/responses/")) return true;
-    for ([_][]const u8{ "/chat/completions", "/completions", "/decisions", "/models" }) |end| if (std.mem.endsWith(u8, path, end)) return true;
-    return false;
+    return true;
 }
 
 /// A request path without its query and trailing slashes.
@@ -255,9 +252,13 @@ pub fn routePath(raw: []const u8) []const u8 {
 pub fn loopback(host: []const u8) bool {
     if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
     const ip = std.Io.net.IpAddress.parse(host, 0) catch return false;
+    return loopbackAddress(ip);
+}
+
+pub fn loopbackAddress(ip: std.Io.net.IpAddress) bool {
     return switch (ip) {
         .ip4 => |v4| v4.bytes[0] == 127,
-        .ip6 => |v6| std.mem.eql(u8, &v6.bytes, &[16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }),
+        .ip6 => |v6| std.mem.eql(u8, &v6.bytes, &[16]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1 }) or (std.mem.eql(u8, v6.bytes[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255 }) and v6.bytes[12] == 127),
     };
 }
 
@@ -372,6 +373,10 @@ test "the key file: refused while others can read it, read at 0600, reread after
     var problem: []const u8 = "";
     try std.testing.expectError(error.KeyFile, Store.init(a, &.{}, "", path, false, &problem));
     try std.testing.expect(std.mem.indexOf(u8, problem, "chmod 600") != null);
+    for ([_]platform.c.mode_t{ 0o620, 0o602, 0o622 }) |mode| {
+        try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, mode, 0));
+        try std.testing.expectError(error.KeyFile, Store.init(a, &.{}, "", path, false, &problem));
+    }
     try std.testing.expectEqual(@as(c_int, 0), platform.c.fchmodat(posix.AT.FDCWD, path, 0o600, 0));
     var s = try Store.init(std.testing.allocator, &.{"sk-cli"}, "sk-env", path, false, &problem);
     defer s.deinit();
@@ -412,4 +417,19 @@ test "a request's key label outlives a reload of the key file" {
     s.checked_ns = null;
     try std.testing.expect(s.match(a, "Bearer sk-one", null) == null); // a refused reload frees the file's keys too
     try std.testing.expectEqualStrings("ci", kept);
+}
+
+test {
+    _ = @import("auth_routes_test.zig");
+}
+
+pub fn gatedRequest(method: []const u8, raw_path: []const u8, metrics_open: bool) bool {
+    return !std.mem.eql(u8, method, "GET") or gated(raw_path, metrics_open);
+}
+
+fn publicAsset(path: []const u8) bool {
+    for ([_][]const u8{ "data.js", "panel.js", "flat.js", "scene.js", "tower.js", "fx.js", "bloom.js", "layout.js" }) |name| {
+        if (std.mem.startsWith(u8, path, "/slide/") and std.mem.eql(u8, path[7..], name)) return true;
+    }
+    return false;
 }
