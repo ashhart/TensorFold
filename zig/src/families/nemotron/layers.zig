@@ -241,11 +241,11 @@ pub fn moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32
 
 /// nemotron_h_puzzle (Bolt): the routed experts run in the moe_latent_size latent, mirroring cuda_latent.zig run().
 /// The normed input projects into the latent (into), the routed experts run up/down in the latent on the runtime-dim
-/// row kernels (reading each layer's own expert count and width), each pick projects back to hidden (out), then
-/// add_norm combines the picks by weight with the shared expert (kept in hidden) and the residual. The shared expert
-/// is the Lightning path unchanged. Reuses dense_bf16 (gate/into/out), route_bolt (sigmoid + bias top-k, runtime
-/// NE/K) and add_norm_moe_xs_bolt (<4096, 512, 9>); the per-pick out-projection is valid because out is linear, so
-/// projecting each pick then combining by weight equals combining in the latent then projecting once.
+/// row kernels (reading each layer's own expert count and width), the picks combine by weight in the latent, the sum
+/// projects back to hidden once (out), then add_norm adds the shared expert (kept in hidden) and the residual — the
+/// order and roundings of mlx_lm's NemotronHMoE. The shared expert is the Lightning path unchanged. Reuses dense_bf16
+/// (gate/into/out), route_bolt (sigmoid + bias top-k, runtime NE/K), combine_latent and add_norm_moe_xs_bolt
+/// (<4096, 512, 1>).
 /// TODO(kernels): the shared expert's up_relu2 and the model's mamba kernels still need Bolt-dim variants to RUN;
 /// this wires the dataflow and the new MoE kernels. Verified by a kernel-contract test at synthetic shapes.
 pub fn bolt_moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps: f32) void {
@@ -291,19 +291,29 @@ pub fn bolt_moe(f: Forward, e: *Enc, m: wts.Moe, next: anytype, rows: usize, eps
     f.indexed(e, m.routed.?[0], c.top_k, pairs, true, s.x_lat, s.idx, s.act);
     f.indexed(e, m.routed.?[1], 1, pairs, false, s.act, s.idx, s.ey_lat);
 
-    // out: each pick's latent output back to hidden (per-pick; combined by weight in add_norm below)
-    e.pipe(f.k.get("dense_bf16"));
+    // the picks combined by weight in the latent (mlx_lm's (y * scores).sum(-2) in fp32, one bf16 rounding),
+    // into x_lat: free now the up projection has read it
+    e.pipe(f.k.get("combine_latent"));
     e.buf(s.ey_lat, 0, 0);
-    e.buf(m.out.?.w, m.out.?.off, 1);
-    e.buf(s.ey, 0, 2);
-    e.bytes([3]u32{ @intCast(pairs), hidden, latent }, 3);
-    e.run(.{ 32 * hidden, (pairs + 7) / 8, 1 }, .{ 256, 1, 1 });
+    e.buf(s.wt, 0, 1);
+    e.buf(s.x_lat, 0, 2);
+    e.bytes([3]u32{ @intCast(rows), K, latent }, 3);
+    e.run(.{ latent, rows, 1 }, .{ 256, 1, 1 });
 
-    // combine the picks by weight + shared + residual, then the next input norm and its sums (top-k 9 baked)
+    // out: the combined latent back to hidden, once a row (delta is free in an MoE layer)
+    e.pipe(f.k.get("dense_bf16"));
+    e.buf(s.x_lat, 0, 0);
+    e.buf(m.out.?.w, m.out.?.off, 1);
+    e.buf(s.delta, 0, 2);
+    e.bytes([3]u32{ @intCast(rows), hidden, latent }, 3);
+    e.run(.{ 32 * hidden, (rows + 7) / 8, 1 }, .{ 256, 1, 1 });
+
+    // + shared, + residual, then the next input norm and its sums: add_norm at one pick of weight 1, which gives
+    // mlx_lm's bf16(y + shared) and then bf16(h + y)
     e.pipe(f.k.get("add_norm_moe_xs_bolt"));
     e.buf(s.h, 0, 0);
-    e.buf(s.ey, 0, 1);
-    e.buf(s.wt, 0, 2);
+    e.buf(s.delta, 0, 1);
+    e.buf(s.ones, 0, 2);
     e.buf(s.sh, 0, 3);
     e.buf(next.buffer, next.offset, 4);
     e.bytes(eps, 5);

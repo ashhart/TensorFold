@@ -57,7 +57,8 @@ pub const all = [_]Kernel{
     .{ .key = "route", .function = "custom_kernel_nemotron_route_8776d7e9b3d3f6f3__128_6_bfloat16_t_float_floatc_uint32_t_float", .source = @embedFile("route.metal") },
     .{ .key = "route_bolt", .function = "tf_nemotron_route_bolt", .source = @embedFile("route_bolt.metal") }, // hand-authored (runtime NE/K; generator not in repo)
     .{ .key = "dense_bf16", .function = "tf_nemotron_dense_bf16", .source = @embedFile("dense_bf16.metal") }, // hand-authored: bf16 write-matmul for the gate and latent projections
-    .{ .key = "add_norm_moe_xs_bolt", .function = "tf_nemotron_add_norm_moe_xs_bolt", .source = @embedFile("add_norm_moe_xs.metal") }, // hand-authored <4096,512,9> instantiation
+    .{ .key = "add_norm_moe_xs_bolt", .function = "tf_nemotron_add_norm_moe_xs_bolt", .source = @embedFile("add_norm_moe_xs.metal") }, // hand-authored <4096,512,1> instantiation
+    .{ .key = "combine_latent", .function = "tf_nemotron_combine_latent", .source = @embedFile("combine_latent.metal") }, // hand-authored: the picks combined in the latent
     .{ .key = "add_norm_xs_bolt", .function = "tf_nemotron_add_norm_xs_bolt", .source = @embedFile("add_norm_xs.metal") }, // hand-authored <4096,512> instantiation
     .{ .key = "group_norm_xs_bolt_16", .function = "tf_nemotron_group_norm_xs_bolt_16", .source = @embedFile("group_norm_xs_bolt.metal") }, // hand-authored: Bolt mamba inner 8192
     .{ .key = "group_norm_xs_bolt_32", .function = "tf_nemotron_group_norm_xs_bolt_32", .source = @embedFile("group_norm_xs_bolt.metal") },
