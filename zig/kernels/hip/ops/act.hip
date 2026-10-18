@@ -49,6 +49,113 @@ __global__ void __launch_bounds__(kRmsThreads) rms_kernel(const T* __restrict__ 
     }
 }
 
+// tf_add's rounding of a sum: fp16 to nearest even, bf16 as c10::BFloat16 (NaN to 0x7fc0).
+__device__ inline __half add_round(float v, const __half*) { return __float2half_rn(v); }
+__device__ inline hip_bfloat16 add_round(float v, const hip_bfloat16*) {
+    hip_bfloat16 out;
+    const uint32_t u = __float_as_uint(v);
+    out.data = v != v ? 0x7fc0 : static_cast<uint16_t>((u + (((u >> 16) & 1u) + 0x7fffu)) >> 16);
+    return out;
+}
+
+constexpr int kAddRmsThreads = 1024;
+
+// The residual's addend: y in T (mode 0), fp32 y (1, tf_add_wide's), or tf_nemo_combine's sum of y's slots (2).
+struct AddRmsIn {
+    const void* y;
+    int mode;
+    const float* wts;
+    const float* shared;
+    int slots;
+};
+
+// x = tf_add's x + the input (see AddRmsIn), then rms_kernel over the new row, in one block.
+template <typename T>
+__device__ void add_rms_body(T* __restrict__ x, AddRmsIn in, const float* __restrict__ weight, T* __restrict__ normed,
+                             int width, float eps) {
+    __shared__ float row_v[kRmsWidth];
+    __shared__ float inv_s;
+    constexpr int kAhead = 8;  // a thread's elements loaded before any is used, so their latencies overlap
+    const long long at = static_cast<long long>(blockIdx.x) * width;
+    T* row = x + at;
+    for (int base = threadIdx.x; base < width; base += kAhead * kAddRmsThreads) {
+        float a[kAhead], b[kAhead];
+#pragma unroll
+        for (int k = 0; k < kAhead; ++k) {
+            const int i = base + k * kAddRmsThreads;
+            if (i >= width) break;
+            a[k] = widen(row[i]);
+            if (in.mode == 0) {
+                b[k] = widen(static_cast<const T*>(in.y)[at + i]);
+            } else if (in.mode == 1) {
+                b[k] = static_cast<const float*>(in.y)[at + i];
+            } else {
+                float acc = 0.f;
+                const long long first = static_cast<long long>(blockIdx.x) * in.slots;
+                for (int s = 0; s < in.slots; ++s) {
+                    acc += static_cast<const float*>(in.y)[(first + s) * width + i] * in.wts[first + s];
+                }
+                if (in.shared != nullptr) acc += in.shared[at + i];
+                b[k] = widen(add_round(acc, row));
+            }
+        }
+#pragma unroll
+        for (int k = 0; k < kAhead; ++k) {
+            const int i = base + k * kAddRmsThreads;
+            if (i >= width) break;
+            const T v = add_round(a[k] + b[k], row);
+            row[i] = v;
+            row_v[i] = widen(v);
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        // rms_kernel's sum, element by element in its order; 16 loads at a time keep the wave from waiting on each
+        constexpr int kLoads = 16;
+        float sum = 0.f;
+        int i = threadIdx.x;
+        for (; i + (kLoads - 1) * 32 < width; i += kLoads * 32) {
+            float v[kLoads];
+#pragma unroll
+            for (int k = 0; k < kLoads; ++k) v[k] = row_v[i + 32 * k];
+#pragma unroll
+            for (int k = 0; k < kLoads; ++k) sum += v[k] * v[k];
+        }
+        for (; i < width; i += 32) sum += row_v[i] * row_v[i];
+        const float inv = rsqrtf(warp_sum(sum) / static_cast<float>(width) + eps);
+        if (threadIdx.x == 0) inv_s = inv;
+    }
+    __syncthreads();
+    const float inv = inv_s;
+    T* out = normed + at;
+    for (int base = threadIdx.x; base < width; base += kAhead * kAddRmsThreads) {
+        float w[kAhead];
+#pragma unroll
+        for (int k = 0; k < kAhead; ++k) {
+            const int i = base + k * kAddRmsThreads;
+            if (i < width) w[k] = weight != nullptr ? weight[i] : 1.f;
+        }
+#pragma unroll
+        for (int k = 0; k < kAhead; ++k) {
+            const int i = base + k * kAddRmsThreads;
+            if (i >= width) break;
+            float value = row_v[i] * inv;
+            if (weight != nullptr) value *= w[k];
+            narrow(value, out + i);
+        }
+    }
+}
+
+extern "C" __global__ void __launch_bounds__(kAddRmsThreads)
+    tf_add_rms_f16(__half* x, AddRmsIn in, const float* weight, __half* normed, int width, float eps) {
+    add_rms_body<__half>(x, in, weight, normed, width, eps);
+}
+
+extern "C" __global__ void __launch_bounds__(kAddRmsThreads)
+    tf_add_rms_bf16(hip_bfloat16* x, AddRmsIn in, const float* weight, hip_bfloat16* normed, int width, float eps) {
+    add_rms_body<hip_bfloat16>(x, in, weight, normed, width, eps);
+}
+
 // Length 1. Taps run in order, then the state shifts toward the new sample.
 extern "C" __global__ void tf_conv_decode(const float* __restrict__ x, const float* __restrict__ weight,
                                    float* __restrict__ state, float* __restrict__ y, int channels, int kernel) {

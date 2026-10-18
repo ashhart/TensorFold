@@ -2,6 +2,7 @@
 
 const t = @import("types.zig");
 const Ops = @import("ops.zig").Ops;
+const nemotron_moe = @import("../launches/nemotron_moe.zig");
 const Error = t.Error;
 const Tensor = t.Tensor;
 const p = t.p;
@@ -56,6 +57,103 @@ pub fn addRms(o: Ops, x: Tensor, y: Tensor, weight: u64, normed: Tensor, rows: u
     if (x.kind != y.kind or x.kind != normed.kind or x.kind == .f32) return error.BadShape;
     const z = o.l;
     try z.tf_tail(p(x.ptr), p(y.ptr), null, f(weight), p(normed.ptr), @backingInt(x.kind), int(rows), 0, int(width), eps, o.stream);
+}
+
+/// `add` (or `addWide` for an fp32 y), then `rms` into `normed`: one launch where it takes the rows, the same bits.
+pub fn residualRms(
+    o: Ops,
+    x: Tensor,
+    y: Tensor,
+    weight: u64,
+    normed: Tensor,
+    rows: usize,
+    width: usize,
+    eps: f32,
+) Error!void {
+    if (x.kind == .f32 or x.kind != normed.kind or (y.kind != .f32 and y.kind != x.kind)) return error.BadShape;
+    if (rows == 0) return;
+    const wide = y.kind == .f32;
+    if (merges(o, width)) return addRms1(
+        o,
+        x,
+        .{ .y = y.ptr, .mode = @intFromBool(wide) },
+        weight,
+        normed,
+        rows,
+        width,
+        eps,
+    );
+    if (wide) try o.addWide(x, y.ptr, x, rows * width) else try o.add(x, y, x, rows * width);
+    try rms(o, x, weight, normed, rows, width, eps);
+}
+
+/// A Nemotron MoE layer's outputs before their sum: `slots` fp32 expert rows a row, their weights, the shared row.
+pub const MoeRows = struct { y: u64, wts: u64, shared: u64, slots: usize };
+
+/// `residualRms` of the rows' MoE sum (tf_nemo_combine's): one launch where it takes the rows, the same bits.
+pub fn residualMoeRms(
+    o: Ops,
+    x: Tensor,
+    m: MoeRows,
+    weight: u64,
+    normed: Tensor,
+    rows: usize,
+    width: usize,
+    eps: f32,
+) Error!void {
+    if (x.kind == .f32 or x.kind != normed.kind or m.slots == 0) return error.BadShape;
+    if (rows == 0) return;
+    if (merges(o, width)) return addRms1(
+        o,
+        x,
+        .{ .y = m.y, .mode = 2, .wts = m.wts, .shared = m.shared, .slots = int(m.slots) },
+        weight,
+        normed,
+        rows,
+        width,
+        eps,
+    );
+    const sum: Tensor = .{ .ptr = try o.arena.take(rows * width * x.kind.size()), .kind = x.kind };
+    try nemotron_moe.combine(
+        o.l,
+        @ptrFromInt(m.y),
+        @ptrFromInt(m.wts),
+        @ptrFromInt(m.shared),
+        p(sum.ptr),
+        @backingInt(x.kind),
+        int(rows),
+        int(m.slots),
+        int(width),
+        o.stream,
+    );
+    try residualRms(o, x, sum, weight, normed, rows, width, eps);
+}
+
+fn merges(o: Ops, width: usize) bool {
+    return o.fused() and width > 1024 and width <= 8192;
+}
+
+fn addRms1(
+    o: Ops,
+    x: Tensor,
+    in: @import("../launches/norms.zig").AddRmsIn,
+    weight: u64,
+    normed: Tensor,
+    rows: usize,
+    width: usize,
+    eps: f32,
+) Error!void {
+    try o.l.tf_add_rms(
+        p(x.ptr),
+        in,
+        f(weight),
+        p(normed.ptr),
+        @backingInt(x.kind),
+        int(rows),
+        int(width),
+        eps,
+        o.stream,
+    );
 }
 
 pub fn gnormSilu(o: Ops, y: u64, z: Tensor, out: Tensor, n: usize, gate: Gate) Error!void {

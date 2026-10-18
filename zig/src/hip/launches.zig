@@ -51,6 +51,8 @@ pub const Launcher = struct {
     r: *const runtime.Runtime,
     mods: [kernels.group_count]Module,
     rms: Triple,
+    /// rms_kernel after tf_add (or tf_add_wide) in one launch, fp16 and bf16.
+    add_rms: [2]Function,
     conv_decode: Function,
     conv_rows: Function,
     rope_decode: Function,
@@ -209,6 +211,7 @@ pub const Launcher = struct {
             try act.function(ns ++ "10rms_kernelI6__halfEEvPKT_PKfPS3_if"),
             try act.function(ns ++ "10rms_kernelI12hip_bfloat16EEvPKT_PKfPS3_if"),
         };
+        l.add_rms = .{ try act.function("tf_add_rms_f16"), try act.function("tf_add_rms_bf16") };
         l.conv_decode = try act.function("tf_conv_decode");
         l.conv_rows = try act.function("tf_conv_rows");
         l.rope_decode = try act.function("tf_rope_decode");
@@ -279,6 +282,7 @@ pub const Launcher = struct {
     pub const tf_rms2 = norms.tf_rms2;
     pub const tf_gnorm_out = norms.tf_gnorm_out;
     pub const tf_tail = norms.tf_tail;
+    pub const tf_add_rms = norms.tf_add_rms;
     pub const tf_conv_decode = conv.tf_conv_decode;
     pub const tf_conv_rows = conv.tf_conv_rows;
     pub const tf_conv_split = conv.tf_conv_split;

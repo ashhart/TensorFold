@@ -42,6 +42,27 @@ pub const Layer = struct {
 
 /// `x` (rows, D) normed rows to (rows, D): x's kind, or fp32 when `l.share` (the caller sums the ranks' shares).
 pub fn run(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Tensor {
+    const m = try expertRows(o, l, x, rows);
+    const d: usize = l.fc2.n;
+    const out_kind: Kind = if (l.share) .f32 else x.kind;
+    const out = try o.arena.take(rows * d * out_kind.size());
+    try launch.combine(
+        o.l,
+        @ptrFromInt(m.y),
+        @ptrFromInt(m.wts),
+        @ptrFromInt(m.shared),
+        @ptrFromInt(out),
+        @backingInt(out_kind),
+        @intCast(rows),
+        @intCast(m.slots),
+        @intCast(d),
+        o.stream,
+    );
+    return .{ .ptr = out, .kind = out_kind };
+}
+
+/// `run` up to its sum: each row's experts' fp32 rows and weights, and the shared expert's fp32 row (0 without one).
+pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRows {
     const kind = x.kind;
     const d: usize = l.fc2.n;
     const ni: usize = l.fc1.n;
@@ -89,21 +110,7 @@ pub fn run(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Tensor {
     const y = try o.projectRouted(act, l.fc2, items, count, members, pairs, 1, @min(tile, rows));
     if (!l.whole()) try o.moeZeroForeign(y, local, l.own, pairs, d);
     const shared: u64 = if (l.shared_up) |su| try sharedExpert(o, su, l.shared_down.?, x, rows) else 0;
-    const out_kind: Kind = if (l.share) .f32 else kind;
-    const out = try o.arena.take(rows * d * out_kind.size());
-    try launch.combine(
-        o.l,
-        @ptrFromInt(y),
-        @ptrFromInt(wts),
-        @ptrFromInt(shared),
-        @ptrFromInt(out),
-        @backingInt(out_kind),
-        @intCast(rows),
-        @intCast(slots),
-        @intCast(d),
-        o.stream,
-    );
-    return .{ .ptr = out, .kind = out_kind };
+    return .{ .y = y, .wts = wts, .shared = shared, .slots = slots };
 }
 
 /// down(relu^2(up x)) in fp32 (rows, D), the up rounded as the routed experts' is.
