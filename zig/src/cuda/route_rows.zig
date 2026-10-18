@@ -17,19 +17,23 @@ pub const most_picks = 128;
 /// tf_route_logits' staged rows (16 inputs and 32 experts, padded by 8): two stages of 128, or three of 256.
 const many_shared: u32 = 2 * 48 * (128 + 8) * 2;
 const few_shared: u32 = 3 * 48 * (256 + 8) * 2;
+/// tf_route_logits_wide's: 64 inputs and 32 experts, two stages of 128.
+const wide_shared: u32 = 2 * 96 * (128 + 8) * 2;
 
 pub const RouteRows = struct {
     mod: Module,
     logits_fn: Function,
     few_fn: Function,
+    wide_fn: Function,
     topk_fn: Function,
 
     pub fn load(d: *const Driver) !RouteRows {
         if (!kernels.available) return error.BuiltWithoutKernels;
         var mod = try Module.load(d, kernels.route_rows);
         errdefer mod.unload();
-        const r: RouteRows = .{ .mod = mod, .logits_fn = try mod.function("tf_route_logits"), .few_fn = try mod.function("tf_route_logits_few"), .topk_fn = try mod.function("tf_route_topk") };
+        const r: RouteRows = .{ .mod = mod, .logits_fn = try mod.function("tf_route_logits"), .few_fn = try mod.function("tf_route_logits_few"), .wide_fn = try mod.function("tf_route_logits_wide"), .topk_fn = try mod.function("tf_route_topk") };
         try r.few_fn.allowDynamicShared(few_shared);
+        try r.wide_fn.allowDynamicShared(wide_shared);
         return r;
     }
 
@@ -49,6 +53,11 @@ pub const RouteRows = struct {
         for ([_]usize{ rows, d, e }) |v| a.add(@as(i32, @intCast(v)));
         // up to 16 rows, deeper staging (the same sums: the router rows' reads set the time)
         const few = rows <= 16;
+        if (rows >= 64) {
+            // 64 rows a block: each router row read once per 64 input rows (the same sums)
+            try launch_.launch(g.wide_fn, .{ .grid = .{ .x = @intCast((rows + 63) / 64), .y = @intCast((e + 31) / 32), .z = 1 }, .block = .{ .x = 128 }, .shared = wide_shared }, s, &a);
+            return;
+        }
         try launch_.launch(if (few) g.few_fn else g.logits_fn, .{ .grid = .{ .x = @intCast((rows + 15) / 16), .y = @intCast((e + 31) / 32), .z = 1 }, .block = .{ .x = 128 }, .shared = if (few) few_shared else many_shared }, s, &a);
     }
 
