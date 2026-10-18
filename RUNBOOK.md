@@ -244,6 +244,19 @@ To accept remote clients, choose `--host 0.0.0.0` and configure `--api-key-file`
 Clients send `Authorization: Bearer KEY`.
 The default loopback server accepts local clients without a key.
 
+The server admits at most 128 open connections, including idle keep-alive connections and active replies.
+Extra connections receive `503 Service Unavailable` with `Retry-After: 1`, then close.
+The reply is best effort if the peer cannot receive it; no extra connection thread is created.
+This cap is independent of the process file limit.
+
+A new connection has 30 seconds to send its request line and all headers.
+A kept connection may wait idle for 900 seconds; its next request's first bytes start a fresh 30-second head budget.
+A fixed-length body has 30 seconds plus one second per 64 KiB declared, rounded up to a millisecond.
+Chunked bodies extend that same original budget only by declared payload bytes, within the 32 MiB body limit.
+Chunk metadata and trailers do not reset the deadline.
+The existing 120-second read-idle and 300-second write-idle limits still apply.
+Read budgets end when input is complete, so they impose no total deadline on inference or streamed replies.
+
 A context limit covers prompt plus reply tokens.
 Inspect the capacity and memory information printed at startup; larger contexts need more cache space.
 After a memory refusal, reduce the context or reply limit, or choose a smaller qualified checkpoint.

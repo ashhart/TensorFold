@@ -74,6 +74,7 @@ pub const Config = struct {
     /// --learn-conversations: /v1/imprint answers; without it each of its routes refuses and names the flag.
     saved_conversations: bool = false,
     timeouts: http_conn.Timeouts = .{},
+    max_connections: u32 = @import("http_admission.zig").default_limit,
     /// The open /health names these after its other keys; empty fields are left out.
     identity: Identity = .{},
     /// The process environment GET /v1/benchmark/manifest reads (rank count, revision, the hardware probe); null: none.
@@ -287,7 +288,7 @@ pub const Server = struct {
         const loopback_bind = if (listener.boundAddress()) |a| auth.loopbackAddress(a) else true;
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
-            _ = srv.open_connections.fetchAdd(1, .acq_rel);
+            if (!srv.admitConnection(c.fd)) continue;
             const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
                 _ = srv.open_connections.fetchSub(1, .acq_rel);
                 _ = platform.posix.system.close(c.fd);
@@ -295,6 +296,13 @@ pub const Server = struct {
             };
             t.detach();
         }
+    }
+
+    pub fn admitConnection(srv: *Server, fd: platform.posix.socket_t) bool {
+        const admission = @import("http_admission.zig");
+        if (admission.acquire(&srv.open_connections, srv.config.max_connections)) return true;
+        admission.reject(fd);
+        return false;
     }
 
     fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
@@ -311,10 +319,12 @@ pub const Server = struct {
         if (conn.auth_enabled) conn.hook = .{ .ctx = srv, .call = countReply };
         var arena: std.heap.ArenaAllocator = .init(srv.gpa);
         defer arena.deinit();
+        var first = true;
         while (true) {
             _ = arena.reset(.retain_capacity);
             const a = arena.allocator();
-            const outcome = conn.readRequest(a, true) catch break;
+            const outcome = conn.readRequest(a, !first) catch break;
+            first = false;
             switch (outcome) {
                 .closed => break,
                 .handled => if (conn.close) break else continue,

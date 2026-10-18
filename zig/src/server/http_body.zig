@@ -54,6 +54,8 @@ pub fn read(c: *Conn, a: Allocator, max: usize) Allocator.Error!Body {
         }
         if (!chunked or codings != 1 or !std.mem.eql(u8, c.version, "HTTP/1.1"))
             return refuse(c, "unsupported request Transfer-Encoding; expected chunked over HTTP/1.1");
+        c.budget.body(c.nowMs(), c.timeouts.request);
+        defer c.budget = .{};
         return chunks(c, a, max, too_big);
     }
     if (!lengths) return .{ .ok = "" };
@@ -71,6 +73,9 @@ pub fn read(c: *Conn, a: Allocator, max: usize) Allocator.Error!Body {
         }
     }
     if (size.? > max) return refuse(c, too_big);
+    c.budget.body(c.nowMs(), c.timeouts.request);
+    c.budget.declared(size.?, c.timeouts.request);
+    defer c.budget = .{};
     var body: std.ArrayList(u8) = .empty;
     if ((c.readExact(a, &body, size.?) catch |e| switch (e) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -110,6 +115,7 @@ fn chunks(c: *Conn, a: Allocator, max: usize, too_big: []const u8) Allocator.Err
                 if (trailers > metadata_limit or !trailerName(trailer)) return refuse(c, "invalid or oversized request trailers");
             }
         }
+        c.budget.declared(size, c.timeouts.request);
         const got = c.readExact(a, &body, size) catch |e| switch (e) {
             error.OutOfMemory => return error.OutOfMemory,
             else => 0,

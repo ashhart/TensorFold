@@ -16,6 +16,7 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("http_limits_test.zig");
     _ = @import("done_times_test.zig");
     _ = @import("drain_test.zig");
     _ = @import("keepalive_test.zig");

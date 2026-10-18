@@ -4,6 +4,7 @@ const platform = @import("sys");
 const posix = platform.posix;
 const Allocator = std.mem.Allocator;
 const log = @import("log.zig");
+const deadline = @import("http_deadline.zig");
 
 pub const max_line = 65536;
 pub const max_headers = 100;
@@ -14,6 +15,7 @@ pub const Timeouts = struct {
     idle_ms: i32 = 900_000, // a kept-alive connection waiting for its next request
     read_ms: i32 = 120_000, // a request whose next bytes stop arriving
     write_ms: i32 = 300_000, // a client that stops reading
+    request: deadline.Policy = .{},
 };
 
 pub const IoError = error{ Closed, Timeout };
@@ -27,10 +29,18 @@ pub const StatusHook = struct {
     call: *const fn (ctx: *anyopaque, conn: *Conn, code: u16) void,
 };
 
+pub const ReadHooks = struct {
+    ctx: *anyopaque,
+    now: *const fn (*anyopaque) i64,
+    read: *const fn (*anyopaque, []u8, i32) IoError!usize,
+};
+
 pub const Conn = struct {
     fd: posix.socket_t,
     peer: []const u8,
     timeouts: Timeouts = .{},
+    budget: deadline.Budget = .{},
+    read_hooks: ?ReadHooks = null,
     buf: []u8,
     start: usize = 0,
     end: usize = 0,
@@ -68,12 +78,22 @@ pub const Conn = struct {
             c.end -= c.start;
             c.start = 0;
         }
-        var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
-        const ready = posix.poll(&fds, timeout_ms) catch return error.Closed;
-        if (ready == 0) return error.Timeout;
-        const got = posix.read(c.fd, c.buf[c.end..]) catch return error.Closed;
+        const wait = try c.budget.wait(c.nowMs(), timeout_ms);
+        const got = if (c.read_hooks) |h| try h.read(h.ctx, c.buf[c.end..], wait) else blk: {
+            var fds = [_]posix.pollfd{.{ .fd = c.fd, .events = posix.POLL.IN, .revents = 0 }};
+            const ready = posix.poll(&fds, wait) catch return error.Closed;
+            if (ready == 0) return error.Timeout;
+            break :blk posix.read(c.fd, c.buf[c.end..]) catch return error.Closed;
+        };
+        if (got > 0) c.budget.arrived(c.nowMs(), c.timeouts.request);
+        _ = try c.budget.wait(c.nowMs(), timeout_ms);
         c.end += got;
         return got;
+    }
+
+    pub fn nowMs(c: *const Conn) i64 {
+        if (c.read_hooks) |h| return h.now(h.ctx);
+        return @intCast(std.Io.Clock.awake.now(log.io()).toMilliseconds());
     }
 
     /// ``rfile.readline(limit)``: through the newline, ``limit`` bytes, or what is left before EOF.
@@ -81,6 +101,7 @@ pub const Conn = struct {
         var line: std.ArrayList(u8) = .empty;
         var wait = timeout_ms;
         while (true) {
+            _ = try c.budget.wait(c.nowMs(), wait);
             const avail = c.buf[c.start..c.end];
             const scan = avail[0..@min(avail.len, limit - line.items.len)];
             if (std.mem.indexOfScalar(u8, scan, '\n')) |i| {
@@ -100,6 +121,7 @@ pub const Conn = struct {
     pub fn readExact(c: *Conn, a: Allocator, list: *std.ArrayList(u8), n: usize) (IoError || Allocator.Error)!usize {
         var want = n;
         while (want > 0) {
+            _ = try c.budget.wait(c.nowMs(), c.timeouts.read_ms);
             if (c.start == c.end and try c.fill(c.timeouts.read_ms) == 0) break;
             const take = @min(want, c.end - c.start);
             try list.appendSlice(a, c.buf[c.start .. c.start + take]);
@@ -166,6 +188,8 @@ pub const Conn = struct {
 
     /// Reads and parses one request head; error replies are sent here, as ``parse_request`` sends them.
     pub fn readRequest(c: *Conn, a: Allocator, idle: bool) Allocator.Error!Outcome {
+        c.budget.head(c.nowMs(), idle and c.start == c.end, c.timeouts.request);
+        defer c.budget = .{};
         c.key_label = null;
         c.counted = false;
         const raw = c.readLine(a, max_line + 1, if (idle) c.timeouts.idle_ms else c.timeouts.read_ms) catch |e| switch (e) {
@@ -239,7 +263,10 @@ pub const Conn = struct {
         while (true) {
             const line = c.readLine(a, max_line + 1, c.timeouts.read_ms) catch |e| switch (e) {
                 error.OutOfMemory => return error.OutOfMemory,
-                else => "",
+                else => {
+                    c.close = true;
+                    return false;
+                },
             };
             if (line.len > max_line) {
                 try c.sendError(a, 431, "Line too long", "got more than 65536 bytes when reading header line");
