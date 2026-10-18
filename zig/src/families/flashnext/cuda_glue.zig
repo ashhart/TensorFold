@@ -11,6 +11,10 @@ const tile_heads = 16;
 fn chunkSmem(buffers: u32) u32 {
     return (tile_heads + buffers * 2 * 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
 }
+/// The one-buffer form: a tile's keys, then its values, in the same rows of shared memory.
+fn oneSmem() u32 {
+    return (tile_heads + 32) * (tile_head_dim + 8) * 2 + tile_heads * (32 + 8) * 2;
+}
 /// Rows up to which attention reads the next tile ahead (fewer blocks, so latency, not occupancy, sets the time).
 const ahead_rows = 16;
 
@@ -46,6 +50,8 @@ const Fns = struct {
     scores: cuda.Function,
     chunks: cuda.Function,
     chunks_ahead: cuda.Function,
+    chunks_one: cuda.Function,
+    fused: cuda.Function,
     merge: cuda.Function,
 };
 
@@ -117,10 +123,14 @@ pub const Glue = struct {
             .scores = try g.attn.function("fn_qsa_scores"),
             .chunks = try g.attn.function("fn_attn_chunks"),
             .chunks_ahead = try g.attn.function("fn_attn_chunks_ahead"),
+            .chunks_one = try g.attn.function("fn_attn_chunks_one"),
+            .fused = try g.attn.function("fn_attn_fused"),
             .merge = try g.attn.function("fn_attn_merge"),
         };
         try g.f.chunks.allowDynamicShared(chunkSmem(1));
         try g.f.chunks_ahead.allowDynamicShared(chunkSmem(2));
+        try g.f.chunks_one.allowDynamicShared(oneSmem());
+        try g.f.fused.allowDynamicShared(oneSmem());
         return g;
     }
 
@@ -196,7 +206,19 @@ pub const Glue = struct {
         a.add(@as(f32, 0.0625));
         ints(&a, &.{ wt.index_idw, @intFromBool(qsa) });
         const ahead = rows <= ahead_rows;
-        try go(if (ahead) g.f.chunks_ahead else g.f.chunks, s, .{ rows, kv, chunks }, 128, chunkSmem(if (ahead) 2 else 1), &a);
+        try go(if (ahead) g.f.chunks_ahead else g.f.chunks_one, s, .{ rows, kv, chunks }, 128, if (ahead) chunkSmem(2) else oneSmem(), &a);
+    }
+
+    /// Prompt rows' attention with every chunk merged in the program (fn_attn_fused): out bf16, attnChunks then
+    pub fn attnFused(g: *const Glue, s: cuda.Stream, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        const group = wt.q_heads / kv;
+        if (group > tile_heads) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ q, kc, vc, pos, out, ids, nk, sparse });
+        ints(&a, &.{ wt.q_heads, kv, group, 512 });
+        a.add(@as(f32, 0.0625));
+        ints(&a, &.{ wt.index_idw, 1 });
+        try go(g.f.fused, s, .{ rows, kv, 1 }, 128, oneSmem(), &a);
     }
 
     pub fn attnMerge(g: *const Glue, s: cuda.Stream, po: u64, pm: u64, pl: u64, pos: u64, out: u64, nk: u64, sparse: u64, rows: usize, kv: usize, qsa: bool) !void {

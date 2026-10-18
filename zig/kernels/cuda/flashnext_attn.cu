@@ -205,7 +205,7 @@ extern "C" __global__ void __launch_bounds__(256) fn_qsa_scores(const __nv_bfloa
 }
 
 // attention._chunks, program (row, KV head, chunk): the chunk's keys TK at a time, online softmax, partial o, m, l.
-template <int NB>
+template <int NB, bool ONE = false, bool FUSE = false>
 __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
                                             const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
                                             float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
@@ -215,7 +215,8 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     typedef __nv_bfloat16 Row[HD + 8];
     Row* qs = reinterpret_cast<Row*>(smem_raw);                  // [QR] the row's query heads
     Row* tiles_kv = qs + QR;                                     // [NB][2][TK] each buffer's keys, then values
-    __nv_bfloat16 (*ps)[TK + 8] = reinterpret_cast<__nv_bfloat16 (*)[TK + 8]>(tiles_kv + NB * 2 * TK);  // [QR] bf16 p
+    // ONE: one [TK] buffer, the tile's keys and then, once the scores are taken, its values (fewer bytes, more blocks)
+    __nv_bfloat16 (*ps)[TK + 8] = reinterpret_cast<__nv_bfloat16 (*)[TK + 8]>(tiles_kv + (ONE ? TK : NB * 2 * TK));
     __shared__ float red_m[4][QR], red_l[4][QR];
     __shared__ int key_ids[NB][TK];
     const int r = blockIdx.x, hk = blockIdx.y, c = blockIdx.z;
@@ -226,8 +227,10 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         sparse = SPR[r] != 0;
         if (sparse) n = NKR[r];
     }
-    const int start = c * CH;
-    if (start >= n) return;
+    // FUSE: one program a row takes every chunk in order and merges them as fn_attn_merge does (no partials)
+    const int c_end = FUSE ? (n + CH - 1) / CH : c + 1;
+    if (c * CH >= n) return;
+    int start = c * CH;
     for (int e = threadIdx.x; e < QR * HD / 8; e += blockDim.x) {
         const int i = e / (HD / 8), v = e % (HD / 8);
         qmm_frag::cp16z(&qs[i][8 * v], Q + (static_cast<long long>(r) * H + hk * G + min(i, G - 1)) * HD + 8 * v, i < G);
@@ -249,6 +252,18 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
             qmm_frag::commit();
         }
     };
+    // ONE: the keys (pass 0) or the values (pass 1) of the tile whose ids are in key_ids[0], into the one buffer
+    auto load_one = [&](int pass) {
+        const __nv_bfloat16* src = pass == 0 ? KC : VC;
+        for (int e = threadIdx.x; e < TK * HD / 8; e += blockDim.x) {
+            const int k = e / (HD / 8), v = e % (HD / 8), key = key_ids[0][k];
+            qmm_frag::cp16z(&tiles_kv[k][8 * v], src + (static_cast<long long>(max(key, 0)) * HK + hk) * HD + 8 * v, key >= 0);
+        }
+        qmm_frag::commit();
+    };
+    float mm[2] = {-INFINITY, -INFINITY}, ll[2] = {0.0f, 0.0f}, oo[FUSE ? 8 : 1][4] = {};
+    for (int cc = c; cc < c_end; ++cc) {
+    start = cc * CH;
     float m[2] = {-INFINITY, -INFINITY}, l[2] = {0.0f, 0.0f};
     float o[8][4] = {};
     const int tiles = min(n - start, CH);
@@ -256,12 +271,22 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
     for (int t0 = 0, it = 0; t0 < tiles; t0 += TK, ++it) {
         const int buf = NB == 2 ? it & 1 : 0;
         const bool ahead = NB == 2 && t0 + TK < tiles;  // the next tile's loads go out before this tile's math
-        if (NB == 1) load(t0, 0);
-        if (ahead) load(t0 + TK, buf ^ 1);
-        Row* kt = tiles_kv + buf * 2 * TK;
-        Row* vt = kt + TK;
+        if constexpr (ONE) {
+            if (threadIdx.x < TK) {
+                const int ki = start + t0 + threadIdx.x;
+                key_ids[0][threadIdx.x] = ki < n ? (sparse ? IDS[static_cast<long long>(r) * IDW + ki] : ki) : -1;
+            }
+            __syncthreads();
+            load_one(0);
+        } else {
+            if (NB == 1) load(t0, 0);
+            if (ahead) load(t0 + TK, buf ^ 1);
+        }
+        Row* kt = tiles_kv + (ONE ? 0 : buf * 2 * TK);
+        Row* vt = ONE ? kt : kt + TK;
         const int* keys = key_ids[buf];
-        if (ahead) qmm_frag::wait<3>(); else qmm_frag::wait<1>();
+        if constexpr (ONE) qmm_frag::wait<0>();
+        else if (ahead) qmm_frag::wait<3>(); else qmm_frag::wait<1>();
         __syncthreads();
         constexpr int JT = TK / 32;  // a warp's 8-key tiles
         float s[JT][4] = {};
@@ -277,6 +302,10 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
                 qmm_frag::mma(s[jt], a0, b[0], b[1]);
                 qmm_frag::mma(s[jt], a1, b[2], b[3]);
             }
+        }
+        if constexpr (ONE) {                              // every warp has read the keys: the values take their place
+            __syncthreads();
+            load_one(1);
         }
         float tile_m[2] = {-INFINITY, -INFINITY};
 #pragma unroll
@@ -319,7 +348,7 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
             rows[h] = __fadd_rn(rows[h], __shfl_xor_sync(0xffffffffu, rows[h], 2));
             if (t == 0) red_l[warp][g + 8 * h] = rows[h];
         }
-        if (ahead) qmm_frag::wait<2>(); else qmm_frag::wait<0>();
+        if (ONE) qmm_frag::wait<0>(); else if (ahead) qmm_frag::wait<2>(); else qmm_frag::wait<0>();
         __syncthreads();
 #pragma unroll
         for (int h = 0; h < 2; ++h) {
@@ -345,11 +374,27 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         }
         __syncthreads();
     }
+    if constexpr (FUSE) {                                  // fn_attn_merge's step for this chunk, element by element
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const bool active = l[h] > 0.0f;
+            const float next = active ? fmaxf(mm[h], m[h]) : mm[h];
+            const float a = active ? (mm[h] == -INFINITY ? 0.0f : tf_exp(__fsub_rn(mm[h], next))) : 1.0f;
+            const float bb = active ? tf_exp(__fsub_rn(m[h], next)) : 0.0f;
+#pragma unroll
+            for (int q = 0; q < 8; ++q)
+#pragma unroll
+                for (int e = 0; e < 2; ++e) oo[FUSE ? q : 0][2 * h + e] = __fmaf_rn(o[q][2 * h + e], bb, __fmul_rn(oo[FUSE ? q : 0][2 * h + e], a));
+            ll[h] = __fmaf_rn(l[h], bb, __fmul_rn(ll[h], a));
+            mm[h] = next;
+        }
+        continue;
+    }
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
         const int i = g + 8 * h;
         if (i >= G) continue;
-        const long long base = (static_cast<long long>(r) * NCH + c) * H + hk * G + i;
+        const long long base = (static_cast<long long>(r) * NCH + cc) * H + hk * G + i;
 #pragma unroll
         for (int q = 0; q < 8; ++q) {
             float2 v = make_float2(o[q][2 * h], o[q][2 * h + 1]);
@@ -358,6 +403,21 @@ __device__ __forceinline__ void attn_chunks(const __nv_bfloat16* __restrict__ Q,
         if (warp == 0 && t == 0) {
             PM[base] = m[h];
             PL[base] = l[h];
+        }
+    }
+    }
+    if constexpr (FUSE) {                                  // o / l, rounded once, as fn_attn_merge writes OUT
+        __nv_bfloat16* OUT = reinterpret_cast<__nv_bfloat16*>(PO);
+#pragma unroll
+        for (int h = 0; h < 2; ++h) {
+            const int i = g + 8 * h;
+            if (i >= G) continue;
+            const long long row = (static_cast<long long>(r) * H + hk * G + i) * HD;
+#pragma unroll
+            for (int q = 0; q < 8; ++q)
+#pragma unroll
+                for (int e = 0; e < 2; ++e)
+                    OUT[row + warp * 64 + q * 8 + 2 * t + e] = __float2bfloat16_rn(__fdiv_rn(oo[q][2 * h + e], ll[h]));
         }
     }
 }
@@ -370,6 +430,25 @@ extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks(const __nv_bflo
                                                                  const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
                                                                  float SCALE, int IDW, int QSA) {
     attn_chunks<1>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
+}
+
+// attn_chunks with one buffer and every chunk of a row merged in place (prompt rows): OUT (bf16, in PO's place), no partials.
+extern "C" __global__ void __launch_bounds__(128) fn_attn_fused(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                                                                const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
+                                                                float* __restrict__ OUT, const int* __restrict__ IDS, const int* __restrict__ NKR,
+                                                                const int* __restrict__ SPR, int H, int HK, int G, int CH,
+                                                                float SCALE, int IDW, int QSA) {
+    attn_chunks<1, true, true>(Q, KC, VC, POS0, OUT, nullptr, nullptr, IDS, NKR, SPR, H, HK, G, CH, 1, SCALE, IDW, QSA);
+}
+
+// attn_chunks with one buffer, keys then values (prompt chunks: three blocks a multiprocessor), the same sums.
+extern "C" __global__ void __launch_bounds__(128) fn_attn_chunks_one(const __nv_bfloat16* __restrict__ Q, const __nv_bfloat16* __restrict__ KC,
+                                                                     const __nv_bfloat16* __restrict__ VC, const int* __restrict__ POS0,
+                                                                     float* __restrict__ PO, float* __restrict__ PM, float* __restrict__ PL,
+                                                                     const int* __restrict__ IDS, const int* __restrict__ NKR,
+                                                                     const int* __restrict__ SPR, int H, int HK, int G, int CH, int NCH,
+                                                                     float SCALE, int IDW, int QSA) {
+    attn_chunks<1, true>(Q, KC, VC, POS0, PO, PM, PL, IDS, NKR, SPR, H, HK, G, CH, NCH, SCALE, IDW, QSA);
 }
 
 // attn_chunks with the next tile's loads in flight (a decode round's few rows): the same sums.

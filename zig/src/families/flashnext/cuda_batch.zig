@@ -386,33 +386,40 @@ pub fn Pass(comptime Tri: type) type {
             // attention.qsa_pool for the blocks these rows complete, then each block of rows' scores and attention
             if (self.seq.media) |m| try m.pooled(self.stream, ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n) else try self.tri.qsaPool(ikc, pooled, at.pos, lw.ik_scale.ptr, s.inv, eps, n);
             const nb = scoreStride(self.seq.cap);
-            var r0: usize = 0;
-            var b: usize = 0;
-            while (r0 < n) : ({
-                r0 += att_rows;
-                b += 1;
-            }) {
-                const m = @min(att_rows, n - r0);
-                const ends = self.pos0 + r0 + m;
-                if (ends > self.seq.cap) return error.UnexpectedTensor;
-                const pos = at.pos + b * 16;
-                const iq = at.iq + r0 * index_heads * index_dim * 2;
-                // rows past `top` complete blocks score theirs; _scores leaves the rest alone, so skip it when none is
-                if (ends / ratio > top) try self.tri.qsaScores(iq, pooled, pos, self.seq.scores, nb, m, @min(nb, cdiv(ends, ratio)));
-                var a: cuda.Args = .{};
-                a.add(self.seq.scores);
-                a.add(pos);
-                a.add(s.qids);
-                a.add(s.qnk);
-                a.add(s.qspr);
-                a.add(cint(nb));
-                a.add(cint(idw));
-                a.add(cint(top));
-                a.add(cint(ratio));
-                try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
-                const chunks = cdiv(@min(ends, wt.dense_keys), 512);
-                try self.tri.attnChunks(at.q + r0 * q_heads * head_dim * 2, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, kv_heads, chunks, true);
-                try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * out_k * 2, s.qnk, s.qspr, m, kv_heads, true);
+            // prompt rows: selections for up to fused_rows rows, then one fused launch (chunks merged in the program)
+            const fused = n > att_rows;
+            const group: usize = if (fused) parts.fused_rows else att_rows;
+            var g0: usize = 0;
+            while (g0 < n) : (g0 += group) {
+                const gm = @min(group, n - g0);
+                var r0 = g0;
+                while (r0 < g0 + gm) : (r0 += att_rows) {
+                    const m = @min(att_rows, g0 + gm - r0);
+                    const ends = self.pos0 + r0 + m;
+                    if (ends > self.seq.cap) return error.UnexpectedTensor;
+                    const pos = at.pos + (r0 / att_rows) * 16;
+                    const iq = at.iq + r0 * index_heads * index_dim * 2;
+                    const sel = r0 - g0;                   // this block's rows in the selection buffers
+                    // rows past `top` complete blocks score theirs; _scores leaves the rest alone, so skip it when none is
+                    if (ends / ratio > top) try self.tri.qsaScores(iq, pooled, pos, self.seq.scores, nb, m, @min(nb, cdiv(ends, ratio)));
+                    var a: cuda.Args = .{};
+                    a.add(self.seq.scores);
+                    a.add(pos);
+                    a.add(s.qids + sel * idw * 4);
+                    a.add(s.qnk + sel * 4);
+                    a.add(s.qspr + sel * 4);
+                    a.add(cint(nb));
+                    a.add(cint(idw));
+                    a.add(cint(top));
+                    a.add(cint(ratio));
+                    try cuda.launch.launch(self.k.select, .{ .grid = .{ .x = @intCast(m) }, .block = .{ .x = 1024 } }, self.stream, &a);
+                    if (!fused) {
+                        const chunks = cdiv(@min(ends, wt.dense_keys), 512);
+                        try self.tri.attnChunks(at.q + r0 * q_heads * head_dim * 2, kc, vc, pos, s.po, s.pm, s.pl, s.qids, s.qnk, s.qspr, m, kv_heads, chunks, true);
+                        try self.tri.attnMerge(s.po, s.pm, s.pl, pos, at.ao + r0 * out_k * 2, s.qnk, s.qspr, m, kv_heads, true);
+                    }
+                }
+                if (fused) try self.tri.attnFused(at.q + g0 * q_heads * head_dim * 2, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * out_k * 2, s.qids, s.qnk, s.qspr, gm, kv_heads);
             }
         }
 

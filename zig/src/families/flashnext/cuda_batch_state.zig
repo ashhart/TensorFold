@@ -45,6 +45,8 @@ pub const proj_row = @max(gdn.proj_width, proj_n);
 pub const att_rows: usize = 256;
 /// Neurons a pocket's activations take a row (fn_back's max_pocket).
 pub const pocket_stride: usize = 128;
+/// Prompt rows one fused attention launch takes (their selections staged att_rows at a time).
+pub const fused_rows: usize = 1024;
 /// Rows a pass holds at most unless asked for more.
 pub const default_chunk: usize = 1536;
 const ratio = wt.index_ratio;
@@ -378,7 +380,7 @@ pub const Scratch = struct {
         n += cap * (2 * gdn.nk * gdn.dk + 2 * gdn.nv) * 4;
         n += cap * q_heads * head_dim * 2 + cap * index_heads * index_dim * 2;
         n += att_rows * nch * q_heads * (head_dim + 2) * 4 + cap * out_k * 2 * 2 + cap * (out_k / 32) * 4;
-        n += att_rows * (idw + 2) * 4;
+        n += fused_rows * (idw + 2) * 4;
         n += cap * (experts_n + 1) * 4 + pairs * 4 * 2 + pairs * 4 + items * 3 * 4 + 8 + pairs * 4 + nblk * (experts_n + 1) * 4;
         n += cap * moe_w * 6 + cap * dims * 4;
         n += pairs * moe_w * 2 + pairs * dims * 4 + cap * dims * 2;
@@ -423,9 +425,9 @@ pub const Scratch = struct {
         s.po = try s.add(gpa, d, att_rows * nch * q_heads * head_dim * 4);
         s.pm = try s.add(gpa, d, att_rows * nch * q_heads * 4);
         s.pl = try s.add(gpa, d, att_rows * nch * q_heads * 4);
-        s.qids = try s.add(gpa, d, att_rows * idw * 4);
-        s.qnk = try s.add(gpa, d, att_rows * 4);
-        s.qspr = try s.add(gpa, d, att_rows * 4);
+        s.qids = try s.add(gpa, d, fused_rows * idw * 4);
+        s.qnk = try s.add(gpa, d, fused_rows * 4);
+        s.qspr = try s.add(gpa, d, fused_rows * 4);
         s.ao = try s.add(gpa, d, cap * out_k * 2);
         s.gated = try s.add(gpa, d, cap * out_k * 2);
         s.gxs_attn = try s.add(gpa, d, cap * (out_k / 32) * 4);

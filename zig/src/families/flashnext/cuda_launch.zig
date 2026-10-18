@@ -259,6 +259,12 @@ pub const Tri = struct {
         return g.hcUpmixUp(t.s, act, xs, weight, scales, biases, normed, mixed, xs_mixed, up, rows, n, k, dims, streams);
     }
 
+    /// Prompt rows' attention, chunks merged in the program, ours only.
+    pub fn attnFused(t: Tri, q: u64, kc: u64, vc: u64, pos: u64, out: u64, ids: u64, nk: u64, sparse: u64, rows: usize, kv: usize) !void {
+        const g = t.glue("_chunks") orelse return error.NoGlue;
+        return g.attnFused(t.s, q, kc, vc, pos, out, ids, nk, sparse, rows, kv);
+    }
+
     /// qmm.hc_down for one decode row. N=324 is the layer down stacked with inject. M folds when it is 1.
     pub fn hcDown(t: Tri, h: u64, pss: u64, scale: u64, normed: u64, weight: u64, scales: u64, biases: u64, out: u64, part: u64, eps: f32, rows: usize, n: usize, k: usize, dims: usize, nc: usize, streams: usize, sk: usize) !void {
         if (t.glue("_qmm_hcdown")) |g| return g.hcDown(t.s, h, pss, scale, normed, weight, scales, biases, out, part, eps, rows, n, k, dims, nc, streams, sk);
