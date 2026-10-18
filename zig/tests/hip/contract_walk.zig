@@ -26,13 +26,29 @@ const names = [2][2][]const u8{
     },
 };
 
-/// The walk, q and its rows fp32; or with `act` in the cache's kind, bit-equal to the casts around the fp32 walk.
-pub fn spec(k: kit.Kind, act: bool) c.Spec {
+const attend_names = [2][2][]const u8{
+    .{ "hip tf_plan_attend_f16 (q and rows fp32)", "hip tf_plan_attend_bf16 (q and rows fp32)" },
+    .{ "hip tf_plan_attend_f16 (q and rows fp16)", "hip tf_plan_attend_bf16 (q and rows bf16)" },
+};
+
+/// Spans the one-block walk takes: a decode row at 4k keys, a draft window, and a short span on a tp 2 rank.
+const attend_served = [_]c.Shape{
+    .{ .rows = 1, .n = 32, .k = 4096 },
+    .{ .rows = 4, .n = 32, .k = 1000 },
+    .{ .rows = 1, .n = 16, .k = 512 },
+};
+
+/// The walk, q and rows fp32 or (`act`) the cache's kind as casts around it give them; `attend`: the one-block walk.
+pub fn spec(k: kit.Kind, act: bool, attend: bool) c.Spec {
     var s = plain(k);
-    s.name = names[@intFromBool(act)][@intFromBool(k == .bf16)];
-    if (!act) return s;
-    s.out = kit.elem(k);
-    s.replaces = "tf_cast, planCausal and tf_cast";
+    s.name = (if (attend) attend_names else names)[@intFromBool(act)][@intFromBool(k == .bf16)];
+    if (act) s.out = kit.elem(k);
+    if (attend) {
+        s.replaces = if (act) "planCausalAs's four launches" else "planCausal's four launches";
+        s.served = &attend_served;
+        return s;
+    }
+    if (act) s.replaces = "tf_cast, planCausal and tf_cast";
     return s;
 }
 
@@ -65,6 +81,8 @@ pub const Walk = struct {
     plan: hip.launches.PlanRef = undefined,
     /// q and the rows in the cache's kind.
     act: bool = false,
+    /// The one-block walk (tf_plan_attend_*) in place of the four launches.
+    attend: bool = false,
     q32: u64 = 0,
     wide: u64 = 0, // the baseline's fp32 rows
     base: u64 = 0,
@@ -82,7 +100,7 @@ pub const Walk = struct {
     }
 
     pub fn kernel(self: *Walk) g.Kernel {
-        return .{ .spec = spec(self.k, self.act), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.k, self.act, self.attend), .ctx = self, .vt = &vt };
     }
 
     const vt = g.hooks(Walk);
@@ -92,6 +110,7 @@ pub const Walk = struct {
     }
 
     pub fn prepare(self: *Walk, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
+        if (self.attend and shape.k > 4096) return false;
         if (shape.rows == 0 or shape.n == 0 or shape.k == 0 or shape.n % @max(shape.n / 16, 1) != 0) return false;
         self.rig.reset();
         _ = self.arena.reset(.retain_capacity);
@@ -168,7 +187,7 @@ pub const Walk = struct {
         const lens = [_]usize{ heads * keys * 4, heads * 2 * 4, heads * tiles * d * 4 };
         for (lens, &self.scratch) |len, *at| at.* = try self.rig.scratch(len);
         self.out = try self.rig.output(heads * d * @as(usize, if (self.act) 2 else 4));
-        if (self.act) {
+        if (self.act or self.attend) {
             self.wide = try self.rig.scratch(heads * d * 4);
             self.base = try self.rig.scratch(heads * d * 2);
         }
@@ -189,6 +208,28 @@ pub const Walk = struct {
     pub fn run(self: *Walk) !void {
         const s = self.shape;
         const scale: f32 = 1 / @sqrt(@as(f32, d));
+        if (self.attend) {
+            const kind = @backingInt(self.k);
+            const qk: c_int = if (self.act) kind else 0;
+            const st = self.rig.s.handle;
+            const ran = try self.l.planAttend(
+                self.qd,
+                qk,
+                self.out,
+                qk,
+                self.plan,
+                0,
+                s.n,
+                self.kv(),
+                d,
+                s.k,
+                scale,
+                kind,
+                st,
+            );
+            if (!ran) return error.Refused;
+            return self.rig.s.synchronize();
+        }
         if (self.act) {
             try self.l.planCausalAs(
                 self.qd,
@@ -228,11 +269,32 @@ pub const Walk = struct {
         try self.rig.s.synchronize();
     }
 
-    /// The fp32 walk on q widened (the cast's exact values), then its rows cast to the kind.
+    /// The fp32 walk on q widened (the cast's exact values), then its rows cast to the kind; or the four launches.
     pub fn replaced(self: *Walk) ![]const u8 {
         const s = self.shape;
         const scale: f32 = 1 / @sqrt(@as(f32, d));
         const st = self.rig.s.handle;
+        if (self.attend) {
+            const out = if (self.act) self.base else self.wide;
+            try self.l.planCausalAs(
+                self.qd,
+                out,
+                self.scratch[0],
+                self.scratch[1],
+                self.scratch[2],
+                self.plan,
+                0,
+                s.n,
+                self.kv(),
+                d,
+                s.k,
+                scale,
+                @backingInt(self.k),
+                self.act,
+                st,
+            );
+            return self.rig.bytes(out, s.rows * s.n * d * @as(usize, if (self.act) 2 else 4));
+        }
         try self.l.planCausal(
             self.q32,
             self.wide,

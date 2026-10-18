@@ -113,6 +113,10 @@ pub fn causalAct(
     scale: f32,
 ) Error!void {
     if (q.kind == .f32 or q.kind != out.kind) return error.BadShape;
+    const k: c_int = @backingInt(q.kind);
+    const l = try launcher(o);
+    if (o.fused() and try l.planAttend(q.ptr, k, out.ptr, k, p, layer, heads, kv_heads, d, span, scale, k, o.stream))
+        return;
     const tiles = (span + 127) / 128;
     const scores = try o.arena.of(f32, p.rows * heads * span);
     const stats = try o.arena.of(f32, p.rows * heads * 2);

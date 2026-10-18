@@ -158,6 +158,119 @@ __device__ void plan_apply_body(const float* __restrict__ scores, const float* _
     }
 }
 
+constexpr int kAttendThreads = 1024;
+constexpr int kAttendSpan = 4096;  // keys the one-block walk holds
+constexpr int kAttendTile = 128;
+
+// The planned walk of one (row, query head) in one block, each step's sums in its own kernel's order (see below).
+template <int KIND>
+__device__ void plan_attend_body(const void* __restrict__ q, int qkind, void* __restrict__ out, int okind, int span,
+                                 int heads, int kv_heads, int d, float scale, PlanArgs plan, int layer) {
+    __shared__ float sc[kAttendSpan];
+    __shared__ float wt[kAttendSpan];
+    __shared__ float part[kAttendSpan / kAttendTile][kAttendTile];
+    __shared__ float qs[kAttendTile];
+    __shared__ float buf[256];
+    const int head = blockIdx.x, batch = blockIdx.y, tid = threadIdx.x;
+    const int visible = min(plan.pos[batch] + 1, span);
+    const long long q0 = (static_cast<long long>(batch) * heads + head) * d;
+    for (int i = tid; i < d; i += kAttendThreads) qs[i] = load(q, qkind, q0 + i);
+    __syncthreads();
+    const unsigned long long* desc = plan_desc(plan, plan.slot[batch]);
+    const unsigned* table = plan_pages(plan, desc);
+    const int kv = head / (heads / kv_heads);
+    const int lane = tid & 31, wave = tid >> 5;
+    // plan_score_body's scores, a wave a key
+    {
+        const void* keys = reinterpret_cast<const void*>(desc[plan_first(layer)]);
+        constexpr int kAhead = 4;  // a wave's keys loaded before their sums
+        for (int key0 = wave * kAhead; key0 < visible; key0 += (kAttendThreads / 32) * kAhead) {
+            float kreg[kAhead][4];
+#pragma unroll
+            for (int j = 0; j < kAhead; ++j) {
+                const int key = key0 + j < visible ? key0 + j : visible - 1;
+                const long long base = page_at(table, plan.pool, kv, key, d);
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int idx = lane + i * 32;
+                    kreg[j][i] = idx < d ? load(keys, KIND, base + idx) : 0.f;
+                }
+            }
+#pragma unroll
+            for (int j = 0; j < kAhead; ++j) {
+                float partial = 0.f;
+#pragma unroll
+                for (int i = 0; i < 4; ++i) {
+                    const int idx = lane + i * 32;
+                    if (idx < d) partial += qs[idx] * kreg[j][i];
+                }
+                const float dot = wave_sum(partial);
+                if (lane == 0 && key0 + j < visible) sc[key0 + j] = dot * scale;
+            }
+        }
+    }
+    __syncthreads();
+    // tf_softmax_stats' max and sum on the first 256 threads
+    if (tid < 256) {
+        float local = -INFINITY;
+        for (int i = tid; i < visible; i += 256) local = fmaxf(local, sc[i]);
+        buf[tid] = local;
+    }
+    __syncthreads();
+    for (int step = 128; step > 0; step >>= 1) {
+        if (tid < step) buf[tid] = fmaxf(buf[tid], buf[tid + step]);
+        __syncthreads();
+    }
+    const float top = buf[0];
+    __syncthreads();
+    if (tid < 256) {
+        float local = 0.f;
+        for (int i = tid; i < visible; i += 256) local += expf(sc[i] - top);
+        buf[tid] = local;
+    }
+    __syncthreads();
+    for (int step = 128; step > 0; step >>= 1) {
+        if (tid < step) buf[tid] += buf[tid + step];
+        __syncthreads();
+    }
+    const float denom = buf[0];
+    for (int i = tid; i < visible; i += kAttendThreads) wt[i] = expf(sc[i] - top) / denom;
+    __syncthreads();
+    // plan_apply_body's 128-key tiles, eight at a time, then tf_sum_partials' sum of them in tile order
+    const int tiles = (span + kAttendTile - 1) / kAttendTile;
+    const int group = tid / kAttendTile, col = tid % kAttendTile;
+    const void* values = reinterpret_cast<const void*>(desc[plan_second(layer)]);
+    for (int tile = group; tile < tiles; tile += kAttendThreads / kAttendTile) {
+        const int key0 = tile * kAttendTile;
+        float acc = 0.f;
+        if (key0 < visible && col < d) {
+            const int stop = min(key0 + kAttendTile, visible);
+            for (int key = key0; key < stop;) {
+                const int edge = min((key / kPageTokens + 1) * kPageTokens, stop);
+                const long long slot0 = page_row(table[key / kPageTokens], plan.pool, kv, 0, d) + col;
+                for (; key + 8 <= edge; key += 8) {
+                    float ahead[8];
+#pragma unroll
+                    for (int u = 0; u < 8; ++u)
+                        ahead[u] = load(values, KIND, slot0 + static_cast<long long>((key + u) % kPageTokens) * d);
+#pragma unroll
+                    for (int u = 0; u < 8; ++u) acc += wt[key + u] * ahead[u];
+                }
+                for (; key < edge; ++key) {
+                    acc += wt[key] * load(values, KIND, slot0 + static_cast<long long>(key % kPageTokens) * d);
+                }
+            }
+        }
+        if (col < d) part[tile][col] = acc;
+    }
+    __syncthreads();
+    if (tid < d) {
+        float total = 0.f;
+        for (int tile = 0; tile < tiles; ++tile) total += part[tile][tid];
+        store(out, okind, q0 + tid, total);
+    }
+}
+
 // The words of a row copied by a block row of threads, four at a time.
 __device__ __forceinline__ void copy_words(unsigned int* to, const unsigned int* from, int words) {
     const int stride = gridDim.x * blockDim.x;
@@ -211,6 +324,16 @@ __global__ void tf_sum_partials_act(const float* __restrict__ partials, void* __
     float acc = 0.f;
     for (int tile = 0; tile < tiles; ++tile) acc += col[static_cast<long long>(tile) * d];
     store(out, kind, (static_cast<long long>(batch) * gridDim.x + head) * d + lane, acc);
+}
+__global__ void __launch_bounds__(kAttendThreads)
+tf_plan_attend_f16(const void* q, int qkind, void* out, int okind, int span, int heads, int kv_heads, int d,
+                   float scale, PlanArgs plan, int layer) {
+    plan_attend_body<1>(q, qkind, out, okind, span, heads, kv_heads, d, scale, plan, layer);
+}
+__global__ void __launch_bounds__(kAttendThreads)
+tf_plan_attend_bf16(const void* q, int qkind, void* out, int okind, int span, int heads, int kv_heads, int d,
+                    float scale, PlanArgs plan, int layer) {
+    plan_attend_body<2>(q, qkind, out, okind, span, heads, kv_heads, d, scale, plan, layer);
 }
 __global__ void __launch_bounds__(256)
 tf_plan_apply_f16(const float* scores, const float* stats, float* partials, int span, int heads, int kv_heads, int d, PlanArgs plan, int layer) {

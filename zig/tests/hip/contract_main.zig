@@ -99,6 +99,14 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     walk_act.act = true;
     defer walk_act.deinit();
     try kernels.append(a, walk_act.kernel());
+    var attends: [2]walk_k.Walk = undefined;
+    for (&attends, [_]bool{ false, true }) |*w, act| {
+        w.* = .init(a, &r, s, &l);
+        w.act = act;
+        w.attend = true;
+    }
+    defer for (&attends) |*w| w.deinit();
+    for (&attends) |*w| try kernels.append(a, w.kernel());
     var add_rms: [3]add_rms_k.AddRms = undefined;
     for (&add_rms, std.enums.values(add_rms_k.Mode)) |*m, w| m.* = .init(a, &r, s, &l, w);
     defer for (&add_rms) |*m| m.deinit();

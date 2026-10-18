@@ -95,6 +95,7 @@ pub const Launcher = struct {
         score: [2]Function, // fp16, bf16
         score_act: [2]Function,
         sum_act: Function,
+        attend: [2]Function,
         apply: [2]Function,
         keep: Function,
         gather: Function,
@@ -174,6 +175,7 @@ pub const Launcher = struct {
             .score = .{ try pl.function("tf_plan_score_f16"), try pl.function("tf_plan_score_bf16") },
             .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
             .sum_act = try pl.function("tf_sum_partials_act"),
+            .attend = .{ try pl.function("tf_plan_attend_f16"), try pl.function("tf_plan_attend_bf16") },
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
             .keep = try pl.function("tf_plan_keep"),
             .gather = try pl.function("tf_plan_gather"),
@@ -327,6 +329,7 @@ pub const Launcher = struct {
     pub const planCausal = plan.planCausal;
     pub const planCausalAs = plan.planCausalAs;
     pub const planKvWriteAct = plan.planKvWriteAct;
+    pub const planAttend = plan.planAttend;
     pub const planGatedDelta = plan.planGatedDelta;
     pub const planKeep = plan.planKeep;
     pub const planGdnReplay = plan.planGdnReplay;

@@ -141,6 +141,44 @@ pub fn planCausalAs(
     try l.go(if (act) l.plan.sum_act else l.sum_partials, dim(heads, rows, 1), dim(256, 1, 1), 0, s, &e);
 }
 
+/// Keys the one-block walk (`planAttend`) takes at most.
+pub const attend_span = 4096;
+
+/// `planCausalAs` as one launch a (row, query head), q and out fp32 (kind 0) or the cache's kind; false past its shape.
+pub fn planAttend(
+    l: *const Launcher,
+    q: u64,
+    q_kind: c_int,
+    out: u64,
+    out_kind: c_int,
+    p: PlanRef,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+    kind: c_int,
+    s: S,
+) Error!bool {
+    if (span > attend_span or d > 128 or heads < 1 or kv_heads < 1 or @rem(heads, kv_heads) != 0) return false;
+    if (kind < 1 or kind > 2) return false;
+    var a: Args = .{};
+    try a.add(q);
+    try a.add(q_kind);
+    try a.add(out);
+    try a.add(out_kind);
+    try a.add(@as(c_int, @intCast(span)));
+    try a.add(@as(c_int, @intCast(heads)));
+    try a.add(@as(c_int, @intCast(kv_heads)));
+    try a.add(@as(c_int, @intCast(d)));
+    try a.add(scale);
+    try a.add(p.args);
+    try a.add(@as(c_int, @intCast(layer)));
+    try l.go(l.plan.attend[@intCast(kind - 1)], dim(heads, p.rows, 1), dim(1024, 1, 1), 0, s, &a);
+    return true;
+}
+
 /// Blocks under which the values' walk splits a KV head's query heads over more blocks.
 const apply_blocks = 128;
 

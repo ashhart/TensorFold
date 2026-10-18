@@ -226,8 +226,8 @@ test "Nemotron's decode attention: the planned walk within 1e-5 of float64 and n
     }
 }
 
-/// The planned walk over q in the activation type into rows of it, against q cast to fp32, the walk and the cast back.
-fn actWalk(t: *Rig, rng: *rig.Rng, c: Cache) !bool {
+/// The act-type walk (in one block when `one`, then with fp32 q and rows too) against the casts and the fp32 walk.
+fn actWalk(t: *Rig, rng: *rig.Rng, c: Cache, sp: usize, one: bool) !bool {
     const rows = lengths.len;
     const scale: f32 = 1 / @sqrt(@as(f32, d));
     const hq = try gpa.alloc(u16, rows * heads * d);
@@ -257,12 +257,14 @@ fn actWalk(t: *Rig, rng: *rig.Rng, c: Cache) !bool {
     defer first.free();
     var count = try t.upload(&[_]i32{rows});
     defer count.free();
-    var scores = try t.alloc(rows * heads * span * 4);
+    var scores = try t.alloc(rows * heads * sp * 4);
     defer scores.free();
     var stats = try t.alloc(rows * heads * 2 * 4);
     defer stats.free();
-    var partials = try t.alloc(rows * heads * (span / 128) * d * 4);
+    var partials = try t.alloc(rows * heads * (sp / 128) * d * 4);
     defer partials.free();
+    var o32b = try t.alloc(rows * heads * d * 4);
+    defer o32b.free();
     var q32 = try t.alloc(rows * heads * d * 4);
     defer q32.free();
     var o32 = try t.alloc(rows * heads * d * 4);
@@ -285,46 +287,28 @@ fn actWalk(t: *Rig, rng: *rig.Rng, c: Cache) !bool {
     };
     const n: c_longlong = @intCast(rows * heads * d);
     try t.on.tf_cast(@ptrFromInt(at(q)), t.kind(), @ptrFromInt(at(q32)), 0, n, s);
-    try t.on.planCausal(
-        at(q32),
-        at(o32),
-        at(scores),
-        at(stats),
-        at(partials),
-        p,
-        0,
-        heads,
-        kv_heads,
-        d,
-        span,
-        scale,
-        t.kind(),
-        s,
-    );
-    try t.on.tf_cast(@ptrFromInt(at(o32)), 0, @ptrFromInt(at(outs[0])), t.kind(), n, s);
-    try t.on.planCausalAs(
-        at(q),
-        at(outs[1]),
-        at(scores),
-        at(stats),
-        at(partials),
-        p,
-        0,
-        heads,
-        kv_heads,
-        d,
-        span,
-        scale,
-        t.kind(),
-        true,
-        s,
-    );
+    const k = t.kind();
+    const bufs = .{ at(scores), at(stats), at(partials) };
+    try t.on.planCausal(at(q32), at(o32), bufs[0], bufs[1], bufs[2], p, 0, heads, kv_heads, d, sp, scale, k, s);
+    try t.on.tf_cast(@ptrFromInt(at(o32)), 0, @ptrFromInt(at(outs[0])), k, n, s);
+    if (one) {
+        if (!try t.on.planAttend(at(q), k, at(outs[1]), k, p, 0, heads, kv_heads, d, sp, scale, k, s)) return false;
+        if (!try t.on.planAttend(at(q32), 0, at(o32b), 0, p, 0, heads, kv_heads, d, sp, scale, k, s)) return false;
+    } else {
+        const o1 = at(outs[1]);
+        try t.on.planCausalAs(at(q), o1, bufs[0], bufs[1], bufs[2], p, 0, heads, kv_heads, d, sp, scale, k, true, s);
+    }
     try t.stream.synchronize();
     const a = try rig.download(u16, outs[0]);
     defer gpa.free(a);
     const b = try rig.download(u16, outs[1]);
     defer gpa.free(b);
-    return std.mem.eql(u16, a, b);
+    if (!one) return std.mem.eql(u16, a, b);
+    const x = try rig.download(u32, o32);
+    defer gpa.free(x);
+    const y = try rig.download(u32, o32b);
+    defer gpa.free(y);
+    return std.mem.eql(u16, a, b) and std.mem.eql(u32, x, y);
 }
 
 test "the planned walk over q and out in the activation type writes the bytes of the casts around the fp32 walk" {
@@ -349,11 +333,11 @@ test "the planned walk over q and out in the activation type writes the bytes of
     var dv = try t.upload(pv);
     defer dv.free();
     const c: Cache = .{ .k = hk, .v = hv, .pool_k = at(dk), .pool_v = at(dv), .table = table };
-    try rig.expect(try actWalk(t, &rng, c), "planned walk in the activation type: the bytes differ", .{});
-    std.debug.print(
-        "  nemotron planned walk in the activation type: {d} rows, the bytes of the casts around it\n",
-        .{lengths.len},
-    );
+    try rig.expect(try actWalk(t, &rng, c, span, false), "planned walk in the activation type: the bytes differ", .{});
+    for ([_]usize{ 128, 512, 4096 }) |sp| {
+        try rig.expect(try actWalk(t, &rng, c, sp, true), "one-block walk over {d} keys: the bytes differ", .{sp});
+    }
+    std.debug.print("  nemotron planned walk in the activation type and in one block: the casts' bytes\n", .{});
 }
 
 test "the planned key write from the activation type writes the bytes of the cast keys' write" {
