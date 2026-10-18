@@ -316,6 +316,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-qwen-image", .path = "zig/tests/qwen_image.zig", .about = "Qwen-Image-2.1's transformer on a reference case: each step compared, then the schedule timed" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
+        .{ .name = "tf-nemotron-forward", .path = "zig/tests/nemotron_forward.zig", .about = "Nemotron (Lightning or Bolt) native teacher-forced logits" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
         .{ .name = "tf-sq-bench", .path = "zig/tests/sq_bench.zig", .about = "Row-exact 4-bit prompt tiles before the M5: chained speed at one shape, every output's bits against the first" },
         .{ .name = "tf-gemma4-kernels", .path = "zig/tests/gemma4/kernels.zig", .about = "Gemma 4 dense decode kernels against the reference's dumped fixtures, bit for bit by window width" },
