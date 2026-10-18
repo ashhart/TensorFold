@@ -33,15 +33,67 @@ machine's production service paths. Bind a replay by hand:
   settings.
 - Fill `{python}`, `{inputs}`, `{port}`, `{run}` and, for startup,
   `{startup}` in the template's `client_argv`. Pass `--repeat-cache zero`
-  and the pinned `corpus.json`.
-- For a startup job, write the receipt before the client runs. Take
-  `launch_before_ns` on `time.perf_counter` before exec, and
-  `ready_probe_end_ns` at the end of the first successful readiness probe.
-  The client must use that same clock. It sends the first burst before any
-  tokenize or primer call.
+  and the pinned `corpus.json`. All four templates expect the complete
+  contents of this directory at `{inputs}/integration/pr836/harness/`,
+  including the Python helpers and JSON fixtures. `{inputs}` is the absolute
+  staging root, not the harness directory itself. Alternatively, set
+  `{inputs}` to the checkout root and replace every
+  `integration/pr836/harness/` prefix in `client_argv` with
+  `docs/receipts/qwen-cuda-first-token/harness/`. Apply the same mapping to
+  script and fixture paths in all four templates, then pin the staged inputs.
+- For a startup job, write the complete receipt described below before the
+  client runs. Capture every `*_ns` value as an integer from
+  `time.perf_counter_ns()` on the server host. The client must run on that
+  same host and use the same monotonic clock; its `time.perf_counter()`
+  timestamps are in seconds. It sends the first burst before any tokenize
+  or primer call.
 - Keep the smoke and safety gate ahead of the panel. Run the two startup
   orders only after those checks pass. `startup-forward` is baseline-first;
   `startup-reverse` is candidate-first.
+
+## Startup receipt contract
+
+`{startup}` names a JSON file accepted by
+[`read_startup()` in run_startup.py](run_startup.py#L31). It must contain all
+of the following fields; the two anchors in `launches.csv` alone are not a
+complete replay receipt.
+
+| Field | Required value or meaning |
+| --- | --- |
+| `schema` | `"native_ttft_startup_v1"` |
+| `complete` | JSON `true`, set after the successful readiness probe |
+| `clock` | Exact string `"time.perf_counter_ns on the Spark host"`, as required by this collector |
+| `launch_before_ns` | Integer clock reading immediately before launching the server process |
+| `launch_after_ns` | Integer clock reading immediately after the process-launch call returns |
+| `ready_probe_begin_ns` | Integer clock reading immediately before the first successful readiness probe |
+| `ready_probe_end_ns` | Integer clock reading immediately after that successful probe |
+| `server_pid` | Positive integer PID of the launched server process |
+| `binary_sha256` | SHA-256 of that server binary, as 64 lowercase hexadecimal characters |
+| `binary` | Object with `sha256` equal to `binary_sha256` |
+| `file_cache_policy` | Exact string `"warm_or_uncontrolled_os_cache"`; these runs do not establish a cold filesystem cache |
+| `readiness_probe_count` | Number of entries in `readiness_probes` |
+| `readiness_probes` | Nonempty array of probe records in execution order, as specified below |
+
+The four top-level clock readings must be positive and strictly ordered:
+`launch_before_ns < launch_after_ns < ready_probe_begin_ns < ready_probe_end_ns`.
+Do not use wall-clock/Unix timestamps or floating-point seconds for these
+fields.
+
+Each readiness probe records integer `begin_ns` and `end_ns` readings from
+the same clock, with `begin_ns < end_ns`, and a Boolean `ready`. Every probe
+before the last must have `ready=false`; the final probe must have
+`ready=true`. The first probe begins at or after `launch_after_ns`, and each
+later probe begins at or after the preceding probe ends. The final probe's
+`begin_ns` and `end_ns` must equal `ready_probe_begin_ns` and
+`ready_probe_end_ns`. Stop probing at the first success and retain all failed
+probes that preceded it.
+
+The collector additionally checks that the first generation requests begin
+at or after readiness. Keep this complete receipt, the source/build/binary
+pins and the client rows together for each process. The exports below retain
+only the two anchors needed to recompute the published startup durations.
+
+## Recomputing the published timings
 
 [../launches.csv](../launches.csv) is the 24 startup receipts reduced to those
 two anchors. Joined to the `first_burst` rows in
