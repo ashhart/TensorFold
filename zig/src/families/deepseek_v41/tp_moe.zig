@@ -24,6 +24,7 @@ pub const Context = struct {
     sequence: u64 = 0,
     valid: bool = true,
     gpu_seconds: f64 = 0,
+    trace: bool = false,
 
     pub fn begin(c: *Context, slot: u32, position: u32, ids: []const u32) !void {
         if (!c.valid) return error.InvalidTensorParallelState;
@@ -58,7 +59,8 @@ pub const Context = struct {
             const dst = buffer.slice(ex.ExpertDescriptor, 385);
             for (src, dst) |d, *out| out.* = try d.columns(n, @as(usize, rank) * n / 2, n / 2);
         };
-        return .{ .gpa = gpa, .rank = rank, .exchange = exchange, .descriptors = descriptors, .send = send, .peer = peer };
+        const trace = if (std.c.getenv("TF_DSV41_TP_TRACE")) |value| std.mem.eql(u8, std.mem.span(value), "1") else false;
+        return .{ .gpa = gpa, .rank = rank, .exchange = exchange, .descriptors = descriptors, .send = send, .peer = peer, .trace = trace };
     }
 
     pub fn deinit(c: *Context) void {
@@ -68,12 +70,18 @@ pub const Context = struct {
         c.* = undefined;
     }
 
-    fn complete(c: *Context, cb: mtl.CommandBuffer, encoder: mtl.ComputeEncoder) !void {
+    fn complete(c: *Context, cb: mtl.CommandBuffer, encoder: mtl.ComputeEncoder, layer: usize, phase: []const u8, encode_started: f64) !void {
+        const began = if (c.trace) mtl.clock.seconds() else 0;
         encoder.end();
+        const ended = if (c.trace) mtl.clock.seconds() else 0;
         cb.commit();
+        const committed = if (c.trace) mtl.clock.seconds() else 0;
         cb.wait();
+        const waited = if (c.trace) mtl.clock.seconds() else 0;
         if (cb.failure() != null) return error.TensorParallelGpuFailure;
-        c.gpu_seconds += cb.gpuSeconds();
+        const gpu = cb.gpuSeconds();
+        c.gpu_seconds += gpu;
+        if (c.trace) std.debug.print("{{\"tp_gpu_rank\":{d},\"layer\":{d},\"phase\":\"{s}\",\"encode_seconds\":{d},\"end_seconds\":{d},\"commit_seconds\":{d},\"wait_seconds\":{d},\"gpu_seconds\":{d}}}\n", .{ c.rank, layer, phase, if (encode_started == 0) 0 else began - encode_started, ended - began, committed - ended, waited - committed, gpu });
     }
 
     fn gather(c: *Context, layer: usize, phase: usize, ws: *work.Workspace, field: work.Field, shared: work.Field, rows: usize, n: usize) !void {
@@ -82,21 +90,23 @@ pub const Context = struct {
         if (used > c.send.len) return error.TensorParallelScratchTooSmall;
         const routed = ws.bytes(field, rows * 6 * n * 2);
         const shared_rows = ws.bytes(shared, rows * n * 2);
+        const began = if (c.trace) mtl.clock.seconds() else 0;
         pack(c.rank, routed, shared_rows, n, c.send[0..used]);
+        const packed = if (c.trace) mtl.clock.seconds() else 0;
         const tag = (try std.math.mul(u64, c.sequence, 256)) | @as(u64, @intCast(layer * 3 + phase));
         try c.exchange.call(c.exchange.ptr, tag, c.send[0..used], c.peer[0..used]);
+        const received = if (c.trace) mtl.clock.seconds() else 0;
         unpack(1 - c.rank, c.peer[0..used], n, routed, shared_rows);
+        if (c.trace) std.debug.print("{{\"tp_pack_rank\":{d},\"tag\":{d},\"pack_seconds\":{d},\"unpack_seconds\":{d}}}\n", .{ c.rank, tag, packed - began, mtl.clock.seconds() - received });
     }
 
     /// Finish the enclosing command before CPU exchange, then restore its encoder for the next layer.
     pub fn boundary(c: *Context, model: anytype, cb: *mtl.CommandBuffer, encoder: *mtl.ComputeEncoder, encoding: *bool, layer: usize, rows: u32) !f64 {
-        encoder.end();
         encoding.* = false;
         model.valid = false;
-        cb.commit();
-        cb.wait();
-        if (cb.failure() != null) return error.TensorParallelGpuFailure;
-        const prior = cb.gpuSeconds();
+        c.gpu_seconds = 0;
+        try c.complete(cb.*, encoder.*, layer, "attention", 0);
+        const prior = c.gpu_seconds;
         c.gpu_seconds = 0;
         try c.run(model, layer, rows);
         cb.* = model.queue.commandBufferUnretained();
@@ -113,6 +123,7 @@ pub const Context = struct {
         const ws = &model.workspace;
         const w = &model.weights.layers[layer_id].moe;
         const p = &model.pipelines;
+        const gate_started = if (c.trace) mtl.clock.seconds() else 0;
         const cb = model.queue.commandBuffer();
         const encoder = cb.compute(.serial);
         var encoding = true;
@@ -130,10 +141,11 @@ pub const Context = struct {
         try c.project(encoder, model, layer_id, 0, rows, .normalized, .gate, .shared_gate);
         try c.project(encoder, model, layer_id, 1, rows, .normalized, .up, .shared_up);
         encoding = false;
-        try c.complete(cb, encoder);
+        try c.complete(cb, encoder, layer_id, "gate_up", gate_started);
         try c.gather(layer_id, 0, ws, .gate, .shared_gate, rows, 2304);
         try c.gather(layer_id, 1, ws, .up, .shared_up, rows, 2304);
 
+        const down_started = if (c.trace) mtl.clock.seconds() else 0;
         const down_cb = model.queue.commandBuffer();
         const down = down_cb.compute(.serial);
         var down_encoding = true;
@@ -144,12 +156,13 @@ pub const Context = struct {
         down.barrier();
         try c.project(down, model, layer_id, 2, rows, .activation, .routed, .shared_down);
         down_encoding = false;
-        try c.complete(down_cb, down);
+        try c.complete(down_cb, down, layer_id, "down", down_started);
         try c.gather(layer_id, 2, ws, .routed, .shared_down, rows, 5120);
+        const combine_started = if (c.trace) mtl.clock.seconds() else 0;
         const combine_cb = model.queue.commandBuffer();
         const combine = combine_cb.compute(.serial);
         ops.encodeCombine(combine, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = 6 * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120 });
-        try c.complete(combine_cb, combine);
+        try c.complete(combine_cb, combine, layer_id, "combine", combine_started);
         c.sequence = try std.math.add(u64, c.sequence, 1);
         c.valid = true;
     }
