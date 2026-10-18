@@ -30,5 +30,5 @@ pub fn main(init: std.process.Init) !void {
     }
     var output: [32]u8 = undefined;
     const text = try std.fmt.bufPrint(&output, "{d}\n", .{calls});
-    if (std.c.write(1, text.ptr, text.len) != text.len) return error.Output;
+    if (@import("sys").c.write(1, text.ptr, text.len) != text.len) return error.Output;
 }
