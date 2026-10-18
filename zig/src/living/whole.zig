@@ -126,8 +126,20 @@ pub fn more(l: anytype) !void {
     }
 }
 
+/// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
+fn liveReplay(l: anytype) ![]const Example {
+    l.live.clearRetainingCapacity();
+    l.live_of.clearRetainingCapacity();
+    const gone: []const u32 = if (@TypeOf(l.pockets) != void) l.pockets.retired_lessons.items else &.{};
+    for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) {
+        try l.live.append(l.gpa, ex);
+        try l.live_of.append(l.gpa, of);
+    };
+    return l.live.items;
+}
+
 fn startPocket(l: anytype) !void {
-    l.stay = .{ l.owned.keep, l.owned.near, try l.liveReplay(), l.owned.unasked, l.extra.items };
+    l.stay = .{ l.owned.keep, l.owned.near, try liveReplay(l), l.owned.unasked, l.extra.items };
     l.pockets.lesson = l.last_lesson;
     l.pockets.replay_lessons = l.live_of.items;
     try l.pockets.begin(l.trainer.?, hooks(l), l.answers, l.owned.asked, l.owned.held, &l.stay);

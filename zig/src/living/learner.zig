@@ -131,18 +131,6 @@ pub fn Learner(comptime H: type) type {
             for (&l.plain) |*x| x.deinit(l.gpa);
         }
 
-        /// The earlier lessons' questions a new lesson stays silent on, but those of facts a newer one replaced.
-        pub fn liveReplay(l: *Self) ![]const Example {
-            l.live.clearRetainingCapacity();
-            l.live_of.clearRetainingCapacity();
-            const gone: []const u32 = if (has_pocket) l.pockets.retired_lessons.items else &.{};
-            for (l.replay.items, l.replay_of.items) |ex, of| if (std.mem.indexOfScalar(u32, gone, of) == null) {
-                try l.live.append(l.gpa, ex);
-                try l.live_of.append(l.gpa, of);
-            };
-            return l.live.items;
-        }
-
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
