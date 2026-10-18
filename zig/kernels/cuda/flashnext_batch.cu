@@ -325,3 +325,10 @@ extern "C" __global__ void fn_moe_sum(const float* __restrict__ y, const float* 
         acc = __fmaf_rn(y[(static_cast<long long>(r) * slots + k) * d + col], wts[r * slots + k], acc);
     out[static_cast<long long>(r) * d + col] = acc;
 }
+
+// dst [rows, width] (rows dst_pitch apart) = the columns src [rows, width] (src_pitch apart), 16-bit values.
+extern "C" __global__ void fn_copy_cols(const uint16_t* __restrict__ src, long long src_pitch, uint16_t* __restrict__ dst,
+                                        long long dst_pitch, int width) {
+    const int col = blockIdx.x * blockDim.x + threadIdx.x, r = blockIdx.y;
+    if (col < width) dst[r * dst_pitch + col] = src[r * src_pitch + col];
+}
