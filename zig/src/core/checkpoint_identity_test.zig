@@ -128,6 +128,7 @@ fn fixturePaths(a: std.mem.Allocator, tmp: *const std.testing.TmpDir, sub: []con
 }
 
 test "whole and split consumers share cached file digests and still check manifests" {
+    if (!@import("digest_key.zig").persistent) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -172,6 +173,7 @@ test "full checkpoint identity includes payloads and detects changed files at re
 }
 
 test "a corrupt shared digest cache refuses the real content consumer" {
+    if (!@import("digest_key.zig").persistent) return error.SkipZigTest;
     const a = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
