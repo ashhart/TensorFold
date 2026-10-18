@@ -141,10 +141,18 @@ pub const Set = struct {
             if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
             if (matches(v.spec, args, consts, .exact)) return self.hit(function, args, consts, v);
         }
-        // a variant that assumes less of an argument than the launch gives computes the same for it, so it may serve
+        // a variant that assumes less of an argument may serve; a launch's 1 first takes a variant that specialized it
         for (self.variants) |*v| {
             if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
+            if (!foldsOnes(v.spec, args)) continue;
             if (matches(v.spec, args, consts, .general)) return self.hit(function, args, consts, v);
+        }
+        for (self.variants) |*v| {
+            if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
+            if (matches(v.spec, args, consts, .general)) {
+                if (takesRuntimeOne(v.spec, args)) std.log.info("aot: {s} runs variant {s}, its 1 read at runtime (the capture holds no folded variant of it)", .{ function, v.spec.hash });
+                return self.hit(function, args, consts, v);
+            }
         }
         if (self.trace) |t| t.note(function, args, consts, null);
         std.log.err("no captured Triton variant of {s} for this launch:", .{function});
@@ -289,6 +297,38 @@ fn lookup(args: []const Arg, name: []const u8) ?Arg {
     return null;
 }
 
+/// Whether the variant specialized every 1 the launch passes: each such int folded into a constexpr of value 1.
+fn foldsOnes(k: KernelJson, args: []const Arg) bool {
+    for (args) |a| switch (a.value) {
+        .i32 => |x| {
+            if (x != 1) continue;
+            const param = for (k.params) |p| {
+                if (std.mem.eql(u8, p.name, a.name)) break p;
+            } else null;
+            if (param != null) return false;
+            const got = k.consts.map.get(a.name) orelse return false;
+            if (got.int == null or got.int.? != 1) return false;
+        },
+        else => {},
+    };
+    return true;
+}
+
+/// Whether the variant reads one of the launch's 1s at runtime, so `find` served it by the fallback.
+fn takesRuntimeOne(k: KernelJson, args: []const Arg) bool {
+    for (args) |a| switch (a.value) {
+        .i32 => |x| {
+            if (x != 1) continue;
+            const param = for (k.params) |p| {
+                if (std.mem.eql(u8, p.name, a.name)) break p;
+            } else null;
+            if (param) |p| if (!p.nospec and std.mem.eql(u8, p.type, "i32")) return true;
+        },
+        else => {},
+    };
+    return false;
+}
+
 const Fit = enum { exact, general };
 
 fn matches(k: KernelJson, args: []const Arg, consts: []const Const, fit: Fit) bool {
@@ -312,8 +352,8 @@ fn matches(k: KernelJson, args: []const Arg, consts: []const Const, fit: Fit) bo
                 }
                 const p = param.?;
                 if (!std.mem.eql(u8, p.type, "i32")) return false;
-                // Triton folds a 1 into a constexpr, so a variant reading it at runtime was compiled for other values
-                if (!p.nospec and x == 1) return false;
+                // Triton folds a 1 into a constexpr: an exact match needs the folded variant, the general pass may not
+                if (!p.nospec and x == 1 and fit == .exact) return false;
                 const div = !p.nospec and @mod(x, 16) == 0;
                 switch (fit) {
                     .exact => if (p.div16 != div) return false,
@@ -469,7 +509,7 @@ test "an aligned pointer takes the div16 variant when the set holds both" {
     try std.testing.expectEqualStrings("b", v.spec.hash);
 }
 
-test "a launch of 1 takes only the variant Triton folded it into, in either pass" {
+test "a launch of 1 takes the variant Triton folded it into when the set holds it, in either pass" {
     const gpa = std.testing.allocator;
     var set = try testSet(gpa,
         \\{"kernels":[{"fn":"k","hash":"a","name":"k","num_warps":4,
@@ -478,9 +518,48 @@ test "a launch of 1 takes only the variant Triton folded it into, in either pass
     );
     defer freeTestSet(gpa, &set);
     const runtime = set.variants[0].spec;
-    for ([_]Fit{ .exact, .general }) |fit| try std.testing.expect(!matches(runtime, &.{int("R", 1)}, &.{}, fit));
+    try std.testing.expect(!matches(runtime, &.{int("R", 1)}, &.{}, .exact));
     try std.testing.expectEqualStrings("b", (try set.find("k", &.{int("R", 1)}, &.{})).spec.hash);
     try std.testing.expect(matches(runtime, &.{int("R", 5)}, &.{}, .exact));
     try std.testing.expect(!matches(runtime, &.{int("R", 32)}, &.{}, .exact));
     try std.testing.expectEqualStrings("a", (try set.find("k", &.{int("R", 32)}, &.{})).spec.hash);
+}
+
+test "a launch of 1 with no folded variant in the set takes the runtime-parameter variant" {
+    const gpa = std.testing.allocator;
+    var set = try testSet(gpa,
+        \\{"kernels":[{"fn":"k","hash":"a","name":"k","num_warps":4,
+        \\ "params":[{"name":"R","type":"i32","div16":false,"nospec":false}],"consts":{}}]}
+    );
+    defer freeTestSet(gpa, &set);
+    try std.testing.expect(!matches(set.variants[0].spec, &.{int("R", 1)}, &.{}, .exact));
+    try std.testing.expectEqualStrings("a", (try set.find("k", &.{int("R", 1)}, &.{})).spec.hash);
+}
+
+test "a folded variant of a launch's 1 wins over a runtime variant that also matches" {
+    const gpa = std.testing.allocator;
+    // cwschroeder's mixed case on #1003: both refused exactly, and the folded candidate must decide first.
+    var set = try testSet(gpa,
+        \\{"kernels":[{"fn":"k","hash":"a","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":false,"nospec":false},{"name":"R","type":"i32","div16":false,"nospec":false}],"consts":{}},
+        \\ {"fn":"k","hash":"b","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":false,"nospec":false}],"consts":{"R":{"int":1}}}]}
+    );
+    defer freeTestSet(gpa, &set);
+    const v = try set.find("k", &.{ ptr("P", "*i8", 0x1000), int("R", 1) }, &.{});
+    try std.testing.expectEqualStrings("b", v.spec.hash);
+}
+
+test "a folded variant that cannot serve leaves the launch to the runtime variant" {
+    const gpa = std.testing.allocator;
+    // the folded candidate refuses the unaligned pointer's div16; the runtime sibling serves, 1 included.
+    var set = try testSet(gpa,
+        \\{"kernels":[{"fn":"k","hash":"a","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":false,"nospec":false},{"name":"R","type":"i32","div16":false,"nospec":false}],"consts":{}},
+        \\ {"fn":"k","hash":"b","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":true,"nospec":false}],"consts":{"R":{"int":1}}}]}
+    );
+    defer freeTestSet(gpa, &set);
+    const v = try set.find("k", &.{ ptr("P", "*i8", 0x1008), int("R", 1) }, &.{});
+    try std.testing.expectEqualStrings("a", v.spec.hash);
 }

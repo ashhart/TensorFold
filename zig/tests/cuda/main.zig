@@ -89,6 +89,7 @@ const fn_hc_back_tests = @import("fn_hc_back_tests.zig");
 const fn_pocket_tests = @import("fn_pocket_tests.zig");
 const kolibri_tests = @import("kolibri_tests.zig");
 const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
+const aot_fallback_tests = @import("aot_fallback_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -202,6 +203,7 @@ const usage =
     \\  kolibri-greedy MODEL PROMPTS N OUT  Kolibri-1 greedy from each prompt (JSON id lists): ids and top-2 margins
     \\  kolibri-logits MODEL IDS OUT [PROMPTS]  Kolibri-1's teacher-forced fp32 logits of 2,048 prompt rows; each prompt's last
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
+    \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
 ;
 
@@ -370,6 +372,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "kolibri-full")) return kolibri_tests.full(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
     if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
+    if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;
