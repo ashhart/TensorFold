@@ -169,10 +169,7 @@ pub const Pipelines = struct {
     dense: mtl.Pipeline,
     /// Two columns per SIMD group, for products too small to fill the GPU with sixteen-column groups.
     matmul_pairs: mtl.Pipeline,
-    /// Products whose sixteen-column grid has at most this many groups use matmul_pairs (0: never).
-    /// Same bits either way. M5 Max, one row, best of 20: n 512 2.15x, n 1024 1.34x, n 1280 1.23x
-    /// faster at k 4096 to 5120; n 2304 (144 groups) 0.73x. TF_EXL3_PAIRS_UP_TO_GROUPS overrides it
-    /// for tuning on a GPU with more cores.
+    /// Maximum sixteen-column grid for matmul_pairs (0 disables); see docs/exl3-projection.md for tuning.
     pairs_up_to_groups: usize = 128,
 
     pub fn load(device: mtl.Device) !Pipelines {
@@ -346,10 +343,7 @@ pub const Job = struct {
     rows: Rows,
 };
 
-/// Independent products in one group: each stage is dispatched for every job before one barrier,
-/// so a concurrent encoder may overlap them; on a serial encoder they run in order. Each job
-/// computes exactly what encode or encodeIndexed computes. No job may write (its output or its
-/// scratch) bytes another job reads or writes; such groups are rejected before anything is encoded.
+/// Dispatch each stage for all independent jobs before its barrier; reject cross-job read/write aliasing first.
 pub fn encodeJobs(p: *const Pipelines, e: mtl.ComputeEncoder, jobs: []const Job) !void {
     if (jobs.len == 0 or jobs.len > max_jobs) return error.InvalidExl3Jobs;
     var staged: [max_jobs]Staged = undefined;
@@ -382,10 +376,7 @@ pub const DenseMatrix = struct {
     n: usize,
 };
 
-/// The kept-dense path: the same rotate stages as the quantized encode, with the trellis
-/// product replaced by a plain dense product over the rotated rows, accumulated in f32 in
-/// the scratch sums region the rotate_out stage reads. Sequential k; the fp64 reference
-/// mirrors this order.
+/// Rotate as in encode, but use a dense f32 product in sequential K order, matching the fp64 reference.
 pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x: View, y: View, scratch: View, r: Rows) !void {
     try shape(m.k, m.n);
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
@@ -503,8 +494,7 @@ fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged) void {
     }
 }
 
-/// Stage 0 rotates the input rows into scratch, 1 multiplies them into the scratch sums, 2 rotates
-/// the sums out; the caller orders stages with a barrier.
+/// Stages rotate input, multiply, then rotate sums out; the caller places barriers between stages.
 fn dispatchStage(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged, stage: usize) void {
     const a = s.a;
     const r = s.r;
@@ -561,80 +551,8 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(Args));
 }
 
-test "EXL3 output partitions retain rectangular strides and reject broken rotation blocks" {
-    const view = View{ .buffer = undefined, .offset = 16 };
-    var m = Matrix{ .trellis = view, .suh = view, .svh = view, .bias = view, .k = 256, .n = 768, .width = .{ .halves = 5 }, .tile_n_stride = 82 };
-    const shard = try m.columns(256, 512);
-    try std.testing.expectEqual(@as(usize, 48 * 82), try shard.kStride());
-    try std.testing.expectEqual(@as(usize, 16 + 16 * 82), shard.trellis.offset);
-    try std.testing.expectEqual(@as(usize, 528), shard.svh.offset);
-    try std.testing.expectEqual(@as(usize, 528), shard.bias.?.offset);
-    try std.testing.expectEqual(@as(usize, 16), shard.suh.offset);
-    const nested = try shard.columns(128, 128);
-    const direct = try m.columns(384, 128);
-    try std.testing.expectEqual(direct.trellis.offset, nested.trellis.offset);
-    try std.testing.expectEqual(direct.svh.offset, nested.svh.offset);
-    try std.testing.expectEqual(try direct.kStride(), try nested.kStride());
-    m.svh_format = .packed_signs;
-    try std.testing.expectEqual(@as(usize, 48), (try m.columns(256, 128)).svh.offset);
-    for ([_][2]usize{ .{ 1, 128 }, .{ 0, 0 }, .{ 0, 16 }, .{ 768, 128 }, .{ 640, 256 }, .{ std.math.maxInt(usize) - 127, 128 } }) |cut|
-        try std.testing.expectError(error.InvalidExl3Partition, m.columns(cut[0], cut[1]));
-    m.trellis.offset = std.math.maxInt(usize) - 1;
-    try std.testing.expectError(error.Overflow, m.columns(128, 128));
-}
-
-test "EXL3 descriptor output cuts preserve K scales and use packed output scale offsets" {
-    var d = ExpertDescriptor{ .trellis = 1024, .suh = 2048, .svh = 4096, .bias = 8192, .tile_k_stride = 3072, .tile_n_stride = 96, .halves = 6, .codebook = 2, .suh_signs = 1, .svh_signs = 0, .has_bias = 1 };
-    const cut = try d.columns(512, 256, 256);
-    try std.testing.expectEqual(@as(u64, 2560), cut.trellis);
-    try std.testing.expectEqual(d.suh, cut.suh);
-    try std.testing.expectEqual(d.tile_k_stride, cut.tile_k_stride);
-    try std.testing.expectEqual(@as(u64, 4608), cut.svh);
-    try std.testing.expectEqual(@as(u64, 8704), cut.bias);
-    d.svh_signs = 1;
-    d.has_bias = 0;
-    d.bias = 0;
-    const packed_cut = try d.columns(512, 256, 256);
-    try std.testing.expectEqual(@as(u64, 4128), packed_cut.svh);
-    try std.testing.expectEqual(@as(u64, 0), packed_cut.bias);
-    try std.testing.expectError(error.InvalidExl3Partition, d.columns(512, 384, 256));
-    d.trellis = std.math.maxInt(u64);
-    try std.testing.expectError(error.Overflow, d.columns(512, 128, 128));
-}
-
-test "stored per-matrix width and rectangular strides include public target shapes" {
-    var m = Matrix{ .trellis = undefined, .suh = undefined, .svh = undefined, .k = 5120, .n = 2304, .width = .{ .halves = 6 } };
-    try m.validate();
-    try std.testing.expectEqual(@as(usize, 4423680), try m.storageBytes());
-    m.width.halves = 5;
-    try m.validate();
-    m.codebook = .mcg;
-    try std.testing.expectError(error.UnsupportedExl3Width, m.validate());
-    m.width.halves = 16;
-    m.k = 1280;
-    m.n = 4096;
-    try m.validate();
-    m.tile_n_stride = 258;
-    try m.validate();
-    m.tile_k_stride = 256;
-    try std.testing.expectError(error.InvalidExl3Stride, m.validate());
-}
-
-test "invalid and overflowing extents fail before storage arithmetic can wrap" {
-    var m = Matrix{ .trellis = undefined, .suh = undefined, .svh = undefined, .k = 0, .n = 128, .width = .{ .halves = 6 } };
-    try std.testing.expectError(error.UnsupportedExl3Shape, m.storageBytes());
-    m.k = 128;
-    m.n = 256;
-    m.tile_n_stride = std.math.maxInt(usize) - 1;
-    try std.testing.expectError(error.Overflow, m.validate());
-    m.tile_n_stride = m.tileBytes();
-    m.tile_k_stride = std.math.maxInt(usize) - 1;
-    try std.testing.expectError(error.Overflow, m.storageBytes());
-    try std.testing.expectError(error.InvalidExl3Rows, scratchBytes(128, 128, std.math.maxInt(u32)));
-    try std.testing.expectError(error.Overflow, scratchBytes(0xffffff80, 0xffffff80, 0xffffff80));
-}
-
 test {
+    _ = @import("exl3_projection_test.zig");
     _ = decoder;
     _ = @import("exl3_rect_test.zig");
 }
