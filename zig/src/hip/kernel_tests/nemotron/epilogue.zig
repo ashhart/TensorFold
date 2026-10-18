@@ -123,3 +123,44 @@ test "the relu^2 epilogue's time against the layer with relu^2 as its own launch
         );
     }
 }
+
+/// One row's expert rows with the routed fc1 and the shared up in one launch, against two: the bytes of y and shared.
+fn pairRows(t: *Rig, o: ops.Ops, view: nm.Layer, x: fx.Input) !bool {
+    const d: usize = view.fc2.n;
+    var two = view;
+    two.pair = false;
+    o.arena.reset();
+    const a = try nm.expertRows(o, two, x.tensor(t, 0, d), 1);
+    const ay = try fx.bytesAt(t, a.y, a.slots * d * 4);
+    defer gpa.free(ay);
+    const as = try fx.bytesAt(t, a.shared, d * 4);
+    defer gpa.free(as);
+    o.arena.reset();
+    const b = try nm.expertRows(o, view, x.tensor(t, 0, d), 1);
+    const by = try fx.bytesAt(t, b.y, b.slots * d * 4);
+    defer gpa.free(by);
+    const bs = try fx.bytesAt(t, b.shared, d * 4);
+    defer gpa.free(bs);
+    return std.mem.eql(u8, ay, by) and std.mem.eql(u8, as, bs);
+}
+
+test "one row's routed fc1 and shared up in one launch give the bytes of the two launches" {
+    const t = try Rig.open(256 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x9A12 };
+    var o = t.ops(&t.on);
+    o.window = true;
+    var cases: usize = 0;
+    for ([_]fx.Shape{ lightning, small }) |s| {
+        const l = try fx.Layer.init(t, &rng, s);
+        defer l.deinit();
+        for (0..4) |_| {
+            var x = try fx.Input.init(t, &rng, 1, s.hidden);
+            defer x.deinit();
+            const same = try pairRows(t, o, l.view, x);
+            try rig.expect(same, "fc1 and shared up pair, hidden {d}: the bytes differ", .{s.hidden});
+            cases += 1;
+        }
+    }
+    std.debug.print("  nemotron fc1 and shared up in one launch: {d} rows, the bytes of two launches\n", .{cases});
+}

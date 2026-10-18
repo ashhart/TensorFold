@@ -70,6 +70,28 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_relu2(Af
     stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, StreamRelu2<T>, R, CB>(a, sides, lpc_log2, gshift);
 }
 
+// Relu^2 products of one x in one launch: plan a (items on z) on the first `split` blocks, plain b past them at z 0.
+template <typename T, int BITS, int R, int CB>
+__global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_relu2_pair(Affine a, Affine b, int split,
+                                                                                  int lpc_log2, int gshift) {
+    StreamSides sides{};
+    if (static_cast<int>(blockIdx.x) < split) {
+        stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, StreamRelu2<T>, R, CB>(a, sides, lpc_log2, gshift);
+        return;
+    }
+    if (blockIdx.z != 0) return;
+    sides.count = 1;
+    sides.first[0] = split;
+    sides.first[1] = gridDim.x;
+    sides.words[0] = b.words;
+    sides.scale[0] = b.scale.p;
+    sides.bias[0] = b.bias.p;
+    sides.out[0] = b.out16;
+    sides.n[0] = b.n;
+    sides.out_half = 1;
+    stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, StreamRelu2<T>, R, CB>(b, sides, lpc_log2, gshift);
+}
+
 
 }  // namespace rocm
 }  // namespace tf

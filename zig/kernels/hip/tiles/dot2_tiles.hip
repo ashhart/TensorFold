@@ -345,7 +345,8 @@ using Dot = DotF16;
 #define TF_STREAM(BITS, R, CB)                                                                     \
     template __global__ void affine_dot2_stream<Dot, BITS, R, CB, false>(Affine, StreamSides, int, int); \
     template __global__ void affine_dot2_stream<Dot, BITS, R, CB, true>(Affine, StreamSides, int, int);  \
-    template __global__ void affine_dot2_stream_relu2<Dot, BITS, R, CB>(Affine, StreamSides, int, int);
+    template __global__ void affine_dot2_stream_relu2<Dot, BITS, R, CB>(Affine, StreamSides, int, int);      \
+    template __global__ void affine_dot2_stream_relu2_pair<Dot, BITS, R, CB>(Affine, Affine, int, int, int);
 #if TF_MATRIX
 #define TF_WMMA(BITS) template __global__ void affine_wmma_gemm<BITS>(Affine);
 #else

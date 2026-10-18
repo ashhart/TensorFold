@@ -461,7 +461,7 @@ const own_records = [_]Record{
             .{ .vgprs = 36, .sgprs = 32, .lds = 50688, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
-};
+} ++ @import("hip_records_pair.zig").records;
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
 

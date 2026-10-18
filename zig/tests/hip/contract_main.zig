@@ -15,6 +15,7 @@ const window_k = @import("contract_window.zig");
 const relu2_k = @import("contract_relu2.zig");
 const kv_k = @import("contract_kv_write.zig");
 const argmax_k = @import("contract_argmax.zig");
+const pair_k = @import("contract_relu2_pair.zig");
 
 const g = core.contract.gates;
 
@@ -132,6 +133,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     var argmax = argmax_k.Argmax.init(a, &r, s, &l);
     defer argmax.deinit();
     try kernels.append(a, argmax.kernel());
+    var pair = pair_k.Pair.init(a, &r, s, &l);
+    defer pair.deinit();
+    try kernels.append(a, pair.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);

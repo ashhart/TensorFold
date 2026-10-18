@@ -40,6 +40,7 @@ pub const Ops = struct {
     pub const projectRouted = products.projectRouted;
     pub const projectRelu2 = products.projectRelu2;
     pub const projectRoutedRelu2 = products.projectRoutedRelu2;
+    pub const projectRoutedPlainRelu2 = products.projectRoutedPlainRelu2;
     pub const embedRows = products.embedRows;
     pub const affine = products.affine;
     pub const affineGroup = products.affineGroup;

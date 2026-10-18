@@ -36,6 +36,8 @@ pub const Layer = struct {
     exact: bool = false,
     /// One row's relu^2 as the product's epilogue; false keeps it a launch of its own (the epilogue's reference).
     epilogue: bool = true,
+    /// One row's routed fc1 and shared up in one launch; false keeps two (the pair's reference).
+    pair: bool = true,
 
     fn whole(l: Layer) bool {
         return l.first == 0 and l.own == l.experts;
@@ -109,19 +111,30 @@ pub fn expertRows(o: Ops, l: Layer, x: Tensor, rows: usize) ops.Error!Ops.MoeRow
     const act: Tensor = .{ .ptr = try o.arena.take(pairs * ni * kind.size()), .kind = kind };
     // one row's relu^2 as the product's epilogue where the stream tile takes the plan (more rows run faster apart)
     const epilogue = rows == 1 and l.epilogue;
-    if (!epilogue or !try o.projectRoutedRelu2(x, l.fc1, items, count, members, slots, @min(tile, rows), act)) {
+    // and the shared up beside the routed fc1 in the same launch where both take the stream tile
+    var up_act: ?Tensor = null;
+    if (epilogue and l.pair) if (l.shared_up) |su| {
+        const sa: Tensor = .{ .ptr = try o.arena.take(rows * su.n * kind.size()), .kind = kind };
+        const tr = @min(tile, rows);
+        if (try o.projectRoutedPlainRelu2(x, l.fc1, items, count, members, slots, tr, act, su, sa)) up_act = sa;
+    };
+    if (up_act == null and
+        (!epilogue or !try o.projectRoutedRelu2(x, l.fc1, items, count, members, slots, @min(tile, rows), act)))
+    {
         const up = try o.projectRouted(x, l.fc1, items, count, members, pairs, slots, @min(tile, rows));
         try relu2(o, up, act, pairs * ni);
     }
     const y = try o.projectRouted(act, l.fc2, items, count, members, pairs, 1, @min(tile, rows));
     if (!l.whole()) try o.moeZeroForeign(y, local, l.own, pairs, d);
-    const shared: u64 = if (l.shared_up) |su| try sharedExpert(o, su, l.shared_down.?, x, rows, epilogue) else 0;
+    const su = l.shared_up;
+    const shared: u64 = if (su) |up| try sharedExpert(o, up, l.shared_down.?, x, rows, epilogue, up_act) else 0;
     return .{ .y = y, .wts = wts, .shared = shared, .slots = slots };
 }
 
 /// down(relu^2(up x)) in fp32 (rows, D), the up rounded as the routed experts' is.
-fn sharedExpert(o: Ops, up: Projection, down: Projection, x: Tensor, rows: usize, epilogue: bool) ops.Error!u64 {
+fn sharedExpert(o: Ops, up: Projection, down: Projection, x: Tensor, rows: usize, epilogue: bool, done: ?Tensor) !u64 {
     if (up.k != down.n or down.k != up.n) return error.BadShape;
+    if (done) |act| return (try o.project(act, down, rows, true)).ptr;
     const act: Tensor = .{ .ptr = try o.arena.take(rows * up.n * x.kind.size()), .kind = x.kind };
     if (!epilogue or !try o.projectRelu2(x, up, rows, act)) {
         const u = try o.project(x, up, rows, true);

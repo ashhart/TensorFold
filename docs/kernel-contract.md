@@ -119,6 +119,8 @@ registered at all six supported bit widths and groups of 32, 64 and 128, with no
 
 The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
 independent float64 output class. No inherited infinity discrepancy is accepted.
+The paired launch retains every table plant and checks both members' separate-launch bytes and every
+float64 output class, without an inherited exception.
 
 ## Coverage
 

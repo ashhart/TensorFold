@@ -88,11 +88,11 @@ const piece_counts = [_]u8{ 1, 2, 4 };
 pub const lane_rows = 8; // kLaneRows
 pub const lane_group_max = 128;
 const fast_n = 256;
-const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
-const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
-const stream_waves = 4; // kStreamWaves
-const streams_wanted = 3000; // kStreamWavesWanted
-const stream_code_words = 32; // kStreamCodeWords
+pub const stream_cbs = [_]c_int{ 2, 4, 8 }; // columns a lane carries in the stream tile
+pub const stream_rows = [_]u8{ 1, 2, 4 }; // its row counts: columns * rows <= 16
+pub const stream_waves = 4; // kStreamWaves
+pub const streams_wanted = 3000; // kStreamWavesWanted
+pub const stream_code_words = 32; // kStreamCodeWords
 
 /// The K-parallel tiles of a short prompt: cb columns a lane set, r rows a pass over up to rb row blocks.
 pub const KpTile = struct { cb: c_int, r: c_int, waves: c_int, rb: c_int, loop: bool = true };
@@ -129,8 +129,9 @@ pub const Kernels = struct {
     stream: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// The same tile with the (gate | up) activation as its epilogue.
     pairs: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
-    /// The same tile with Nemotron's relu^2 as its epilogue.
+    /// The same tile with Nemotron's relu^2 as its epilogue, and with two such products in one launch.
     relu2: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
+    relu2_pair: [bit_widths.len][stream_rows.len][stream_cbs.len]?Function,
     /// Off keeps the decode tiles before the stream tile (the policy's reference switch).
     stream_on: bool,
     block: [bit_widths.len]Function,
@@ -198,6 +199,13 @@ pub const Kernels = struct {
                         try m.function(
                             std.fmt.comptimePrint("_ZN2tf4rocm24affine_dot2_stream_relu2INS0_{s}" ++
                                 "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineENS0_11StreamSidesEii", .{ dot, bits, rows, cb }),
+                        )
+                    else
+                        null;
+                    k.relu2_pair[b][r][c] = if (cb * rows <= 16)
+                        try m.function(
+                            std.fmt.comptimePrint("_ZN2tf4rocm29affine_dot2_stream_relu2_pairINS0_{s}" ++
+                                "ELi{d}ELi{d}ELi{d}EEEvNS0_6AffineES3_iii", .{ dot, bits, rows, cb }),
                         )
                     else
                         null;
