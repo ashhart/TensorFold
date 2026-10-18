@@ -461,11 +461,8 @@ pub const Engine = struct {
             for (0..3) |a| @memcpy(mpos[a * max_rows ..][0..total], im.pos[a * n + p0 ..][0..total]);
         }
         try e.tables.uploadAsync(0, st[0..if (images != null) tables_len else src_at], e.stream.handle); // text: as before
-        // a captured forward covers a row bucket and every window; kernels read the true counts; a lone step is exact
-        const lone = total == 1 and parts.len == 1;
-        const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
-        const windows: usize = if (lone) 1 else max_segs;
-        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0, .slots = @intCast(Round.variant(slot_peak)), .hidden = keep == .hidden };
+        var shape = Shape.init(total, parts.len, record, e.n_taps > 0, @intCast(Round.variant(slot_peak)));
+        shape.hidden = keep == .hidden;
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);
@@ -524,20 +521,7 @@ pub const Engine = struct {
         }
     }
 
-    /// A forward's shape, which fixes its launches: its tables and the caches' lengths are read on the device.
-    const Shape = struct {
-        total: u8,
-        nseg: u8,
-        record: bool,
-        prompt: bool,
-        taps: bool,
-        slots: u8,
-        hidden: bool = false,
-
-        fn key(s: Shape) u32 {
-            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27;
-        }
-    };
+    pub const Shape = @import("cuda_shapes.zig").Shape;
 
     /// The same scan selected by body, exposed for host launch-contract fixtures.
     pub fn deltaScan(e: *Engine, record: bool, slot_count: u8, segments: usize, layer: c_int) !void {
