@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Qwen on CUDA keeps DFlash and MTP proposal and live context projections on native arithmetic regardless of shared frame size. Prompt ingestion retains its historical arithmetic.
+
 - Qwen on single-GPU HIP polls cancellation inside prompt chunks, releasing cancelled work at layer boundaries (#1028). Thanks to @ThinkOffApp.
 
 - Metal serving keeps weights, stream state and draft, image and speech working buffers resident between requests within the memory bound. GLM enables the shared set by default; `GLM_RESIDENCY=0` turns it off.

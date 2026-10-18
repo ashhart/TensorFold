@@ -27,6 +27,8 @@ pub const FakeDrafter = struct {
     releases: u32 = 0,
     widest_hold: usize = 0,
     rows: u64 = 0,
+    prompt_rows: u64 = 0,
+    live_rows: u64 = 0,
     observe_first: ?*bool = null,
     ordered: bool = true,
     first_start: ?u64 = null, // the last opened stream's first absorbed row
@@ -87,6 +89,7 @@ pub const FakeDrafter = struct {
             try l.history.appendSlice(gpa, rows[0..f.rows]);
             for (it.follow[0 .. it.follow.len - 1], rows[1..f.rows]) |a, b| if (a != b) return error.FollowMismatch;
             x.rows += f.rows;
+            if (it.prompt) x.prompt_rows += f.rows else x.live_rows += f.rows;
         }
     }
 
@@ -331,19 +334,6 @@ pub const p1 = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5 };
 const p2 = [_]u32{ 2, 7, 1, 8, 2, 8, 1, 8, 2, 8, 4, 5, 9 };
 pub const long = [_]u32{ 3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4 };
 pub const sampled: Sampling = .{ .seed = 5, .temperature = 0.7, .top_k = 0, .top_p = 0.95 };
-
-test "an external drafter's rounds commit the one-token decode, greedy and sampled, and its drafts land" {
-    for ([_]?Sampling{ null, sampled }) |s| {
-        const drafted = try run(&.{.{ .prompt = &p1, .sampling = s }}, .wrapped, false);
-        defer freeOut(drafted);
-        const plain = try run(&.{.{ .prompt = &p1, .sampling = s, .drafts = false }}, .plain, false);
-        defer freeOut(plain);
-        try std.testing.expectEqualSlices(u32, plain.tokens[0], drafted.tokens[0]);
-        // four in five of its drafts are the target's, so far more than chance (1 in 97) land
-        try std.testing.expect(drafted.drafted > 0 and drafted.accepted * 3 > drafted.drafted);
-        try std.testing.expect(drafted.head.rows >= p1.len - 1 + drafted.tokens[0].len - 1);
-    }
-}
 
 test "drafts off on the wrapped backend never reach the drafter" {
     for ([_]?Sampling{ null, sampled }) |s| {
@@ -597,4 +587,8 @@ test "the drafter wrapper sees the committed callback before its first hold" {
     try engine.addStreamCommitted(&stream, .{ .ptr = &seen, .call = Hook.call });
     try std.testing.expect(seen and head.ordered and head.holds > 0);
     engine.discard(&stream);
+}
+
+test {
+    _ = @import("drafted_role_test.zig");
 }

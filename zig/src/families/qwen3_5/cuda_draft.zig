@@ -7,6 +7,7 @@ const engine = @import("cuda_engine.zig");
 const weights = @import("cuda_draft_weights.zig");
 const tree = @import("cuda_draft_tree.zig");
 const profile = @import("cuda_startup_profile.zig");
+pub const precision = @import("cuda_draft_precision.zig");
 
 const E = engine.Engine;
 const DeviceBuffer = cuda.DeviceBuffer;
@@ -45,6 +46,7 @@ pub const Draft = struct {
     gpa: std.mem.Allocator,
     io: std.Io,
     e: *E,
+    projection_role: precision.Role = .proposal,
     c: Config,
     w: weights.Weights,
     mod: cuda.Module,
@@ -129,7 +131,7 @@ pub const Draft = struct {
         errdefer d.drop(ctx);
         try e.stream.synchronize();
         const warm_start = profile.now(io);
-        try d.absorb(ctx, d.taps_in, 0, 1, null);
+        try d.absorb(ctx, d.taps_in, 0, 1, null, true);
         var quickest: f64 = std.math.inf(f64);
         for (0..8) |_| {
             ctx.end = 1;
@@ -223,7 +225,7 @@ pub const Draft = struct {
         try ctx.ring.fill8(0, null);
         d.startup.reserve += profile.elapsed(d.io, started);
         const warm_start = profile.now(d.io);
-        try d.absorb(ctx, d.taps_in, 0, 1, null); // any tap rows do: the drafter's own zeroed staging
+        try d.absorb(ctx, d.taps_in, 0, 1, null, true); // any tap rows do: the drafter's own zeroed staging
         try d.hold(ctx, 0, 1, d.c.block - 1, null);
         ctx.* = .{ .ring = ctx.ring };
         d.startup.warmups += profile.elapsed(d.io, warm_start);
@@ -259,10 +261,7 @@ pub const Draft = struct {
     }
 
     pub fn projSums(d: *Draft, l: cuda.qlinear.Affine4, x: u64, out: u64, rows: usize, sums: bool) !void {
-        const e = d.e;
-        if (rows > 16) return e.affine.prompt(e.stream, x, l, out, rows);
-        if (sums) try e.run(e.fns.sums, .{ rows, (l.k / 64 + 63) / 64, 1 }, .{ 64, 1, 1 }, .{ x, d.xs, @as(c_int, @intCast(l.k)), @as(u64, 0) });
-        try e.affine.decode(e.stream, x, d.xs, l, out, rows);
+        return precision.affine(d.e, l, x, d.xs, out, rows, sums, d.projection_role);
     }
 
     /// out = the normed h, and its group sums into xs for a projAgain over out.
@@ -280,7 +279,10 @@ pub const Draft = struct {
     }
 
     /// Target rows [start, start + n) from the tap ring into the context; with `rows`, ring rows start + rows[i].
-    fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32) !void {
+    fn absorb(d: *Draft, ctx: *Ctx, tap_ring: u64, start_: u64, n_: usize, rows_: ?[]const u32, prompt: bool) !void {
+        const previous = d.projection_role;
+        defer d.projection_role = previous;
+        d.projection_role = if (prompt) .prompt else .live;
         const c = d.c;
         var start = start_;
         var n = n_;
@@ -398,8 +400,8 @@ pub const Draft = struct {
             ctx.grown = 0;
             // the target's features: its ring, `offset` the first row's position (cuda_native.zig's featuresFn)
             if (it.rows) |rs| {
-                try d.absorb(ctx, it.features.buffer, it.features.offset, rs.len, rs);
-            } else try d.absorb(ctx, it.features.buffer, it.features.offset, it.features.rows, null);
+                try d.absorb(ctx, it.features.buffer, it.features.offset, rs.len, rs, it.prompt);
+            } else try d.absorb(ctx, it.features.buffer, it.features.offset, it.features.rows, null, it.prompt);
         }
     }
 

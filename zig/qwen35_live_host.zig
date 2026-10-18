@@ -179,6 +179,7 @@ test "deferred calibration: a late failure frees temporary storage and publishes
 
 test "served scratch: one drafter frame does not allocate 128 streams of logits and attention" {
     var d: q.draft.Draft = undefined;
+    d.projection_role = .proposal;
     d.c = .{ .hidden = 5120, .intermediate = 17408, .layers = 5, .vocab = 248320, .heads = 32, .kv_heads = 8, .head_dim = 128, .block = 16, .mask = 248070, .window = 2048, .group = 16, .rank = 256, .topk = 16, .eps = 1e-6, .theta = 10000000, .taps = @splat(0), .n_taps = 5 };
     d.frame_streams = 1;
     d.scratch_one = 23667968;

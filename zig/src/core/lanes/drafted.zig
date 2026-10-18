@@ -213,7 +213,7 @@ pub const Drafted = struct {
                 for (rows, 0..) |row, i| prefix = prefix and row == i;
                 const n: u32 = @intCast(if (prefix) rows.len else rows[rows.len - 1] + 1);
                 const f = try x.target.features(r.stream, x.drafter.taps(), r.start, n);
-                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .offered = lane.offered });
+                try x.absorbs.append(x.gpa, .{ .stream = r.stream, .features = f, .start = r.start, .follow = r.follow[0..rows.len], .rows = if (prefix) null else rows, .prompt = false, .offered = lane.offered });
                 lane.offered = 0;
                 pending = r.follow[rows.len - 1];
                 lane.rows = true;
