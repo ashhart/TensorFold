@@ -47,3 +47,34 @@ The margin-capture runner prefills a long prompt, then copies one diagnostic
 token's per-layer score tiles, top-k heap and positions for offline analysis.
 It does not reload the model or run a second reference chain. This capture is
 distinct from the per-window comparison of FP32 and FP64 selection margins.
+
+## Selection and rotary isolation
+
+The indexer compares the top-k boundary margin with one stored-score quantum.
+A margin near that quantum can make the selected set sensitive to arithmetic
+rounding. Both selectors resolve equal scores by lowest position. The position
+view starts after score, heap and candidate storage; reading the backing buffer
+without its offset would make the position check compare the wrong words.
+
+The rotary contract computes frequency, angle and trigonometric functions in
+FP32. The ideal retains those values and the products in FP64. Metal's factor
+table supplies its own unary results. Cases use 64 rotary columns, apply YaRN
+only to the compressed spectrum and include positions up to resident capacity.
+
+## Retained mHC checks
+
+The split-stage isolation supplies identical projected mixes and inverse to
+each path, leaving unary and reduction boundaries to compare. The test keeps
+its documented one-ULP Metal exp allowance and NRMS bound of `1e-7` for
+near-cancelled cells, where absolute ULP counts can grow.
+
+Retained cancellation fixtures require the original FP32 accumulation order
+exactly. Their FP64 results document the intended half-ULP difference. The post
+fixture combines a column `{1, 2^-24, 2^-24, 0}` with stream `{1,1,1,1}`,
+branch `{1}` and post `{-1,0,0,0}`. The two half-ULP terms follow `1.0`.
+
+The retained-row checks expand token 671 into four streams and use checkpoint
+FFN scale/base tensors. A separate bitwise comparison keeps the verbatim
+pre-parameterization FP32 algorithm as a control. The amplification check
+batches the first teacher row with 16 stream-cell perturbations through Metal
+and compares their response with the FP64 analog gain.

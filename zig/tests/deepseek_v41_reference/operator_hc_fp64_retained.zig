@@ -49,8 +49,7 @@ test "mHC fp64 rounding level and Metal deltas on retained streams" {
 
     const weight = try syntheticWeight(gpa);
 
-    // Token 671 embedding expanded to four copies; real FFN scale/base; synthetic branch-free case
-    // uses the retained branch row. All three sides consume identical inputs.
+    // Token 671 expands to four streams; all sides share retained branch data and real FFN scale/base.
     {
         const stream = try fourCopies(gpa, token671);
         const branch = try gpa.alloc(u16, width);
@@ -93,8 +92,7 @@ test "mHC fp64 rounding level and Metal deltas on retained streams" {
     }
 }
 
-// The comptime parameterization must keep the FP32 source contract bitwise; this compares
-// math.mixesOf(f32) against the pre-parameterization algorithm verbatim on a retained row.
+// Compare math.mixesOf(f32) bitwise with the verbatim pre-parameterization algorithm on a retained row.
 test "mHC fp32 reference path stays bit-identical under the comptime parameterization" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();

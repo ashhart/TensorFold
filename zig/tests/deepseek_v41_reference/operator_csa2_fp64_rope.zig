@@ -11,9 +11,7 @@ const Lcg = fixture.Lcg;
 const Buffers = fixture.Buffers;
 const view = fixture.view;
 
-/// Both sides of one rotary call: `contract` is the pinned source's FP32 path (FP32 frequency, FP32
-/// angle, FP32 trig), `ideal` keeps frequency, angle, both unaries and the products in FP64. The
-/// kernel differs from the contract by the factor table's own unaries, which is what this checks.
+/// FP32 source rotary versus FP64 ideal and Metal factor-table unaries; see docs/reference-precision.md.
 fn ropeFrequency64(
     index: usize,
     theta: f64,
@@ -121,8 +119,7 @@ test "the rotary stage sits at rounding level for both spectra and at long posit
     defer pool.pop();
     const queue = try device.queue();
     defer queue.deinit();
-    // The production shape: 64 rotary columns, YaRN on the compressed spectrum only, positions out
-    // to the resident capacity.
+    // Production shape: 64 rotary columns, YaRN only on compressed frequencies, positions to resident capacity.
     var p = try tf.deepseek_v41.rope.Pipelines.load(device, 16384, 64, .{ .theta = 10000, .original = 0 }, .{ .theta = 10000, .factor = 16, .original = 65536, .beta_fast = 32, .beta_slow = 1 });
     defer p.deinit();
 

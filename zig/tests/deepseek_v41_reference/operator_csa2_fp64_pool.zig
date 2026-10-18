@@ -15,9 +15,7 @@ const Buffers = fixture.Buffers;
 const view = fixture.view;
 const weightCells = fixture.weightCells;
 
-/// One compressor-pool group: the two projected positions of a ratio-2 group, pooled then RMS-normed.
-/// `values[i][d]`/`gates[i][d]` are the FP32 outputs of the compressor's wkv/wgate projections; the
-/// kernel and both references read exactly these numbers.
+/// Pool and RMS a ratio-2 pair; all sides read identical FP32 compressor wkv/wgate outputs.
 fn poolCase(device: mtl.Device, queue: mtl.Queue, p: *const kv.Pipelines, case_name: []const u8, values: []const f32, gates: []const f32, weight: []const u16) !void {
     var b = Buffers{ .device = device };
     defer b.deinit();

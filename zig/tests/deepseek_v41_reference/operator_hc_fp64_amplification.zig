@@ -173,8 +173,7 @@ test "mHC 1-ULP input amplification through the hyperconnection mix" {
             }
         }
         std.debug.print("HC64 {{\"amplification\":{{\"row\":{d},\"row_name\":\"{s}\",\"perturbations\":{d},\"amp_mean\":{d},\"amp_max\":{d},\"amp_collapse_mean\":{d},\"amp_collapse_max\":{d},\"amp_bf16_mean\":{d},\"amp_bf16_max\":{d},\"bf16_changed_fraction\":{d},\"mean_changed_cells\":{d},\"inv_rel_mean\":{d},\"comb_nrms_mean\":{d}}}}}\n", .{ row_index, row.name, amp_n, amp_sum / @as(f64, @floatFromInt(amp_n)), amp_max, amp_c_sum / @as(f64, @floatFromInt(amp_n)), amp_c_max, amp_b_sum / @as(f64, @floatFromInt(amp_n)), amp_b_max, changed_any, @as(f64, @floatFromInt(changed_cells)) / @as(f64, @floatFromInt(amp_n)), inv_rel_sum / @as(f64, @floatFromInt(amp_n)), comb_sq / @as(f64, @floatFromInt(comb_n)) });
-        // The mix attenuates a single-ULP input in FP64 (analog gain < 1) and stays near one
-        // BF16-visible ULP of growth; the collapse gain is pinned near one half.
+        // Bound analog gain below one, BF16-visible growth near one ULP and collapse gain near one half.
         try std.testing.expect(amp_sum / @as(f64, @floatFromInt(amp_n)) < 1.0);
         try std.testing.expect(amp_max < 1.0);
         try std.testing.expect(amp_c_max < 2.5);
@@ -182,8 +181,7 @@ test "mHC 1-ULP input amplification through the hyperconnection mix" {
         try std.testing.expect(inv_rel_sum / @as(f64, @floatFromInt(amp_n)) < 1e-5);
     }
 
-    // Metal confirmation on the first teacher row: batch the base row plus 16 stream-cell
-    // perturbations through the real kernels and compare against the FP64 analog gain.
+    // Batch the first teacher row and 16 stream-cell perturbations through Metal, then compare FP64 gain.
     {
         const metal_perturbations = 16;
         const batch = metal_perturbations + 1;

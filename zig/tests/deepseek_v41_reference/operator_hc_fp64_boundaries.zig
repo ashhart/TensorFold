@@ -17,8 +17,7 @@ const Buffers = support.Buffers;
 const upload = support.upload;
 const view = support.view;
 
-// Direct split-stage isolation: identical projected mixes and inverse on both sides, so every
-// delta is a unary (sigmoid/exp) or reduction boundary, not a projection difference.
+// Identical mixes/inverse isolate split-stage sigmoid, exp and reduction errors from projection differences.
 test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -121,14 +120,12 @@ test "mHC split unary boundaries against the FP64 ideal on retained arguments" {
         }
     }
     std.debug.print("HC64 {{\"case\":\"split_args\",\"summary\":true,\"max_ulp_metal_vs_f64\":{d:.4},\"worst_stage\":\"{s}\",\"max_ulp_f32_vs_f64\":{d:.4}}}\n", .{ max_ulp_metal, worst_name, max_ulp_f32 });
-    // The kernel may exceed the FP32 reference by at most the documented Metal exp slack (1 ULP).
-    // Absolute ULPs inflate on near-cancelled Sinkhorn cells; NRMS stays below 1e-7 everywhere.
+    // Allow the documented one-ULP Metal exp slack; near-cancelled cells also require NRMS below 1e-7.
     try std.testing.expect(max_ulp_metal <= max_ulp_f32 + 2.0);
     try std.testing.expect(max_ulp_metal < 48.0);
 }
 
-// The retained cancellation fixtures: the kernel must keep the source FP32 accumulation
-// contract exactly; the FP64 ideal column documents the by-design half-ULP divergence.
+// Retained cancellation fixtures require exact FP32 accumulation; FP64 records the intended half-ULP gap.
 test "mHC collapse and post keep source FP32 accumulation under cancellation" {
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
@@ -155,8 +152,7 @@ test "mHC collapse and post keep source FP32 accumulation under cancellation" {
     upload(f32, previous_a, &previous_values);
     const collapsed = try b.get(u16, 1);
 
-    // Post fixture: stream {1,1,1,1}, branch {1}, post {-1,0,0,0},
-    // comb column 0 = {1, 2^-24, 2^-24, 0} (two half-ULP terms after 1.0).
+    // Post fixture: stream={1,1,1,1}, branch={1}, post={-1,0,0,0}, comb column 0={1,2^-24,2^-24,0}.
     const stream_b = try b.get(u16, 4);
     const values_b = [_]u16{ math.b(1), math.b(1), math.b(1), math.b(1) };
     upload(u16, stream_b, &values_b);

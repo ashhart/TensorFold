@@ -75,8 +75,7 @@ pub fn sparseCase(
     @memcpy(positions_gpu.slice(i32, spec.rows * spec.topk), indices);
     @memcpy(sink_gpu.slice(f32, spec.heads), sinks);
 
-    // The reference's key table is the kernel's decoded cache: window columns by slot, then the
-    // selected compressed rows in the order the index array selects them.
+    // Decode the same cache as the kernel: window slots followed by compressed rows in selected-index order.
     var window_table = try std.testing.allocator.alloc(u16, 128 * width);
     defer std.testing.allocator.free(window_table);
     @memset(window_table, 0);
@@ -85,8 +84,7 @@ pub fn sparseCase(
     var compressed_table = try std.testing.allocator.alloc(u16, compressed_cells * width);
     defer std.testing.allocator.free(compressed_table);
     @memset(compressed_table, 0);
-    // Rows are laid out by ring slot: a logical position reads ring[(pos % 128)] unless it belongs to
-    // the chunk this call publishes, which the kernel reads from `chunk` instead.
+    // Logical positions use ring[pos % 128], except rows published by this call, which use chunk.
     for (window_rows, 0..) |values, logical| {
         const bytes = try std.testing.allocator.alloc(u8, 528);
         defer std.testing.allocator.free(bytes);
@@ -166,13 +164,11 @@ pub fn sparseCase(
             , .{ spec.name, "sparse", count, live, @sqrt(energy / @as(f64, width)), peak });
             var stage_buffer: [32]u8 = undefined;
             const stage = std.fmt.bufPrint(&stage_buffer, "row{d}_head{d}", .{ row, head }) catch unreachable;
-            // The intrinsic FP32-versus-FP64 level of the stage, before the BF16 output quantum hides
-            // it. This is the rounding level the stage verdicts are measured against.
+            // Measure FP32-versus-FP64 rounding before final BF16 quantization hides it.
             printF32(spec.name, stage, "f32_vs_ideal_pre_rounding", deltaF32VsF64(&pre32, &pre64));
             printBf(spec.name, stage, "metal", deltaBf16(metal[row * q_stride + head * width ..][0..width], &ideal));
             printBf(spec.name, stage, "f32_reference", deltaBf16(wide32[0..width], &ideal));
-            // Decisive for the stage verdict: the kernel and the source-contract reference on the
-            // identical decoded rows. Anything nonzero here is the kernel, not the contract.
+            // Metal versus FP32 contract on identical decoded rows isolates kernel error.
             var contract_cells: [width]f64 = undefined;
             for (wide32, 0..) |cell, d| contract_cells[d] = math.f(cell);
             printBf(spec.name, stage, "metal_vs_f32_reference", deltaBf16(metal[row * q_stride + head * width ..][0..width], &contract_cells));
@@ -198,9 +194,7 @@ pub fn sparseCaseFrom(
     try sparseCaseScaled(gpa, device, queue, p, spec, rng, key_amplitude, scale_exponent, scale_exponent, indices_mode, sink, pattern);
 }
 
-/// The same rows with the window and the compressed cache on independent scale grids: the stage
-/// output then carries a large and a tiny contribution in one accumulator, which is what the
-/// mixing step actually rounds.
+/// Independently scale window/compressed caches to exercise mixed-magnitude accumulation.
 pub fn sparseCaseScaled(
     gpa: std.mem.Allocator,
     device: mtl.Device,
@@ -259,8 +253,7 @@ fn fillPatternRow(row: []f32, rng: *Lcg, index: usize, amplitude: f32, exponent:
     }
     for (row, 0..) |*v, d| {
         if (pattern == .cancelling) {
-            // Same shape in every key: all scores tie, and the value sum cancels to the ULPs of
-            // the large terms that make it up.
+            // Identically shaped keys tie all scores; the value sum cancels to the large terms' ULPs.
             const flip: f32 = if ((d & 1) == 0) 1 else -1;
             v.* = flip * amplitude * scale + rng.uniform() * amplitude * scale * 1e-3;
         } else if (pattern == .near_tie) {
@@ -302,19 +295,16 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
     // Denormal-scale sink: the sink mass underflows FP32 while it is exact in FP64.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_denormal", .heads = 1, .rows = 1, .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, -16.0, KeyPattern.random);
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "sink_large", .heads = 1, .rows = 1, .position = 100, .ratio = 0, .compressed_rows = 0, .topk = 0 }, &rng, 1.0, 0, 0, 12.0, KeyPattern.random);
-    // Value-product cancellation: identical-shaped keys, so every score ties and the P·V sum
-    // cancels to the ULPs of the terms that make it up.
+    // Identical key shapes tie scores and make the P*V sum cancel to the terms' ULPs.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_values", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 0, 0, 0, KeyPattern.cancelling);
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "cancel_wide", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 64, .topk = 64 }, &rng, 32.0, 6, 0, 0, KeyPattern.cancelling);
-    // Scores that tie: the softmax denominator is the sum of equal exponentials, and the
-    // accumulation order decides which probability lands on which side of its rounding boundary.
+    // Equal exponentials expose probability-rounding differences caused by accumulation order.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "score_tie", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 32, .topk = 32 }, &rng, 1.0, 0, 0, 0, KeyPattern.near_tie);
     // One dominant key against keys orders of magnitude smaller: denominator and accumulator run at the extreme ratio.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "one_dominant", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 16, .topk = 16 }, &rng, 1.0, 0, 0, 0, KeyPattern.one_sided);
     // Many tiles, so the online correction multiplies the accumulator once per 64 columns.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "many_tiles", .heads = 1, .rows = 1, .position = 511, .ratio = 2, .compressed_rows = 512, .topk = 384 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);
-    // Cancellation in the value product: keys of alternating sign, so the P·V sum is small next
-    // to the terms that make it up.
+    // Alternating-sign keys produce a P*V sum small relative to its terms.
     {
         const spec = SparseSpec{ .name = "pv_cancellation", .heads = 1, .rows = 1, .position = 64, .ratio = 0, .compressed_rows = 0, .topk = 0 };
         const q = try gpa.alloc(u16, width);

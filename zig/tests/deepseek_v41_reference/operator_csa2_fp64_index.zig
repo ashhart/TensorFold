@@ -88,8 +88,7 @@ fn indexCase(
     cb.wait();
     if (cb.failure() != null) return error.Csa2Fp64GpuFailure;
 
-    // Positions live behind the scores/heap/candidates regions; read them through the view's offset,
-    // otherwise this compares the score words against themselves and the check is vacuous.
+    // Read positions through the view offset past scores/heap/candidates; otherwise the comparison is vacuous.
     const kernel_scores = scratch.scores().buffer.slice(f32, spec.rows * 4096);
     const positions_offset = scratch.positions().offset / @sizeOf(i32);
     const kernel_positions = scratch.positions().buffer.slice(i32, positions_offset + spec.rows * 512);
@@ -97,8 +96,7 @@ fn indexCase(
     defer std.testing.allocator.free(ref32);
     var ref64 = try std.testing.allocator.alloc(f64, spec.keys);
     defer std.testing.allocator.free(ref64);
-    // The same scores with only the documented quantizations below the final one: the BF16 quantum
-    // that no change of arithmetic can remove.
+    // Keep documented quantizations to isolate the unavoidable BF16 output quantum.
     var exact = try std.testing.allocator.alloc(f64, spec.keys);
     defer std.testing.allocator.free(exact);
     const w_scale: f32 = 1 / @sqrt(@as(f32, 128 * 32));
@@ -109,8 +107,7 @@ fn indexCase(
         for (0..32) |head| {
             var dot: f64 = 0;
             for (0..128) |d| dot += @as(f64, math.f(key[d])) * @as(f64, math.f(q[head * 128 + d]));
-            // The pinned source's head einsum lands in BF16, so the rectified score is a quantized
-            // algorithm boundary like the cache codes are; only the reduction above it is widened.
+            // The source head einsum lands in BF16; widen only the reduction above that algorithm boundary.
             const rectified: f64 = @max(math.f(math.b(@min(@as(f32, @floatCast(dot)), 1e38))), 0);
             const weight: f32 = math.f(weights[head]);
             const scaled_weight = math.f(math.b(weight * w_scale));
@@ -119,9 +116,7 @@ fn indexCase(
             narrow32 += @as(f32, @floatCast(weighted));
         }
         exact[row] = ideal;
-        // The score is written back through BF16 by the kernel and by the source contract, so the
-        // ideal carries that final boundary too: the stage then differs from its output by nothing
-        // but the arithmetic being compared.
+        // Retain final BF16 score storage in the ideal so only arithmetic differs from the kernel.
         ref64[row] = math.f(math.b64(ideal));
         ref32[row] = math.f(math.b(narrow32));
     }
@@ -131,14 +126,12 @@ fn indexCase(
     printF32(spec.name, "index_score", "bf16_score_boundary", deltaF32VsF64(ref32[0..shown], exact[0..shown]));
     printF32(spec.name, "index_score", "metal_vs_ideal", deltaF32VsF64(kernel_scores[0..shown], ideal_cells[0..shown]));
     printF32(spec.name, "index_score", "f32_vs_ideal", deltaF32VsF64(ref32[0..shown], ideal_cells[0..shown]));
-    // The kernel against the source-contract FP32 reference on identical keys: the stage delta that
-    // selection can actually see, independent of how far the reference itself sits from the ideal.
+    // Compare Metal with the FP32 contract on identical keys to isolate selection-visible kernel error.
     var contract: [1024]f64 = undefined;
     for (0..shown) |row| contract[row] = @as(f64, ref32[row]);
     printF32(spec.name, "index_score", "metal_vs_f32_reference", deltaF32VsF64(kernel_scores[0..shown], contract[0..shown]));
 
-    // Selection: which keys land in the top-k. Both sides break ties by the lowest position, the
-    // kernel's heap comparator and the reference's strict-greater scan agree on that.
+    // Both top-k selectors break ties by lowest position: heap comparator versus strict-greater scan.
     var chosen = try std.testing.allocator.alloc(bool, spec.keys);
     defer std.testing.allocator.free(chosen);
     @memset(chosen, false);
@@ -176,9 +169,7 @@ fn indexCase(
         }
         if (!chosen[@intCast(slot)]) kernel_only += 1;
     }
-    // How much arithmetic noise the selection can absorb before the *set* changes. The score is only
-    // worth what the storage keeps, so a pick is knife-edged when the boundary margin is comparable
-    // to one score quantum; if it is not, no 1-ULP arithmetic difference can flip this row.
+    // Compare the selection boundary margin with one stored-score quantum; see docs/reference-precision.md.
     var exact_picks: [512]u32 = undefined;
     var exact_scores = try std.testing.allocator.alloc(f64, spec.keys);
     defer std.testing.allocator.free(exact_scores);
