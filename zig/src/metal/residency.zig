@@ -8,6 +8,16 @@ const Id = objc.Id;
 pub const ResidencySet = struct {
     id: Id,
 
+    pub const GiB: u64 = 1 << 30;
+
+    pub fn totalRam() ?u64 {
+        return std.process.totalSystemMemory() catch null;
+    }
+
+    pub fn gibs(bytes: u64) f64 {
+        return @as(f64, @floatFromInt(bytes)) / GiB;
+    }
+
     /// The share of RAM, in percent, a process's sets may wire: the rest stays with macOS and other processes.
     pub const share_percent = 70;
     /// Kept back inside that share for buffers that grow with long prompts.
@@ -47,7 +57,7 @@ pub const ResidencySet = struct {
 
     /// As within, using the family's already validated load limit rather than parsing its environment again.
     pub fn withinUnder(name: []const u8, held: u64, added: u64, limit: ?u64) bool {
-        const ram = std.process.totalSystemMemory() catch null;
+        const ram = totalRam();
         if (fitsUnder(held, added, ram, limit)) return true;
         refusedUnder(name, held, added, ram, limit);
         return false;

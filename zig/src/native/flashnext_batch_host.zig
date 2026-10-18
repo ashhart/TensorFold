@@ -216,29 +216,8 @@ fn memory(ctx: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 /// Session-owned buffers stay allocated until close, beside the runner's buffers and shared hidden rows.
-fn holdResident(h: *Host) !void {
-    var buffers: std.ArrayList(mtl.Buffer) = .empty;
-    defer buffers.deinit(h.gpa);
-    try buffers.appendSlice(h.gpa, h.eng.r.held.items);
-    for (h.back.sessions) |s| try buffers.appendSlice(h.gpa, s.owned.items);
-    try buffers.append(h.gpa, h.back.hidden.b);
-    if (h.vis) |v| try buffers.appendSlice(h.gpa, &v.buffers());
-    h.resident = try Resident.holdUnder(h.gpa, h.host.io, h.eng.r.device, h.eng.r.queue, buffers.items, "flash next shared", h.load_limit) orelse return;
-    const r = &h.resident.?;
-    h.warm = r.target();
-    h.eng.r.follow = r.follow();
-    h.eng.snap_pool.follow = r.follow();
-}
-
-/// Stop reporting new buffers before releasing the set and then the session/backend buffers it held.
-fn dropResident(h: *Host) void {
-    const r = if (h.resident) |*x| x else return;
-    h.eng.r.follow = null;
-    h.eng.snap_pool.follow = null;
-    r.deinit();
-    h.resident = null;
-    h.warm = .{ .queue = h.eng.r.queue };
-}
+const holdResident = @import("flashnext_residency.zig").holdShared;
+const dropResident = @import("flashnext_residency.zig").dropShared;
 
 /// Auto with room for only one session transfers the loaded engine, preserving the chosen footprint limit.
 fn single(gpa: std.mem.Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over: bool, cap: u64, vis: ?*images.Vision, a: std.mem.Allocator, why: *[]const u8) !api.Opened {

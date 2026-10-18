@@ -111,6 +111,7 @@ pub const Run = struct {
     pub fn buffer(r: *Run, len: usize) !mtl.Buffer {
         const n = @max(len, 64);
         const b = try r.device.buffer(n, opts);
+        errdefer b.deinit();
         @memset(b.contents()[0..n], 0);
         try r.keep(b);
         return b;

@@ -277,6 +277,7 @@ pub fn load(gpa: std.mem.Allocator, device: mtl.Device, c: *const ckpt.Checkpoin
 /// The lane pipelines, one per distinct (n, k, width, stride, prologue).
 pub const Projections = struct {
     geo: cfg.Geometry,
+    follow: ?mtl.ResidencySet.Follow = null,
     list: std.ArrayList(struct { x: Linear, p: lane.Projection }) = .empty,
     fused_list: std.ArrayList(struct { x: Linear, fuse: u8, p: fused.Projection }) = .empty,
     fn same(a: Linear, b: Linear) bool {
@@ -287,6 +288,7 @@ pub const Projections = struct {
         const p = try lane.Projection.init(gpa, device, layout(ps.geo, x));
         errdefer p.deinit();
         try ps.list.append(gpa, .{ .x = x, .p = p });
+        if (ps.follow) |f| mtl.resident.fields.apply(&p, f, true);
         return p;
     }
     pub fn getFused(ps: *Projections, gpa: std.mem.Allocator, device: mtl.Device, x: Linear, fuse: u8) !fused.Projection {
@@ -297,9 +299,22 @@ pub const Projections = struct {
         return p;
     }
     pub fn deinit(ps: *Projections, gpa: std.mem.Allocator) void {
+        ps.setResident(null);
         for (ps.list.items) |v| v.p.deinit();
         ps.list.deinit(gpa);
         for (ps.fused_list.items) |v| v.p.deinit();
         ps.fused_list.deinit(gpa);
+    }
+
+    pub fn appendBuffers(ps: *const Projections, gpa: std.mem.Allocator, list: *std.ArrayList(mtl.Buffer)) !void {
+        for (ps.list.items) |*v| try mtl.resident.fields.append(gpa, list, &v.p);
+    }
+
+    pub fn setResident(ps: *Projections, hook: ?mtl.ResidencySet.Follow) void {
+        for (ps.list.items) |*v| {
+            if (ps.follow) |f| mtl.resident.fields.apply(&v.p, f, false);
+            if (hook) |f| mtl.resident.fields.apply(&v.p, f, true);
+        }
+        ps.follow = hook;
     }
 };

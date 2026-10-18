@@ -122,6 +122,8 @@ pub fn snapRead(ptr: *anyopaque, dir: [:0]const u8, key: u64, at: u32) anyerror!
     snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
     errdefer snap.buf.deinit();
     try readFile(snap, file);
+    snap.residency = b.residency;
+    if (snap.residency) |f| f.join(f.ctx, snap.buf);
     return @ptrCast(snap);
 }
 

@@ -75,6 +75,7 @@ pub const Metal = struct {
     masks: ?Masks = null, // structured output's bits (grammar.zig), made at the first structured request
     living: ?@import("adapters.zig").Sites = null, // the saved lessons' gated blocks, until a learner takes them
     trace: bool = false, // TF_SLIDE_TRACE: each reply's lesson scores logged (dev)
+    residency: ?mtl.ResidencySet.Follow = null,
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, o: Options) !*Metal {
         const b = try gpa.create(Metal);
@@ -102,6 +103,7 @@ pub const Metal = struct {
 
     pub fn deinit(self: *Metal) void {
         self.drain() catch {};
+        @import("residency.zig").set(self, null);
         self.flights.deinit(self.gpa);
         var it = self.caches.valueIterator();
         while (it.next()) |c| {
@@ -246,13 +248,7 @@ pub const Metal = struct {
             self.gpa.destroy(old);
             _ = self.caches.remove(s);
         }
-        const c = try self.gpa.create(st.Cache);
-        c.* = try st.Cache.init(self.m.device, self.m.config, rows_needed, self.head != null);
-        c.rid = try self.pool.takeRid();
-        // a decision row only where lessons route on it: else the prompt's chunks stay as plain serving cuts them
-        c.decide = if (s.decide != null and layers.firstAdapter(&self.m.weights) != null) s.decide.? else lesson_route.none;
-        c.untaught = s.untaught;
-        try self.caches.put(self.gpa, s, c);
+        const c = try @import("residency.zig").openCache(self, s, rows_needed);
         @memcpy(self.prompt.slice(u32, ids.len), ids);
         const Chunks = struct {
             n: usize,

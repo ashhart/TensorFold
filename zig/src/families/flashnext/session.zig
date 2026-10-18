@@ -6,6 +6,7 @@ const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
 
 pub const Session = struct {
+    follow: ?mtl.ResidencySet.Follow = null,
     m: fz.Model,
     owned: std.ArrayList(mtl.Buffer) = .empty,
     select: [fz.CATCH]?fz.Select = @splat(null),
@@ -67,10 +68,11 @@ pub const Session = struct {
         return s;
     }
 
-    fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
+    pub fn buffer(s: *Session, gpa: std.mem.Allocator, e: *Engine, size: usize) !Buf {
         const b = try e.r.device.buffer(@max(size, 64), fz.opts);
         errdefer b.deinit();
         try s.owned.append(gpa, b);
+        if (s.follow) |f| f.join(f.ctx, b);
         @memset(b.contents()[0..@max(size, 64)], 0);
         return .{ .b = b };
     }
@@ -223,7 +225,16 @@ pub const Session = struct {
         s.held_n = depth;
     }
 
+    pub fn setResident(s: *Session, hook: ?mtl.ResidencySet.Follow) void {
+        for (s.owned.items) |b| {
+            if (s.follow) |f| f.leave(f.ctx, b);
+            if (hook) |f| f.join(f.ctx, b);
+        }
+        s.follow = hook;
+    }
+
     pub fn deinit(s: *Session, gpa: std.mem.Allocator) void {
+        s.setResident(null);
         for (s.owned.items) |b| b.deinit();
         s.owned.deinit(gpa);
     }

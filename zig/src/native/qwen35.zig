@@ -13,6 +13,7 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 }
 
 const Host = struct {
+    resident: ?mtl.resident.Resident = null,
     gpa: std.mem.Allocator,
     model: *q.Model,
     metal: *q.backend.Metal,
@@ -26,6 +27,7 @@ const Host = struct {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
         h.core.deinit();
+        mtl.resident.streams.drop(h);
         h.config.deinit(h.gpa);
         h.metal.deinit();
         h.model.deinit();
@@ -51,6 +53,7 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.model = model;
+    h.resident = null;
     const chunk = 128;
     h.metal = try q.backend.Metal.init(gpa, model, .{ .capacity = @intCast(window), .chunk = chunk, .streams = @max(o.lanes, 2) });
     errdefer h.metal.deinit();
@@ -61,7 +64,8 @@ pub fn open(a: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, o: api.Ope
     errdefer h.core.deinit();
     h.host = api.LaneHost.init(gpa, io, &h.core, .{ .lanes = o.lanes, .context_window = @intCast(window), .prefill_step = chunk, .structures = true });
     h.host.memory = .{ .ctx = h, .read = readMemory };
-    h.warm = .{ .queue = h.metal.model.queue };
+    try mtl.resident.streams.hold(h, io, "qwen3.5");
+    errdefer mtl.resident.streams.drop(h);
     h.host.keepalive_target = .{ .ctx = &h.warm, .tick = mtl.keepalive.Target.tick };
     try h.host.start();
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };

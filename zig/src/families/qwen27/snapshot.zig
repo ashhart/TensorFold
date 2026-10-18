@@ -5,7 +5,23 @@ const Runner = @import("decode_round.zig").Runner;
 const Draft = @import("dflash/runtime_model.zig").Model;
 
 /// One kept state: its bytes in a GPU buffer, its position and the drafter's committed end there.
-pub const State = struct { buf: mtl.Buffer, at: u32, bytes: usize, draft_end: u64 };
+pub const State = struct {
+    buf: mtl.Buffer,
+    at: u32,
+    bytes: usize,
+    draft_end: u64,
+    residency: ?mtl.ResidencySet.Follow = null,
+};
+
+pub fn blank(a: std.mem.Allocator, r: *const Runner, ring: ?Ring, at: u32) !*State {
+    const n = slotBytes(r, ring, at);
+    const buf = try r.model.device.buffer(n, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked);
+    errdefer buf.deinit();
+    const st = try a.create(State);
+    st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = 0, .residency = r.residency };
+    if (st.residency) |f| f.join(f.ctx, buf);
+    return st;
+}
 
 const Part = struct { buffer: mtl.Buffer, offset: usize, len: usize };
 const ROW = 256 * 2; // a key or value row of one head (bf16)
@@ -80,6 +96,8 @@ pub fn saveSlot(a: std.mem.Allocator, r: *const Runner, slot: u32, ring: ?Ring, 
     errdefer a.destroy(st);
     st.* = .{ .buf = buf, .at = at, .bytes = n, .draft_end = if (ring) |g| g.end.* else 0 };
     try copy(a, r, slot, ring, st, true);
+    st.residency = r.residency;
+    if (st.residency) |f| f.join(f.ctx, st.buf);
     return st;
 }
 
@@ -132,6 +150,7 @@ pub fn moveSlot(a: std.mem.Allocator, r: *Runner, from: u32, from_ring: ?Ring, t
 }
 
 pub fn drop(a: std.mem.Allocator, st: *State) void {
+    if (st.residency) |f| f.leave(f.ctx, st.buf);
     st.buf.deinit();
     a.destroy(st);
 }

@@ -5,7 +5,7 @@ const api = @import("engine_api");
 const mtl = @import("metal");
 const math = @import("cache_budget.zig");
 
-pub const GiB: u64 = 1 << 30;
+pub const GiB = mtl.ResidencySet.GiB;
 /// The share of RAM a served model may hold: the rest stays with macOS and other processes.
 pub const SHARE_PERCENT = mtl.ResidencySet.share_percent;
 /// Kept back from the cache for buffers that grow with long prompts.
@@ -48,9 +48,7 @@ pub fn ceiling(total: u64, most: u64, text: ?[]const u8) error{BadLoadLimit}!Cei
 }
 
 /// This machine's RAM (null where the OS does not say).
-pub fn ram() ?u64 {
-    return std.process.totalSystemMemory() catch null;
-}
+pub const ram = mtl.ResidencySet.totalRam;
 
 extern "c" fn proc_pid_rusage(pid: c_int, flavor: c_int, buffer: *anyopaque) c_int;
 extern "c" fn getpid() c_int;
@@ -135,9 +133,7 @@ fn budgetUnderBeside(limit: ?u64, gib: ?f64, over: bool, spare: u64, later: u64,
 }
 
 /// GiB with one decimal, for log lines and messages.
-pub fn gibs(bytes: u64) f64 {
-    return @as(f64, @floatFromInt(bytes)) / GiB;
-}
+pub const gibs = mtl.ResidencySet.gibs;
 
 test "the default budget is what 70% of RAM leaves past the footprint at ready and the margin" {
     const ram256: u64 = 256 * GiB;

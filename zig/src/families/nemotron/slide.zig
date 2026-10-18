@@ -164,6 +164,7 @@ pub fn loadLiving(gpa: std.mem.Allocator, io: std.Io, b: *backend.Metal) !void {
     errdefer sites.deinit();
     const blocks = try Living.fill(&saved, c, &sites);
     sites.attach(&b.m.weights, true);
+    sites.setResident(b.residency);
     b.living = sites;
     std.log.info("slide: {d} saved lessons act on the replies their routers choose", .{blocks});
 }

@@ -10,9 +10,13 @@ pub const Snap = struct {
     at: u32,
     bytes: u64,
     freed: bool = false, // its storage given back early (a stream needed the room); its entry goes at the pass's report
+    follow: ?mtl.ResidencySet.Follow = null,
 
     pub fn free(self: *Snap) void {
-        if (!self.freed) self.buf.deinit();
+        if (!self.freed) {
+            if (self.follow) |f| f.leave(f.ctx, self.buf);
+            self.buf.deinit();
+        }
         self.freed = true;
     }
 };
@@ -64,7 +68,8 @@ pub fn save(gpa: std.mem.Allocator, device: mtl.Device, queue: mtl.Queue, c: *co
     const buf = try device.buffer(@intCast(n), mtl.ResourceOptions.private);
     errdefer buf.deinit();
     try copy(gpa, queue, c, cache, buf, true);
-    return .{ .buf = buf, .at = @intCast(cache.len), .bytes = n };
+    if (cache.follow) |f| f.join(f.ctx, buf);
+    return .{ .buf = buf, .at = @intCast(cache.len), .bytes = n, .follow = cache.follow };
 }
 
 /// Make `cache` (empty, any capacity past the state) hold `snap`'s state.

@@ -9,7 +9,7 @@ const Metal = @import("backend.zig").Metal;
 const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 
 /// One kept state: `at` prompt tokens of one stream, in one buffer the GPU copies on the engine's queue.
-pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize };
+pub const Snap = struct { at: u32, head: bool, buf: mtl.Buffer, bytes: usize, residency: ?mtl.ResidencySet.Follow = null };
 
 fn convBytes(c: cfg.Config) usize {
     return (c.conv_kernel - 1) * c.convDim() * 2;
@@ -82,6 +82,8 @@ pub fn save(b: *Metal, cache: *st.Cache, at: u32) !*Snap {
     snap.* = .{ .at = at, .head = head, .buf = try b.m.device.buffer(n, opts), .bytes = n };
     errdefer snap.buf.deinit();
     try b.submit(.prefill, b.next, Copies{ .c = cache, .slot = cache.slot, .snap = snap, .into = true });
+    snap.residency = b.residency;
+    if (snap.residency) |f| f.join(f.ctx, snap.buf);
     return snap;
 }
 
@@ -99,6 +101,7 @@ pub fn restore(b: *Metal, cache: *st.Cache, snap: *const Snap) !void {
 /// A state's buffer goes once no command buffer in flight reads it (the queue holds unretained references).
 pub fn drop(b: *Metal, snap: *Snap) void {
     b.drain() catch {};
+    if (snap.residency) |f| f.leave(f.ctx, snap.buf);
     snap.buf.deinit();
     b.gpa.destroy(snap);
 }

@@ -15,6 +15,7 @@ pub const Kind = enum { projection, xsum, norm, input_norm, mlp, ane_input, mlp_
 
 pub const Kernels = struct {
     allocator: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
     device: mtl.Device,
     profiler: ?*profile.Trace = null,
     row_pipelines: ?row.Pipelines = null,
@@ -31,7 +32,21 @@ pub const Kernels = struct {
     lanes: std.AutoHashMapUnmanaged(Key, lane.Projection) = .empty,
     cache: std.AutoHashMapUnmanaged(Key, mtl.Pipeline) = .empty,
 
+    pub fn setResident(k: *Kernels, hook: ?mtl.ResidencySet.Follow) void {
+        var it = k.lanes.valueIterator();
+        while (it.next()) |p| {
+            if (k.residency) |f| mtl.resident.fields.apply(p, f, false);
+            if (hook) |f| mtl.resident.fields.apply(p, f, true);
+        }
+        k.residency = hook;
+    }
+
+    pub fn joined(k: *Kernels, p: *const lane.Projection) void {
+        if (k.residency) |f| mtl.resident.fields.apply(p, f, true);
+    }
+
     pub fn deinit(k: *Kernels) void {
+        k.setResident(null);
         if (k.row_pipelines) |*pipelines| pipelines.deinit();
         if (k.simd) |*pipelines| pipelines.deinit();
         if (k.simd_bits) |*pipelines| pipelines.deinit();
@@ -152,6 +167,7 @@ pub const Kernels = struct {
         if (!entry.found_existing) {
             errdefer _ = k.lanes.remove(key);
             entry.value_ptr.* = try lane.Projection.init(k.allocator, k.device, .{ .n = p.n, .k = p.k, .format = .{ .bits = p.bits, .group = p.group }, .sk = key.slices, .ranges = if (skip > 0) &ranges else &.{}, .groups = if (cut[1] > 0) .{ cut[0], cut[1] } else null, .output = if (cut[1] > 0) .f32 else .bf16, .precompute_sums = reg, .reg = reg });
+            k.joined(entry.value_ptr);
         }
         const step: u32 = if (entry.value_ptr.reg) lane.reg_rows else 16;
         var first: u32 = 0;

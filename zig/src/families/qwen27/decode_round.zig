@@ -27,6 +27,7 @@ pub fn gpuFailed(cb: mtl.CommandBuffer, what: []const u8) bool {
 
 pub const Runner = struct {
     allocator: std.mem.Allocator,
+    residency: ?mtl.ResidencySet.Follow = null,
     model: *Model,
     gdn: GdnPool,
     attention: attn.Attention,
@@ -137,6 +138,7 @@ pub const Runner = struct {
         const layers = r.caches.len / r.slots;
         for (0..layers) |layer| r.caches[layer * r.slots + slot] = try slotCache(r.allocator, r.model, &r.owned, r.capacity);
         r.ready += 1;
+        if (r.residency) |f| for (r.owned.items[first..]) |b| f.join(f.ctx, b);
         return r.owned.items[first..];
     }
 
@@ -148,7 +150,12 @@ pub const Runner = struct {
         };
     }
 
+    pub fn setResident(r: *Runner, hook: ?mtl.ResidencySet.Follow) void {
+        @import("residency.zig").setRunner(r, hook);
+    }
+
     pub fn deinit(r: *Runner) void {
+        r.setResident(null);
         r.taps.deinit();
         r.gdn.deinit();
         r.attention.deinit();

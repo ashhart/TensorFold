@@ -7,6 +7,7 @@ pub const forward = @import("forward.zig");
 pub const mtp = @import("mtp.zig");
 pub const prompt = @import("prompt.zig");
 pub const engine = @import("engine.zig");
+pub const residency = @import("residency.zig");
 pub const ep = @import("ep.zig");
 pub const slots = @import("slots.zig");
 pub const snapshot = @import("snapshot.zig");

@@ -72,6 +72,7 @@ pub const Trainer = struct {
     prefixes: prefix.Store, // sequences' prompt prefixes, run once and their states kept
     profile: ?*fwd.Profiler = null, // times each dispatch alone (a check's breakdown), else steps run as one command buffer
     count: Count = .{}, // passes run and the rows they held
+    residency: ?mtl.ResidencySet.Follow = null,
 
     /// Every buffer a step needs and a change at every layer, attached to the forward (zero, so nothing moves yet).
     pub fn init(gpa: std.mem.Allocator, b: *Metal) !*Trainer {
@@ -82,6 +83,7 @@ pub const Trainer = struct {
         errdefer gpa.destroy(t);
         t.gpa = gpa;
         t.b = b;
+        t.residency = null;
         t.prefixes = prefix.Store.init(m.device, c, max_rows);
         t.profile = null;
         t.sketched = 0;
@@ -140,10 +142,12 @@ pub const Trainer = struct {
         try b.submit(.prefill, b.next, Head{ .t = t });
         try b.drain();
         t.sites.attach(&m.weights, true);
+        @import("residency.zig").trainer(t, b.residency);
         return t;
     }
 
     pub fn deinit(t: *Trainer, gpa: std.mem.Allocator) void {
+        @import("residency.zig").trainer(t, null);
         t.prefixes.deinit(gpa);
         t.sites.attach(&t.b.m.weights, false);
         t.sites.deinit();

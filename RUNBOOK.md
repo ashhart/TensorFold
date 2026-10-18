@@ -225,6 +225,18 @@ That guide's two-Mac Flash Next commands load the checkpoint directly, as one Ma
 On one Mac, GLM loads only when its weights and caches fit in 70% of RAM, 179.2 GB on a 256 GB Mac, and leaves the MTP head on disk when only the head is over.
 `GLM_LOAD_LIMIT_GB=N` sets that limit in GB, up to the GPU's recommended working set; a value that isn't a number above 0 stops the server.
 Past 70% of RAM the server warns at startup: a load that wires most of the RAM can stall macOS until its watchdog restarts the Mac, so run nothing else large beside it.
+GLM enables a shared residency set by default when its unique Metal buffers and a 2 GiB margin fit the load bound.
+`GLM_RESIDENCY=1` keeps that default, `GLM_RESIDENCY=0` disables it, and every other value stops loading before Metal allocations.
+The startup log reports the GiB held or the reason the set was skipped.
+
+A successful Metal residency set keeps weights, live stream state and working buffers wired during idle keepalive.
+This retains the memory already used by serving instead of letting macOS reclaim its pages between requests.
+The shared keepalive commits a small blit every 400 ms; the set alone is insufficient.
+The default keep-warm window is 900 seconds, and `--keep-warm 0` disables it.
+Later buffers join through their owners while they fit the same bound, and leave before they are freed or replaced.
+The bound reserves 2 GiB inside a validated family load limit, or 70% of known RAM by default.
+Neural Engine program weights are separate from Metal buffers and are outside this set.
+
 
 ## Access, context and updates
 
