@@ -277,7 +277,8 @@ Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are all
 call with no tools gets HTTP 400. `auto` remains optional, and `none` hides the tools.
 
 The constrained answer contains one or more complete calls and no prose outside them. Arguments follow the offered
-parameter schema. Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
+parameter schema. GLM uses `<arg_key>` and `<arg_value>` tags after the function name.
+Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
 `<|tool_call>call:NAME{...}<tool_call|>` with JSON arguments, which the tool parser accepts. An unrecognized template
 uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
 whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
