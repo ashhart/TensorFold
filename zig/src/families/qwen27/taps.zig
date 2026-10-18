@@ -15,7 +15,7 @@ pub const Taps = struct {
     rows: u32 = 0,
 
     pub fn init(device: mtl.Device, capacity: u32, width: u32) !Taps {
-        if (capacity == 0 or capacity > 128 or width == 0) return error.BadTapShape;
+        if (capacity == 0 or capacity > @import("gpu_frame.zig").max_rows or width == 0) return error.BadTapShape;
         const bytes = try std.math.mul(usize, try std.math.mul(usize, capacity, width), 2 * layers.len);
         return .{ .buffer = try device.buffer(bytes, mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked), .capacity = capacity, .width = width };
     }

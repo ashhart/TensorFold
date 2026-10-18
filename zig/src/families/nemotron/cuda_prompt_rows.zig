@@ -5,7 +5,7 @@ const Engine = @import("cuda_engine.zig").Engine;
 /// Where a prompt pass puts its rows: the next prompt tokens and the kernel's words, host-mapped, and who reads them.
 pub const PromptRows = struct {
     k: u8,
-    rows: usize, // rows a head pass takes: state.max_rows, or batch_rows with a logits buffer of its own
+    rows: usize, // rows a head pass takes: state.windowRows, or batch_rows with a logits buffer of its own
     logits: u64, // `rows` rows of vocab logits
     picks: []u32, // host-mapped, `rows` words, at `picks_dev` on the device
     picks_dev: u64,

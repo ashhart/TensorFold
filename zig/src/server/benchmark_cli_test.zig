@@ -1,5 +1,6 @@
 //! The command end to end against fakes: attached run, consent, login, publish, cancel and the checks.
 const std = @import("std");
+const platform = @import("sys");
 const json = @import("json");
 const suite = @import("benchmark_suite.zig");
 const receipt = @import("benchmark_receipt.zig");
@@ -99,8 +100,9 @@ test "an attached run saves an unranked receipt that publishes with explicit con
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try runArgs(&r, try f.url(a, ""), out)));
     try std.testing.expect(r.has("unranked") and r.has("Receipt saved") and r.has("code T=0 repeat 1/1: ok"));
-    try std.testing.expectEqual(@as(usize, 4), f.count());
-    for (0..4) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
+    try std.testing.expectEqual(@as(usize, 5), f.count()); // the manifest it asked for first, then the four replies
+    try std.testing.expectEqualStrings("/v1/benchmark/manifest", f.request(0).path);
+    for (0..5) |i| try std.testing.expect(std.mem.startsWith(u8, f.request(i).path, "/v1/"));
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expect(v.get("samples").?.array.len == 2 and !v.get("settings").?.get("managed").?.bool and v.get("settings").?.get("rank_count").? == .null);
@@ -418,7 +420,7 @@ test "an attached rocm run saves a local receipt that inspect accepts and publis
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     const out = try r.path("run.json");
     try std.testing.expectEqual(@as(u8, 0), try r.command(try backendArgs(&r, "rocm", try f.url(a, ""), out)));
-    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 4);
+    try std.testing.expect(r.has("| rocm |") and r.has("Receipt saved") and r.has("rocm receipt is saved locally") and f.count() == 5);
     var problem: []const u8 = "";
     const v = (try receipt.load(a, std.testing.io, out, std.Io.Clock.real.now(std.testing.io).toMilliseconds(), &problem)).?;
     try std.testing.expectEqualStrings("rocm", v.get("runtime").?.get("backend").?.string);
@@ -495,9 +497,9 @@ test "the hidden login prompt reads with echo off and a guarded terminal, then r
     const f = try world(a, false, "202 Accepted");
     defer f.stop();
     var fds: [2]std.posix.fd_t = undefined;
-    if (std.c.pipe(&fds) != 0) return error.SkipZigTest;
+    if (platform.c.pipe(&fds) != 0) return error.SkipZigTest;
     defer for (fds) |fd| {
-        _ = std.c.close(fd);
+        _ = platform.c.close(fd);
     };
     var buf: [256]u8 = undefined;
     var piped = (std.Io.File{ .handle = fds[0], .flags = .{ .nonblocking = false } }).readerStreaming(std.testing.io, &buf);
@@ -515,7 +517,7 @@ test "the hidden login prompt reads with echo off and a guarded terminal, then r
                 t.quiet = if (std.posix.tcgetattr(t.term)) |now| !now.lflag.ECHO else |_| false;
                 if (t.quiet) t.guarded = stop.guardedTerminal() else fake.nap(2);
             }
-            _ = std.c.write(t.pipe, token ++ "\n", token.len + 1);
+            _ = platform.c.write(t.pipe, token ++ "\n", token.len + 1);
         }
     };
     var typist: Typist = .{ .term = pty.term, .pipe = fds[1] };

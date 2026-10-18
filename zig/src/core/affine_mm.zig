@@ -7,12 +7,13 @@ const frags = @import("frags.zig");
 /// The gather GLU's SwiGLU: GLM's clipped bf16 form, or mlx-lm's compiled silu(g) * u on bf16 rows (LFM2).
 pub const Glu = enum { clipped, plain };
 
-/// The weights' bits (2-6 or 8) and group (32 or 64), the output's type and the GLU epilogue.
+/// The weights' bits (2-6 or 8) and group (32, 64 or 128), the output's type and the GLU epilogue.
 pub const Format = struct { bits: u8 = 4, group: u16 = 64, out_f32: bool = false, glu: Glu = .clipped };
 
 /// The kernel source for `f` (nax.h inlined for this GPU).
 pub fn source(device: mtl.Device, a: std.mem.Allocator, f: Format) ![]u8 {
-    if (f.bits < 2 or f.bits > 8 or f.bits == 7 or (f.group != 32 and f.group != 64)) return error.UnsupportedFormat;
+    const group_ok = f.group == 32 or f.group == 64 or f.group == 128;
+    if (f.bits < 2 or f.bits > 8 or f.bits == 7 or !group_ok) return error.UnsupportedFormat;
     const body = try frags.source(device, a, ks.core_affine_mm);
     defer a.free(body);
     const glu = if (f.glu == .plain) "#define TF_GLU_PLAIN 1\n" else "";
@@ -136,6 +137,7 @@ fn f32of(h: u16) f32 {
 }
 
 test "dense and gathered, each format, against exact sums on the host" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();
@@ -162,6 +164,9 @@ test "dense and gathered, each format, against exact sums on the host" {
         .{ 6, 64 },
         .{ 5, 32 },
         .{ 6, 32 },
+        .{ 2, 128 },
+        .{ 4, 128 },
+        .{ 8, 128 },
     }) |fmt| {
         const bits = fmt[0];
         const group = fmt[1];
@@ -258,6 +263,7 @@ test "dense and gathered, each format, against exact sums on the host" {
 }
 
 test "a batch of dense products with pitches: each batch's rows of x, the weights and y" {
+    if (comptime !@hasDecl(mtl.Device, "init")) return error.SkipZigTest; // a recording Metal stand-in has no device
     const device = mtl.Device.init() catch return error.SkipZigTest;
     defer device.deinit();
     const pool = mtl.objc.Pool.push();

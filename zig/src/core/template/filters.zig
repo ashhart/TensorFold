@@ -12,7 +12,7 @@ const Kw = methods.Kw;
 const Ctx = eval.Ctx;
 const bind = methods.bind;
 
-pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
+pub const implemented = [_][]const u8{ "default", "d", "length", "count", "string", "trim", "upper", "lower", "capitalize", "safe", "tojson", "fromjson", "items", "dictsort", "join", "list", "map", "first", "last", "unique", "reverse", "sort", "select", "reject", "selectattr", "rejectattr", "indent", "replace", "escape", "e" };
 const jinja_filters = [_][]const u8{ "abs", "attr", "batch", "capitalize", "center", "count", "d", "default", "dictsort", "e", "escape", "filesizeformat", "first", "float", "forceescape", "format", "groupby", "indent", "int", "items", "join", "last", "length", "list", "lower", "map", "max", "min", "pprint", "random", "reject", "rejectattr", "replace", "reverse", "round", "safe", "select", "selectattr", "slice", "sort", "string", "striptags", "sum", "title", "tojson", "trim", "truncate", "unique", "upper", "urlencode", "urlize", "wordcount", "wordwrap", "xmlattr" };
 pub const tests = [_][]const u8{ "odd", "even", "divisibleby", "defined", "undefined", "filter", "test", "none", "boolean", "false", "true", "integer", "float", "string", "mapping", "number", "sequence", "iterable", "callable", "sameas", "escaped", "in", "==", "eq", "equalto", "!=", "ne", ">", "gt", "greaterthan", ">=", "ge", "<", "lt", "lessthan", "<=", "le" };
 const jinja_tests = tests ++ [_][]const u8{ "lower", "upper" };
@@ -185,6 +185,12 @@ pub fn filter(c: *Ctx, name: []const u8, value: Value, pos: []const Value, kw: [
             o.key_sep = pair[1].str.s;
         };
         return Value.string(try pyjson.dumps(rt, value, o));
+    }
+    if (eq(u8, name, "fromjson")) { // vLLM's and SGLang's json.loads, which Step-5's template uses on string arguments
+        _ = try bind(rt, "fromjson", &.{}, 0, pos, kw);
+        const text = try softStr(c, value);
+        const parsed = std.json.parseFromSliceLeaky(std.json.Value, rt.a, text.s, .{}) catch return rt.fail("fromjson: not JSON: {s}", .{text.s});
+        return pyjson.fromJson(rt, parsed);
     }
     if (eq(u8, name, "items")) {
         if (v.isUndef(value)) return rt.iter(&.{}, null);

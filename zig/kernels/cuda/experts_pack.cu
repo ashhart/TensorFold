@@ -16,10 +16,11 @@ __device__ __forceinline__ uint32_t shuffle(uint32_t w) {
 template <int H>   // group size / 32
 __global__ void __launch_bounds__(32 * 4 * H + 32)
 pack_kernel(const uint32_t* __restrict__ words, const uint16_t* __restrict__ scales,
-            const uint16_t* __restrict__ biases, uint32_t* __restrict__ out, int n, int k8, int kg, int nb) {
+            const uint16_t* __restrict__ biases, uint32_t* __restrict__ out, int n, int k8, int kg, int nb, int m, int mi) {
   constexpr int WORDS = 32 * 4 * H;               // a block's weight words: NTW * H words a lane
   const int g = blockIdx.x, b = blockIdx.y, e = blockIdx.z, i = threadIdx.x;
-  uint32_t* dst = out + ((static_cast<int64_t>(e) * nb + b) * kg + g) * (WORDS + 32);
+  // block (e, b, g) of m interleaved tables, this one the mi-th: [E][nb][kg][m][WORDS + 32]
+  uint32_t* dst = out + ((((static_cast<int64_t>(e) * nb + b) * kg + g) * m) + mi) * (WORDS + 32);
   if (i < WORDS) {
     const int row = i / (4 * H), kk = i % (4 * H);                 // row = t * 8 + r; kk = q * H + j
     const int t = row / 8, r = row % 8, q = kk / H, j = kk % H;
@@ -37,6 +38,8 @@ pack_kernel(const uint32_t* __restrict__ words, const uint16_t* __restrict__ sca
 
 } // namespace tf_experts_pack
 
-// Groups of 64 inputs.
-template __global__ void tf_experts_pack::pack_kernel<2>(const uint32_t*, const uint16_t*, const uint16_t*,
-    uint32_t*, int, int, int, int);
+// Groups of 64 inputs, then groups of 32.
+template __global__ void tf_experts_pack::pack_kernel<2>(const uint32_t* __restrict__, const uint16_t* __restrict__, const uint16_t* __restrict__,
+    uint32_t* __restrict__, int, int, int, int, int, int);
+template __global__ void tf_experts_pack::pack_kernel<1>(const uint32_t* __restrict__, const uint16_t* __restrict__, const uint16_t* __restrict__,
+    uint32_t* __restrict__, int, int, int, int, int, int);

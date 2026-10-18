@@ -1,12 +1,13 @@
 //! The CUDA driver opened at run time: libcuda.so.1's versioned entry points in one table, and checked calls.
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
 
-pub const Error = error{ DriverUnavailable, MissingSymbol, CudaFailed, OutOfDeviceMemory, NotReady, NotFound, Invalid };
+pub const Error = error{ CopySourceLimit, StageBusy, StageUnprepared, UnownedCaptureSource, OutOfMemory, DriverUnavailable, MissingSymbol, CudaFailed, OutOfDeviceMemory, NotReady, NotFound, Invalid };
 
 pub const Driver = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: abi.Api,
     /// cuFuncGetName (CUDA 12.3+; optional: an older driver opens without it): a failed launch names its kernel
     func_name: ?FuncGetName = null,
@@ -14,12 +15,12 @@ pub const Driver = struct {
     pub const FuncGetName = *const fn (*?[*:0]const u8, abi.Function) callconv(.c) abi.Result;
 
     pub fn open() Error!Driver {
-        return openPath("libcuda.so.1");
+        return openPath(platform.cuda_driver);
     }
 
     /// Resolves every field of `abi.Api` by its exact name; a missing symbol refuses the whole driver.
     pub fn openPath(path: []const u8) Error!Driver {
-        var lib = std.DynLib.open(path) catch return error.DriverUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.DriverUnavailable;
         errdefer lib.close();
         var api: abi.Api = undefined;
         const info = @typeInfo(abi.Api).@"struct";
@@ -35,9 +36,13 @@ pub const Driver = struct {
     }
 
     pub fn close(self: *Driver) void {
+        if (@import("copy_source.zig").keepDriver(self)) return;
         self.lib.close();
     }
 
+    pub fn synchronize(self: *const Driver) Error!void {
+        try @import("copy_source.zig").synchronizeContext(self);
+    }
     /// Logs a failed call with the driver's own name and text for the code; NOT_READY is a state, not a failure.
     pub fn check(self: *const Driver, res: abi.Result, what: []const u8) Error!void {
         if (res == abi.success) return;
