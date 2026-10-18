@@ -79,9 +79,18 @@ const Ready = struct {
     }
 };
 
+/// Why the HIP engines cannot keep fp8 caches yet: every family's caches stay 16-bit.
+const kv8_refusal = "--kv-cache fp8 keeps fp8 caches on CUDA; the HIP engines keep 16-bit caches: serve without it";
+
+/// The cache flags this backend cannot honour, refused on every rank before a family loads.
+fn cacheRefused(o: api.Open) ?[]const u8 {
+    return if (o.kv8) kv8_refusal else null;
+}
+
 /// Resolves the policy on rank 0 (defaults, flags, old variables, TF_POLICY), joins the group, sends it to the others.
 fn ready(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) (Refused || Allocator.Error)!Ready {
     try checkGroup(a, o, problem);
+    if (cacheRefused(o)) |why| return refuse(a, problem, "{s}", .{why});
     const native = modelContext(a, io, o.dir);
     const window = admission.contextWindow(o.context, native, F.default_context) catch |err| return switch (err) {
         error.Negative => refuse(a, problem, "--context {d}: a token count, or 0 for the model's window", .{o.context.?}),
@@ -318,6 +327,12 @@ test "--drafter is refused before any load, on every rank, until the HIP engine 
     follower.rank = 1;
     follower.master = "node0";
     try std.testing.expectError(error.Refused, checkGroup(a, follower, &problem));
+}
+
+test "--kv-cache fp8 is refused by name on HIP; bf16 caches are not" {
+    const fp8: api.Open = .{ .dir = "d", .model_type = "qwen3_5", .kv8 = true };
+    try std.testing.expectEqualStrings(kv8_refusal, cacheRefused(fp8).?);
+    try std.testing.expect(cacheRefused(.{ .dir = "d", .model_type = "qwen3_5" }) == null);
 }
 
 test "matrix=on runs only where the matrix-core tiles exist; auto runs everywhere" {
