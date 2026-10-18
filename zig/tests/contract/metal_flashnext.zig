@@ -39,7 +39,11 @@ pub const Probe = struct {
     pub fn kernel(p: *Probe) g.Kernel {
         return .{ .ctx = p, .spec = f.specScaled(c, p.which, p.factor > 1), .vt = if (p.which == .mask) &mask_vt else &mrope_vt };
     }
-    const mask_vt = g.hooks(Probe);
+    const mask_vt: g.VTable = blk: {
+        var v = g.hooks(Probe);
+        v.bounds = null;
+        break :blk v;
+    };
     const mrope_vt: g.VTable = blk: {
         var v = g.hooks(Probe);
         v.check = null;
@@ -160,6 +164,27 @@ pub const Probe = struct {
     }
     pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
         try p.compute(.f64, .sequential, want, mag);
+    }
+    pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
+        const rotary = f.table(23.253496170043945, p.factor);
+        for (0..p.shape.rows) |r| {
+            var row: [f.output_width]f64 = undefined;
+            const pos = if (p.which == .mrope) p.positions[r * 3 ..][0..3].* else @as([3]i32, @splat(p.positions[r]));
+            for (0..30) |head| {
+                const kind: usize = if (head < 24) 0 else if (head < 26) 1 else 2;
+                const width: usize = if (kind == 2) 128 else 256;
+                const src: usize = if (kind == 0) head * 512 else if (kind == 1) 24 * 512 + (head - 24) * 256 else 24 * 512 + 4 * 256 + (head - 26) * 128;
+                const dst: usize = if (head < 26) head * 256 else 26 * 256 + (head - 26) * 128;
+                try f.normalizedBounds(p.host[r * f.packed_width + src ..][0..width], pos, p.weights[kind][0..width], 1e-5, &rotary, row[dst..][0..width]);
+            }
+            var src: usize = 0;
+            var block: usize = 0;
+            for ([_]usize{ 24 * 256, 2 * 256, 4 * 128 }) |n| {
+                @memcpy(allow[block + r * n ..][0..n], row[src..][0..n]);
+                src += n;
+                block += p.shape.rows * n;
+            }
+        }
     }
     pub fn simulate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
         const mag = try p.a.alloc(f64, out.len);

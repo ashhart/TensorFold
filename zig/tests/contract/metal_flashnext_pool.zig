@@ -98,6 +98,11 @@ pub const Probe = struct {
     pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
         try p.compute(.f64, .sequential, want, mag);
     }
+    pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
+        const weights: [128]f32 = @splat(1.25);
+        const rotary = f.table(23.253496170043945, p.factor);
+        for (0..p.shape.rows) |r| try f.pooledBounds(p.host[(start + r) * 4 * 128 ..][0 .. 4 * 128], @intCast(4 * (start + r)), &weights, 1e-5, &rotary, allow[r * 128 ..][0..128]);
+    }
     pub fn simulate(p: *Probe, acc: c.Accum, order: g.Order, out: []f64) !void {
         const mag = try p.a.alloc(f64, out.len);
         defer p.a.free(mag);

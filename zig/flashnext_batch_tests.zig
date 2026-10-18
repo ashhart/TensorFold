@@ -13,3 +13,8 @@ test {
 test {
     _ = @import("src/families/flashnext/window_config_test.zig");
 }
+
+test {
+    _ = @import("flashnext_rotary_bounds_tests.zig");
+    _ = @import("contract_bounds_host_test.zig");
+}

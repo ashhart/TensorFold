@@ -8,6 +8,8 @@ fn toBf16(v: f32) u16 {
     if (std.math.isNan(v)) return @truncate((bits >> 16) | 0x40);
     return @truncate((bits +% 0x7fff +% ((bits >> 16) & 1)) >> 16);
 }
+pub const normalizedBounds = @import("vision_bounds.zig").normalized;
+pub const pooledBounds = @import("vision_bounds.zig").pooled;
 pub const Which = enum { mask, mrope, target, mtp, pooled, absolute };
 pub const table_words = @import("rotary_config.zig").words;
 pub const packed_width = 13952;
