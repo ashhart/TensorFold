@@ -92,7 +92,7 @@ pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
 
 /// The CUDA hybrids use the shared lane planner for five-token context copies, alone and without a draft model.
 pub fn laneFacts(window: u32, verify: u32) lanes.Model {
-    return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true };
+    return .{ .exact_width = window, .hidden_rows = true, .batch_rows = verify, .max_streams = E.max_segs, .streams_exact = true, .copy_match = 5, .context_copies = true, .lone_cost_tile = 16 };
 }
 
 fn reserve(p: *anyopaque, streams: u32) anyerror!void {

@@ -24,6 +24,7 @@ test "Suffix copies: CUDA facts enable five-token copies on the shared core" {
     defer cfg.deinit(a);
     try std.testing.expectEqual(@as(i64, 5), cfg.enter_match);
     try std.testing.expect(cfg.lone_copies);
+    try std.testing.expectEqual(@as(u32, 16), cfg.lone_cost_tile);
     try std.testing.expect(@hasField(lanes.Config, "context_copies"));
     if (comptime @hasField(lanes.Config, "context_copies")) try std.testing.expect(cfg.context_copies);
 }

@@ -194,7 +194,7 @@ pub const Engine = struct {
         s.priced = null;
         const a = e.arena.allocator();
         var plans = [_]Plan{try win.plan(e, s, copied)};
-        if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null)) try win.allocate(e, &plans);
+        if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null or @import("lone_costs.zig").enabled(e, plans[0]))) try win.allocate(e, &plans);
         try win.constrain(e, &plans[0]);
         const plan = plans[0];
         const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
@@ -221,6 +221,7 @@ pub const Engine = struct {
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
                 try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                @import("lone_costs.zig").observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {

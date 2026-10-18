@@ -2,6 +2,7 @@
 const std = @import("std");
 const accept = @import("accept.zig");
 const cut = @import("window_cut.zig");
+const lone_costs = @import("lone_costs.zig");
 const alloc = @import("allocate.zig");
 const be = @import("backend.zig");
 const depth = @import("depth.zig");
@@ -27,6 +28,7 @@ pub const Plan = struct {
     forced: []const u32 = &.{},
     parents: ?[]const i32 = null, // a tree's drafts' parents
     branch_from: u32 = 0, // the first row of suffix-match branches (0: none; lanes/fill.zig)
+    cost_probe_rows: ?u32 = null, // an unseen width selected for calibration, confirmed by a matching completed round
     context_copy: bool = false, // branch_from names a copied continuation appended to the head
     tried: bool = false, // the planner read the head's chain back to graft branches
     lanes: ?*const shape.Shape = null, // the held drafts' tree shape (each lane's depth and rank)
@@ -233,7 +235,23 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     }
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
-    const counts = try alloc.allocate(a, fixed, probs, if (explicit) &untimed else &e.cfg.shared_costs, if (explicit) 0 else e.rule.overheadMs(plans.len, anySampled(plans)), @max(plans.len, e.cfg.batch_rows));
+    const live = plans.len == 1 and lone_costs.enabled(e, plans[0]);
+    const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
+    const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
+    const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));
+    const counts = try alloc.allocate(a, fixed, probs, costs, overhead, @max(plans.len, e.cfg.batch_rows));
+    const trial = if (live) lone_costs.probe(e, plans[0]) else null;
+    if (trial) |count| {
+        counts[0] = count;
+        plans[0].cost_probe_rows = count + 1;
+        plans[0].stream.cost_probe_trial = lone_costs.trial(plans[0].stream, probs[0], count + 1);
+    }
+    if (live) {
+        var expected: f64 = 1;
+        for (probs[0][0..counts[0]]) |chance| expected += chance;
+        const ms = own.get(1 + @as(i64, counts[0]));
+        try trail.event(e, &.{ f("ev", trail.str("lone-price")), f("stream", trail.str(plans[0].stream.id)), f("rows", trail.int(counts[0] + 1)), f("expected", ev.bits(expected)), f("ms", if (ms) |value| ev.bits(value) else .null), f("probe", .{ .bool = trial != null }) });
+    }
     for (plans, counts) |*p, c| {
         if (p.kind == .head) p.stream.granted = c;
         if (p.kind == .forced or p.count() == 0 or c == p.count()) continue;
