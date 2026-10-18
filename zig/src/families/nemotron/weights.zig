@@ -25,6 +25,9 @@ pub const Linear = struct {
 /// lane_qmm's 64-wide tiles of a 4/64 projection.
 pub const Tiles = struct { w: mtl.Buffer, sbt: mtl.Buffer };
 
+/// A plain bf16 matrix [n, k] a dense GEMM reads in place (nemotron_h_puzzle's latent projections; no scales).
+pub const Dense = struct { w: mtl.Buffer, off: usize, n: usize, k: usize };
+
 /// One matrix of a fused stack, written from column `first` of the stack's output rows.
 pub const Member = struct { first: usize, rows: row.Weights };
 
@@ -68,6 +71,8 @@ pub const Moe = struct {
     adapter: ?Adapter = null, // after shared_down
     slide: ?mtl.Buffer = null, // bf16 [D, W]: shared_down's weight read from the shards minus its codes, added after it
     pocket: ?Pocket = null, // learned neurons, after shared_down
+    into: ?Dense = null, // fc1_latent_proj [latent, hidden] bf16: hidden -> latent before the routed experts (puzzle)
+    out: ?Dense = null, // fc2_latent_proj [hidden, latent] bf16: latent -> hidden after the routed experts (puzzle)
 };
 
 pub const Attention = struct {
@@ -257,13 +262,16 @@ pub const Builder = struct {
         return out;
     }
 
-    /// An MoE block at `ws` (fc1, fc2, shared up, shared down; members(.moe) order).
-    fn moe(self: *Builder, comptime prefix: []const u8, args: anytype, ws: [4]Width) !Moe {
+    /// An MoE block at `ws` (fc1, fc2, shared up, shared down; members(.moe) order). `experts` and `ewidth` are the
+    /// layer's own (per-layer in nemotron_h_puzzle); `latent` > 0 routes the experts through it, hidden otherwise,
+    /// with the two bf16 latent projections (fc1/fc2_latent_proj) around them.
+    fn moe(self: *Builder, comptime prefix: []const u8, args: anytype, ws: [4]Width, n_experts: usize, ewidth: usize, latent: usize) !Moe {
         const c = self.c;
-        const gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ c.experts, c.hidden });
-        const gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{c.experts});
-        const fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ c.experts, c.expert_width, c.hidden }, ws[0]);
-        const fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ c.experts, c.hidden, c.expert_width }, ws[1]);
+        const inner = if (latent > 0) latent else c.hidden; // the width the routed experts read and write
+        const gate = try self.typed(prefix ++ ".gate.weight", args, .bf16, &.{ n_experts, c.hidden });
+        const gate_bias = try self.typed(prefix ++ ".gate.e_score_correction_bias", args, .f32, &.{n_experts});
+        const fc1 = try self.quantized(prefix ++ ".switch_mlp.fc1", args, &.{ n_experts, ewidth, inner }, ws[0]);
+        const fc2 = try self.quantized(prefix ++ ".switch_mlp.fc2", args, &.{ n_experts, inner, ewidth }, ws[1]);
         const full = c.shared_width + c.pocket;
         const up = try self.quantized(prefix ++ ".shared_experts.up_proj", args, &.{ full, c.hidden }, ws[2]);
         const down = try self.quantized(prefix ++ ".shared_experts.down_proj", args, &.{ c.hidden, full }, ws[3]);
@@ -287,7 +295,15 @@ pub const Builder = struct {
             .shared_down = if (four) try self.linear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}) else try self.rowLinear(prefix ++ ".shared_experts.down_proj", args, &.{own_down}),
             .shared_raw = .{ own_up.t, own_down.t },
             .pocket = if (c.pocket > 0) try self.pocketOf(up.t, down.t) else null,
+            .into = if (latent > 0) try self.dense(prefix ++ ".fc1_latent_proj.weight", args, latent, c.hidden) else null,
+            .out = if (latent > 0) try self.dense(prefix ++ ".fc2_latent_proj.weight", args, c.hidden, latent) else null,
         };
+    }
+
+    /// A plain bf16 matrix [n, k] referenced in place (the puzzle latent projections; no scales to read).
+    fn dense(self: *Builder, comptime fmt: []const u8, args: anytype, n: usize, k: usize) !Dense {
+        const t = try self.typed(fmt, args, .bf16, &.{ n, k });
+        return .{ .w = t.buffer, .off = t.offset, .n = n, .k = k };
     }
 
     /// A shared expert's learned neurons (its last up_proj rows, down_proj columns) as f32, in use to the last nonzero.
@@ -367,7 +383,7 @@ pub const Builder = struct {
             .norm = try self.typed("mtp.layers.0.norm.weight", .{}, .bf16, d),
             .attention = try self.attention("mtp.layers.0.mixer", "mtp.fused.qkv", .{}, four),
             .norm2 = try self.typed("mtp.layers.1.norm.weight", .{}, .bf16, d),
-            .moe = try self.moe("mtp.layers.1.mixer", .{}, four),
+            .moe = try self.moe("mtp.layers.1.mixer", .{}, four, self.c.experts, self.c.expert_width, self.c.latent),
             .final = try self.typed("mtp.layers.1.final_layernorm.weight", .{}, .bf16, d),
             .draft = try self.picked(try self.quantized("lm_head", .{}, &.{ self.c.vocab, self.c.hidden }, self.c.head_width), draft_ids),
             .ids = ids,
@@ -431,7 +447,7 @@ pub const Builder = struct {
                     .dt_bias = try b.f32vec(try b.get("backbone.layers.{d}.mixer.dt_bias", .{i})),
                     .norm = try b.typed("backbone.layers.{d}.mixer.norm.weight", .{i}, .bf16, &.{c.inner()}),
                 } },
-                .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}, ws) },
+                .moe => .{ .moe = try b.moe("backbone.layers.{d}.mixer", .{i}, ws, if (c.bolt) c.moe[i].experts else c.experts, if (c.bolt) c.moe[i].width else c.expert_width, c.latent) },
                 .attention => .{ .attention = try b.attention("backbone.layers.{d}.mixer", "fused.qkv.{d}", .{i}, ws) },
             };
         }
