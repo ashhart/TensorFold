@@ -255,7 +255,8 @@ pub const Pread = struct {
             var done: usize = 0;
             while (done < bytes) {
                 const n = @min(bytes - done, stage_buf.len - paced.alignment);
-                try paced.read(fd, all[done..][0..n], file.data_start + file.scale_begin + done, stage_buf);
+                var short: paced.Memory = undefined;
+                try paced.read(fd, all[done..][0..n], file.data_start + file.scale_begin + done, stage_buf, &short);
                 done += n;
             }
             self.scales = all;

@@ -311,6 +311,7 @@ fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .link_libc = true,
         .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = mods.engine } },
     });
+    engines.addImport("tokenizer", mods.tokenizer);
     @import("zig/build/drama3_metal.zig").addNative(b, target, optimize, metal, engines, metal_std);
     @import("zig/build/drama3_metal.zig").targets(b, target, optimize, metal, metal_std, test_step);
 
@@ -630,7 +631,7 @@ fn metalEngineModules(b: *std.Build, target: std.Build.ResolvedTarget, optimize:
     const sources = b.createModule(.{ .root_source_file = b.path("zig/kernels/metal/sources.zig") });
     // One tokenizer module shared by the engine (the Engram token map's builder) and the
     // server, so tokenizer.zig never lands in two modules of one compilation.
-    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
     const engine = b.createModule(.{
         .root_source_file = b.path("zig/src/tensorfold.zig"),
         .target = target,
@@ -652,6 +653,7 @@ pub fn distMetalServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_id
     m.metal.addSystemIncludePath(b.graph.cwdRelativePath(b.pathJoin(&.{ sdk, "usr/include" })));
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = m.lanes }} });
     const engines = b.createModule(.{ .root_source_file = b.path("zig/src/native/metal.zig"), .target = target, .optimize = .fast, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = m.metal }, .{ .name = "engine_api", .module = api }, .{ .name = "tensorfold", .module = m.engine } } });
+    engines.addImport("tokenizer", m.tokenizer);
     @import("zig/build/drama3_metal.zig").addNative(b, target, .fast, m.metal, engines, mlxMetalStd(b));
     return nativeServer(b, target, .fast, m.metal, m.engine, api, engines, m.tokenizer, build_options, null);
 }
