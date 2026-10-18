@@ -17,7 +17,6 @@ const slide_teacher = @import("slide_teacher.zig");
 const talks = @import("slide_context.zig");
 const supplied_questions = @import("slide_supplied.zig");
 const log = @import("log.zig");
-const Gone = @import("openai.zig").Gone;
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
@@ -95,11 +94,13 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
     sse.open(conn) catch return;
     var out: Out = .{ .conn = conn, .a = a };
     var cx: errors.Cx = .{ .a = a };
-    const gone: Gone = .{ .conn = conn };
+    defer out.stop();
+    out.start(srv.io, 5000) catch |e| return out.fail(&cx, e);
+    const gone = &out;
     const facts = found.facts(srv, &cx, text, source, gone) catch |e| return out.fail(&cx, e);
     if (facts.len == 0) {
         out.event("failed", .{ .message = "no facts found in the text: nothing was learned" });
-        sse.done(conn) catch {};
+        out.done();
         return;
     }
     const ids = a.alloc(u32, facts.len) catch return;
@@ -118,6 +119,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
         srv.slide.mark(id, .learning);
         srv.slide.phase(id, .writing);
         out.event("learning", .{ .id = id });
+        out.stage(id, "writing");
         var kept = [1]bool{false};
         const written = now(srv);
         // a chat fact not about the user ("The Quillon bridge is 1,312 metres long.") learns as a document's does
@@ -146,7 +148,7 @@ pub fn learn(srv: *Server, conn: *Conn, a: Allocator) void {
             out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps, .message = why });
         } else out.event("learned", .{ .id = id, .recalled = back, .steps = result.steps });
     }
-    sse.done(conn) catch {};
+    out.done();
 }
 
 /// The folder's original files kept before its first lesson or delete, else refused with why; true to go on.
@@ -203,7 +205,8 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         request.more = round > 0;
         var held = false;
         srv.slide.round(id, @intCast(round + 1));
-        switch (run(srv, a, &request, id)) {
+        o.stage(id, "initializing");
+        switch (runReported(srv, a, &request, id, o)) {
             .learned => |l| {
                 out.steps += l.steps;
                 held = l.recalled;
@@ -218,6 +221,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
         unchecked = false;
         const checked = now(srv);
         srv.slide.phase(id, .checking);
+        o.stage(id, "checking");
         const verdict = check.verify(srv, cx, plan, held or round + 1 >= teach.rounds, gone) catch |e| check.Verdict{ .recalled = out.recalled, .damage = words(cx, e) };
         srv.slide.checked(id, verdict.damage == null and std.mem.allEqual(bool, verdict.recalled, true));
         log.line("slide: round {d}: {d} steps ({d:.1} s learning, {d:.1} s checking); the held-out answers {s} token for token, and {s} when asked", .{ round + 1, out.steps, learned, seconds(srv, checked), if (held) "come back" else "do not come back", if (std.mem.allEqual(bool, verdict.recalled, true)) "come back" else "do not come back" });
@@ -234,7 +238,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                 out.why = words(cx, e);
                 return out;
             };
-            switch (run(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true }, id)) {
+            switch (runReported(srv, a, &.{ .unasked = &.{back.prompt}, .kept = &.{back.kept}, .reroute = true }, id, o)) {
                 .failed => |message| {
                     out.why = message;
                     return out;
@@ -283,7 +287,7 @@ pub fn rounds(srv: *Server, a: Allocator, cx: *errors.Cx, plan: teach.Plan, gone
                     repaired += 1;
                     log.line("slide: fact {d}'s lesson made the model forget {s}: fitted again with their held-out answers kept as they were (repair {d} of {d})", .{ id, who, repaired, recheck.repairs });
                     o.event("repair", .{ .id = id, .message = std.fmt.allocPrint(a, "it made the model forget {s}: fitted again with their answers kept", .{who}) catch who });
-                    switch (run(srv, a, &.{ .unasked = back.prompts, .kept = back.kept, .reroute = true }, id)) {
+                    switch (runReported(srv, a, &.{ .unasked = back.prompts, .kept = back.kept, .reroute = true }, id, o)) {
                         .failed => |message| {
                             takeOut(srv, a, &out, id, message);
                             return out;
@@ -377,7 +381,7 @@ pub fn saveAll(srv: *Server, a: Allocator) ?[]const u8 {
 }
 
 /// Earlier chat facts `fact` replaces ("I like blue." for "Now I like red."): their neurons zeroed, marked replaced.
-fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: Gone) []const slide_graph.Fact {
+fn giveWay(srv: *Server, a: Allocator, cx: *errors.Cx, fact: []const u8, id: u32, gone: anytype) []const slide_graph.Fact {
     const olds = replace.replaced(srv, cx, fact, id, gone) catch return &.{};
     if (olds.len == 0) return &.{};
     var neurons: std.ArrayList(api.Neuron) = .empty;
@@ -425,6 +429,11 @@ pub const Outcome = union(enum) {
 
 /// One lesson through the engine's learner, waited for to its end; fact `id`'s progress and neurons go to the graph.
 pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32) Outcome {
+    return runReported(srv, a, request, id, null);
+}
+
+/// A lesson with progress sent to its open stream as well as its graph.
+pub fn runReported(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32, out: ?*Out) Outcome {
     var box: Box = .{ .io = srv.io, .gpa = srv.gpa };
     defer box.deinit();
     srv.engine.learn(request, box.sink()) catch |e| return .{ .refused = e };
@@ -443,6 +452,7 @@ pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32
                     var p = c.progress;
                     p.neurons = c.neurons;
                     srv.slide.progress(id, p);
+                    if (out) |o| o.progress(id, p);
                 },
                 .done => if (c.text.len > 0) {
                     outcome = .{ .failed = a.dupe(u8, c.text) catch "the learner failed" };
@@ -456,35 +466,7 @@ pub fn run(srv: *Server, a: Allocator, request: *const api.LearnRequest, id: u32
     }
 }
 
-/// The learn stream: events while the client listens.
-pub const Out = struct {
-    conn: *Conn,
-    a: Allocator,
-    open: bool = true,
-
-    pub fn event(o: *Out, kind: []const u8, fields: anytype) void {
-        if (!o.open) return;
-        const obj = json.newObject(o.a) catch return;
-        inline for (@typeInfo(@TypeOf(fields)).@"struct".field_names) |name| {
-            const v = @field(fields, name);
-            const value: json.Value = switch (@TypeOf(v)) {
-                bool => .{ .bool = v },
-                u32 => json.intValue(o.a, v) catch return,
-                f64 => .{ .float = @round(v * 10) / 10 },
-                else => .{ .string = v },
-            };
-            obj.put(o.a, name, value) catch return;
-        }
-        sse.event(o.conn, o.a, kind, .{ .object = obj }) catch {
-            o.open = false;
-        };
-    }
-
-    pub fn fail(o: *Out, cx: *errors.Cx, e: anyerror) void {
-        o.event("failed", .{ .message = words(cx, e) });
-        sse.done(o.conn) catch {};
-    }
-};
+pub const Out = @import("slide_stream.zig").Out;
 
 /// What the server says while a delete's put-back has not reached the device.
 pub const unplaced = "a delete could not be put back on the device, so replies are refused until it is: send the delete again to retry it, or restart the server";
