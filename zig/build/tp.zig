@@ -41,9 +41,15 @@ fn kernelModule(b: *std.Build, image: ?std.Build.LazyPath) *std.Build.Module {
 
 pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, test_step: *std.Build.Step) void {
     const host = b.graph.host;
+    const cli_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/tp/gpu_cli.zig"), .target = host, .optimize = optimize }) }));
+    const cli_step = b.step("test-tp-cli", "TP runner command validation (no GPU)");
+    cli_step.dependOn(&cli_tests.step);
+    test_step.dependOn(&cli_tests.step);
     if (host.result.os.tag == .linux) {
         const tests = b.addRunArtifact(b.addTest(.{ .root_module = module(b, host, .debug, runtime(b, host, .debug)) }));
-        b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)").dependOn(&tests.step);
+        const tp_step = b.step("test-tp", "Tensor parallelism's host tests: bootstrap, fate channel, in-process ranks (no GPU)");
+        tp_step.dependOn(&tests.step);
+        tp_step.dependOn(cli_step);
         test_step.dependOn(&tests.step);
     }
     if (target.result.os.tag != .linux) return;
@@ -56,6 +62,27 @@ pub fn add(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     runner.addImport("tp", module(b, target, optimize, cuda));
     runner.addImport("tp_kernel", kernelModule(b, image));
     const exe = b.addExecutable(.{ .name = "tf-tp-test", .root_module = runner });
+    if (host.result.os.tag == .linux and target.query.isNative()) {
+        const cli = @import("../src/fabric/tp/gpu_cli.zig");
+        for (cli.invalid) |args| {
+            const check = b.addRunArtifact(exe);
+            check.addArgs(args);
+            check.setEnvironmentVariable("TF_TP_WORLD", "invalid");
+            check.expectExitCode(2);
+            check.expectStdErrEqual(cli.usage);
+            cli_step.dependOn(&check.step);
+            test_step.dependOn(&check.step);
+        }
+        if (image == null) {
+            const kernel = b.addRunArtifact(exe);
+            kernel.addArg("kernel");
+            kernel.setEnvironmentVariable("TF_TP_WORLD", "invalid");
+            kernel.expectExitCode(1);
+            kernel.expectStdErrEqual("mailbox kernel 0 B\n");
+            cli_step.dependOn(&kernel.step);
+            test_step.dependOn(&kernel.step);
+        }
+    }
     b.installArtifact(exe);
     b.step("tf-tp-test", "TP=2 on two GPUs: bootstrap, every collective bit-exact, graph capture, fail-fast, latency").dependOn(&b.addInstallArtifact(exe, .{}).step);
 }
