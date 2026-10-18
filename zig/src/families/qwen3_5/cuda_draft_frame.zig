@@ -95,8 +95,12 @@ pub fn forward(d: anytype, items: []const dr.Hold, contexts: []const *draft.Ctx)
         try conv(d, d.o, l.mlp_base, d.h2, d.h, B, 1);
     }
     const rows = items.len * (c.block - 1);
-    try e.run(d.fns.mask_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.h, d.h2, @as(c_int, @intCast(c.hidden)), @as(c_int, @intCast(c.block)) });
-    try d.norm(d.h2, d.w.final_norm, d.x, rows);
+    var masked = d.h + c.hidden * 2;
+    if (items.len > 1) {
+        try e.run(d.fns.mask_rows, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.h, d.h2, @as(c_int, @intCast(c.hidden)), @as(c_int, @intCast(c.block)) });
+        masked = d.h2;
+    }
+    try d.norm(masked, d.w.final_norm, d.x, rows);
     try e.projSums(e.head, d.x, d.xs, d.logits, rows, rows > 16, 0);
     try e.draws.topkRows(e.stream, d.logits, c.vocab, @intCast(c.topk), d.parts, d.words, rows);
     try d.proj(d.w.selector, d.x, d.hp, rows);

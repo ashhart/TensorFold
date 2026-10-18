@@ -56,9 +56,11 @@ const Record = struct {
     var downloads: usize = 0;
     var waits: usize = 0;
     var fail: bool = false;
-    fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, _: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
+    var last_norm_input: u64 = 0;
+    fn launch(f: cuda.abi.Function, x: c_uint, _: c_uint, z: c_uint, threads: c_uint, _: c_uint, _: c_uint, _: c_uint, _: cuda.abi.Stream, args: ?[*]?*anyopaque, _: ?[*]?*anyopaque) callconv(.c) cuda.abi.Result {
         const id = @intFromPtr(f);
         if (id < counts.len) counts[id] += 1;
+        if (id == 13) last_norm_input = @as(*const u64, @ptrCast(@alignCast(args.?[0].?))).*;
         if (id == 1) max_rows = @max(max_rows, x);
         if (id == 5) {
             std.debug.assert(z == 9 and threads == 32);
@@ -115,6 +117,9 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
     e.embed_s = 2;
     e.embed_b = 3;
     e.affine.prefill_fn = function(&driver, 11);
+    e.affine.group_fn = function(&driver, 10);
+    e.affine.pdl = false;
+    e.fns.norm = function(&driver, 13);
     e.head = .{ .a4 = weight() };
     e.draws.logprob_rows_fn = function(&driver, 9);
     e.draws.topk_slices_fn = function(&driver, 9);
@@ -164,7 +169,7 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
         it.* = .{ .stream = @ptrFromInt(0x1000 + i * @alignOf(lanes.Stream)), .pending = @intCast(i), .position = 2049 + i, .depth = @intCast(1 + i % 7), .lanes = if (i % 2 == 0) &shape else null };
         try d.streams.put(a, it.stream, ctx);
     }
-    for ([_]usize{ 4, 8, 16, 128 }) |count| {
+    for ([_]usize{ 1, 2, 4, 8, 16, 128 }) |count| {
         Record.counts = @splat(0);
         Record.max_rows = 0;
         Record.uploads = 0;
@@ -173,7 +178,9 @@ test "Draft frames: the real hold adapter emits one frame for every stream and i
         Record.fail = false;
         try d.drafter().hold(holds[0..count]);
         try std.testing.expectEqual(@as(u32, @intCast(count * 8)), Record.max_rows);
-        for ([_]usize{ 1, 4, 5, 6, 9, 12 }) |id| try std.testing.expectEqual(@as(usize, 1), Record.counts[id]);
+        for ([_]usize{ 1, 5, 6, 9, 12 }) |id| try std.testing.expectEqual(@as(usize, 1), Record.counts[id]);
+        try std.testing.expectEqual(@as(usize, if (count == 1) 0 else 1), Record.counts[4]);
+        try std.testing.expectEqual(if (count == 1) d.h + d.c.hidden * 2 else d.h2, Record.last_norm_input);
         try std.testing.expectEqual(@as(usize, 4), Record.counts[2]);
         try std.testing.expectEqual(@as(usize, 2), Record.counts[3]);
         try std.testing.expectEqual(@as(usize, 2), Record.uploads);
