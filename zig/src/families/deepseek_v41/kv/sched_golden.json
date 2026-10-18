@@ -1,0 +1,4998 @@
+{
+ "python": "8474f31",
+ "settings": {
+  "rows": 2048,
+  "short": 512,
+  "share": 0.5,
+  "long_prompt": 6000,
+  "concurrent": 1,
+  "session_min": 64,
+  "adapt_gib": 4.5,
+  "adapt_up_gib": 0.5,
+  "adapt_min": 512,
+  "floor_gib": 5.0,
+  "hard_gib": 4.0,
+  "refuse_s": 30.0,
+  "cache_keep_gib": 2.0,
+  "index_budget_mib": 256
+ },
+ "tag": 272,
+ "page": 256,
+ "pages": 72,
+ "slots": 4,
+ "capacity": 16384,
+ "slack": 64,
+ "ram_bytes": 3670016,
+ "disk_min": 1024,
+ "bounded_bytes": 1048576,
+ "window_s": 0.0625,
+ "jobs": [
+  {
+   "id": 1,
+   "chat": 1,
+   "n": 1500,
+   "max_tokens": 24,
+   "background": false,
+   "submitted": 1000.0
+  },
+  {
+   "id": 2,
+   "chat": 2,
+   "n": 300,
+   "max_tokens": 40,
+   "background": false,
+   "submitted": 1000.0
+  },
+  {
+   "id": 3,
+   "chat": 3,
+   "n": 9000,
+   "max_tokens": 16,
+   "background": false,
+   "submitted": 1001.0
+  },
+  {
+   "id": 4,
+   "chat": 4,
+   "n": 7000,
+   "max_tokens": 12,
+   "background": false,
+   "submitted": 1002.0
+  },
+  {
+   "id": 5,
+   "chat": 5,
+   "n": 200,
+   "max_tokens": 20,
+   "background": true,
+   "submitted": 1002.0
+  },
+  {
+   "id": 6,
+   "chat": 1,
+   "n": 2100,
+   "max_tokens": 30,
+   "background": false,
+   "submitted": 1004.0
+  },
+  {
+   "id": 7,
+   "chat": 6,
+   "n": 5000,
+   "max_tokens": 3000,
+   "background": false,
+   "submitted": 1006.0
+  },
+  {
+   "id": 8,
+   "chat": 2,
+   "n": 1200,
+   "max_tokens": 10,
+   "background": false,
+   "submitted": 1009.0
+  },
+  {
+   "id": 9,
+   "chat": 3,
+   "n": 9500,
+   "max_tokens": 10,
+   "background": false,
+   "submitted": 1014.0
+  },
+  {
+   "id": 10,
+   "chat": 7,
+   "n": 3000,
+   "max_tokens": 10,
+   "background": false,
+   "submitted": 1016.0
+  },
+  {
+   "id": 11,
+   "chat": 8,
+   "n": 600,
+   "max_tokens": 10,
+   "background": false,
+   "submitted": 1016.0
+  }
+ ],
+ "rounds": [
+  {
+   "round": 0,
+   "clock": 1000.0,
+   "free_gib": 24.0,
+   "arrive": [
+    1,
+    2
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 1,
+     "tier": "none",
+     "cached": 0,
+     "need": 7,
+     "damaged": false
+    },
+    {
+     "id": 2,
+     "tier": "none",
+     "cached": 0,
+     "need": 2,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     2,
+     0,
+     288
+    ],
+    [
+     1,
+     0,
+     1488
+    ]
+   ],
+   "ran": [
+    [
+     2,
+     0,
+     288
+    ],
+    [
+     1,
+     0,
+     1488
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    2,
+    1
+   ],
+   "finals": [],
+   "windows": [],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.216796875,
+   "window_s": 0.0,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 63,
+   "debt": 0.216796875,
+   "fair_rounds": 0
+  },
+  {
+   "round": 1,
+   "clock": 1001.0,
+   "free_gib": 24.0,
+   "arrive": [
+    3
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 3,
+     "tier": "none",
+     "cached": 0,
+     "need": 36,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     1,
+     1488,
+     1499
+    ],
+    [
+     2,
+     288,
+     299
+    ],
+    [
+     3,
+     0,
+     2016
+    ]
+   ],
+   "ran": [
+    [
+     1,
+     1488,
+     1499
+    ],
+    [
+     2,
+     288,
+     299
+    ],
+    [
+     3,
+     0,
+     2016
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    1,
+    2
+   ],
+   "windows": [
+    1,
+    2
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.248779296875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 27,
+   "debt": 0.403076171875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 2,
+   "clock": 1002.0,
+   "free_gib": 24.0,
+   "arrive": [
+    4,
+    5
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 5,
+     "tier": "none",
+     "cached": 0,
+     "need": 2,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     5,
+     0,
+     192
+    ]
+   ],
+   "ran": [
+    [
+     5,
+     0,
+     192
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    5
+   ],
+   "finals": [],
+   "windows": [
+    1,
+    2
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0234375,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "long_waits": 1
+   },
+   "queue": [
+    4
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.364013671875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 3,
+   "clock": 1003.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     5,
+     192,
+     199
+    ]
+   ],
+   "ran": [
+    [
+     5,
+     192,
+     199
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    5
+   ],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0008544921875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    4
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.3023681640625,
+   "fair_rounds": 1
+  },
+  {
+   "round": 4,
+   "clock": 1004.0,
+   "free_gib": 24.0,
+   "arrive": [
+    6
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    4,
+    6
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.2398681640625,
+   "fair_rounds": 2
+  },
+  {
+   "round": 5,
+   "clock": 1005.0,
+   "free_gib": 4.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_down": 1,
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.1773681640625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 6,
+   "clock": 1006.0,
+   "free_gib": 4.0,
+   "arrive": [
+    7
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6,
+    7
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.1148681640625,
+   "fair_rounds": 4
+  },
+  {
+   "round": 7,
+   "clock": 1007.0,
+   "free_gib": 3.2,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6,
+    7
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0523681640625,
+   "fair_rounds": 5
+  },
+  {
+   "round": 8,
+   "clock": 1008.0,
+   "free_gib": 2.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6,
+    7
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": -0.0101318359375,
+   "fair_rounds": 6
+  },
+  {
+   "round": 9,
+   "clock": 1009.0,
+   "free_gib": 2.0,
+   "arrive": [
+    8
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     2016,
+     2528
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     2016,
+     2528
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0625,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6,
+    7,
+    8
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 10,
+   "clock": 1010.0,
+   "free_gib": 2.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     2528,
+     3040
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     2528,
+     3040
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 512,
+   "piece_s": 0.0625,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_512": 1
+   },
+   "queue": [
+    4,
+    6,
+    7,
+    8
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 11,
+   "clock": 1011.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [
+    4
+   ],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     3040,
+     5088
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     3040,
+     5088
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "rows_up": 1
+   },
+   "queue": [
+    6,
+    7,
+    8
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 12,
+   "clock": 1012.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 13,
+   "clock": 1013.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 14,
+   "clock": 1014.0,
+   "free_gib": 24.0,
+   "arrive": [
+    9
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 15,
+   "clock": 1015.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     5088,
+     7136
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     5088,
+     7136
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 16,
+   "clock": 1016.0,
+   "free_gib": 24.0,
+   "arrive": [
+    10,
+    11
+   ],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 17,
+   "clock": 1017.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 18,
+   "clock": 1018.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    288,
+    1488
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 19,
+   "clock": 1019.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     7136,
+     8992
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     7136,
+     8992
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    3
+   ],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.2265625,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.1640625,
+   "fair_rounds": 1
+  },
+  {
+   "round": 20,
+   "clock": 1020.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     3,
+     8992,
+     8999
+    ]
+   ],
+   "ran": [
+    [
+     3,
+     8992,
+     8999
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    3
+   ],
+   "windows": [
+    1,
+    2,
+    3,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0008544921875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 21,
+   "clock": 1021.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    3,
+    5
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 22,
+   "clock": 1022.0,
+   "free_gib": 2.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    3,
+    5
+   ],
+   "ended": [
+    5
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 23,
+   "clock": 1023.0,
+   "free_gib": 2.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    3
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "mem_waits": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 24,
+   "clock": 1024.0,
+   "free_gib": 2.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    1,
+    2,
+    3
+   ],
+   "ended": [
+    1
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "mem_waits": 1
+   },
+   "queue": [
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    192,
+    1488,
+    8992
+   ],
+   "disk": [],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 25,
+   "clock": 1025.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 6,
+     "tier": "ram",
+     "cached": 1488,
+     "need": 9,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     6,
+     1488,
+     2096
+    ]
+   ],
+   "ran": [
+    [
+     6,
+     1488,
+     2096
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    6
+   ],
+   "finals": [],
+   "windows": [
+    2,
+    3
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.07421875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.01171875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 26,
+   "clock": 1026.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     6,
+     2096,
+     2099
+    ]
+   ],
+   "ran": [
+    [
+     6,
+     2096,
+     2099
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    6
+   ],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0003662109375,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 27,
+   "clock": 1027.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 28,
+   "clock": 1028.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 29,
+   "clock": 1029.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 30,
+   "clock": 1030.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 31,
+   "clock": 1031.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 32,
+   "clock": 1032.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 33,
+   "clock": 1033.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 34,
+   "clock": 1034.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 35,
+   "clock": 1035.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    3,
+    6
+   ],
+   "ended": [
+    3
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 36,
+   "clock": 1036.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    7,
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096,
+    8992
+   ],
+   "disk": [],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 37,
+   "clock": 1037.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 7,
+     "tier": "none",
+     "cached": 0,
+     "need": 32,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     7,
+     0,
+     2048
+    ]
+   ],
+   "ran": [
+    [
+     7,
+     0,
+     2048
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    8,
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 28,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 38,
+   "clock": 1038.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 8,
+     "tier": "none",
+     "cached": 0,
+     "need": 5,
+     "damaged": false
+    }
+   ],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 23,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 39,
+   "clock": 1039.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 23,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 40,
+   "clock": 1040.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    2,
+    6
+   ],
+   "ended": [
+    2
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 23,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 41,
+   "clock": 1041.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     8,
+     0,
+     1184
+    ],
+    [
+     7,
+     2048,
+     2912
+    ]
+   ],
+   "ran": [
+    [
+     8,
+     0,
+     1184
+    ],
+    [
+     7,
+     2048,
+     2912
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    8
+   ],
+   "finals": [],
+   "windows": [
+    6
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 42,
+   "clock": 1042.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     8,
+     1184,
+     1199
+    ]
+   ],
+   "ran": [
+    [
+     8,
+     1184,
+     1199
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    8
+   ],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0018310546875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": 0.1268310546875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 43,
+   "clock": 1043.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": 0.0643310546875,
+   "fair_rounds": 2
+  },
+  {
+   "round": 44,
+   "clock": 1044.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": 0.0018310546875,
+   "fair_rounds": 3
+  },
+  {
+   "round": 45,
+   "clock": 1045.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": true,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": -0.0606689453125,
+   "fair_rounds": 4
+  },
+  {
+   "round": 46,
+   "clock": 1046.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     7,
+     2912,
+     4960
+    ]
+   ],
+   "ran": [
+    [
+     7,
+     2912,
+     4960
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    1488,
+    2096
+   ],
+   "disk": [
+    8992
+   ],
+   "available": 25,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 47,
+   "clock": 1047.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     7,
+     4960,
+     4992
+    ]
+   ],
+   "ran": [
+    [
+     7,
+     4960,
+     4992
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    7
+   ],
+   "finals": [],
+   "windows": [
+    6,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.00390625,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.12890625,
+   "fair_rounds": 1
+  },
+  {
+   "round": 48,
+   "clock": 1048.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     7,
+     4992,
+     4999
+    ]
+   ],
+   "ran": [
+    [
+     7,
+     4992,
+     4999
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    7
+   ],
+   "windows": [
+    6,
+    7,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0008544921875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 49,
+   "clock": 1049.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 50,
+   "clock": 1050.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7,
+    8
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 51,
+   "clock": 1051.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7,
+    8
+   ],
+   "ended": [
+    8
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 52,
+   "clock": 1052.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 53,
+   "clock": 1053.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 54,
+   "clock": 1054.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 55,
+   "clock": 1055.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    6,
+    7
+   ],
+   "ended": [
+    6
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 56,
+   "clock": 1056.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    9,
+    10,
+    11
+   ],
+   "ram": [
+    1184,
+    2096,
+    4992
+   ],
+   "disk": [
+    1488,
+    8992
+   ],
+   "available": 26,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 57,
+   "clock": 1057.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 9,
+     "tier": "disk",
+     "cached": 8992,
+     "need": 38,
+     "damaged": true
+    }
+   ],
+   "pieces": [
+    [
+     9,
+     8992,
+     9488
+    ]
+   ],
+   "ran": [],
+   "skipped": [
+    9
+   ],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": -0.0625,
+   "fair_rounds": 2
+  },
+  {
+   "round": 58,
+   "clock": 1058.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     0,
+     2048
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     0,
+     2048
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 59,
+   "clock": 1059.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 60,
+   "clock": 1060.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 61,
+   "clock": 1061.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 62,
+   "clock": 1062.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     2048,
+     4096
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     2048,
+     4096
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 63,
+   "clock": 1063.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 64,
+   "clock": 1064.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 65,
+   "clock": 1065.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 66,
+   "clock": 1066.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     4096,
+     6144
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     4096,
+     6144
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 67,
+   "clock": 1067.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 68,
+   "clock": 1068.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 69,
+   "clock": 1069.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 70,
+   "clock": 1070.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     6144,
+     8192
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     6144,
+     8192
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 71,
+   "clock": 1071.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 72,
+   "clock": 1072.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 73,
+   "clock": 1073.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 74,
+   "clock": 1074.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     8192,
+     9488
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     8192,
+     9488
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    9
+   ],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.158203125,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.095703125,
+   "fair_rounds": 1
+  },
+  {
+   "round": 75,
+   "clock": 1075.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     9,
+     9488,
+     9499
+    ]
+   ],
+   "ran": [
+    [
+     9,
+     9488,
+     9499
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    9
+   ],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0013427734375,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 76,
+   "clock": 1076.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 77,
+   "clock": 1077.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 78,
+   "clock": 1078.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 79,
+   "clock": 1079.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 80,
+   "clock": 1080.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 81,
+   "clock": 1081.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 82,
+   "clock": 1082.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 83,
+   "clock": 1083.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 84,
+   "clock": 1084.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    9
+   ],
+   "ended": [
+    9
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 85,
+   "clock": 1085.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "pool_waits": 1
+   },
+   "queue": [
+    10,
+    11
+   ],
+   "ram": [
+    4992,
+    9488
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096
+   ],
+   "available": 2,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 86,
+   "clock": 1086.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 10,
+     "tier": "none",
+     "cached": 0,
+     "need": 13,
+     "damaged": false
+    }
+   ],
+   "pieces": [
+    [
+     10,
+     0,
+     2048
+    ]
+   ],
+   "ran": [
+    [
+     10,
+     0,
+     2048
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.25,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1,
+    "pool_waits": 1
+   },
+   "queue": [
+    11
+   ],
+   "ram": [],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 27,
+   "debt": 0.1875,
+   "fair_rounds": 1
+  },
+  {
+   "round": 87,
+   "clock": 1087.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [
+    {
+     "id": 11,
+     "tier": "none",
+     "cached": 0,
+     "need": 3,
+     "damaged": false
+    }
+   ],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.125,
+   "fair_rounds": 2
+  },
+  {
+   "round": 88,
+   "clock": 1088.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0625,
+   "fair_rounds": 3
+  },
+  {
+   "round": 89,
+   "clock": 1089.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 4
+  },
+  {
+   "round": 90,
+   "clock": 1090.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     11,
+     0,
+     592
+    ],
+    [
+     10,
+     2048,
+     2992
+    ]
+   ],
+   "ran": [
+    [
+     11,
+     0,
+     592
+    ],
+    [
+     10,
+     2048,
+     2992
+    ]
+   ],
+   "skipped": [],
+   "saves": [
+    11,
+    10
+   ],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.1875,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.125,
+   "fair_rounds": 1
+  },
+  {
+   "round": 91,
+   "clock": 1091.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [
+    [
+     10,
+     2992,
+     2999
+    ],
+    [
+     11,
+     592,
+     599
+    ]
+   ],
+   "ran": [
+    [
+     10,
+     2992,
+     2999
+    ],
+    [
+     11,
+     592,
+     599
+    ]
+   ],
+   "skipped": [],
+   "saves": [],
+   "finals": [
+    10,
+    11
+   ],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.001708984375,
+   "window_s": 0.0625,
+   "counts": {
+    "rows_2048": 1
+   },
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 92,
+   "clock": 1092.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 93,
+   "clock": 1093.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 94,
+   "clock": 1094.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 95,
+   "clock": 1095.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 96,
+   "clock": 1096.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 97,
+   "clock": 1097.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 98,
+   "clock": 1098.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 99,
+   "clock": 1099.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 100,
+   "clock": 1100.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7,
+    10,
+    11
+   ],
+   "ended": [
+    10,
+    11
+   ],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 24,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 101,
+   "clock": 1101.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 102,
+   "clock": 1102.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 103,
+   "clock": 1103.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 104,
+   "clock": 1104.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [
+    7
+   ],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0625,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 25,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 105,
+   "clock": 1105.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [
+    7
+   ],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 57,
+   "debt": 0.0,
+   "fair_rounds": 1
+  },
+  {
+   "round": 106,
+   "clock": 1106.0,
+   "free_gib": 24.0,
+   "arrive": [],
+   "cancel": [],
+   "damage": false,
+   "admits": [],
+   "pieces": [],
+   "ran": [],
+   "skipped": [],
+   "saves": [],
+   "finals": [],
+   "windows": [],
+   "ended": [],
+   "rows": 2048,
+   "piece_s": 0.0,
+   "window_s": 0.0,
+   "counts": {},
+   "queue": [],
+   "ram": [
+    592,
+    2992
+   ],
+   "disk": [
+    1184,
+    1488,
+    2096,
+    4992,
+    9488
+   ],
+   "available": 57,
+   "debt": 0.0,
+   "fair_rounds": 1
+  }
+ ],
+ "counts": {
+  "rows_2048": 54,
+  "long_waits": 1,
+  "rows_down": 1,
+  "rows_512": 6,
+  "rows_up": 1,
+  "mem_waits": 2,
+  "pool_waits": 59
+ }
+}
