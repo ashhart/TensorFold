@@ -30,6 +30,7 @@ pub const registry = @import("registry.zig");
 pub const tuning = @import("tuning.zig");
 pub const norms_ref = @import("norms_ref.zig");
 pub const act_ref = @import("act_ref.zig");
+pub const bf16_round = @import("bf16_round.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
@@ -67,6 +68,7 @@ test {
     _ = tuning;
     _ = norms_ref;
     _ = act_ref;
+    _ = bf16_round;
     _ = contract;
     _ = tree_round;
     _ = attention_ref;
