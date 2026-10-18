@@ -187,8 +187,7 @@ fn revisionFromEnv(env: *const std.process.Environ.Map) ?[]const u8 {
     return raw;
 }
 
-/// The revision a server attests: its snapshot directory's name, as a managed run records it. ``TF_CHECKPOINT_REVISION``
-/// stands in only for a directory that names none; one that disagrees with the loaded snapshot leaves the revision out.
+/// The attested revision: the snapshot directory's name, else TF_CHECKPOINT_REVISION; a mismatch gives none.
 pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const u8) ?[]const u8 {
     const told = revisionFromEnv(env);
     const loaded = (if (model_dir.len > 0) model_facts.snapshotRevision(model_dir) else null) orelse return told;
@@ -196,7 +195,7 @@ pub fn attestedRevision(env: *const std.process.Environ.Map, model_dir: []const 
     return loaded;
 }
 
-/// The receipt's name for an engine backend: the HIP engine's runs are ``rocm`` and Metal's ``mlx``, as the board names them.
+/// The receipt's name for an engine backend, as the board names them: HIP is ``rocm``, Metal is ``mlx``.
 pub fn receiptBackend(engine: []const u8) []const u8 {
     if (std.mem.eql(u8, engine, "hip")) return "rocm";
     if (std.mem.eql(u8, engine, "metal")) return "mlx";

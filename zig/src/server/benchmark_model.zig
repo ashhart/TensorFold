@@ -72,8 +72,7 @@ pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
     return total;
 }
 
-/// The commit a Hugging Face cache snapshot directory is named for (``.../snapshots/<40 or 64 lowercase hex>``), else null.
-/// A managed run's receipt and a server's manifest both take the checkpoint revision from here.
+/// The commit a HF cache snapshot directory is named for (40 or 64 lowercase hex), for receipts and manifests.
 pub fn snapshotRevision(dir: []const u8) ?[]const u8 {
     const name = std.fs.path.basename(dir);
     const parent = std.fs.path.basename(std.fs.path.dirname(dir) orelse "");
