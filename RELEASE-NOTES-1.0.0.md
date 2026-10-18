@@ -120,7 +120,7 @@ Thank you to all 145 public contributors who have sent TensorFold a pull request
 [@johnymoo](https://github.com/johnymoo),
 [@JordiPosthumus](https://github.com/JordiPosthumus),
 [@JRaxworthy](https://github.com/JRaxworthy),
-[@jregan-beasley-smc](https://github.com/jregan-beasley-smc),
+[@jrb-ai](https://github.com/jrb-ai),
 [@jschmied](https://github.com/jschmied),
 [@juliankang4](https://github.com/juliankang4),
 [@kingjamez](https://github.com/kingjamez),
