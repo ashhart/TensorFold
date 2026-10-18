@@ -341,7 +341,6 @@ pub const cuda_sets = [_]CudaSet{
 pub fn newer(x: limits.Nvcc, y: limits.Nvcc) bool {
     return x.major > y.major or (x.major == y.major and x.minor > y.minor);
 }
-
 /// The release whose records a compiler's images are checked against: the newest set at or below it, else cuda's.
 pub fn setFor(release: ?limits.Nvcc) limits.Nvcc {
     var at = cuda_release;

@@ -11,11 +11,12 @@ pub fn host(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void {
     all.dependOn(&run.step);
 }
 
-pub fn images(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, kernels: anytype, files: []const ?std.Build.LazyPath) void {
+pub fn images(b: *std.Build, runner: *std.Build.Step.Compile, controls: ?std.Build.LazyPath, h3: ?std.Build.LazyPath, kernels: anytype, files: []const ?std.Build.LazyPath) *std.Build.Step {
     const install = @import("kernel_contract.zig").cuda(b, runner, controls, h3);
     for (kernels, files) |k, file| {
         if (std.mem.eql(u8, k.name, "moe") or std.mem.eql(u8, k.name, "qwen36_mtp")) {
             if (file) |image| install.dependOn(&b.addInstallFile(image, b.fmt("fatbin/{s}.fatbin", .{k.name})).step);
         }
     }
+    return install;
 }

@@ -13,6 +13,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
+
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
     gpu_tokens: bool = false, // one-token rounds may run a step ahead (pipelined)

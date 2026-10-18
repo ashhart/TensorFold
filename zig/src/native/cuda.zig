@@ -24,11 +24,11 @@ const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
 const kv_pages = @import("cuda_kv_pool.zig");
 /// CUDA families provide metadata, open their lane backend and explain their refusals.
-const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native };
+const registry = .{ nemotron.native, nemotron.omni, glm.native, qwen35.native, qwen35.native_moe, flashnext.native, @import("mimo_v2").native };
 /// --record opens here (engines.zig refuses it for a backend without this).
 pub const records = true;
 pub const backends: []const []const u8 = &.{"cuda"};
-pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence" };
+pub const serves: []const []const u8 = &.{ "--mtp-drafts", "--mtp-confidence", "--policy" };
 pub const families: []const api.Family = blk: {
     var out: [registry.len + 2]api.Family = undefined;
     for (registry, 0..) |F, i| out[i] = .{ .model_type = F.model_type, .formats = F.formats };
@@ -449,6 +449,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         .lanes = streams,
         .context_window = @intCast(window),
         .startup = h.startup,
+        .policy = if (@hasField(@TypeOf(loaded), "policy")) loaded.policy else "",
         .prompt_cache = h.store != null,
         .warm_turns = h.store != null and @hasDecl(F, "warm_quiet"),
         .logprobs = served.backend.vtable.first_row != null,
@@ -576,7 +577,6 @@ test "family readiness reaches production lane admission without binding CUDA" {
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
 }
-
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
