@@ -82,5 +82,27 @@ struct StreamSwiglu {
     }
 };
 
+// tf_nemo_relu2 on the sum: relu(the sum rounded to T)^2, the square rounded to fp32 before it is rounded to T.
+template <class T>
+struct StreamRelu2 {
+    static constexpr bool kPair = false;
+
+    template <int CB, class Args>
+    __device__ static void put(const Args& a, long long row, int col, const float (&v)[CB], int c, int, float) {
+        const typename T::elem r = narrow<T>(v[c]);
+        float u;
+        if constexpr (std::is_same_v<typename T::elem, __half>) {
+            u = __half2float(r);
+        } else {
+            u = __uint_as_float(static_cast<uint32_t>(__builtin_bit_cast(unsigned short, r)) << 16);
+        }
+        u = u != u ? u : fmaxf(u, 0.f);  // a NaN stays NaN, as tf_nemo_relu2 keeps it
+        float sq = u * u;
+        // kept apart from the narrowing: fptrunc(fmul) would otherwise become one mixed-precision op
+        asm("" : "+v"(sq));
+        static_cast<typename T::elem*>(static_cast<void*>(a.out16))[row * a.n + col] = narrow<T>(sq);
+    }
+};
+
 }  // namespace rocm
 }  // namespace tf

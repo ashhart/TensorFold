@@ -117,6 +117,9 @@ HIP’s MLX stream tile keeps its finite dot2 sums unchanged. A non-finite resul
 operand is recomputed by full quantization groups using the factored float64 formula. The plain tile is
 registered at all six supported bit widths and groups of 32, 64 and 128, with no known finding.
 
+The HIP relu^2 replacement retains every non-finite plant and checks both unfused bytes and every
+independent float64 output class. No inherited infinity discrepancy is accepted.
+
 ## Coverage
 
 Metal: softmax, RMS norm, bf16 top-k, the row projection (3, 4, 6 and 8 bits), affine_mm (4 and 8 bits), simd_qmm

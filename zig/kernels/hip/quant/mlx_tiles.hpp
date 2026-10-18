@@ -63,6 +63,13 @@ __global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream(Affine a
     stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, Epi, R, CB>(a, sides, lpc_log2, gshift);
 }
 
+// The plain product (or plan item) with Nemotron's relu^2 as the epilogue, into a.out16 in the activation type.
+template <typename T, int BITS, int R, int CB>
+__global__ void __launch_bounds__(32 * kStreamWaves) affine_dot2_stream_relu2(Affine a, StreamSides sides, int lpc_log2,
+                                                                             int gshift) {
+    stream_tile<MlxDecoder<BITS>, IdentityAct<T>, T, StreamRelu2<T>, R, CB>(a, sides, lpc_log2, gshift);
+}
+
 
 }  // namespace rocm
 }  // namespace tf

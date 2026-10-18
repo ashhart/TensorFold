@@ -12,6 +12,7 @@ const moe_k = @import("contract_nemo_moe.zig");
 const walk_k = @import("contract_walk.zig");
 const add_rms_k = @import("contract_add_rms.zig");
 const window_k = @import("contract_window.zig");
+const relu2_k = @import("contract_relu2.zig");
 
 const g = core.contract.gates;
 
@@ -108,6 +109,9 @@ fn run(a: std.mem.Allocator, io: std.Io) !usize {
     for (&streams, 0..) |*x, i| x.* = .init(a, &r, s, &l, i);
     defer for (&streams) |*x| x.deinit();
     for (&streams) |*x| try kernels.append(a, x.kernel());
+    var relu2 = relu2_k.Relu2.init(a, &r, s, &l);
+    defer relu2.deinit();
+    try kernels.append(a, relu2.kernel());
     var t: g.Tally = .{};
     const t0 = ms(io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
