@@ -333,6 +333,12 @@ pub const Hip = struct {
         return lane;
     }
 
+    /// The cancel a prompt chunk's forward polls after each layer (null: the chunk runs through, asked only between chunks).
+    fn cancelOf(s: *lanes.Stream) ?Engine.Cancel {
+        const c = s.cancel_check orelse return null;
+        return .{ .ctx = c.ptr, .check = c.check };
+    }
+
     /// One chunk of the prompt pass, ending on the next cut or the prompt's end; the last draws the first token.
     fn prefillStepFn(ptr: *anyopaque, s: *lanes.Stream) anyerror!bool {
         const h = of(ptr);
@@ -348,11 +354,11 @@ pub const Hip = struct {
             // a structured reply keeps the prompt's last row: its first token is drawn again under the grammar
             if (s.grammar != null and lane.first_row == null) lane.first_row = try h.gpa.alloc(u16, h.e.drawer.vocab);
             const keep = if (s.grammar != null) lane.first_row else null;
-            _ = h.take(try h.e.prefill(&lane.caches, prompt, f.at, lane.hidden, .{ .sampling = sampling(s), .position = prompt.len, .keep = keep }, null));
+            _ = h.take(try h.e.prefill(&lane.caches, prompt, f.at, lane.hidden, .{ .sampling = sampling(s), .position = prompt.len, .keep = keep }, cancelOf(s)));
             lane.fill = null;
             return true;
         }
-        try h.e.advance(&lane.caches, prompt, f.at, to, null);
+        try h.e.advance(&lane.caches, prompt, f.at, to, cancelOf(s));
         f.at = to;
         if (f.next < f.count and to == f.stops[f.next]) {
             var owner: hip_prefix.Owner = .{ .caches = &lane.caches, .id = lane.id };
@@ -547,3 +553,23 @@ pub const Hip = struct {
         h.free(kv.value);
     }
 };
+
+test "a prompt chunk's forward polls its stream's cancel" {
+    const Flag = struct {
+        on: bool = false,
+        fn check(p: *anyopaque) bool {
+            const f: *@This() = @ptrCast(@alignCast(p));
+            return f.on;
+        }
+    };
+    var flag: Flag = .{};
+    var s = try lanes.Stream.init(std.testing.allocator, .{ .id = "long", .prompt = &.{ 1, 2, 3 }, .max_new = 8, .cancel_check = .{ .ptr = &flag, .check = Flag.check } });
+    defer s.deinit(std.testing.allocator);
+    const c = Hip.cancelOf(&s) orelse return error.TestExpectedCancel;
+    try std.testing.expect(!c.check(c.ctx));
+    flag.on = true; // the client left: the next layer edge ends the chunk
+    try std.testing.expect(c.check(c.ctx));
+    var plain = try lanes.Stream.init(std.testing.allocator, .{ .id = "plain", .prompt = &.{ 1, 2, 3 }, .max_new = 8 });
+    defer plain.deinit(std.testing.allocator);
+    try std.testing.expect(Hip.cancelOf(&plain) == null); // no hook: nothing to poll, no sync a layer
+}
