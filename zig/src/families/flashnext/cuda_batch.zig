@@ -7,6 +7,7 @@ const ple = @import("cuda_ple.zig");
 const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
+const tiles = @import("cuda_tiles.zig");
 
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
@@ -51,18 +52,12 @@ const ratio = wt.index_ratio;
 const top = wt.index_top;
 const idw = wt.index_idw;
 const cubin_qmm: [:0]const u8 = "_ZN6tf_qmm10qmm_kernelILi32ELi16ELi64ELi1ELi4ELi4ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
-const qmm_smem: u32 = 9472;
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
 const plan_small: usize = cuda.grouped.small;
 
 fn cint(v: usize) c_int {
     return @intCast(v);
-}
-
-/// tile_of's sweep: row tiles a column pass keeps in 12 MiB of the input.
-fn sweepOf(m: usize, bm: usize, k: usize) usize {
-    return @max(@as(usize, 1), @min(cdiv(m, bm), (12 << 20) / (bm * k * 2)));
 }
 
 fn cdiv(a: usize, b: usize) usize {
@@ -118,45 +113,9 @@ pub fn Pass(comptime Tri: type) type {
 
         // ---- launches ----------------------------------------------------------------------------------------
 
-        /// qmm.cu's lane tile over m rows: out bf16 [m, n] (sk 1) or the unreduced fp32 slices [sk, m, n] in part.
-        /// Returns the K slices written to part: 1 when the prompt tile folded them (their sum in slice order).
+        /// qmm.cu's arithmetic over m rows into out (bf16) or part (fp32 K slices); returns the slices (1 when folded).
         pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
-            if (w.native) |native| {
-                if (sk == 1) {
-                    try self.k.native_lane.matmul(self.stream, x, w.k, m, native, out, self.s.native_part);
-                    return 1;
-                }
-                // Legacy callers consume SK slices; the native lane has already reduced its own shape-driven slices.
-                try self.k.native_lane.matmulF32(self.stream, x, w.k, m, native, part, self.s.native_part);
-                const bytes = m * w.n * 4;
-                if (sk > 1) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), self.stream.handle), "cuMemsetD8Async");
-                return sk;
-            }
-            // from 64 rows the prompt tile (flashnext_fact.cu), bit for bit the 16-row lane tile
-            const big = m >= 64;
-            const bm: usize = if (big) 64 else 16;
-            const bn: usize = if (big) 128 else 64;
-            const k = w.k;
-            const rows_t = cdiv(m, bm);
-            const cols_t = cdiv(w.n, bn);
-            const sweep = @max(@as(usize, 1), @min(rows_t, (12 << 20) / (bm * k * 2)));
-            const npad = (w.n + 127) / 128 * 128;
-            var a: cuda.Args = .{};
-            a.add(x);
-            a.add(xs);
-            a.add(w.w.ptr);
-            a.add(w.s.ptr);
-            a.add(w.b.ptr);
-            a.add(out);
-            a.add(part);
-            for ([_]usize{ m, w.n, k, sk, npad, k, sweep }) |v| a.add(cint(v));
-            const fold = big and sk > 1;
-            const f = if (fold) self.k.fact_fold else if (big) self.k.fact else self.k.lane;
-            const block: u32 = if (big) 256 else 128;
-            const shared: u32 = if (big) parts.fact_smem else qmm_smem;
-            const z: usize = if (fold) 1 else sk;
-            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(z) }, .block = .{ .x = block }, .shared = shared }, self.stream, &a);
-            return z;
+            return tiles.matmul(self.k, self.stream, x, xs, w, out, part, self.s.native_part, m, sk);
         }
 
         pub fn sumSlices(self: *Self, part: u64, out: u64, bf16: bool, n: usize, sk: usize) !void {
@@ -235,36 +194,9 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
         }
 
-        /// Prompt rows' read-out on flashnext_hcf.cu's tiles (fn_hc_down's and fn_hc_upmix's bits): the down rows with their
-        /// K slices folded, the reduce on one slice, the up rows in bf16, then the mix renorming the streams on the fly.
+        /// Prompt rows' read-out on flashnext_hcf.cu's tiles, fn_hc_down's and fn_hc_upmix's bits (K slices folded).
         fn readoutTiles(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
-            const s = self.s;
-            const h = s.h + r0 * wide * 2;
-            const pss = s.pss + r0 * pss_n * 4;
-            const rinv = s.rinv + r0 * streams * 4;
-            const act = s.act + r0 * low * 2;
-            const xs_act = s.xs_act + r0 * (low / 32) * 4;
-            const inj_ptr = if (hc_w.has_inj == 1) s.inj + r0 * streams * 2 else act;
-            const nc = dims / 256;
-            var a: cuda.Args = .{};
-            for ([_]u64{ h, 0, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.hc_part }) |v| a.add(v);
-            for ([_]usize{ n, hc_w.n_down, wide, hc_sk, wide, sweepOf(n, 32, wide) }) |v| a.add(cint(v));
-            a.add(pss);
-            a.add(hc_w.scale.ptr);
-            a.add(eps);
-            for ([_]usize{ dims, nc, streams }) |v| a.add(cint(v));
-            try cuda.launch.launch(self.k.hcf_down, .{ .grid = .{ .x = @intCast(cdiv(n, 32) * cdiv(hc_w.n_down, 192)) }, .block = .{ .x = 256 }, .shared = parts.hcf_down_smem }, self.stream, &a);
-            try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
-            var b: cuda.Args = .{};
-            for ([_]u64{ act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, s.proj }) |v| b.add(v);
-            for ([_]usize{ n, wide, low, 1, low, sweepOf(n, 64, low) }) |v| b.add(cint(v));
-            b.add(@as(u64, 0));
-            b.add(@as(u64, 0));
-            b.add(@as(f32, 0));
-            for ([_]usize{ dims, nc, streams }) |v| b.add(cint(v));
-            try cuda.launch.launch(self.k.hcf_up, .{ .grid = .{ .x = @intCast(cdiv(n, 64) * cdiv(wide, 128)) }, .block = .{ .x = 256 }, .shared = parts.hcf_up_smem }, self.stream, &b);
-            try self.tri.hcRinv(pss, rinv, eps, n, dims, nc, streams);
-            try self.tri.hcMixH(s.proj, h, rinv, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
+            return tiles.readout(self.tri, self.k, self.stream, self.s, hc_w, r0, n);
         }
 
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
@@ -386,7 +318,7 @@ pub fn Pass(comptime Tri: type) type {
             a.add(ggb);
             a.add(state);
             if (rows >= 64) {
-                // two threads a state row (fn_gdn_chain_tpr), fn_gdn_rows' bits; in place when there is no rollback copy
+                // two threads a state row (fn_gdn_chain_tpr), fn_gdn_rows' bits; in place without a rollback copy
                 a.add(if (state_out != 0) state_out else state);
                 a.add(cint(rows));
                 a.add(ys);
@@ -460,7 +392,7 @@ pub fn Pass(comptime Tri: type) type {
                     const pos = at.pos + (r0 / att_rows) * 16;
                     const iq = at.iq + r0 * index_heads * index_dim * 2;
                     const sel = r0 - g0; // this block's rows in the selection buffers
-                    // rows past `top` complete blocks score theirs; _scores leaves the rest alone, so skip it when none is
+                    // rows past `top` complete blocks score theirs; _scores leaves the rest, so skip it when none is
                     if (ends / ratio > top) try self.tri.qsaScores(iq, pooled, pos, self.seq.scores, nb, m, @min(nb, cdiv(ends, ratio)));
                     var a: cuda.Args = .{};
                     a.add(self.seq.scores);
@@ -481,11 +413,6 @@ pub fn Pass(comptime Tri: type) type {
                 }
                 if (fused) try self.tri.attnFused(at.q + g0 * q_heads * head_dim * 2, kc, vc, at.pos + (g0 / att_rows) * 16, at.ao + g0 * out_k * 2, s.qids, s.qnk, s.qspr, gm, kv_heads);
             }
-        }
-
-        fn fexp(self: *Self, f: cuda.Function, wn: usize, x: u64, x_stride: usize, slot_n: usize, w: u64, kg: usize, nb: usize, plan: cuda.grouped.Plan, out: u64, n: usize, items: usize) !void {
-            var a = cuda.experts.Affine4Experts.argsOf(x, x_stride, slot_n, w, kg, nb, plan, out, n);
-            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(items * cdiv(nb, wn)) }, .block = .{ .x = 256 }, .shared = parts.fexp_smem }, self.stream, &a);
         }
 
         /// Router, each row's ten experts and the shared one, the grouped expert launches: y [rows, 11, dims] fp32.
@@ -530,8 +457,8 @@ pub fn Pass(comptime Tri: type) type {
                 // prompt rows on 64-pair factored tiles, expert_rows' bits
                 try self.k.router.route(self.stream, s.picks, pairs, e, parts.fexp_tile, plan);
                 const items64 = cdiv(pairs, parts.fexp_tile) + e;
-                try self.fexp(self.k.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
-                try self.fexp(self.k.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
+                try tiles.experts(self.stream, self.k.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
+                try tiles.experts(self.stream, self.k.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);

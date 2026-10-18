@@ -45,8 +45,7 @@ __device__ __forceinline__ void block_best(float& v, int& i, float (*sv)[NT / 32
 
 using namespace tf_route;
 
-// OUT[m, e] = x[m] . w[e], a warp of 8 experts and RT tiles of 16 rows: one mma chain over K from zero, STAGES of KC
-// staged (D % 16 == 0). A row's sums never depend on RT.
+// OUT[m, e] = x[m] . w[e], 8 experts a warp, RT tiles of 16 rows, one mma chain over K, STAGES of KC (row sums fixed).
 template <int WARPS, int STAGES, int KC, int RT = 1>
 __device__ __forceinline__ void route_logits(const __nv_bfloat16* __restrict__ X, int x_ld, const __nv_bfloat16* __restrict__ W,
                                              float* __restrict__ OUT, int M, int D, int E) {
@@ -117,8 +116,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfl
     route_logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
 }
 
-// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows: each router row read once per 128
-// input rows), the same sums.
+// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows), the same sums.
 extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
                                                                        const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
                                                                        int M, int D, int E) {
