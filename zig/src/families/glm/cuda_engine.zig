@@ -154,6 +154,7 @@ pub const Engine = struct {
             gpa.free(e.packs.ptrs);
             gpa.free(e.packs.bits);
         }
+        e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
         e.m.tiled = o.settings.tiled;
         if (o.settings.tiled) e.m.packs = &e.packs;
         try e.bind(0);

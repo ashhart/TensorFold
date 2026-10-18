@@ -44,6 +44,7 @@ pub const Kernels = struct {
     reduce: cuda.Function,
     tile: cuda.Function,
     tile_packed: [3]cuda.Function, // glm_mm_tile4/6/8: packed rows and their scales into the tiles
+    prompt_fixed_k: bool = false, // opt-in prompt experiment; never selected from the number of batched rows
     pdl: bool, // dependent launches: a matmul's weights stream in while the kernel before it finishes
 
     pub fn load(m: cuda.Module) !Kernels {
@@ -102,7 +103,7 @@ pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, o
     var done: usize = 0;
     const wi = try widthIndex(w.bits);
     while (done < m) { // windows to 64 rows a launch with K slices; prompts in one launch of 128-row blocks, one slice
-        const big = one or m - done >= 128;
+        const big = if (one) !k.prompt_fixed_k else m - done >= 128;
         const rows = if (big) m - done else @min(m - done, 64);
         const i: usize = if (big) 3 else if (rows <= 16) 0 else if (rows <= 32) 1 else 2;
         const bm = bucket(i);

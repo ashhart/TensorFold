@@ -7,6 +7,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// The forward's knobs a rank reads from its environment (the Python family's names and defaults).
 pub const Settings = struct {
+    prompt_fixed_k: bool = false, // TF_GLM_PROMPT_K: one (default) or shape (experimental fixed K slices)
     tiled: bool = true, // TF_GLM_MM: 1 (the bf16 linears on glm_mm, tiled at load) or 0
     split: bool = true, // TF_GLM_PREFILL_REDUCE: split (each rank glues its own rows), ring or gather
     ring: bool = false, // TF_GLM_PREFILL_REDUCE=ring: split, its exchanges passed along the ring (cuda_relay)
@@ -20,6 +21,12 @@ pub const Settings = struct {
     /// The settings `get` (an environment lookup) gives; `problem` names a value that is not one of the choices.
     pub fn read(get: *const fn ([:0]const u8) ?[]const u8, problem: *[]const u8) !Settings {
         var s: Settings = .{};
+        if (get("TF_GLM_PROMPT_K")) |v| {
+            if (std.mem.eql(u8, v, "shape")) s.prompt_fixed_k = true else if (!std.mem.eql(u8, v, "one")) {
+                problem.* = "TF_GLM_PROMPT_K: one or shape";
+                return error.BadSetting;
+            }
+        }
         if (get("TF_GLM_MM")) |v| {
             if (std.mem.eql(u8, v, "0")) s.tiled = false else if (!std.mem.eql(u8, v, "1")) {
                 problem.* = "TF_GLM_MM: 0 or 1";
@@ -73,6 +80,10 @@ pub const Settings = struct {
             problem.* = "TF_HEAT_HIGH and TF_HEAT_LOW: both or neither, in degrees, with low at or under high";
             return error.BadSetting;
         };
+        if (s.prompt_fixed_k and !s.tiled) {
+            problem.* = "TF_GLM_PROMPT_K=shape requires TF_GLM_MM=1";
+            return error.BadSetting;
+        }
         return s;
     }
 };
@@ -87,9 +98,10 @@ pub fn environment(name: [:0]const u8) ?[]const u8 {
 
 /// What every rank must agree on, as bytes the communicator carries.
 pub const Fingerprint = extern struct {
-    layout: u32 = 9, // this struct's version
+    layout: u32 = 10, // this struct's version
     world: u32,
     rank: u32,
+    prompt_fixed_k: u32,
     tiled: u32,
     split: u32, // TF_GLM_PREFILL_REDUCE: 0 gather, 1 split, 2 ring
     kda_wide: u32,
@@ -113,6 +125,7 @@ pub const Fingerprint = extern struct {
         layout,
         rank,
         world,
+        prompt_fixed_k,
         tiled,
         split,
         kda_wide,
@@ -146,6 +159,7 @@ pub const Fingerprint = extern struct {
         const f: Fingerprint = .{
             .world = @intCast(world),
             .rank = @intCast(rank),
+            .prompt_fixed_k = @intFromBool(s.prompt_fixed_k),
             .tiled = @intFromBool(s.tiled),
             .split = if (!s.split) 0 else if (s.ring) 2 else 1,
             .kda_wide = @intFromBool(s.kda_wide),
@@ -172,6 +186,7 @@ pub fn mismatch(all: []const Fingerprint) ?Mismatch {
         if (f.layout != all[0].layout) return .{ .field = .layout, .rank = r };
         if (f.rank != r) return .{ .field = .rank, .rank = r };
         const fields = .{
+            "prompt_fixed_k",
             "world",
             "tiled",
             "split",
@@ -278,6 +293,7 @@ fn explain(f: Fingerprint.Field) []const u8 {
         .layout => "a different build of this check",
         .rank => "a rank number given twice or out of order",
         .world => "the ranks were started with different world sizes",
+        .prompt_fixed_k => "TF_GLM_PROMPT_K",
         .tiled => "TF_GLM_MM",
         .split => "TF_GLM_PREFILL_REDUCE",
         .kda_wide => "TF_GLM_KDA_DECODE_WIDE",
@@ -534,4 +550,36 @@ test "ranks disagree on tensor bytes under identical headers, and agree on a cop
     try std.testing.expectEqual(Mismatch{ .field = .checkpoint, .rank = 1 }, mismatch(&all).?);
     all[1] = Fingerprint.of(2, 1, .{}, 8192, true, h, h, try artifact(a, io, paths[2]));
     try std.testing.expect(mismatch(&all) == null);
+}
+
+test "prompt K experiment is explicit and all ranks must agree" {
+    const Reader = struct {
+        fn absent(_: [:0]const u8) ?[]const u8 {
+            return null;
+        }
+        fn one(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_K")) "one" else null;
+        }
+        fn untiled(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_K")) "shape" else if (std.mem.eql(u8, key, "TF_GLM_MM")) "0" else null;
+        }
+
+        fn shape(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_K")) "shape" else null;
+        }
+        fn bad(key: [:0]const u8) ?[]const u8 {
+            return if (std.mem.eql(u8, key, "TF_GLM_PROMPT_K")) "auto" else null;
+        }
+    };
+    var problem: []const u8 = "";
+    const selected = try Settings.read(Reader.shape, &problem);
+    try std.testing.expect(selected.prompt_fixed_k);
+    try std.testing.expect(!(try Settings.read(Reader.absent, &problem)).prompt_fixed_k);
+    try std.testing.expect(!(try Settings.read(Reader.one, &problem)).prompt_fixed_k);
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.untiled, &problem));
+    try std.testing.expectError(error.BadSetting, Settings.read(Reader.bad, &problem));
+    var all = [_]Fingerprint{ Fingerprint.of(2, 0, .{}, 8192, true, @splat(0), @splat(0), @splat(0)), Fingerprint.of(2, 1, selected, 8192, true, @splat(0), @splat(0), @splat(0)) };
+    try std.testing.expectEqual(Fingerprint.Field.prompt_fixed_k, mismatch(&all).?.field);
+    all[0].prompt_fixed_k = 1;
+    try std.testing.expectEqual(@as(?Mismatch, null), mismatch(&all));
 }

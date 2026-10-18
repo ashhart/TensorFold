@@ -413,9 +413,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     offer_tests.has_side_effects = true;
     video_step.dependOn(&offer_tests.step);
     const compile_modules = engines(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision);
-    const glm_open = b.addObject(.{ .name = "glm-native-open", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_open_compile.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "glm", .module = glmCuda(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.heat) }} }) });
-    _ = glm_open.getEmittedBin();
-    b.step("compile-glm-native-open", "Compile the actual GLM Linux open body with empty GPU images").dependOn(&glm_open.step);
+    @import("glm_family_host.zig").compile(b, cuda_target, check_cuda, check_mods, glmCuda);
     const open_object = b.addObject(.{ .name = "omni-video-native-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/omni_video_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "native", .module = compile_modules.engines }} }) });
     _ = open_object.getEmittedBin();
     b.step("compile-omni-video-host", "Compile actual native CUDA startup and offer for Linux without images or GPU execution").dependOn(&open_object.step);
