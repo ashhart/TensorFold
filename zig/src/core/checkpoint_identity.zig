@@ -3,6 +3,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const Io = std.Io;
+const digest_cache = @import("digest_cache.zig");
 
 /// Before any weight loads: config.json (a split's rank left out), the index, each shard's name, size and header.
 pub fn identity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
@@ -113,6 +114,10 @@ pub const Content = struct {
     dir: []const u8,
     split: bool,
     names: []const []const u8,
+    cache_root: ?[]const u8 = null,
+    keys: []digest_cache.Key,
+    errors: []?anyerror,
+    hits: std.atomic.Value(usize) = .init(0),
     files: [][32]u8, // each file's sha256, every byte
     plain: [][32]u8, // each file's non-expert tensor bytes (a split's shared part)
     next: std.atomic.Value(usize) = .init(0),
@@ -126,60 +131,87 @@ pub const Content = struct {
     const block = 8 << 20;
 
     pub fn start(gpa: std.mem.Allocator, io: Io, dir: []const u8, split: bool) !*Content {
+        const root = try digest_cache.environmentRoot(gpa);
+        defer if (root) |path| gpa.free(path);
+        return startWithCache(gpa, io, dir, split, root);
+    }
+
+    pub fn startWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, split: bool, root: ?[]const u8) !*Content {
         const c = try gpa.create(Content);
         errdefer gpa.destroy(c);
-        c.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .dir = undefined, .split = split, .names = undefined, .files = undefined, .plain = undefined, .t0 = Io.Clock.awake.now(io) };
+        c.* = .{ .gpa = gpa, .io = io, .arena = .init(gpa), .dir = undefined, .split = split, .names = undefined, .files = undefined, .plain = undefined, .keys = undefined, .errors = undefined, .t0 = Io.Clock.awake.now(io) };
         errdefer c.arena.deinit();
         const a = c.arena.allocator();
         c.dir = try a.dupe(u8, dir);
+        c.cache_root = if (root) |path| try a.dupe(u8, path) else null;
         c.names = try shards(a, io, dir, null);
         c.files = try a.alloc([32]u8, c.names.len);
         c.plain = try a.alloc([32]u8, c.names.len);
+        c.keys = try a.alloc(digest_cache.Key, c.names.len);
+        c.errors = try a.alloc(?anyerror, c.names.len);
+        @memset(c.errors, null);
         for (&c.threads) |*t| t.* = std.Thread.spawn(.{}, work, .{c}) catch null;
         if (c.threads[0] == null) c.work(); // no thread could start: hash here
         return c;
     }
 
     fn work(c: *Content) void {
-        const buf = std.heap.page_allocator.alloc(u8, block) catch return c.fail(c.names.len);
+        const buf = std.heap.page_allocator.alloc(u8, block) catch return c.fail(c.names.len, error.OutOfMemory);
         defer std.heap.page_allocator.free(buf);
         while (!c.stop.load(.acquire)) {
             const i = c.next.fetchAdd(1, .monotonic);
             if (i >= c.names.len) return;
-            c.file(i, buf) catch return c.fail(i);
+            c.file(i, buf) catch |err| return c.fail(i, err);
         }
     }
 
-    fn fail(c: *Content, i: usize) void {
+    fn fail(c: *Content, i: usize, err: anyerror) void {
+        if (i < c.errors.len) c.errors[i] = err;
         _ = c.failed.fetchMin(i, .monotonic);
         c.stop.store(true, .release);
     }
 
-    /// File `i`: its sha256 over every byte; for a split, its non-expert tensors' bytes too, in offset order.
+    /// Reuse both the whole-file and shared-tensor digests under the same descriptor identity.
     fn file(c: *Content, i: usize, buf: []u8) !void {
+        const path = try std.fs.path.join(c.gpa, &.{ c.dir, c.names[i] });
+        defer c.gpa.free(path);
+        const Reader = struct {
+            owner: *Content,
+            buffer: []u8,
+            pub fn read(reader: @This(), f: Io.File, size: u64) !digest_cache.Value {
+                return reader.owner.read(f, size, reader.buffer);
+            }
+        };
+        const got = try (digest_cache.Cache{ .root = c.cache_root }).get(c.gpa, c.io, path, true, Reader{ .owner = c, .buffer = buf });
+        c.files[i] = got.value.sha256;
+        c.plain[i] = got.value.shared.?;
+        c.keys[i] = got.key;
+        if (got.hit) _ = c.hits.fetchAdd(1, .monotonic);
+    }
+
+    fn read(c: *Content, f: Io.File, size: u64, buf: []u8) !digest_cache.Value {
         var arena: std.heap.ArenaAllocator = .init(c.gpa);
         defer arena.deinit();
         const a = arena.allocator();
-        const f = try Io.Dir.cwd().openFile(c.io, try std.fs.path.join(a, &.{ c.dir, c.names[i] }), .{});
-        defer f.close(c.io);
-        const size = try f.length(c.io);
         var ranges: std.ArrayList(Range) = .empty;
-        if (c.split) {
-            const text = try header(a, c.io, f, size);
-            const root = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
-            if (root != .object) return error.BadHeader;
-            const start_at = 8 + @as(u64, text.len);
-            for (root.object.keys(), root.object.values()) |k, t| {
-                if (expert(k) or std.mem.eql(u8, k, "__metadata__")) continue;
-                const offs = if (t == .object) t.object.get("data_offsets") else null;
-                if (offs == null or offs.? != .array or offs.?.array.items.len != 2) return error.BadHeader;
-                const b0: u64 = @intCast(offs.?.array.items[0].integer);
-                const b1: u64 = @intCast(offs.?.array.items[1].integer);
-                if (b1 < b0 or start_at + b1 > size) return error.BadHeader;
-                try ranges.append(a, .{ .lo = start_at + b0, .hi = start_at + b1 });
-            }
-            std.mem.sort(Range, ranges.items, {}, byLo);
+        const text = try header(a, c.io, f, size);
+        const root = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{});
+        if (root != .object) return error.BadHeader;
+        const start_at = 8 + @as(u64, text.len);
+        for (root.object.keys(), root.object.values()) |k, t| {
+            if (expert(k) or std.mem.eql(u8, k, "__metadata__")) continue;
+            const offs = if (t == .object) t.object.get("data_offsets") else null;
+            if (offs == null or offs.? != .array or offs.?.array.items.len != 2) return error.BadHeader;
+            const pair = offs.?.array.items;
+            if (pair[0] != .integer or pair[1] != .integer or pair[0].integer < 0 or pair[1].integer < 0)
+                return error.BadHeader;
+            const b0: u64 = @intCast(pair[0].integer);
+            const b1: u64 = @intCast(pair[1].integer);
+            if (b1 < b0 or b1 > size - start_at) return error.BadHeader;
+            try ranges.append(a, .{ .lo = start_at + b0, .hi = start_at + b1 });
         }
+        std.mem.sort(Range, ranges.items, {}, byLo);
+        for (ranges.items, 0..) |range, i| if (i > 0 and range.lo < ranges.items[i - 1].hi) return error.BadHeader;
         var all = Sha256.init(.{});
         var part = Sha256.init(.{});
         var at: u64 = 0;
@@ -201,8 +233,7 @@ pub const Content = struct {
             at = end;
             _ = c.bytes.fetchAdd(n, .monotonic);
         }
-        c.files[i] = all.finalResult();
-        c.plain[i] = part.finalResult();
+        return .{ .sha256 = all.finalResult(), .shared = part.finalResult() };
     }
 
     /// The pages just read leave the page cache: on unified memory they would take the device's.
@@ -211,7 +242,7 @@ pub const Content = struct {
         _ = std.os.linux.fadvise(f.handle, @intCast(at), @intCast(n), std.os.linux.POSIX_FADV.DONTNEED);
     }
 
-    fn join(c: *Content) void {
+    pub fn wait(c: *Content) void {
         for (&c.threads) |*t| if (t.*) |x| {
             x.join();
             t.* = null;
@@ -221,21 +252,32 @@ pub const Content = struct {
     /// Stops the threads and frees everything (a load that failed first).
     pub fn abandon(c: *Content) void {
         c.stop.store(true, .release);
-        c.join();
+        c.wait();
         c.arena.deinit();
         c.gpa.destroy(c);
     }
 
     /// Each file checked against its manifest or blob name; the digest: a whole one's bytes, a split's non-experts.
     pub fn finish(c: *Content) ![32]u8 {
+        return (try c.finishWithStats()).digest;
+    }
+
+    pub const Stats = struct { digest: [32]u8, bytes_read: u64, cache_hits: usize };
+
+    pub fn finishWithStats(c: *Content) !Stats {
         defer c.abandon();
-        c.join();
+        c.wait();
         const bad = c.failed.load(.monotonic);
         if (bad != std.math.maxInt(usize)) {
-            std.log.err("hashing the checkpoint failed at {s}", .{if (bad < c.names.len) c.names[bad] else "a buffer"});
-            return error.CheckpointUnreadable;
+            if (!builtin.is_test) std.log.err("hashing the checkpoint failed at {s}", .{if (bad < c.names.len) c.names[bad] else "a buffer"});
+            return if (bad < c.errors.len) c.errors[bad].? else error.OutOfMemory;
         }
         const a = c.arena.allocator();
+        for (c.names, c.keys) |name, key| {
+            const f = try Io.Dir.cwd().openFile(c.io, try std.fs.path.join(a, &.{ c.dir, name }), .{});
+            defer f.close(c.io);
+            if (!key.equal(try digest_cache.Key.of(f, c.io))) return error.DigestFileChanged;
+        }
         const want = if (c.split) try manifest(a, c.io, c.dir, c.names) else try blobNames(a, c.io, c.dir, c.names);
         for (c.names, c.files, want) |name, got, w| if (w) |x| if (!std.mem.eql(u8, &got, &x)) {
             if (!builtin.is_test) std.log.err("{s}'s bytes differ from its recorded sha256 ({s}): the copy is damaged or another revision", .{ name, if (c.split) "the export manifest" else "its Hugging Face blob name" });
@@ -247,8 +289,8 @@ pub const Content = struct {
             h.update(if (c.split) &part else &all);
         }
         const s = @as(f64, @floatFromInt(Io.Clock.awake.now(c.io).toNanoseconds() - c.t0.toNanoseconds())) / 1e9;
-        std.log.info("checkpoint bytes hashed: {d:.1} GiB in {d:.1} s, every byte of {d} files", .{ @as(f64, @floatFromInt(c.bytes.load(.monotonic))) / (1 << 30), s, c.names.len });
-        return h.finalResult();
+        std.log.info("checkpoint digest: {d:.1} GiB read in {d:.1} s, {d}/{d} cached files", .{ @as(f64, @floatFromInt(c.bytes.load(.monotonic))) / (1 << 30), s, c.hits.load(.monotonic), c.names.len });
+        return .{ .digest = h.finalResult(), .bytes_read = c.bytes.load(.monotonic), .cache_hits = c.hits.load(.monotonic) };
     }
 };
 
@@ -291,91 +333,23 @@ fn hex(s: []const u8) ?[32]u8 {
     return out;
 }
 
-/// A test checkpoint: config.json, a dense and a 1 MiB expert tensor, a manifest of `manifest_sha` (else the shard's).
-fn write(io: Io, dir: Io.Dir, sub: []const u8, config: []const u8, dense: u8, flip: ?usize, manifest_sha: ?[32]u8) !void {
-    const gpa = std.testing.allocator;
-    const mib = 1 << 20;
-    const head = "{\"m.layers.0.d.weight\":{\"dtype\":\"U8\",\"shape\":[4],\"data_offsets\":[0,4]}," ++
-        "\"m.layers.1.mixer.experts.0.up_proj.weight\":{\"dtype\":\"U8\",\"shape\":[1048576],\"data_offsets\":[4,1048580]}}";
-    const bytes = try gpa.alloc(u8, 8 + head.len + 4 + mib);
-    defer gpa.free(bytes);
-    std.mem.writeInt(u64, bytes[0..8], head.len, .little);
-    @memcpy(bytes[8..][0..head.len], head);
-    const body = bytes[8 + head.len ..];
-    for (body, 0..) |*b, i| b.* = @truncate(i *% 13);
-    body[0] = dense;
-    if (flip) |at| body[4 + at] ^= 1;
-    try dir.createDirPath(io, sub);
-    var d = try dir.openDir(io, sub, .{});
-    defer d.close(io);
-    try d.writeFile(io, .{ .sub_path = "config.json", .data = config });
-    try d.writeFile(io, .{ .sub_path = "model.safetensors", .data = bytes });
-    var sha: [32]u8 = undefined;
-    Sha256.hash(bytes, &sha, .{});
-    const m = try std.fmt.allocPrint(gpa, "{{\"files\": {{\"model.safetensors\": {{\"sha256\": \"{s}\"}}}}}}", .{&std.fmt.bytesToHex(manifest_sha orelse sha, .lower)});
-    defer gpa.free(m);
-    try d.writeFile(io, .{ .sub_path = "tensorfold-export-manifest.json", .data = m });
+/// Metadata identity plus every shard byte, with no folder-name dependency.
+pub fn fullIdentity(gpa: std.mem.Allocator, io: Io, dir: []const u8) ![32]u8 {
+    const root = try digest_cache.environmentRoot(gpa);
+    defer if (root) |path| gpa.free(path);
+    return fullWithCache(gpa, io, dir, root);
 }
 
-fn contentOf(io: Io, path: []const u8, split: bool) ![32]u8 {
-    const c = try Content.start(std.testing.allocator, io, path, split);
-    return c.finish();
+pub fn fullWithCache(gpa: std.mem.Allocator, io: Io, dir: []const u8, root: ?[]const u8) ![32]u8 {
+    const meta = try identity(gpa, io, dir);
+    const bytes = try (try Content.startWithCache(gpa, io, dir, false, root)).finish();
+    var h = Sha256.init(.{});
+    h.update("TensorFold full checkpoint v1");
+    h.update(&meta);
+    h.update(&bytes);
+    return h.finalResult();
 }
 
-test "every byte counts: one bit at 8 KiB into a 1 MiB expert payload changes the digest, or fails a split's manifest" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const cfg = "{\"hidden_size\": 8, \"tensorfold_tp\": {\"rank\": 0, \"world\": 2}}";
-    try write(io, tmp.dir, "a", cfg, 9, null, null);
-    try write(io, tmp.dir, "b", "{\"hidden_size\": 8, \"tensorfold_tp\": {\"rank\": 1, \"world\": 2}}", 9, null, null);
-    try write(io, tmp.dir, "c", cfg, 9, 8192, null); // the expert byte past every old sample, manifest updated
-    try write(io, tmp.dir, "d", cfg, 10, null, null); // a dense byte
-    var good: [32]u8 = undefined;
-    Sha256.hash("not this shard", &good, .{});
-    try write(io, tmp.dir, "e", cfg, 9, 8192, good); // the expert byte, the manifest still the old file's
-    var path: [5][]u8 = undefined;
-    for ([_][]const u8{ "a", "b", "c", "d", "e" }, &path) |s, *p| p.* = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/{s}", .{ tmp.sub_path, s });
-    defer for (path) |p| gpa.free(p);
-    // before loading: the split's rank leaves the identity alone, its bytes are not read
-    try std.testing.expectEqual(try identity(gpa, io, path[0]), try identity(gpa, io, path[1]));
-    try std.testing.expectEqual(try identity(gpa, io, path[0]), try identity(gpa, io, path[2]));
-    // whole: every byte, so the unsampled expert byte changes the digest
-    try std.testing.expect(!std.mem.eql(u8, &try contentOf(io, path[0], false), &try contentOf(io, path[2], false)));
-    // split: the halves share their non-expert bytes; a dense byte differs; a damaged expert byte fails the manifest
-    try std.testing.expectEqual(try contentOf(io, path[0], true), try contentOf(io, path[1], true));
-    try std.testing.expect(!std.mem.eql(u8, &try contentOf(io, path[0], true), &try contentOf(io, path[3], true)));
-    try std.testing.expectError(error.ShardBytesDiffer, contentOf(io, path[4], true));
-}
-
-test "a Hugging Face snapshot's shard is checked against its blob name: the right sha256 passes, another refuses" {
-    const io = std.testing.io;
-    const gpa = std.testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try write(io, tmp.dir, "src", "{\"hidden_size\": 8}", 9, null, null);
-    const bytes = try tmp.dir.readFileAlloc(io, "src/model.safetensors", gpa, .limited(1 << 24));
-    defer gpa.free(bytes);
-    var sha: [32]u8 = undefined;
-    Sha256.hash(bytes, &sha, .{});
-    var other: [32]u8 = undefined;
-    Sha256.hash("another revision", &other, .{});
-    for ([_][]const u8{ "good", "bad" }, [_][32]u8{ sha, other }) |repo, name| {
-        var buf: [128]u8 = undefined;
-        const blobs = try tmp.dir.createDirPathOpen(io, try std.fmt.bufPrint(&buf, "{s}/blobs", .{repo}), .{});
-        defer blobs.close(io);
-        const hexname = std.fmt.bytesToHex(name, .lower);
-        try blobs.writeFile(io, .{ .sub_path = &hexname, .data = bytes });
-        const snap = try tmp.dir.createDirPathOpen(io, try std.fmt.bufPrint(&buf, "{s}/snapshots/r1", .{repo}), .{});
-        defer snap.close(io);
-        try snap.writeFile(io, .{ .sub_path = "config.json", .data = "{\"hidden_size\": 8}" });
-        try snap.symLink(io, try std.fmt.bufPrint(&buf, "../../blobs/{s}", .{&hexname}), "model.safetensors", .{});
-    }
-    const good = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/good/snapshots/r1", .{tmp.sub_path});
-    defer gpa.free(good);
-    const bad = try std.fmt.allocPrint(gpa, ".zig-cache/tmp/{s}/bad/snapshots/r1", .{tmp.sub_path});
-    defer gpa.free(bad);
-    _ = try contentOf(io, good, false);
-    try std.testing.expectError(error.ShardBytesDiffer, contentOf(io, bad, false));
+test {
+    _ = @import("checkpoint_identity_test.zig");
 }

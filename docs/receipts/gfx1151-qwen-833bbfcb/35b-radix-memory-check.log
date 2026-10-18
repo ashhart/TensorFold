@@ -1,0 +1,55 @@
+policy matrix=auto,attention=auto,kernels=auto,graphs=auto,prefill_step=1024,fill_rows=512; mtp drafts 3 under 0.3, 8 snapshots
+check <MODEL_ROOT>/Qwen3.6-35B-A3B-MLX-4bit-MTP, tp 1
+PASS rows 1 stream x 1 row, 1 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 2 rows, 2 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 3 rows, 3 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 4 rows, 4 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 5 rows, 5 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 6 rows, 6 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 7 rows, 7 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 8 rows, 8 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 9 rows, 9 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 10 rows, 10 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 11 rows, 11 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 12 rows, 12 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 13 rows, 13 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 14 rows, 14 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 15 rows, 15 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 16 rows, 16 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 4 streams x 4 rows, 4 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 4 streams x 4 rows, 2 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 4 streams x 2 rows, 2 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 4 streams x 2 rows, 1 kept: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 1 row, 1 kept, padded to 4: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 1 stream x 3 rows, 3 kept, padded to 8: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 3 streams x 3 rows, 2 kept, padded to 16: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 4 streams x 4 rows, 4 kept, padded to 32: every layer's residuals and the final rows equal each stream one row at a time
+PASS rows 2 streams x 4 rows, 1 kept, padded to 64: every layer's residuals and the final rows equal each stream one row at a time
+PASS lanes short greedy: drafted == serial: 4 streams, 192 tokens, 68 drafts accepted
+PASS lanes short greedy: solo == together: 4 streams, 192 tokens, 68 drafts accepted
+PASS lanes short greedy: graph == eager: 41 rounds replayed, 192 tokens
+PASS lanes short seeded t=1: drafted == serial: 4 streams, 192 tokens, 77 drafts accepted
+PASS lanes short seeded t=1: solo == together: 4 streams, 192 tokens, 77 drafts accepted
+PASS lanes short seeded t=1: graph == eager: 47 rounds replayed, 192 tokens
+PASS lanes long greedy: drafted == serial: 4 streams, 192 tokens, 106 drafts accepted
+PASS lanes long greedy: solo == together: 4 streams, 192 tokens, 106 drafts accepted
+PASS lanes long greedy: graph == eager: 29 rounds replayed, 192 tokens
+PASS lanes long seeded t=1: drafted == serial: 4 streams, 192 tokens, 80 drafts accepted
+PASS lanes long seeded t=1: solo == together: 4 streams, 192 tokens, 80 drafts accepted
+PASS lanes long seeded t=1: graph == eager: 31 rounds replayed, 192 tokens
+PASS lanes long greedy: resumed == fresh: 4 streams, 192 tokens, 896 prompt tokens from the kept caches
+PASS radix: 14 requests, resumed == fresh: 27 of 28 resumed, 48 tokens each
+PASS radix: all together == fresh: 14 streams, 212 drafts accepted
+PASS radix: spans start on page edges: every resume at a multiple of 64
+PASS radix: the system prompt is shared: 7 requests resumed at 1088 of 1100 tokens
+PASS radix memory: 8 requests sharing 1100 system tokens, 1420 tokens each: the tree holds 699.4 MiB (57 pages 71.3 MiB, 10 snapshots 628.1 MiB); copies of the caches at each cut held 883.1 MiB; 7616 prompt tokens came from the tree
+PASS radix: a resumed page equals a fresh one: 18 pages of 1132 tokens in each of 10 attention layers, the first 17 from the tree, all equal
+PASS radix: a shared page is copied before a write: page 1 copied, page 0 still shared, the copy equal in every attention layer
+PASS lanes short greedy: rounds replayed: 100.0% of 43 rounds replayed, 53 us a round submitting
+PASS radix: every page comes back: 1 of 951 pages held after the runs, as before
+check PASS: 47 passed, 0 failed, 0 skipped in 132.6 s
+info: backend verify: 2523 calls, 22712 us each
+info: backend keep: 969 calls, 6 us each
+info: backend draft: 1594 calls, 3289 us each
+info: head graphs: 16 captured, 735 of 820 batches replayed
+info: graphs: 34 captured (3 ms each), 2501 of 2958 rounds replayed

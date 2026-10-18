@@ -42,11 +42,11 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8, count_text: 
     var cand: [candidates]u32 = undefined;
     for (0..count) |_| {
         try h.begin(1);
-        try h.launch(1);
+        try h.launch(1, .subset);
         try e.ops().copy(level1.ptr, h.out, D * 2);
         try e.ops().download(std.mem.sliceAsBytes(&vals), h.vals);
         try e.ops().download(std.mem.sliceAsBytes(&wide), h.cand);
-        for (2..depth + 1) |j| try h.launch(j);
+        for (2..depth + 1) |j| try h.launch(j, .subset);
         try e.stream.synchronize();
         for (&cand, wide) |*c, w| c.* = @intCast(w);
         const base = drafts.items.len;
@@ -59,7 +59,7 @@ pub fn run(gpu: check.Gpu, model: []const u8, ids_path: []const u8, count_text: 
             if (taken(drafts.items[base..], depth, c)) continue;
             try e.ops().copy(h.out, level1.ptr, D * 2);
             try e.ops().fill32(e.b.ids + 4, c, 1);
-            for (2..depth + 1) |j| try h.launch(j);
+            for (2..depth + 1) |j| try h.launch(j, .subset);
             try e.stream.synchronize();
             try drafts.append(gpa, c);
             try drafts.appendSlice(gpa, h.drafts()[1..depth]);

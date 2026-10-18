@@ -1,6 +1,7 @@
 //! Flash Next on our Metal runtime: the Python engine's recorded kernels (a dump from tools/zig/flashnext_dump.py)
 //! replayed from Zig, with our own kernels for wide experts, prompt chunks, block selection and GPU-side rounds.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const ks = @import("kernel_sources");
 const roles_gen = @import("roles_gen.zig");
@@ -43,7 +44,7 @@ pub const Buf = struct {
         return .{ .b = x.b, .off = x.off + bytes };
     }
 };
-pub const Entry = struct { fd: std.c.fd_t, at: usize, len: usize };
+pub const Entry = struct { fd: platform.c.fd_t, at: usize, len: usize };
 pub const Variant = struct { inputs: [][]const u8, outputs: [][]const u8, meta: [][]const u8, pipe: mtl.Pipeline, file: []const u8 = "", name: []const u8 = "", text: []const u8 = "" };
 pub const Site = struct { v: *Variant, grid: mtl.Size, tg: mtl.Size };
 
@@ -814,10 +815,10 @@ const hc_up_source =
     \\
 ;
 
-pub fn readAll(fd: std.c.fd_t, dest: []u8, at: usize) !void {
+pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: usize) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
@@ -936,7 +937,7 @@ pub const Run = struct {
 
     /// Every tensor of a safetensors file in the index, at its absolute offset.
     pub fn indexFile(r: *Run, path: [:0]const u8) !void {
-        const fd = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        const fd = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd < 0) return error.OpenFailed;
         var head: [8]u8 = undefined;
         try readAll(fd, &head, 0);
@@ -1828,6 +1829,7 @@ pub const Model = struct {
     ple: Ple,
     t: Tmp,
     pos: usize = 0,
+    cap: usize = CAP,
     state: usize = 0, // the DeltaNet buffer pair holding the state
     state_row: usize = 0, // its row
     gpu_seconds: f64 = 0,
@@ -2185,7 +2187,7 @@ pub const Model = struct {
             nk8[i] = if (i < rows) @intCast(h.pos + i + 1) else 0;
         }
         const kvm = sl.kvmeta.b.slice(u32, 3);
-        kvm[0], kvm[1], kvm[2] = .{ @intCast(h.pos), CAP, @intCast(rows) };
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(h.pos), @intCast(m.cap), @intCast(rows) };
         sl.n_add.b.slice(u32, 1)[0] = @intCast(rows * WIDE);
     }
 
@@ -2868,7 +2870,7 @@ pub const Prompt = struct {
             b.nk.b.slice(i32, PMAX)[i] = @intCast(pos + i + 1);
         }
         const kvm = b.kvmeta.b.slice(u32, 3);
-        kvm[0], kvm[1], kvm[2] = .{ @intCast(pos), CAP, @intCast(rows) };
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(pos), @intCast(m.cap), @intCast(rows) };
         b.rows.b.slice(i32, 1)[0] = @intCast(rows);
         const pp = &m.ple;
         const seq = try gpa.alloc(i64, 2 + rows);
@@ -2985,7 +2987,7 @@ pub const Prompt = struct {
                     try sl.encode(r, L, b.iq, t.eps, t.log2base, s.pos, rows);
                 }
                 p.bind(p.sattn, &.{ b.q, L.keys, L.vals, sl.keys, sl.counts, sl.sparse, b.p, t.scale });
-                const cap: i32 = CAP;
+                const cap: i32 = @intCast(m.cap);
                 r.enc.setBytes(std.mem.asBytes(&cap), 8);
                 r.enc.setBuffer(b.aout.b, b.aout.off, 9);
                 r.enc.dispatchThreads(mtl.Size.of(rows * 128, 2, 1), mtl.Size.of(128, 1, 1));
@@ -3001,7 +3003,7 @@ pub const Prompt = struct {
                 try r.callRows("q4_attn_merge_gate#[24, 16, 256]", rows, &.{ b.po, b.pm, b.p }, &.{b.aout}, null);
             } else if (p.skip & 4 == 0) {
                 p.bind(p.attn256, &.{ b.q, L.keys, L.vals, b.p });
-                const ap = [4]i32{ @intCast(rows), @intCast(s.pos + rows), @intCast(s.pos), CAP };
+                const ap = [4]i32{ @intCast(rows), @intCast(s.pos + rows), @intCast(s.pos), @intCast(m.cap) };
                 r.enc.setBytes(std.mem.asBytes(&ap), 4);
                 r.enc.setBuffer(t.scale.b, t.scale.off, 5);
                 r.enc.setBuffer(b.aout.b, b.aout.off, 6);
@@ -3333,7 +3335,7 @@ pub const Prompt = struct {
         @memcpy(b.mids.b.slice(u32, n), nexts);
         for (0..n) |i| b.pos.b.slice(i32, PMAX)[i] = @intCast(start + i);
         const kvm = b.kvmeta.b.slice(u32, 3);
-        kvm[0], kvm[1], kvm[2] = .{ @intCast(start), CAP, @intCast(n) };
+        kvm[0], kvm[1], kvm[2] = .{ @intCast(start), @intCast(m.cap), @intCast(n) };
         b.n_add.b.slice(u32, 1)[0] = @intCast(n * WIDE);
         const cb = r.queue.commandBuffer();
         r.enc = cb.compute(if (r.serial) .serial else .concurrent);

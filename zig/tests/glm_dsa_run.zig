@@ -1,5 +1,6 @@
 //! GLM-5.3 on the pair without the server: rank 0 runs a prompt and its greedy reply, rank 1 follows.
 const std = @import("std");
+const platform = @import("sys");
 const tf = @import("tensorfold");
 const tok = @import("tokenizer");
 const g = tf.glm_dsa;
@@ -13,7 +14,7 @@ const usage =
 ;
 
 fn env(name: [:0]const u8, default: u64) u64 {
-    const v = std.c.getenv(name) orelse return default;
+    const v = platform.c.getenv(name) orelse return default;
     return std.fmt.parseInt(u64, std.mem.span(v), 10) catch default;
 }
 
@@ -30,9 +31,9 @@ pub fn main(init: std.process.Init) !void {
     }
     var ram: u64 = 0;
     var len: usize = 8;
-    if (std.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
+    if (platform.c.sysctlbyname("hw.memsize", &ram, &len, null, 0) != 0) return error.NoRamSize;
     const limit = env("GLM_LIMIT_GB", ram * 7 / 10 / 1_000_000_000) * 1_000_000_000;
-    const layers: ?u32 = if (std.c.getenv("GLM_LAYERS") != null) @intCast(env("GLM_LAYERS", 78)) else null;
+    const layers: ?u32 = if (platform.c.getenv("GLM_LAYERS") != null) @intCast(env("GLM_LAYERS", 78)) else null;
     const depth: u32 = @intCast(env("GLM_DEPTH", 0));
     const e = try g.engine.Engine.load(a, io, argv[1], argv[2], layers, depth > 0, @intCast(env("GLM_CONTEXT", 8192)), 1, limit);
     defer e.deinit();
@@ -53,7 +54,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 fn once(e: *g.engine.Engine, io: std.Io, t: *const tok.Tokenizer, prompt: []const u32, max: u64, depth: u32) !void {
-    const forced = std.c.getenv("GLM_FORCED") != null;
+    const forced = platform.c.getenv("GLM_FORCED") != null;
     var agree: usize = 0;
     const t0 = std.Io.Timestamp.now(io, .awake);
     try g.follow.begin(e, 0, prompt);

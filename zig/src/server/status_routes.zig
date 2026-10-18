@@ -4,6 +4,7 @@ const api = @import("engine_api");
 const json = @import("json");
 const live = @import("live.zig");
 const routes = @import("routes.zig");
+const manifest = @import("benchmark_manifest.zig");
 const Server = @import("server.zig").Server;
 const Conn = @import("http_conn.zig").Conn;
 const Value = json.Value;
@@ -11,6 +12,9 @@ const Allocator = std.mem.Allocator;
 
 /// With keys on, health names nothing about the model.
 pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
+    var status: api.Status = .{};
+    srv.engine.status(&status, &.{});
+    if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
     routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
 }
@@ -45,6 +49,14 @@ pub fn openHealth(srv: *Server, a: Allocator, reset_peak: bool) !Value {
     }) |field|
         if (field[1].len > 0) try o.put(a, field[0], .{ .string = field[1] });
     return .{ .object = o };
+}
+
+/// Facts an attached benchmark may copy. A missing or rejected manifest leaves the run unranked.
+pub fn manifestRoute(srv: *Server, conn: *Conn, a: Allocator) !void {
+    const none: std.process.Environ.Map = .init(a);
+    const env = srv.config.environ orelse &none;
+    const backend = srv.config.identity.backend;
+    routes.sendValue(conn, a, 200, try manifest.serveDocument(a, srv.io, env, srv.config.identity.version, backend, srv.config.model_dir));
 }
 
 pub fn models(srv: *Server, conn: *Conn, a: Allocator) !void {

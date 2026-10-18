@@ -15,22 +15,24 @@ pub const Stream = struct {
         return .{ .d = d, .handle = s };
     }
 
+    /// A stream its caller owns, such as a host framework's (null: the legacy default stream); never deinit it.
+    pub fn borrowed(d: *const Driver, handle: abi.Stream) Stream {
+        return .{ .d = d, .handle = handle };
+    }
+
     pub fn deinit(self: *Stream) void {
+        @import("copy_source.zig").synchronizeStream(self.d, self.handle) catch {};
         _ = self.d.api.cuStreamDestroy_v2(self.handle);
         self.* = undefined;
     }
 
     pub fn synchronize(self: Stream) Error!void {
-        try self.d.check(self.d.api.cuStreamSynchronize(self.handle), "cuStreamSynchronize");
+        try @import("copy_source.zig").synchronizeStream(self.d, self.handle);
     }
 
     /// True once every queued item has finished.
     pub fn done(self: Stream) Error!bool {
-        self.d.check(self.d.api.cuStreamQuery(self.handle), "cuStreamQuery") catch |e| switch (e) {
-            error.NotReady => return false,
-            else => return e,
-        };
-        return true;
+        return @import("copy_source.zig").streamDone(self.d, self.handle);
     }
 
     pub fn wait(self: Stream, event: Event) Error!void {

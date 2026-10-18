@@ -7,8 +7,9 @@ import { formatName } from './cli'
 import { isRepoId } from './paths'
 
 const STATE_LIMIT = 2 * 1024 * 1024
-const JSON_LIMIT = 4 * 1024 * 1024
-const DEFAULT_LIMITS = { directories: 512, entries: 12_000, models: 256, depth: 4, metadataBytes: 32 * 1024 * 1024, durationMs: 15_000 }
+// The native engine reads checkpoint metadata well above this cap; the limit only guards the scan's bounded read loop.
+const JSON_LIMIT = 64 * 1024 * 1024
+const DEFAULT_LIMITS = { directories: 512, entries: 12_000, models: 256, depth: 4, metadataBytes: 256 * 1024 * 1024, durationMs: 15_000 }
 const INVALID = 'The local model library is invalid. Preserve its settings and repair them before scanning or loading models.'
 const LOCAL_ID = /^local\/[a-f0-9]{64}$/
 const SHA = /^[a-f0-9]{40}$/
@@ -217,7 +218,9 @@ export class ModelLibrary {
     } finally { await handle.close() }
   }
 
-  private async inspect(root: Root, directory: string, names: string[], caps: EngineCapabilities, budget: ScanBudget, repo: string | null = null, revision: string | null = null, blobRoot: string | null = null): Promise<{ model: EngineLibraryModel; fingerprint: string }> {
+  private async inspect(root: Root, directory: string, rawNames: string[], caps: EngineCapabilities, budget: ScanBudget, repo: string | null = null, revision: string | null = null, blobRoot: string | null = null): Promise<{ model: EngineLibraryModel; fingerprint: string }> {
+    // AppleDouble companions (._file) hold resource forks, never checkpoint assets, so drop them before inspection.
+    const names = rawNames.filter((name) => !name.startsWith('._'))
     const model: EngineLibraryModel = { id: `local/${digest(directory)}`, repo, title: repo ?? path.basename(directory), path: directory, source: blobRoot ? 'huggingface' : 'folder', folderId: root.id, revision, modelType: null, format: null, complete: false, compatible: false, loadable: false, reason: null, weightsBytes: null, memoryFloorBytes: null, fitsMemory: null }
     let fingerprint = directory
     try {
@@ -298,7 +301,8 @@ export class ModelLibrary {
       visited.add(directory)
       if (await fs.realpath(directory) !== directory || !(await fs.lstat(directory)).isDirectory()) throw new Error('A model search folder is missing or has been redirected; select it again.')
       const entries = await this.list(directory, budget)
-      if (entries.some((entry) => entry.name === 'config.json' || /\.(safetensors|gguf|bin|pt|pth)$/i.test(entry.name))) { await collect(root, directory, entries); return }
+      const assets = entries.filter((entry) => !entry.name.startsWith('._'))
+      if (assets.some((entry) => entry.name === 'config.json' || /\.(safetensors|gguf|bin|pt|pth)$/i.test(entry.name))) { await collect(root, directory, assets); return }
       for (const entry of entries) {
         this.check(budget)
         if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name.startsWith('.') || ['blobs', 'node_modules', 'venv', '__pycache__'].includes(entry.name)) continue
