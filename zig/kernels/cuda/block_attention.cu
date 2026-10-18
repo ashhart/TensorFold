@@ -42,6 +42,7 @@ __device__ __forceinline__ uint32_t pack(float lo, float hi) {
 __device__ __forceinline__ int sw(int r, int c) { return r * C + (c ^ (r & 7)); }
 
 // One warp's running fold over a 32-key tile: scores masked by `vis(row, key)`, online softmax per row, P x V.
+// KEEP: the replay's infinities already in o stay (attn_odd::keep), whatever the rescale.
 struct Fold {
     float o[NB][4];
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
@@ -51,7 +52,7 @@ struct Fold {
         for (int i = 0; i < NB; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
     }
 
-    template <typename Vis>
+    template <bool KEEP = false, typename Vis>
     __device__ __forceinline__ void tile(const uint32_t (&qa)[K16][4], const uint4* ks, const uint4* vs, float scale,
                                          int lane, int k0, Vis vis) {
         const int g8 = lane / 4, qd = lane % 4, mt = lane / 8;
@@ -109,10 +110,10 @@ struct Fold {
         m1 = n1;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
-            o[i][0] = __fmul_rn(o[i][0], a0);
-            o[i][1] = __fmul_rn(o[i][1], a0);
-            o[i][2] = __fmul_rn(o[i][2], a1);
-            o[i][3] = __fmul_rn(o[i][3], a1);
+            o[i][0] = KEEP ? attn_odd::keep(o[i][0], a0) : __fmul_rn(o[i][0], a0);
+            o[i][1] = KEEP ? attn_odd::keep(o[i][1], a0) : __fmul_rn(o[i][1], a0);
+            o[i][2] = KEEP ? attn_odd::keep(o[i][2], a1) : __fmul_rn(o[i][2], a1);
+            o[i][3] = KEEP ? attn_odd::keep(o[i][3], a1) : __fmul_rn(o[i][3], a1);
         }
         uint32_t pa[2][4];
 #pragma unroll
@@ -219,7 +220,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
         block_keys();
         attn_odd::clean<D>(vs, blockDim.x);
         __syncthreads();
-        f.tile(qa, ks, vs, scale, lane, 0, own);
+        f.tile<true>(qa, ks, vs, scale, lane, 0, own); // its rescale (0 when it holds the max) keeps the infinities
         const auto row = [&](int c) { return vb + ((int64_t)g * rows + j * L + c) * D; };
         attn_odd::add_back<D>(f.o, row, bk, 0, L, lane, own, f.l0, f.l1, w);
     }
