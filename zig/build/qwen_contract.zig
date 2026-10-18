@@ -38,6 +38,7 @@ fn imageTests(b: *std.Build, core: *std.Build.Module, all: *std.Build.Step) void
         .target = b.graph.host,
         .imports = &.{ .{ .name = "cuda", .module = facade }, .{ .name = "core", .module = core } },
     });
+    @import("cuda_contract_deepseek.zig").inert(b, tests);
     const opts = b.addOptions();
     opts.addOption(bool, "controls", true);
     tests.addOptions("contract_options", opts);

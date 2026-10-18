@@ -1,6 +1,8 @@
 //! Host-only driver fault injection for EXL3 ownership tests.
 const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
+pub var shared_calls: usize = 0;
+pub var shared_bytes: c_int = 0;
 pub var frees: usize = 0;
 pub var allocations: usize = 0;
 pub var fail: bool = false;
@@ -14,6 +16,8 @@ pub var fail_waits: usize = 0; // how many of its waits fail before one complete
 pub var pending: bool = false; // a copy is accepted and no wait has completed it
 pub var bad_frees: usize = 0; // device frees while a copy was pending
 pub fn init() Driver {
+    shared_calls = 0;
+    shared_bytes = 0;
     copy_count = 0;
     frees = 0;
     allocations = 0;
@@ -28,6 +32,7 @@ pub fn init() Driver {
     d.api.cuMemFree_v2 = free;
     d.api.cuMemcpyHtoD_v2 = copy;
     d.api.cuStreamSynchronize = sync;
+    d.api.cuFuncSetAttribute = attribute;
     d.api.cuCtxSynchronize = context;
     d.api.cuGetErrorName = name;
     d.api.cuGetErrorString = name;
@@ -68,5 +73,21 @@ fn context() callconv(.c) abi.Result {
 }
 fn name(_: abi.Result, out: *?[*:0]const u8) callconv(.c) abi.Result {
     out.* = "mock";
+    return 0;
+}
+
+test "fake attributes: EXL3 ownership driver records shared memory setup" {
+    const std = @import("std");
+    var d = init();
+    const f: @import("module.zig").Function = .{ .d = &d, .handle = @ptrFromInt(1) };
+    try f.allowDynamicShared(48 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), shared_calls);
+    try std.testing.expectEqual(@as(c_int, 48 * 1024), shared_bytes);
+}
+
+fn attribute(_: abi.Function, attr: abi.FunctionAttribute, value: c_int) callconv(.c) abi.Result {
+    @import("std").debug.assert(attr == .max_dynamic_shared_size_bytes and value > 0);
+    shared_calls += 1;
+    shared_bytes = value;
     return 0;
 }

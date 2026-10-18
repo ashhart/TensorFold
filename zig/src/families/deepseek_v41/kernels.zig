@@ -180,6 +180,9 @@ test "DeepSeek refuses pre-cluster GPUs before loading any image" {
             };
             return abi.success;
         }
+        fn shared(_: abi.Function, _: abi.FunctionAttribute, _: c_int) callconv(.c) abi.Result {
+            return abi.error_not_ready;
+        }
         fn load(_: *abi.Module, _: ?*const anyopaque) callconv(.c) abi.Result {
             loads += 1;
             return abi.error_not_ready;
@@ -188,6 +191,7 @@ test "DeepSeek refuses pre-cluster GPUs before loading any image" {
     var driver: cuda.Driver = undefined;
     driver.api.cuDeviceGetAttribute = Fake.attribute;
     driver.api.cuModuleLoadData = Fake.load;
+    driver.api.cuFuncSetAttribute = Fake.shared;
     const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
     Fake.loads = 0;
     Fake.failed = false;
@@ -202,6 +206,8 @@ test "DeepSeek refuses pre-cluster GPUs before loading any image" {
         try std.testing.expectError(if (available) error.NotReady else error.BuiltWithoutKernels, Kernels.load(&ctx));
         try std.testing.expectEqual(before + @intFromBool(available), Fake.loads);
     }
+    const group: cuda.Function = .{ .d = &driver, .handle = @ptrFromInt(1) };
+    try std.testing.expectError(error.NotReady, group.allowDynamicShared(48 * 1024));
     Fake.failed = true;
     const before = Fake.loads;
     try std.testing.expectError(error.NotReady, Kernels.load(&ctx));

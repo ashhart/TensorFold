@@ -560,6 +560,7 @@ pub const Ops = struct {
 
     /// tfl2pf launch_segments: (address, bytes) table prefetched to L2 (bulk: cp.async.bulk.prefetch).
     pub fn l2Segments(o: Ops, table: u64, n: usize, grid: usize, threads: usize, chunk: u32, bulk: bool) !void {
+        if (threads == 0 or threads > 256) return error.Unsupported;
         var args: cuda.Args = .{};
         args.add(table);
         args.add(@as(c_int, @intCast(n)));

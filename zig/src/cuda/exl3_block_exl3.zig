@@ -156,6 +156,7 @@ pub const Functions = struct {
         };
         inline for (0..15) |i| f.dequant[i] = try experts.function(dequantSymbol(i + 2));
         f.group = try experts.function(up_sym.group);
+        try f.group.allowDynamicShared(48 * 1024);
         f.rot_in = .{ try experts.function(up_sym.rot_in_bf16), try experts.function(up_sym.rot_in_f16) };
         f.gateup_epilogue = try experts.function(up_sym.gateup_epilogue);
         f.down_epilogue = try experts.function(up_sym.down_epilogue);

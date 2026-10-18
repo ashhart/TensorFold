@@ -5,6 +5,8 @@ const engine = @import("cuda_engine.zig");
 const shape = @import("cuda_learn_shape.zig");
 const a = std.testing.allocator;
 const F = struct {
+    var shared_calls: usize = 0;
+    var shared_bytes: c_int = 0;
     var pending = false;
     var early: usize = 0;
     var allocated: usize = 0;
@@ -73,7 +75,15 @@ const F = struct {
         out.* = @ptrFromInt(1);
         return 0;
     }
+    fn attribute(_: cuda.abi.Function, attr: cuda.abi.FunctionAttribute, value: c_int) callconv(.c) cuda.abi.Result {
+        std.debug.assert(attr == .max_dynamic_shared_size_bytes and value > 0);
+        shared_calls += 1;
+        shared_bytes = value;
+        return 0;
+    }
     fn driver() cuda.Driver {
+        shared_calls = 0;
+        shared_bytes = 0;
         pending = false;
         early = 0;
         allocated = 0;
@@ -94,6 +104,7 @@ const F = struct {
         d.api.cuModuleLoadData = module;
         d.api.cuModuleUnload = unload;
         d.api.cuModuleGetFunction = function;
+        d.api.cuFuncSetAttribute = attribute;
         return d;
     }
     fn allocator() std.mem.Allocator {
@@ -186,4 +197,12 @@ pub fn pendingFailure(comptime init: anytype) !void {
         try child(init, n, true, true);
         try child(init, n, true, false);
     }
+}
+
+test "dense constructor: fake driver records shared memory setup" {
+    var d = F.driver();
+    const f: cuda.Function = .{ .d = &d, .handle = @ptrFromInt(1) };
+    try f.allowDynamicShared(48 * 1024);
+    try std.testing.expectEqual(@as(usize, 1), F.shared_calls);
+    try std.testing.expectEqual(@as(c_int, 48 * 1024), F.shared_bytes);
 }

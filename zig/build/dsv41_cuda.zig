@@ -38,6 +38,7 @@ pub fn steps(b: *std.Build) void {
     _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
     _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
     const planner = module(b, b.graph.host, "cuda_test.zig", false);
+    b.step("test-dsv41-bounds-host", "DeepSeek resource bounds and real wrapper controls without devices").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = planner, .filters = &.{"DeepSeek bounds:"} })).step);
     const binding_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("dsv41_kernels").? }));
     const common_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("cuda").? }));
     const host = b.addRunArtifact(b.addTest(.{ .root_module = module(b, b.graph.host, "cuda_test.zig", false) }));
@@ -70,6 +71,7 @@ pub fn steps(b: *std.Build) void {
     consumers.addOptions("contract_options", controls);
     consumers.addAnonymousImport("fatbin_h3", .{ .root_source_file = b.addWriteFiles().add("compile-h3", "SYNTHETIC-COMPILE-ONLY") });
     consumers.addAnonymousImport("fatbin_contract_controls", .{ .root_source_file = b.addWriteFiles().add("compile-controls", "SYNTHETIC-COMPILE-ONLY") });
+    @import("cuda_contract_deepseek.zig").inert(b, consumers);
     const consumer_object = b.addObject(.{ .name = "contract-consumers", .root_module = consumers });
     _ = consumer_object.getEmittedBin();
     b.step("compile-cuda-contract-consumers", "Emit both real resource consumers with synthetic nonexecuted images").dependOn(&consumer_object.step);

@@ -2,6 +2,8 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const abi = cuda.abi;
+pub var shared_calls: usize = 0;
+pub var shared_bytes: c_int = 0;
 pub var modules: usize = 0;
 pub var unloaded: usize = 0;
 pub var allocated: usize = 0;
@@ -19,6 +21,8 @@ pub var live: [1024]bool = @splat(false);
 pub var memory: [1024][1024]u8 = @splat(@splat(0));
 pub var pinned: ?[]align(16) u8 = null;
 pub fn init() cuda.Driver {
+    shared_calls = 0;
+    shared_bytes = 0;
     modules = 0;
     fail_event = false;
     unloaded = 0;
@@ -43,6 +47,7 @@ pub fn init() cuda.Driver {
     d.api.cuMemcpyDtoH_v2 = download;
     d.api.cuMemcpyHtoDAsync_v2 = copyAsync;
     d.api.cuMemcpyDtoDAsync_v2 = deviceCopy;
+    d.api.cuFuncSetAttribute = attribute;
     d.api.cuCtxSynchronize = ctxSync;
     d.api.cuStreamSynchronize = streamSync;
     d.api.cuMemHostAlloc = hostAlloc;
@@ -150,4 +155,19 @@ fn memset8(_: abi.DevicePtr, _: u8, _: usize) callconv(.c) abi.Result {
 fn deviceCopy(_: abi.DevicePtr, _: abi.DevicePtr, _: usize, _: abi.Stream) callconv(.c) abi.Result {
     pending = true;
     return if (fail_copy) abi.error_not_ready else 0;
+}
+
+test "fake attributes: DeepSeek ownership driver resolves shared EXL3 group setup" {
+    var d = init();
+    const m: cuda.Module = .{ .d = &d, .handle = @ptrFromInt(1) };
+    _ = try @import("dsv41_kernels").exl3.Functions.resolveBase(m);
+    try std.testing.expectEqual(@as(usize, 1), shared_calls);
+    try std.testing.expectEqual(@as(c_int, 48 * 1024), shared_bytes);
+}
+
+fn attribute(_: abi.Function, attr: abi.FunctionAttribute, value: c_int) callconv(.c) abi.Result {
+    @import("std").debug.assert(attr == .max_dynamic_shared_size_bytes and value > 0);
+    shared_calls += 1;
+    shared_bytes = value;
+    return 0;
 }

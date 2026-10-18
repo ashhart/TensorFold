@@ -3,7 +3,7 @@ const std = @import("std");
 const cuda = @import("cuda");
 const dk = @import("dsv41_kernels");
 const abi = cuda.abi;
-pub const Entry = struct { image: []const u8, name: [512]u8 = undefined, len: usize, shared: u32 = 0, threads: u32 = 0, cluster: u32 = 1, optional_shared: bool = false, available: bool = true };
+pub const Entry = struct { image: []const u8, name: [512]u8 = undefined, len: usize, shared: u32 = 0, threads: u32 = 0, cluster: u32 = 1, optional_shared: bool = false, available: bool = true, opt_in: bool = false };
 pub var entries: [2048]Entry = undefined;
 pub var count: usize = 0;
 const images = [_][]const u8{ "dsv41_exl3_experts", "dsv41_x3ld", "dsv41_x3pf", "dsv41_x3gm", "dsv41_linear", "dsv41_x3seg", "dsv41_dense3", "dsv41_attn", "dsv41_topk", "dsv41_mhc", "dsv41_mhc_pf", "dsv41_router_gemv", "dsv41_pfdense_k8", "dsv41_pfdense_k10", "dsv41_pfdense_k12", "dsv41_pfdense_k16", "dsv41_engram_gate", "dsv41_l2pace", "dsv41_l2pf", "dsv41_x3gm_plan", "dsv41_topk_keys", "dsv41_pointwise", "dsv41_kvsplit", "dsv41_glue", "dsv41_x3gm3", "dsv41_pfglue", "dsv41_router_glue", "dsv41_kv_glue", "dsv41_x3ld_epi", "dsv41_topk_b", "dsv41_lin2", "dsv41_sampling", "exl3_linear", "exl3_experts", "exl3_candidate" };
@@ -26,7 +26,11 @@ fn attribute(out: *c_int, attr: abi.FunctionAttribute, _: abi.Function) callconv
     return 0;
 }
 fn setAttribute(handle: abi.Function, attr: abi.FunctionAttribute, value: c_int) callconv(.c) abi.Result {
-    if (attr == .max_dynamic_shared_size_bytes) entries[@intFromPtr(handle.?) - 1].shared = @max(entries[@intFromPtr(handle.?) - 1].shared, @as(u32, @intCast(value)));
+    if (attr == .max_dynamic_shared_size_bytes) {
+        const e = &entries[@intFromPtr(handle.?) - 1];
+        e.shared = @max(e.shared, @as(u32, @intCast(value)));
+        e.opt_in = true;
+    }
     return 0;
 }
 fn occupancy(out: *c_int, handle: abi.Function, threads: c_int, shared: usize) callconv(.c) abi.Result {
