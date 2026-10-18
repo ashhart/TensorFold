@@ -68,6 +68,12 @@ fn launchOf(a: std.mem.Allocator, device: mtl.Device, d: limits.MetalLaunch) !La
     } else if (std.mem.startsWith(u8, d.name, "moe_route ")) {
         const r = @import("metal_route.zig");
         text = try tf.moe_route.source(a, r.shapeOf(r.named(d.name)));
+    } else if (std.mem.startsWith(u8, d.name, "qwen27 attention ")) {
+        const at = @import("metal_q27_attn.zig");
+        const h = at.named(d.name);
+        const pre = try at.source(a, h, false, true, null);
+        const here = if (device.tensorUnits()) try at.source(a, h, true, false, null) else pre;
+        return .{ .decl = d, .function = fun, .here = here, .pre_m5 = pre };
     } else if (std.mem.startsWith(u8, d.name, "qwen27 moe ")) {
         text = try tf.qwen27.moe.source(a, @import("metal_q27_moe.zig").config());
     } else if (std.mem.startsWith(u8, d.name, "qwen27 ")) {

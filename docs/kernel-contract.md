@@ -133,6 +133,16 @@ prompt tiles and their decode twin (4, 6 and 8 bits; the twin bit-equal to the t
 tile_qmm's pipelines and GLM-5.3-Flash's hc_expand_10.
 CUDA: the RMS norm rows (16-byte form and the fp32-out tree), the bf16 residual's norm tails (MLX's rounded rows and
 the once-rounded ones, each checked on its residual and its output, with four controls each dropping a rounding point), Nemotron's router logits (and their 128-row tiles,
+qwen27's attention at both head counts it serves (24 query heads over 4, the 35B-A3B's 16 over 2): a round's rows
+through the engine's own plan and launcher against float64 attention (the tail and merge before the M5; prefix, tail
+and merge on its tensor units), prompt rows through the prompt kernel on tensor units, and attention_io's packing and
+cache moves checked bit for bit (keep also a second time on the caches the first left). A plan check on every chip
+shows the decode shapes plan prefix_1 to _4 for chains and _2 to _4 for trees (a tree packs 2 tiles at least), and a
+tree over two tail chunks; it reads the engine's plans, not an M5's launches. Gate 4's inputs separate the score
+sums only; the normalizer and P V are replayed in each accumulator but sit near exact there. Gate 2's guards cover
+the test's buffers (inputs, caches, output), not the engine's own scratch and plan buffers. Its controls: a row
+seeing one key past its own, a merge dropping a round's later tail chunks, the prompt kernel losing its bounded last
+step (tensor units), and an append one row late.
 bit-equal to them) and top-k, the latent top-k's decode form (bit-equal to `tf_super_topk`), the latent combine and
 shared add over bf16 share sums (bit-equal to `tf_super_combine` and `tf_super_moe_out` over the fp32 shares), the
 Mamba scan of a verify window (its host twin's bytes), qmm_group's cluster tile, lane_gemv and its split-K form (both
