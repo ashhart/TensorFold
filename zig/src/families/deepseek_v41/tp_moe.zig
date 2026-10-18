@@ -81,7 +81,7 @@ pub const Context = struct {
         if (cb.failure() != null) return error.TensorParallelGpuFailure;
         const gpu = cb.gpuSeconds();
         c.gpu_seconds += gpu;
-        if (c.trace) std.debug.print("{{\"tp_gpu_rank\":{d},\"layer\":{d},\"phase\":\"{s}\",\"encode_seconds\":{d},\"end_seconds\":{d},\"commit_seconds\":{d},\"wait_seconds\":{d},\"gpu_seconds\":{d}}}\n", .{ c.rank, layer, phase, if (encode_started == 0) 0 else began - encode_started, ended - began, committed - ended, waited - committed, gpu });
+        if (c.trace) std.debug.print("{{\"tp_gpu_rank\":{d},\"layer\":{d},\"phase\":\"{s}\",\"encode_seconds\":{d},\"end_seconds\":{d},\"commit_seconds\":{d},\"wait_seconds\":{d},\"gpu_seconds\":{d},\"scheduled_after_commit_seconds\":{d},\"returned_after_gpu_seconds\":{d}}}\n", .{ c.rank, layer, phase, if (encode_started == 0) 0 else began - encode_started, ended - began, committed - ended, waited - committed, gpu, cb.gpuStart() - committed, waited - cb.gpuEnd() });
     }
 
     fn gather(c: *Context, layer: usize, phase: usize, ws: *work.Workspace, field: work.Field, shared: work.Field, rows: usize, n: usize) !void {
