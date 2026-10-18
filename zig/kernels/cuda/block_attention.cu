@@ -41,8 +41,7 @@ __device__ __forceinline__ uint32_t pack(float lo, float hi) {
 
 __device__ __forceinline__ int sw(int r, int c) { return r * C + (c ^ (r & 7)); }
 
-// One warp's running fold over a 32-key tile: scores masked by `vis(row, key)`, online softmax per row, P x V.
-// KEEP: the replay's infinities already in o stay (attn_odd::keep), whatever the rescale.
+// One warp's fold over a 32-key tile: scores masked by `vis(row, key)`, online softmax, P x V (KEEP: o's inf stays).
 struct Fold {
     float o[NB][4];
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
