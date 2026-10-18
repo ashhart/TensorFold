@@ -132,7 +132,7 @@ pub const Link = struct {
     }
 
     pub fn send(l: Link, bytes: []const u8, until: u64) !void {
-        if (builtin.os.tag != .linux) return error.RankPlatform;
+        if (builtin.os.tag == .windows) return error.RankPlatform; // no MSG.NOSIGNAL or DONTWAIT in Winsock
         var at: usize = 0;
         while (at < bytes.len) {
             if (now() >= until) return error.RankTimeout;
@@ -150,7 +150,7 @@ pub const Link = struct {
     }
 
     pub fn receive(l: Link, bytes: []u8, until: ?u64) !void {
-        if (builtin.os.tag != .linux) return error.RankPlatform;
+        if (builtin.os.tag == .windows) return error.RankPlatform;
         var at: usize = 0;
         while (at < bytes.len) {
             if (until) |end| if (now() >= end) return error.RankTimeout;
@@ -182,7 +182,7 @@ pub const Link = struct {
 
     /// A non-consuming EOF check while a GPU collective progresses. A future control frame stays queued.
     pub fn checkPeer(l: Link) !void {
-        if (builtin.os.tag != .linux) return error.RankPlatform;
+        if (builtin.os.tag == .windows) return error.RankPlatform;
         var byte: u8 = 0;
         const rc = std.c.recv(l.fd, &byte, 1, p.MSG.PEEK | p.MSG.DONTWAIT);
         if (rc == 0) return error.RankDisconnected;
