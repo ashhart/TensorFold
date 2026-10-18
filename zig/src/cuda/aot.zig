@@ -54,9 +54,9 @@ pub fn parseSpecs(gpa: std.mem.Allocator, text: []const u8) !std.json.Parsed(Spe
     return std.json.parseFromSlice(SpecSet, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
 }
 
-/// Whether variant `k` can serve these arguments and constexprs: `Set.find` takes an exact variant first, else this.
+/// Preferred general-pass match for selection and capture checks, excluding runtime-one fallback.
 pub fn specMatches(k: Spec, args: []const Arg, consts: []const Const) bool {
-    return matches(k, args, consts, .general);
+    return foldsOnes(k, args) and matches(k, args, consts, .general);
 }
 
 /// One argument of a launch, by the kernel's parameter name.
@@ -150,7 +150,7 @@ pub const Set = struct {
         for (self.variants) |*v| {
             if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
             if (matches(v.spec, args, consts, .general)) {
-                if (takesRuntimeOne(v.spec, args)) std.log.info("aot: {s} runs variant {s}, its 1 read at runtime (the capture holds no folded variant of it)", .{ function, v.spec.hash });
+                if (takesRuntimeOne(v.spec, args)) std.log.info("aot: {s} runs variant {s}, its 1 read at runtime (the capture holds no matching folded variant of it)", .{ function, v.spec.hash });
                 return self.hit(function, args, consts, v);
             }
         }
@@ -297,7 +297,7 @@ fn lookup(args: []const Arg, name: []const u8) ?Arg {
     return null;
 }
 
-/// Whether the variant specialized every 1 the launch passes: each such int folded into a constexpr of value 1.
+/// Whether each specializable 1 was folded; nospec parameters retain the original general-pass policy.
 fn foldsOnes(k: KernelJson, args: []const Arg) bool {
     for (args) |a| switch (a.value) {
         .i32 => |x| {
@@ -305,7 +305,10 @@ fn foldsOnes(k: KernelJson, args: []const Arg) bool {
             const param = for (k.params) |p| {
                 if (std.mem.eql(u8, p.name, a.name)) break p;
             } else null;
-            if (param != null) return false;
+            if (param) |p| {
+                if (p.nospec) continue;
+                return false;
+            }
             const got = k.consts.map.get(a.name) orelse return false;
             if (got.int == null or got.int.? != 1) return false;
         },
@@ -562,4 +565,31 @@ test "a folded variant that cannot serve leaves the launch to the runtime varian
     defer freeTestSet(gpa, &set);
     const v = try set.find("k", &.{ ptr("P", "*i8", 0x1008), int("R", 1) }, &.{});
     try std.testing.expectEqualStrings("a", v.spec.hash);
+}
+
+test "aot fallback: nospec ones preserve the original general pass in either candidate order" {
+    const t = std.testing;
+    var set = try testSet(t.allocator,
+        \\{"kernels":[{"fn":"k","hash":"runtime","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":false,"nospec":false},{"name":"R","type":"i32","div16":false,"nospec":true},{"name":"S","type":"i32","div16":false,"nospec":false}],"consts":{}},
+        \\ {"fn":"k","hash":"folded","name":"k","num_warps":4,
+        \\ "params":[{"name":"P","type":"*i8","div16":false,"nospec":false},{"name":"R","type":"i32","div16":false,"nospec":true}],"consts":{"S":{"int":1}}}]}
+    );
+    defer freeTestSet(t.allocator, &set);
+    for (0..2) |order| {
+        if (order == 1) std.mem.swap(@TypeOf(set.variants[0]), &set.variants[0], &set.variants[1]);
+        const args = [_]Arg{ ptr("P", "*i8", 0x1000), int("R", 1), int("S", 1) };
+        const v = try set.find("k", &args, &.{});
+        try t.expectEqualStrings("folded", v.spec.hash);
+        try t.expectEqualStrings("runtime", (try set.find("k", &.{ ptr("P", "*i8", 0x1000), int("R", 1), int("S", 2) }, &.{})).spec.hash);
+    }
+    const runtime = set.variants[1].spec;
+    const args = [_]Arg{ ptr("P", "*i8", 0x1000), int("R", 1), int("S", 1) };
+    try t.expect(matches(runtime, &args, &.{}, .general));
+    try t.expect(!matches(runtime, &args, &.{ci("BLOCK", 256)}, .general));
+    try t.expect(!matches(runtime, &.{ ptr("P", "*f32", 0x1000), int("R", 1), int("S", 1) }, &.{}, .general));
+    try t.expect(!matches(runtime, &.{ ptr("P", "*i8", 0x1000), float("R", 1), int("S", 1) }, &.{}, .general));
+    try t.expect(!matches(runtime, args[0..2], &.{}, .general));
+    runtime.params[0].div16 = true;
+    try t.expect(!matches(runtime, &.{ ptr("P", "*i8", 0x1008), int("R", 1), int("S", 1) }, &.{}, .general));
 }
