@@ -117,11 +117,12 @@ extern "C" __global__ void __launch_bounds__(128) tf_route_logits(const __nv_bfl
     route_logits<4, 2, 128>(X, x_ld, W, OUT, M, D, E);
 }
 
-// route_logits over 64 rows a block (from 64 rows: the router rows are read once per 64 input rows), the same sums.
-extern "C" __global__ void __launch_bounds__(128) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
+// route_logits over 128 rows and 64 experts a block, eight warps (from 64 rows: each router row read once per 128
+// input rows), the same sums.
+extern "C" __global__ void __launch_bounds__(256) tf_route_logits_wide(const __nv_bfloat16* __restrict__ X, int x_ld,
                                                                        const __nv_bfloat16* __restrict__ W, float* __restrict__ OUT,
                                                                        int M, int D, int E) {
-    route_logits<4, 2, 128, 4>(X, x_ld, W, OUT, M, D, E);
+    route_logits<8, 2, 64, 8>(X, x_ld, W, OUT, M, D, E);
 }
 
 // route_logits with three stages of 256 in flight (up to 16 rows, where the router rows' reads set its time).
