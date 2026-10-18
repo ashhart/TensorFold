@@ -160,7 +160,7 @@ pub fn request(a: Allocator, io: std.Io, port: u16, method: []const u8, path: []
     const addr: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
     const stream = try addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    const head = try std.fmt.allocPrint(a, "{s} {s} HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ method, path, body.len, body });
+    const head = try std.fmt.allocPrint(a, "{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ method, path, body.len, body });
     var wbuf: [4096]u8 = undefined;
     var w = std.Io.net.Stream.Writer.init(stream, io, &wbuf);
     try w.interface.writeAll(head);

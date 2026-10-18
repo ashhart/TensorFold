@@ -18,7 +18,7 @@ pub fn health(srv: *Server, conn: *Conn, a: Allocator) !void {
     srv.engine.status(&status, &.{});
     if (!status.healthy) return conn.sendJson(503, "{\"status\": \"unavailable\"}");
     if (srv.keys) |k| if (k.enabled()) return conn.sendJson(200, "{\"status\": \"ok\"}");
-    routes.sendValue(conn, a, 200, try openHealth(srv, a, std.mem.indexOf(u8, conn.path, "reset_peak=1") != null));
+    routes.sendValue(conn, a, 200, try openHealth(srv, a, false));
 }
 
 /// The open health body: model, lanes, memory and live counts, then whichever of release, backend and GPU it knows.

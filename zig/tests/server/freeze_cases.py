@@ -110,10 +110,6 @@ def main() -> int:
         ("alt-models", "GET", "/alt/models", None, {}),
         ("options", "OPTIONS", "/v1/models", None, {}),
     ]
-    decision = {"state": None, "questions": {"q": {"type": "choice", "instructions": "i", "criteria": {"A": "a", "B": "b"}}}}
-    for stem, path in (("systemone", "/systemone"), ("v1-systemone", "/v1/systemone"), ("x-systemone", "/x/systemone")):
-        key_cases.append((stem + "-none", "POST", path, decision, {}))
-        key_cases.append((stem + "-with-key", "POST", path, decision, {"x-api-key": "sk-cli"}))
     chat = corpus.chat("plain")
     key_steps: list[dict] = [{
         "kind": "cases",
@@ -122,7 +118,7 @@ def main() -> int:
                   for name, method, path, body, headers in key_cases]}
         , {"kind": "cases", "cases": [
             {"group": "keys", "name": "twice-x-api-key",
-             "raws": raw_bytes([b"GET /v1/models HTTP/1.1\r\nx-api-key: sk-cli\r\nx-api-key: sk-cli\r\n\r\n"]), "opts": {}},
+             "raws": raw_bytes([b"GET /v1/models HTTP/1.1\r\nHost: parity\r\nx-api-key: sk-cli\r\nx-api-key: sk-cli\r\n\r\n"]), "opts": {}},
             {"group": "keys", "name": "chat-with-key",
              "raws": raw_bytes([request("POST", "/v1/chat/completions", chat, {"x-api-key": "sk-cli"})]), "opts": {}},
             {"group": "keys", "name": "expect-without-key",

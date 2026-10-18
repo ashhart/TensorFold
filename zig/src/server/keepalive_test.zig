@@ -14,7 +14,7 @@ fn leave(a: std.mem.Allocator, io: std.Io, port: u16, body: []const u8, slow: *d
     const addr: std.Io.net.IpAddress = .{ .ip4 = .loopback(port) };
     const stream = try addr.connect(io, .{ .mode = .stream });
     defer stream.close(io);
-    const head = try std.fmt.allocPrint(a, "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
+    const head = try std.fmt.allocPrint(a, "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {d}\r\n\r\n{s}", .{ body.len, body });
     var wbuf: [4096]u8 = undefined;
     var w = std.Io.net.Stream.Writer.init(stream, io, &wbuf);
     try w.interface.writeAll(head);

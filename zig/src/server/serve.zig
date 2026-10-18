@@ -146,6 +146,7 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         return 1;
     };
     const config: server_mod.Config = .{
+        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .served_name = s.served,
         .model_dir = s.model_dir,
         .model_ids = ids.items,

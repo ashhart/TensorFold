@@ -15,13 +15,49 @@ Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KE
 `#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
 The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
 
-Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. With keys configured, the native server requires a key on every route by default. Its public exceptions are GET `/`, `/health`, `/slide` and the eight embedded `/slide/` scripts; `--metrics-open` also opens GET `/metrics` and `/v1/metrics`. Other methods and unknown assets require a key. This includes every `/systemone` inference alias and future private routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. Public health is read-only, including when a reset query is supplied. With no keys, its health details remain available; a non-loopback bind prints a warning.
 
 The native server raises its soft open-file limit before listening when the platform permits it. If `accept` runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
 
 Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests. Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots, underscores or hyphens; choose non-secret labels.
 
 In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH` forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key. The native binary has neither command. Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+
+
+## Browser request headers
+
+The server accepts origin-form targets beginning with `/`, with query text and trailing slashes interpreted by the
+shared route helper. Absolute URLs, fragments and control bytes are refused before routing. Routes are case-sensitive
+and percent escapes are not decoded into aliases. Malformed or folded header fields are refused and closed.
+
+On a loopback bind, the native server accepts a `Host` naming `localhost` or a loopback IP, with any valid port.
+It checks the actual bound socket, including a hostname that resolved to loopback. Missing, duplicate, malformed or
+foreign hosts receive HTTP 403 before authentication, `100 Continue` or routing. Repeat `--allowed-host NAME` to add
+trusted hostnames or bracketed IP literals. A name has no scheme, path or port; it admits that name at any port.
+The flag changes header admission, not the listening address. A non-loopback bind skips this host restriction.
+
+On every bind, an `Origin` must match the request's `Host` and the native server's HTTP scheme. Hostname case,
+IPv6 spellings and default ports are normalized. The origin must be a single `http://HOST[:PORT]` or
+`https://HOST[:PORT]` value with no path or userinfo. `null`, malformed values and duplicate origins are refused.
+Repeat `--allowed-origin ORIGIN` for trusted exceptions, including an HTTPS origin used through a TLS proxy.
+Host and origin exceptions are independent; allowing an origin does not admit a foreign loopback Host.
+Forwarded headers do not select the scheme or bypass either check.
+
+Each 403 names the refused header and its corresponding exception flag. Clients without an `Origin`, including curl,
+SDKs and the app, keep their existing requests with a valid Host. Content-Type is not required by these checks, so
+`curl -d` requests keep working. The server adds no CORS headers; these flags do not enable cross-origin browser reads.
+The header checks protect browser access and do not replace API keys. Trailing spaces or tabs in Host or Origin values
+are refused; clients should omit that outer whitespace.
+
+Host and Origin exception lists each accept at most 64 entries. DNS names use nonempty ASCII labels without a trailing
+dot; IPv6 literals are bracketed without zone identifiers. Every HTTP request needs exactly one valid Host, including
+HTTP/1.0; hostless HTTP/0.9 is refused and closed. An external bind skips only loopback-name admission.
+
+For a trusted proxy name and web origin, for example:
+
+```sh
+tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin https://inference.example
+```
 
 | Route | Behavior |
 | --- | --- |
@@ -510,8 +546,8 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 `live.connections` counts running and waiting requests, and `live.waiting` the waiting ones.
 `decode_tokens_per_second` is the tokens decoded in the last 2 s, divided by 2. `prefill_tokens_per_second` is the
 last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
-rounded to one decimal. `?reset_peak=1` starts a new CUDA peak at the current `active`; `/memory`'s `device.peak_bytes`
-is the same peak. With keys configured, `reset_peak` is ignored.
+rounded to one decimal. Public health never resets the peak, with or without keys. Reset queries on `/health` and `/`
+are ignored. The separate `/memory` route also reports memory without resetting it and requires a key when keys are configured.
 
 The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use

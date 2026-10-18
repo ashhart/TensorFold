@@ -6,6 +6,7 @@ const json = @import("json");
 const errors = @import("errors.zig");
 const fields = @import("fields.zig");
 const auth = @import("auth.zig");
+const request_guard = @import("request_guard.zig");
 const metrics = @import("metrics.zig");
 const model_text = @import("model_text.zig");
 const reply_text = @import("reply_text.zig");
@@ -32,6 +33,7 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 pub const Identity = @import("identity.zig").Identity;
 
 pub const Config = struct {
+    browser: request_guard.Policy = .{},
     sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
@@ -282,10 +284,11 @@ pub const Server = struct {
 
     /// Accepts connections until ``stop`` is set, each on its own thread.
     pub fn serve(srv: *Server, listener: listener_mod.Listener, stop: *const std.atomic.Value(bool)) void {
+        const loopback_bind = if (listener.boundAddress()) |a| auth.loopbackAddress(a) else true;
         while (listener.accept(stop)) |c| {
             // counted before its thread runs, so a zero count once this loop ends means no connection is left
             _ = srv.open_connections.fetchAdd(1, .acq_rel);
-            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c }) catch {
+            const t = std.Thread.spawn(.{ .stack_size = 8 << 20 }, connection, .{ srv, c, loopback_bind }) catch {
                 _ = srv.open_connections.fetchSub(1, .acq_rel);
                 _ = platform.posix.system.close(c.fd);
                 continue;
@@ -294,7 +297,7 @@ pub const Server = struct {
         }
     }
 
-    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted) void {
+    fn connection(srv: *Server, accepted: listener_mod.Listener.Accepted, loopback_bind: bool) void {
         defer _ = srv.open_connections.fetchSub(1, .acq_rel);
         defer _ = platform.posix.system.close(accepted.fd);
         var peer_buf: [64]u8 = undefined;
@@ -302,6 +305,8 @@ pub const Server = struct {
         var conn = http_conn.Conn.init(srv.gpa, accepted.fd, peer) catch return;
         defer conn.deinit();
         conn.timeouts = srv.config.timeouts;
+        var browser = srv.config.browser;
+        browser.loopback_bind = loopback_bind;
         conn.auth_enabled = srv.keys != null and srv.keys.?.enabled();
         if (conn.auth_enabled) conn.hook = .{ .ctx = srv, .call = countReply };
         var arena: std.heap.ArenaAllocator = .init(srv.gpa);
@@ -315,6 +320,7 @@ pub const Server = struct {
                 .handled => if (conn.close) break else continue,
                 .ready => {},
             }
+            if (!request_guard.allow(&conn, browser, a)) break;
             if (!srv.authenticate(&conn, a)) break;
             if (conn.header("Expect")) |expect| if (std.ascii.eqlIgnoreCase(expect, "100-continue") and std.mem.order(u8, conn.version, "HTTP/1.1") != .lt) conn.sendContinue();
             routes.dispatch(srv, &conn, a);

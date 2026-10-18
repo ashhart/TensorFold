@@ -32,11 +32,14 @@ pub const Listener = struct {
         return .{ .fd = fd };
     }
 
-    pub fn port(l: Listener) u16 {
+    pub fn boundAddress(l: Listener) ?net.IpAddress {
         var storage: Threaded.PosixAddress = undefined;
         var len: posix.socklen_t = @sizeOf(Threaded.PosixAddress);
-        if (posix.errno(posix.system.getsockname(l.fd, &storage.any, &len)) != .SUCCESS) return 0;
-        return Threaded.addressFromPosix(&storage).getPort();
+        if (posix.errno(posix.system.getsockname(l.fd, &storage.any, &len)) != .SUCCESS) return null;
+        return Threaded.addressFromPosix(&storage);
+    }
+    pub fn port(l: Listener) u16 {
+        return if (l.boundAddress()) |a| a.getPort() else 0;
     }
 
     pub const Accepted = struct { fd: posix.socket_t, peer: net.IpAddress };
