@@ -134,8 +134,7 @@ pub const Window = struct {
         return &x[(self.cacheRow(w.base, key) * self.f.hk + kh) * self.f.d + e];
     }
 
-    /// NaN in a query; +inf and -inf in values; both in one column; NaN in a key; +inf in a window's first value;
-    /// +inf at float64 weights of 0 and below float32's least.
+    /// NaN query; +inf and -inf values, both in one column; NaN key; +inf at a window's first key and at tiny weights.
     fn plant(self: *Window) void {
         const n = self.shape.rows;
         const nan = c.toBf16(std.math.nan(f32));
@@ -160,8 +159,7 @@ pub const Window = struct {
         if (!self.f.prompt and n > 7) self.split(if (self.f.win == 0) 4 else n - 1, if (hk > 2) 2 else 0, 21);
     }
 
-    /// Row r, key head kh: key p all 8, the window's other keys all -8 with +inf at e; kh's first head queries all 2
-    /// (weights below float32's least: inf), its second all 8 (float64 weights of 0: NaN). Tiles split the keys.
+    /// Row r, key head kh: key p all 8, its other keys -8 with +inf at e; queries 2 (inf) and 8 (weight 0: NaN).
     fn split(self: *Window, r: usize, kh: usize, e: usize) void {
         const f = self.f;
         const p = self.at(r).p;
