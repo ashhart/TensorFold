@@ -243,6 +243,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
+    @import("release_version.zig").tests(b, step);
     const flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/build/cuda_release_flags.zig"),
         .target = b.graph.host,
