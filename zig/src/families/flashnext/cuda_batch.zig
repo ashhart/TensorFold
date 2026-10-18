@@ -109,6 +109,8 @@ pub fn Pass(comptime Tri: type) type {
         pos0: usize = 0,
         /// The MoE write-back the next layer (or the head) applies first, and the layer it came from.
         pending: ?usize = null,
+        /// K slices the last out projection wrote to part (1 when the prompt tile folded them).
+        out_slices: usize = out_sk,
         prepared: bool = false,
         /// The pending write-back's branch sits in fp32 in moe_f32 (something added to it, or it is kept).
         pending_f32: bool = false,
@@ -116,14 +118,18 @@ pub fn Pass(comptime Tri: type) type {
         // ---- launches ----------------------------------------------------------------------------------------
 
         /// qmm.cu's lane tile over m rows: out bf16 [m, n] (sk 1) or the unreduced fp32 slices [sk, m, n] in part.
-        pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !void {
+        /// Returns the K slices written to part: 1 when the prompt tile folded them (their sum in slice order).
+        pub fn lane(self: *Self, x: u64, xs: u64, w: Q4, out: u64, part: u64, m: usize, sk: usize) !usize {
             if (w.native) |native| {
-                if (sk == 1) return self.k.native_lane.matmul(self.stream, x, w.k, m, native, out, self.s.native_part);
+                if (sk == 1) {
+                    try self.k.native_lane.matmul(self.stream, x, w.k, m, native, out, self.s.native_part);
+                    return 1;
+                }
                 // Legacy callers consume SK slices; the native lane has already reduced its own shape-driven slices.
                 try self.k.native_lane.matmulF32(self.stream, x, w.k, m, native, part, self.s.native_part);
                 const bytes = m * w.n * 4;
                 if (sk > 1) try self.stream.d.check(self.stream.d.api.cuMemsetD8Async(part + bytes, 0, bytes * (sk - 1), self.stream.handle), "cuMemsetD8Async");
-                return;
+                return sk;
             }
             // from 64 rows the prompt tile (flashnext_fact.cu), bit for bit the 16-row lane tile
             const big = m >= 64;
@@ -143,10 +149,13 @@ pub fn Pass(comptime Tri: type) type {
             a.add(out);
             a.add(part);
             for ([_]usize{ m, w.n, k, sk, npad, k, sweep }) |v| a.add(cint(v));
-            const f = if (big) self.k.fact else self.k.lane;
+            const fold = big and sk > 1;
+            const f = if (fold) self.k.fact_fold else if (big) self.k.fact else self.k.lane;
             const block: u32 = if (big) 256 else 128;
             const shared: u32 = if (big) parts.fact_smem else qmm_smem;
-            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(sk) }, .block = .{ .x = block }, .shared = shared }, self.stream, &a);
+            const z: usize = if (fold) 1 else sk;
+            try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(rows_t * cols_t), .z = @intCast(z) }, .block = .{ .x = block }, .shared = shared }, self.stream, &a);
+            return z;
         }
 
         pub fn sumSlices(self: *Self, part: u64, out: u64, bf16: bool, n: usize, sk: usize) !void {
@@ -301,9 +310,9 @@ pub fn Pass(comptime Tri: type) type {
             const n = self.rows;
             // the rows' n-gram embeddings (host gathers from the mapped table) are already uploaded by `stage`
             _ = ids;
-            try self.lane(s.ple_emb, s.ple_xs, lw.key, s.ple_keys, s.dummy, n, 1);
-            try self.lane(s.ple_emb, s.ple_xs, lw.val, s.dummy, s.ple_part, n, 4);
-            try self.sumSlices(s.ple_part, s.ple_vals, true, n * dims, 4);
+            _ = try self.lane(s.ple_emb, s.ple_xs, lw.key, s.ple_keys, s.dummy, n, 1);
+            const vsk = try self.lane(s.ple_emb, s.ple_xs, lw.val, s.dummy, s.ple_part, n, 4);
+            try self.sumSlices(s.ple_part, s.ple_vals, true, n * dims, vsk);
             try self.tri.pleGate(s.ple_keys, s.ple_vals, s.h, lw.nk.ptr, lw.nq.ptr, s.ple_gated, s.ple_pss, eps, n, dims, streams);
             if (self.lanes.len == 0) {
                 try self.tri.pleConv(s.ple_gated, s.ple_pss, lw.nc.ptr, self.seq.tail.ptr, lw.ple_cw.ptr, s.h, s.h, s.ple_nrow, eps, n, dims, streams, 4, 3);
@@ -321,7 +330,7 @@ pub fn Pass(comptime Tri: type) type {
         pub fn gdnBlock(self: *Self, lw: *const Layer, li: usize, keep: LayerKeep) !void {
             const s = self.s;
             const n = self.rows;
-            try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
+            _ = try self.lane(s.mixed, s.xsm, lw.proj, s.proj, s.dummy, n, 1);
             try self.copy(keep.proj, s.proj, n * gdn.proj_width * 2);
             try self.copy(keep.hist, self.seq.conv[li].ptr, (gdn.taps - 1) * gdn.conv_dim * 2);
             // every row's conv, norms and gates, the recurrence, then the gated norm: the one-block chain's bits
@@ -349,7 +358,7 @@ pub fn Pass(comptime Tri: type) type {
             } else for (self.lanes, 0..) |l, r| {
                 try self.shiftWindow(l.seq.conv[li].ptr, s.proj + r * gdn.proj_width * 2, gdn.proj_width, 1, gdn.taps - 1, gdn.conv_dim);
             }
-            try self.lane(s.gout, s.gxs, lw.out, s.dummy, s.part, n, out_sk);
+            self.out_slices = try self.lane(s.gout, s.gxs, lw.out, s.dummy, s.part, n, out_sk);
         }
 
         /// fn_gdn_front over `rows` projection rows after the conv window `conv`.
@@ -397,7 +406,7 @@ pub fn Pass(comptime Tri: type) type {
             const s = self.s;
             const n = self.rows;
             const pa = s.proj;
-            try self.lane(s.mixed, s.xsm, lw.proj, pa, s.dummy, n, 1);
+            _ = try self.lane(s.mixed, s.xsm, lw.proj, pa, s.dummy, n, 1);
             const qw2 = q_heads * 2 * head_dim;
             const kw = kv_heads * head_dim;
             try self.copyCols(pa, proj_n, keep.pq, qw2, qw2, n);
@@ -419,7 +428,7 @@ pub fn Pass(comptime Tri: type) type {
             } else try self.attnRows(lw, ai, pa, n, .{ .pos = s.pos, .q = s.q, .iq = s.iq, .ao = s.ao });
             const gated = if (keep.gated != 0) keep.gated else s.gated;
             try self.tri.attnGate(s.ao, pa, gated, s.gxs_attn, n, proj_n, q_heads, head_dim);
-            try self.lane(gated, s.gxs_attn, lw.out, s.dummy, s.part, n, out_sk);
+            self.out_slices = try self.lane(gated, s.gxs_attn, lw.out, s.dummy, s.part, n, out_sk);
         }
 
         /// Where attnRows reads its rows' positions (16 bytes apart) and writes queries, indexer queries and outputs.
@@ -602,8 +611,8 @@ pub fn Pass(comptime Tri: type) type {
                 } else {
                     try self.attnBlockKeep(lw, wt.attnIndex(layer), keep);
                 }
-                if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, out_sk);
-                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, out_sk);
+                if (keep.mix_branch != 0) try self.sumSlices(s.part, keep.mix_branch, true, n * dims, self.out_slices);
+                try self.tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", n * dims, n, dims, streams, 4, 1, 1, self.out_slices);
                 try self.readoutKeep(lw.mlp_hc, 0, n, keep.mlp_hc);
                 try self.moeBlockKeep(lw, keep);
                 try self.moeAdds(layer, keep);
@@ -620,10 +629,13 @@ pub fn Pass(comptime Tri: type) type {
         /// Column tiles keep their own reduction order; each gathered row restores global vocabulary order.
         pub fn projectHead(self: *Self, out: u64, n: usize) !void {
             const s = self.s;
-            if (self.m.head.n == vocab) return self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+            if (self.m.head.n == vocab) {
+                _ = try self.lane(s.mixed, s.xsm, self.m.head, out, s.dummy, n, 1);
+                return;
+            }
             if (self.m.head.n != vocab / 2 or n > s.cap) return error.UnexpectedTensor;
             const c = self.m.collective orelse return error.TensorParallelUnavailable;
-            try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
+            _ = try self.lane(s.mixed, s.xsm, self.m.head, s.head_local, s.dummy, n, 1);
             for (0..n) |r| try c.gather(self.stream, s.head_local + r * vocab, out + r * vocab * 2, vocab / 2);
         }
 

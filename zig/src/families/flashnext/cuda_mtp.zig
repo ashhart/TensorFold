@@ -225,7 +225,7 @@ pub const Head = struct {
             const view_: cuda.qlinear.proposal.Head = .{ .weight = .{ .bf16 = weight }, .role = .decode, .vocab = vocab, .logical = @intCast(h.ids.len), .stride = @intCast(h.ids.len), .ids = h.ids, .generation = h.artifact.fingerprint };
             return view_.project(.{ .lane = &pass.k.native_lane }, pass.stream, .{ .x = input, .sums = sums, .part = pass.s.native_part }, out, rows);
         }
-        return pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
+        _ = try pass.lane(input, sums, h.draft, out, pass.s.dummy, rows, 1);
     }
 
     /// fn_row_best over `rows` rows of `v` scores `ld` apart: [rows, 4] fp32 at `out` (best, log-sum-exp, id bits).

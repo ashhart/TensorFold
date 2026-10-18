@@ -143,18 +143,18 @@ pub fn Ops(comptime Tri: type) type {
                 }
                 try @import("cuda_media.zig").injectNext(d.media, o.stream(), s.ple_keys, d.len, m);
                 try tri.rmsnorm(s.ple_keys, h.norm_e.ptr, s.mixed, s.xsm, eps, wide, m, dims, dims);
-                try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
-                try p.sumSlices(s.part, s.branch, true, m * dims, fc_sk);
+                const esk = try p.lane(s.mixed, s.xsm, h.fc_e, s.dummy, s.part, m, fc_sk);
+                try p.sumSlices(s.part, s.branch, true, m * dims, esk);
                 // the hidden branch: the four streams normed as one row, fc_hidden on each stream
                 try tri.rmsnorm(rows + at * wide * 2, h.norm_h.ptr, s.norm, s.gq, eps, wide, m, wide, wide);
-                try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * m, fc_sk);
-                try p.sumSlices(s.part, s.ple_gated, true, streams * m * dims, fc_sk);
+                const hsk = try p.lane(s.norm, s.gq, h.fc_h, s.dummy, s.part, streams * m, fc_sk);
+                try p.sumSlices(s.part, s.ple_gated, true, streams * m * dims, hsk);
                 try tri.addStreams(s.branch, s.ple_gated, s.h, m, dims, streams);
                 // the layer: attention over the head's own cache, its experts
                 try p.writeback(0, m);
                 try p.readout(h.layer.attn_hc, 0, m);
                 try p.attnBlock(&h.layer, 0);
-                try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, out_sk);
+                try tri.hcWriteback(s.h, s.h, s.pss, s.part, "*fp32", s.inj, s.dummy, "*bf16", s.dummy, "*bf16", m * dims, m, dims, streams, 4, 1, 1, p.out_slices);
                 try p.readout(h.layer.mlp_hc, 0, m);
                 try p.moeBlock(&h.layer);
                 p.pending = 0;

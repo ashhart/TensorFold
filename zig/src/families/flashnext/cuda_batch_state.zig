@@ -68,6 +68,7 @@ pub const fexp_smem: u32 = 41472;
 pub const fexp_tile: usize = 64;
 /// fn_gdn_chain_tpr's staged rows: 2 x 16 steps of q, k, v (128 fp32 each) and g, beta.
 pub const chain_tpr_smem: u32 = 2 * 16 * (3 * 128 * 4 + 16);
+const cubin_fact_fold: [:0]const u8 = "_ZN4fact11fact_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELi2ELb1ELb1ELb1EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
 pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
@@ -159,6 +160,7 @@ pub const Kernels = struct {
     lane: cuda.Function,
     fact_mod: cuda.Module,
     fact: cuda.Function,
+    fact_fold: cuda.Function,
     hcf_mod: cuda.Module,
     fexp_mod: cuda.Module,
     fexp_up: cuda.Function,
@@ -196,6 +198,8 @@ pub const Kernels = struct {
         errdefer k.fact_mod.unload();
         k.fact = try k.fact_mod.function(cubin_fact);
         try k.fact.allowDynamicShared(fact_smem);
+        k.fact_fold = try k.fact_mod.function(cubin_fact_fold);
+        try k.fact_fold.allowDynamicShared(fact_smem);
         k.fexp_mod = try cuda.Module.load(d, cuda.kernels.flashnext_fexp);
         errdefer k.fexp_mod.unload();
         k.fexp_up = try k.fexp_mod.function(cubin_fexp_up);
