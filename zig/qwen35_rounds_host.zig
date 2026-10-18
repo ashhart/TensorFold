@@ -235,3 +235,32 @@ test "Shared verification: shared 16 32 64 128 stream rounds preserve drafted pl
         };
     }
 }
+
+test "Verify width calibration: straight metadata needs no branch scratch and matches the general schedule" {
+    const R = q.round;
+    var storage: [R.bytes]u8 align(8) = undefined;
+    var parents: [64]i32 = undefined;
+    var expected: [64]core.tree_slots.Step = undefined;
+    for (1..65) |rows| {
+        for (parents[0..rows], 0..) |*parent, row| parent.* = if (row == 0) -1 else @intCast(row - 1);
+        _ = try core.tree_slots.build(a, parents[0..rows], expected[0..rows], 1, 16);
+        for ([_]?[]const i32{ null, parents[0..rows] }) |ps| {
+            const parts = [_]q.engine.Part{ .{ .cache = undefined, .rows = 1 }, .{ .cache = undefined, .rows = rows, .parents = ps } };
+            try std.testing.expectEqual(@as(usize, 1), try R.buildWithScratch(&storage, &parts, true, &.{}));
+            try std.testing.expectEqualSlices(core.tree_slots.Step, expected[0..rows], R.steps(&storage)[1..][0..rows]);
+            try core.tree_slots.validate(parents[0..rows], R.steps(&storage)[1..][0..rows], 1, 16);
+        }
+    }
+    var parts: [128]q.engine.Part = @splat(.{ .cache = undefined, .rows = 1 });
+    try std.testing.expectEqual(@as(usize, 1), try R.buildWithScratch(&storage, &parts, true, &.{}));
+    for (R.steps(&storage)[0..128], 0..) |step, row| {
+        try std.testing.expectEqual(@as(u32, @intCast(row)), step.row);
+        try std.testing.expectEqual(@as(i32, -1), step.read_slot);
+        try std.testing.expectEqual(@as(i32, 0), step.write_slot);
+    }
+    const branch = [_]i32{ -1, 0, 0, 1, 2 };
+    const fork = [_]q.engine.Part{.{ .cache = undefined, .rows = branch.len, .parents = &branch }};
+    try std.testing.expectError(error.OutOfMemory, R.buildWithScratch(&storage, &fork, true, &.{}));
+    try std.testing.expect((try R.build(&storage, &fork, true)) > 1);
+    try core.tree_slots.validate(&branch, R.steps(&storage)[0..branch.len], 0, 16);
+}
