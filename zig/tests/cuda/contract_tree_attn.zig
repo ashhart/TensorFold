@@ -153,7 +153,8 @@ pub const Tree = struct {
         return true;
     }
 
-    /// NaN in a query, +inf and -inf in values (committed and on a path), both in one column, NaN in a committed key.
+    /// NaN in a query, +inf and -inf in values (committed and on a path), both in one column, NaN in a committed key;
+    /// +inf at float64 weights of 0 and below float32's least.
     fn plant(self: *Tree) void {
         const d = self.v.d;
         const kv = self.v.hk * d;
@@ -171,6 +172,27 @@ pub const Tree = struct {
             self.cache.items[vo + (p0 - 3) * kv + 2 * d + 11] = ninf;
         }
         self.cache.items[ko + (p0 - 1) * kv + 3 * d + 0] = nan;
+        self.under(1, 21);
+    }
+
+    /// Key head kh, row 0: committed key p0 - 1 all 8, its other keys all -8 with +inf at e. Head kh's first query is
+    /// all 2 (weights below float32's least: inf), its second all 8 (float64 weights of 0, 0 x inf: NaN).
+    fn under(self: *Tree, kh: usize, e: usize) void {
+        const d = self.v.d;
+        const kv = self.v.hk * d;
+        const G = self.v.h / self.v.hk;
+        const p0 = self.committed.items[0];
+        const ko: usize = @intCast(self.offs.items[0]);
+        const vo: usize = @intCast(self.offs.items[1]);
+        const inf = c.toBf16(std.math.inf(f32));
+        @memset(self.q.items[(kh * G) * d ..][0..d], c.toBf16(2));
+        @memset(self.q.items[(kh * G + 1) * d ..][0..d], c.toBf16(8));
+        for (0..p0) |j| {
+            @memset(self.cache.items[ko + j * kv + kh * d ..][0..d], c.toBf16(if (j == p0 - 1) 8 else -8));
+            if (j != p0 - 1) self.cache.items[vo + j * kv + kh * d + e] = inf;
+        }
+        @memset(self.kn.items[kh * d ..][0..d], c.toBf16(-8)); // row 0's path: itself
+        self.vn.items[kh * d + e] = inf;
     }
 
     /// Gate 4: every key alike (each p is 1), committed values mirrored per column, path values 0.
