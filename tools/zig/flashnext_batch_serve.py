@@ -136,7 +136,7 @@ def main():
     parser.add_argument("output", type=Path)
     parser.add_argument("--tokens", type=int, default=128)
     parser.add_argument("--rounds", type=int, default=3)
-    parser.add_argument("--parallel", default="1,default,auto,4",
+    parser.add_argument("--parallel", default="1,4",
                         help="comma-separated blocks starting with 1; default omits --parallel")
     parser.add_argument("--context", type=int, default=16384)
     parser.add_argument("--require-shared-rounds", action="store_true",

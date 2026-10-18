@@ -74,11 +74,11 @@ to one stream, while successful checks allow the lane engine to combine requests
 
 ## Native Metal shared sessions
 
-The native 6-bit MTP engine uses shared target rounds with the default `--parallel auto` when at least two sessions fit. Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions. The default needs no parallel flag:
+The native 6-bit MTP engine uses shared target rounds with an explicit `--parallel N` above one; `--parallel auto`, the default, keeps the single-reply driver, whose lone decode is 1.0.12's (a lone request in a shared session decoded 7% slower on an M3 Ultra). Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions. The default needs no parallel flag:
 
 ```bash
 tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP \
-  --context 16384 --temperature 0
+  --context 16384 --temperature 0 --parallel 8
 ```
 
 Each request holds its own recurrent state, attention cache, n-gram history and MTP cache. The scheduler packs
@@ -86,7 +86,7 @@ up to 16 target rows, including draft rows, into one layer loop. Projections and
 together; recurrence, convolution and attention read each request's own state. Every stream's MTP drafts share one command buffer; `FZ_BATCH_MTP_SERIAL=1` restores serial drafting.
 New requests join between rounds, and cancelling a request releases its slot for another request.
 
-`auto` chooses up to 16 sessions from the memory left after loading the model and reserving the prompt cache. If fewer than two fit, it opens the single-reply driver instead. Explicit `--parallel 1`, `--learn`, and the two-Mac path retain their supported driver. Shared sessions run on one Mac; `--parallel N` above one with `--speed-up` or `--learn` is refused. Use `--parallel 1` for the two-Mac link.
+An explicit count that does not fit is refused, as below. Explicit `--parallel 1`, `--learn`, and the two-Mac path retain their supported driver. Shared sessions run on one Mac; `--parallel N` above one with `--speed-up` or `--learn` is refused. Use `--parallel 1` for the two-Mac link.
 
 The ceiling is 70% of RAM, or `FLASHNEXT_LOAD_LIMIT_GB` (GB, up to the GPU's recommended working set). It covers the
 server's whole footprint: the model, the sessions and the prompt cache. Left out, `--prompt-cache-gib` takes what the
@@ -127,15 +127,15 @@ For a served comparison with identical requests and settings:
 zig build native
 python tools/zig/flashnext_batch_serve.py zig-out/native/bin/tensorfold-native \
   MODEL_DIR /tmp/flashnext-prompts /tmp/flashnext-served \
-  --parallel 1,default,auto,4 --context 16384 --require-shared-rounds
+  --parallel 1,4 --context 16384 --require-shared-rounds
 ```
 
 The served gate starts one server at a time on loopback port 52417. `default` omits `--parallel`; `auto` passes
 it explicitly. Each block uses the same context and requests, including thinking on and off. It compares response
 bodies, token counts and native token fingerprints with the serial reference and records wall time and peak
 running and waiting requests. `--require-shared-rounds` also requires multi-stream GPU forwards in the batch log
-during those requests. Running requests alone do not prove shared rounds. If auto falls back to one session,
-that shared-round gate fails and the receipt retains the observed results.
+during those requests. Running requests alone do not prove shared rounds. The default and `auto` serve on the
+single-reply driver, so that gate fails for them; an explicit count that falls back to one session fails it too.
 
 End-to-end time includes prompts. The shared-round check enables `FZ_BATCH_LOG`, so its times include logging;
 omit that option for a separate timing run. Repeat into a fresh output directory with `--context 65536` or another

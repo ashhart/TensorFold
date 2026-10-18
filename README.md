@@ -123,9 +123,9 @@ Every accepted draft must equal the token the same native engine would produce w
 A resumed request must equal fresh execution, and each concurrent stream must equal its solo run.
 The comparison fixes the checkpoint, backend, settings and runtime.
 Different quantizations and different backends can produce different outputs.
-Flash Next on Metal uses shared target rounds with default `--parallel auto` when at least two sessions fit.
-A lone greedy request uses GPU-side rounds and hands over when a second request arrives.
-Explicit `--parallel 1`, learning, two-Mac serving and the one-session fallback use the single-reply driver.
+Flash Next on Metal uses shared target rounds with an explicit `--parallel N` above one, when that many sessions fit.
+A lone greedy request there uses GPU-side rounds and hands over when a second request arrives.
+`--parallel auto` (the default) and `--parallel 1`, learning and two-Mac serving use the single-reply driver.
 `FZ_BATCH_MTP_SERIAL=1` restores serial MTP drafting on the shared host.
 The [earlier MTP chain receipt](docs/receipts/flashnext-mtp-chain-2026-10-10/README.md) records its own pinned commits.
 Nemotron, GLM, the 2B model and Qwen3.8-27B use shared lane rounds.

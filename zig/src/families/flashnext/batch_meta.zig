@@ -58,12 +58,12 @@ pub fn fit(want: u32, fixed: bool, room: u64, per_slot: u64) !u32 {
     return n;
 }
 
-/// Default auto uses shared sessions; explicit one, learning and paired serving keep their own host.
+/// An explicit --parallel above one shares sessions; auto (the default, as on CUDA), one, learning and pairs do not.
 pub fn shared(fixed: bool, streams: u32, paired: bool, learning: bool) bool {
-    return (!fixed or streams > 1) and !paired and !learning;
+    return fixed and streams > 1 and !paired and !learning;
 }
 
-/// Why an explicit --parallel above one cannot open; null when it can (auto falls back to the single-reply host).
+/// Why an explicit --parallel above one cannot open; null when it can (auto keeps the single-reply host).
 pub fn refusal(fixed: bool, streams: u32, paired: bool, learning: bool) ?[]const u8 {
     if (!fixed or streams <= 1) return null;
     if (paired) return "Flash Next shared sessions are single-Mac only; use --parallel 1 with --speed-up";
