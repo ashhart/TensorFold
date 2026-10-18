@@ -79,8 +79,7 @@ pub const Metal = struct {
 
     pub fn init(gpa: std.mem.Allocator, m: *Model, given: Options) !*Metal {
         var o = given;
-        // nemotron_h_puzzle: prompts run through the decode kernels in fused_rows chunks; the prefill kernels
-        // (prefill_mixers) are not yet built for the latent MoE or Bolt's widths
+        // nemotron_h_puzzle: prompts take the decode kernels; prefill_mixers is not built for the latent MoE yet
         if (m.config.bolt) o.chunk = @min(o.chunk, fused_rows);
         const b = try gpa.create(Metal);
         errdefer gpa.destroy(b);

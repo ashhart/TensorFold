@@ -1,8 +1,4 @@
-// Nemotron 3.5 Bolt (nemotron_h_puzzle) router top-k: runtime expert count NE and picks K, so one kernel serves
-// every Puzzle layer's own expert count (240/304/368/432/496, all NE % 32 == 16). The scoring is the same as
-// route.metal (sigmoid of the gate logit, plus the per-expert correction bias, weights normalised and scaled),
-// but the per-lane slices are bounded by NE instead of a compile-time NE/32 so the last partial slice is not
-// dropped. Hand-authored for this PR (the generated route.metal bakes <128, 6>); keep in step with route.metal.
+// nemotron_h_puzzle (Bolt): route.metal's top-k at runtime NE and K, slices bounded by NE (pad-to-32; hand-authored)
 #include <metal_stdlib>
 using namespace metal;
 typedef bfloat bfloat16_t;

@@ -1,5 +1,4 @@
-//! Native teacher-forced Nemotron logits (Lightning or Bolt) for a token fixture, for tools/zig/nemotron_fidelity.py:
-//! the ids run through the decode kernels fused_rows rows a forward, as Bolt's prompts do, every row's logits kept.
+//! Native teacher-forced Nemotron logits for tools/zig/nemotron_fidelity.py, fused_rows rows a decode forward.
 const std = @import("std");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
