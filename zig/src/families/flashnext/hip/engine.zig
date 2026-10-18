@@ -398,7 +398,8 @@ fn keyOf(e: *const Engine, segs: []const forward.Seg) !Key {
     if (segs.len > forward.max_segs) return error.TooManyStreams;
     var k: Key = .{ .count = @intCast(segs.len) };
     for (segs, 0..) |g, i| {
-        if (g.c.layout.cap != e.o.capacity) return error.CachesNotPooled;
+        // a graph names its slot's buffers: caches made elsewhere would have it use another stream's or freed memory
+        if (g.c.layout.cap != e.o.capacity or !e.pool.holds(g.c)) return error.CachesNotPooled;
         k.slots[i] = g.c.id;
         k.rows[i] = @intCast(g.tokens.len);
     }

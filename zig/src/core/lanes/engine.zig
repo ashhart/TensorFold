@@ -13,6 +13,7 @@ const plan_lanes = @import("plan_lanes.zig");
 const fill = @import("fill.zig");
 const trail = @import("trail.zig");
 const open = @import("open.zig");
+const handover = @import("handover.zig");
 const trim = @import("trim.zig");
 const Stream = sm.Stream;
 const Feed = be.Feed;
@@ -66,8 +67,10 @@ pub const Engine = struct {
                 .family_costs = &cfg.family_costs,
                 .shared_costs = &cfg.shared_costs,
                 .mtp_step_ms = cfg.mtp_step_ms,
+                .draft_step_ms = cfg.draft_step_ms,
                 .plain_guard = cfg.plain_guard,
                 .node_probabilities = cfg.node_probabilities,
+                .confidence_floor = cfg.draft_confidence,
                 .batch_rows = cfg.batch_rows,
                 .batched_heads = cfg.draft_streams,
             },
@@ -89,39 +92,22 @@ pub const Engine = struct {
     }
 
     pub const addStream = open.add;
+    pub const addStreamCommitted = open.addCommitted;
+    pub const addStreams = open.addStreams;
+    pub const max_together = open.max_together;
+
+    /// Whether the backend prefills several prompts in one pass (addStreams batches them).
+    pub fn batchesPrompts(e: *const Engine) bool {
+        return e.backend.vtable.prefill_many != null;
+    }
     pub const opened = open.opened;
     pub const fills = open.fills;
     pub const fillStream = open.fillStream;
-
-    /// Take over a stream another driver decoded so far: its cache settled, `pending` and `cache_len` set, no drafts held.
-    pub fn adopt(e: *Engine, s: *Stream) !void {
-        try e.live.append(e.gpa, s);
-    }
-
-    /// Give a live stream to another driver between rounds, its round state dropped (adopt takes it back).
-    pub fn detach(e: *Engine, s: *Stream) bool {
-        if (s.inflight != null or s.finished) return false;
-        for (e.live.items, 0..) |x, i| {
-            if (x != s) continue;
-            _ = e.live.orderedRemove(i);
-            s.dropRoundState(e.gpa);
-            return true;
-        }
-        return false;
-    }
-
-    /// Release a cancelled stream between rounds: no pending draws or drafts.
-    pub fn discard(e: *Engine, s: *Stream) void {
-        s.finished = true;
-        s.reason = .cancelled;
-        for (e.live.items, 0..) |x, i| {
-            if (x == s) {
-                _ = e.live.orderedRemove(i);
-                break;
-            }
-        }
-        e.release(s);
-    }
+    pub const fillStreamCommitted = open.fillStreamCommitted;
+    pub const adopt = handover.adopt;
+    pub const detach = handover.detach;
+    pub const discard = handover.discard;
+    pub const sweep = handover.sweep;
 
     /// One round for every live stream (Python `_family_step`).
     pub fn step(e: *Engine) !void {
@@ -161,17 +147,7 @@ pub const Engine = struct {
             }
         }
         try trail.resolve(e);
-        var kept: usize = 0;
-        for (e.live.items) |s| {
-            if (s.finished) {
-                try trail.finish(e, s);
-                e.release(s);
-                continue;
-            }
-            e.live.items[kept] = s;
-            kept += 1;
-        }
-        e.live.shrinkRetainingCapacity(kept);
+        try e.sweep();
         try trail.state(e);
     }
 
@@ -317,7 +293,10 @@ pub const Engine = struct {
         }
         try e.backend.keep(windows, paths);
         if (e.cfg.timed) {
-            const ms = e.clock.elapsedMs(.overhead);
+            // the drafts budgets priced past each stream's first are no part of the round's overhead
+            var steps: i64 = 0;
+            for (budgets) |d| steps += @max(0, d - 1);
+            const ms = e.clock.elapsedMs(.overhead) - e.cfg.draft_step_ms * @as(f64, @floatFromInt(steps));
             try trail.event(e, &.{ f("ev", str("overhead")), f("streams", int(plans.len)), f("rows", int(total)), f("ms", ev.bits(ms)) });
             try e.rule.observeOverhead(@intCast(plans.len), total, ms, sampled, e.rule.headMs(budgets));
         }
@@ -507,7 +486,8 @@ pub const Engine = struct {
     /// One token, the next forward queued first; a copied continuation ahead switches to verify windows.
     fn pipelinedRound(e: *Engine, s: *Stream) !Result {
         const before = s.mode;
-        const mode = s.mode orelse .pipe;
+        // an adopted stream holds neither a mode nor a queued step: it starts where a drain step leaves one
+        const mode: sm.Mode = s.mode orelse if (s.inflight == null) .verify else .pipe;
         var result: Result = .{ .rows = 1, .keep = 1, .got = &.{} };
         if (mode == .verify or mode == .exit) {
             const verifying = mode == .verify and e.cfg.family_width >= 2;

@@ -12,12 +12,25 @@ release fixes it, and the release notes say which one.
   `max_tokens`, because the grammar allows no decimal point there. Nemotron writes the same schema correctly.
 - Qwen3.8-27B on an M1 to M4 Mac: the drafter's landing counts last for the server's life, so after four prose replies
   greedy code drafts shallower, about 4% slower on an M3 Ultra. The tokens are the same.
+- The reported M3 Ultra peak for Qwen3.8-27B on Metal is 4.1 GB higher than 1.0.12 because the second DeltaNet bank is
+  allocated at startup; reducing that allocation remains follow-up work.
+- Flash Next on Metal with explicit --parallel 2 or more retains a cache-count/performance issue: on an M3 Ultra with
+  the MLX 4-bit checkpoint, 9 of 12 chat steps reused 17 to 312 fewer tokens than the single host, with the same
+  output tokens, and a lone request decoded 7% slower. The default --parallel auto uses the single host and matched
+  1.0.12's cache counts; the separate shared-session repair is held for a later 1.1.x and is absent from the current
+  1.1.1 series.
+- The 1.0.12 gfx1151 Qwen receipts leave the 27B cancellation failure open and the 9B/27B drafted/plain comparisons
+  unrun. Those receipts do not establish a new 1.1.0 device pass.
 - Qwen3.8-Flash-Next in speed-up mode: a drafted request right after a `"draft": false` one decodes slowly, and the next
   request is back to speed. The tokens are the same.
 - Qwen3.8-Flash-Next on a Mac: a turn more than `--keep-warm` seconds after the last request (900 by default) takes
   about 2 s to its first token on an M3 Ultra, even when its prompt is cached, while macOS wires the model again.
 - On a Mac without tensor units (M1 to M4), Flash Next's uniform 6-bit checkpoint decodes different tokens from 1.0.9
   since 1.0.10's faster products. `FZ_M3_LANES=1` keeps the earlier kernels and their tokens.
+- GLM-5.3-Flash's ModelOpt NVFP4 checkpoint on two CUDA ranks has not been run since 1.0.12: on two GB10s the weights
+  leave no room for its streams beside the memory reserve. Code that path shares changed in 1.1.0 (NVFP4 scale planes
+  and their tensor-parallel slices, the copy-source owner, NCCL's allocations and the RoCE cap on the ranks), so its
+  regression run is owed. The EXL3 checkpoint is the two-rank path we measure.
 
 ## Living Weights (`--slide`)
 

@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("sys");
 const pc = @import("core/prompt_cache.zig");
 const Imprint = @import("core/prompt_imprint.zig").Imprint;
 const Fake = @import("core/prompt_cache_fake.zig").Fake;
@@ -56,7 +57,7 @@ fn expectedWarnings(n: usize) !void {
 pub fn main() !void {
     const a = std.heap.page_allocator;
     var buf: [128]u8 = undefined;
-    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-warning-{d}", .{std.c.getpid()});
+    const root = try std.fmt.bufPrint(&buf, "/tmp/tf-learn-warning-{d}", .{platform.c.getpid()});
     defer @import("core/prompt_imprint_test.zig").rmTree(root);
     {
         var im = try Imprint.open(a, root, 1, 1 << 20);

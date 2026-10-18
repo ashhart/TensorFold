@@ -5,6 +5,7 @@ const core = @import("core");
 pub const config = @import("config.zig");
 pub const Config = config.Config;
 pub const image = @import("image.zig");
+pub const video = @import("video.zig");
 pub const position = @import("position.zig");
 pub const weights = @import("weights.zig");
 pub const Tower = @import("tower.zig").Tower;
@@ -34,11 +35,16 @@ fn read(a: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, mos
     };
 }
 
+/// The reserved token a video's `<video>` stands as before encoding: the checkpoint's first spare special token.
+pub const video_token = "<SPECIAL_30>";
+
 /// The prompt's image tokens: the placeholder the template writes, and the two the processor wraps its rows in.
 pub const Marks = struct {
     image: u32,
     open: u32,
     close: u32,
+    /// The token a video's placeholder becomes before encoding (the tokenizer has no `<video>` token); null: none.
+    video: ?u32 = null,
 
     /// The marks from the tokenizer's special tokens; null when one is missing or the image token is not the config's.
     pub fn resolve(t: *const core.tokenizer.Tokenizer, c: *const Config) ?Marks {
@@ -46,6 +52,7 @@ pub const Marks = struct {
             .image = t.specialTokenId("<image>") orelse return null,
             .open = t.specialTokenId("<img>") orelse return null,
             .close = t.specialTokenId("</img>") orelse return null,
+            .video = t.specialTokenId(video_token),
         };
         return if (m.image == c.image_token) m else null;
     }
@@ -59,8 +66,13 @@ pub const Marks = struct {
 test {
     _ = config;
     _ = image;
+    _ = video;
     _ = position;
     _ = weights;
     _ = rows;
     _ = @import("tower.zig");
+}
+
+test {
+    _ = @import("video_test.zig");
 }

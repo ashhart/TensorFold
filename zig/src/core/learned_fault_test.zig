@@ -1,4 +1,5 @@
 const std = @import("std");
+const platform = @import("sys");
 const pc = @import("prompt_cache.zig");
 const Imprint = @import("prompt_imprint.zig").Imprint;
 const Fake = @import("prompt_cache_fake.zig").Fake;
@@ -14,14 +15,14 @@ const Disk = struct {
     }
 };
 fn root(buf: []u8, suffix: []const u8) ![]const u8 {
-    return std.fmt.bufPrint(buf, "/tmp/tf-learn-fault-{s}-{d}", .{ suffix, std.c.getpid() });
+    return std.fmt.bufPrint(buf, "/tmp/tf-learn-fault-{s}-{d}", .{ suffix, platform.c.getpid() });
 }
 fn put(dir: []const u8, name: []const u8, count: usize) !void {
     var buf: [1200]u8 = undefined;
-    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(std.c.mode_t, 0o600));
+    const fd = platform.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/{s}", .{ dir, name }, 0), .{ .ACCMODE = .WRONLY, .CREAT = true }, @as(platform.c.mode_t, 0o600));
     if (fd < 0) return error.Create;
-    defer _ = std.c.close(fd);
-    if (std.c.ftruncate(fd, @intCast(count)) != 0) return error.Create;
+    defer _ = platform.c.close(fd);
+    if (platform.c.ftruncate(fd, @intCast(count)) != 0) return error.Create;
 }
 
 pub fn learnOne(im: *Imprint, prompt: []const u32) !void {
@@ -61,9 +62,9 @@ pub fn recallOne(im: *Imprint, prompt: []const u32) !void {
 
 fn appendIndex(dir: []const u8, bytes: []const u8) !void {
     var buf: [1200]u8 = undefined;
-    const fd = std.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/index", .{dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(try std.fmt.bufPrintSentinel(&buf, "{s}/index", .{dir}, 0), .{ .ACCMODE = .WRONLY, .APPEND = true }, @as(platform.c.mode_t, 0));
     if (fd < 0) return error.TestFile;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     try @import("prompt_imprint.zig").writeAll(fd, bytes);
 }
 
@@ -125,9 +126,9 @@ test "invalid complete records salvage the valid prefix but unknown versions rem
         } else |err| try std.testing.expectEqual(error.ImprintRead, err);
         try std.testing.expectEqual(@as(u64, 104), try im.indexScratchBytes());
         var path: [1200]u8 = undefined;
-        const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+        const fd = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
         if (fd < 0) return error.TestFile;
-        defer _ = std.c.close(fd);
+        defer _ = platform.c.close(fd);
         var actual: [44]u8 = undefined;
         try std.testing.expect(@import("prompt_imprint.zig").readAt(fd, &actual, 60));
         try std.testing.expectEqualSlices(u8, std.mem.sliceAsBytes(&record), &actual);
@@ -206,9 +207,9 @@ test "short future-version prefixes preserve index bytes and payloads on open an
             defer im.deinit();
             if (prefix) try learnOne(&im, &first);
             var path: [1200]u8 = undefined;
-            const fd = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDWR, .APPEND = true, .CREAT = true }, @as(std.c.mode_t, 0o600));
+            const fd = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/index", .{im.dir}, 0), .{ .ACCMODE = .RDWR, .APPEND = true, .CREAT = true }, @as(platform.c.mode_t, 0o600));
             if (fd < 0) return error.TestFile;
-            defer _ = std.c.close(fd);
+            defer _ = platform.c.close(fd);
             try @import("prompt_imprint.zig").writeAll(fd, std.mem.sliceAsBytes(&future)[0..cut]);
             var expected: [96]u8 = undefined;
             const len = (if (prefix) @as(usize, 60) else 0) + cut;
@@ -225,13 +226,13 @@ test "short future-version prefixes preserve index bytes and payloads on open an
             var actual: [96]u8 = undefined;
             try std.testing.expect(@import("prompt_imprint.zig").readAt(fd, actual[0..len], 0));
             try std.testing.expectEqualSlices(u8, expected[0..len], actual[0..len]);
-            const payload = std.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/00000000000000af.bin", .{im.dir}, 0), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+            const payload = platform.c.open(try std.fmt.bufPrintSentinel(&path, "{s}/00000000000000af.bin", .{im.dir}, 0), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
             if (payload < 0) return error.FuturePayloadRemoved;
-            _ = std.c.close(payload);
+            _ = platform.c.close(payload);
             if (prefix) {
-                const kept = std.c.open(try Fake.file(&path, im.dir, Imprint.keyOf(first[0..6])), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(std.c.mode_t, 0));
+                const kept = platform.c.open(try Fake.file(&path, im.dir, Imprint.keyOf(first[0..6])), .{ .ACCMODE = .RDONLY, .NOFOLLOW = true }, @as(platform.c.mode_t, 0));
                 if (kept < 0) return error.ValidPrefixPayloadRemoved;
-                _ = std.c.close(kept);
+                _ = platform.c.close(kept);
             }
         }
     };
@@ -272,14 +273,14 @@ test "an index replacement failure retains its metadata and removes its partial 
     var idx_buf: [1200]u8 = undefined;
     const idx = try std.fmt.bufPrintSentinel(&idx_buf, "{s}/index", .{im.dir}, 0);
     try dirs.unlink(idx);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(idx, 0o700));
-    defer _ = std.c.rmdir(idx); // the tree removal goes two levels down
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(idx, 0o700));
+    defer _ = platform.c.rmdir(idx); // the tree removal goes two levels down
     try std.testing.expectError(error.ImprintWrite, im.remove(Imprint.keyOf(&.{ 1, 2 })));
     try std.testing.expect(im.has(Imprint.keyOf(&.{ 1, 2 })));
     const part = try std.fmt.bufPrintSentinel(&path, "{s}/index.part", .{im.dir}, 0);
-    const fd = std.c.open(part, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(part, .{ .ACCMODE = .RDONLY }, @as(platform.c.mode_t, 0));
     if (fd >= 0) {
-        _ = std.c.close(fd);
+        _ = platform.c.close(fd);
         return error.PartRemains;
     }
 }
@@ -315,8 +316,8 @@ test "unlink failure is observable and missing files are idempotently removed" {
     const r = try root(&buf, "unlink");
     var path: [150]u8 = undefined;
     const dir = try std.fmt.bufPrintSentinel(&path, "{s}", .{r}, 0);
-    try std.testing.expectEqual(@as(c_int, 0), std.c.mkdir(dir, 0o700));
-    defer _ = std.c.rmdir(dir);
+    try std.testing.expectEqual(@as(c_int, 0), platform.c.mkdir(dir, 0o700));
+    defer _ = platform.c.rmdir(dir);
     try std.testing.expectError(error.LearnedUnlink, dirs.unlink(dir));
     var absent: [180]u8 = undefined;
     try dirs.unlink(try std.fmt.bufPrintSentinel(&absent, "{s}/absent", .{dir}, 0));
