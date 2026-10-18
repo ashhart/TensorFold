@@ -1,6 +1,7 @@
 //! CPU-only checks of the same framed exchanges used by DeepSeek MoE; no model, Metal device or RDMA is opened.
 const std = @import("std");
 const tf = @import("tensorfold");
+const clock = @import("metal").clock;
 const Transport = tf.deepseek_v41.tp_transport.Transport;
 
 pub fn main(init: std.process.Init) !void {
@@ -27,18 +28,18 @@ pub fn main(init: std.process.Init) !void {
     defer init.gpa.free(receive);
     var tag: u64 = 0;
     for (sizes) |size| {
-        var elapsed: u64 = 0;
+        var elapsed: f64 = 0;
         for (0..rounds + 4) |step| {
             @memset(send[0..size], @truncate(step * 2 + rank));
-            const began = try tf.fabric.words.checkedNowNs();
+            const began = clock.seconds();
             try exchange.call(exchange.ptr, tag, send[0..size], receive[0..size]);
-            const duration = (try tf.fabric.words.checkedNowNs()) - began;
+            const duration = clock.seconds() - began;
             tag += 1;
             if (step >= 4) elapsed += duration;
             const expected: u8 = @truncate(step * 2 + 1 - rank);
             if (!std.mem.allEqual(u8, receive[0..size], expected)) return error.PayloadMismatch;
         }
-        std.debug.print("{{\"mode\":\"deepseek_transport_probe\",\"rank\":{d},\"bytes\":{d},\"rounds\":{d},\"exchange_ns_total\":{d},\"payload_verified\":true}}\n", .{ rank, size, rounds, elapsed });
+        std.debug.print("{{\"mode\":\"deepseek_transport_probe\",\"rank\":{d},\"bytes\":{d},\"rounds\":{d},\"exchange_seconds_total\":{d},\"payload_verified\":true}}\n", .{ rank, size, rounds, elapsed });
     }
     try transport.endpoint.tcp.finish();
 }
