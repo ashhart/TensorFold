@@ -248,6 +248,8 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
 
 /// A rank above 0: holds its share and runs rank 0's steps until rank 0 stops; false with `problem` if it cannot start.
 pub fn follow(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !bool {
+    const report = @import("sys").optional_libraries.atBoundary();
+    defer report.deinit();
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) {
             const r = ready(F, a, gpa, io, o, problem) catch |err| switch (err) {
