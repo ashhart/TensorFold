@@ -4,7 +4,8 @@ const hooks = @import("cuda_learn_hooks.zig");
 const geometry = @import("cuda_geometry.zig");
 const head_dim = geometry.head_dim;
 const max_chunks = 64;
-const most_window = E.most_window;
+/// Prompt experts keep the shipped arithmetic boundary, independently of verification capacity.
+pub const prompt_moe_cutoff: usize = 16;
 const ids_at = E.Engine.ids_at;
 const segs_at = E.Engine.segs_at;
 const rowseg_at = E.Engine.rowseg_at;
@@ -13,6 +14,10 @@ const rowanc_at = E.Engine.rowanc_at;
 const params_at = E.Engine.params_at;
 const mpos_at = E.Engine.mpos_at;
 const src_at = E.Engine.src_at;
+
+pub fn promptMoe(prompt: bool, rows: usize) bool {
+    return prompt and rows > prompt_moe_cutoff;
+}
 
 pub fn body(e: *E.Engine, shape: anytype) !void {
     const g = e.g;
@@ -83,7 +88,7 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
                 try e.proj(m.down, e.act, e.r, total, prompt);
                 if (e.mlp) |k| try k.f(k.ctx, i, e.x, e.r, total, e.taught) else try e.pockets.add(e.stream, i, e.x, e.r, total, e.taught);
             },
-            .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, prompt and total > most_window),
+            .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, promptMoe(prompt, total)),
         }
         if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
             try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
@@ -101,4 +106,28 @@ pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
     // the head over the kept rows
     try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);
     if (e.learning) |k| try hooks.logits(k, e.logits, e.stream);
+}
+
+test "prompt MoE precision: target piece arithmetic keeps the shipped 16-row boundary" {
+    const std = @import("std");
+    try std.testing.expectEqual(@as(usize, 64), E.most_window);
+    var mismatches: usize = 0;
+    for ([_]usize{ 16, 17, 32, 64, 65 }) |rows| {
+        const expected = rows > 16;
+        if (promptMoe(true, rows) != expected) {
+            std.debug.print("prompt piece {d}: expected prompt experts {any}\n", .{ rows, expected });
+            mismatches += 1;
+        }
+        if (promptMoe(false, rows)) {
+            std.debug.print("verify window {d}: expected decode experts\n", .{rows});
+            mismatches += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), mismatches);
+}
+
+test "prompt MoE precision: every prompt piece through 128 and admitted verify width keeps its recipe" {
+    const std = @import("std");
+    for (1..129) |rows| try std.testing.expectEqual(rows > 16, promptMoe(true, rows));
+    for (1..E.most_window + 1) |rows| try std.testing.expect(!promptMoe(false, rows));
 }

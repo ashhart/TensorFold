@@ -12,6 +12,7 @@ pub const vision = @import("cuda_vision.zig");
 pub const reuse = @import("cuda_reuse.zig");
 
 test {
+    _ = @import("cuda_forward.zig");
     _ = engine;
     _ = native;
     _ = native_moe;
