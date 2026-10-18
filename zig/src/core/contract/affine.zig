@@ -108,7 +108,7 @@ pub const Affine = struct {
     }
 
     /// Output (r, j) in float64 by the kernel's form, and the magnitude of the terms its sums add.
-    fn one(f: Affine, r: usize, j: usize) [2]f64 {
+    pub fn one(f: Affine, r: usize, j: usize) [2]f64 {
         const k = f.shape.k;
         var y: f64 = 0;
         var mag: f64 = 0;
