@@ -77,7 +77,7 @@ pub const CancelCheck = struct {
     check: *const fn (ptr: *anyopaque) bool,
 };
 
-/// A kept prompt state the backend restores before its prompt pass (core/prompt_cache.zig), and where it keeps new ones.
+/// A kept prompt state to restore before prefill, and destinations for new states.
 pub const Reuse = struct {
     saved: ?*anyopaque = null, // the backend's copy of the state after `at` prompt tokens (null: start at 0)
     at: u32 = 0,
@@ -99,7 +99,14 @@ pub const Held = struct {
 };
 
 /// One image of a prompt: tower input (patches [gh * gw, width]) for the `tokens` placeholder rows from `at`.
-pub const Image = struct { pixels: []const f32, gh: u32, gw: u32, at: u32, tokens: u32 };
+pub const Image = struct {
+    pixels: []const f32,
+    gh: u32,
+    gw: u32,
+    at: u32,
+    tokens: u32,
+    hash: u64 = 0, // core/picture/identity.zig's: the bytes and the grid, as the prompt cache's key names the image
+};
 
 pub const Spec = struct {
     id: []const u8,
@@ -168,6 +175,7 @@ pub const Stream = struct {
     cached: u32 = 0, // prompt tokens the backend restored from `reuse` (its prompt pass started there)
     fill_at: std.atomic.Value(u32) = .init(0), // prompt tokens the pass has prefilled; the engine thread writes
     reuse_failed: bool = false, // the backend's restore of `reuse` failed: it prefilled from 0
+    reuse_error: ?anyerror = null, // the rejected restore's reason, logged once when its cache borrow is reported
     context: std.ArrayList(u32) = .empty,
     pending: ?u32 = null,
     force: std.ArrayList(u32) = .empty,

@@ -1,6 +1,7 @@
 //! Nemotron CUDA streams own their sequences and share window rounds.
 
 const std = @import("std");
+const vision = @import("cuda_vision.zig");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
 const core = @import("core");
@@ -15,6 +16,7 @@ const config = @import("config.zig");
 const seq_graphs = @import("cuda_seq_graphs.zig");
 const costs = @import("cuda_costs.zig");
 const lesson_route = @import("lesson_route.zig");
+const Pages = @import("cuda_pages.zig").Pages;
 
 const be = lanes.backend;
 const LogRow = lanes.LogprobRow;
@@ -25,8 +27,8 @@ const row_slots = engine.max_streams * state.max_rows + 1;
 /// First tokens a handle names (the prompt's draw is on the host once prefill returns).
 const ring = 1024;
 
-/// A stream's sequence (`own`: the engine's, the graphs' buffers) and its first token's logprob row from prefill.
-const Lane = struct { seq: *state.Seq, own: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
+/// A stream's sequence (`own`: the engine's, the graphs' buffers; `paged`: the pool's) and its first logprob row.
+const Lane = struct { seq: *state.Seq, own: bool = false, paged: bool = false, pending_rows: ?usize = null, first: ?LogRow = null, stats: seq_graphs.Stats = .{}, keep: usize = 0, taps: Taps = .{} };
 
 /// A recorded stream's rows: its prompt's on the host until its first verify, then where its last verify started.
 const Taps = struct { prompt: std.ArrayList(u8) = .empty, from: usize = 0, verified: ?u64 = null };
@@ -42,6 +44,8 @@ pub const Cuda = struct {
     head: ?*Head,
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     own_free: bool = true, // no stream holds the engine's own sequence
+    pages: ?*Pages = null, // the other streams' sequences and KV pages, made at load (null: a window each, at prefill)
+    paged_only: bool = false, // TF_KV_PAGES=all: every stream on pages, the engine's own sequence left idle (checks)
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
     pinned: cuda.HostBuffer, // each window's held drafts read back (state.max_rows words a stream)
@@ -53,10 +57,13 @@ pub const Cuda = struct {
     costs: [state.max_rows]lanes.config.Cost = undefined,
     cost_count: usize = 0,
     mtp_ms: f64 = 0,
-    measured: ?core.draft_depth.Costs = null, // a lone stream's depth rule prices its rounds by these
+    measured: ?costs.Measured = null, // a lone stream's depth rules price its rounds by these
+    mtp_drafts: ?u32 = null,
+    mtp_confidence: ?f64 = null,
     bits: ?cuda.HostBuffer = null, // structured output's row bits, device-mapped (row_slots rows), made at first use
     bits_dev: u64 = 0,
     tapped: ?cuda.HostBuffer = null, // a recorder's rows on their way to the host (state.pass_rows of them)
+    copy_drafts: bool = false, // the global draft switch also controls lane-core copy proposals
 
     pub fn init(gpa: std.mem.Allocator, e: *Engine, head: ?*Head) !Cuda {
         var pinned = try cuda.HostBuffer.alloc(e.ctx.d, engine.max_streams * state.max_rows * 4);
@@ -70,7 +77,9 @@ pub const Cuda = struct {
 
     pub fn deinit(self: *Cuda) void {
         var it = self.lanes.valueIterator();
-        while (it.next()) |l| if (!l.own) self.e.freeSeq(l.seq);
+        while (it.next()) |l| if (l.paged) {
+            _ = self.pages.?.close(l.seq);
+        } else if (!l.own) self.e.freeSeq(l.seq);
         self.lanes.deinit(self.gpa);
         self.pinned.free();
         self.rows_out.free();
@@ -93,6 +102,7 @@ pub const Cuda = struct {
             .first_row = firstRowFn,
             .first_masked = firstMaskedFn,
             .held = heldFn,
+            .probabilities = probabilitiesFn,
             .prepare_features = prepareFeaturesFn,
             .features = featuresFn,
             .prompt_rows = true,
@@ -125,7 +135,7 @@ pub const Cuda = struct {
     fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
         const self = of(ptr);
         const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
-        if (out.len + 1 > state.max_rows) return error.WindowTooWide;
+        if (out.len + 1 > state.windowRows(self.e.c)) return error.WindowTooWide;
         self.e.bind(l.seq);
         const held = self.pinned.slice(u32)[0..out.len];
         try self.e.ops().download(std.mem.sliceAsBytes(held), self.e.b.ids + 4);
@@ -133,38 +143,50 @@ pub const Cuda = struct {
         @memcpy(out, held);
     }
 
-    /// The facts the round loop reads at setup: windows up to 16 rows, one stream a forward, this GPU's costs.
+    pub fn draftControls(self: *const Cuda) lanes.mtp_policy.Controls {
+        return .{ .cap = self.mtp_drafts, .floor = self.mtp_confidence };
+    }
+    fn probabilitiesFn(ptr: *anyopaque, s: *lanes.Stream, out: []f64) anyerror!bool {
+        return @import("cuda_mtp_policy.zig").probabilities(of(ptr), s, out);
+    }
+
+    /// The checkpoint's verify width, shared target forwards and this GPU's measured costs.
     pub fn facts(self: *const Cuda) lanes.Model {
         const drafting = self.head != null;
+        const width = state.windowRows(self.e.c);
         return .{
-            .exact_width = if (drafting) state.max_rows else 1,
+            .exact_width = @intCast(width),
+            .copy_drafts = self.copy_drafts,
             .gpu_tokens = false,
             .mtp = drafting,
             .speculate = drafting,
             .speculate_early = false,
             .draft_prior = &config.draft_prior,
-            .drafts = mtp.max_chain,
+            .drafts = @intCast(self.draftControls().limit(width - 1)),
+            .draft_confidence = self.mtp_confidence,
+            .draft_probabilities = self.mtp_confidence != null,
             .draft_streams = drafting, // a shared round's heads draft in one batch (Head.chains)
             .window_costs = self.costs[0..self.cost_count],
             .mtp_step_ms = self.mtp_ms,
-            .hidden_rows = drafting, // several streams' windows share a forward (Engine.verifyShared)
-            .batch_rows = state.max_rows,
-            .max_streams = if (drafting) engine.max_streams else 1,
+            .hidden_rows = true, // copy-only models retain the landed shared target forward
+            .batch_rows = @intCast(width),
+            .max_streams = engine.max_streams,
         };
     }
 
-    /// costs.measure on the engine's own sequence: windows of 1 to 16 rows and a head level, in ms.
+    /// costs.measure on the engine's own sequence: windows of every width it takes and each head's level, in ms.
     pub fn measure(self: *Cuda, io: std.Io, model_dir: []const u8) !void {
         const h = self.head orelse return;
         self.e.bind(&self.e.own);
-        const c = try costs.measure(self.gpa, io, self.e, h, model_dir);
+        const m = try costs.measure(self.gpa, io, self.e, h, model_dir);
+        const shared = m.full orelse m.subset; // a shared round's streams may draft on either head: priced as the dearer
         self.cost_count = 0;
-        for (1..c.rows + 1) |w| {
-            self.costs[self.cost_count] = .{ .width = @intCast(w), .ms = c.verify[w] };
+        for (1..shared.rows + 1) |w| {
+            self.costs[self.cost_count] = .{ .width = @intCast(w), .ms = shared.verify[w] };
             self.cost_count += 1;
         }
-        self.mtp_ms = c.level;
-        self.measured = c;
+        self.mtp_ms = shared.level;
+        self.measured = m;
     }
 
     /// A lone driver's hand-over: the head absorbs the last `kept` rows; the stream stands as a lane round leaves it.
@@ -174,7 +196,7 @@ pub const Cuda = struct {
         l.keep = 0;
         if (self.head) |h| {
             try h.begin(kept);
-            try h.launch(0);
+            try h.launch(0, .subset); // an absorb reads no head
         }
         s.cache_len = self.e.pos;
         s.pending = s.context.items[s.context.items.len - 1];
@@ -254,11 +276,17 @@ pub const Cuda = struct {
         const gop = try self.lanes.getOrPut(self.gpa, s);
         if (gop.found_existing) self.drop(gop.value_ptr.*);
         // the engine's own sequence while it is free: its rounds replay the captured graphs
-        const own = self.own_free and e.serial != null and !s.untaught; // the own graphs carry the pocket
-        gop.value_ptr.* = .{ .own = own, .stats = e.stats, .seq = if (own) &e.own else e.newSeq() catch |err| {
-            self.lanes.removeByPtr(gop.key_ptr);
-            return err;
-        } };
+        const own = self.own_free and e.serial != null and !s.untaught and !self.paged_only; // the own graphs carry the pocket
+        const seq = if (own) &e.own else if (self.pages) |p| p.open(ids.len, s.max_new, s.untaught) else e.newSeq();
+        gop.value_ptr.* = .{
+            .own = own,
+            .paged = !own and self.pages != null,
+            .stats = e.stats,
+            .seq = seq catch |err| {
+                self.lanes.removeByPtr(gop.key_ptr); // nothing held: a LaneMemory request waits for a stream to end
+                return err;
+            },
+        };
         if (own) self.own_free = false;
         gop.value_ptr.seq.untaught = s.untaught;
         e.bind(gop.value_ptr.seq);
@@ -266,14 +294,16 @@ pub const Cuda = struct {
         e.decide = if (s.decide != null and e.lessons() != null) s.decide.? else lesson_route.none;
         try e.setSampling(s.sampling);
         s.cached = 0;
-        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len); // prompt rows need every row
+        const from = if (s.prompt_logprobs != null) 0 else self.restoreKept(s, ids.len);
         const keep: ?engine.Keep = if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
+        if (s.images.len > 0) try (e.vision orelse return error.NoVision).begin(e.stream, s.images, from);
+        defer if (e.vision) |v| v.end();
         var sink: PromptSink = .{ .gpa = self.gpa, .s = s };
         s.prompt_rows.clearRetainingCapacity();
         if (s.prompt_logprobs) |k| {
-            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's state.max_rows
+            // a logits buffer of its own takes batch_rows a head pass; without the memory, the window's rows
             if (self.prompt_logits == null) self.prompt_logits = cuda.DeviceBuffer.alloc(e.ctx.d, prompt_rows.batch_rows * e.c.vocab * 2) catch null;
-            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.max_rows;
+            const rows: usize = if (self.prompt_logits != null) prompt_rows.batch_rows else state.windowRows(e.c);
             const words = self.prompt_out.slice(u32);
             const picks_at = rows * row_words; // after the rows
             e.prompt_rows = .{ .k = k, .rows = rows, .logits = if (self.prompt_logits) |b| b.ptr else e.b.logits, .picks = words[picks_at..][0..rows], .picks_dev = self.prompt_dev + picks_at * 4, .out = words[0..picks_at], .out_dev = self.prompt_dev, .stride = row_words, .ctx = &sink, .call = PromptSink.take };
@@ -351,7 +381,7 @@ pub const Cuda = struct {
             if (start < t.from or start + count > t.from + t.prompt.items.len / d) return error.RowsNotHeld;
             return .{ .buffer = @intFromPtr(t.prompt.items.ptr), .offset = (start - t.from) * d, .rows = count, .row_bytes = @intCast(d), .space = .host, .dtype = .bf16 };
         }
-        if (start != t.verified.? or count > state.max_rows) return error.RowsNotHeld;
+        if (start != t.verified.? or count > state.windowRows(self.e.c)) return error.RowsNotHeld;
         self.e.bind(l.seq);
         const host = self.tapped.?.slice(u8)[0 .. count * d];
         try self.e.ops().download(host, self.e.b.hidden);
@@ -394,7 +424,7 @@ pub const Cuda = struct {
         const e = self.e;
         verified(self.gpa, l, e.pos);
         const rows = w.rows();
-        if (rows > state.max_rows) return error.WindowTooWide;
+        if (rows > state.windowRows(e.c)) return error.WindowTooWide;
         for (w.positions, 0..) |p, r| if (p != e.pos + 1 + r) return error.PositionMismatch;
         var ids: [state.max_rows]u32 = undefined;
         ids[0] = w.pending;
@@ -490,14 +520,15 @@ pub const Cuda = struct {
                 first[0] = self.value(r.first orelse return error.NoFirstToken);
                 break :blk first[0..];
             };
-            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.max_rows) {
-                try h.chain(follow, r.depth);
+            const v = h.vocab(r.stream.context.items);
+            if (drafting < 2 or r.depth == 0 or batched == parts.len or rows + follow.len > state.windowRows(self.e.c)) {
+                try h.chain(follow, r.depth, v);
                 l.keep = h.keep;
                 continue;
             }
-            if (r.depth > mtp.max_chain) return error.BadDraftRequest;
+            if (r.depth >= state.windowRows(self.e.c)) return error.BadDraftRequest;
             try self.e.ops().upload(self.e.b.sampled, std.mem.sliceAsBytes(follow));
-            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth };
+            parts[batched] = .{ .k_cache = h.k_cache, .v_cache = h.v_cache, .table = self.e.b.table, .probs = h.probs, .ids = self.e.b.ids, .hidden = self.e.b.hidden, .sampled = self.e.b.sampled, .rule = if (self.e.sampling != null) self.e.b.rule else null, .pos = h.pos, .keep = follow.len, .depth = r.depth, .vocab = v };
             l.keep = follow.len; // as h.chain records h.keep: a reclaim begins this head again at these rows
             h.pos += follow.len;
             batched += 1;
@@ -521,6 +552,33 @@ pub const Cuda = struct {
             const ms = @as(f64, @floatFromInt(d.capture_ns)) / 1e6;
             std.log.info("graphs while a request on {s} sequence ran: {d} captures in {d:.1} ms, {d} replays of graphs it captured for itself, {d} eager windows", .{ if (l.own) "the own" else "another", d.captures, ms, d.replays, d.eager });
         }
-        if (l.own) self.own_free = true else self.e.freeSeq(l.seq);
+        if (l.own) self.own_free = true else if (l.paged) {
+            _ = self.pages.?.close(l.seq);
+        } else self.e.freeSeq(l.seq);
+    }
+
+    /// The lane host's admission: the engine's own sequence is free, or the pool holds the request's pages now.
+    pub fn fits(self: *const Cuda, prompt: usize, max_tokens: usize) bool {
+        if (self.own_free and !self.paged_only) return true;
+        const p = self.pages orelse return true;
+        return p.fits(prompt, max_tokens);
     }
 };
+
+test "latent Bolt allows copy drafts and shared rounds without an MTP head" {
+    var e: Engine = undefined;
+    e.c.latent = 128;
+    var c: Cuda = undefined;
+    c.e = &e;
+    c.head = null;
+    c.copy_drafts = true;
+    c.cost_count = 0;
+    c.mtp_ms = 0;
+    c.mtp_drafts = null;
+    c.mtp_confidence = null;
+    const f = c.facts();
+    try std.testing.expectEqual(@as(u32, state.max_rows), f.exact_width);
+    try std.testing.expect(f.hidden_rows);
+    try std.testing.expect(f.max_streams > 1);
+    try std.testing.expect(!f.mtp);
+}

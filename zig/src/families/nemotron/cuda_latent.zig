@@ -25,14 +25,17 @@ pub const Latent = struct { into: kern.QLinear, out: kern.QLinear, t: Tables, id
 pub const mtp_id: u32 = 1 << 16;
 
 /// The scratch an expert pass uses: the plan, routed and shared activations, the shared expert's pair ids, NVFP4 rows.
-pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64 = 0 };
+pub const Scratch = struct { plan: kern.Plan, act: u64, sact: u64, sids: u64, ck4: u64 = 0, shared_plan: ?kern.Plan = null }; // null: planned in `plan`
 
 /// nemotron_latent.cu's kernels.
 pub const Fns = struct {
     mod: cuda.Module,
     topk: cuda.Function,
+    topk_few: cuda.Function,
     combine: cuda.Function,
     moe_out: cuda.Function,
+    combine_sums: cuda.Function,
+    moe_out_sums: cuda.Function,
     share_ids: cuda.Function,
 
     pub fn load(d: *const cuda.Driver) !Fns {
@@ -41,14 +44,29 @@ pub const Fns = struct {
         return .{
             .mod = mod,
             .topk = try mod.function("tf_super_topk"),
+            .topk_few = try mod.function("tf_super_topk_few"),
             .combine = try mod.function("tf_super_combine"),
             .moe_out = try mod.function("tf_super_moe_out"),
+            .combine_sums = try mod.function("tf_super_combine_sums"),
+            .moe_out_sums = try mod.function("tf_super_moe_out_sums"),
             .share_ids = try mod.function("tf_super_share_ids"),
         };
     }
 
     pub fn unload(x: *Fns) void {
         x.mod.unload();
+    }
+
+    /// Each row's top-k of `sk` slices (ids by pick and share, weights by pick): `few` an expert a thread, else a warp.
+    pub fn picks(x: Fns, s: cuda.Stream, few: bool, part: u64, bias: u64, ids: u64, wts: u64, rows: usize, scaling: f32, experts: usize, sk: usize, top_k: usize, shares: usize, norm_topk: bool) !void {
+        var t: cuda.Args = .{};
+        for ([_]u64{ part, bias, ids, wts }) |p| t.add(p);
+        t.add(int(rows));
+        t.add(scaling);
+        for ([_]usize{ experts, sk, top_k, shares }) |v| t.add(int(v));
+        t.add(@as(c_int, @intFromBool(norm_topk)));
+        if (few) return go(x.topk_few, s, .{ rows, 1, 1 }, @intCast((experts + 31) / 32 * 32), 0, &t);
+        try go(x.topk, s, .{ rows, 1, 1 }, 32, 0, &t);
     }
 };
 
@@ -105,7 +123,7 @@ const Fingerprint = extern struct {
     dims: [12]u64, // the config's sizes, rank and world left out
     kinds: [32]u8, // sha256 of the block pattern
     program: [32]u8, // sha256 of this executable
-    weights: [32]u8, // the checkpoint's identity (cuda_identity.zig): config, index, shard names, sizes, headers
+    weights: [32]u8, // the checkpoint's identity (core.checkpoint_identity): config, index, shard names, sizes, headers
 
     fn of(c: Config, program: [32]u8, weights: [32]u8) Fingerprint {
         var f: Fingerprint = .{ .rank = @intCast(c.rank), .world = @intCast(c.world), .ck = @intFromBool(c.ck), .dims = .{ c.hidden, c.vocab, c.layers, c.experts, c.top_k, c.latent, c.expert_width, c.shared_width, c.shares, c.mamba_heads, c.heads, c.kv_heads }, .kinds = undefined, .program = program, .weights = weights };
@@ -122,7 +140,7 @@ pub fn agree(gpa: std.mem.Allocator, io: std.Io, c: Config, g: *const cuda.tp_gr
     const exe = try std.Io.Dir.cwd().readFileAlloc(io, "/proc/self/exe", gpa, .limited(1 << 31));
     defer gpa.free(exe);
     std.crypto.hash.sha2.Sha256.hash(exe, &program, .{});
-    const weights = try @import("cuda_identity.zig").identity(gpa, io, dir); // every byte is compared at ready
+    const weights = try core.checkpoint_identity.identity(gpa, io, dir); // every byte is compared at ready
     var all: [16]Fingerprint = undefined;
     if (c.world > all.len) return error.TooManyRanks;
     try g.gather(Fingerprint, d, s, Fingerprint.of(c, program, weights), all[0..c.world]);
@@ -173,7 +191,7 @@ fn norm(L: *W.Loader, ck: *core.Checkpoint, label: []const u8, pre: []const u8, 
     return L.raw(label, try ck.expect(try std.fmt.bufPrint(&b, "{s}{s}", .{ pre, leaf }), .bf16, &.{c.hidden}));
 }
 
-/// The MTP head as stored (bf16 attention and input projection, a latent MoE); it drafts over the whole head.
+/// The MTP head as stored (bf16 attention and input projection, a latent MoE).
 pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
     var buf: [6][192]u8 = undefined;
     var p: [128]u8 = undefined;
@@ -194,12 +212,7 @@ pub fn mtp(L: *W.Loader, ck: *core.Checkpoint, c: Config) !void {
         .moe = try load(L, ck, "mtp.moe", try at(&buf[5], pre, "1.mixer."), c, mtp_id),
         .final_norm = try norm(L, ck, "mtp.final_norm", pre, "1.final_layernorm.weight", c),
     };
-    // the draft head is the target's: every id a candidate, so no vocabulary table is needed for this tokenizer
-    L.w.draft_head = L.w.head;
-    const ids = try L.gpa.alloc(u32, c.vocab);
-    defer L.gpa.free(ids);
-    for (ids, 0..) |*x, i| x.* = @intCast(i);
-    try W.draftIds(L, ids);
+    try modelopt.fp8DraftHead(L, ck, c);
 }
 
 /// Expert `e`'s projection name: `pre` then `mid` (with its index when `mid` takes one) then the leaf.
@@ -309,39 +322,36 @@ fn route(f: *const fwd.Forward, m: W.MoE, x: u64, rows: usize) !void {
     const b = f.b;
     const g = f.glue;
     const sk = routerSlices(c.hidden);
-    const per = c.hidden / sk;
-    var a: cuda.Args = .{};
-    for ([_]u64{ x, m.router, b.part }) |p| a.add(p);
-    for ([_]usize{ rows, c.hidden, c.experts, sk }) |v| a.add(int(v));
-    if (rows <= 16 and per % 8 == 0 and (x | m.router) % 16 == 0) {
-        const staged: u32 = @intCast((rows + 16) * (per / 8 + 1) * 16);
-        try go(g.f.router_rows, g.s, .{ (c.experts + 15) / 16, sk, 1 }, 256, staged, &a);
-    } else {
-        try go(g.f.router, g.s, .{ (rows + 15) / 16, (c.experts + 15) / 16, sk }, 256, @intCast(2 * 16 * (per / 2 + 1) * 4), &a);
-    }
-    const fns = f.ops.k.latent.?;
-    var t: cuda.Args = .{};
-    for ([_]u64{ b.part, m.bias, b.pick, b.wts }) |p| t.add(p);
-    t.add(int(rows));
-    t.add(c.routed_scaling);
-    for ([_]usize{ c.experts, sk, c.top_k, c.ownShares() }) |v| t.add(int(v));
-    t.add(@as(c_int, @intFromBool(c.norm_topk)));
-    try go(fns.topk, g.s, .{ rows, 1, 1 }, 32, 0, &t);
+    try g.logits(x, m.router, b.part, rows, c.hidden, c.experts, sk);
+    try f.ops.k.latent.?.picks(g.s, rows <= state.max_rows, b.part, m.bias, b.pick, b.wts, rows, c.routed_scaling, c.experts, sk, c.top_k, c.ownShares(), c.norm_topk);
 }
 
-/// One share set's expert rows into `out` (fp32): routed pairs by `picks`, then the shared expert's (row, share).
+/// One share set's expert rows into `out` (fp32 a share, or four.summed's bf16 sums): routed pairs, then the shared's.
 pub fn partials(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
-    if (t.ck) |x| return four.partials(o, x, s.plan, s.act, s.sact, s.sids, s.ck4, picks, lat, hidden, rows, own, c, out);
+    try routed(o, t, s, picks, lat, rows, own, c, out);
+    try sharedRows(o, t, s, hidden, rows, own, c, out + @as(u64, rows * c.top_k * own) * c.latent * 4);
+}
+
+/// `picks`' pairs through the routed experts into `out` (partials' first region).
+fn routed(o: kern.Ops, t: Tables, s: Scratch, picks: u64, lat: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    if (t.ck) |x| return four.routed(o, x.routed, s.plan, s.act, s.ck4, picks, lat, rows, own, c, out);
     const pairs = rows * c.top_k * own;
     const g = o.grouped();
     try o.plan(picks, pairs, t.routed.experts, 16, s.plan);
     const items = kern.maxItems(pairs, t.routed.experts, 16);
     try g.decode(o.s, .up, .{ .x = lat, .stride = c.latent, .slots = c.top_k * own }, t.routed, s.plan, s.act, items, -1);
     try g.decode(o.s, .down_f32, .{ .x = s.act, .stride = t.routed.width }, t.routed, s.plan, out, items, -1);
-    try o.plan(s.sids, rows * own, own, 16, s.plan);
+}
+
+/// The shared expert's (row, share) pairs into `out` (partials' second region), on `s`'s fixed plan where it has one.
+fn sharedRows(o: kern.Ops, t: Tables, s: Scratch, hidden: u64, rows: usize, own: usize, c: Config, out: u64) !void {
+    if (t.ck) |x| return four.shared(o, x.shared, s.plan, s.shared_plan, s.sact, s.sids, s.ck4, hidden, rows, own, c, out);
+    const g = o.grouped();
+    const sp = s.shared_plan orelse s.plan;
+    if (s.shared_plan == null) try o.plan(s.sids, rows * own, own, 16, sp);
     const sh_items = kern.maxItems(rows * own, own, 16);
-    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, s.plan, s.sact, sh_items, -1);
-    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, s.plan, out + @as(u64, pairs) * c.latent * 4, sh_items, -1);
+    try g.decode(o.s, .up, .{ .x = hidden, .stride = c.hidden, .slots = own }, t.shared, sp, s.sact, sh_items, -1);
+    try g.decode(o.s, .down_f32, .{ .x = s.sact, .stride = t.shared.width }, t.shared, sp, out, sh_items, -1);
 }
 
 /// The MoE block's delta into b.delta: the other ranks' shares asked for, ours run, all summed in share order.
@@ -355,11 +365,24 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
     const pairs = rows * c.top_k * own;
     const D: u64 = c.hidden;
     const Lw: u64 = c.latent;
+    const sh = b.ymoe + @as(u64, pairs) * Lw * 4; // the shared expert's rows
+    const sums = lt.t.ck != null and four.summed(c, rows); // the down kernels summed each pick's shares (bf16)
+    const window = rows <= state.windowRows(c); // the shared expert's fixed plans; on one GPU, the side stream
+    const scratch: Scratch = .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4, .shared_plan = if (window) b.latentPlan(c, rows) else null };
+    const side = if (window and f.tp == null) f.side else null;
+    if (side) |sd| {
+        try sd.fork.record(o.s);
+        try sd.s.wait(sd.fork);
+        const so: kern.Ops = .{ .k = o.k, .s = sd.s };
+        try sharedRows(so, lt.t, scratch, b.y, rows, own, c, sh);
+        try sd.join.record(sd.s);
+    }
     try route(f, m, b.y, rows);
     try f.mark(.route);
-    try o.linear().decode(o.s, lt.into, .{ .x = b.y }, b.lat, rows);
+    try o.linear().decode(o.s, lt.into, .{ .x = b.y, .part = o.part }, b.lat, rows);
     if (f.tp != null) try worker.send(f, lt.id, rows); // the other ranks' shares start while ours run
-    try partials(o, lt.t, .{ .plan = b.plan, .act = b.act, .sact = b.sact, .sids = b.sids, .ck4 = b.ck4 }, b.pick, b.lat, b.y, rows, own, c, b.ymoe);
+    try routed(o, lt.t, scratch, b.pick, b.lat, rows, own, c, b.ymoe);
+    if (side == null) try sharedRows(o, lt.t, scratch, b.y, rows, own, c, sh);
     try f.mark(.experts_down);
     // one GPU: shares interleaved by pair; ranks: each rank's rows in its own region of ymoe, in rank order
     var share_stride: u64 = Lw;
@@ -375,20 +398,37 @@ pub fn run(f: *const fwd.Forward, m: W.MoE, rows: usize) !void {
         shared_row = D;
         n = tp.world;
     }
-    var a: cuda.Args = .{};
-    a.add(b.ymoe);
-    a.add(@as(i64, @intCast(share_stride)));
-    a.add(@as(i64, @intCast(pair_stride)));
-    a.add(int(n));
-    a.add(b.wts);
-    a.add(int(c.top_k));
-    a.add(b.comb);
-    a.add(int(c.latent));
-    try go(fns.combine, o.s, .{ rows, (c.latent + 255) / 256, 1 }, 256, 0, &a);
-    try o.linear().decode(o.s, lt.out, .{ .x = b.comb }, b.delta, rows);
+    if (sums) {
+        var a: cuda.Args = .{};
+        for ([_]u64{ b.ymoe, b.wts }) |p| a.add(p);
+        a.add(int(c.top_k));
+        a.add(b.comb);
+        a.add(int(c.latent));
+        try go(fns.combine_sums, o.s, .{ rows, (c.latent + 1023) / 1024, 1 }, 128, 0, &a);
+    } else {
+        var a: cuda.Args = .{};
+        a.add(b.ymoe);
+        a.add(@as(i64, @intCast(share_stride)));
+        a.add(@as(i64, @intCast(pair_stride)));
+        a.add(int(n));
+        a.add(b.wts);
+        a.add(int(c.top_k));
+        a.add(b.comb);
+        a.add(int(c.latent));
+        try go(fns.combine, o.s, .{ rows, (c.latent + 255) / 256, 1 }, 256, 0, &a);
+    }
+    try o.linear().decode(o.s, lt.out, .{ .x = b.comb, .part = o.part }, b.delta, rows);
+    if (side) |sd| { // the shared rows' first reader is the add below
+        try o.s.wait(sd.join);
+        try f.mark(.shared_wait);
+    }
     var z: cuda.Args = .{};
     z.add(b.delta);
-    z.add(b.ymoe + @as(u64, pairs) * Lw * 4);
+    z.add(sh);
+    if (sums) {
+        z.add(int(c.hidden));
+        return go(fns.moe_out_sums, o.s, .{ rows, (c.hidden + 2047) / 2048, 1 }, 256, 0, &z);
+    }
     z.add(@as(i64, @intCast(shared_share)));
     z.add(@as(i64, @intCast(shared_row)));
     z.add(int(n));

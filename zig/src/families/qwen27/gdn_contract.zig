@@ -3,6 +3,9 @@ const std = @import("std");
 const Config = @import("config.zig").Config;
 const DType = @import("checkpoint.zig").DType;
 
+/// Rows a tree round snapshots at most; longer rounds are chains, which keep none.
+pub const snapshot_rows = 128;
+
 pub const Storage = enum(u32) { bf16 = 0, f32 = 1 };
 
 pub fn storage(dtype: DType) !Storage {
@@ -36,6 +39,7 @@ pub const Params = extern struct {
     eps: f32,
     /// 0: z, a and b in their own rows; else one fused zba row of this many values (z, then b, then a).
     zba_stride: u32 = 0,
+    advance: u32 = 0, // 1: a shared round's one-row windows step their state in the scan; the replay skips them
 };
 
 pub const Segment = extern struct { first: u32, rows: u32, state_slot: u32, next_slot: u32 };
@@ -54,7 +58,7 @@ pub const Shape = struct {
     }
 
     pub fn params(s: Shape, rows: usize, slots: usize, k: WeightKinds) !Params {
-        if (rows == 0 or rows > 128 or slots == 0 or slots > 64 or !std.math.isFinite(s.c.eps) or s.c.eps <= 0) return error.BadGdnDispatch;
+        if (rows == 0 or rows > @import("gpu_frame.zig").max_rows or slots == 0 or slots > 128 or !std.math.isFinite(s.c.eps) or s.c.eps <= 0) return error.BadGdnDispatch;
         return .{ .rows = @intCast(rows), .nk = @intCast(s.c.k_heads), .nv = @intCast(s.c.v_heads), .dk = @intCast(s.c.dk), .dv = @intCast(s.c.dv), .taps = @intCast(s.c.conv_kernel), .slots = @intCast(slots), .weight_flags = k.flags(), .eps = s.c.eps };
     }
 };
@@ -90,7 +94,7 @@ pub const Bytes = struct {
             .heads = try countBytes(u16, s.c.v_heads, p.rows),
             .decay = try countBytes(f32, s.c.v_heads, p.rows),
             .state = try countBytes(f32, s.state, p.slots),
-            .snapshots = try countBytes(f32, s.state, p.rows),
+            .snapshots = try countBytes(f32, s.state, @min(p.rows, snapshot_rows)),
             .history = try countBytes(u16, s.conv, p.slots),
             .tails = try countBytes(u16, s.conv, p.rows),
             .conv_weight = try countBytes(u8, s.qkv * s.c.conv_kernel, byteWidth(k.conv)),
