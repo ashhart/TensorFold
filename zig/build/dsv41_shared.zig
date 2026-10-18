@@ -8,6 +8,10 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8)
 }
 pub fn steps(b: *std.Build) void {
     const host = b.addTest(.{ .root_module = module(b, b.graph.host, "shared_test.zig") });
+    b.step("test-dsv41-engram-alloc", "Actual Engram startup failure sweeps with varying remap behavior").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = host.root_module, .filters = &.{ "production batch", "engram alloc:" } })).step);
+    const arm = b.addTest(.{ .root_module = module(b, b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }), "shared_test.zig"), .filters = &.{ "production batch", "engram alloc:" } });
+    _ = arm.getEmittedBin();
+    b.step("compile-dsv41-engram-alloc-aarch64", "Emit Linux ARM64 Engram failure controls; never execute").dependOn(&arm.step);
     const run = b.addRunArtifact(host);
     run.setCwd(b.path("."));
     b.step("test-dsv41-shared", "Shared DeepSeek checkpoint host tests, no GPU dependencies").dependOn(&run.step);

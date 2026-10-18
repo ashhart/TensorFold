@@ -74,17 +74,75 @@ test "production batch start retains full live owner after failed drain" {
     try r.close();
 }
 test "production batch map, batch list, pool queue allocations and table constructor unwind" {
-    const C = struct {
-        fn run(a: std.mem.Allocator, pool: bool) !void {
-            var tabs = [_]io.Table{try table(a)};
-            defer freeTable(a, &tabs[0]);
-            var p: io.Pool = .{};
-            defer p.jobs.deinit(a);
-            var r: Fake = .{ .gpa = a, .tables = &tabs, .pool = if (pool) &p else null };
-            defer r.close() catch unreachable;
-            _ = try io.start(&r, 0, &.{ 0, 99 }, false);
-        }
-    };
-    try t.checkAllAllocationFailures(t.allocator, C.run, .{false});
-    try t.checkAllAllocationFailures(t.allocator, C.run, .{true});
+    try sweep(t.allocator, false);
+    try sweep(t.allocator, true);
+}
+
+fn allocationCase(a: std.mem.Allocator, pool: bool) !void {
+    var tabs = [_]io.Table{try table(a)};
+    defer freeTable(a, &tabs[0]);
+    var p: io.Pool = .{};
+    defer p.jobs.deinit(a);
+    var r: Fake = .{ .gpa = a, .tables = &tabs, .pool = if (pool) &p else null };
+    defer r.close() catch unreachable;
+    _ = try io.start(&r, 0, &.{ 0, 99 }, false);
+}
+
+fn sweep(a: std.mem.Allocator, pool: bool) !void {
+    var stable = std.testing.FailingAllocator.init(a, .{ .resize_fail_index = 0 });
+    try t.checkAllAllocationFailures(stable.allocator(), allocationCase, .{pool});
+}
+
+const VaryRemap = struct {
+    backing: std.mem.Allocator,
+    cases: usize = 0,
+    remaps: usize = 0,
+    remap_successes: usize = 0,
+
+    fn allocator(v: *VaryRemap) std.mem.Allocator {
+        return .{ .ptr = v, .vtable = &.{ .alloc = alloc, .resize = resize, .remap = remap, .free = free } };
+    }
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const v: *VaryRemap = @ptrCast(@alignCast(ctx));
+        if (len == 2 * format.row_bytes) v.cases += 1;
+        return v.backing.rawAlloc(len, alignment, ra);
+    }
+    fn resize(_: *anyopaque, _: []u8, _: std.mem.Alignment, _: usize, _: usize) bool {
+        return false;
+    }
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, len: usize, ra: usize) ?[*]u8 {
+        const v: *VaryRemap = @ptrCast(@alignCast(ctx));
+        v.remaps += 1;
+        if (v.cases <= 1) return null;
+        const ptr = v.backing.rawRemap(memory, alignment, len, ra) orelse return null;
+        v.remap_successes += 1;
+        return ptr;
+    }
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const v: *VaryRemap = @ptrCast(@alignCast(ctx));
+        v.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+test "engram alloc: both complete failure sweeps ignore changing remap success" {
+    for ([_]bool{ false, true }) |pool| {
+        var arena: std.heap.ArenaAllocator = .init(t.allocator);
+        defer arena.deinit();
+        var varying: VaryRemap = .{ .backing = arena.allocator() };
+        try sweep(varying.allocator(), pool);
+        try t.expect(varying.cases > 1);
+        try t.expectEqual(@as(usize, 0), varying.remaps);
+    }
+}
+
+test "engram alloc: successful owner paths still exercise refused and successful remaps" {
+    for ([_]bool{ false, true }) |pool| {
+        var arena: std.heap.ArenaAllocator = .init(t.allocator);
+        defer arena.deinit();
+        var varying: VaryRemap = .{ .backing = arena.allocator() };
+        try allocationCase(varying.allocator(), pool);
+        try t.expect(varying.remaps > 0 and varying.remap_successes == 0);
+        try allocationCase(varying.allocator(), pool);
+        try t.expect(varying.remap_successes > 0);
+    }
 }
