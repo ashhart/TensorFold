@@ -39,6 +39,40 @@ pub fn grid(c: *const Config, w: u64, h: u64, room: u64) error{ImageTooSmall}!Gr
     return .{ .h = @intCast(th), .w = @intCast(tw) };
 }
 
+/// Python's round(): halves to the even neighbour.
+fn pyRound(x: f64) u64 {
+    const f = @floor(x);
+    const d = x - f;
+    const r: f64 = if (d > 0.5 or (d == 0.5 and @mod(f, 2) == 1)) f + 1 else f;
+    return @intFromFloat(r);
+}
+
+/// _compute_target_patches_video: the aspect-preserving grid nearest `video_target_patches`, both sides even.
+pub fn gridVideo(c: *const Config, w: u64, h: u64) !Grid {
+    if (w == 0 or h == 0 or c.video_target_patches < 4 or c.patch == 0) return error.BadVideo;
+    if (w > picture.max_side or h > picture.max_side) return error.VideoTooLarge;
+    picture.fits(w, h) catch return error.VideoTooLarge;
+    if (c.video_target_patches > c.max_patches / @max(c.video_temporal, 1)) return error.VideoTooLarge;
+    const target: f64 = @floatFromInt(c.video_target_patches);
+    const aspect = @as(f64, @floatFromInt(w)) / @as(f64, @floatFromInt(@max(h, 1)));
+    var ph = @max(pyRound(@sqrt(target / aspect)), 1);
+    var pw = @max(pyRound(@sqrt(target * aspect)), 1);
+    const d = Config.shuffle;
+    const rem_h = ph % d;
+    const rem_w = pw % d;
+    const ph_up = ph + (if (rem_h != 0) d - rem_h else 0);
+    const pw_up = pw + (if (rem_w != 0) d - rem_w else 0);
+    if (@as(f64, @floatFromInt(ph_up * pw_up)) <= target) {
+        ph = ph_up;
+        pw = pw_up;
+    } else {
+        ph = @max(d, ph - rem_h);
+        pw = @max(d, pw - rem_w);
+    }
+    if (ph * pw > c.max_patches / @max(c.video_temporal, 1) or ph > std.math.maxInt(u32) or pw > std.math.maxInt(u32)) return error.VideoTooLarge;
+    return .{ .h = @intCast(ph), .w = @intCast(pw) };
+}
+
 /// The patches one image may take when the request allows it `max_tokens` tokens: the processor's bound, or less.
 pub fn budget(c: *const Config, max_tokens: u32) error{ImageTooSmall}!u64 {
     const room = @min(@as(u64, c.max_patches), @as(u64, max_tokens) * Config.shuffle * Config.shuffle);
@@ -138,4 +172,17 @@ test "the hash names the grid: one picture at two budgets is two images to the c
     try std.testing.expect(whole.tokens > small.tokens);
     try std.testing.expect(whole.hash != small.hash); // another grid: neither resumes a state the other kept
     try std.testing.expectEqual(whole.hash, again.hash); // the same picture at the same budget resumes
+}
+
+test "video grids as the processor picks them (its own outputs, 1,024 patches)" {
+    // (width, height) -> (target_w, target_h) from _compute_target_patches_video on the public checkpoint's processor
+    const cases = [_][4]u64{
+        .{ 640, 480, 36, 28 }, .{ 1920, 1080, 42, 24 }, .{ 1280, 720, 42, 24 }, .{ 3840, 2160, 42, 24 },
+        .{ 100, 400, 16, 64 }, .{ 480, 360, 36, 28 },   .{ 1, 1, 32, 32 },      .{ 4000, 16, 506, 2 },
+        .{ 16, 4000, 2, 506 }, .{ 1024, 1024, 32, 32 }, .{ 720, 1280, 24, 42 },
+    };
+    for (cases) |k| {
+        const g = try gridVideo(&test_config, k[0], k[1]);
+        try std.testing.expectEqual(Grid{ .h = @intCast(k[3]), .w = @intCast(k[2]) }, g);
+    }
 }

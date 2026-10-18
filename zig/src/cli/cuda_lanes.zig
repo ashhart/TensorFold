@@ -33,7 +33,7 @@ pub fn run(gpa: std.mem.Allocator, io: std.Io, e: *nemotron.Engine, model_dir: [
     var cuda = try nemotron.Lanes.init(gpa, e, head);
     defer cuda.deinit();
     try cuda.measure(io, model_dir);
-    const rows: u32 = if (head != null) nemotron.state.max_rows else 1;
+    const rows: u32 = if (head != null) @intCast(nemotron.state.windowRows(e.c)) else 1;
     var cfg = try lanes.Config.init(gpa, cuda.facts(), rows, rows - 1);
     defer cfg.deinit(gpa);
     var clock = lanes.backend.WallClock{ .io = io };

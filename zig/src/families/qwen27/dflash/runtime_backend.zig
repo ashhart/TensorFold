@@ -10,7 +10,14 @@ const callbacks = @import("runtime_callbacks.zig");
 pub const Head = @import("runtime_head.zig").Head;
 pub const Frame = @import("runtime_frame.zig").Frame;
 pub const Ref = core.draft_ops.Ref;
-pub const Cache = struct { keys: mtl.Buffer, values: mtl.Buffer };
+const caches_impl = @import("caches.zig");
+pub const Cache = caches_impl.Pair(mtl.Buffer);
+pub fn newCaches(a: std.mem.Allocator, device: mtl.Device, c: cfg.Config, layers: usize) ![]Cache {
+    return caches_impl.newCaches(mtl.Buffer, a, device, c, layers);
+}
+pub fn freeCaches(a: std.mem.Allocator, caches: []Cache) void {
+    caches_impl.freeCaches(mtl.Buffer, a, caches);
+}
 const simd = core.row_projection.simd;
 /// Chips without tensor units: a prepared q4 matrix in MLX layout on simdgroup-matrix tiles.
 pub const Tiled = struct {
@@ -56,6 +63,7 @@ pub const Backend = struct {
     frame: Frame,
     caches: []Cache,
     context: op.Context = .{ .cache = 1, .begin = 0, .end = 0 },
+    batch: []const []Cache = &.{}, // a batched pass's streams' caches, by stream
     transaction: ?u64 = null,
     staged: ?u64 = null,
     appended: u32 = 0,
@@ -74,25 +82,7 @@ pub const Backend = struct {
         errdefer topk.deinit();
         var head = try @import("runtime_head.zig").Head.init(a, target.device, target.weights.head);
         errdefer head.deinit();
-        const caches = try a.alloc(Cache, c.layers);
-        var made: usize = 0;
-        errdefer {
-            for (caches[0..made]) |cache| {
-                cache.keys.deinit();
-                cache.values.deinit();
-            }
-            a.free(caches);
-        }
-        for (caches) |*cache| {
-            const bytes = @as(usize, c.window + 16) * c.kvWidth() * 2;
-            const keys = try target.device.buffer(bytes, options);
-            const values = target.device.buffer(bytes, options) catch |err| {
-                keys.deinit();
-                return err;
-            };
-            cache.* = .{ .keys = keys, .values = values };
-            made += 1;
-        }
+        const caches = try newCaches(a, target.device, c, c.layers);
         return .{ .allocator = a, .target = target, .checkpoint = checkpoint, .config = c, .primitives = primitives, .attention = attention, .topk = topk, .head = head, .frame = .{ .allocator = a, .device = target.device, .queue = target.queue }, .caches = caches };
     }
     pub fn deinit(b: *Backend) void {
@@ -104,17 +94,13 @@ pub const Backend = struct {
         while (tiled.next()) |t| t.deinit();
         b.tiled.deinit(b.allocator);
         if (b.simd) |*p| p.deinit();
-        for (b.caches) |cache| {
-            cache.keys.deinit();
-            cache.values.deinit();
-        }
-        b.allocator.free(b.caches);
+        freeCaches(b.allocator, b.caches);
         b.head.deinit();
         b.topk.deinit();
         b.attention.deinit();
         b.primitives.deinit();
     }
-    /// Each linear's q4 copy (M5 lane adapters, else simdgroup-matrix tiles), keyed by the address its graph view carries.
+    /// Prepared q4 linears use tensor adapters or SIMD tiles, keyed by the graph weight address.
     pub fn prepare(b: *Backend) !void {
         const units = b.target.device.tensorUnits();
         const order = if (units) try core.lane_projection.RegOrder.init(b.target.device) else null;

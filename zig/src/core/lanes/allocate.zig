@@ -14,7 +14,13 @@ pub fn allocate(gpa: Allocator, fixed: []const u32, probs: []const []const f64, 
 pub const HeadCost = struct {
     step_ms: f64 = 0.0,
     batched: bool = false,
+    free_first: bool = false,
 };
+
+/// allocate, each stream's drafts past its first costing one more head step.
+pub fn allocatePriced(gpa: Allocator, fixed: []const u32, probs: []const []const f64, costs: *const Table, overhead_ms: f64, max_rows: u64, step_ms: f64) ![]u32 {
+    return allocateDrafts(gpa, fixed, probs, costs, overhead_ms, max_rows, .{ .step_ms = step_ms, .free_first = true });
+}
 
 /// allocate, each count also priced by the head steps that draft it.
 pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const f64, costs: *const Table, overhead_ms: f64, max_rows: u64, head: HeadCost) ![]u32 {
@@ -28,6 +34,7 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
     var expected: f64 = @floatFromInt(rows);
     var drafts: u64 = 0;
     var deepest: u32 = 0;
+    var firsts: u64 = 0;
     const timed = !costs.empty();
     var best = rate(costs, timed, rows, expected, overhead_ms);
     while (rows < max_rows) {
@@ -44,13 +51,14 @@ pub fn allocateDrafts(gpa: Allocator, fixed: []const u32, probs: []const []const
         }
         const s = pick orelse break;
         counts[s] += 1;
+        firsts += @intFromBool(counts[s] == 1);
         rows += 1;
         drafts += 1;
         deepest = @max(deepest, counts[s]);
         expected += pick_p;
-        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts);
+        const steps: f64 = @floatFromInt(if (head.batched) deepest else drafts - (if (head.free_first) firsts else 0));
         const now = rate(costs, timed, rows, expected, overhead_ms + head.step_ms * steps);
-        if (now > best) {
+        if (now > best or (!timed and head.step_ms == 0)) {
             best = now;
             @memcpy(best_counts, counts);
         }
@@ -128,6 +136,55 @@ test "allocate takes the widest round when no cost is timed" {
     const counts = try allocate(gpa, &.{ 1, 1 }, &probs, &empty, 0.0, 8);
     defer gpa.free(counts);
     try std.testing.expectEqualSlices(u32, &.{ 2, 1 }, counts);
+}
+
+test "a priced draft step keeps a stream's later drafts out when they land too seldom to pay" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10.0 }, .{ .width = 8, .ms = 12.0 } }, 8);
+    defer costs.deinit(gpa);
+    const probs = [_][]const f64{ &.{ 0.6, 0.3, 0.15 }, &.{ 0.6, 0.3, 0.15 } };
+    const free = try allocate(gpa, &.{ 1, 1 }, &probs, &costs, 2.0, 8);
+    defer gpa.free(free);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 3 }, free);
+    const priced = try allocatePriced(gpa, &.{ 1, 1 }, &probs, &costs, 2.0, 8, 1.5);
+    defer gpa.free(priced);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 1 }, priced);
+}
+
+test "a priced draft step leaves each stream's first draft free" {
+    const gpa = std.testing.allocator;
+    var flat = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10.0 }, .{ .width = 8, .ms = 10.0 } }, 8);
+    defer flat.deinit(gpa);
+    const probs = [_][]const f64{&.{0.5}};
+    // charged, the draft would cost 100 ms against 0.5 tokens: it stays because the first is free
+    const counts = try allocatePriced(gpa, &.{1}, &probs, &flat, 0.0, 8, 100.0);
+    defer gpa.free(counts);
+    try std.testing.expectEqualSlices(u32, &.{1}, counts);
+}
+
+test "a priced draft step cuts the stream whose later drafts land seldom and keeps the other's" {
+    const gpa = std.testing.allocator;
+    var flat = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10.0 }, .{ .width = 8, .ms = 10.0 } }, 8);
+    defer flat.deinit(gpa);
+    const probs = [_][]const f64{ &.{ 0.9, 0.85, 0.8 }, &.{ 0.9, 0.2, 0.1 } };
+    const priced = try allocatePriced(gpa, &.{ 1, 1 }, &probs, &flat, 0.0, 8, 1.0);
+    defer gpa.free(priced);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 1 }, priced);
+    const free = try allocate(gpa, &.{ 1, 1 }, &probs, &flat, 0.0, 8);
+    defer gpa.free(free);
+    try std.testing.expectEqualSlices(u32, &.{ 3, 3 }, free);
+}
+
+test "a zero draft step prices rounds as allocate does" {
+    const gpa = std.testing.allocator;
+    var costs = try extendCosts(gpa, &.{ .{ .width = 1, .ms = 10.0 }, .{ .width = 8, .ms = 12.0 } }, 8);
+    defer costs.deinit(gpa);
+    const probs = [_][]const f64{ &.{ 0.9, 0.85, 0.8 }, &.{ 0.9, 0.2, 0.1 }, &.{0.4} };
+    const priced = try allocatePriced(gpa, &.{ 1, 1, 1 }, &probs, &costs, 2.0, 8, 0.0);
+    defer gpa.free(priced);
+    const free = try allocate(gpa, &.{ 1, 1, 1 }, &probs, &costs, 2.0, 8);
+    defer gpa.free(free);
+    try std.testing.expectEqualSlices(u32, free, priced);
 }
 
 test "extendCosts interpolates and extrapolates" {

@@ -27,12 +27,13 @@ pub fn engineModules(b: *std.Build, target: std.Build.ResolvedTarget, metal: *st
         index = b.fmt("{s}pub const {s} = @embedFile(\"{s}.metal\");\n", .{ index, part, part });
     }
     _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet.metal"), "gdn.metal");
+    _ = files.addCopyFile(b.path("zig/kernels/metal/core/deltanet_slots.metal"), "gdn_slots.metal");
     const bf16_topk = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_topk.zig"), .target = target, .optimize = .ReleaseSafe });
     const tree_round = b.createModule(.{ .root_source_file = b.path("zig/src/core/tree_round.zig"), .target = target, .optimize = .ReleaseSafe });
     const s: Shared = .{
         .delta = b.createModule(.{ .root_source_file = b.path("zig/src/core/deltanet_kernels.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } }),
         .runtime_sources = b.createModule(.{ .root_source_file = files.add("qwen_runtime_sources.zig", index) }),
-        .gdn_source = b.createModule(.{ .root_source_file = files.add("qwen_gdn_source.zig", "pub const text = @embedFile(\"gdn.metal\");\n") }),
+        .gdn_source = b.createModule(.{ .root_source_file = files.add("qwen_gdn_source.zig", "pub const text = @embedFile(\"gdn.metal\") ++ \"\\n\" ++ @embedFile(\"gdn_slots.metal\");\n") }),
         .bf16_topk = bf16_topk,
         .bf16_topk_gpu = b.createModule(.{ .root_source_file = b.path("zig/src/core/bf16_topk_gpu.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "bf16_topk", .module = bf16_topk }, .{ .name = "bf16_topk_sources", .module = b.createModule(.{ .root_source_file = b.path("zig/bf16_topk_sources.zig") }) } } }),
         .tree_round = tree_round,
@@ -107,9 +108,11 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const family: []const std.Build.Module.Import = &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } };
     _ = program(b, "tf-qwen27-run", "Build the native greedy, chunk and prompt-speed check on real weights", "zig/tests/qwen27/run.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal }, .{ .name = "core_lane", .module = core_lane }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources }, .{ .name = "qwen_gdn_source", .module = s.gdn_source } });
     _ = program(b, "tf-qwen27-attention-fused", "Build the fused-chain versus tail-kernel attention byte check on this Mac's tensor units, no models", "zig/tests/qwen27/attention_fused.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources } });
+    _ = program(b, "tf-qwen27-attention-precision", "Build decode attention's error against a float64 reference on this Mac, no models", "zig/tests/qwen27/attention_precision.zig", target, false, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources } });
     _ = program(b, "tf-qwen27-projection-cases", "Build real-input production projection precision replay", "zig/tests/qwen27/projection_cases.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "metal", .module = metal } });
     _ = program(b, "tf-qwen27-dflash-run", "Build the explicit draft prototype and its plain comparison on real weights", "zig/tests/qwen27/dflash_run.zig", target, true, family);
     const engine_only: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal } };
+    _ = program(b, "tf-qwen27-empty-keep", "Build shared empty/full keep state checks", "zig/tests/qwen27/empty_keep.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-synthetic", "Build bounded synthetic native hybrid chunk checks, no models", "zig/tests/qwen27/synthetic.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-dflash-synthetic", "Build model-free native draft context/forward/tree check", "zig/tests/qwen27/dflash_runtime.zig", target, false, engine_only);
     _ = program(b, "tf-qwen27-widths", "Build the projections at every oQ width before tensor units: float64, row windows, mixed stacks, embedding", "zig/tests/qwen27/widths.zig", target, false, engine_only);
@@ -118,6 +121,7 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const api = b.createModule(.{ .root_source_file = b.path("zig/src/core/engine_api.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{.{ .name = "lanes", .module = lanes }} });
     const host = b.createModule(.{ .root_source_file = b.path("zig/src/native/qwen27_served.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = api }, .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = engine } } });
     const served: []const std.Build.Module.Import = &.{ .{ .name = "tensorfold", .module = engine }, .{ .name = "metal", .module = metal }, .{ .name = "engine_api", .module = api }, .{ .name = "qwen27_served", .module = host } };
+    _ = program(b, "tf-qwen27-speed-served", "Build long secondary-slot prompt and shared drafting checks", "zig/tests/qwen27/speed_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-served-check", "Build synthetic CLI versus served-host token check", "zig/tests/qwen27/served.zig", target, false, served);
     _ = program(b, "tf-qwen27-dflash-served-check", "Build synthetic drafted CLI versus served-host token check", "zig/tests/qwen27/dflash_served.zig", target, false, served);
     _ = program(b, "tf-qwen27-lanes-check", "Build synthetic lane-core versus plain greedy token and state check", "zig/tests/qwen27/lanes_check.zig", target, false, served);

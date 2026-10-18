@@ -59,7 +59,11 @@ pub fn renderIds(srv: *Server, cx: *Cx, messages: Value, tools: []const Value, t
 fn render(srv: *Server, a: std.mem.Allocator, messages: Value, options: model_text.RenderOptions, problem: *[]const u8) model_text.Error![]u32 {
     const v = srv.info.vision orelse return srv.text.renderIds(a, messages, options, problem);
     const markers = try images.markerText(srv.text, a, v);
-    const text = try srv.text.render(a, try images.shield(a, messages, markers), options, problem);
+    var text = try srv.text.render(a, try images.shield(a, messages, markers), options, problem);
+    if (v.video) |o| if (o.video_text.len > 0) { // the template's own video placeholder becomes one token before encoding
+        const word = try srv.text.tokenString(a, o.video_token);
+        text = try std.mem.replaceOwned(u8, a, text, o.video_text, word);
+    };
     return images.encodeShielded(srv.text, a, text, markers);
 }
 

@@ -6,6 +6,15 @@ const tool_specs = @import("tool_specs.zig");
 const Value = json.Value;
 const Allocator = std.mem.Allocator;
 
+/// Valid JSON object arguments, before any legacy markup conversion can rewrite their string contents.
+pub fn parseObject(a: Allocator, text: []const u8) Allocator.Error!?Value {
+    const v = switch (try json.parseText(a, text)) {
+        .ok => |v| v,
+        .err => return null,
+    };
+    return if (v == .object) v else null;
+}
+
 /// Each offered tool's parameter schemas by lowercase name.
 pub const Schemas = std.StringHashMapUnmanaged(*const json.Object);
 

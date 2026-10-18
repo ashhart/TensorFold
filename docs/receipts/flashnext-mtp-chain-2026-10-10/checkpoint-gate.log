@@ -1,0 +1,17 @@
+PASS draft chain: prompt 0, 23 tokens, absorb 1/4/16, rewind 0/3, depths 0/1/2/4/8/15, exact drafts, hidden bytes and cache positions
+PASS draft chain: prompt 1, 66 tokens, absorb 1/4/16, rewind 0/3, depths 0/1/2/4/8/15, exact drafts, hidden bytes and cache positions
+PASS draft chain: prompt 2, 2764 tokens, absorb 1/4/16, rewind 0/3, depths 0/1/2/4/8/15, exact drafts, hidden bytes and cache positions
+PASS draft chain: prompt 3, 11237 tokens, absorb 1/4/16, rewind 0/3, depths 0/1/2/4/8/15, exact drafts, hidden bytes and cache positions
+PASS draft chain: prompt 0, 2050 tokens, absorb 1/4/16, rewind 0/3, depths 0/1/2/4/8/15, exact drafts, hidden bytes and cache positions
+PASS drafts false: 4 streams, 256 exact tokens, 63 shared forwards, 12.716s, legacy serial 15.130s
+MEASURE chain false: draft calls 0, waits 0, draft 0.000000s, total 12.716432s
+PASS drafts false: cancellation, slot reuse and prompt admission
+PASS drafts false: multi-chunk mark and restored prefix in a dynamic-capacity slot
+PASS drafts true: 4 streams, 256 exact tokens, 20 shared forwards, 12.474s, legacy serial 13.090s
+MEASURE chain false: draft calls 84, waits 256, draft 0.312223s, total 12.473931s
+PASS drafts true: cancellation, slot reuse and prompt admission
+PASS drafts true: multi-chunk mark and restored prefix in a dynamic-capacity slot
+PASS drafts true: 4 streams, 256 exact tokens, 20 shared forwards, 12.376s, legacy serial 13.090s
+MEASURE chain true: draft calls 84, waits 84, draft 0.261944s, total 12.375544s
+PASS drafts true: cancellation, slot reuse and prompt admission
+PASS drafts true: multi-chunk mark and restored prefix in a dynamic-capacity slot
