@@ -193,6 +193,12 @@
     "io": "MAT bf16 [N, ld], VEC bf16 [K], P i32 [K, N, ld] -> OUT bf16 [N]",
     "launch": "threadgroups [ceil(N / 4), 1, batch] of [32, 8, 1]"
    },
+   "tf_gemv_bf16_bm{4,8}_tm4": {
+    "mlx": "gemv_bfloat16_bm{4,8}_bn1_sm1_sn32_tm4_tn4_nc0_axpby0 (x @ W.T with K < 16 N; bm 8 from N 4096): Bolt's gate, latent projections and bf16 lm_head",
+    "io": "MAT bf16 [N, ld], VEC bf16 [rows, K], P i32 [K, N, ld] -> OUT bf16 [rows, N], one row a threadgroup z",
+    "launch": "threadgroups [ceil(N / (4 bm)), 1, rows] of [32, 1, bm]",
+    "check": "check_mlx_ops.py --ops bolt_gemv (tools/zig/bolt_op_cases.py)"
+   },
    "tf_gemv_wide_bf16_v{3,4,5}_kl32": {
     "mlx": "gemv_wide_bfloat16_nv{nv}_kl32_nc1_axpby0: the multi-row MTP attention's scores",
     "io": "MAT bf16 rows (keys), X bf16 vectors, P i32 [K, N, M, mat_ld, x_ld], BATCH i64 [inner, x outer/inner strides, mat outer/inner strides] -> OUT bf16 [batch, M, N]",
@@ -223,7 +229,7 @@
    "tf_add_bf16": "vv_Addbfloat16",
    "tf_relu2_bf16": "the relu2 fusion (CV2I...MaximumCDFV2OSquareE)",
    "tf_scale_bf16": "sv_Multiplybfloat16 (bf16(scale) x q in the unfused attention)",
-   "tf_moe_combine": "v_copybfloat16float32 + g2_Multiplyfloat32 + col_reduce_small_1_reduce_sumfloat32 + v_copyfloat32bfloat16 in one launch (one row, k <= 7 weights)",
+   "tf_moe_combine": "v_copybfloat16float32 + g2_Multiplyfloat32 + col_reduce_small_1_reduce_sumfloat32 + v_copyfloat32bfloat16 in one launch (one row; past 8 weights, col_reduce_small's 8 lanes: weight 8 onto weight 0); _rows: a row each, Bolt's k 9 (bolt_combine)",
    "tf_causal_mask_bf16": "arangeint32 x2 + g2_GreaterEqualint32 + g2_Selectbfloat16: where(q >= k, s, lowest bf16)",
    "tf_gather_u32": "gather_frontuint32_uint32_int_1 (token = draft_ids[argmax]; up to 7 ids)",
    "launch": "threads [count, 1, 1] (mask: [n, R, batch]; combine: [D, rows, 1]), threadgroup [256, 1, 1] or fewer"
