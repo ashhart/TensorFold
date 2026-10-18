@@ -1,5 +1,7 @@
 import { readBoundedJsonResponse, readBoundedResponseText } from '../bounded-response'
-import { createConnectorFetch } from '../secure-fetch'
+import { resolveHubEndpoint } from './hub-network'
+import { hubError, hubFailureCause } from '../../../shared/hub-failure'
+export { HF_ORIGIN, createHubFetch } from './hub-network'
 import type { HubGated, HubModelSummary, ModelPreflight, PreflightVerdict } from '../types'
 import { describeFormat, formatName } from './cli'
 import { assertRepoId, isRevision } from './paths'
@@ -9,29 +11,37 @@ import { discardResponseBody } from '../pinned-fetch'
 // Hugging Face search and a per-repo preflight: is the family served, is the format one the engine
 // reads, is the repo gated (pull sends no token), how big is it, does it fit memory and disk.
 
-export const HF_ORIGIN = 'https://huggingface.co'
 export const RUNTIME_MARGIN_BYTES = 2 * 1024 ** 3
 const DISK_HEADROOM_BYTES = 1024 ** 3
 const TIMEOUT_MS = 15_000
 
-export function createHubFetch(): typeof fetch {
-  return createConnectorFetch(HF_ORIGIN, 'Hugging Face')
-}
-
 export interface HubDeps {
   fetch: typeof fetch
+  endpoint?: string
   offline?: boolean
 }
 
 function assertOnline(deps: HubDeps): void {
-  if (deps.offline) throw new Error('Hugging Face is offline in this session (HF_HUB_OFFLINE is set).')
+  if (deps.offline) throw hubError('offline', 'Hugging Face is offline in this session (HF_HUB_OFFLINE is set).')
+}
+
+function origin(deps: HubDeps): string { return resolveHubEndpoint(deps.endpoint) }
+
+async function request(deps: HubDeps, url: string, init: RequestInit): Promise<Response> {
+  try { return await deps.fetch(url, init) } catch (cause) {
+    const failure = hubFailureCause(cause)
+    if (failure) throw hubError(failure.category, failure.message, cause)
+    throw hubError('transport', 'Could not reach the Hub. Check the connection or proxy settings, then retry.', cause)
+  }
 }
 
 async function getJson(deps: HubDeps, url: string, label: string): Promise<any> {
-  const res = await deps.fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'manual' })
-  if (res.status === 401 || res.status === 404) throw new Error(`${label}: not found on Hugging Face, or private.`)
-  if (!res.ok) throw new Error(`${label}: Hugging Face answered HTTP ${res.status}.`)
-  return readBoundedJsonResponse(res, label, 8 * 1024 * 1024)
+  const res = await request(deps, url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'manual' })
+  if (res.status === 401 || res.status === 404) { await discardResponseBody(res); throw hubError('http', `${label}: not found on Hugging Face, or private.`) }
+  if (!res.ok) { await discardResponseBody(res); throw hubError('http', `${label}: Hugging Face answered HTTP ${res.status}.`) }
+  try { return await readBoundedJsonResponse(res, label, 8 * 1024 * 1024) } catch (cause) {
+    throw hubError('http', `${label}: the Hub response could not be read as bounded JSON.`, cause)
+  }
 }
 
 function gatedValue(value: unknown): HubGated {
@@ -69,25 +79,27 @@ export async function searchHub(query: string, deps: HubDeps, limit = 30): Promi
   if (q.length > 200) throw new Error('Search text is too long.')
   const params = new URLSearchParams({ search: q, limit: String(Math.min(Math.max(1, limit), 50)), sort: 'downloads', direction: '-1' })
   for (const field of ['downloads', 'likes', 'lastModified', 'gated', 'config', 'pipeline_tag', 'library_name']) params.append('expand', field)
-  return parseSearchResults(await getJson(deps, `${HF_ORIGIN}/api/models?${params}`, 'Hugging Face search'))
+  return parseSearchResults(await getJson(deps, `${origin(deps)}/api/models?${params}`, 'Hugging Face search'))
 }
 
-function nextLink(header: string | null): string | null {
+function nextLink(header: string | null, deps: HubDeps): string | null {
   const match = /<([^>]+)>;\s*rel="next"/.exec(header ?? '')
   if (!match) return null
-  const url = new URL(match[1], HF_ORIGIN)
-  return url.origin === HF_ORIGIN ? url.toString() : null
+  const url = new URL(match[1], origin(deps))
+  if (url.origin !== origin(deps) || url.username || url.password) throw hubError('policy', 'The Hub file list points outside the configured HTTPS endpoint.')
+  return url.toString()
 }
 
-// Sum of file sizes at one revision; follows the tree API's Link pagination on huggingface.co only.
+// Sum file sizes at one revision, following pagination only on the configured Hub origin.
 export async function treeTotal(deps: HubDeps, repo: string, revision: string): Promise<{ bytes: number; files: number }> {
-  let url: string | null = `${HF_ORIGIN}/api/models/${assertRepoId(repo)}/tree/${encodeURIComponent(revision)}?recursive=true`
+  let url: string | null = `${origin(deps)}/api/models/${assertRepoId(repo)}/tree/${encodeURIComponent(revision)}?recursive=true`
   let bytes = 0
   let files = 0
   for (let page = 0; url && page < 20; page++) {
-    const res: Response = await deps.fetch(url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'manual' })
-    if (!res.ok) throw new Error(`${repo}: the file list is unavailable (HTTP ${res.status}).`)
-    const next = nextLink(res.headers.get('link'))
+    const res: Response = await request(deps, url, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(TIMEOUT_MS), redirect: 'manual' })
+    if (!res.ok) { await discardResponseBody(res); throw hubError('http', `${repo}: the file list is unavailable (HTTP ${res.status}).`) }
+    let next: string | null
+    try { next = nextLink(res.headers.get('link'), deps) } catch (cause) { await discardResponseBody(res); throw cause }
     const body = await readBoundedJsonResponse(res, `${repo} file list`, 8 * 1024 * 1024)
     if (!Array.isArray(body)) throw new Error(`${repo}: the file list has an unexpected shape.`)
     for (const entry of body) {
@@ -97,31 +109,34 @@ export async function treeTotal(deps: HubDeps, repo: string, revision: string): 
     }
     url = next
   }
+  if (url) throw hubError('http', `${repo}: the Hub file list exceeded the pagination limit.`)
   return { bytes, files }
 }
 
 async function readConfig(deps: HubDeps, repo: string, revision: string): Promise<Record<string, any> | null> {
   try {
-    let url = new URL(`${HF_ORIGIN}/${repo}/resolve/${encodeURIComponent(revision)}/config.json`)
+    let url = new URL(`${origin(deps)}/${repo}/resolve/${encodeURIComponent(revision)}/config.json`)
     const signal = AbortSignal.timeout(TIMEOUT_MS)
     for (let hop = 0; hop <= 5; hop++) {
-      const res = await deps.fetch(url.href, { signal, redirect: 'manual' })
+      const res = await request(deps, url.href, { signal, redirect: 'manual' })
       if ([301, 302, 303, 307, 308].includes(res.status)) {
         const location = res.headers.get('location')
         await discardResponseBody(res)
-        if (!location || hop === 5) return null
+        if (!location || hop === 5) throw hubError('http', `${repo}: the Hub config redirect limit was reached.`)
         const next = new URL(location, url)
-        if (next.origin !== HF_ORIGIN || next.username || next.password) return null
+        if (next.origin !== origin(deps) || next.username || next.password) throw hubError('policy', 'The Hub config redirect leaves its configured HTTPS endpoint.')
         url = next
         continue
       }
-      if (res.status !== 200) { await discardResponseBody(res); return null }
+      if (res.status !== 200) { await discardResponseBody(res); throw hubError('http', `${repo}: config.json is unavailable (HTTP ${res.status}).`) }
       const doc = JSON.parse(await readBoundedResponseText(res, `${repo} config.json`, 4 * 1024 * 1024))
       return doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : null
     }
     return null
-  } catch {
-    return null
+  } catch (cause) {
+    const failure = hubFailureCause(cause)
+    if (failure) throw hubError(failure.category, failure.message, cause)
+    throw hubError('http', `${repo}: config.json could not be read from the Hub.`, cause)
   }
 }
 
@@ -143,7 +158,7 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   assertRepoId(repo)
   const rev = revision ?? 'main'
   if (!isRevision(rev)) throw new Error('Expected a branch, tag or commit for the revision.')
-  const info = await getJson(ctx, `${HF_ORIGIN}/api/models/${repo}/revision/${encodeURIComponent(rev)}`, repo)
+  const info = await getJson(ctx, `${origin(ctx)}/api/models/${repo}/revision/${encodeURIComponent(rev)}`, repo)
   if (typeof info?.sha !== 'string' || !/^[0-9a-f]{40}$/.test(info.sha)) throw new Error('The Hub did not resolve the model to an immutable commit. Retry the model checks before downloading.')
   const sha: string = info.sha
   const gated = gatedValue(info?.gated)
@@ -157,11 +172,15 @@ export async function preflightRepo(repo: string, revision: string | null, ctx: 
   const drafterRepo = supported ? ctx.drafterFor(repo) : null
   let drafterRevision: string | null = null
   const drafterTree = drafterRepo ? await (async () => {
-    const metadata = await getJson(ctx, `${HF_ORIGIN}/api/models/${drafterRepo}/revision/main`, drafterRepo)
+    const metadata = await getJson(ctx, `${origin(ctx)}/api/models/${drafterRepo}/revision/main`, drafterRepo)
     if (typeof metadata?.sha !== 'string' || !/^[0-9a-f]{40}$/.test(metadata.sha) || gatedValue(metadata.gated)) return null
     drafterRevision = metadata.sha
     return treeTotal(ctx, drafterRepo, drafterRevision!)
-  })().catch(() => null) : null
+  })().catch((cause) => {
+    const failure = hubFailureCause(cause)
+    if (failure) throw hubError(failure.category, failure.message, cause)
+    return null
+  }) : null
   const totalBytes = tree.bytes + (drafterTree?.bytes ?? 0)
   const memoryFloorBytes = tree.bytes ? totalBytes + RUNTIME_MARGIN_BYTES : null
   const fitsMemory = memoryFloorBytes == null ? null : memoryFloorBytes <= ctx.memoryLimitBytes

@@ -5,12 +5,16 @@ import path from 'node:path'
 import type { EngineCapabilities, EngineConnection, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EnginePerformance, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness } from '../types'
 import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
 import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
-import { createHubFetch, preflightRepo, searchHub } from './hub'
-import { assertRepoId, freeDiskBytes, hasCachedSnapshot, hubCacheDir, isRevision, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
+import { ModelHub } from './model-hub'
+import { assertRepoId, hasCachedSnapshot, hubCacheDir, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
 import { setEnginePerformanceRecorder, setEngineServeHook } from './provider'
 import { createTurnStats, finalizeTurnStats, readEngineTimings, recordModelCall, type ModelCallSample } from '../turn-stats'
 import { recordEngineContext } from './context'
-import { startPull, type PullHandle } from './pull'
+import { EngineDownloads, type RunningPull } from './downloads'
+import { engineLaunchEnv } from './engine-env'
+import type { EngineServiceOptions } from './service-options'
+export { engineChildEnv } from './engine-env'
+export type { EngineServiceOptions } from './service-options'
 import { EngineSupervisor } from './supervisor'
 import { ModelRevisions } from './model-revisions'
 import { EnginePreferenceStore } from './preferences'
@@ -19,36 +23,7 @@ import { EngineLearning } from './learning'
 import { isLocalModelId, ModelLibrary } from './library'
 import { assertCortheonReleaseAllowed, CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 
-// Glue for the main process: one supervisor, the pull jobs, cached CLI answers, and the events the
-// renderer mirrors. Electron-free; main-app passes the binary path, app home and an emitter.
-
-export interface EngineServiceOptions {
-  binaryPath: string
-  appHome: string
-  env?: NodeJS.ProcessEnv
-  // Exact environment for engine processes; tests use it to reach the fake engine's knobs.
-  childEnv?: NodeJS.ProcessEnv
-  binary?: EngineBinary
-  fetch?: typeof fetch
-  totalMemoryBytes?: number
-  memoryBudgetBytes?: number
-  readyTimeoutMs?: number
-  pollMs?: number
-  emit: (event: EngineEvent) => void
-  onInstalled?: (repos: string[]) => void
-}
-
-const CHILD_ENV_KEYS = ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE']
-
-// The engine gets ordinary OS values and the Hugging Face cache settings, never the app's provider keys.
-export function engineChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of CHILD_ENV_KEYS) if (typeof base[key] === 'string') env[key] = base[key]
-  env.HOME = env.HOME || os.homedir()
-  env.PATH = env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'
-  return env
-}
-
+// Main-process ownership of the supervisor, pull jobs, cached CLI answers and renderer events.
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
@@ -62,11 +37,9 @@ export class EngineService {
   private capabilities: EngineCapabilities | null = null
   private performance: EnginePerformance | null = null
   private installedCache: EngineInstalledModel[] | null = null
-  private readonly pulls = new Map<string, { handle: PullHandle; last: PullProgress }>()
-  private readonly finished = new Map<string, PullProgress>()
-  private readonly preflights = new Map<string, ModelPreflight>()
-  private readonly lastPullEmit = new Map<string, number>()
-  private hubFetch: typeof fetch | null
+  private readonly pulls = new Map<string, RunningPull>()
+  private readonly downloads: EngineDownloads
+  private readonly models: ModelHub
   private readonly revisions: ModelRevisions
   private readonly preferences: EnginePreferenceStore
   private readonly library: ModelLibrary
@@ -83,10 +56,22 @@ export class EngineService {
   private purgingLearning = false
 
   constructor(private readonly options: EngineServiceOptions) {
-    this.env = options.childEnv ?? engineChildEnv(options.env ?? process.env)
+    const launch = engineLaunchEnv(options)
+    this.env = launch.env
     this.totalMemoryBytes = options.totalMemoryBytes ?? os.totalmem()
-    this.hubFetch = options.fetch ?? null
+    this.models = new ModelHub({
+      endpoint: launch.endpoint, fetch: options.fetch, env: this.env, totalMemoryBytes: this.totalMemoryBytes,
+      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
+      memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes }),
+    })
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)
+    this.downloads = new EngineDownloads({
+      running: this.pulls, revisions: this.revisions, env: this.env, hub: () => this.hub,
+      binary: () => this.requireBinary(), assertIdle: (repo) => this.assertPullIdle(repo),
+      cached: (key) => this.models.cached(key), preflight: (repo, revision) => this.preflight(repo, revision),
+      invalidate: (repo) => this.invalidatePreflight(repo), invalidateInstalled: () => { this.installedCache = null },
+      refreshInstalled: () => this.installed(true), emit: options.emit, pollMs: options.pollMs,
+    })
     this.preferences = new EnginePreferenceStore(options.appHome)
     this.library = new ModelLibrary({ appHome: options.appHome, env: this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
     this.learningCopies = new LearningCopies(options.appHome)
@@ -434,92 +419,13 @@ export class EngineService {
     return out
   }
 
-  async search(query: string): Promise<HubModelSummary[]> {
-    return searchHub(query, this.hubDeps())
-  }
+  search(query: string): Promise<HubModelSummary[]> { return this.models.search(query) }
 
-  private hubDeps() {
-    this.hubFetch ??= createHubFetch()
-    return { fetch: this.hubFetch, offline: /^(1|true|yes|on)$/i.test(this.env.HF_HUB_OFFLINE ?? '') }
-  }
+  preflight(repo: string, revision: string | null = null): Promise<ModelPreflight> { return this.models.preflight(repo, revision) }
 
-  async preflight(repo: string, revision: string | null = null): Promise<ModelPreflight> {
-    assertRepoId(repo)
-    if (isLocalModelId(repo)) throw new Error('Local library checkpoints load in place. Scan their folder instead of downloading them.')
-    if (revision != null && !isRevision(revision)) throw new Error('Expected a branch, tag or commit for the revision.')
-    // Offline: fail before asking the engine for its families or touching the network.
-    const hub = this.hubDeps()
-    if (hub.offline) throw new Error('Hugging Face is offline in this session (HF_HUB_OFFLINE is set).')
-    const [caps, installed] = await Promise.all([this.capabilitiesDoc(), this.installed()])
-    const result = await preflightRepo(repo, revision, {
-      ...hub,
-      families: caps.families,
-      familyTitles: FAMILY_TITLES,
-      totalMemoryBytes: this.totalMemoryBytes,
-      memoryLimitBytes: this.supervisor.memoryLimitBytes,
-      memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
-      installed: new Set(installed.map((m) => m.repo)),
-      drafterFor,
-      cachedBytes: (r) => repoCachedBytes(this.hub, r),
-      freeDiskBytes: () => freeDiskBytes(this.hub),
-    })
-    this.preflights.set(JSON.stringify([repo, revision]), result)
-    return result
-  }
+  pullList(): PullProgress[] { return this.downloads.list() }
 
-  pullList(): PullProgress[] {
-    const running = [...this.pulls.values()].map((p) => p.last)
-    return [...running, ...[...this.finished.values()].filter((p) => !this.pulls.has(p.repo))]
-  }
-
-  async pull(repo: string, revision: string | null = null): Promise<PullProgress> {
-    if (isLocalModelId(repo)) throw new Error('Local library checkpoints load in place and cannot be downloaded by their library ID.')
-    if (this.pulls.has(assertRepoId(repo))) return this.pulls.get(repo)!.last
-    await this.revisions.read() // Preserve invalid registry bytes and refuse before starting a child.
-    this.assertPullIdle(repo)
-    const pre = this.preflights.get(JSON.stringify([repo, revision])) ?? await this.preflight(repo, revision)
-    this.assertPullIdle(repo)
-    if (this.pulls.has(repo)) return this.pulls.get(repo)!.last
-    if (!['ok', 'installed'].includes(pre.verdict)) throw new Error(pre.reasons[0] ?? `${repo} cannot be downloaded for the built-in engine.`)
-    if (!pre.resolvedRevision || (pre.drafter && !pre.drafter.resolvedRevision)) throw new Error('Retry the model checks to resolve an immutable checkpoint before downloading.')
-    const steps = [{ repo, revision: pre.resolvedRevision }, ...(pre.drafter ? [{ repo: pre.drafter.repo, revision: pre.drafter.resolvedRevision! }] : [])]
-    this.finished.delete(repo)
-    const handle = startPull({
-      binary: this.requireBinary(),
-      env: this.env,
-      hub: this.hub,
-      steps,
-      totalBytes: pre.totalBytes,
-      pollMs: this.options.pollMs ? Math.max(50, this.options.pollMs) : 1000,
-      onUpdate: (progress) => this.onPullUpdate(progress),
-    })
-    this.pulls.set(repo, { handle, last: handle.progress() })
-    this.options.emit({ kind: 'pull', pull: handle.progress() })
-    void handle.done.then(async (final) => {
-      if (final.state === 'done') {
-        try { await this.revisions.commit(steps) } catch (error) {
-          final = { ...final, state: 'failed', phase: 'Failed', message: (error as Error).message }
-        }
-      }
-      this.pulls.delete(repo)
-      this.finished.set(repo, final)
-      this.invalidatePreflight(repo)
-      this.installedCache = null
-      this.options.emit({ kind: 'pull', pull: final })
-      if (final.state === 'done') await this.installed(true).catch(() => {})
-    })
-    return handle.progress()
-  }
-
-  private onPullUpdate(progress: PullProgress): void {
-    if (progress.state !== 'running') return // Completion is emitted only after the selection is durable.
-    const job = this.pulls.get(progress.repo)
-    if (job) job.last = progress
-    const now = Date.now()
-    if (progress.state === 'running' && now - (this.lastPullEmit.get(progress.repo) ?? 0) < 250) return
-    this.lastPullEmit.set(progress.repo, now)
-    this.options.emit({ kind: 'pull', pull: progress })
-  }
+  pull(repo: string, revision: string | null = null): Promise<PullProgress> { return this.downloads.pull(repo, revision) }
 
   private assertPullIdle(repo: string): void {
     const status = this.supervisor.status()
@@ -527,7 +433,7 @@ export class EngineService {
   }
 
   private invalidatePreflight(repo: string): void {
-    for (const [key, value] of this.preflights) if (value.repo === repo) this.preflights.delete(key)
+    this.models.invalidate(repo)
   }
 
   cancelPull(repo: string): boolean {
@@ -567,7 +473,7 @@ export class EngineService {
     for (const target of targets) await this.removeRepoFolder(target, selected[target])
     await this.revisions.remove(targets)
     this.invalidatePreflight(repo)
-    this.finished.delete(repo)
+    this.downloads.forget(repo)
     return this.installed(true)
   }
 

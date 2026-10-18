@@ -1,3 +1,4 @@
+import { aggregateHubFailures, decodeHubFailure } from '../../shared/hub-failure'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import clsx from 'clsx'
 import { api } from '../lib/ipc'
@@ -23,9 +24,7 @@ const AUTO_CHECK = 10
 const TABS = ['Models', 'Workers', 'Learning', 'API'] as const
 type WorkspaceTab = typeof TABS[number]
 
-function errorText(e: unknown): string {
-  return String((e as Error)?.message ?? e).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '')
-}
+function errorText(e: unknown): string { return decodeHubFailure(e).message }
 
 export function Models({ minimal = false }: { minimal?: boolean } = {}) {
   const { snapshot } = useEngine()
@@ -61,7 +60,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
       const result = await api.enginePreflight(repo, revision)
       setChecks((c) => ({ ...c, [repo]: { loading: false, result, error: null } }))
     } catch (e) {
-      setChecks((c) => ({ ...c, [repo]: { loading: false, result: null, error: errorText(e) } }))
+      setChecks((c) => ({ ...c, [repo]: { loading: false, result: null, error: errorText(e), errorKind: decodeHubFailure(e).category } }))
     }
   }, [])
 
@@ -142,6 +141,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
   const revisionFor = (repo: string) => suggestions.find((s) => s.repo === repo)?.revision ?? null
   const recommendation = recommendEngineModel({ status, installed, suggestions, preflights: Object.fromEntries(Object.entries(checks).map(([repo, state]) => [repo, state.result])) })
   const checkFailed = suggestions.length > 0 && suggestions.every((s) => checks[s.repo] && !checks[s.repo].loading) && suggestions.some((s) => !!checks[s.repo]?.error)
+  const failureKind = aggregateHubFailures(suggestions.flatMap((s) => checks[s.repo]?.error ? [checks[s.repo].errorKind ?? 'check'] : []))
 
   return (
     <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">
@@ -171,7 +171,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
         {!minimal && <div id="local-panel-Learning" role="tabpanel" aria-labelledby="local-tab-Learning" hidden={tab !== 'Learning'}>{tab === 'Learning' && <LearningPanel activeRuns={activeRuns} />}</div>}
         <div id="local-panel-API" role="tabpanel" aria-labelledby="local-tab-API" hidden={tab !== 'API'}><EngineApiPanel minimal={minimal} onModels={() => setTab('Models')} /></div>
         <div id="local-panel-Models" role="tabpanel" aria-labelledby="local-tab-Models" hidden={tab !== 'Models'}>
-        <ModelRecommendationPanel minimal={minimal} recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingRecommendation != null} locked={learningLocked || activeRuns > 0 && recommendation.selected?.repo !== status?.model || status?.state === 'starting'} checkFailed={checkFailed} onStart={(repo) => void startRecommended(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
+        <ModelRecommendationPanel minimal={minimal} recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingRecommendation != null} locked={learningLocked || activeRuns > 0 && recommendation.selected?.repo !== status?.model || status?.state === 'starting'} checkFailed={checkFailed} failureKind={failureKind} onStart={(repo) => void startRecommended(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
 
         {pulls.length > 0 && (
           <Section title="Downloads">

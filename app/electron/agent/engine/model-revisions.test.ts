@@ -145,7 +145,7 @@ async function main() {
     const noCommit = new EngineService({ binaryPath: '/fake', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: reviewedFetch({ invalidSha: true }), emit: () => {} })
     await assert.rejects(() => noCommit.pull(REPO), /immutable commit/)
     const missingDrafter = new EngineService({ binaryPath: '/fake', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: reviewedFetch({ missingDrafter: true }), emit: () => {} })
-    await assert.rejects(() => missingDrafter.pull(PRIMARY), /drafter.*immutable commit/)
+    await assert.rejects(() => missingDrafter.pull(PRIMARY), /TF_HUB_HTTP/)
   } finally {
     for (const service of services) service.shutdown()
     await h.cleanup()

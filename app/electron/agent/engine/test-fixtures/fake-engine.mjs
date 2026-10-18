@@ -76,7 +76,7 @@ function infoCommand(repo) {
 
 async function pullCommand(spec) {
   const [repo, revision = 'main'] = spec.split('@')
-  record({ kind: 'pull', repo, revision, args: argv })
+  record({ kind: 'pull', repo, revision, args: argv, endpoint: env.HF_ENDPOINT ?? null, hasHubToken: 'HF_TOKEN' in env })
   if (env.FAKE_PULL_FAIL) { console.error(`${repo}: the hub's file tree is unreachable (ConnectionRefused)`); return 1 }
   const files = Number(env.FAKE_PULL_FILES ?? 3)
   const size = Number(env.FAKE_PULL_SIZE ?? 64 * 1024)

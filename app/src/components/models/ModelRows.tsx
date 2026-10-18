@@ -1,3 +1,4 @@
+import type { HubFailureCategory } from '../../../shared/hub-failure'
 import { useState, type ReactNode } from 'react'
 import clsx from 'clsx'
 import { Icon } from '../../lib/icons'
@@ -120,6 +121,7 @@ export function PullRow({ pull, onCancel, onRetry }: { pull: PullProgress; onCan
 }
 
 export interface PreflightState {
+  errorKind?: HubFailureCategory | null
   loading: boolean
   result: ModelPreflight | null
   error: string | null

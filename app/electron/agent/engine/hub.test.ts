@@ -95,10 +95,7 @@ async function main() {
     const routes = repoRoutes('Org/Blocked')
     routes[`/Org/Blocked/resolve/${SHA}/config.json`] = { status: 307, headers: { location } }
     const blocked = mockHub(routes)
-    const result = await preflightRepo('Org/Blocked', null, context(blocked.fetchImpl))
-    assert.equal(result.verdict, 'error', 'unread config cannot authorize a model download')
-    assert.equal(result.formatOk, null)
-    assert.match(result.reasons.join(' '), /could not be verified/)
+    await assert.rejects(() => preflightRepo('Org/Blocked', null, context(blocked.fetchImpl)), /TF_HUB_(POLICY|HTTP)/)
     assert.equal(blocked.calls.some((url) => !url.startsWith(HF_ORIGIN)), false, 'redirects never leave the fixed HTTPS Hugging Face origin')
     assert.ok(blocked.calls.filter((url) => url.endsWith('/config.json')).length <= 6, 'same-origin redirect loops are bounded')
   }
@@ -162,9 +159,8 @@ async function main() {
     [`/api/models/Org/Evil/tree/${SHA}`]: { body: [{ type: 'file', path: 'a', size: 10 }], headers: { link: '<https://evil.example/next>; rel="next"' } },
     [`/Org/Evil/resolve/${SHA}/config.json`]: { text: '{"model_type":"nemotron_h","quantization":{"bits":4,"group_size":64}}' },
   })
-  const evil = await preflightRepo('Org/Evil', null, context(evilNext.fetchImpl))
-  assert.equal(evilNext.calls.some((c) => c.includes('evil.example')), false, 'a cross-origin next link is ignored')
-  assert.equal(evil.totalBytes, 10)
+  await assert.rejects(() => preflightRepo('Org/Evil', null, context(evilNext.fetchImpl)), /TF_HUB_POLICY/)
+  assert.equal(evilNext.calls.some((c) => c.includes('evil.example')), false, 'a cross-origin next link is refused')
 
   const missing = mockHub({})
   await assert.rejects(() => preflightRepo('Org/Missing', null, context(missing.fetchImpl)), /not found on Hugging Face, or private/)
