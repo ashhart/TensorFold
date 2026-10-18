@@ -14,6 +14,8 @@ pub const Probe = struct {
     pipe: mtl.Pipeline,
     which: f.Which,
     factor: f64 = 0,
+    long_positions: bool = false,
+    accuracy: ?*const f.rotary_accuracy.Receipt = null,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
     positions: []i32 = &.{},
@@ -42,6 +44,7 @@ pub const Probe = struct {
     const mask_vt: g.VTable = blk: {
         var v = g.hooks(Probe);
         v.bounds = null;
+        v.intervals = null;
         break :blk v;
     };
     const mrope_vt: g.VTable = blk: {
@@ -97,7 +100,7 @@ pub const Probe = struct {
             const axes: usize = if (p.which == .mrope) 3 else 1;
             p.positions = try p.a.alloc(i32, shape.rows * axes);
             for (0..shape.rows) |r| for (0..axes) |axis| {
-                p.positions[r * axes + axis] = @intCast((if (p.factor > 1) @as(usize, 262140) else 0) + r * 17 + (if (r % 2 == 0) @as(usize, 0) else axis * 3));
+                p.positions[r * axes + axis] = if (p.long_positions) @import("flashnext_positions.zig").token(r, axis) else @intCast((if (p.factor > 1) @as(usize, 262140) else 0) + r * 17 + (if (r % 2 == 0) @as(usize, 0) else axis * 3));
             };
             p.pos = try p.rig.input(std.mem.sliceAsBytes(p.positions));
             for (&p.ws, &p.weights, 0..) |*w, values, i| w.* = try p.rig.input(std.mem.sliceAsBytes(values[0..if (i == 2) 128 else 256]));
@@ -134,9 +137,13 @@ pub const Probe = struct {
         var wide = try Probe.init(p.a, p.rig.device, p.rig.queue, p.which);
         defer wide.deinit();
         wide.factor = p.factor;
+        wide.long_positions = p.long_positions;
+        wide.accuracy = p.accuracy;
         var solo = try Probe.init(p.a, p.rig.device, p.rig.queue, p.which);
         defer solo.deinit();
         solo.factor = p.factor;
+        solo.long_positions = p.long_positions;
+        solo.accuracy = p.accuracy;
         for ([_]usize{ 7, if (p.which == .mtp) 16 else 128 }) |rows| {
             _ = try wide.prepare(.{ .rows = rows, .n = f.output_width, .k = 256 }, .random, 23);
             try wide.run();
@@ -165,7 +172,46 @@ pub const Probe = struct {
     pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
         try p.compute(.f64, .sequential, want, mag);
     }
-    pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
+    pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
+        const high = try p.a.alloc(f64, allow.len);
+        defer p.a.free(high);
+        try p.intervals(allow, high);
+        for (allow, high, want) |*low, h, ref| low.* = @max(@abs(low.* - ref), @abs(h - ref));
+    }
+    pub fn intervals(p: *Probe, low: []f64, high: []f64) !void {
+        const receipt = p.accuracy orelse return error.UnrecordedRotaryCompiler;
+        const rotary = f.table(23.253496170043945, p.factor);
+        if (!std.mem.eql(u8, p.rig.bytes(p.base, f.table_words * 4), std.mem.asBytes(&rotary))) return error.UnrecordedRotaryTable;
+        const role: f.rotary_accuracy.Role = switch (p.which) {
+            .mrope => .mrope,
+            .target => .target,
+            .mtp => .mtp,
+            else => return error.UnrecordedRotaryFixture,
+        };
+        const record = try receipt.find(role, &rotary);
+        for (0..p.shape.rows) |r| {
+            var row: [f.output_width]f.rotary_interval.Interval = undefined;
+            const pos = if (p.which == .mrope) p.positions[r * 3 ..][0..3].* else @as([3]i32, @splat(p.positions[r]));
+            for (0..30) |head| {
+                const kind: usize = if (head < 24) 0 else if (head < 26) 1 else 2;
+                const width: usize = if (kind == 2) 128 else 256;
+                const src: usize = if (kind == 0) head * 512 else if (kind == 1) 24 * 512 + (head - 24) * 256 else 24 * 512 + 4 * 256 + (head - 26) * 128;
+                const dst: usize = if (head < 26) head * 256 else 26 * 256 + (head - 26) * 128;
+                try f.rotary_interval.normalized(record, p.host[r * f.packed_width + src ..][0..width], pos, p.weights[kind][0..width], 1e-5, &rotary, row[dst..][0..width]);
+            }
+            var src: usize = 0;
+            var block: usize = 0;
+            for ([_]usize{ 24 * 256, 2 * 256, 4 * 128 }) |n| {
+                for (row[src..][0..n], 0..) |x, i| {
+                    low[block + r * n + i] = x.low;
+                    high[block + r * n + i] = x.high;
+                }
+                src += n;
+                block += p.shape.rows * n;
+            }
+        }
+    }
+    pub fn conditionalBounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
         const rotary = f.table(23.253496170043945, p.factor);
         for (0..p.shape.rows) |r| {
             var row: [f.output_width]f64 = undefined;

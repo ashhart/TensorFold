@@ -1,5 +1,14 @@
 #include <metal_stdlib>
 using namespace metal;
+struct TF_RotaryScalar { float frequency, angle, cosine, sine, co, si; };
+inline TF_RotaryScalar tf_rotary_scalar(int i, int position, const constant float* LOG2BASE) {
+  const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::precise::exp2(-(float(i) / 32.0f) * LOG2BASE[0]);
+  const float angle = float(position) * freq;
+  const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
+  const float co = metal::precise::cos(angle), si = metal::precise::sin(angle);
+  return {freq, angle, co, si, co * ys, si * ys};
+}
+
 typedef bfloat bfloat16_t;
 
 // The recorded q4_attn_prep at three positions a row (interleaved M-RoPE 11, 11, 10): a text row keeps its bits.
@@ -48,11 +57,8 @@ typedef bfloat bfloat16_t;
     const int hr = RD / 2;
     const int i = d % hr;
     const int axis = (i % 3 == 1 && i < 33) ? 1 : ((i % 3 == 2 && i < 30) ? 2 : 0);
-    // LOG2BASE[1] != 0: YaRN (the frequencies at [3, 35), cos and sin scaled by [2]); else the plain rotary
-    const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
-    const float angle = float(POS3[r * 3 + axis]) * freq;
-    const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
-    const float c = metal::fast::cos(angle) * ys, s = metal::fast::sin(angle) * ys;
+    const TF_RotaryScalar cs = tf_rotary_scalar(i, POS3[r * 3 + axis], LOG2BASE);
+    const float c = cs.co, s = cs.si;
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;
   }
   if (isq) Q[(r * NQ + head) * HD + d] = bfloat(out);

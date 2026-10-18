@@ -41,6 +41,8 @@ pub const VTable = struct {
     reference: *const fn (*anyopaque, []f64, []f64) anyerror!void,
     /// A derived absolute error allowance for every output; null retains the registered generic formula.
     bounds: ?*const fn (*anyopaque, []const f64, []const f64, []f64) anyerror!void = null,
+    /// Signed pointwise endpoints, checked in addition to the reference-distance allowance.
+    intervals: ?*const fn (*anyopaque, []f64, []f64) anyerror!void = null,
     /// The outputs if every sum ran in an accumulator, in an order (gate 4); null: no sums to simulate.
     simulate: ?*const fn (*anyopaque, c.Accum, Order, []f64) anyerror!void = null,
     /// A raw output or a stated NaN rule checks itself at a gate: null when it holds, else what failed.
@@ -82,6 +84,9 @@ pub fn hooks(comptime T: type) VTable {
         fn bounds(ctx: *anyopaque, want: []const f64, mag: []const f64, allow: []f64) anyerror!void {
             return of(ctx).bounds(want, mag, allow);
         }
+        fn intervals(ctx: *anyopaque, low: []f64, high: []f64) anyerror!void {
+            return of(ctx).intervals(low, high);
+        }
         fn simulate(ctx: *anyopaque, acc: c.Accum, order: Order, out: []f64) anyerror!void {
             return of(ctx).simulate(acc, order, out);
         }
@@ -102,6 +107,7 @@ pub fn hooks(comptime T: type) VTable {
         .count = H.count,
         .reference = H.reference,
         .bounds = if (@hasDecl(T, "bounds")) H.bounds else null,
+        .intervals = if (@hasDecl(T, "intervals")) H.intervals else null,
         .simulate = if (@hasDecl(T, "simulate")) H.simulate else null,
         .check = if (@hasDecl(T, "check")) H.check else null,
         .replaced = if (@hasDecl(T, "replaced")) H.replaced else null,
@@ -222,6 +228,7 @@ pub fn shapes(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
         const allow = try a.alloc(f64, n);
         defer a.free(allow);
         try allowances(k, shape, want, mag, allow, false);
+        if (!try inIntervals(a, k, out)) return say(.fail, .shapes, name, "output leaves its signed pointwise interval", .{});
         for (want, allow, 0..) |w, limit, i| {
             const got = c.read(k.spec.out, out, i);
             const q = if (got == w) 0 else @abs(got - w) / limit;
@@ -239,6 +246,22 @@ fn allowances(k: Kernel, shape: c.Shape, want: []const f64, mag: []const f64, al
         try bound(k.ctx, want, mag, allow);
         for (allow) |l| if (!std.math.isFinite(l) or l < 0) return error.InvalidErrorBound;
     }
+}
+
+fn inIntervals(a: std.mem.Allocator, k: Kernel, out: []const u8) !bool {
+    const hook = k.vt.intervals orelse return true;
+    const n = k.vt.count(k.ctx);
+    const limits = try a.alloc(f64, 2 * n);
+    defer a.free(limits);
+    const low = limits[0..n];
+    const high = limits[n..];
+    try hook(k.ctx, low, high);
+    for (low, high, 0..) |l, h, i| {
+        if (!std.math.isFinite(l) or !std.math.isFinite(h) or l > h) return error.InvalidErrorBound;
+        const got = c.read(k.spec.out, out, i);
+        if (!(got >= l and got <= h)) return false;
+    }
+    return true;
 }
 
 /// The worst |got - want| / allow over a row of outputs; a non-finite where float64 is finite counts as infinite.
@@ -282,6 +305,7 @@ pub fn sums(a: std.mem.Allocator, k: Kernel, seed: u64) !Verdict {
         return say(.fail, .sums, s.name, "its stress inputs make {s} sums miss by only {d:.1}x (needs {d:.0}x)", .{ what, m, r });
     try k.vt.run(k.ctx);
     const out = try k.vt.output(k.ctx);
+    if (!try inIntervals(a, k, out)) return say(.fail, .sums, s.name, "output leaves its signed pointwise interval", .{});
     for (got, 0..) |*g, i| g.* = c.read(s.out, out, i);
     const q = misses(got, want, allow);
     if (!(q <= 1)) return say(.fail, .sums, s.name, "{d:.1}x over its exact-sum bound at k {d}: not fp32 sums (fp16 would miss {d:.0}x, bf16 {d:.0}x)", .{ q, shape.k, margin[0], margin[1] });

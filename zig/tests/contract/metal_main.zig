@@ -18,16 +18,16 @@ const gemma = @import("metal_gemma4.zig");
 const gemma_embed = @import("metal_gemma4_embed.zig");
 const gemma_mixed = @import("metal_gemma4_mixed.zig");
 const g = contract.gates;
-const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro]";
+const usage = "usage: tf-kernel-contract [--only TEXT] [--no-gates] [--no-limits] [--offline DIR] [--seed N] [--repro] [--rotary-long] [--rotary-accuracy FILE]";
 
-const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false };
+const Opts = struct { only: ?[]const u8 = null, gates: bool = true, limits: bool = true, offline: ?[]const u8 = null, seed: u64 = 0x6b63, repro: bool = false, rotary_long: bool = false, rotary_accuracy: ?[]const u8 = null };
 
 fn parse(args: []const [:0]const u8) !Opts {
     var o = Opts{};
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const a = args[i];
-        if (std.mem.eql(u8, a, "--repro")) o.repro = true else if (std.mem.eql(u8, a, "--no-gates")) o.gates = false else if (std.mem.eql(u8, a, "--no-limits")) o.limits = false else if (i + 1 < args.len and std.mem.eql(u8, a, "--only")) {
+        if (std.mem.eql(u8, a, "--rotary-long")) o.rotary_long = true else if (std.mem.eql(u8, a, "--repro")) o.repro = true else if (std.mem.eql(u8, a, "--no-gates")) o.gates = false else if (std.mem.eql(u8, a, "--no-limits")) o.limits = false else if (i + 1 < args.len and std.mem.eql(u8, a, "--only")) {
             i += 1;
             o.only = args[i];
         } else if (i + 1 < args.len and std.mem.eql(u8, a, "--offline")) {
@@ -36,6 +36,9 @@ fn parse(args: []const [:0]const u8) !Opts {
         } else if (i + 1 < args.len and std.mem.eql(u8, a, "--seed")) {
             i += 1;
             o.seed = try std.fmt.parseInt(u64, args[i], 0);
+        } else if (i + 1 < args.len and std.mem.eql(u8, a, "--rotary-accuracy")) {
+            i += 1;
+            o.rotary_accuracy = args[i];
         } else {
             std.debug.print("{s}\n", .{usage});
             return error.Usage;
@@ -79,10 +82,24 @@ pub fn main(init: std.process.Init) !u8 {
     const a = std.heap.page_allocator;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     const o = parse(args) catch return 2;
+    if (o.rotary_long) std.debug.print("MODE rotary-long: FP64 references through position 1048639; pooling ends at the allocation limit\n", .{});
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
     const device = try mtl.Device.init();
     defer device.deinit();
+    var receipt: ?std.json.Parsed(tf.flashnext_vision_contract.rotary_accuracy.Receipt) = null;
+    defer if (receipt) |*value| value.deinit();
+    var needs_receipt = false;
+    for (std.enums.values(tf.flashnext_vision_contract.Which)) |w| {
+        if (w != .mask and (wanted(o, tf.flashnext_vision_contract.name(w, false)) or wanted(o, tf.flashnext_vision_contract.name(w, true)))) needs_receipt = true;
+    }
+    if (o.gates and needs_receipt) {
+        const deployment = @import("rotary_deployment.zig");
+        receipt = deployment.load(a, init.io, o.rotary_accuracy, try deployment.current(a, init.io, device)) catch |err| {
+            std.debug.print("rotary probes refuse this deployment: run tf-rotary-sweep and pass --rotary-accuracy FILE ({s})\n", .{@errorName(err)});
+            return err;
+        };
+    }
     const queue = try device.queue();
     defer queue.deinit();
     const tensor = device.tensorUnits();
@@ -150,11 +167,15 @@ pub fn main(init: std.process.Init) !u8 {
         if (tf.flashnext_vision_contract.isPool(w)) {
             pool_list[pool_made] = try flash_pool.Probe.init(a, device, queue, w);
             pool_list[pool_made].factor = factor;
+            pool_list[pool_made].long_positions = o.rotary_long;
+            pool_list[pool_made].accuracy = if (receipt) |*value| &value.value else null;
             pool_made += 1;
             try kernels.append(a, pool_list[pool_made - 1].kernel());
         } else {
             flash_list[flash_made] = try flash.Probe.init(a, device, queue, w);
             flash_list[flash_made].factor = factor;
+            flash_list[flash_made].long_positions = o.rotary_long;
+            flash_list[flash_made].accuracy = if (receipt) |*value| &value.value else null;
             flash_made += 1;
             try kernels.append(a, flash_list[flash_made - 1].kernel());
         }

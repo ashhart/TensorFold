@@ -32,6 +32,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+    @import("rotary_sweep.zig").steps(b, target, metal_mod);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,

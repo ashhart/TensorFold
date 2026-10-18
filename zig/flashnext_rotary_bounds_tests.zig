@@ -90,7 +90,7 @@ test "rotary bound: normalization midpoint crossings survive endpoint rounding" 
     try f.normalizedBounds(&p, .{ 0, 0, 0 }, &w, 1e-30, &rotary, &allow);
     try std.testing.expect(allow[64] >= 0.0078125);
     try std.testing.expect(allow[64] < 0.015625);
-    try std.testing.expectError(error.InvalidVisionBoundInput, f.normalizedBounds(&p, .{ 1048576, 0, 0 }, &w, 1e-5, &rotary, &allow));
+    try std.testing.expectError(error.InvalidVisionBoundInput, f.normalizedBounds(&p, .{ f.maximum, 0, 0 }, &w, 1e-5, &rotary, &allow));
 }
 test "rotary bound: wrong axes and a wrong rotary scale still fail" {
     const p: [128]u16 = @splat(0x3f80);

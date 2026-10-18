@@ -12,6 +12,9 @@ pub const normalizedBounds = @import("vision_bounds.zig").normalized;
 pub const pooledBounds = @import("vision_bounds.zig").pooled;
 pub const Which = enum { mask, mrope, target, mtp, pooled, absolute };
 pub const table_words = @import("rotary_config.zig").words;
+pub const maximum = @import("window_config.zig").maximum;
+pub const rotary_accuracy = @import("rotary_accuracy.zig");
+pub const rotary_interval = @import("rotary_interval.zig");
 pub const packed_width = 13952;
 pub const output_width = 24 * 256 + 2 * 256 + 4 * 128;
 

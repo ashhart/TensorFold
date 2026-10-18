@@ -14,6 +14,8 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const facade = b.createModule(.{ .root_source_file = b.path("zig/flashnext_bound_family.zig"), .target = b.graph.host, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources } } });
     const probes = b.createModule(.{ .root_source_file = b.path("zig/flashnext_bound_probes_test.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "tensorfold", .module = facade }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
     b.step("test-flashnext-bound-probes-host", "Real rotary allowance callbacks without GPU calls").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = probes })).step);
+    b.step("test-flashnext-precise-host", "Explicit rotary math and FP64 golden references without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"precise rotary:"} })).step);
+    b.step("test-rotary-sweep-host", "Exhaustive finite rotary input enumeration and receipt controls without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary sweep:"} })).step);
     const tests_ = b.addTest(.{ .root_module = root, .filters = &.{"batch widths:"} });
     const run = b.addRunArtifact(tests_);
     run.has_side_effects = true;

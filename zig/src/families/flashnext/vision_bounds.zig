@@ -4,7 +4,7 @@ const f = @import("vision_contract.zig");
 const u: f64 = 0x1p-24;
 const floor: f64 = 0x1p-126;
 
-/// Required intrinsic accuracy, not a guarantee about Metal fast functions; the device differential must check it.
+/// Intrinsic accuracy assumptions awaiting the compiler's numerical table; no device guarantee follows.
 pub const policy = struct {
     pub const rsqrt_relative: f64 = 4 * u;
     pub const exp2_relative: f64 = 8 * u;
@@ -64,7 +64,7 @@ fn normalize(p: []const u16, weights: []const f32, eps: f32, out: []Value) !void
 }
 const Coefficients = struct { co: f64, si: f64, ec: f64, es: f64 };
 fn coefficients(i: usize, position: i32, rotary: []const f32) !Coefficients {
-    if (position < 0 or position >= 1048576) return error.InvalidVisionBoundInput;
+    if (position < 0 or position >= @import("window_config.zig").maximum) return error.InvalidVisionBoundInput;
     const scaled = rotary[1] != 0;
     const exponent = -(@as(f64, @floatFromInt(i)) / 32) * rotary[0];
     const exponent32: f32 = @floatCast(exponent);

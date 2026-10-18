@@ -37,6 +37,10 @@ const P = struct {
         const p: *P = @ptrCast(@alignCast(ctx));
         allow[0] = p.allowance;
     }
+    fn intervals(_: *anyopaque, low: []f64, high: []f64) !void {
+        low[0] = 0.125;
+        high[0] = 0.125;
+    }
     fn depth(_: c.Shape) usize {
         return 1;
     }
@@ -74,4 +78,26 @@ test "rotary bound: invalid or nonfinite allowances fail closed" {
         try std.testing.expectError(error.InvalidErrorBound, g.shapes(std.testing.allocator, p.kernel(&v), 0));
         try std.testing.expectError(error.InvalidErrorBound, g.sums(std.testing.allocator, p.kernel(&v), 0));
     }
+}
+
+test "rotary sweep: the real shape gate rejects a sign flip admitted by a symmetric allowance" {
+    g.quiet = true;
+    defer g.quiet = false;
+    var p: P = .{};
+    var v = table();
+    v.intervals = P.intervals;
+    try std.testing.expectEqual(g.Verdict.pass, try g.shapes(std.testing.allocator, p.kernel(&v), 0));
+    p.output_bytes = @bitCast(@as(f32, -0.125));
+    try std.testing.expectEqual(g.Verdict.fail, try g.shapes(std.testing.allocator, p.kernel(&v), 0));
+}
+
+test "rotary sweep: the real sum gate rejects a sign flip admitted by a symmetric allowance" {
+    g.quiet = true;
+    defer g.quiet = false;
+    var p: P = .{};
+    var v = table();
+    v.intervals = P.intervals;
+    try std.testing.expectEqual(g.Verdict.pass, try g.sums(std.testing.allocator, p.kernel(&v), 0));
+    p.output_bytes = @bitCast(@as(f32, -0.125));
+    try std.testing.expectEqual(g.Verdict.fail, try g.sums(std.testing.allocator, p.kernel(&v), 0));
 }

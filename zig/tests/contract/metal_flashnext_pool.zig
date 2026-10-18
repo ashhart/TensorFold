@@ -6,7 +6,6 @@ const contract = @import("contract");
 const c = contract.spec;
 const g = contract.gates;
 const rig_ = @import("rig.zig");
-const start: usize = 7;
 
 pub const Probe = struct {
     a: std.mem.Allocator,
@@ -14,6 +13,9 @@ pub const Probe = struct {
     pipe: mtl.Pipeline,
     which: f.Which,
     factor: f64 = 0,
+    long_positions: bool = false,
+    calibration: bool = false,
+    accuracy: ?*const f.rotary_accuracy.Receipt = null,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
     raw: rig_.Ref = undefined,
@@ -33,7 +35,11 @@ pub const Probe = struct {
         p.pipe.deinit();
     }
     fn prefix(p: *const Probe) usize {
-        return if (p.which == .absolute) start * 128 * 2 else 0;
+        return if (p.which == .absolute) p.firstBlock() * 128 * 2 else 0;
+    }
+    pub fn firstBlock(p: *const Probe) usize {
+        if (p.calibration) return 0;
+        return if (p.long_positions) @import("flashnext_positions.zig").firstBlock(p.shape.rows) else 7;
     }
     pub fn kernel(p: *Probe) g.Kernel {
         return .{ .ctx = p, .spec = f.specScaled(c, p.which, p.factor > 1), .vt = &vt };
@@ -57,11 +63,14 @@ pub const Probe = struct {
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.rows > 128 or shape.n != 128 or shape.k != 128) return false;
         p.shape = shape;
+        const start = p.firstBlock();
         p.rig.reset();
         p.a.free(p.host);
         p.host = &.{};
         p.host = try p.a.alloc(u16, (start + shape.rows) * 4 * 128);
-        for (p.host, 0..) |*h, i| h.* = c.toBf16(@as(f32, @floatFromInt((i +% seed) % 17)) / 8 - 1);
+        if (p.long_positions) @memset(p.host, 0);
+        const first = if (p.long_positions) start * 4 * 128 else 0;
+        for (p.host[first..], first..) |*h, i| h.* = c.toBf16(@as(f32, @floatFromInt((i +% seed) % 17)) / 8 - 1);
         if (fill == .nonfinite) for (0..shape.rows) |r| {
             p.host[(start + r) * 4 * 128] = switch (r % 3) {
                 0 => 0x7fc0,
@@ -71,8 +80,8 @@ pub const Probe = struct {
         };
         p.raw = try p.rig.input(std.mem.sliceAsBytes(p.host));
         var selection: [128]i32 = @splat(0);
-        selection[0] = start;
-        selection[64] = start;
+        selection[0] = @intCast(start);
+        selection[64] = @intCast(start);
         selection[65] = @intCast(shape.rows);
         p.select = try p.rig.input(std.mem.asBytes(&selection));
         const weights: [128]f32 = @splat(1.25);
@@ -98,7 +107,29 @@ pub const Probe = struct {
     pub fn reference(p: *Probe, want: []f64, mag: []f64) !void {
         try p.compute(.f64, .sequential, want, mag);
     }
-    pub fn bounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
+    pub fn bounds(p: *Probe, want: []const f64, _: []const f64, allow: []f64) !void {
+        const high = try p.a.alloc(f64, allow.len);
+        defer p.a.free(high);
+        try p.intervals(allow, high);
+        for (allow, high, want) |*low, h, ref| low.* = @max(@abs(low.* - ref), @abs(h - ref));
+    }
+    pub fn intervals(p: *Probe, low: []f64, high: []f64) !void {
+        const receipt = p.accuracy orelse return error.UnrecordedRotaryCompiler;
+        const rotary = f.table(23.253496170043945, p.factor);
+        if (!std.mem.eql(u8, p.rig.bytes(p.base, f.table_words * 4), std.mem.asBytes(&rotary))) return error.UnrecordedRotaryTable;
+        const record = try receipt.find(if (p.which == .pooled) .pooled else .absolute, &rotary);
+        const weights: [128]f32 = @splat(1.25);
+        for (0..p.shape.rows) |r| {
+            var row: [128]f.rotary_interval.Interval = undefined;
+            try f.rotary_interval.pooled(record, p.host[(p.firstBlock() + r) * 512 ..][0..512], @intCast(4 * (p.firstBlock() + r)), &weights, 1e-5, &rotary, &row);
+            for (row, 0..) |x, i| {
+                low[r * 128 + i] = x.low;
+                high[r * 128 + i] = x.high;
+            }
+        }
+    }
+    pub fn conditionalBounds(p: *Probe, _: []const f64, _: []const f64, allow: []f64) !void {
+        const start = p.firstBlock();
         const weights: [128]f32 = @splat(1.25);
         const rotary = f.table(23.253496170043945, p.factor);
         for (0..p.shape.rows) |r| try f.pooledBounds(p.host[(start + r) * 4 * 128 ..][0 .. 4 * 128], @intCast(4 * (start + r)), &weights, 1e-5, &rotary, allow[r * 128 ..][0..128]);
@@ -118,6 +149,7 @@ pub const Probe = struct {
         }, out, mag);
     }
     fn compute(p: *Probe, acc: f.Accum, order: f.Order, want: []f64, mag: []f64) !void {
+        const start = p.firstBlock();
         const weights: [128]f32 = @splat(1.25);
         const rotary = f.table(23.253496170043945, p.factor);
         for (0..p.shape.rows) |r| {
