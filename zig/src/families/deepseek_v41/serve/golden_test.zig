@@ -1,10 +1,11 @@
 //! Reference goldens from TF_DSV41_MODEL (tokenizer.json dir) and TF_DSV41_GOLDEN (gen_*.py output); skipped if unset.
 const std = @import("std");
+const platform = @import("sys");
 const testing = std.testing;
 const tokenizer = @import("tokenizer.zig");
 
-pub fn env(name: []const u8) ?[]const u8 {
-    return testing.environ.getPosix(name);
+pub fn env(name: [*:0]const u8) ?[]const u8 {
+    return platform.getenv(name); // Environ.getPosix does not build on Windows
 }
 
 pub fn readGolden(a: std.mem.Allocator, name: []const u8) !?[]u8 {
