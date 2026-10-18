@@ -15,6 +15,7 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*con
     const t = &m.t;
     if (r.tp != null or r.gpu_round) return error.BatchModeUnsupported;
     r.rows = rows;
+    try @import("rotary_cache.zig").prepare(r, t.log2base, t.pos8, rows);
     var cur: usize = 0;
     var ce: [2]variants.Const = undefined;
     try variants.callAs(r, "qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]}, variants.width(&ce, "BITS", "GS", m.embed_w));

@@ -23,6 +23,7 @@ test {
     _ = @import("flashnext_precise_rotary_test.zig");
     _ = @import("rotary_sweep_tests.zig");
     _ = @import("rotary_receipt_host_test.zig");
+    _ = @import("src/families/flashnext/rotary_cache_test.zig");
 }
 
 test "Flash Next memory: construction and preflight consume the same prompt sizes" {

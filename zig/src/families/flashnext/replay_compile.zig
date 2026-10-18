@@ -21,6 +21,7 @@ const class = Run.class;
 const callAs = Run.callAs;
 
 pub fn compileChecked(r: *Run) !void {
+    @import("rotary_cache.zig").start(r);
     const lanes = !r.device.tensorUnits();
     for (&roles_gen.entries) |*e| {
         const gop = try r.roles.getOrPut(r.arena, e.site);
@@ -34,9 +35,10 @@ pub fn compileChecked(r: *Run) !void {
             const src: []const u8 = for (ks.flashnext_gen.sources) |s| {
                 if (std.mem.eql(u8, s.name, name)) break s.text;
             } else return error.NoSource;
-            const lib = try r.ownResource(try mtl.Library.fromSource(r.device, src, mtl.CompileOptions.mlx()));
+            const compiled = @import("rotary_cache.zig").forRun(r, src);
+            const lib = try r.ownResource(try mtl.Library.fromSource(r.device, compiled, mtl.CompileOptions.mlx()));
             const nv = try r.arena.create(Variant);
-            nv.* = .{ .inputs = try r.arena.dupe([]const u8, e.inputs), .outputs = try r.arena.dupe([]const u8, e.outputs), .meta = try r.arena.dupe([]const u8, e.meta), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, e.function, false)), .file = name, .name = e.function, .text = src };
+            nv.* = .{ .inputs = try r.arena.dupe([]const u8, e.inputs), .outputs = try r.arena.dupe([]const u8, e.outputs), .meta = try r.arena.dupe([]const u8, e.meta), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, e.function, false)), .file = name, .name = e.function, .text = compiled };
             try r.variants.put(r.arena, nv.name, nv);
             break :blk nv;
         };
@@ -57,6 +59,7 @@ pub fn compileChecked(r: *Run) !void {
 }
 
 pub fn compile(r: *Run, dir: []const u8) !void {
+    @import("rotary_cache.zig").start(r);
     const path = try std.fmt.allocPrintSentinel(r.arena, "{s}/plan.json", .{dir}, 0);
     const f = try r.mapFile(path);
     const plan = try std.json.parseFromSliceLeaky(std.json.Value, r.arena, f.bytes[0..f.size], .{});
@@ -65,9 +68,10 @@ pub fn compile(r: *Run, dir: []const u8) !void {
         const o = kv.value_ptr.object;
         const src_path = try std.fmt.allocPrintSentinel(r.arena, "{s}/{s}", .{ dir, o.get("file").?.string }, 0);
         const src = try r.mapFile(src_path);
-        const lib = try r.ownResource(try mtl.Library.fromSource(r.device, src.bytes[0..src.size], mtl.CompileOptions.mlx()));
+        const compiled = @import("rotary_cache.zig").forRun(r, src.bytes[0..src.size]);
+        const lib = try r.ownResource(try mtl.Library.fromSource(r.device, compiled, mtl.CompileOptions.mlx()));
         const v = try r.arena.create(Variant);
-        v.* = .{ .inputs = try strings(r.arena, o.get("inputs").?), .outputs = try strings(r.arena, o.get("outputs").?), .meta = try strings(r.arena, o.get("meta").?), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, kv.key_ptr.*, false)), .file = try std.fmt.allocPrint(r.arena, "{s}/{s}", .{ dir, o.get("file").?.string }), .name = kv.key_ptr.* };
+        v.* = .{ .inputs = try strings(r.arena, o.get("inputs").?), .outputs = try strings(r.arena, o.get("outputs").?), .meta = try strings(r.arena, o.get("meta").?), .pipe = try r.ownResource(try mtl.Pipeline.init(r.device, lib, kv.key_ptr.*, false)), .file = try std.fmt.allocPrint(r.arena, "{s}/{s}", .{ dir, o.get("file").?.string }), .name = kv.key_ptr.*, .text = compiled };
         try r.variants.put(r.arena, kv.key_ptr.*, v);
     }
     var rit = plan.object.get("roles").?.object.iterator();
@@ -112,7 +116,7 @@ pub fn compileGlue(r: *Run) !void {
     r.repack_w = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_w", false));
     r.repack_s = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_repack_s", false));
     r.touch_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, glue, "fz_touch", false));
-    const slib = try r.ownResource(try mtl.Library.fromSource(r.device, ks.flashnext_select, mtl.CompileOptions.mlx()));
+    const slib = try r.ownResource(try mtl.Library.fromSource(r.device, @import("rotary_cache.zig").forRun(r, ks.flashnext_select), mtl.CompileOptions.mlx()));
     r.sel_meta_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, slib, "fz_sel_meta", false));
     r.pool_abs_pipe = try r.ownResource(try mtl.Pipeline.init(r.device, slib, "fz_idx_pool_abs", false));
     r.sink = .{ .b = try r.buffer(64) };

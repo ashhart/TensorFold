@@ -219,6 +219,7 @@ pub const Model = struct {
             r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
             if (!r.serial) r.enc.barrier();
         }
+        try @import("rotary_cache.zig").prepare(r, t.log2base, t.pos8, rows);
         var cur: usize = 0;
         var ce: [2]variants.Const = undefined;
         try variants.callAs(r, "qa_embed_rows@embed", rows, &.{ ids, m.embed[0], m.embed[1], m.embed[2] }, &.{t.h[0]}, variants.width(&ce, "BITS", "GS", m.embed_w));

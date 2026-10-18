@@ -27,6 +27,9 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     b.step("test-flashnext-bound-probes-host", "Real rotary allowance callbacks without GPU calls").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = probes })).step);
     b.step("test-flashnext-precise-host", "Explicit rotary math and FP64 golden references without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"precise rotary:"} })).step);
     b.step("test-rotary-sweep-host", "Exhaustive finite rotary input enumeration and receipt controls without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary sweep:"} })).step);
+    const rotary_cache = b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary cache:"} }));
+    b.step("test-rotary-cache-host", "Rotary source fallback and same-command cache dispatch without shaders").dependOn(&rotary_cache.step);
+    all.dependOn(&rotary_cache.step);
     const tests_ = b.addTest(.{ .root_module = root, .filters = &.{"batch widths:"} });
     const run = b.addRunArtifact(tests_);
     run.has_side_effects = true;

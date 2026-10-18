@@ -74,7 +74,7 @@ pub fn open(gpa: Allocator, io: std.Io, eng: *fx.Engine, dir: []const u8, o: api
         .largest = planned.largest,
     }, Build.load);
     errdefer v.tower.deinit();
-    v.prep = try vp.Prep.init(eng.r.device);
+    v.prep = try vp.Prep.initCached(eng.r.device, gpa, eng.r.rotary_pipe != null);
     std.log.info("flash next: image tower loaded ({d:.2} GiB with scratch for {d} tokens a pass; {d} image and {d} video tokens a request)", .{ @as(f64, @floatFromInt(v.tower.bytes)) / (1 << 30), planned.largest, o.image_tokens, if (videos) o.video_tokens else 0 });
     return v;
 }

@@ -329,7 +329,7 @@ pub const Tmp = struct {
 /// The rotary's constants every rotary kernel reads: [log2(base), YaRN on, YaRN's cos and sin scale, 32 frequencies].
 pub fn ropeBuf(r: *Run, log2base: f32, factor: f64) !Buf {
     const rotary = @import("rotary_config.zig");
-    const b = try r.buffer(rotary.words * 4);
+    const b = r.rotary_buffer orelse try r.buffer(rotary.words * 4);
     @memcpy(b.slice(f32, rotary.words), &rotary.table(log2base, factor, TRAINED));
     return .{ .b = b };
 }

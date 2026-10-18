@@ -107,7 +107,11 @@ pub fn admitInventory(device: anytype, weights: u64, capacity: usize, ram: ?u64,
 
 pub fn admitPhase(device: anytype, weights: u64, capacity: usize, ram: ?u64, text: ?[]const u8, extra: u64, inventory: weights_plan.Inventory, existing: u64, needs_build: bool) !u64 {
     const cap = try ceiling(ram, device.maxWorkingSet(), text);
-    if ((try budgetLive(weights, capacity, inventory, extra, existing)).forPhase(needs_build) > cap) return error.FlashNextMemoryShortfall;
+    return admitBudget(cap, try budgetLive(weights, capacity, inventory, extra, existing), needs_build);
+}
+
+pub fn admitBudget(cap: u64, value: Budget, needs_build: bool) !u64 {
+    if (value.forPhase(needs_build) > cap) return error.FlashNextMemoryShortfall;
     return cap;
 }
 

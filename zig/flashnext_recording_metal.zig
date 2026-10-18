@@ -11,6 +11,7 @@ pub var scale_calls: usize = 0;
 pub var first_blit: ?struct { offset: usize, bytes: usize } = null;
 pub var blits: usize = 0;
 pub var draws: usize = 0;
+pub var rotary_calls: usize = 0;
 pub const Buffer = struct {
     id: usize,
     data: []align(256) u8,
@@ -93,6 +94,10 @@ pub const ComputeEncoder = struct {
         };
     }
     pub fn dispatchThreads(_: ComputeEncoder, grid: Size, _: Size) void {
+        if (std.mem.eql(u8, pipe.name, "tf_rotary_prepare")) {
+            rotary_calls += 1;
+            return;
+        }
         if (std.mem.eql(u8, pipe.name, "fz_xgu") or std.mem.eql(u8, pipe.name, "fz_xdown")) {
             calls[if (std.mem.eql(u8, pipe.name, "fz_xgu")) @as(usize, 2) else 3] += 1;
             for (expected, [_]usize{ 6, 32, 6, 32 }) |want, actual| if (want != actual) {

@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Flash Next can reuse precise rotary values across target layers and MTP calls on tensor-unit Metal devices. Admission keeps the direct path when the optional table does not fit.
+
 - Cluster checkpoint headers use the core safetensors parser and validate tensor ranges against the actual file length.
 
 - HTTP serving closes unfinished replies, reports token staging allocation failures, releases SSE frame storage after each write, and shares one public address policy between media and web fetches.

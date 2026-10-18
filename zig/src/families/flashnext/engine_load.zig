@@ -58,14 +58,18 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     const device = try mtl.Device.init();
     errdefer device.deinit();
     const existing = device.allocated();
-    const extra = try std.math.add(u64, requested, existing);
-    const startup = try memory.budgetLive(weights, window.capacity, inventory, extra, existing);
+    const base_extra = try std.math.add(u64, requested, existing);
+    const plain = try memory.budgetLive(weights, window.capacity, inventory, base_extra, existing);
     const ram = std.process.totalSystemMemory() catch null;
     const limit_text: ?[]const u8 = if (platform.c.getenv("FLASHNEXT_LOAD_LIMIT_GB")) |v| std.mem.span(v) else null;
-    const load_limit = memory.admitPhase(device, weights, window.capacity, ram, limit_text, extra, inventory, existing, route.needs_build) catch |err| {
+    const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
+    const cache = @import("rotary_cache.zig");
+    const rotary_enabled = cache.fits(device.tensorUnits(), plain.steady, limit) and plain.forPhase(route.needs_build) <= limit;
+    const extra = try std.math.add(u64, base_extra, if (rotary_enabled) cache.growth else 0);
+    const startup = try memory.budgetLive(weights, window.capacity, inventory, extra, existing);
+    const load_limit = memory.admitBudget(limit, startup, route.needs_build) catch |err| {
         if (err == error.FlashNextMemoryShortfall) {
             const need = startup.forPhase(route.needs_build);
-            const limit = try memory.ceiling(ram, device.maxWorkingSet(), limit_text);
             const gib: f64 = 1 << 30;
             std.log.err("flash next: startup plans {d:.2} GiB ({s} phase) for raw/packed and vision weights, applicable phase scratch, both prompt planes/selectors, KV/state, existing device allocations and requested sessions/cache and a {d} GiB runtime reserve; the RAM/GPU-bounded load ceiling {d:.2} GiB is short by {d:.2} GiB (GPU working set {d:.2} GiB); FLASHNEXT_LOAD_LIMIT_GB may raise the 70% policy within those bounds; {s}", .{ @as(f64, @floatFromInt(need)) / gib, if (route.needs_build and startup.building > startup.steady) @as([]const u8, "pack construction") else "load/warm-up", memory.margin >> 30, @as(f64, @floatFromInt(limit)) / gib, @as(f64, @floatFromInt(need - limit)) / gib, @as(f64, @floatFromInt(device.maxWorkingSet())) / gib, memory.options });
         }
@@ -98,7 +102,7 @@ pub fn loadConfigured(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_di
     const arena = e.arena_state.allocator();
 
     const r = try arena.create(Run);
-    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window, .load_limit = load_limit };
+    r.* = .{ .arena = arena, .device = device, .queue = try device.queue(), .window = window, .load_limit = load_limit, .rotary_enabled = rotary_enabled };
     return @import("load_prefix.zig").build(*Engine, r, Construction{
         .e = e,
         .io = io,
