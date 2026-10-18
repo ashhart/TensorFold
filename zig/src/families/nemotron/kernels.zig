@@ -8,7 +8,7 @@ const row = @import("../../core/row_projection.zig");
 pub const glue_names = [_][:0]const u8{ "tf_embed_q4", "tf_embed_bits", "tf_rms_mlx", "tf_argmax_bf16", "tf_kv_write", "tf_attn_q", "tf_attn_out", "tf_copy_rows", "tf_copy_u32", "tf_coop_combine" };
 
 /// Tree windows (nemotron_tree.metal): Mamba by parent for every forward, tree attention, compaction, gathers, top-k.
-pub const tree_names = [_][:0]const u8{ "tf_tree_conv", "tf_tree_scan", "tf_tree_tail", "tf_tree_merge", "tf_kv_compact", "tf_gather_rows", "tf_topk_probs", "tf_lane_tokens" };
+pub const tree_names = [_][:0]const u8{ "tf_tree_conv", "tf_tree_scan", "tf_tree_tail", "tf_tree_merge", "tf_kv_compact", "tf_gather_rows", "tf_topk_probs", "tf_lane_tokens", "tf_tree_conv_bolt", "tf_tree_scan_bolt" };
 
 /// A lone stream's GPU-side round (nemotron_round.metal): the verify's arguments, the accept, the stop, a row gather.
 pub const round_names = [_][:0]const u8{ "tf_round_args", "tf_round_accept", "tf_round_gather", "tf_round_root", "tf_round_top1", "tf_round_copy", "tf_round_tail", "tf_round_sib", "tf_round_attsel" };
