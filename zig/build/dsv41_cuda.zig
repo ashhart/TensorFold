@@ -31,6 +31,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
     const tp = @import("tp.zig").module(b, target, .Debug, cuda);
     m.addImport("tp", tp);
     m.addImport("kv", @import("dsv41_state.zig").kvModule(b, target, cuda, tp));
+    @import("dsv41_draft.zig").addImports(b, m, target);
     return m;
 }
 pub fn steps(b: *std.Build) void {

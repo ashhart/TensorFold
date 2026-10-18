@@ -99,6 +99,7 @@ pub fn build(b: *std.Build) void {
     @import("zig/build/dsv41_shared.zig").steps(b);
     @import("zig/build/dsv41_cuda.zig").steps(b);
     @import("zig/build/dsv41_state.zig").steps(b);
+    @import("zig/build/dsv41_draft.zig").steps(b);
     const target = b.standardTargetOptions(.{});
     @import("zig/build/copy_source.zig").steps(b);
     const release_version = b.option([]const u8, "version", "Release version, exactly MAJOR.MINOR.PATCH");
