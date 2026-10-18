@@ -74,7 +74,7 @@ to one stream, while successful checks allow the lane engine to combine requests
 
 ## Native Metal shared sessions
 
-The native 6-bit MTP engine uses shared target rounds with an explicit `--parallel N` above one; `--parallel auto`, the default, keeps the single-reply driver, whose lone decode is 1.0.12's (a lone request in a shared session decoded 7% slower on an M3 Ultra). Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions. The default needs no parallel flag:
+The native 6-bit MTP engine uses shared target rounds with an explicit `--parallel N` above one; `--parallel auto`, the default, keeps the single-reply driver, whose lone decode is 1.0.12's (a lone request in a shared session decoded 7% slower on an M3 Ultra). Without `FLASHNEXT_SLOT_CONTEXTS`, an explicit count fixes the number of sessions, eight here:
 
 ```bash
 tensorfold-native serve TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP \
