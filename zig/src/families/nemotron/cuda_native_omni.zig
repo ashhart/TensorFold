@@ -5,7 +5,7 @@ const Config = @import("config.zig").Config;
 const latent = @import("cuda_latent.zig");
 
 pub const model_type = "nemotron_h_omni";
-pub const formats: []const []const u8 = &.{"modelopt-nvfp4"};
+pub const formats = native.formats;
 /// --vision-image-tokens unless given: four images at the most tokens NVIDIA's processor gives one (3,328 each).
 pub const default_image_tokens: u32 = 13312;
 pub const default_context = native.default_context;
@@ -23,7 +23,11 @@ pub const snap_bytes = native.snap_bytes;
 pub const snap_save = native.snap_save;
 pub const snap_restore = native.snap_restore;
 pub const snap_drop = native.snap_drop;
-pub const snap_ready = native.snap_ready;
+pub const snap_slots = native.snap_slots;
+pub const snap_place = native.snap_place;
+pub const window_rows = native.window_rows;
+pub const attach = native.attach;
+pub const fits = native.fits;
 
 /// NVFP4 bytes a parameter takes: a 4-bit code and an e4m3 scale a 16.
 const nvfp4_bytes: f64 = 0.5625;
@@ -40,3 +44,5 @@ pub fn weightShare(a: std.mem.Allocator, io: std.Io, dir: []const u8, total: u64
     if (c.rank > 0) return share;
     return total -| (experts - share);
 }
+
+pub const tensorWeightBytes = native.tensorWeightBytes;

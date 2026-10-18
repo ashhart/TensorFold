@@ -146,8 +146,9 @@ For Qwen, each image request carries its own multimodal rotary positions and con
 ## The native server
 
 `tensorfold-native serve` takes `--vision`, `--vision-max-images` (default 4) and `--vision-image-tokens` (default
-4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash and Qwen3.8-27B on one Mac,
-and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at startup.
+4,096; 13,312 for Nemotron 3.5 Super VL) for engines that read images: GLM-5.3-Flash, Qwen3.8-27B, Gemma 4
+[31B](recipes/gemma-4-native.md#images) and [12B](recipes/gemma-4-12b-native.md#images) and Step-5-Preview on one
+Mac, and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at startup.
 
 - Images arrive as `image_url` data URLs in user messages and tool results. With `--vision-urls` (it needs
   `--vision`), a part may name a public HTTPS URL instead, fetched as 0.6.6 fetched it: port 443 without credentials
@@ -165,9 +166,16 @@ and Nemotron 3.5 Super VL on CUDA. Other native engines refuse the flag at start
   server loads it at the first JPEG from the file `TENSORFOLD_LIBTURBOJPEG` names, else `lib/` beside the server's
   folder, beside the server, Homebrew's `jpeg-turbo` on macOS, then the system's library path. It checks the version
   libjpeg-turbo writes into the library and refuses JPEG images by name when the library is missing or another
-  release; PNG images still serve. WebP is refused by name until a decoder exists; other formats are refused.
-- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the GLM5-Next
-  processor's sizing and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
+  release; PNG images still serve.
+- WebP is decoded by libwebp 1.6.0's decoder library (`libwebpdecoder`, the release Pillow 13.0.0 bundles), to the
+  RGB bytes Pillow 13.0.0 gives the same file (lossy and lossless, with and without alpha, EXIF-oriented:
+  `zig/tests/fixtures/picture/webp.json`, from `tools/zig/picture_webp_fixtures.py`). TensorFold does not ship it
+  either; the server loads it at the first WebP from the file `TENSORFOLD_LIBWEBP` names, else `lib/` beside the
+  server's folder, beside the server, Homebrew's `webp` on macOS, then the system's library path, and refuses WebP
+  images by name when it is missing or another release (`WebPGetDecoderVersion`). Animated WebP is refused as
+  animated pictures are. Other formats are refused.
+- The limits and the processing are 0.6.6's: EXIF and XMP orientation, alpha composited over white, the model's
+  processor's sizing (GLM5-Next's, or Gemma 4's PIL processor) and Pillow's bicubic resampler. The decoder gives 0.6.6's pixels for every picture in
   `zig/tests/fixtures/lfm2/images.json` and `zig/tests/fixtures/picture/edges.json`, except where it departs on
   purpose: a CMYK JPEG is refused, and a JPEG holding several pictures (MPO) gives its first, which 0.6.6 refused.
 - Images are counted from the request's image parts. A user or tool message whose text spells the model's image
@@ -258,3 +266,17 @@ Tests cover input validation, bounded fetching, expanded prompt accounting, cach
 Hardware qualification is separate from these tests: each backend and chip needs real image understanding, drafted/serial equality, concurrency, chunked-prefill and memory checks before a release claim.
 Checkpoint metadata must describe the decoder separately from MTP: the `mlp_layer_types` list must match `num_hidden_layers` for Transformers validation. Preserve the separate MTP configuration and weights.
 Image input stays experimental until the hardware matrix is complete, and makes no throughput claim.
+
+## Native CUDA: Qwen3.5/3.8
+
+`tensorfold-native serve <checkpoint> --vision` loads the checkpoint's vision tower beside the language model on the
+Qwen CUDA engine (`families/qwen3_5/cuda_vision.zig`, kernels in `qwen_vision.cu`, its Linears on cuBLASLt). The
+server prepares each image as it does on a Mac: core/picture decodes it and core/qwen_vl resizes and cuts it with the
+checkpoint's processor settings, so an image's patches, grid and cache identity are the same on both backends. The
+tower and the scratch of one 16,384-patch call are allocated at startup and counted as model memory, so the stream
+budget never has to make room for an image. A request's images go through the tower before its prompt; their rows
+replace the `<|image_pad|>` placeholders in the prompt chunks, which rotate at M-RoPE's t, h and w positions
+(interleaved sections 11, 11 and 10), and the reply's rows rotate at their position plus the layout's shift, as
+transformers' `get_rope_index` lays them out. Text-only requests keep their bits. One image holds at most 4,096
+tokens (one tower call); `--vision-image-tokens` bounds a request's images together. JPEG needs libturbojpeg on the
+machine (PNG decodes everywhere); video parts are refused.

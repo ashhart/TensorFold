@@ -134,6 +134,7 @@ pub fn open(gpa: Allocator, io: std.Io, dir: []const u8, window: u32, speed_up: 
         h.host.info_.prompt_cache = true;
         h.slots.grow = .{ .ctx = h, .f = growSnap }; // a resident state made whole before its slot writes below it
         h.slots.expire = .{ .ctx = h, .f = expireSnap }; // invalidate now, reclaim after restore borrowers release
+        h.slots.borrowed = .{ .ctx = h, .f = borrowedState }; // an outstanding lookup spares its state's rows
     }
     errdefer if (h.cache) |*store| store.deinit();
     if (learn) |l| if (l.conversations) {
@@ -175,6 +176,13 @@ fn growSnap(ctx: *anyopaque, saved: *anyopaque, extra: u64) bool {
 fn expireSnap(ctx: *anyopaque, saved: *anyopaque) void {
     const h: *Host = @ptrCast(@alignCast(ctx));
     if (h.cache) |*store| store.expired(saved);
+}
+
+/// Eviction asks the store: an outstanding lookup still restores this state, so its rows are spared.
+fn borrowedState(ctx: *anyopaque, saved: *anyopaque) bool {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    if (h.cache) |*store| return store.borrowed(saved);
+    return false;
 }
 
 /// Info.vision's prepare: an image's bytes to the tower's patches (families/glm/image.zig), on the HTTP thread.

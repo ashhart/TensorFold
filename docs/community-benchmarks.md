@@ -13,7 +13,7 @@ The command starts its own single-request `serve` on a loopback port, disables p
 
 An engine that decodes greedily only refuses the sampled cells, so it cannot complete community-v1; the run prints the server's reason, and `--temperatures 0` gives a local run. A large checkpoint may need its engine's own load limit raised (`GLM_LOAD_LIMIT_GB` for GLM-5.3-Flash) and a longer `--startup-timeout`: without the flag, the run waits up to 600 s plus 6 s per GB of weights past 20 GB, at most 3600 s.
 
-Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed runs record `python_version` as `"none"`, because no Python runs in the client or the server; attached runs record `"unknown"`.
+Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed native runs record `python_version` as `"none"`. An attached manifest may attest the same value; an unattested attached run records `"unknown"`.
 
 ## Commands
 
@@ -33,7 +33,7 @@ tensorfold serve example-org/public-checkpoint --name local-model
 tensorfold benchmark example-org/public-checkpoint --server http://127.0.0.1:8080 --model-id local-model --backend mlx
 ```
 
-Attached-server results do not claim the client's hardware is the server's hardware. They carry unknown hardware, versions and checkpoint revisions and remain unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.
+Attached-server results do not claim the client's hardware is the server's hardware. The client reads `GET /v1/benchmark/manifest` from the server it attached to. A manifest that passes the receipt checks fills the version, hardware, checkpoint hashes, revision and rank count (1 or 2). Without that document, or if any field fails those checks, the receipt keeps unknown hardware and an unknown revision and remains unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.
 
 The runner records failures, incomplete streams, missing usage, early EOS and cancellations. Exit code 0 means every measured attempt completed its requested output with a delivery interval; 1 means an error, and with `--publish` the receipt is still saved when the run finished; 2 means incomplete attempts remain in the saved receipt; 130 means the run was cancelled with Ctrl-C: an attempt in flight is kept in the receipt, and a cancel during server startup saves nothing. SIGTERM and SIGHUP exit 143 and 129 without a receipt. Errors never silently disappear from an average.
 
@@ -49,28 +49,60 @@ Receipts include token hashes supplied by the server, but the command does not r
 
 ## Publishing
 
-The receiver uses administrator-issued contributor tokens. Running locally needs no token or account.
+The browser upload flow needs no login, pasted token, email request or administrator approval. Install or update the CLI using the [runbook](../RUNBOOK.md), run a cached public model locally, and save its receipt:
 
 ```sh
-# Paste an issued token at the hidden prompt.
-tensorfold benchmark login
+tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --output benchmark.json
+```
 
-# For automation, read the token from a private secret store or file.
-tensorfold benchmark login --token-stdin < /secure/upload-token
+Open [the benchmark board](https://tensorfold.dev/benchmarks), choose **Upload result**, enter a public display name and select `benchmark.json`. Review the hardware, model and timing fields, then confirm the data to submit it. Receipt contents are not sent before confirmation. The website creates a scoped browser profile privately and remembers it across reloads using a Secure, HttpOnly, SameSite cookie; there is no upload key to copy or paste.
 
-# Run, show the exact public fields, and ask before publishing. The token is checked before the run starts.
+That browser profile keeps later submissions together, with up to 20 uploads per day. Clearing browser data or using another browser creates a separate profile. Display names are self-chosen and do not verify an identity; matching names do not merge profiles. New-profile limits apply to reduce spam.
+
+Complete standard community-v1 submissions publish automatically after quota checks, strict receipt validation, public-checkpoint lookup and server-side statistics/completeness checks. A complete standard run includes both workloads at the suite temperatures and seeds, five successful repetitions per cell, 256 output tokens, a native managed run or a validated attached manifest, an attested rank count of one or two, a checkpoint revision/configuration digest and reported GPU hardware. Attached runs without accepted manifest facts remain unranked. A published submission returns its public result URL.
+
+If the website's model-checkpoint service is temporarily unavailable, a valid receipt is saved privately and its public-checkpoint check is retried automatically. A complete standard run becomes public only after that check passes. You do not need to rerun the benchmark or upload the same receipt again. Private or inaccessible checkpoints are never published automatically. Valid incomplete or nonstandard runs remain pending review after public-checkpoint verification; invalid receipts are rejected.
+
+Retries return the same saved submission without using another upload. Older manual-review submissions and withdrawn results are not automatically republished. The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported; automatic approval does not independently verify speed or hardware.
+
+### Existing CLI publishing credentials
+
+CLI installations that already have scoped upload credentials can continue to publish directly:
+
+```sh
+# Run, show the public fields, and ask before publishing.
 tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --publish
 
-# Or publish an existing receipt; --yes consents without the prompt.
+# Publish an existing receipt; --yes consents without the prompt.
 tensorfold benchmark publish receipt.json --yes
 
-# Remove locally stored upload credentials.
+# Remove locally stored CLI upload credentials.
 tensorfold benchmark logout
 ```
 
-`TENSORFOLD_BENCHMARK_TOKEN` can supply a token for a single automation run; it is never saved into a receipt or printed. `--upload-url` selects another HTTPS receiver, and saved credentials are bound to that exact API URL. Redirects are not followed, and uploads and the public check connect directly: proxy variables are not used. Loopback HTTP is accepted for local development only. Before any upload, the receipt is checked with the board's own rules and the checkpoint must be public on Hugging Face.
+Direct CLI publishing still requires its existing credentials; it does not use the browser cookie. New contributors can use the local-run and browser-upload flow above without credentials. If a CLI publication check fails, the saved receipt can be uploaded through the website without rerunning the model.
 
-New submissions are pending moderation. Only approved submissions appear on [the benchmark board](https://tensorfold.dev/benchmarks). The receiver recomputes statistics rather than trusting a client summary. All community measurements remain self-reported.
+For existing automation, `tensorfold benchmark login` reads an issued token at a hidden prompt, and `--token-stdin` reads it from a private secret store or file. `TENSORFOLD_BENCHMARK_TOKEN` can supply a token for a single automation run; it is never saved into a receipt or printed. Saved credentials are bound to the exact HTTPS API URL selected by `--upload-url`. Redirects are not followed, and CLI uploads and public checks connect directly without proxy variables. Loopback HTTP is accepted for local development only.
+
+## Contributor profiles and leaderboards
+
+Click a contributor name on [the benchmark dashboard](https://tensorfold.dev/benchmarks) to see their public benchmark history, model and hardware counts, personal best and earned milestones. Profiles include every approved receipt through pagination, not only the newest page. Profile links can be shared or opened directly. A contributor ID names an upload identity; self-chosen display names are not verified, and two identities with the same name remain separate.
+
+The performance map plots the visible protocol-complete greedy-chat medians by first-text latency and stream-delivery speed. Each point opens its receipt, with keyboard access; the sample count describes only the loaded page, and loading more adds older results. Model and hardware filters update the map and standings.
+
+**Most benchmarks** ranks contributors by their number of approved receipts. **Fastest run** ranks each contributor by their best protocol-complete greedy-chat stream-delivery median, using the same five-repeat, 256-token workload as the run board. The model, platform and hardware filters apply to both rankings and community counters. Different models and hardware have different limits; filter the view before comparing setups. All results remain community-reported.
+
+The profile achievement cabinet awards bronze, silver, gold and platinum trophies for published-run milestones at 1, 5, 10 and 100 runs, plus model and hardware exploration. Top contributor honours go to the highest global approved-run count; speed leader honours go to the highest global protocol-complete greedy-chat median. Awards use the unrounded global values, equal leaders share honours and missing speeds earn no speed trophy. The profile progress bar shows the next published-run milestone. Pending and withdrawn submissions do not earn public standings or milestones, and public profile IDs grant no submission or administration access.
+
+## Model size and speed
+
+The default **Size × speed** podium ranks each contributor by their best eligible product of the model's published parameter count in billions and its standard greedy-chat stream-delivery median. Select **Total** to compare model capacity with delivery speed, or **Active** to use the parameters active per token in a sparse MoE model. The score has units of billion parameters × tokens per second; it is a sizing comparison, not measured FLOPS, model quality or hardware-independent efficiency.
+
+Total and active counts are shown together, with links to the original model publishers. Counts may be rounded or include multimodal components. Dense models use total parameters as the active-count sizing convention. External drafters and additional prediction-head overhead are not estimated. An unknown model size or an unavailable active count stays unranked for that view; repository-name suffixes are not accepted as verified size metadata.
+
+The parameter-versus-speed plot uses the selected parameter basis on a logarithmic size axis. Its latency view remains available, and both views show only loaded eligible runs; loading more adds older measurements. Size standings use the full approved history and apply the same model, platform and hardware filters. Unknown-size runs remain visible with their original measurements.
+
+**Speed records** still ranks raw tokens per second, **Contributions** still ranks published-run counts, and existing profile speed honours are unchanged. Use the hardware and model filters and inspect quantization and execution settings when comparing results.
 
 ## AMD (ROCm)
 

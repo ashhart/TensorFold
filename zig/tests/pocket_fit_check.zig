@@ -1,5 +1,6 @@
 //! A dumped pocket lesson's read rows fitted as the learner fits them, timed; each fit's numbers and weights written.
 const std = @import("std");
+const platform = @import("sys");
 const tf = @import("tensorfold");
 
 const pocket_fit = tf.nemotron.pocket_fit;
@@ -57,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     const us = try gpa.alloc(f32, jobs.items.len * d);
     const fits = try gpa.alloc(Fit, jobs.items.len);
     // TF_FIT_THREADS: that many threads take the fits in turn (default: a thread a fit, as the learner runs them)
-    const want = if (std.c.getenv("TF_FIT_THREADS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else jobs.items.len;
+    const want = if (platform.c.getenv("TF_FIT_THREADS")) |v| try std.fmt.parseInt(usize, std.mem.span(v), 10) else jobs.items.len;
     const threads = try gpa.alloc(std.Thread, @min(@max(want, 1), jobs.items.len));
     var next = std.atomic.Value(usize).init(0);
     const work: Work = .{ .gpa = gpa, .rows = rows, .kinds = all_kinds, .m = m, .slots = slots, .d = d, .jobs = jobs.items, .us = us, .fits = fits, .next = &next };

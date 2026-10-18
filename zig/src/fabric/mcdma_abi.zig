@@ -1,5 +1,6 @@
 //! First-party libmcdma-fabric ABI 1, loaded only from an explicit absolute library path.
 const std = @import("std");
+const platform = @import("sys");
 
 pub const Context = opaque {};
 pub const Peer = opaque {};
@@ -27,7 +28,7 @@ pub const MaxLinks = *const fn () callconv(.c) c_uint;
 pub const ws_room: usize = 64;
 
 pub const Library = struct {
-    handle: std.DynLib,
+    handle: platform.DynLib,
     api: Api,
     write_signal: ?WriteSignal = null,
     connect_links: ?ConnectLinks = null,
@@ -36,7 +37,7 @@ pub const Library = struct {
     /// No install-path or loader-search fallback; the caller supplies the inspected user-directory library.
     pub fn open(path: [:0]const u8) Error!Library {
         if (!std.fs.path.isAbsolute(path)) return error.InvalidPath;
-        var handle = std.DynLib.openZ(path.ptr) catch return error.LibraryUnavailable;
+        var handle = platform.DynLib.openZ(path.ptr) catch return error.LibraryUnavailable;
         errdefer handle.close();
         var api: Api = undefined;
         inline for (@typeInfo(Api).@"struct".field_names) |name| {

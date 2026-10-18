@@ -111,6 +111,7 @@ pub fn launch(f: Function, cfg: Config, stream: Stream, args: *Args) Error!void 
 /// A launch's result; a failure names the kernel and its configuration with the code.
 fn launched(f: Function, cfg: Config, res: abi.Result, what: []const u8) Error!void {
     if (res == abi.success) return;
+    if (res == abi.error_not_ready) return error.NotReady; // as Driver.check: not a failure to log
     const d = f.d;
     var buf: [160]u8 = undefined;
     std.log.err("{s}: {s} ({d}) {s}; {s}{s}", .{ what, d.errorName(res), res, d.errorText(res), describe(&buf, d.functionName(f.handle), cfg), driver.shutdownNote(res) });

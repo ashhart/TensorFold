@@ -9,6 +9,11 @@ const Backend = @import("runtime_backend.zig").Backend;
 const Target = @import("../model.zig").Model;
 const Session = @import("session.zig").Session;
 const op = @import("operators.zig");
+const execution = @import("execution.zig");
+const selector = @import("selector.zig");
+const backend_mod = @import("runtime_backend.zig");
+const Cache = backend_mod.Cache;
+const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
 pub const Model = struct {
     allocator: std.mem.Allocator,
     checkpoint: core.checkpoint_metal.Checkpoint,
@@ -109,6 +114,88 @@ pub const Model = struct {
         if (block == 0 or block > 16 or m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadRuntimeBlock;
         m.tree_block = block;
     }
+    /// Exchange the drafting state with `x` (no frame or transaction open): swap a stream in, draft, swap it back.
+    pub fn swap(m: *Model, x: *Context) !void {
+        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or m.backend.staged != null or x.caches.len != m.backend.caches.len) return error.BadDraftContext;
+        std.mem.swap(mtl.Buffer, &m.pending, &x.pending);
+        std.mem.swap(u64, &m.committed_end, &x.committed_end);
+        std.mem.swap([]Cache, &m.backend.caches, &x.caches);
+        std.mem.swap(Session, &m.session, &x.session);
+        std.mem.swap(op.Context, &m.backend.context, &x.context);
+    }
+    /// One stream of a batch: its parked context (null: the model's own), pending token and node budget.
+    pub const Proposal = struct { context: ?*Context, pending: u32, nodes: u32 };
+    /// Trees for 2 to 8 streams from one frame: each stream's new taps into its own caches, then one block pass.
+    pub fn proposeBatch(m: *Model, entries: []const Proposal, out: []selector.Tree) !void {
+        const n = entries.len;
+        if (n < 2 or n > 8 or out.len != n or m.tree_block < 2) return error.BadDraftOptions;
+        const c = m.graph.config;
+        var streams: [8]execution.Stream = undefined;
+        var caches: [8][]Cache = undefined;
+        var news: [8]?Fresh = @splat(null);
+        for (entries, 0..) |en, k| {
+            if (en.pending >= c.vocab or en.nodes == 0 or en.nodes > 15) return error.BadDraftOptions;
+            if (en.context) |x| try m.swap(x);
+            news[k] = m.fresh();
+            const flushed: anyerror!void = if (news[k] == null) m.flush() else {};
+            if (en.context) |x| m.swap(x) catch {
+                m.backend.failed = true; // the model holds this stream's context: recovery resets both
+                return error.DraftContextSwap;
+            };
+            try flushed;
+            const current = if (en.context) |x| x.session.context else m.session.context;
+            streams[k] = .{ .context = if (news[k]) |f| f.next else current, .anchor = en.pending };
+            caches[k] = if (en.context) |x| x.caches else m.backend.caches;
+        }
+        m.backend.batch = caches[0..n];
+        defer m.backend.batch = &.{};
+        // the block spans the deepest tree asked for: drafter rows cost even when a stream's tree is small
+        var deepest: u32 = 1;
+        for (entries) |en| deepest = @max(deepest, en.nodes);
+        const block = @min(m.tree_block, deepest + 1);
+        const ops = m.backend.ops();
+        const frame = try ops.vtable.begin(ops.ptr);
+        defer ops.vtable.release(ops.ptr, frame);
+        var absorbs: [8]?execution.Absorb = @splat(null);
+        var positions: [8][128]u64 = undefined;
+        const stride = @as(usize, c.tapWidth()) * 2;
+        for (news[0..n], absorbs[0..n], 0..) |f, *a, k| if (f) |x| {
+            for (positions[k][0..x.rows], 0..) |*p, i| p.* = x.first + i;
+            a.* = .{ .taps = try m.backend.frame.add(.{ .buf = x.ring, .off = @as(usize, x.slot) * stride }, x.rows, c.tapWidth(), c.tapWidth(), .bf16), .positions = positions[k][0..x.rows] };
+        };
+        var lattices: [8]op.Lattice = undefined;
+        try execution.absorbBlocks(ops, &m.graph, m.preparation, frame, absorbs[0..n], streams[0..n], block, lattices[0..n]);
+        defer for (lattices[0..n]) |*l| l.deinit();
+        // the frame completed, so an absorbing stream's context now covers its new taps
+        for (entries, news[0..n]) |en, f| if (f) |x| {
+            if (en.context) |ctx| {
+                ctx.session.context = x.next;
+                ctx.session.ready = true;
+                ctx.context = x.next;
+            } else {
+                m.session.context = x.next;
+                m.session.ready = true;
+                m.backend.context = x.next;
+            }
+        };
+        var made: usize = 0;
+        errdefer for (out[0..made]) |*t| t.deinit();
+        for (entries, streams[0..n], lattices[0..n], out) |en, s2, l, *t| {
+            t.* = try selector.propose(m.allocator, &m.graph, l, en.pending, s2.context.end + 1, .{ .nodes = en.nodes });
+            made += 1;
+        }
+    }
+    /// A short run of committed taps the session lacks, for a batched frame to absorb (null: none, or flush first).
+    const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
+    fn fresh(m: *const Model) ?Fresh {
+        const window = m.graph.config.window;
+        if (!m.session.ready or m.committed_end <= m.session.context.end) return null;
+        const behind = m.committed_end - m.session.context.end;
+        const slot: u32 = @intCast(m.session.context.end % window);
+        if (behind > 128 or slot + behind > window or m.session.context.end < m.committed_end -| (@as(u64, window) - 1)) return null;
+        const begin = @max(m.session.context.begin, m.committed_end -| (@as(u64, window) - 1));
+        return .{ .ring = m.pending, .slot = slot, .rows = @intCast(behind), .first = m.session.context.end, .next = .{ .cache = m.session.context.cache, .begin = begin, .end = m.committed_end } };
+    }
     pub fn propose(m: *Model, pending: u32, nodes: u32) !@import("selector.zig").Tree {
         if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null or pending >= m.graph.config.vocab or nodes > 15 or m.tree_block == 0 or m.tree_block > 16) return error.BadDraftOptions;
         if (m.committed_end == 0) return error.DraftContextNotReady;
@@ -130,6 +217,48 @@ pub const Model = struct {
         return m.session.treeBlock(m.allocator, m.backend.ops(), &m.graph, m.preparation, pending, first, block, .{ .nodes = nodes });
     }
 };
+/// A stream's own drafter state, parked while another stream drafts: its taps ring, rolling K/V and session.
+pub const Context = struct {
+    pending: mtl.Buffer,
+    committed_end: u64 = 0,
+    caches: []Cache,
+    session: Session,
+    context: op.Context = .{ .cache = 1, .begin = 0, .end = 0 },
+
+    /// `drafting`: the stream drafts its own trees, so it gets K/V caches; else only its ring.
+    pub fn init(a: std.mem.Allocator, m: *const Model, drafting: bool) !*Context {
+        const c = m.graph.config;
+        const device = m.backend.target.device;
+        const x = try a.create(Context);
+        errdefer a.destroy(x);
+        const pending = try device.buffer(@as(usize, c.window) * c.tapWidth() * 2, opts);
+        errdefer pending.deinit();
+        const caches = try backend_mod.newCaches(a, device, c, if (drafting) c.layers else 0);
+        x.* = .{ .pending = pending, .caches = caches, .session = try Session.init(c, 1, 0) };
+        return x;
+    }
+    pub fn deinit(x: *Context, a: std.mem.Allocator) void {
+        backend_mod.freeCaches(a, x.caches);
+        x.pending.deinit();
+        a.destroy(x);
+    }
+    /// Empty, as Model.reset leaves the model's own.
+    pub fn reset(x: *Context, c: cfg.Config) !void {
+        x.committed_end = 0;
+        x.session = try Session.init(c, 1, 0);
+        x.context = .{ .cache = 1, .begin = 0, .end = 0 };
+    }
+    /// Its taps ring, where the lane backend absorbs the stream's kept rows while it is parked.
+    pub fn ring(x: *Context, c: cfg.Config) @import("../tap_ring.zig").Ring {
+        return .{ .buf = x.pending, .end = &x.committed_end, .window = c.window, .stride = @as(usize, c.tapWidth()) * 2 };
+    }
+    /// Its buffers, for a residency set.
+    pub fn buffers(x: *const Context, list: *std.ArrayList(mtl.Buffer), a: std.mem.Allocator) !void {
+        try list.append(a, x.pending);
+        for (x.caches) |cache| try list.appendSlice(a, &.{ cache.keys, cache.values });
+    }
+};
+
 pub fn loadGraph(a: std.mem.Allocator, b: *Backend) !weights.Graph {
     const target = b.target;
     const prefix: []const u8 = if (target.checkpoint.has("language_model.model.embed_tokens.weight")) "language_model." else "";

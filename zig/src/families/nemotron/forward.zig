@@ -1,5 +1,6 @@
 //! One Nemotron-H forward over streams' row segments, encoded as FusedDecode's kernels with their geometry.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -436,7 +437,7 @@ var split_mode: enum(u8) { unread, on, off } = .unread;
 /// TF_COOP_SPLIT=0 keeps one threadgroup a column tile, as the Python engine dispatches.
 fn splitOn() bool {
     if (split_mode == .unread) {
-        const v = std.c.getenv("TF_COOP_SPLIT");
+        const v = platform.c.getenv("TF_COOP_SPLIT");
         split_mode = if (v != null and v.?[0] == '0') .off else .on;
     }
     return split_mode == .on;

@@ -9,7 +9,7 @@ const jpeg = core.picture.jpeg;
 /// JPEG cases need the pinned libjpeg-turbo: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
 fn jpegReady() !bool {
     if (jpeg.available(std.testing.io, std.testing.allocator)) return true;
-    if (std.testing.environ.getPosix(jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
+    if (@import("sys").getenv(jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
     std.debug.print("libjpeg-turbo {s} not found: LFM2's JPEG cases skipped\n", .{jpeg.pinned});
     return false;
 }
