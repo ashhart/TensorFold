@@ -1,5 +1,6 @@
 //! The snapshot --slide keeps before a folder's first lesson, the loader passing it by, and the rollback that uses it.
 const std = @import("std");
+const platform = @import("sys");
 const originals = @import("originals.zig");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -64,12 +65,12 @@ fn model(a: Allocator, io: Io, tmp: std.testing.TmpDir) ![]const u8 {
 /// A lesson's writes as the learner makes them: a shard rewritten, one written in place, the index, config.json, more.
 fn teach(a: Allocator, io: Io, dir: []const u8) !void {
     try replace(a, io, dir, shard1, try tensor(a, "layers.0.up.weight", &.{ 1, 2, 3, 4, 5, 6, 0.5, 0, 0 }));
-    const fd = std.c.open(try path(a, dir, shard2), .{ .ACCMODE = .WRONLY }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(try path(a, dir, shard2), .{ .ACCMODE = .WRONLY }, @as(platform.c.mode_t, 0));
     try std.testing.expect(fd >= 0);
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     const moved = [_]f32{99};
     const end = (try read(a, io, try path(a, dir, shard2))).len - 4;
-    try std.testing.expectEqual(@as(isize, 4), std.c.pwrite(fd, std.mem.asBytes(&moved), 4, @intCast(end)));
+    try std.testing.expectEqual(@as(isize, 4), platform.c.pwrite(fd, std.mem.asBytes(&moved), 4, @intCast(end)));
     try replace(a, io, dir, "model.safetensors.index.json", index_taught);
     const config = "{\"model_type\": \"nemotron_h\", \"moe_shared_expert_intermediate_size\": 3776, " ++
         "\"tensorfold_learned_neurons\": 64}";
@@ -105,13 +106,13 @@ fn has(text: []const u8, part: []const u8) bool {
 
 /// The first byte of `p` flipped, in place.
 fn flip(p: [:0]const u8) void {
-    const fd = std.c.open(p, .{ .ACCMODE = .RDWR }, @as(std.c.mode_t, 0));
+    const fd = platform.c.open(p, .{ .ACCMODE = .RDWR }, @as(platform.c.mode_t, 0));
     if (fd < 0) return;
-    defer _ = std.c.close(fd);
+    defer _ = platform.c.close(fd);
     var b: [1]u8 = undefined;
-    if (std.c.pread(fd, &b, 1, 0) != 1) return;
+    if (platform.c.pread(fd, &b, 1, 0) != 1) return;
     b[0] ^= 1;
-    _ = std.c.pwrite(fd, &b, 1, 0);
+    _ = platform.c.pwrite(fd, &b, 1, 0);
 }
 
 fn short(_: [:0]const u8) ?u64 {

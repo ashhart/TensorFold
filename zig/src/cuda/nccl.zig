@@ -1,7 +1,9 @@
 //! NCCL opened at run time for tensor-parallel ranks: communicators and the collectives the lane engines use.
 
 const std = @import("std");
+const platform = @import("sys");
 const abi = @import("abi.zig");
+const tp_watch = @import("tp_watch.zig");
 
 pub const Result = c_int;
 pub const Comm = ?*opaque {};
@@ -9,6 +11,31 @@ pub const UniqueId = extern struct { internal: [128]u8 };
 
 pub const DataType = enum(c_int) { i8 = 0, u8 = 1, i32 = 2, u32 = 3, i64 = 4, u64 = 5, f16 = 6, f32 = 7, f64 = 8, bf16 = 9 };
 pub const RedOp = enum(c_int) { sum = 0, prod = 1, max = 2, min = 3, avg = 4 };
+
+/// NCCL 2.30 public ncclConfig_v23000 ABI. New nonblocking rank owners explicitly require 2.30 or later.
+pub const Config = extern struct {
+    size: usize = @sizeOf(Config),
+    magic: u32 = 0xcafebeef,
+    version: u32 = 23000,
+    blocking: c_int = 0,
+    cga_cluster_size: c_int = std.math.minInt(c_int),
+    min_ctas: c_int = std.math.minInt(c_int),
+    max_ctas: c_int = std.math.minInt(c_int),
+    net_name: ?[*:0]const u8 = null,
+    split_share: c_int = std.math.minInt(c_int),
+    traffic_class: c_int = std.math.minInt(c_int),
+    comm_name: ?[*:0]const u8 = null,
+    collnet_enable: c_int = std.math.minInt(c_int),
+    cta_policy: c_int = std.math.minInt(c_int),
+    shrink_share: c_int = std.math.minInt(c_int),
+    nvls_ctas: c_int = std.math.minInt(c_int),
+    n_channels_per_net_peer: c_int = std.math.minInt(c_int),
+    nvlink_centric_sched: c_int = std.math.minInt(c_int),
+    graph_usage_mode: c_int = std.math.minInt(c_int),
+    num_rma_ctx: c_int = std.math.minInt(c_int),
+    max_p2p_peers: c_int = std.math.minInt(c_int),
+    graph_stream_ordering: c_int = std.math.minInt(c_int),
+};
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
 
@@ -21,6 +48,8 @@ pub const Api = struct {
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *R) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
@@ -32,7 +61,7 @@ pub const Api = struct {
 };
 
 pub const Library = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
 
     pub fn open() Error!Library {
@@ -40,7 +69,7 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = std.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";
@@ -59,9 +88,21 @@ pub const Library = struct {
 
     pub fn check(self: *const Library, r: Result, what: []const u8) Error!void {
         if (r == 0) return;
+        if (@import("builtin").is_test) return error.NcclFailed; // a test's injected failure: the runner fails error logs
         const s = self.api.ncclGetErrorString(r);
         std.log.err("{s}: {s} ({d})", .{ what, if (s) |p| std.mem.span(p) else "?", r });
+        tp_watch.fatal(what); // with the ranks' lines open, every rank stops with it; with none, the caller hears it
         return error.NcclFailed;
+    }
+
+    /// `post(ctx)`'s sends and receives as one group; a failed post still ends it, so later calls stay out of it.
+    pub fn group(self: *const Library, ctx: anytype, comptime post: fn (@TypeOf(ctx)) anyerror!void) anyerror!void {
+        try self.check(self.api.ncclGroupStart(), "ncclGroupStart");
+        post(ctx) catch |err| {
+            _ = self.api.ncclGroupEnd();
+            return err;
+        };
+        try self.check(self.api.ncclGroupEnd(), "ncclGroupEnd");
     }
 
     /// NCCL's version as 10000 * major + 100 * minor + patch.
@@ -71,3 +112,11 @@ pub const Library = struct {
         return v;
     }
 };
+
+test "nonblocking communicator config preserves the public ABI defaults" {
+    const c: Config = .{};
+    try std.testing.expectEqual(@as(usize, 96), @sizeOf(Config));
+    try std.testing.expectEqual(@as(usize, 32), @offsetOf(Config, "net_name"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(Config, "comm_name"));
+    try std.testing.expect(c.size == 96 and c.blocking == 0 and c.max_ctas == std.math.minInt(c_int));
+}

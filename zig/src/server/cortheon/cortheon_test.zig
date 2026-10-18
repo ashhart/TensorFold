@@ -63,6 +63,8 @@ const Text = struct {
 const Eng = struct {
     script: []const []const u8 = &.{},
     next: usize = 0,
+    refuse_at: ?usize = null,
+    refusal: api.SubmitError = error.Closed,
     prompts: std.ArrayList([]u8) = .empty,
 
     fn engine(e: *Eng) api.Engine {
@@ -73,6 +75,7 @@ const Eng = struct {
     }
     fn submit(ctx: *anyopaque, id: api.Id, request: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const e: *Eng = @ptrCast(@alignCast(ctx));
+        if (e.refuse_at == e.next) return e.refusal;
         const buf = gpa.alloc(u8, request.prompt.len) catch return error.Busy;
         for (request.prompt, buf) |tok, *byte| byte.* = @intCast(tok);
         e.prompts.append(gpa, buf) catch {};
@@ -121,17 +124,22 @@ const Web = struct {
 const Got = struct {
     events: std.ArrayList(Value) = .empty,
     body: ?Value = null,
+    opened: bool = false,
+    status: ?u16 = null,
     a: Allocator,
     fn out(g: *Got) openai.Out {
         return .{ .ctx = g, .vt = &.{ .open = open, .event = event, .reply = reply } };
     }
-    fn open(_: *anyopaque, _: usize) error{Closed}!void {}
+    fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
+        @as(*Got, @ptrCast(@alignCast(ctx))).opened = true;
+    }
     fn event(ctx: *anyopaque, payload: ?Value) error{Closed}!void {
         const g: *Got = @ptrCast(@alignCast(ctx));
         if (payload) |p| g.events.append(g.a, json.deepCopy(g.a, p) catch return error.Closed) catch return error.Closed;
     }
-    fn reply(ctx: *anyopaque, _: u16, payload: Value) void {
+    fn reply(ctx: *anyopaque, status: u16, payload: Value) void {
         const g: *Got = @ptrCast(@alignCast(ctx));
+        g.status = status;
         g.body = json.deepCopy(g.a, payload) catch null;
     }
     /// Every streamed delta's text under `key`, joined.
@@ -243,6 +251,22 @@ test "a fresh question on current facts is researched before the model starts" {
     // no URL in the answer: one more round for its sources, appended after it
     try std.testing.expect(rig.eng.saw(2, checks.sources_note));
     try std.testing.expectEqualStrings("The latest is 0.17.\n\nOK", message(got.body.?).strField("content").?);
+}
+
+test "research progress cannot open a stream before its final request is admitted" {
+    for ([_]api.SubmitError{ error.Closed, error.Busy }) |reason| {
+        var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"}, .refuse_at = 1, .refusal = reason } };
+        try rig.start(true);
+        defer rig.stop();
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const got = try rig.ask(arena.allocator(), "{\"stream\":true,\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
+        try std.testing.expect(rig.web.searches > 0);
+        try std.testing.expectEqual(@as(?u16, 503), got.status);
+        try std.testing.expect(!got.opened);
+        try std.testing.expectEqual(@as(usize, 0), got.events.items.len);
+        try std.testing.expectEqual(@as(i64, 0), rig.srv.preparing.load(.acquire));
+    }
 }
 
 test "a stream hides Cortheon's calls, shows progress as reasoning, and passes the client's calls" {

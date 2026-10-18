@@ -1,0 +1,362 @@
+[
+  {
+    "repo": "lmstudio-community/Qwen3.5-9B-MLX-4bit",
+    "revision": "b455506b0f574c74616dbcd56879bde38fafcff3",
+    "path": "<MODEL_ROOT>/Qwen3.5-9B-MLX-4bit",
+    "files": [
+      {
+        "file": "chat_template.jinja",
+        "bytes": 7756,
+        "digest": "a585dec894e63da457d9440ec6aa7caa16d20860",
+        "expected": "a585dec894e63da457d9440ec6aa7caa16d20860",
+        "match": true
+      },
+      {
+        "file": "config.json",
+        "bytes": 3331,
+        "digest": "0435ae3f4b3c8b907f7359a2f8f7150d316f3435",
+        "expected": "0435ae3f4b3c8b907f7359a2f8f7150d316f3435",
+        "match": true
+      },
+      {
+        "file": "model-00001-of-00002.safetensors",
+        "bytes": 5349771292,
+        "digest": "973cc1efdedb4d327993fb9c27865f0bcfd9015897d5f0ca9ffb6cda6a0768e5",
+        "expected": "973cc1efdedb4d327993fb9c27865f0bcfd9015897d5f0ca9ffb6cda6a0768e5",
+        "match": true
+      },
+      {
+        "file": "model-00002-of-00002.safetensors",
+        "bytes": 600449850,
+        "digest": "597dae0ed72b60acc07382e8ea0cdb9509c54128e07b0eaa9cf4996373d5ca7d",
+        "expected": "597dae0ed72b60acc07382e8ea0cdb9509c54128e07b0eaa9cf4996373d5ca7d",
+        "match": true
+      },
+      {
+        "file": "model.safetensors.index.json",
+        "bytes": 123592,
+        "digest": "d366fa524ccd8f4ed93a67c7857597dc56172b92",
+        "expected": "d366fa524ccd8f4ed93a67c7857597dc56172b92",
+        "match": true
+      },
+      {
+        "file": "tokenizer.json",
+        "bytes": 19989325,
+        "digest": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "expected": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "match": true
+      },
+      {
+        "file": "tokenizer_config.json",
+        "bytes": 9187,
+        "digest": "803283d87369d6d9ff8d970a8a49a602ca306544",
+        "expected": "803283d87369d6d9ff8d970a8a49a602ca306544",
+        "match": true
+      },
+      {
+        "file": ".gitattributes",
+        "bytes": 1570,
+        "digest": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "expected": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "match": true
+      },
+      {
+        "file": "README.md",
+        "bytes": 2253,
+        "digest": "bc49d09693d821d87be9d91feb1a3ae87dafc280",
+        "expected": "bc49d09693d821d87be9d91feb1a3ae87dafc280",
+        "match": true
+      },
+      {
+        "file": "preprocessor_config.json",
+        "bytes": 390,
+        "digest": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "expected": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "match": true
+      },
+      {
+        "file": "processor_config.json",
+        "bytes": 991,
+        "digest": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40",
+        "expected": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40",
+        "match": true
+      },
+      {
+        "file": "video_preprocessor_config.json",
+        "bytes": 385,
+        "digest": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "expected": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "match": true
+      },
+      {
+        "file": "vocab.json",
+        "bytes": 6722759,
+        "digest": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "expected": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "match": true
+      }
+    ],
+    "match": true
+  },
+  {
+    "repo": "TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP",
+    "revision": "f84b054c5677b6e59bdb969ae61915b0983d68bb",
+    "path": "<MODEL_ROOT>/Qwen3.6-35B-A3B-MLX-4bit-MTP",
+    "files": [
+      {
+        "file": "chat_template.jinja",
+        "bytes": 7764,
+        "digest": "a8755d827c0a7b614c246c4060dfd58ab352a8ff",
+        "expected": "a8755d827c0a7b614c246c4060dfd58ab352a8ff",
+        "match": true
+      },
+      {
+        "file": "config.json",
+        "bytes": 23591,
+        "digest": "e3a2334ebf2df216742ef3ed4b784417bfffe6fc",
+        "expected": "e3a2334ebf2df216742ef3ed4b784417bfffe6fc",
+        "match": true
+      },
+      {
+        "file": "generation_config.json",
+        "bytes": 202,
+        "digest": "023756cfadf88e5bf69eefeee3e172f38c448d64",
+        "expected": "023756cfadf88e5bf69eefeee3e172f38c448d64",
+        "match": true
+      },
+      {
+        "file": "model-00001-of-00004.safetensors",
+        "bytes": 5288196018,
+        "digest": "09f3e6ecb0b7af6e6a38bc8169a134c821b0924c2679b2bb8f4426ad38d032b8",
+        "expected": "09f3e6ecb0b7af6e6a38bc8169a134c821b0924c2679b2bb8f4426ad38d032b8",
+        "match": true
+      },
+      {
+        "file": "model-00002-of-00004.safetensors",
+        "bytes": 5368472749,
+        "digest": "31dcdb1c49eebdb1505bd14e3cb33f9cf900bd2546b638f2464694ae763a033f",
+        "expected": "31dcdb1c49eebdb1505bd14e3cb33f9cf900bd2546b638f2464694ae763a033f",
+        "match": true
+      },
+      {
+        "file": "model-00003-of-00004.safetensors",
+        "bytes": 5368324139,
+        "digest": "3e66de06a1f03dade16a612a368cfce4a4c9caa4efd7d28185454384082cec03",
+        "expected": "3e66de06a1f03dade16a612a368cfce4a4c9caa4efd7d28185454384082cec03",
+        "match": true
+      },
+      {
+        "file": "model-00004-of-00004.safetensors",
+        "bytes": 4377211365,
+        "digest": "a5d0cf03519c26f8b506df6b0ba60526e5c08c8cea22d0c21ce92950e58a5422",
+        "expected": "a5d0cf03519c26f8b506df6b0ba60526e5c08c8cea22d0c21ce92950e58a5422",
+        "match": true
+      },
+      {
+        "file": "model.safetensors.index.json",
+        "bytes": 215755,
+        "digest": "f714d295484e01790bad8b40c2ce49323d7d2598",
+        "expected": "f714d295484e01790bad8b40c2ce49323d7d2598",
+        "match": true
+      },
+      {
+        "file": "mtp-4bit.safetensors",
+        "bytes": 475394847,
+        "digest": "c4d7d795b06eaf39c90520940887d81c71abeda3f04f892c2ef0fbc5a8970eb4",
+        "expected": "c4d7d795b06eaf39c90520940887d81c71abeda3f04f892c2ef0fbc5a8970eb4",
+        "match": true
+      },
+      {
+        "file": "tokenizer.json",
+        "bytes": 19989343,
+        "digest": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+        "expected": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+        "match": true
+      },
+      {
+        "file": "tokenizer_config.json",
+        "bytes": 1139,
+        "digest": "a068e2468cff426a9b105006e74e044030a6faf4",
+        "expected": "a068e2468cff426a9b105006e74e044030a6faf4",
+        "match": true
+      },
+      {
+        "file": ".gitattributes",
+        "bytes": 1570,
+        "digest": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "expected": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "match": true
+      },
+      {
+        "file": "README.md",
+        "bytes": 2252,
+        "digest": "f8d1e248f3b2867a49be5ae0e4032f09b79b9732",
+        "expected": "f8d1e248f3b2867a49be5ae0e4032f09b79b9732",
+        "match": true
+      },
+      {
+        "file": "configuration.json",
+        "bytes": 58,
+        "digest": "d24dba949ee1fe70cc810e4c4709a0bddf4e06ba",
+        "expected": "d24dba949ee1fe70cc810e4c4709a0bddf4e06ba",
+        "match": true
+      },
+      {
+        "file": "preprocessor_config.json",
+        "bytes": 390,
+        "digest": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "expected": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "match": true
+      },
+      {
+        "file": "processor_config.json",
+        "bytes": 1312,
+        "digest": "a3be3e79470d0a5befe0ba5247dfad8717d84529",
+        "expected": "a3be3e79470d0a5befe0ba5247dfad8717d84529",
+        "match": true
+      },
+      {
+        "file": "video_preprocessor_config.json",
+        "bytes": 385,
+        "digest": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "expected": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "match": true
+      },
+      {
+        "file": "vocab.json",
+        "bytes": 6722759,
+        "digest": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "expected": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "match": true
+      }
+    ],
+    "match": true
+  },
+  {
+    "repo": "TensorFold/Qwen3.8-27B-MLX-4bit",
+    "revision": "70ae7fac63274ff2eac54152031433374cb80f2f",
+    "path": "<MODEL_ROOT>/qwen38-27b-mlx4",
+    "files": [
+      {
+        "file": "chat_template.jinja",
+        "bytes": 8952,
+        "digest": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3",
+        "expected": "c0c686f9c38d70d179fb7b5f5aa7530bc913dda3",
+        "match": true
+      },
+      {
+        "file": "config.json",
+        "bytes": 4932,
+        "digest": "3fb03e916f494e6745aa23df751da26f79e06470",
+        "expected": "3fb03e916f494e6745aa23df751da26f79e06470",
+        "match": true
+      },
+      {
+        "file": "generation_config.json",
+        "bytes": 202,
+        "digest": "023756cfadf88e5bf69eefeee3e172f38c448d64",
+        "expected": "023756cfadf88e5bf69eefeee3e172f38c448d64",
+        "match": true
+      },
+      {
+        "file": "model-00001-of-00003.safetensors",
+        "bytes": 5343268662,
+        "digest": "6cc1508e96fb5d0865dfd5753a79f4ec60651bf3e2a82844a7e8ae9c60528c0d",
+        "expected": "6cc1508e96fb5d0865dfd5753a79f4ec60651bf3e2a82844a7e8ae9c60528c0d",
+        "match": true
+      },
+      {
+        "file": "model-00002-of-00003.safetensors",
+        "bytes": 5354185130,
+        "digest": "83f2a20ca8058f486a3634a27faf99587f4cd3c156a83dee34fb99e6ac178670",
+        "expected": "83f2a20ca8058f486a3634a27faf99587f4cd3c156a83dee34fb99e6ac178670",
+        "match": true
+      },
+      {
+        "file": "model-00003-of-00003.safetensors",
+        "bytes": 5357087557,
+        "digest": "31b8c91ef899f79efaaa69e3d2c096f6e2ebeb2ff20e29222abbd9ebc79e560a",
+        "expected": "31b8c91ef899f79efaaa69e3d2c096f6e2ebeb2ff20e29222abbd9ebc79e560a",
+        "match": true
+      },
+      {
+        "file": "model.safetensors.index.json",
+        "bytes": 218281,
+        "digest": "05a3a3a17368d54d2887783e96b3a8191e9655f0",
+        "expected": "05a3a3a17368d54d2887783e96b3a8191e9655f0",
+        "match": true
+      },
+      {
+        "file": "tokenizer.json",
+        "bytes": 19989325,
+        "digest": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "expected": "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523",
+        "match": true
+      },
+      {
+        "file": "tokenizer_config.json",
+        "bytes": 1165,
+        "digest": "1d134cd298be1e3be25db393d93a1cefe80e3214",
+        "expected": "1d134cd298be1e3be25db393d93a1cefe80e3214",
+        "match": true
+      },
+      {
+        "file": ".gitattributes",
+        "bytes": 1570,
+        "digest": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "expected": "52373fe24473b1aa44333d318f578ae6bf04b49b",
+        "match": true
+      },
+      {
+        "file": "LICENSE",
+        "bytes": 11544,
+        "digest": "f938136e3adacfd92be087f6e113b5d6d97f678f",
+        "expected": "f938136e3adacfd92be087f6e113b5d6d97f678f",
+        "match": true
+      },
+      {
+        "file": "README.md",
+        "bytes": 7694,
+        "digest": "efc1f01b8f3559bce0e12ab3d639cedf31d8062b",
+        "expected": "efc1f01b8f3559bce0e12ab3d639cedf31d8062b",
+        "match": true
+      },
+      {
+        "file": "preprocessor_config.json",
+        "bytes": 390,
+        "digest": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "expected": "2ea84a437d448ff71b08df68fdd949d5cc4ebb64",
+        "match": true
+      },
+      {
+        "file": "processor_config.json",
+        "bytes": 991,
+        "digest": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40",
+        "expected": "8f29fe38a79a9d8367009ebebd25c35b1f3c4e40",
+        "match": true
+      },
+      {
+        "file": "qwen-logo.png",
+        "bytes": 11203,
+        "digest": "559e037931bded333328cb920e297700a0c06a22",
+        "expected": "559e037931bded333328cb920e297700a0c06a22",
+        "match": true
+      },
+      {
+        "file": "video_preprocessor_config.json",
+        "bytes": 385,
+        "digest": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "expected": "3ba673a5ad7d4d13f54155ecd38b2a94a6dac8fe",
+        "match": true
+      },
+      {
+        "file": "vocab.json",
+        "bytes": 6722759,
+        "digest": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "expected": "0aa0ce0658d60ac4a5d609f4eadb0e8e43514176",
+        "match": true
+      }
+    ],
+    "match": true
+  }
+]

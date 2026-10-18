@@ -69,6 +69,45 @@ In the Python engine, frozen at 0.6.6, the MLX engine of `glm5_next`
   row, so each row keeps MLX's one-row bits. The native `zig/kernels/metal/glm/qmv*.metal`, `gemv*.metal`,
   `moe_*.metal` and `router.metal` are generated from these.
 
+## Gemma 4 on Apple Silicon
+
+The native Gemma 4 engine (`zig/src/families/gemma4/`) ports the Python engine's dense Gemma 4 decode, which @gilby
+wrote in [#360](https://github.com/ashhart/TensorFold/pull/360) on @cshintov's Gemma kernels from
+[#10](https://github.com/ashhart/TensorFold/pull/10) ([credits](https://github.com/ashhart/TensorFold/blob/main/docs/credits.md)).
+Its reference is gilby's `gemma4-dense` branch at `a6ff795e`: `RowDecode` in `src/tensorfold/kernels/gemma/v1/decode.py`
+and the `_EMIT`, `qkv_prep`, `attn_tail` and `dense_tail` kernels and the attention partials and merge in `glue.py` and
+`attention.py`. `zig/kernels/metal/gemma4/glue.metal` repeats that arithmetic, and each kernel names its source.
+
+Where that reference calls MLX or mlx-lm, `glue.metal` repeats their kernels' arithmetic (MLX and mlx-lm, MIT License,
+Copyright © 2023 Apple Inc.; see [the license text](LICENSES/MIT.txt)): `gemma_rms_looped` is MLX's `rms_looped` from
+`mlx/backend/metal/kernels/rms_norm.metal`, the kernel `mx.fast.rms_norm` runs for rows past 4,096, with its thread
+counts, reads and rounding points; `gemma_embed` is MLX's affine dequantize followed by a bf16 multiply;
+`gemma_geglu` and `gemma_softcap` are `geglu` and `logit_softcap` from mlx-lm's `models/gemma4_text.py` as MLX's
+bf16 ops; and `gemma_rope_freqs` is mlx-lm's `ProportionalRoPE` frequencies, computed as MLX's `pow` computes them.
+
+The image tower (`zig/src/families/gemma4/vision.zig`, `zig/kernels/metal/gemma4/vision.metal`) follows
+`Gemma4VisionModel` and `Gemma4MultimodalEmbedder` in transformers' `models/gemma4/modeling_gemma4.py`, and
+`zig/src/families/gemma4/image.zig` follows `Gemma4ImageProcessorPil` in `image_processing_pil_gemma4.py`
+(`get_aspect_ratio_preserving_size`, the patch layout and the rescale). Copyright 2026 the HuggingFace Team, Apache
+License 2.0; see [the license text](LICENSES/Apache-2.0.txt). The engine runs none of their code.
+
+The drafter (`zig/src/families/gemma4/dflash.zig`) implements z-lab's DFlash for Gemma 4 31B from the MLX model listed
+under [vendored code](#vendored-code-and-weights) (z-lab/dflash, MIT License, Copyright © 2026 Z Lab); the native
+engine vendors no copy.
+
+The 12B (`gemma4_unified`) and its MTP assistant (`zig/src/families/gemma4/assistant.zig`, `assistant_weights.zig`)
+follow @gilby's `gemma4_unified` family at `6b0ead7a` ([gilby/TensorFold](https://github.com/gilby/TensorFold),
+`src/tensorfold/families/gemma4_unified/model.py` and `assistant.py`), which follows `Gemma4UnifiedAssistantForCausalLM`
+in transformers. The 12B's image embedder (`zig/src/families/gemma4/vision_unified.zig`) follows
+`Gemma4UnifiedVisionEmbedder` in `models/gemma4_unified/modeling_gemma4_unified.py`, and `image.zig`'s merged patches
+`patches_merge` in `image_processing_gemma4_unified.py` (transformers, Copyright 2026 the HuggingFace Team, Apache
+License 2.0; see [the license text](LICENSES/Apache-2.0.txt)). The engine runs none of their code.
+
+Other widths (`zig/src/families/gemma4/widths.zig` and the stacks in `weights.zig`) follow @gilby's oQ per-layer widths
+at `76c83c37` on the `gemma4-dense` branch: each module's MLX affine width from the config, and a q|k|v or gate|up stack
+whose members differ split into runs of equal widths (`src/tensorfold/kernels/gemma/v1/matmul.py`). The engine runs none of
+that code.
+
 ## CUDA
 
 The Python engine's CUDA backends, frozen at 0.6.6, use [PyTorch](https://github.com/pytorch/pytorch), BSD-3-Clause, and
@@ -83,10 +122,20 @@ Flash Next implements transformers' model math under the attribution above. In t
 DeltaNet kernel follows flash-linear-attention's numerics, MIT; its NCCL wrapper follows vLLM's stream convention,
 Apache-2.0, without copying either implementation.
 
+The earlier #927 Drama backbone included a Gated DeltaNet prefill adapted from Flash Linear Attention.
+The merged Drama family uses #939/#956's operators instead. The staged BF16 GEMV candidate in
+`zig/kernels/cuda/drama3_staged_gemv.cu` and the direct-I/O stager in `zig/src/families/drama3/cuda/stager.zig`
+come from plotarmordev's #927 implementation. Their qualification against the merged model is separate from
+#927's earlier native baseline receipts.
+
 The Python engine's GLM CUDA engine implements transformers' `models/glm5_next/modular_glm5_next.py` math,
 Apache-2.0, without including that source. Its draft inputs and thinking-off rendering follow the public GLM recipe
 from Mia-AiLab without including recipe code.
-No native CUDA family serves GLM.
+The native CUDA GLM family (`zig/src/families/glm/cuda_*.zig`, its kernels in `zig/kernels/cuda/glm_*.cu`) implements
+the same math. Its image tower, on Metal (`zig/src/families/glm/vision.zig`) and on CUDA (`cuda_vision.zig`,
+`zig/kernels/cuda/glm_vision.cu`), and the PyTorch reference that checks it (`tools/glm_vision_ref.py`) follow
+mlx-vlm's `glm5_next` (`vision.py`, and `processing.py` for the reference's patches; MIT License, Copyright (c) 2025
+Prince Canuma) without importing it.
 
 In the Python engine, frozen at 0.6.6, GLM EXL3 (`families/glm5_next/cuda/exl3.py`, `exl3.cu`, `exl3_mm.py`), the
 shared EXL3 module (`src/tensorfold/cuda/exl3/`) and the EXL3 loaders of Qwen3.8-27B and Qwen3.8 Flash Next
@@ -100,7 +149,10 @@ checked bit for bit against ExLlamaV3's dequantization.
 
 The native `zig/src/core/exl3_format.zig` reference decoder, the `zig/src/core/exl3_projection*.zig` decoder and
 `zig/kernels/metal/core/exl3_projection.metal` separately implement the same format and codebooks
-under the Turboderp attribution above. No captured kernel binaries or model weights are bundled.
+under the Turboderp attribution above. So do the native checkpoint scan (`zig/src/core/exl3_load.zig`,
+`exl3_metal_load.zig`), the CUDA kernels (`zig/kernels/cuda/exl3_*.cu`, `exl3_decode.cuh`, `exl3_candidate.cuh`) and
+their Zig side (`zig/src/cuda/exl3*.zig`), and GLM's reader of its EXL3 experts (`zig/src/families/glm/cuda_exl3.zig`).
+No captured kernel binaries or model weights are bundled.
 
 The EXLR8 reader, decoder, pull and kernels (`zig/src/core/exlr8*.zig`, `zig/src/cli/pull_exlr8*.zig`,
 `zig/src/cuda/exlr8.zig`, `zig/kernels/metal/core/exlr8*.metal`, `zig/kernels/cuda/exlr8*.cu`) read kindlingai's exlr8
@@ -125,6 +177,12 @@ values agree within fp16/bf16 rounding (under 0.01 on random groups), not bit fo
 dequant are written for TensorFold and checked against an independent reference of that arithmetic. The native engine
 has no quantized KV cache and refuses `--kv-dtype`.
 
+The two-rank CUDA RoCE gather (`zig/src/cuda/roce.zig`, `zig/kernels/cuda/roce_gather.cu`) adapts
+the one-shot all-gather protocol of [b12x](https://github.com/local-inference-lab/b12x)'s RoCEnante
+(`b12x/comm/roce/`, PRs #295 and #315): a device-resident epoch, sequence flags after each payload, two slots by
+sequence parity and a timeout that fails the transport. Copyright 2026 Luke Alonso and the b12x contributors,
+Apache License 2.0 (see [the license text](LICENSES/Apache-2.0.txt)); b12x ships no NOTICE file.
+
 ## Vendored code and weights
 
 In the Python engine, frozen at 0.6.6, `src/tensorfold/drafters/vendor/z_lab_dflash/model_mlx.py` is the unmodified
@@ -139,6 +197,11 @@ unmodified `encoding/encoding_dsv4.py` of
 `tests/fixtures/deepseek_v4/` holds two of its test cases, MIT License, Copyright (c) 2023 DeepSeek.
 The MTP layer that engine drafts with comes from that checkpoint's last shard (MIT), converted by
 `families/deepseek_v4/convert.py`. The native engine has no DeepSeek-V4 family and ships none of these files.
+
+`zig/kernels/cuda/ggml_iq2xxs_tables.cuh` holds [ggml](https://github.com/ggml-org/ggml)'s IQ2_XXS grid and sign
+tables as `ggml-common.h` defines them, MIT License, Copyright (c) 2023-2026 The ggml authors (the license text is
+below); `tools/zig/bolt_ggml.py` reads them from that file. The IQ2_XXS and Q8_0 kernels that use them for Nemotron 3.5
+Bolt's GGML checkpoints (`zig/kernels/cuda/ggml.cu`, `zig/src/cuda/ggml.zig`) are TensorFold's own.
 
 TensorFold ships no model weights. The `z-lab/Qwen3.8-27B-DFlash2` model card states Apache-2.0.
 The optional `incoai/GLM-5.3-Flash-DFlash2` model card states CC BY-NC-ND 4.0, for non-commercial use
@@ -200,8 +263,7 @@ SOFTWARE.
 
 This notice covers the Flash Next image input on CUDA that @shantanugoel added to the Python engine in
 [#146](https://github.com/ashhart/TensorFold/pull/146), under `src/tensorfold/vision/` and
-`src/tensorfold/families/qwen4_exp/cuda/`; that engine is frozen at 0.6.6. The native engine reads no vision tower
-and ships none of this code.
+`src/tensorfold/families/qwen4_exp/cuda/`; that engine is frozen at 0.6.6. The native engine ships none of this code.
 The multimodal rotary and image-feature integration is adapted from MiaAI-Lab's
 [Flash Next vision patch 0008](https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold/blob/a3aa89835022c55ca8e55008c37785954834e04f/patches/0008-flash-next-vision.patch),
 MIT License, Copyright (c) 2026 MiaAI-Lab. The license is included in `LICENSES/MiaAI-Lab-MIT.txt`.
@@ -209,12 +271,16 @@ The port preserves the v0.5 CUDA execution APIs and adds an offline EXL3 vision 
 
 ## Pictures in the native engine
 
-`zig/src/core/picture/` reads PNG and JPEG pictures to the RGB pixels TensorFold 0.6.6's Python engine loaded with
-Pillow 12.3, and the families' processors resize them. No libjpeg-turbo, Pillow or PyTorch code is included.
+`zig/src/core/picture/` reads PNG, JPEG and WebP pictures to the RGB pixels Pillow loads them as (Pillow 12.3 for
+TensorFold 0.6.6's PNG and JPEG, Pillow 13.0.0 for WebP), and the families' processors resize them. No libjpeg-turbo,
+libwebp, Pillow or PyTorch code is included.
 
 - JPEG pictures decode in libjpeg-turbo 3.1.4.1's TurboJPEG library (`libturbojpeg`), the release Pillow 12.3
   bundles, loaded at run time and called with Pillow's decoder settings. TensorFold neither includes nor ships it;
   libjpeg-turbo is under the IJG, BSD-3-Clause and zlib licenses.
+- WebP pictures decode in libwebp 1.6.0's decoder library (`libwebpdecoder`), the release Pillow 13.0.0 bundles,
+  loaded at run time. TensorFold neither includes nor ships it; libwebp is under the BSD-3-Clause license, Copyright
+  (c) 2010, Google Inc.
 - PNG pictures decode from the PNG specification on Zig's zlib inflater, and each layout becomes 8-bit samples as
   Pillow's PNG modes hold it. The bicubic resizes repeat, bit for bit, the fixed-point arithmetic of Pillow's
   `Image.resize` (MIT-CMU License, Copyright © 1997-2011 by Secret Labs AB, Copyright © 1995-2011 by Fredrik Lundh
@@ -232,3 +298,21 @@ TensorFold. What they follow or copy:
 
 - The Level Zero loader and the Intel compute runtime are loaded at run time and are not bundled; `ocloc` compiles the kernels
   at build time and is not distributed.
+
+## Fish Audio Drama 3 on CUDA
+
+`zig/src/families/drama3/`, `zig/kernels/cuda/drama3*.cu` and `drama3*.cuh` implement the model math of
+[SGLang-Omni](https://github.com/sgl-project/sglang-omni)'s `sglang_omni/models/fishaudio_drama3` (revision 416a70c0),
+Apache-2.0, without including its source. The codec they decode with is Fish Audio's modded DAC from
+[Fish Speech](https://github.com/fishaudio/fish-speech) (Fish Audio Community License Agreement v1.0), itself built on
+[descript-audio-codec](https://github.com/descriptinc/descript-audio-codec) (MIT License, Copyright (c) 2023-present,
+Descript); `codec.zig` and `drama3_codec.cu` are separate implementations of its arithmetic and include no Fish Speech
+or descript-audio-codec source. The samplers draw from the Philox stream of SGLang-Omni's Triton sampling kernels.
+`drama3_fp8.cu` is TensorFold's `fp8_experts.cu` with per-row FP8 activation scales, the dynamic activation scheme
+SGLang serves the checkpoint's FP8 experts with. The resampler in `wav.zig` follows torchaudio's `functional.resample`
+(BSD-2-Clause) without including its source.
+
+TensorFold ships no Drama 3 weights and no codec weights. [fishaudio/drama-3](https://huggingface.co/fishaudio/drama-3)
+and its `codec.pth` are under the Fish Audio Community License Agreement v1.0: research and non-commercial use,
+commercial use below its revenue threshold, and no Hosted Service without a separate license from Fish Audio. Users
+obtain the checkpoint and accept that license themselves.

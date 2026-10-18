@@ -28,13 +28,13 @@ const grids = [_][2]u8{ .{ 1, 2 }, .{ 2, 1 }, .{ 3, 1 }, .{ 1, 3 }, .{ 2, 2 }, .
 /// Oriented RGB rows, three bytes a pixel.
 pub const Rgb = picture.Rgb;
 
-/// A data URL's PNG or JPEG as 0.6.6 loaded it (core's picture decoder), or null with tensorfold's refusal.
+/// A data URL's PNG, JPEG or WebP as 0.6.6 loaded it (core's picture decoder), or null with tensorfold's refusal.
 pub fn load(io: std.Io, a: Allocator, url: []const u8, problem: *[]const u8) Allocator.Error!?Rgb {
     const bytes = (try dataBytes(a, url, problem)) orelse return null;
     defer a.free(bytes);
     return picture.decode(io, a, bytes) catch |err| {
         if (err == error.OutOfMemory) return error.OutOfMemory;
-        problem.* = picture.problem(err, bytes);
+        problem.* = picture.problem(err);
         return null;
     };
 }

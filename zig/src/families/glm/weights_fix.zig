@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash weights as they load: parallel reads into place, and rewrites (mixes, router, conv, norms, columns).
 const std = @import("std");
+const platform = @import("sys");
 const st = @import("../../core/safetensors.zig");
 const paced_read = @import("../../core/paced_read.zig");
 
@@ -12,16 +13,16 @@ pub const Transform = struct { src: Src, dst: [*]u8, fix: Fix, extra: [3]?Src = 
 /// One tensor's bytes read straight into their place in a weights buffer.
 pub const Copy = struct { shard: u32, off: u64, len: u64, dst: [*]u8 };
 
-pub fn readAll(fd: std.c.fd_t, dest: []u8, at: u64) !void {
+pub fn readAll(fd: platform.c.fd_t, dest: []u8, at: u64) !void {
     var done: usize = 0;
     while (done < dest.len) {
-        const n = std.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
+        const n = platform.c.pread(fd, dest.ptr + done, dest.len - done, @intCast(at + done));
         if (n <= 0) return error.ShortRead;
         done += @intCast(n);
     }
 }
 
-pub fn transform(gpa: std.mem.Allocator, fds: []std.c.fd_t, t: Transform) !void {
+pub fn transform(gpa: std.mem.Allocator, fds: []platform.c.fd_t, t: Transform) !void {
     const raw = try gpa.alloc(u8, t.src.len);
     defer gpa.free(raw);
     try readAll(fds[t.src.shard], raw, t.src.off);
@@ -110,7 +111,7 @@ test "fp32 values that are bf16 narrow in place; any other value is refused" {
 }
 
 const Pool = struct {
-    fds: []std.c.fd_t,
+    fds: []platform.c.fd_t,
     jobs: []const Copy,
     next: std.atomic.Value(usize) = .init(0),
     failed: std.atomic.Value(bool) = .init(false),
@@ -138,15 +139,15 @@ const Pool = struct {
 
 /// Every copy on `threads` threads, uncached, paced by the memory the kernel can give (else a load fills the cache).
 pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: []const Copy, transforms: []const Transform, threads: usize) !void {
-    const fds = try gpa.alloc(std.c.fd_t, shards.len);
+    const fds = try gpa.alloc(platform.c.fd_t, shards.len);
     defer gpa.free(fds);
     for (shards, fds) |path, *fd| {
-        fd.* = std.c.open(path, .{ .ACCMODE = .RDONLY });
+        fd.* = platform.c.open(path, .{ .ACCMODE = .RDONLY });
         if (fd.* < 0) return error.OpenFailed;
-        _ = std.c.fcntl(fd.*, 48, @as(c_int, 1)); // F_NOCACHE
+        _ = platform.c.fcntl(fd.*, 48, @as(c_int, 1)); // F_NOCACHE
     }
     defer for (fds) |fd| {
-        _ = std.c.close(fd);
+        _ = platform.c.close(fd);
     };
     var pool: Pool = .{ .fds = fds, .jobs = copies };
     const workers = try gpa.alloc(?std.Thread, threads);
@@ -164,7 +165,7 @@ pub fn runCopies(gpa: std.mem.Allocator, shards: []const [:0]const u8, copies: [
     const Tx = struct {
         gpa: std.mem.Allocator,
         jobs: []const Transform,
-        fds: []std.c.fd_t,
+        fds: []platform.c.fd_t,
         next: std.atomic.Value(usize) = .init(0),
         failed: std.atomic.Value(bool) = .init(false),
         fn run(x: *@This()) void {

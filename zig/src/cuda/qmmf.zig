@@ -1,4 +1,4 @@
-//! The lane matmul (qmmf.cu) for FP4, FP8, FP8G and BF16 weights, with its kernel, tile and slices.
+//! The lane matmul (qmmf.cu) for FP4, FP8, MXFP8, FP8G and BF16 weights, with its kernel, tile and slices.
 const std = @import("std");
 const driver = @import("driver.zig");
 const module = @import("module.zig");
@@ -17,9 +17,9 @@ const bn = 64;
 const threads = 128; // WM 1 x WN 4 warps
 
 /// The packed formats (qmmf.cu Mode): FP4 with e4m3 scales a 16, e4m3 with one scale or fp32 a 64, and bf16.
-pub const Mode = enum(u3) { fp4 = 0, fp8 = 1, fp8g = 3, bf16 = 4 };
+pub const Mode = enum(u3) { fp4 = 0, fp8 = 1, mxfp8 = 2, fp8g = 3, bf16 = 4 };
 
-const modes = [_]Mode{ .fp4, .fp8, .fp8g, .bf16 };
+const modes = [_]Mode{ .fp4, .fp8, .mxfp8, .fp8g, .bf16 };
 
 fn modeIndex(mode: Mode) usize {
     return std.mem.indexOfScalar(Mode, &modes, mode).?;
@@ -29,10 +29,10 @@ fn modeIndex(mode: Mode) usize {
 pub fn sharedBytes(mode: Mode, bm: u32) u32 {
     const w: u32 = switch (mode) {
         .fp4 => bn * group / 2,
-        .fp8, .fp8g => bn * group,
+        .fp8, .mxfp8, .fp8g => bn * group,
         .bf16 => bn * group * 2,
     };
-    const s: u32 = if (mode == .fp4 or mode == .fp8g) bn * 4 else 0;
+    const s: u32 = if (mode == .fp4 or mode == .fp8g) bn * 4 else if (mode == .mxfp8) bn * 2 else 0;
     const stage = (bm * group * 2 + w + s + 127) / 128 * 128;
     const partials = (bm / 16) * 2 * 4 * threads * 4;
     return @max(4 * stage, partials);
@@ -85,7 +85,7 @@ pub const reduce_symbols = [2][:0]const u8{
 };
 const row_tiles = [_]u32{ 16, 32, 64 };
 
-/// What a call writes: bf16 rows, or the fp32 sums unrounded (FP4 only, a tensor-parallel rank's partial rows).
+/// What a call writes: bf16 rows, or the fp32 sums unrounded (a tensor-parallel rank's partial rows).
 pub const Out = enum { bf16, f32 };
 
 fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function {
@@ -103,7 +103,7 @@ fn loadTiles(mod: Module, comptime mode: Mode, comptime wide: bool) ![7]Function
 pub const Lane = struct {
     mod: Module,
     fns: [modes.len][7]Function, // per mode: lane16, lane16c, lane32, lane32c, lane64, lane64c, fused
-    fp4_f32: [7]Function, // FP4's tiles writing fp32
+    f32_fns: [modes.len][7]Function,
     reduce: [2]Function, // by Out
     clusters: bool, // sm_90 on: slices meet in a cluster's shared memory
 
@@ -114,11 +114,14 @@ pub const Lane = struct {
         var l: Lane = .{
             .mod = mod,
             .fns = undefined,
-            .fp4_f32 = try loadTiles(mod, .fp4, true),
+            .f32_fns = undefined,
             .reduce = undefined,
             .clusters = capability_major >= 9,
         };
-        inline for (modes, 0..) |mode, mi| l.fns[mi] = try loadTiles(mod, mode, false);
+        inline for (modes, 0..) |mode, mi| {
+            l.fns[mi] = try loadTiles(mod, mode, false);
+            l.f32_fns[mi] = try loadTiles(mod, mode, true);
+        }
         for (&l.reduce, reduce_symbols) |*f, name| f.* = try mod.function(name);
         return l;
     }
@@ -138,11 +141,16 @@ pub const Lane = struct {
         return l.matmulOut(s, x, ldx, m, w, y, .bf16, part);
     }
 
-    /// matmul() writing y as `out` says: bf16, or fp32 (FP4 only).
+    /// Preserve FP32 outputs for a later residual or tensor-rank sum.
+    pub fn matmulF32(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, part: u64) !void {
+        return l.matmulOut(s, x, ldx, m, w, y, .f32, part);
+    }
+
+    /// matmul() writing y as `out` says: bf16, or fp32.
     pub fn matmulOut(l: Lane, s: Stream, x: u64, ldx: usize, m: usize, w: Weight, y: u64, out: Out, part: u64) !void {
-        if (out == .f32 and w.mode != .fp4) return error.EpilogueNotBuilt;
         const p = plan(m, w.n, w.k, l.clusters);
-        const set = if (out == .f32) l.fp4_f32 else l.fns[modeIndex(w.mode)];
+        if (p.reduce and part == 0) return error.MissingLanePart;
+        const set = (if (out == .f32) l.f32_fns else l.fns)[modeIndex(w.mode)];
         const ti: usize = if (p.bm == 16) 0 else if (p.bm == 32) 1 else 2;
         const f = if (p.fused) set[6] else set[ti * 2 + @intFromBool(p.cluster)];
         const rows_t = (m + p.bm - 1) / p.bm;
@@ -220,6 +228,9 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp8g, 16));
     try std.testing.expectEqual(@as(u32, 33792), sharedBytes(.fp8g, 32));
     try std.testing.expectEqual(@as(u32, 50176), sharedBytes(.fp8g, 64));
+    try std.testing.expectEqual(@as(u32, 25088), sharedBytes(.mxfp8, 16));
+    try std.testing.expectEqual(@as(u32, 33280), sharedBytes(.mxfp8, 32));
+    try std.testing.expectEqual(@as(u32, 49664), sharedBytes(.mxfp8, 64));
     try std.testing.expectEqual(@as(u32, 17408), sharedBytes(.fp4, 16));
     try std.testing.expectEqual(@as(u32, 25600), sharedBytes(.fp4, 32));
     try std.testing.expectEqual(@as(u32, 41984), sharedBytes(.fp4, 64));
@@ -243,16 +254,9 @@ test "tile shared bytes, slices and row tiles as the Python host picks them" {
 }
 
 test "instance names are qmmf.cu's" {
-    try std.testing.expectEqualStrings(
-        "_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
-        symbol(.fp8g, 16, true, false, false),
-    );
-    try std.testing.expectEqualStrings(
-        "_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
-        symbol(.fp4, 64, false, true, false),
-    );
-    try std.testing.expectEqualStrings(
-        "_ZN7tf_qmmf11qmmf_kernelILi0ELi32ELi64ELi1ELi4ELi4ELb1ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii",
-        symbol(.fp4, 32, true, false, true),
-    );
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi4ELi64ELi64ELi1ELi4ELi4ELb1ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.bf16, 64, false, true, true));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi2ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.mxfp8, 16, true, false, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi3ELi16ELi64ELi1ELi4ELi4ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp8g, 16, true, false, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi64ELi64ELi1ELi4ELi4ELb0ELb0ELb1EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 64, false, true, false));
+    try std.testing.expectEqualStrings("_ZN7tf_qmmf11qmmf_kernelILi0ELi32ELi64ELi1ELi4ELi4ELb1ELb1ELb0EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii", symbol(.fp4, 32, true, false, true));
 }

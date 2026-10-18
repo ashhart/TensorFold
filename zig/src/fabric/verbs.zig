@@ -1,5 +1,6 @@
 //! The system's verbs library by dlopen (Apple's librdma, Linux libibverbs): every entry point resolved by name.
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const abi = @import("verbs_abi.zig");
 
@@ -52,13 +53,13 @@ const GidEx = *const fn (ctx: Ctx, port: u32, index: u32, entry: *abi.GidEntry, 
 const InOrder = *const fn (qp: *abi.Qp, op: c_int, flags: u32) callconv(.c) c_int;
 
 pub const Verbs = struct {
-    lib: std.DynLib,
+    lib: platform.DynLib,
     api: Api,
     gid_ex: ?GidEx = null,
     in_order: ?InOrder = null,
 
     pub fn open(path: ?[:0]const u8) Error!Verbs {
-        var lib = std.DynLib.openZ((path orelse default_path).ptr) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.openZ((path orelse default_path).ptr) catch return error.LibraryUnavailable;
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";
@@ -195,7 +196,7 @@ test "a data-device GID scan skips zero entries and prefers link-local over an I
 }
 
 test "verbs smoke: open the device list and close it (TF_FABRIC_VERBS=1)" {
-    const flag = std.c.getenv("TF_FABRIC_VERBS") orelse return error.SkipZigTest;
+    const flag = platform.c.getenv("TF_FABRIC_VERBS") orelse return error.SkipZigTest;
     if (flag[0] != '1') return error.SkipZigTest;
     var v = Verbs.open(null) catch |err| {
         std.debug.print("verbs: {s} unavailable ({s})\n", .{ default_path, @errorName(err) });

@@ -44,6 +44,8 @@ pub const Settings = struct {
     serial: bool,
     context_tokens: ?i64,
     managed: bool,
+    /// 1 or 2 when attested. A managed run is one rank. An attached run stays null until the server manifest names it.
+    rank_count: ?u8 = null,
 };
 
 const Builder = struct {
@@ -123,7 +125,7 @@ pub fn value(a: Allocator, run_id: []const u8, created_at: []const u8, model: Mo
     try st.put("serial", .{ .bool = settings.serial });
     try st.int("context_tokens", settings.context_tokens);
     try st.put("managed", .{ .bool = settings.managed });
-    try st.int("rank_count", if (settings.managed) @as(?u8, 1) else null);
+    try st.int("rank_count", settings.rank_count orelse if (settings.managed) @as(?u8, 1) else null);
     try top.put("settings", st.value());
     const rows = try a.alloc(Value, samples.len);
     for (samples, rows) |x, *slot| slot.* = try sampleValue(a, x);

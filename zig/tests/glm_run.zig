@@ -1,5 +1,6 @@
 //! GLM-5.3-Flash replies on the native engine at each draft depth: hashes, first differences from depth 0 and the reference, speeds.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const tf = @import("tensorfold");
 const glm = tf.glm;
@@ -56,7 +57,7 @@ const Collect = struct {
 };
 
 fn env(name: [:0]const u8, default: []const u8) []const u8 {
-    return if (std.c.getenv(name)) |v| std.mem.span(v) else default;
+    return if (platform.c.getenv(name)) |v| std.mem.span(v) else default;
 }
 
 fn hash(t: []const u32) u64 {
@@ -127,13 +128,13 @@ pub fn main(init: std.process.Init) !void {
     const e = try glm.engine.Engine.load(gpa, args[1], cap);
     defer e.deinit();
     std.debug.print("loaded in {d:.1} s: {d} of {d} layers, routed experts {d}-{d}, {d:.1} GB of weights, MTP head {s}, {d:.2} GB of caches and buffers, prompt chunks of {d} rows\n", .{ e.load_seconds, e.c.run, e.c.layers, e.c.own[0], e.c.own[1] - 1, @as(f64, @floatFromInt(e.w.bytes)) / 1e9, if (e.hasMtp()) "yes" else "no", @as(f64, @floatFromInt(e.arena.bytes)) / 1e9, if (e.pr) |p| p.rows else 0 });
-    const strict = std.c.getenv("GLM_REF_STRICT") != null;
+    const strict = platform.c.getenv("GLM_REF_STRICT") != null;
     const eos = e.c.eos[0..e.c.eos_n];
-    if (std.c.getenv("GLM_CAPTURE")) |path| { // the first prompt's first window, sublayer by sublayer (glm_ref.py --capture)
+    if (platform.c.getenv("GLM_CAPTURE")) |path| { // the first prompt's first window, sublayer by sublayer (glm_ref.py --capture)
         const first = doc.object.get("prompts").?.array.items[0];
         try e.capture(try ints(arena, first.object.get("ids").?), std.mem.span(path));
     }
-    if (std.c.getenv("GLM_TRACE")) |spec| { // NAME:STEPS:PATH, glm_ref.py --trace NAME STEPS PATH's twin
+    if (platform.c.getenv("GLM_TRACE")) |spec| { // NAME:STEPS:PATH, glm_ref.py --trace NAME STEPS PATH's twin
         var parts = std.mem.splitScalar(u8, std.mem.span(spec), ':');
         const want = parts.next() orelse return error.BadTrace;
         const steps = try std.fmt.parseInt(usize, parts.next() orelse return error.BadTrace, 10);
@@ -142,18 +143,18 @@ pub fn main(init: std.process.Init) !void {
             try e.trace(try ints(arena, p.object.get("ids").?), try ints(arena, p.object.get("expect").?), steps, out_path);
         };
     }
-    if (std.c.getenv("GLM_FORCED") != null) for (doc.object.get("prompts").?.array.items) |p| {
+    if (platform.c.getenv("GLM_FORCED") != null) for (doc.object.get("prompts").?.array.items) |p| {
         const want = try ints(arena, p.object.get("expect") orelse continue);
         const r = try e.forced(try ints(arena, p.object.get("ids").?), want);
         std.debug.print("{s} forced: {d} of {d} picks equal the reference's", .{ p.object.get("name").?.string, r.same, want.len });
         if (r.first) |i| std.debug.print(", first differs at {d}\n", .{i}) else std.debug.print("\n", .{});
     };
     var failures: usize = 0;
-    const vs: ?std.json.Value = if (std.c.getenv("GLM_VS")) |path| blk: {
+    const vs: ?std.json.Value = if (platform.c.getenv("GLM_VS")) |path| blk: {
         const f = try mtl.MappedFile.open(path);
         break :blk try std.json.parseFromSliceLeaky(std.json.Value, arena, f.bytes[0..f.size], .{});
     } else null;
-    const trace_prefix: ?[*:0]const u8 = std.c.getenv("GLM_TRACE_LAST");
+    const trace_prefix: ?[*:0]const u8 = platform.c.getenv("GLM_TRACE_LAST");
     const trace_bytes = (2 + 4 * @as(usize, e.c.run)) * e.c.hidden * 2;
     if (trace_prefix != null) e.trace_last = try e.arena.buffer(trace_bytes);
     var saved: std.ArrayList(u8) = .empty;
@@ -171,10 +172,10 @@ pub fn main(init: std.process.Init) !void {
             if (trace_prefix != null and run == 0 and d == depths.items[0]) col.trace_from = e.trace_last.?.addr()[0..trace_bytes];
             var margins: std.ArrayList(f32) = .empty;
             defer margins.deinit(gpa);
-            const want_margins = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_MARGINS") != null or std.c.getenv("GLM_MARGINS_VS") != null);
+            const want_margins = run == 0 and d == depths.items[0] and (platform.c.getenv("GLM_MARGINS") != null or platform.c.getenv("GLM_MARGINS_VS") != null);
             e.margins = if (want_margins) &margins else null;
             defer e.margins = null;
-            const want_logits = run == 0 and d == depths.items[0] and (std.c.getenv("GLM_LOGITS") != null or std.c.getenv("GLM_LOGITS_VS") != null);
+            const want_logits = run == 0 and d == depths.items[0] and (platform.c.getenv("GLM_LOGITS") != null or platform.c.getenv("GLM_LOGITS_VS") != null);
             if (want_logits) col.logits_from = @as([*]const u16, @ptrCast(@alignCast(e.sc.logits.addr())))[0..e.c.vocab];
             const r = try e.generate(ids, max, eos, d, .{ .ctx = &col, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
             const toks = col.toks.items;
@@ -185,7 +186,7 @@ pub fn main(init: std.process.Init) !void {
                 const rn: f64 = @floatFromInt(r.rounds);
                 std.debug.print("  a round: {d:.2} ms wall, {d:.2} ms GPU, {d:.2} ms encoding, {d:.2} ms GPU idle between rounds; {d:.2} tokens\n", .{ r.decode_seconds * 1e3 / rn, r.gpu_seconds * 1e3 / rn, r.encode_seconds * 1e3 / rn, r.gap_seconds * 1e3 / @max(rn - 1, 1), @as(f64, @floatFromInt(toks.len -| 1)) / rn });
                 if (r.copy_rounds > 0) std.debug.print("  copy drafts: {d} rounds, {d} drafts kept ({d:.2} a copy round)\n", .{ r.copy_rounds, r.copy_accepted, @as(f64, @floatFromInt(r.copy_accepted)) / @as(f64, @floatFromInt(r.copy_rounds)) });
-                if (std.c.getenv("GLM_RANKS") != null) {
+                if (platform.c.getenv("GLM_RANKS") != null) {
                     std.debug.print("  draft ranks (kept: all / miss at 2nd / 3rd / later):", .{});
                     for (r.draft_ranks, 0..) |row, m| if (row[0] + row[1] + row[2] + row[3] > 0) std.debug.print(" m{d} {d}/{d}/{d}/{d}", .{ m, row[0], row[1], row[2], row[3] });
                     std.debug.print("\n", .{});
@@ -195,17 +196,17 @@ pub fn main(init: std.process.Init) !void {
                 failures += 1;
                 std.debug.print("  DIFFERS from depth {d} at token {d}\n", .{ depths.items[0], at });
             } else std.debug.print("  equal to depth {d}\n", .{depths.items[0]});
-            if (want_margins) if (std.c.getenv("GLM_MARGINS")) |prefix| {
+            if (want_margins) if (platform.c.getenv("GLM_MARGINS")) |prefix| {
                 const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.margins", .{ prefix, name }, 0);
-                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
-                defer _ = std.c.fclose(file);
-                if (std.c.fwrite(std.mem.sliceAsBytes(margins.items).ptr, 4, margins.items.len, file) != margins.items.len) return error.WriteFailed;
+                const file = platform.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = platform.c.fclose(file);
+                if (platform.c.fwrite(std.mem.sliceAsBytes(margins.items).ptr, 4, margins.items.len, file) != margins.items.len) return error.WriteFailed;
             };
             if (vs) |other| if (other.object.get(name)) |theirs| {
                 const want = try ints(arena, theirs);
                 if (firstDiff(want, toks)) |at| {
                     std.debug.print("  vs GLM_VS: first token {s}, first difference at token {d} of {d}\n", .{ if (at == 0) "DIFFERS" else "equal", at, @min(want.len, toks.len) });
-                    if (want_margins) if (std.c.getenv("GLM_MARGINS_VS")) |prefix| {
+                    if (want_margins) if (platform.c.getenv("GLM_MARGINS_VS")) |prefix| {
                         const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.margins", .{ prefix, name }, 0);
                         if (mtl.MappedFile.open(path)) |f| {
                             defer f.deinit();
@@ -219,18 +220,18 @@ pub fn main(init: std.process.Init) !void {
             };
             if (col.trace.len > 0) {
                 const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.trace", .{ std.mem.span(trace_prefix.?), name }, 0);
-                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
-                defer _ = std.c.fclose(file);
-                if (std.c.fwrite(col.trace.ptr, 1, col.trace.len, file) != col.trace.len) return error.WriteFailed;
+                const file = platform.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = platform.c.fclose(file);
+                if (platform.c.fwrite(col.trace.ptr, 1, col.trace.len, file) != col.trace.len) return error.WriteFailed;
             }
             if (want_logits and col.logits.len == 0) return error.NoLogits;
-            if (want_logits) if (std.c.getenv("GLM_LOGITS")) |prefix| {
+            if (want_logits) if (platform.c.getenv("GLM_LOGITS")) |prefix| {
                 const path = try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0);
-                const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
-                defer _ = std.c.fclose(file);
-                if (std.c.fwrite(std.mem.sliceAsBytes(col.logits).ptr, 2, col.logits.len, file) != col.logits.len) return error.WriteFailed;
+                const file = platform.c.fopen(path, "wb") orelse return error.OpenFailed;
+                defer _ = platform.c.fclose(file);
+                if (platform.c.fwrite(std.mem.sliceAsBytes(col.logits).ptr, 2, col.logits.len, file) != col.logits.len) return error.WriteFailed;
             };
-            if (want_logits) if (std.c.getenv("GLM_LOGITS_VS")) |prefix| try compareLogits(gpa, col.logits, try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0));
+            if (want_logits) if (platform.c.getenv("GLM_LOGITS_VS")) |prefix| try compareLogits(gpa, col.logits, try std.fmt.allocPrintSentinel(arena, "{s}.{s}.bf16", .{ prefix, name }, 0));
             if (run == 0 and d == depths.items[0]) {
                 if (saved.items.len > 1) try saved.append(arena, ',');
                 try saved.print(arena, "\"{s}\":[", .{name});
@@ -244,7 +245,7 @@ pub fn main(init: std.process.Init) !void {
                 } else std.debug.print("  reference: {d} of {d} tokens equal\n", .{ @min(want.len, toks.len), want.len });
             }
         };
-        if (std.c.getenv("GLM_CANCEL_TEST") != null) { // a reply cancelled after its first prompt window, then a fresh one
+        if (platform.c.getenv("GLM_CANCEL_TEST") != null) { // a reply cancelled after its first prompt window, then a fresh one
             var cut: Collect = .{ .gpa = gpa, .cancel_at = 1 };
             defer cut.toks.deinit(gpa);
             const rc = try e.generate(ids, max, eos, depths.items[0], .{ .ctx = &cut, .prefilled = Collect.prefilled, .tokens = Collect.tokens, .cancelled = Collect.cancelled });
@@ -256,23 +257,23 @@ pub fn main(init: std.process.Init) !void {
             std.debug.print("  cancel test: cancelled reply ended {t} after {d} tokens; the next fresh reply {s} the plain one\n", .{ rc.reason, cut.toks.items.len, if (same) "equals" else "DIFFERS from" });
         }
     }
-    if (std.c.getenv("GLM_PROFILE")) |spec| {
+    if (platform.c.getenv("GLM_PROFILE")) |spec| {
         const reps = try std.fmt.parseInt(usize, env("GLM_PROFILE_REPS", "12"), 10);
         var pit = std.mem.tokenizeScalar(u8, std.mem.span(spec), ',');
-        const only = std.c.getenv("GLM_PROFILE_ONLY") != null; // each class alone instead of each left out
-        const parts = std.c.getenv("GLM_PROFILE_PARTS") != null; // by launch instead of by class
+        const only = platform.c.getenv("GLM_PROFILE_ONLY") != null; // each class alone instead of each left out
+        const parts = platform.c.getenv("GLM_PROFILE_PARTS") != null; // by launch instead of by class
         while (pit.next()) |dv| try e.profile(try std.fmt.parseInt(u32, dv, 10), reps, only, parts);
     }
-    if (std.c.getenv("GLM_MM_CHECK") != null) try e.checkMatmul(try ints(arena, doc.object.get("prompts").?.array.items[0].object.get("ids").?));
-    if (std.c.getenv("GLM_PROMPT_PROFILE")) |v| { // each prompt's first chunk by class (GLM_PROFILE_ONLY: each alone)
+    if (platform.c.getenv("GLM_MM_CHECK") != null) try e.checkMatmul(try ints(arena, doc.object.get("prompts").?.array.items[0].object.get("ids").?));
+    if (platform.c.getenv("GLM_PROMPT_PROFILE")) |v| { // each prompt's first chunk by class (GLM_PROFILE_ONLY: each alone)
         const reps = try std.fmt.parseInt(usize, std.mem.span(v), 10);
-        for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, std.c.getenv("GLM_PROFILE_ONLY") != null, std.c.getenv("GLM_PROFILE_PARTS") != null);
+        for (doc.object.get("prompts").?.array.items) |p| try e.profilePrompt(try ints(arena, p.object.get("ids").?), reps, platform.c.getenv("GLM_PROFILE_ONLY") != null, platform.c.getenv("GLM_PROFILE_PARTS") != null);
     }
     try saved.append(arena, '}');
-    if (std.c.getenv("GLM_OUT")) |path| {
-        const file = std.c.fopen(path, "wb") orelse return error.OpenFailed;
-        defer _ = std.c.fclose(file);
-        if (std.c.fwrite(saved.items.ptr, 1, saved.items.len, file) != saved.items.len) return error.WriteFailed;
+    if (platform.c.getenv("GLM_OUT")) |path| {
+        const file = platform.c.fopen(path, "wb") orelse return error.OpenFailed;
+        defer _ = platform.c.fclose(file);
+        if (platform.c.fwrite(saved.items.ptr, 1, saved.items.len, file) != saved.items.len) return error.WriteFailed;
     }
     if (failures > 0) {
         std.debug.print("{d} replies differ from the plain ones{s}\n", .{ failures, if (strict) " or the references" else "" });

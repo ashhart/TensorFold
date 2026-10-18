@@ -2,7 +2,7 @@
 const std = @import("std");
 
 pub const H = ?*anyopaque;
-pub const Error = error{ LoaderUnavailable, MissingSymbol, ZeFailed, NoDevice };
+pub const Error = error{ LoaderUnavailable, MissingSymbol, ZeFailed, NoDevice, OutOfMemory };
 
 pub const Api = struct {
     zeInit: *const fn (u32) callconv(.c) u32,
@@ -35,6 +35,12 @@ pub const Api = struct {
     zeEventHostSynchronize: *const fn (H, u64) callconv(.c) u32,
     zeEventHostReset: *const fn (H) callconv(.c) u32,
     zeEventQueryKernelTimestamp: *const fn (H, *KernelTimestampResult) callconv(.c) u32,
+    zeEventDestroy: *const fn (H) callconv(.c) u32,
+    zeEventPoolDestroy: *const fn (H) callconv(.c) u32,
+    zeKernelDestroy: *const fn (H) callconv(.c) u32,
+    zeModuleDestroy: *const fn (H) callconv(.c) u32,
+    zeCommandListDestroy: *const fn (H) callconv(.c) u32,
+    zeContextDestroy: *const fn (H) callconv(.c) u32,
 };
 
 /// Sysman, for the free memory of the device's own memory modules (Gpu.freeMemory).
@@ -178,6 +184,58 @@ pub const Gpu = struct {
     device: H,
     context: H,
     props: DeviceProperties,
+    owned: Owned = .{}, // what close() gives back
+
+    /// Every allocation, kernel, module, list and event made through this Gpu, destroyed by close().
+    const Owned = struct {
+        mems: std.AutoHashMapUnmanaged(usize, void) = .empty,
+        kernels: std.ArrayList(H) = .empty,
+        modules: std.ArrayList(H) = .empty,
+        lists: std.ArrayList(H) = .empty,
+        events: std.ArrayList(H) = .empty,
+        pools: std.ArrayList(H) = .empty,
+    };
+    const own_alloc = std.heap.c_allocator;
+
+    fn keep(list: *std.ArrayList(H), h: H, destroy: *const fn (H) callconv(.c) u32) Error!H {
+        list.append(own_alloc, h) catch {
+            _ = destroy(h);
+            return error.OutOfMemory;
+        };
+        return h;
+    }
+
+    fn keepMem(g: *Gpu, p: *anyopaque) Error!*anyopaque {
+        g.owned.mems.put(own_alloc, @intFromPtr(p), {}) catch {
+            _ = g.api.zeMemFree(g.context, p);
+            return error.OutOfMemory;
+        };
+        return p;
+    }
+
+    /// Waits for every list this Gpu made, then destroys what it made and the context (startup errors included).
+    pub fn close(g: *Gpu) void {
+        if (release(&g.api, g.context, &g.owned)) g.lib.close();
+    }
+
+    /// `close` before the loader: false, with nothing destroyed, when a list does not drain (it may still run).
+    fn release(api: *const Api, context: H, o: *Owned) bool {
+        for (o.lists.items) |l| if (api.zeCommandListHostSynchronize(l, std.math.maxInt(u64)) != 0) {
+            std.log.warn("XPU: a command list did not drain at close; its memory and context stay until the process ends", .{});
+            return false;
+        };
+        for (o.events.items) |e| _ = api.zeEventDestroy(e);
+        for (o.pools.items) |p| _ = api.zeEventPoolDestroy(p);
+        for (o.kernels.items) |k| _ = api.zeKernelDestroy(k);
+        for (o.modules.items) |m| _ = api.zeModuleDestroy(m);
+        for (o.lists.items) |l| _ = api.zeCommandListDestroy(l);
+        var it = o.mems.keyIterator();
+        while (it.next()) |p| _ = api.zeMemFree(context, @ptrFromInt(p.*));
+        o.mems.deinit(own_alloc);
+        inline for (.{ &o.kernels, &o.modules, &o.lists, &o.events, &o.pools }) |l| l.deinit(own_alloc);
+        _ = api.zeContextDestroy(context);
+        return true;
+    }
 
     pub fn open(device_id: u32) Error!Gpu {
         var lib = std.DynLib.open("libze_loader.so.1") catch return error.LoaderUnavailable;
@@ -241,16 +299,17 @@ pub const Gpu = struct {
     pub fn deviceAlloc(g: *Gpu, size: usize) Error!*anyopaque {
         var p: ?*anyopaque = null;
         try check(g.api.zeMemAllocDevice(g.context, &.{}, size, 4096, g.device, &p));
-        return p.?;
+        return g.keepMem(p.?);
     }
 
     pub fn hostAlloc(g: *Gpu, size: usize) Error!*anyopaque {
         var p: ?*anyopaque = null;
         try check(g.api.zeMemAllocHost(g.context, &.{}, size, 4096, &p));
-        return p.?;
+        return g.keepMem(p.?);
     }
 
     pub fn free(g: *Gpu, p: *anyopaque) void {
+        _ = g.owned.mems.remove(@intFromPtr(p));
         _ = g.api.zeMemFree(g.context, p);
     }
 
@@ -258,25 +317,26 @@ pub const Gpu = struct {
     pub fn immediate(g: *Gpu, ordinal: u32, priority: u32) Error!H {
         var l: H = null;
         try check(g.api.zeCommandListCreateImmediate(g.context, g.device, &.{ .ordinal = ordinal, .flags = queue_in_order, .mode = 2, .priority = priority }, &l));
-        return l;
+        return keep(&g.owned.lists, l, g.api.zeCommandListDestroy);
     }
 
     /// Immediate list without the in-order flag: commands with no barrier or event between them may overlap.
     pub fn immediateUnordered(g: *Gpu, ordinal: u32) Error!H {
         var l: H = null;
         try check(g.api.zeCommandListCreateImmediate(g.context, g.device, &.{ .ordinal = ordinal, .flags = 0, .mode = 2, .priority = 0 }, &l));
-        return l;
+        return keep(&g.owned.lists, l, g.api.zeCommandListDestroy);
     }
 
     pub fn module(g: *Gpu, bin: []const u8) Error!H {
         var m: H = null;
         try check(g.api.zeModuleCreate(g.context, g.device, &.{ .inputSize = bin.len, .pInputModule = bin.ptr }, &m, null));
-        return m;
+        return keep(&g.owned.modules, m, g.api.zeModuleDestroy);
     }
 
     pub fn kernel(g: *Gpu, m: H, name: [*:0]const u8) Error!H {
         var k: H = null;
         try check(g.api.zeKernelCreate(m, &.{ .pKernelName = name }, &k));
+        _ = try keep(&g.owned.kernels, k, g.api.zeKernelDestroy);
         var kp: KernelProperties = .{};
         try check(g.api.zeKernelGetProperties(k, &kp));
         if (kp.spillMemSize != 0) std.debug.print("warning: {s} spills {d} bytes of registers\n", .{ name, kp.spillMemSize });
@@ -297,8 +357,12 @@ pub const Gpu = struct {
         @setEvalBranchQuota(100000);
         var pool: H = null;
         try check(g.api.zeEventPoolCreate(g.context, &.{ .flags = pool_host_visible | pool_kernel_timestamp, .count = n }, 1, @ptrCast(&g.device), &pool));
+        _ = try keep(&g.owned.pools, pool, g.api.zeEventPoolDestroy);
         var out: [n]H = @splat(null);
-        for (&out, 0..) |*e, i| try check(g.api.zeEventCreate(pool, &.{ .index = @intCast(i) }, e));
+        for (&out, 0..) |*e, i| {
+            try check(g.api.zeEventCreate(pool, &.{ .index = @intCast(i) }, e));
+            _ = try keep(&g.owned.events, e.*, g.api.zeEventDestroy);
+        }
         return out;
     }
 
@@ -309,3 +373,43 @@ pub const Gpu = struct {
         return @as(f64, @floatFromInt(r.global_end -% r.global_start)) / @as(f64, @floatFromInt(g.props.timerResolution));
     }
 };
+
+test "close drains every list before it destroys anything, and destroys nothing while one will not drain" {
+    const Fake = struct {
+        var calls: [16]u8 = undefined;
+        var n: usize = 0;
+        var stuck = true;
+        fn note(c: u8) void {
+            calls[n] = c;
+            n += 1;
+        }
+        fn sync(_: H, _: u64) callconv(.c) u32 {
+            note('s');
+            return @intFromBool(stuck);
+        }
+        fn destroy(_: H) callconv(.c) u32 {
+            note('d');
+            return 0;
+        }
+        fn free(_: H, _: ?*anyopaque) callconv(.c) u32 {
+            note('f');
+            return 0;
+        }
+    };
+    var api: Api = undefined;
+    api.zeCommandListHostSynchronize = Fake.sync;
+    inline for (.{ "zeEventDestroy", "zeEventPoolDestroy", "zeKernelDestroy", "zeModuleDestroy", "zeCommandListDestroy", "zeContextDestroy" }) |f| @field(api, f) = Fake.destroy;
+    api.zeMemFree = Fake.free;
+    var o: Gpu.Owned = .{};
+    for ([_]usize{ 0x10, 0x18 }) |l| try o.lists.append(Gpu.own_alloc, @ptrFromInt(l));
+    try o.kernels.append(Gpu.own_alloc, @ptrFromInt(0x20));
+    try o.mems.put(Gpu.own_alloc, 0x30, {});
+    // a queued fill that never completes: the first list's wait fails, and the kernel, the memory and the context stay
+    try std.testing.expect(!Gpu.release(&api, null, &o));
+    try std.testing.expectEqualStrings("s", Fake.calls[0..Fake.n]);
+    Fake.n = 0;
+    Fake.stuck = false;
+    try std.testing.expect(Gpu.release(&api, null, &o));
+    // both lists drained, then the kernel, both lists, the memory and the context
+    try std.testing.expectEqualStrings("ssdddfd", Fake.calls[0..Fake.n]);
+}
