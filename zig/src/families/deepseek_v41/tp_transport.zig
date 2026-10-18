@@ -80,3 +80,52 @@ test "TP exchanges reject mismatched phase and malformed payload before copying"
     packet[8] = 3;
     try std.testing.expectError(error.InvalidTensorParallelMessage, validate(&packet, 123, 4));
 }
+
+fn testTransport(endpoint: fabric.Rdma, packet: []u8) Transport {
+    return .{ .gpa = std.testing.allocator, .config_arena = undefined, .endpoint = undefined, .channel = fabric.Channel.init(endpoint, 0, packet.len), .packet = packet };
+}
+
+test "TP exchanges carry consecutive peer payloads and reject phase disagreement on both ranks" {
+    const gpa = std.testing.allocator;
+    const cluster = try fabric.fake.Cluster.init(gpa, 2, fabric.Channel.bytes(2, 64), .immediate, null);
+    defer cluster.deinit();
+    var packets: [2][64]u8 = undefined;
+    var transports = [_]Transport{ testTransport(cluster.endpoint(0), &packets[0]), testTransport(cluster.endpoint(1), &packets[1]) };
+    const Worker = struct {
+        transport: *Transport,
+        failure: ?anyerror = null,
+        fn run(w: *@This()) void {
+            w.exercise() catch |e| {
+                w.failure = e;
+            };
+        }
+        fn exercise(w: *@This()) !void {
+            const rank = w.transport.channel.myRank();
+            var send: [8]u8 = undefined;
+            var receive: [8]u8 = undefined;
+            for (0..32) |step| {
+                std.mem.writeInt(u64, &send, step * 2 + rank, .little);
+                try Transport.transfer(w.transport, step, &send, &receive);
+                try std.testing.expectEqual(@as(u64, step * 2 + 1 - rank), std.mem.readInt(u64, &receive, .little));
+            }
+            try std.testing.expectError(error.InvalidTensorParallelMessage, Transport.transfer(w.transport, 100 + rank, &send, &receive));
+            try std.testing.expectError(error.InvalidTensorParallelState, Transport.transfer(w.transport, 102, &send, &receive));
+        }
+    };
+    var workers = [_]Worker{ .{ .transport = &transports[0] }, .{ .transport = &transports[1] } };
+    const peer = try std.Thread.spawn(.{}, Worker.run, .{&workers[1]});
+    workers[0].run();
+    peer.join();
+    for (workers) |worker| if (worker.failure) |err| return err;
+}
+
+test "TP exchanges time out without a peer and cannot reuse that channel" {
+    const cluster = try fabric.fake.Cluster.init(std.testing.allocator, 2, fabric.Channel.bytes(2, 64), .immediate, null);
+    defer cluster.deinit();
+    var packet: [64]u8 = undefined;
+    var transport = testTransport(cluster.endpoint(0), &packet);
+    transport.channel.timeout_ns = std.time.ns_per_ms;
+    var receive: [1]u8 = undefined;
+    try std.testing.expectError(error.PeerTimeout, Transport.transfer(&transport, 0, &.{42}, &receive));
+    try std.testing.expectError(error.InvalidTensorParallelState, Transport.transfer(&transport, 0, &.{42}, &receive));
+}
