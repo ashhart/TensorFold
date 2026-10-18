@@ -32,6 +32,7 @@ pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, file: []const u8,
 }
 pub fn steps(b: *std.Build) void {
     _ = @import("dsv41_images.zig").images(b, b.option([]const u8, "dsv41-nvcc", "Optional family nvcc compiler"), b.option([]const u8, "dsv41-fatbins", "Optional complete family prebuilt image directory"));
+    _ = @import("dsv41_images.zig").module(b, b.graph.host, .Debug, runtime(b, b.graph.host, false), null);
     const planner = module(b, b.graph.host, "cuda_test.zig", false);
     const binding_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("dsv41_kernels").? }));
     const common_tests = b.addRunArtifact(b.addTest(.{ .root_module = planner.import_table.get("cuda").? }));
@@ -68,4 +69,14 @@ pub fn steps(b: *std.Build) void {
     const record = b.addRunArtifact(catalog);
     const output = record.captureStdOut(.{});
     b.step("emit-dsv41-catalog", "Record symbol resolution without CUDA device work").dependOn(&b.addInstallFile(output, "dsv41-launches.txt").step);
+    const runner_base = module(b, target, "cuda_test.zig", true);
+    const runner = b.addExecutable(.{ .name = "tf-dsv41-test", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/cuda/dsv41_main.zig"),
+        .target = target,
+        .optimize = .Debug,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "cuda", .module = runner_base.import_table.get("cuda").? }, .{ .name = "dsv41_kernels", .module = runner_base.import_table.get("dsv41_kernels").? } },
+    }) });
+    _ = runner.getEmittedBin();
+    b.step("compile-dsv41-runner", "Emit the supplied device fixture runner with nonexecuted synthetic images").dependOn(&runner.step);
 }
