@@ -165,7 +165,7 @@ __device__ __forceinline__ float rowsum(const float (&c)[8]) {
                      __fadd_rn(__fadd_rn(w[1], w[5]), __fadd_rn(w[3], w[7])));
 }
 
-// ODD: the edge tiles' NaN and infinite values leave the mma, and the rows that see them add them back.
+// ODD: every NaN and infinite value leaves the mma, and the rows that see them add them back at float64's weights.
 template <int D, int WARPS, int HPC, int NS, bool ODD>
 __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc,
                                            const __nv_bfloat16* __restrict__ vc, __nv_bfloat16* __restrict__ out,
@@ -275,9 +275,6 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
             mma(o[i + 1], pa1, b[2], b[3]);
         }
     };
-    const auto edge = [&](int t) { // tile t, where some row of the block cannot see some key
-        return (t0 + t) * BN < (win > 0 ? p0 + last - win + 1 : 0) || (t0 + t) * BN + BN - 1 > p0 + row0;
-    };
     for (int t = 0; t < tiles; ++t) {
         const int it = 4 * t;
         scores(*reinterpret_cast<float(*)[4][4]>(&sc[0]), take(it, false));
@@ -336,9 +333,9 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
                 pa[j][3] = pack(sc[2 * j + 1][2], sc[2 * j + 1][3]);
             }
         }
-        values(pa[0], pa[1], take(it + 2, ODD && edge(t)));
+        values(pa[0], pa[1], take(it + 2, ODD));
         done(it + 2);
-        values(pa[2], pa[3], take(it + 3, ODD && edge(t)));
+        values(pa[2], pa[3], take(it + 3, ODD));
         done(it + 3);
     }
     wait_group<0>();
@@ -347,9 +344,12 @@ __device__ __forceinline__ bool wattn_rows(const __nv_bfloat16* __restrict__ q, 
         if (__syncthreads_or(attn_odd::nonfinite_out<NB>(o, r0 < W, r1 < W))) return true;
     } else {
         const auto row = [&](int k) { return vc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D; };
-        const auto vis = [&](int r, int k) { return k >= (win > 0 ? pw + r - win + 1 : 0) && k <= pw + r; };
-        for (int t = 0; t < tiles; ++t)
-            if (edge(t)) attn_odd::add_back<D>(o, row, (t0 + t) * BN, min((t0 + t + 1) * BN, limit), lane, vis, l0, l1);
+        const auto krow = [&](int k) { return kc + ((int64_t)(ring > 0 ? k % ring : k) * HK + hk) * D; };
+        const auto lo = [&](int r) { return win > 0 ? max(pw + r - win + 1, 0) : 0; };
+        const auto vis = [&](int r, int k) { return wrow + r < W && k >= lo(r) && k <= pw + r; };
+        const auto each = [&](int r, auto f) { for (int k = lo(r); k <= pw + r; ++k) f(krow(k)); }; // row r's keys
+        auto w = attn_odd::weights<D>([&](int r) { return q + ((int64_t)(wrow + r) * H + head) * D; }, each, scale, lane);
+        attn_odd::add_back<D>(o, row, krow, t0 * BN, limit, lane, vis, l0, l1, w);
     }
 #pragma unroll
     for (int i = 0; i < NB; ++i) {
