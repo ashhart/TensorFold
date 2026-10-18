@@ -268,3 +268,19 @@ test "a target that gives no rows cannot be recorded" {
     table.features = null;
     try std.testing.expectError(error.NoFeatures, rec.Recorded.init(.{ .ptr = &target, .vtable = &table }, &recorder));
 }
+
+test "recorded backend preserves both values of first_before_draft" {
+    var target: fake.Fake = .{ .gpa = gpa };
+    defer target.deinit();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var buf: [64]u8 = undefined;
+    var recorder = try rec.Recorder.init(gpa, io, try std.fmt.bufPrintSentinel(&buf, ".zig-cache/tmp/{s}", .{tmp.sub_path}, 0), &.{1});
+    defer recorder.deinit();
+    for ([_]bool{ false, true }) |enabled| {
+        var inner = target.backend();
+        inner.first_before_draft = enabled;
+        var recorded = try rec.Recorded.init(inner, &recorder);
+        try std.testing.expectEqual(enabled, recorded.backend().first_before_draft);
+    }
+}
