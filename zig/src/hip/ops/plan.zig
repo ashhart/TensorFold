@@ -84,6 +84,58 @@ pub fn causal(o: Ops, q: u64, kind: t.Kind, out: u64, p: Plan, layer: usize, hea
     try (try launcher(o)).planCausal(q, out, scores, stats, partials, p, layer, heads, kv_heads, d, span, scale, @backingInt(kind), o.stream);
 }
 
+/// `kvWrite` of keys in the activation kind (as `values`): the cache bytes of their fp32 cast.
+pub fn kvWriteAct(o: Ops, keys: Tensor, values: Tensor, p: Plan, layer: usize, kv_heads: usize, d: usize) Error!void {
+    if (values.kind == .f32 or keys.kind != values.kind) return error.BadShape;
+    try (try launcher(o)).planKvWriteAct(
+        keys.ptr,
+        values.ptr,
+        @backingInt(values.kind),
+        p,
+        layer,
+        kv_heads,
+        d,
+        o.stream,
+    );
+}
+
+/// `causal` with q and out in the activation kind `kind`: the bytes of q cast to fp32 and the output cast back.
+pub fn causalAct(
+    o: Ops,
+    q: Tensor,
+    out: Tensor,
+    p: Plan,
+    layer: usize,
+    heads: usize,
+    kv_heads: usize,
+    d: usize,
+    span: usize,
+    scale: f32,
+) Error!void {
+    if (q.kind == .f32 or q.kind != out.kind) return error.BadShape;
+    const tiles = (span + 127) / 128;
+    const scores = try o.arena.of(f32, p.rows * heads * span);
+    const stats = try o.arena.of(f32, p.rows * heads * 2);
+    const partials = try o.arena.of(f32, p.rows * heads * tiles * d);
+    try (try launcher(o)).planCausalAs(
+        q.ptr,
+        out.ptr,
+        scores,
+        stats,
+        partials,
+        p,
+        layer,
+        heads,
+        kv_heads,
+        d,
+        span,
+        scale,
+        @backingInt(q.kind),
+        true,
+        o.stream,
+    );
+}
+
 /// Keeps the listed slots' rows (see `launches.PlanKeep`).
 pub fn keep(o: Ops, p: Plan, k: Keep) Error!void {
     try (try launcher(o)).planKeep(p, k, o.stream);

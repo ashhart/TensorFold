@@ -225,3 +225,202 @@ test "Nemotron's decode attention: the planned walk within 1e-5 of float64 and n
         try rig.expect(w[0] < 1e-5 and w[0] <= w[1], "q x{d}: planned {e} against the tile {e}", .{ gain, w[0], w[1] });
     }
 }
+
+/// The planned walk over q in the activation type into rows of it, against q cast to fp32, the walk and the cast back.
+fn actWalk(t: *Rig, rng: *rig.Rng, c: Cache) !bool {
+    const rows = lengths.len;
+    const scale: f32 = 1 / @sqrt(@as(f32, d));
+    const hq = try gpa.alloc(u16, rows * heads * d);
+    defer gpa.free(hq);
+    for (hq) |*x| x.* = t.bits(rng.unit());
+    var q = try t.upload(hq);
+    defer q.free();
+    const words = 4;
+    const desc = try gpa.alloc(u64, words + (c.table.len + 1) / 2);
+    defer gpa.free(desc);
+    @memset(desc, 0);
+    desc[2] = c.pool_k;
+    desc[3] = c.pool_v;
+    @memcpy(std.mem.sliceAsBytes(desc[words..])[0 .. c.table.len * 4], std.mem.sliceAsBytes(c.table));
+    var dev_desc = try t.upload(desc);
+    defer dev_desc.free();
+    var descs = try t.upload(&[_]u64{at(dev_desc)});
+    defer descs.free();
+    var pos: [rows]i32 = undefined;
+    for (&pos, lengths) |*p, n| p.* = @intCast(n - 1);
+    var dev_pos = try t.upload(&pos);
+    defer dev_pos.free();
+    const zeros: [rows]i32 = @splat(0);
+    var slot = try t.upload(&zeros);
+    defer slot.free();
+    var first = try t.upload(&[_]i32{0});
+    defer first.free();
+    var count = try t.upload(&[_]i32{rows});
+    defer count.free();
+    var scores = try t.alloc(rows * heads * span * 4);
+    defer scores.free();
+    var stats = try t.alloc(rows * heads * 2 * 4);
+    defer stats.free();
+    var partials = try t.alloc(rows * heads * (span / 128) * d * 4);
+    defer partials.free();
+    var q32 = try t.alloc(rows * heads * d * 4);
+    defer q32.free();
+    var o32 = try t.alloc(rows * heads * d * 4);
+    defer o32.free();
+    var outs: [2]DeviceBuffer = .{ try t.alloc(rows * heads * d * 2), try t.alloc(rows * heads * d * 2) };
+    defer for (&outs) |*o| o.free();
+    const s = t.stream.handle;
+    const p: plan.PlanRef = .{
+        .rows = rows,
+        .slots = 1,
+        .args = .{
+            .pos = at(dev_pos),
+            .slot = at(slot),
+            .first = at(first),
+            .count = at(count),
+            .desc = at(descs),
+            .pages = words,
+            .pool = @intCast(c.table.len),
+        },
+    };
+    const n: c_longlong = @intCast(rows * heads * d);
+    try t.on.tf_cast(@ptrFromInt(at(q)), t.kind(), @ptrFromInt(at(q32)), 0, n, s);
+    try t.on.planCausal(
+        at(q32),
+        at(o32),
+        at(scores),
+        at(stats),
+        at(partials),
+        p,
+        0,
+        heads,
+        kv_heads,
+        d,
+        span,
+        scale,
+        t.kind(),
+        s,
+    );
+    try t.on.tf_cast(@ptrFromInt(at(o32)), 0, @ptrFromInt(at(outs[0])), t.kind(), n, s);
+    try t.on.planCausalAs(
+        at(q),
+        at(outs[1]),
+        at(scores),
+        at(stats),
+        at(partials),
+        p,
+        0,
+        heads,
+        kv_heads,
+        d,
+        span,
+        scale,
+        t.kind(),
+        true,
+        s,
+    );
+    try t.stream.synchronize();
+    const a = try rig.download(u16, outs[0]);
+    defer gpa.free(a);
+    const b = try rig.download(u16, outs[1]);
+    defer gpa.free(b);
+    return std.mem.eql(u16, a, b);
+}
+
+test "the planned walk over q and out in the activation type writes the bytes of the casts around the fp32 walk" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0xAC7 };
+    const hk = try gpa.alloc(u16, kv_heads * span * d);
+    defer gpa.free(hk);
+    const hv = try gpa.alloc(u16, kv_heads * span * d);
+    defer gpa.free(hv);
+    for (hk) |*x| x.* = t.bits(rng.unit());
+    for (hv) |*x| x.* = t.bits(rng.unit());
+    const table = try gpa.alloc(u32, span / page);
+    defer gpa.free(table);
+    for (table, 0..) |*e, i| e.* = @intCast((i * 7919) % table.len);
+    const pk = try pooled(hk, table);
+    defer gpa.free(pk);
+    const pv = try pooled(hv, table);
+    defer gpa.free(pv);
+    var dk = try t.upload(pk);
+    defer dk.free();
+    var dv = try t.upload(pv);
+    defer dv.free();
+    const c: Cache = .{ .k = hk, .v = hv, .pool_k = at(dk), .pool_v = at(dv), .table = table };
+    try rig.expect(try actWalk(t, &rng, c), "planned walk in the activation type: the bytes differ", .{});
+    std.debug.print(
+        "  nemotron planned walk in the activation type: {d} rows, the bytes of the casts around it\n",
+        .{lengths.len},
+    );
+}
+
+test "the planned key write from the activation type writes the bytes of the cast keys' write" {
+    const t = try Rig.open(1 << 20);
+    defer t.close();
+    var rng: rig.Rng = .{ .state = 0x6E1 };
+    const pages = 8;
+    const rows = 5;
+    const table = [_]u32{ 3, 0, 6, 1, 7, 2, 5, 4 };
+    const words = 4;
+    var pools: [2][2]DeviceBuffer = undefined;
+    for (&pools) |*pp| for (pp) |*b| {
+        b.* = try t.alloc(kv_heads * pages * page * d * 2);
+        try b.fill8(0);
+    };
+    defer for (&pools) |*pp| for (pp) |*b| b.free();
+    var descs: [2]DeviceBuffer = undefined;
+    for (0..2) |v| {
+        var desc: [words + pages / 2]u64 = @splat(0);
+        desc[2] = at(pools[v][0]);
+        desc[3] = at(pools[v][1]);
+        @memcpy(std.mem.sliceAsBytes(desc[words..])[0 .. pages * 4], std.mem.sliceAsBytes(&table));
+        descs[v] = try t.upload(&desc);
+    }
+    defer for (&descs) |*b| b.free();
+    const hk = try gpa.alloc(u16, rows * kv_heads * d);
+    defer gpa.free(hk);
+    const hv = try gpa.alloc(u16, rows * kv_heads * d);
+    defer gpa.free(hv);
+    for (hk) |*x| x.* = t.bits(rng.unit() * 3);
+    for (hv) |*x| x.* = t.bits(rng.unit());
+    var k = try t.upload(hk);
+    defer k.free();
+    var vals = try t.upload(hv);
+    defer vals.free();
+    var k32 = try t.alloc(rows * kv_heads * d * 4);
+    defer k32.free();
+    const pos = [rows]i32{ 0, 63, 64, 200, 511 };
+    var dev_pos = try t.upload(&pos);
+    defer dev_pos.free();
+    const zeros: [rows]i32 = @splat(0);
+    var slot = try t.upload(&zeros);
+    defer slot.free();
+    const s = t.stream.handle;
+    for (0..2) |v| {
+        var list = try t.upload(&[_]u64{at(descs[v])});
+        defer list.free();
+        const args: plan.PlanArgs = .{
+            .pos = at(dev_pos),
+            .slot = at(slot),
+            .desc = at(list),
+            .pages = words,
+            .pool = pages,
+        };
+        const p: plan.PlanRef = .{ .rows = rows, .slots = 1, .args = args };
+        if (v == 0) {
+            try t.on.tf_cast(@ptrFromInt(at(k)), t.kind(), @ptrFromInt(at(k32)), 0, @intCast(rows * kv_heads * d), s);
+            try t.on.planKvWrite(at(k32), at(vals), t.kind(), p, 0, kv_heads, d, s);
+        } else try t.on.planKvWriteAct(at(k), at(vals), t.kind(), p, 0, kv_heads, d, s);
+        try t.stream.synchronize();
+    }
+    for (0..2) |w| {
+        const a = try rig.download(u8, pools[0][w]);
+        defer gpa.free(a);
+        const b = try rig.download(u8, pools[1][w]);
+        defer gpa.free(b);
+        try rig.expect(std.mem.eql(u8, a, b), "planned key write from the activation type: pool {d} differs", .{w});
+    }
+    std.debug.print("  nemotron planned key write from the activation type: the cast keys' bytes\n", .{});
+}

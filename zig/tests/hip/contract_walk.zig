@@ -18,14 +18,27 @@ fn depth(s: c.Shape) usize {
     return 22 + 4 + s.k / 256 + 8 + 1 + 2 * 128 + s.k / 128 + 4;
 }
 
-const names = [2][]const u8{
-    "hip planned decode walk planCausal (fp16 cache)",
-    "hip planned decode walk planCausal (bf16 cache)",
+const names = [2][2][]const u8{
+    .{ "hip planned decode walk planCausal (fp16 cache)", "hip planned decode walk planCausal (bf16 cache)" },
+    .{
+        "hip planned decode walk planCausalAs (q and rows fp16)",
+        "hip planned decode walk planCausalAs (q and rows bf16)",
+    },
 };
 
-pub fn spec(k: kit.Kind) c.Spec {
+/// The walk, q and its rows fp32; or with `act` in the cache's kind, bit-equal to the casts around the fp32 walk.
+pub fn spec(k: kit.Kind, act: bool) c.Spec {
+    var s = plain(k);
+    s.name = names[@intFromBool(act)][@intFromBool(k == .bf16)];
+    if (!act) return s;
+    s.out = kit.elem(k);
+    s.replaces = "tf_cast, planCausal and tf_cast";
+    return s;
+}
+
+fn plain(_: kit.Kind) c.Spec {
     return .{
-        .name = names[@intFromBool(k == .bf16)],
+        .name = "",
         .accum = .f32,
         .depth = depth,
         .out = .f32,
@@ -50,6 +63,11 @@ pub const Walk = struct {
     kc: []f64 = &.{}, // [kv][keys][d]
     vc: []f64 = &.{},
     plan: hip.launches.PlanRef = undefined,
+    /// q and the rows in the cache's kind.
+    act: bool = false,
+    q32: u64 = 0,
+    wide: u64 = 0, // the baseline's fp32 rows
+    base: u64 = 0,
     scratch: [3]u64 = @splat(0), // scores, stats, partials
     qd: u64 = 0,
     out: u64 = 0,
@@ -64,7 +82,7 @@ pub const Walk = struct {
     }
 
     pub fn kernel(self: *Walk) g.Kernel {
-        return .{ .spec = spec(self.k), .ctx = self, .vt = &vt };
+        return .{ .spec = spec(self.k, self.act), .ctx = self, .vt = &vt };
     }
 
     const vt = g.hooks(Walk);
@@ -138,12 +156,22 @@ pub const Walk = struct {
             .pages = words,
             .pool = @intCast(pages),
         } };
-        self.qd = try self.rig.input(try kit.f32Bytes(a, self.q));
+        self.q32 = try self.rig.input(try kit.f32Bytes(a, self.q));
+        self.qd = self.q32;
+        if (self.act) {
+            const qb = try a.alloc(u8, self.q.len * 2);
+            for (self.q, 0..) |v, i| kit.put(k, qb, i, v);
+            self.qd = try self.rig.input(qb);
+        }
         const heads = shape.rows * shape.n;
         const tiles = (keys + 127) / 128;
         const lens = [_]usize{ heads * keys * 4, heads * 2 * 4, heads * tiles * d * 4 };
         for (lens, &self.scratch) |len, *at| at.* = try self.rig.scratch(len);
-        self.out = try self.rig.output(heads * d * 4);
+        self.out = try self.rig.output(heads * d * @as(usize, if (self.act) 2 else 4));
+        if (self.act) {
+            self.wide = try self.rig.scratch(heads * d * 4);
+            self.base = try self.rig.scratch(heads * d * 2);
+        }
         return true;
     }
 
@@ -161,6 +189,26 @@ pub const Walk = struct {
     pub fn run(self: *Walk) !void {
         const s = self.shape;
         const scale: f32 = 1 / @sqrt(@as(f32, d));
+        if (self.act) {
+            try self.l.planCausalAs(
+                self.qd,
+                self.out,
+                self.scratch[0],
+                self.scratch[1],
+                self.scratch[2],
+                self.plan,
+                0,
+                s.n,
+                self.kv(),
+                d,
+                s.k,
+                scale,
+                @backingInt(self.k),
+                true,
+                self.rig.s.handle,
+            );
+            return self.rig.s.synchronize();
+        }
         try self.l.planCausal(
             self.qd,
             self.out,
@@ -178,6 +226,32 @@ pub const Walk = struct {
             self.rig.s.handle,
         );
         try self.rig.s.synchronize();
+    }
+
+    /// The fp32 walk on q widened (the cast's exact values), then its rows cast to the kind.
+    pub fn replaced(self: *Walk) ![]const u8 {
+        const s = self.shape;
+        const scale: f32 = 1 / @sqrt(@as(f32, d));
+        const st = self.rig.s.handle;
+        try self.l.planCausal(
+            self.q32,
+            self.wide,
+            self.scratch[0],
+            self.scratch[1],
+            self.scratch[2],
+            self.plan,
+            0,
+            s.n,
+            self.kv(),
+            d,
+            s.k,
+            scale,
+            @backingInt(self.k),
+            st,
+        );
+        const n = s.rows * s.n * d;
+        try self.l.tf_cast(@ptrFromInt(self.wide), 0, @ptrFromInt(self.base), @backingInt(self.k), @intCast(n), st);
+        return self.rig.bytes(self.base, n * 2);
     }
 
     pub fn count(self: *Walk) usize {

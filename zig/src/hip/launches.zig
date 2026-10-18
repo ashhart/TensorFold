@@ -91,7 +91,10 @@ pub const Launcher = struct {
 
     const PlanFns = struct {
         kv_write: Function,
+        kv_write_act: Function,
         score: [2]Function, // fp16, bf16
+        score_act: [2]Function,
+        sum_act: Function,
         apply: [2]Function,
         keep: Function,
         gather: Function,
@@ -165,7 +168,10 @@ pub const Launcher = struct {
         l.dec = .{ .router = .{ try dec.function("tf_router_decode_f16"), try dec.function("tf_router_decode_bf16") }, .tail = try dec.function("tf_tail"), .conv_split = try dec.function("tf_conv_split"), .rms2 = try dec.function("tf_rms2"), .gnorm_out = try dec.function("tf_gnorm_out"), .select = try dec.function("tf_select_decode") };
         l.plan = .{
             .kv_write = try pl.function("tf_plan_kv_write"),
+            .kv_write_act = try pl.function("tf_plan_kv_write_act"),
             .score = .{ try pl.function("tf_plan_score_f16"), try pl.function("tf_plan_score_bf16") },
+            .score_act = .{ try pl.function("tf_plan_score_act_f16"), try pl.function("tf_plan_score_act_bf16") },
+            .sum_act = try pl.function("tf_sum_partials_act"),
             .apply = .{ try pl.function("tf_plan_apply_f16"), try pl.function("tf_plan_apply_bf16") },
             .keep = try pl.function("tf_plan_keep"),
             .gather = try pl.function("tf_plan_gather"),
@@ -314,6 +320,8 @@ pub const Launcher = struct {
     pub const tf_gated_delta = recurrence.tf_gated_delta;
     pub const planKvWrite = plan.planKvWrite;
     pub const planCausal = plan.planCausal;
+    pub const planCausalAs = plan.planCausalAs;
+    pub const planKvWriteAct = plan.planKvWriteAct;
     pub const planGatedDelta = plan.planGatedDelta;
     pub const planKeep = plan.planKeep;
     pub const planGdnReplay = plan.planGdnReplay;
