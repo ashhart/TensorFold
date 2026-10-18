@@ -290,7 +290,7 @@ const hip_drafter = "the HIP engine runs no DFlash2 drafter yet";
 /// Why a ROCm run refuses a named ``--drafter`` before it starts.
 pub const rocm_drafter = "--drafter: " ++ hip_drafter ++ ", so a rocm run takes none; --drafter none runs without it";
 
-/// The drafter ``--drafter auto`` names: the family's own, but none under --serial or on rocm, whose HIP engine runs none.
+/// The drafter ``--drafter auto`` names: the family's own; none under --serial or on rocm (HIP runs none).
 pub fn autoDrafter(config: json.Value, backend: []const u8, serial: bool) ?[]const u8 {
     if (serial or std.mem.eql(u8, backend, "rocm")) return null;
     return model.knownDrafter(config);
