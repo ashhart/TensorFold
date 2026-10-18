@@ -51,6 +51,8 @@ pub const Transport = struct {
     packet: []u8,
     valid: bool = true,
     control_base: usize = 0,
+    trace: bool = false,
+    trace_last_ns: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, json: []const u8, max_rows: u32) !Transport {
         return initWithControl(gpa, json, max_rows, 0);
@@ -83,7 +85,8 @@ pub const Transport = struct {
                 .links = config.links,
             }) };
         };
-        return .{ .gpa = gpa, .config_arena = arena, .endpoint = endpoint, .channel = fabric.Channel.init(endpoint.rdma(), 0, size), .packet = packet, .control_base = control_base };
+        const trace = if (std.c.getenv("TF_DSV41_TP_TRACE")) |value| std.mem.eql(u8, std.mem.span(value), "1") else false;
+        return .{ .gpa = gpa, .config_arena = arena, .endpoint = endpoint, .channel = fabric.Channel.init(endpoint.rdma(), 0, size), .packet = packet, .control_base = control_base, .trace = trace };
     }
 
     pub fn deinit(t: *Transport) void {
@@ -101,6 +104,7 @@ pub const Transport = struct {
         const t: *Transport = @ptrCast(@alignCast(ptr));
         if (!t.valid) return error.InvalidTensorParallelState;
         t.valid = false;
+        const began = if (t.trace) try fabric.words.checkedNowNs() else 0;
         if (send.len != receive.len or send.len > t.packet.len - 16) return error.InvalidTensorParallelMessage;
         std.mem.writeInt(u64, t.packet[0..8], tag, .little);
         std.mem.writeInt(u64, t.packet[8..16], send.len, .little);
@@ -108,11 +112,20 @@ pub const Transport = struct {
         const payload = t.packet[0 .. 16 + send.len];
         const chunks = [_][]const u8{ payload, payload };
         var incoming: [2][]const u8 = undefined;
-        try t.channel.exchange(&chunks, &incoming);
+        const copied = if (t.trace) try fabric.words.checkedNowNs() else 0;
+        const step = try t.channel.post(&chunks);
+        const posted = if (t.trace) try fabric.words.checkedNowNs() else 0;
+        try t.channel.complete(step, &incoming);
+        const completed = if (t.trace) try fabric.words.checkedNowNs() else 0;
         const peer = incoming[1 - t.channel.myRank()];
         try validate(peer, tag, receive.len);
         @memcpy(receive, peer[16..]);
         t.valid = true;
+        if (t.trace) {
+            const ended = try fabric.words.checkedNowNs();
+            std.debug.print("{{\"tp_trace_rank\":{d},\"step\":{d},\"tag\":{d},\"bytes\":{d},\"gap_ns\":{d},\"pack_ns\":{d},\"post_ns\":{d},\"complete_ns\":{d},\"copy_ns\":{d}}}\n", .{ t.channel.myRank(), step, tag, send.len, if (t.trace_last_ns == 0) 0 else began - t.trace_last_ns, copied - began, posted - copied, completed - posted, ended - completed });
+            t.trace_last_ns = ended;
+        }
     }
 };
 
