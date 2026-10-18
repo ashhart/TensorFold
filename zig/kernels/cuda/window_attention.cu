@@ -22,6 +22,43 @@ constexpr int DMAX = 128;  // head dim (static shared memory: q, a K and a V til
 
 using namespace tf_window;
 
+// tf_window_part's tile with a NaN or infinite output (out of the common path): those outputs again, finite values
+// summed as before, then each NaN or infinite value the row sees at its key's float64 weight (0: inf x 0 is NaN).
+__device__ __noinline__ void window_part_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const float* sc,
+                                             const __nv_bfloat16* vs, double* m64, float* po, int64_t r, int kh,
+                                             int g, int h, int hk, int d, int t, int lo, int p, int64_t base,
+                                             long long ring, float scale) {
+    const auto krow = [&](int key) { return kc + ((base + key % ring) * hk + kh) * d; };
+    const auto qrow = [&](int hd) { return q + (r * h + kh * g + hd) * d; };
+    { // each head's float64 max over the row's window, attention_ref's scores: a warp a head, lanes over keys
+        const int warp = threadIdx.x / 32, lane = threadIdx.x % 32;
+        for (int hd = warp; hd < g; hd += NT / 32) {
+            double mx = -INFINITY;
+            for (int key = lo + lane; key <= p; key += 32) mx = fmax(mx, attn_odd::score64(qrow(hd), krow(key), d, scale));
+            for (int k = 16; k > 0; k >>= 1) mx = fmax(mx, __shfl_xor_sync(0xFFFFFFFFu, mx, k));
+            if (lane == 0) m64[hd] = mx;
+        }
+    }
+    __syncthreads();
+    for (int o = threadIdx.x; o < g * d; o += NT) {
+        if (isfinite(po[o])) continue;
+        const int hd = o / d, e = o % d;
+        float a = 0.f;
+        for (int jj = 0; jj < BN; ++jj) {
+            const float v = __bfloat162float(vs[jj * d + e]);
+            if (isfinite(v)) a = __fmaf_rn(sc[hd * BN + jj], v, a);
+        }
+        for (int jj = 0; jj < BN; ++jj) {
+            const float v = __bfloat162float(vs[jj * d + e]);
+            const int key = t * BN + jj;
+            if (isfinite(v) || key < lo || key > p) continue;
+            const bool w = __dsub_rn(attn_odd::score64(qrow(hd), krow(key), d, scale), m64[hd]) >= attn_odd::least();
+            a = __fadd_rn(a, w ? v : __fmul_rn(0.f, v)); // NaN score: no weight
+        }
+        po[o] = a;
+    }
+}
+
 // Decode split by key tile (block: row, key head, tile); tf_window_merge folds the partials in tile order.
 extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloat16* __restrict__ q,
                                                                 const __nv_bfloat16* __restrict__ kc,
@@ -80,13 +117,19 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_part(const __nv_bfloa
         }
     }
     __syncthreads();
+    bool odd = false;
     for (int o = threadIdx.x; o < g * d; o += NT) {
         const int hd = o / d, e = o % d;
         float a = 0.f;
         for (int jj = 0; jj < BN; ++jj) a = __fmaf_rn(sc[hd * BN + jj], __bfloat162float(vs[jj * d + e]), a);
         po[part * g * d + o] = a;
+        odd |= !isfinite(a);
     }
     if (threadIdx.x < g) pm[part * g + threadIdx.x] = mx[threadIdx.x], pl[part * g + threadIdx.x] = ls[threadIdx.x];
+    if (__syncthreads_or(odd)) { // a NaN or infinite output: those again (finite outputs keep their bits)
+        __shared__ double m64[GMAX];
+        window_part_odd(q, kc, sc, vs, m64, po + part * g * d, r, kh, g, h, hk, d, t, lo, p, base, ring, scale);
+    }
 }
 
 // out [W, H, D] bf16: a row's partials folded in tile order, o = sum_j exp(m_j - M) o_j / sum_j exp(m_j - M) l_j.
@@ -109,6 +152,13 @@ extern "C" __global__ void __launch_bounds__(NT) tf_window_merge(const float* __
             const float a = expf(__fsub_rn(mj, m));
             acc = __fmaf_rn(a, po[(part0 + j) * g * d + o], acc);
             l = __fmaf_rn(a, pl[(part0 + j) * g + hd], l);
+        }
+        if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a factor of 0; again, kept
+            acc = 0.f;
+            for (int j = 0; j < tiles; ++j) {
+                const float mj = pm[(part0 + j) * g + hd];
+                if (mj != -INFINITY) acc = attn_odd::fold(po[(part0 + j) * g * d + o], expf(__fsub_rn(mj, m)), acc);
+            }
         }
         out[(r * h + kh * g + hd) * d + o % d] = __float2bfloat16_rn(__fdiv_rn(acc, l));
     }
@@ -382,7 +432,11 @@ wattn_kernel(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restric
 }
 
 // Decode on tensor cores (d 128): a row's heads one mma tile; warps take every 4th 32-key tile, fold in warp order.
-extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
+// ODD: every NaN and infinite value leaves the mma, and the heads add them back at float64's weights.
+// !ODD: true when some output is NaN, the one wrong class a 0 x inf can make (an infinite output holds a weight
+// above float32's least, so above float64's): the block (one warp: its warp) runs again as ODD over it.
+template <bool ODD>
+__device__ __forceinline__ bool decode_tc_rows(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
     __nv_bfloat16* __restrict__ out, const int* __restrict__ pos, const int* __restrict__ slot, int h, int hk, int win,
     long long ring, float scale) {
@@ -499,6 +553,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
             o[i][3] = __fmul_rn(o[i][3], a1);
         }
         wait_group<1>(); // tile t's V (the next K may still be in flight)
+        if constexpr (ODD) attn_odd::clean_rows<D, HB>(vs, lane, 32); // the chunks this lane copied
         __syncwarp();
         uint32_t pa[2][4];
 #pragma unroll
@@ -527,20 +582,31 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
     }
     wait_group<0>();
     const int na = min(4, p / HB - lo / HB + 1); // warps that saw keys
+    if constexpr (ODD) {
+        const auto krow = [&](int k) { return kc + ((base + k % ring) * hk + kh) * D; };
+        const auto vrow = [&](int k) { return vc + ((base + k % ring) * hk + kh) * D; };
+        const auto qrow = [&](int m) { return q + ((int64_t)r * h + kh * G + m) * D; };
+        const auto each = [&](int, auto f) { for (int k = lo; k <= p; ++k) f(krow(k)); }; // the row's window
+        auto w = attn_odd::weights<D>(qrow, each, scale, lane);
+        const auto vis = [&](int m, int) { return m < G; };
+        for (int t = lo / HB + warp; t <= p / HB; t += 4) // after the last tile: no rescale turns an infinity into NaN
+            attn_odd::add_back<D>(o, vrow, krow, max(lo, t * HB), min(p + 1, t * HB + HB), lane, vis, l0, l1, w);
+    }
     if (na == 1) { // one warp's fold is the result (the merge below would scale it by exp(0) = 1)
         if (warp == 0) {
+            bool nan = false;
 #pragma unroll
             for (int i = 0; i < NB; ++i) {
                 const int d = 8 * i + 2 * qd;
-                if (g8 < G)
-                    *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + g8) * D + d) =
-                        pack(tdiv(o[i][0], l0), tdiv(o[i][1], l0));
-                if (g8 + 8 < G)
-                    *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + g8 + 8) * D + d) =
-                        pack(tdiv(o[i][2], l1), tdiv(o[i][3], l1));
+                const float x0 = tdiv(o[i][0], l0), x1 = tdiv(o[i][1], l0), x2 = tdiv(o[i][2], l1), x3 = tdiv(o[i][3], l1);
+                if (g8 < G) *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + g8) * D + d) = pack(x0, x1);
+                if (g8 + 8 < G) *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + g8 + 8) * D + d) = pack(x2, x3);
+                nan |= (g8 < G && (x0 != x0 || x1 != x1)) || (g8 + 8 < G && (x2 != x2 || x3 != x3));
             }
+            // a NaN output (a 0 x inf the fold could not avoid; an infinity here is float64's): the warp again as ODD
+            if (!ODD && __any_sync(0xffffffffu, nan)) return true;
         }
-        return;
+        return false;
     }
     __syncthreads();
     float* os = reinterpret_cast<float*>(smem);   // [4 warps][16 heads][D]
@@ -575,6 +641,7 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
         il[hd] = l;
     }
     __syncthreads();
+    bool nan = false;
     for (int idx = threadIdx.x; idx < G * D / 2; idx += 128) {
         const int hd = idx / (D / 2), e = 2 * (idx % (D / 2));
         float acc0 = 0.0f, acc1 = 0.0f;
@@ -586,9 +653,37 @@ extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
             acc0 = __fmaf_rn(a, v.x, acc0);
             acc1 = __fmaf_rn(a, v.y, acc1);
         }
+        if (ODD && (acc0 != acc0 || acc1 != acc1)) { // NaN: a replayed infinity (float64's) met a factor of 0; kept
+            acc0 = acc1 = 0.0f;
+            for (int w = 0; w < 4; ++w) {
+                if (ms[w * 16 + hd] == -INFINITY) continue;
+                const float a = as[w * 16 + hd];
+                acc0 = attn_odd::fold(os[(w * 16 + hd) * D + e], a, acc0);
+                acc1 = attn_odd::fold(os[(w * 16 + hd) * D + e + 1], a, acc1);
+            }
+        }
         const float l = il[hd];
-        *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + hd) * D + e) = pack(tdiv(acc0, l), tdiv(acc1, l));
+        const float x0 = tdiv(acc0, l), x1 = tdiv(acc1, l);
+        *reinterpret_cast<uint32_t*>(out + ((int64_t)r * h + kh * G + hd) * D + e) = pack(x0, x1);
+        nan |= x0 != x0 || x1 != x1;
     }
+    // a NaN output (a 0 x inf in a fold or here; an infinity is float64's then): the block again as ODD
+    return !ODD && __syncthreads_or(nan);
+}
+
+// A block (or the one warp that saw keys) with a NaN output, run again with ODD on (out of the common path).
+__device__ __noinline__ void decode_tc_odd(const __nv_bfloat16* q, const __nv_bfloat16* kc, const __nv_bfloat16* vc,
+                                           __nv_bfloat16* out, const int* pos, const int* slot, int h, int hk, int win,
+                                           long long ring, float scale) {
+    decode_tc_rows<true>(q, kc, vc, out, pos, slot, h, hk, win, ring, scale);
+}
+
+extern "C" __global__ void __launch_bounds__(128) tf_window_decode_tc(
+    const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kc, const __nv_bfloat16* __restrict__ vc,
+    __nv_bfloat16* __restrict__ out, const int* __restrict__ pos, const int* __restrict__ slot, int h, int hk, int win,
+    long long ring, float scale) {
+    if (decode_tc_rows<false>(q, kc, vc, out, pos, slot, h, hk, win, ring, scale))
+        decode_tc_odd(q, kc, vc, out, pos, slot, h, hk, win, ring, scale);
 }
 
 } // namespace tf_window_prompt

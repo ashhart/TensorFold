@@ -62,6 +62,15 @@ __device__ __forceinline__ double score64(const __nv_bfloat16* q, const __nv_bfl
     return __dmul_rn(s, scale);
 }
 
+// The same with a head dim known only at run time.
+__device__ __forceinline__ double score64(const __nv_bfloat16* q, const __nv_bfloat16* k, int d, double scale) {
+    double s = 0.0;
+#pragma unroll 1
+    for (int e = 0; e < d; ++e)
+        s = __dadd_rn(s, __dmul_rn((double)__bfloat162float(q[e]), (double)__bfloat162float(k[e])));
+    return __dmul_rn(s, scale);
+}
+
 // Rows g, g + 8: w(r, K row) is attention_ref's exp(score - max) > 0; each(r, f) walks r's K rows (max on first use).
 template <int D, typename Q, typename Each>
 struct Weights {

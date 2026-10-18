@@ -134,7 +134,8 @@ pub const Window = struct {
         return &x[(self.cacheRow(w.base, key) * self.f.hk + kh) * self.f.d + e];
     }
 
-    /// NaN in a query; +inf and -inf in values; both in one column; NaN in a key; +inf in a window's first value.
+    /// NaN in a query; +inf and -inf in values; both in one column; NaN in a key; +inf in a window's first value;
+    /// +inf at float64 weights of 0 and below float32's least.
     fn plant(self: *Window) void {
         const n = self.shape.rows;
         const nan = c.toBf16(std.math.nan(f32));
@@ -154,6 +155,23 @@ pub const Window = struct {
         if (self.f.prompt and n > 6) {
             if (hk > 2) self.reach(5, 1);
             self.under(n - 1, 2 % hk);
+        }
+        // decode rows: the same over a row's window (unwindowed: row 4, whose keys stop short of row 3's NaN key)
+        if (!self.f.prompt and n > 7) self.split(if (self.f.win == 0) 4 else n - 1, if (hk > 2) 2 else 0, 21);
+    }
+
+    /// Row r, key head kh: key p all 8, the window's other keys all -8 with +inf at e; kh's first head queries all 2
+    /// (weights below float32's least: inf), its second all 8 (float64 weights of 0: NaN). Tiles split the keys.
+    fn split(self: *Window, r: usize, kh: usize, e: usize) void {
+        const f = self.f;
+        const p = self.at(r).p;
+        const G = f.h / f.hk;
+        @memset(self.q.items[(r * f.h + kh * G) * f.d ..][0..f.d], c.toBf16(2));
+        @memset(self.q.items[(r * f.h + kh * G + 1) * f.d ..][0..f.d], c.toBf16(8));
+        for (self.first(p)..p + 1) |key| {
+            const k = self.cell(self.kc.items, r, key, kh, 0);
+            @memset(@as([*]u16, @ptrCast(k))[0..f.d], c.toBf16(if (key == p) 8 else -8));
+            if (key != p) self.cell(self.vc.items, r, key, kh, e).* = c.toBf16(std.math.inf(f32));
         }
     }
 
