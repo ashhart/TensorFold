@@ -314,3 +314,12 @@ extern "C" __global__ void __launch_bounds__(1024) fn_qsa_select(const float* __
         spr[r] = 1;
     }
 }
+
+#include "flashnext_gdn_tpr.cuh"
+
+// The prompt chain on two threads a state row (gdn_tpr): fn_gdn_rows_to's bits, state_in == state_out in place.
+extern "C" __global__ void __launch_bounds__(256) fn_gdn_chain_tpr(const float* qn, const float* kn, const float* v,
+                                                                 const float* gb, const float* state_in, float* state_out,
+                                                                 int rows, float* ys_out) {
+    gdn_tpr::chain<2, 16>(qn, kn, v, gb, state_in, state_out, rows, ys_out);
+}

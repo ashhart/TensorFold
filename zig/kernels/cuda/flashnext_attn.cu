@@ -487,3 +487,8 @@ extern "C" __global__ void __launch_bounds__(256) fn_attn_merge(const float* __r
         OUT[(static_cast<long long>(r) * H + head) * HD + d] = __float2bfloat16_rn(__fdiv_rn(o, l));
     }
 }
+
+#include "flashnext_qsa_tile.cuh"
+
+// The indexer scores 8 rows a block, every head, the sums in fn_qsa_scores' order (its bits).
+template __global__ void qsa_tile::scores<8, 4>(const __nv_bfloat16*, const __nv_bfloat16*, const int*, float*, int, int, int, int);

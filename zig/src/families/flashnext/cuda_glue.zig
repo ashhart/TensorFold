@@ -49,6 +49,7 @@ const Fns = struct {
     gate: cuda.Function,
     pool: cuda.Function,
     scores: cuda.Function,
+    scores_tile: cuda.Function,
     chunks: cuda.Function,
     chunks_ahead: cuda.Function,
     chunks_one: cuda.Function,
@@ -123,6 +124,7 @@ pub const Glue = struct {
             .gate = try g.attn.function("fn_attn_gate"),
             .pool = try g.attn.function("fn_qsa_pool"),
             .scores = try g.attn.function("fn_qsa_scores"),
+            .scores_tile = try g.attn.function("_ZN8qsa_tile6scoresILi8ELi4EEEvPK13__nv_bfloat16S3_PKiPfiiii"),
             .chunks = try g.attn.function("fn_attn_chunks"),
             .chunks_ahead = try g.attn.function("fn_attn_chunks_ahead"),
             .chunks_one = try g.attn.function("fn_attn_chunks_one"),
@@ -242,6 +244,11 @@ pub const Glue = struct {
         if (wt.index_dim != 128 or wt.index_heads > 8) return error.RowShape;
         var a: cuda.Args = .{};
         ptrs(&a, &.{ iq, pooled, pos, sc });
+        if (wt.index_heads == 4) {
+            // 8 rows and 256 blocks a CTA, every head, fn_qsa_scores' sums in its order (its bits)
+            ints(&a, &.{ nb, wt.index_ratio, wt.index_top, rows });
+            return go(g.f.scores_tile, s, .{ cdiv(rows, 8), cdiv(blocks, 256), 1 }, 256, 0, &a);
+        }
         ints(&a, &.{ nb, wt.index_heads, wt.index_ratio, wt.index_top });
         try go(g.f.scores, s, .{ rows, cdiv(blocks, 64), 1 }, 256, 0, &a);
     }
