@@ -126,6 +126,7 @@ test {
         _ = @import("benchmark_facts_test.zig");
         _ = @import("benchmark_rocm_test.zig");
         _ = @import("benchmark_manifest.zig");
+        _ = @import("benchmark_drafts.zig");
         _ = @import("benchmark_upload.zig");
         _ = @import("benchmark_upload_test.zig");
         _ = @import("benchmark_args.zig");

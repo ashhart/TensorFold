@@ -15,6 +15,7 @@ const manifest = @import("benchmark_manifest.zig");
 const upload = @import("benchmark_upload.zig");
 const check = @import("benchmark_check.zig");
 const stop = @import("benchmark_stop.zig");
+const drafts = @import("benchmark_drafts.zig");
 const Allocator = std.mem.Allocator;
 const Args = args_mod.Args;
 
@@ -451,6 +452,12 @@ fn run(ctx: *const Context, args: Args) !u8 {
     try show(ctx, v);
     if (!try receipt.save(a, ctx.io, v, dest, nowMs(ctx), &problem)) return fail(ctx, problem);
     try say(ctx, "Receipt saved: {s}", .{dest});
+    // whether a drafter ran is the server's counters, kept beside the receipt; the board's receipt has no field for it
+    const passed: ?bool = if (plan) |p| p.drafter_dir != null else null;
+    const counts = try drafts.path(a, dest);
+    const kept = try drafts.value(a, &run_id, std.fs.path.basename(dest), facts.model.drafter_repo_id, passed, samples);
+    if (!try drafts.save(a, ctx.io, kept, counts, &problem)) return fail(ctx, problem);
+    try say(ctx, "{s}", .{try drafts.verdict(a, drafts.totals(samples), passed, counts)});
     if (cleanup) |c| return fail(ctx, c);
     const was_cancelled = stop.requested() != null or for (samples) |s| {
         if (s.error_code == .cancelled) break true;

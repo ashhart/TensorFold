@@ -34,6 +34,7 @@ pub const Stream = struct {
     last: ?i96 = null,
     deliveries: u32 = 0,
     usage: ?Value = null,
+    speculative: ?Value = null,
     runtime: *json.Object,
     done: bool = false,
     finished: bool = false,
@@ -86,6 +87,9 @@ pub const Stream = struct {
             if (u != .object) return error.InvalidUsage;
             s.usage = u;
         }
+        if (chunk.get("speculative")) |d| if (d == .object) {
+            s.speculative = d;
+        };
         const reported = chunk.get("tensorfold") orelse chunk.get("runtime");
         if (reported) |r| if (r == .object) for (r.object.keys(), r.object.values()) |k, v| try s.runtime.put(s.a, k, v);
         const choices = chunk.get("choices") orelse Value{ .array = &.{} };
@@ -150,6 +154,7 @@ pub const Stream = struct {
         sample.server_decode_seconds = runtimeNumber(s.runtime, "decode_seconds", "decode_s");
         sample.prefill_seconds = runtimeNumber(s.runtime, "prefill_seconds", "prefill_s");
         sample.token_sha = tokenSha(s.a, s.runtime.get("token_sha"));
+        sample.drafts = drafts(s.speculative);
         if (s.first) |f| sample.ttft_seconds = @max(0, seconds(f - start));
         if (s.deliveries >= 2 and s.last.? > s.first.?) {
             const span = seconds(s.last.? - s.first.?);
@@ -170,6 +175,17 @@ fn count(v: ?Value) ?u64 {
     const x = v orelse return null;
     if (x != .int or x.int.len == 0 or x.int[0] == '-') return null;
     return std.fmt.parseInt(u64, x.int, 10) catch null;
+}
+
+/// The final chunk's ``speculative`` rounds, drafted and accepted counts; null unless all three are counts and accepted <= drafted.
+fn drafts(v: ?Value) ?suite.Drafts {
+    const d = v orelse return null;
+    const out: suite.Drafts = .{
+        .rounds = count(d.get("rounds")) orelse return null,
+        .drafted = count(d.get("drafted")) orelse return null,
+        .accepted = count(d.get("accepted")) orelse return null,
+    };
+    return if (out.accepted <= out.drafted) out else null;
 }
 
 /// ``key``, else ``fallback``, from the telemetry block: a finite non-negative number, else null.

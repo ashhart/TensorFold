@@ -395,3 +395,50 @@ test "an attached run whose accepted manifest lacks its rank count or revision i
         try std.testing.expect(missing_field == .null);
     }
 }
+
+test "the draft counts beside the receipt show whether a passed drafter drafted, and the receipt keeps the board's fields" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const hub = try r.path("hub");
+    try r.env.put("HF_HUB_CACHE", hub);
+    const drafter = "z-lab/Qwen3.8-27B-DFlash2";
+    try cache(a, hub, drafter);
+    const big = try r.path("big-checkpoint");
+    try std.Io.Dir.cwd().createDirPath(io, big);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = try std.fs.path.join(a, &.{ big, "config.json" }), .data = "{\"model_type\": \"qwen3_5\", \"hidden_size\": 5120, \"num_hidden_layers\": 64}" });
+    const out = try r.path("run.json");
+    const counts = try r.path("run.drafts.json");
+    const Case = struct { speculative: []const u8, drafter: []const u8, line: []const u8, fields: []const []const u8, unproven: bool };
+    const cases = [_]Case{
+        .{ .speculative = "\"rounds\": 3, \"drafted\": 4, \"accepted\": 3, \"acceptance_rate\": 0.75", .drafter = "auto", .line = "Draft counts: 6 of 8 drafted tokens accepted over 6 rounds (2 of 2 attempts reported them); saved: ", .fields = &.{ "\"drafter_passed\":true", "\"drafter_repo_id\":\"" ++ drafter ++ "\"", "\"accepted\":3,\"completion_tokens\":4,\"drafted\":4", "\"totals\":{\"accepted\":6,\"attempts\":2,\"drafted\":8,\"reported\":2,\"rounds\":6}" }, .unproven = false },
+        .{ .speculative = "\"rounds\": 4, \"drafted\": 0, \"accepted\": 0", .drafter = "auto", .line = "Draft counts: 0 of 0 drafted tokens accepted over 8 rounds (2 of 2 attempts reported them); saved: ", .fields = &.{"\"drafter_passed\":true"}, .unproven = true },
+        .{ .speculative = "\"rounds\": 4, \"drafted\": 0, \"accepted\": 0", .drafter = "none", .line = "Draft counts: 0 of 0 drafted tokens accepted over 8 rounds", .fields = &.{ "\"drafter_passed\":false", "\"drafter_repo_id\":null" }, .unproven = false },
+        .{ .speculative = "", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{ "\"reported\":0", "\"rounds\":null" }, .unproven = false },
+        // accepted past drafted is no count at all
+        .{ .speculative = "\"rounds\": 1, \"drafted\": 1, \"accepted\": 2", .drafter = "auto", .line = "Draft counts: the server reported none; saved: ", .fields = &.{"\"reported\":0"}, .unproven = false },
+    };
+    for (cases) |c| {
+        const m = try cli.draftedWorld(a, c.speculative);
+        defer m.stop();
+        r.self_exe = try cli.standIn(&r, m.port);
+        try std.testing.expectEqual(@as(u8, 0), try r.command(try argv(&r, &.{ big, "--drafter", c.drafter, "--output", out })));
+        try std.testing.expect(r.has(c.line) and r.has(counts));
+        try std.testing.expectEqual(c.unproven, r.has(@import("benchmark_drafts.zig").not_drafted));
+        const text = try std.Io.Dir.cwd().readFileAlloc(io, counts, a, .limited(1 << 20));
+        for (c.fields) |f| if (std.mem.indexOf(u8, text, f) == null) {
+            std.debug.print("draft counts lack {s}: {s}\n", .{ f, text });
+            return error.TestUnexpectedResult;
+        };
+        const st = try std.Io.Dir.cwd().statFile(io, counts, .{});
+        try std.testing.expectEqual(@as(u32, 0o600), @as(u32, @intCast(st.permissions.toMode() & 0o777)));
+        // the receipt itself holds exactly the board's fields, so it loads under the same rules as before
+        var problem: []const u8 = "";
+        const v = (try receipt.load(a, io, out, std.Io.Clock.real.now(io).toMilliseconds(), &problem)).?;
+        for (v.get("samples").?.array) |s| try std.testing.expect(s.get("drafted") == null and s.get("rounds") == null);
+    }
+}
