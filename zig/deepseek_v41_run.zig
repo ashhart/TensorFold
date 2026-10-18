@@ -219,6 +219,19 @@ pub fn main(init: std.process.Init) !void {
         .bound_only = streamEngram(),
     });
     defer model.deinit();
+    var tp_transport: ?ds.tp_transport.Transport = null;
+    defer if (tp_transport) |*transport| transport.deinit();
+    var tp_context: ?ds.tp_moe.Context = null;
+    defer if (tp_context) |*context| context.deinit();
+    if (std.c.getenv("TF_DSV41_TP_SETTINGS")) |path| {
+        const settings_json = try std.Io.Dir.cwd().readFileAlloc(io, std.mem.span(path), arena, .limited(65536));
+        tp_transport = try ds.tp_transport.Transport.init(a, settings_json, model.workspace.plan.rows);
+        const transport = &tp_transport.?;
+        tp_context = try ds.tp_moe.Context.init(a, model.device, &model.weights, @intCast(transport.channel.myRank()), model.workspace.plan.rows, transport.exchange());
+        for (tp_context.?.descriptors) |layer| for (layer) |buffer| model.residency.add(buffer);
+        model.residency.commit();
+        model.tp = &tp_context.?;
+    }
     const ready = mtl.clock.seconds();
     const before = try counters();
     const engram_before = model.engramStats();
@@ -240,6 +253,10 @@ pub fn main(init: std.process.Init) !void {
         after.disk_read == before.disk_read;
     const receipt = try std.json.Stringify.valueAlloc(a, .{
         .mode = mode,
+        .tensor_parallel_ranks = if (model.tp != null) @as(u32, 2) else 1,
+        .tensor_parallel_rank = if (model.tp) |context| @as(u32, context.rank) else 0,
+        .tensor_parallel_partition = if (model.tp != null) "moe_output_columns_replicated_weights" else "none",
+        .tensor_parallel_exchanges = if (tp_transport) |transport| transport.channel.step else 0,
         .evidence_origin = "current_invocation_not_historical_qualification",
         .context_capacity = model.cache.plan.capacity,
         .consumed_tokens = model.cache.position,

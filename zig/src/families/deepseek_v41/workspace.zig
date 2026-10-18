@@ -91,7 +91,7 @@ pub const Plan = struct {
             t * 24 * 4,       t * 6144 * 2,       t * 25600 * 2,                   t * 384 * 4,   t * 6 * 4,    t * 6 * 4,    t * 7 * 2304 * 2,
             t * 7 * 2304 * 2, t * 7 * 2304 * 2,   t * 7 * 5120 * 2,                t * 2304 * 2,  t * 2304 * 2, t * 2304 * 2, t * 5120 * 2,
             t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, stage * 256,   stage * 256,  stage * 8,    stage * 8,
-            stage * 4,        stage * 4,        t * 7 * 4,                       t * 7 * 4,
+            stage * 4,        stage * 4,          t * 7 * 4,                       t * 7 * 4,
         };
         var out = Plan{ .rows = rows, .lanes = lanes, .streamed = streamed, .offsets = undefined, .bytes = 0, .projection_bytes = projection_bytes };
         for (sizes, 0..) |size, i| {

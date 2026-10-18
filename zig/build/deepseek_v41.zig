@@ -39,6 +39,12 @@ pub fn checks(
             .{ .name = "kernel_sources", .module = sources },
         },
     }) });
+    const tp_host = b.addTest(.{
+        .root_module = engine,
+        .filters = &.{ "TP history", "TP output row", "TP exchanges" },
+    });
+    b.step("test-deepseek-v41-tp-host", "Two-rank row layout, history and message validation")
+        .dependOn(&b.addRunArtifact(tp_host).step);
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
     device_step.dependOn(&b.addRunArtifact(device).step);
     const reference = b.addTest(.{

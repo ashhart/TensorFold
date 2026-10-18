@@ -20,6 +20,8 @@ pub const engram_rows = @import("engram_rows.zig");
 const View = @import("view.zig").View;
 const gpu_counters = @import("profiler.zig");
 const expert_groups = @import("../../core/expert_groups.zig");
+pub const tp_moe = @import("tp_moe.zig");
+pub const tp_transport = @import("tp_transport.zig");
 
 pub const prefill_step = 256;
 pub const Logits = enum { none, last, all };
@@ -113,6 +115,7 @@ pub const Model = struct {
     /// installed profiler) selects the serial encoder; both give the same bits.
     concurrent: bool = true,
     observer: ?Observer = null,
+    tp: ?*tp_moe.Context = null,
     pub const Observer = struct {
         ctx: *anyopaque,
         encode: *const fn (*anyopaque, mtl.ComputeEncoder, u32, gpu_counters.Stage, *const Model) void,
@@ -289,12 +292,17 @@ pub const Model = struct {
     /// A chunk against lane slot `slot`'s caches and Engram cursor: rows land at that slot's positions.
     pub fn forwardOn(m: *Model, slot: u32, ids: []const u32, logits: Logits) ![]const f32 {
         if (!m.valid) return error.InvalidModelState;
+        if (m.tp != null and m.profile != null) return error.TensorParallelProfilerUnsupported;
         if (slot >= m.lanes) return error.InvalidLaneSlot;
         const state = &m.caches[slot];
         if (ids.len == 0 or ids.len > m.workspace.plan.rows) return error.InvalidPrefillChunk;
         if (state.position > state.plan.capacity or
             ids.len > state.plan.capacity - state.position) return error.ContextFull;
         for (ids) |id| if (id >= 129280) return error.UnsupportedToken;
+        if (m.tp) |tp| tp.begin(slot, @intCast(state.position), ids) catch |err| {
+            m.valid = false;
+            return err;
+        };
         m.logits_rows = 0;
         @memcpy(m.workspace.tokenIds(ids.len), ids);
         const pool = mtl.objc.Pool.push();
@@ -325,7 +333,8 @@ pub const Model = struct {
             staged[0] = try sources[0].stage(ws.words(.engram_ids_0, n), ws.bytes(.engram_stage_w_0, n * engram_rows.weight_bytes), ws.bytes(.engram_stage_s_0, n * engram_rows.scale_bytes), ws.words(.engram_local_0, n));
             staged[1] = try sources[1].stage(ws.words(.engram_ids_1, n), ws.bytes(.engram_stage_w_1, n * engram_rows.weight_bytes), ws.bytes(.engram_stage_s_1, n * engram_rows.scale_bytes), ws.words(.engram_local_1, n));
         }
-        const e = m.queue.commandBufferUnretained();
+        var e = m.queue.commandBufferUnretained();
+        var prior_gpu_seconds: f64 = 0;
         var enc = e.compute(if (m.concurrent and m.profile == null) .concurrent else .serial);
         for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
         var encoding = true;
@@ -389,7 +398,9 @@ pub const Model = struct {
             enc.barrier();
             m.normalize(enc, ws.view(.collapsed), layer.ffn_norm, ws.view(.normalized), rows);
             try m.profileSpan(&enc, .moe);
-            try m.moe(enc, &layer.moe, rows);
+            if (m.tp) |tp| {
+                prior_gpu_seconds += try tp.boundary(m, &e, &enc, &encoding, index, rows);
+            } else try m.moe(enc, &layer.moe, rows);
             try m.profileSpan(&enc, .mhc);
             m.post(enc, rows);
             if (m.observer) |observer| observer.encode(observer.ctx, enc, @intCast(index), .moe, m);
@@ -414,7 +425,7 @@ pub const Model = struct {
         try completed(e);
         if (m.profile) |recorder| _ = try recorder.readAfterCompletion();
         try state.append(rows);
-        m.last_gpu_seconds = e.gpuSeconds();
+        m.last_gpu_seconds = prior_gpu_seconds + e.gpuSeconds();
         m.valid = true;
         m.logits_rows = if (logits == .all) rows else if (logits == .last) 1 else 0;
         return ws.logits(m.logits_rows);

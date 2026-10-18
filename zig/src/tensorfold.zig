@@ -65,6 +65,8 @@ pub const flashnext_pack = @import("families/flashnext/pack.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = lora_merge;
+    _ = deepseek_v41.tp_moe;
+    _ = deepseek_v41.tp_transport;
     _ = @import("families/nemotron/prefill_kernels.zig"); // Compile the prompt-chunk sources in tests.
     _ = @import("families/nemotron/simd_attention.zig"); // The pre-M5 attention rewrite finds its lines.
     _ = @import("families/nemotron/weights.zig");
