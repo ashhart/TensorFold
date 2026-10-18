@@ -93,7 +93,8 @@ pub const Lanes = struct {
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
-        v.many_rows = engine.prompt_rows;
+        v.prefill_many = null;
+        v.many_rows = 0;
         break :vt v;
     };
 
