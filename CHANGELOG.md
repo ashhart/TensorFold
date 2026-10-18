@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.1
 
+- Qwen3.8-27B on Metal keeps its Neural Engine prompt share off by default on M5. Its fp16 prompt rows can change replies, so the default follows the no-quality-tradeoffs rule. `TF_ANE_COLUMNS=N` opts in; M1 to M4 already use the GPU alone. The load receipt reports requested and loaded columns, fp16 program-weight bytes and exact-output qualification.
+
 - Source builds report the release version. A source build of 1.1.0 reported 1.0.12 because its package manifest still carried the older version.
 - Qwen on CUDA uses larger verification trees, shared rounds across streams and batched DFlash proposals. Captured launches follow the live row and window sizes. A lone stream chooses its draft width from measured complete-round costs, with separate retry cooldowns for widths that did not repay their cost; straight chains avoid the branch planner and contiguous drafter rows avoid a redundant gather (#978). Thanks to @BobClawblaw and the shared CUDA contributors.
 - DeepSeek-V4.1 gains a native CUDA family, with shared checkpoint planning and Engram token maps, paged and split KV, prompt-cache sessions, keyed sampling and drafting through the lane scheduler. Devices older than sm_90 refuse before family image loading. The shared configuration and host references accompany the CUDA family; a complete DeepSeek Metal backend remains separate (#667, #668, #671, #674, #686, #688, #691, #693, #694, #695, #699, #702, #703, #707, #727, #824, #825, #826, #827). Thanks to @jayleaton and @akol1, retaining Turboderp's ExLlamaV3 attribution and the common EXL3 contributors' credits.

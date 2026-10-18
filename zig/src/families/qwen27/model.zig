@@ -12,8 +12,7 @@ const glue = @import("glue_gpu.zig");
 const Frame = @import("gpu_frame.zig").Frame;
 const ane_mlp = @import("ane_mlp.zig");
 
-/// Gate/up columns a layer the Neural Engine computes for prompt chunks (TF_ANE_COLUMNS overrides); M5 only.
-const ane_columns = 3072;
+const ane_policy = @import("ane_policy.zig");
 
 pub const Model = struct {
     allocator: std.mem.Allocator,
@@ -72,14 +71,16 @@ pub const Model = struct {
         m.frame = try Frame.init(m.device, c, @max(rows, promptRows()));
         errdefer m.frame.deinit();
         m.ane = null;
-        const columns = if (platform.c.getenv("TF_ANE_COLUMNS")) |v| try std.fmt.parseInt(u32, std.mem.span(v), 10) else ane_columns;
-        const share = columns > 0 and m.device.tensorUnits() and mtl.ane.available() and m.weights.uniformMlp();
+        const columns = try ane_policy.columns(if (platform.c.getenv("TF_ANE_COLUMNS")) |v| std.mem.span(v) else null);
+        const share = ane_policy.requestedOnChip(columns, m.device.tensorUnits()) and mtl.ane.available() and m.weights.uniformMlp();
         const fits = if (share_fits) |f| !share or f(ane_mlp.Share.bytes(c, columns)) else true;
         if (!fits) std.log.info("qwen27: the Neural Engine's prompt share ({d} MiB of fp16 weights) would take this Mac past its load limit; prompts run on the GPU alone", .{ane_mlp.Share.bytes(c, columns) >> 20});
         if (share and fits) m.ane = ane_mlp.Share.init(a, m.device, m.queue, &m.checkpoint, c, columns, (m.frame.capacity + ane_mlp.width - 1) / ane_mlp.width) catch |err| blk: {
             std.log.warn("qwen27: the Neural Engine's prompt share did not load ({s}); prompts run on the GPU alone", .{@errorName(err)});
             break :blk null;
         };
+        const loaded_columns = if (m.ane) |loaded| loaded.columns else 0;
+        std.log.info("qwen27: Neural Engine prompt share requested_columns={d} loaded_columns={d} program_weight_bytes={d} loaded={any} exact_output_qualified={any}", .{ columns, loaded_columns, ane_mlp.Share.bytes(c, loaded_columns), m.ane != null, ane_policy.exact_output_qualified });
         m.checkpoint.closeFiles();
         return m;
     }
@@ -129,5 +130,5 @@ test "the 27B's Neural Engine share of 3,072 columns holds 5,760 MiB of fp16 wei
     var c: cfg.Config = undefined;
     c.hidden = 5120;
     c.layers = 64;
-    try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, ane_columns));
+    try std.testing.expectEqual(@as(u64, 5760 << 20), ane_mlp.Share.bytes(c, 3072));
 }
