@@ -560,8 +560,7 @@ pub fn checkShapes(c: Config) !void {
     }
 }
 
-/// Nemotron 3.5 Bolt 74B-A9B (nemotron_h_puzzle): per-layer expert counts 240-496 and widths 1536-2560 routed
-/// through a 1,024 latent, a 5,376 shared expert kept in hidden, top-k 9 uniform.
+/// Nemotron 3.5 Bolt 74B-A9B: per-layer experts 240-496, widths 1536-2560, a 1,024 latent, shared 5,376, top-k 9.
 fn checkBoltShapes(c: Config) !void {
     var ok = c.hidden == 4096 and c.vocab == 131072 and c.mamba_heads == 128 and c.mamba_head_dim == 64 and
         c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
