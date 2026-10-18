@@ -292,6 +292,10 @@ fn bind(e: mtl.ComputeEncoder, v: View, index: usize) void {
 
 /// No allocation or commit; retain all views until completion, disjoint from writes, with valid GPU IDs.
 pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y: View, scratch: View, r: Rows) !void {
+    stages(p, e, try prepare(m, x, y, scratch, r));
+}
+
+fn prepare(m: Matrix, x: View, y: View, scratch: View, r: Rows) !Staged {
     const storage_bytes = try m.checkStorage();
     var a = try rowsArgs(m.k, m.n, r, x, y, scratch);
     if (r.grouped) return error.InvalidExl3GroupedRows;
@@ -303,8 +307,43 @@ pub fn encode(p: *const Pipelines, e: mtl.ComputeEncoder, m: Matrix, x: View, y:
     a.has_bias = @intFromBool(m.bias != null);
     a.tile_k_stride = try m.kStride();
     a.tile_n_stride = m.nStride();
-    stages(p, e, a, m.trellis, m.suh, m.svh, m.bias orelse m.svh, scratch, x, y, scratch, r);
+    return .{ .a = a, .trellis = m.trellis, .su = m.suh, .sv = m.svh, .bias = m.bias orelse m.svh, .descriptors = scratch, .x = x, .y = y, .scratch = scratch, .r = r };
 }
+
+/// One product of a concurrent group: a plain matrix or GPU-routed experts.
+pub const Job = struct {
+    weights: union(enum) { matrix: Matrix, experts: Experts },
+    x: View,
+    y: View,
+    scratch: View,
+    rows: Rows,
+};
+
+/// Independent products in one group: each stage is dispatched for every job before one barrier,
+/// so a concurrent encoder may overlap them; on a serial encoder they run in order. Each job
+/// computes exactly what encode or encodeIndexed computes. No job may write (its output or its
+/// scratch) bytes another job reads or writes; such groups are rejected before anything is encoded.
+pub fn encodeJobs(p: *const Pipelines, e: mtl.ComputeEncoder, jobs: []const Job) !void {
+    if (jobs.len == 0 or jobs.len > max_jobs) return error.InvalidExl3Jobs;
+    var staged: [max_jobs]Staged = undefined;
+    for (jobs, staged[0..jobs.len]) |job, *out| out.* = switch (job.weights) {
+        .matrix => |m| try prepare(m, job.x, job.y, job.scratch, job.rows),
+        .experts => |x| try prepareIndexed(x, job.x, job.y, job.scratch, job.rows),
+    };
+    for (staged[0..jobs.len], 0..) |a, i| for (staged[0..jobs.len], 0..) |b, j| {
+        if (i == j) continue;
+        // a's writes against everything b touches.
+        for ([_]Extent{ a.output(), a.scratchExtent() }) |w| for (b.reads() ++ [_]Extent{ b.output(), b.scratchExtent() }) |o| {
+            if (o.bytes != 0) try disjoint(w.view, w.bytes, o.view, o.bytes);
+        };
+    };
+    // Stage barriers: the matmul reads every job's rotated rows, rotate_out every job's sums.
+    for (0..3) |stage| {
+        for (staged[0..jobs.len]) |job| dispatchStage(p, e, job, stage);
+        e.barrier();
+    }
+}
+const max_jobs = 6;
 
 /// A kept-dense EXL3 matrix: a bf16 weight beside the input/output rotation scales, no trellis.
 pub const DenseMatrix = struct {
@@ -366,6 +405,10 @@ pub fn encodeDense(p: *const Pipelines, e: mtl.ComputeEncoder, m: DenseMatrix, x
 
 /// GPU routes choose caller-validated resident descriptors; grouped padding uses maxInt(u32).
 pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Experts, x: View, y: View, scratch: View, r: Rows) !void {
+    stages(p, e, try prepareIndexed(experts, x, y, scratch, r));
+}
+
+fn prepareIndexed(experts: Experts, x: View, y: View, scratch: View, r: Rows) !Staged {
     if (r.routes == null or experts.count == 0 or experts.count > std.math.maxInt(u32)) return error.InvalidExl3Experts;
     if (r.grouped and (r.input_ids == null or r.output_ids == null or r.count % 8 != 0))
         return error.InvalidExl3GroupedRows;
@@ -377,7 +420,7 @@ pub fn encodeIndexed(p: *const Pipelines, e: mtl.ComputeEncoder, experts: Expert
     try readonly(experts.descriptors, experts.count * @sizeOf(ExpertDescriptor), y, ybytes, scratch, try scratchBytes(experts.k, experts.n, r.count));
     a.indexed = if (r.grouped) 2 else 1;
     a.experts = @intCast(experts.count);
-    stages(p, e, a, scratch, scratch, scratch, scratch, experts.descriptors, x, y, scratch, r);
+    return .{ .a = a, .trellis = scratch, .su = scratch, .sv = scratch, .bias = scratch, .descriptors = experts.descriptors, .x = x, .y = y, .scratch = scratch, .r = r };
 }
 
 fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows) !void {
@@ -390,43 +433,97 @@ fn matrixWrites(m: Matrix, storage_bytes: usize, y: View, scratch: View, r: Rows
     if (m.bias) |b| try readonly(b, m.n * 2, y, ybytes, scratch, scratch_bytes);
 }
 
-fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, a: Args, trellis: View, su: View, sv: View, bias: View, descriptors: View, x: View, y: View, scratch: View, r: Rows) void {
+const Extent = struct { view: View, bytes: usize };
+
+/// A validated product: its arguments and every view its three stages bind.
+const Staged = struct {
+    a: Args,
+    trellis: View,
+    su: View,
+    sv: View,
+    bias: View,
+    descriptors: View,
+    x: View,
+    y: View,
+    scratch: View,
+    r: Rows,
+
+    fn output(s: Staged) Extent {
+        const yrows: usize = if (s.r.output_ids != null) s.r.output_rows else s.r.count;
+        return .{ .view = s.y, .bytes = ((yrows - 1) * s.r.y_stride + s.a.n) * (if (s.r.output == .f32) @as(usize, 4) else 2) };
+    }
+    fn scratchExtent(s: Staged) Extent {
+        return .{ .view = s.scratch, .bytes = scratchBytes(s.a.k, s.a.n, s.r.count) catch unreachable };
+    }
+    /// The input rows and ID maps; weights are read-only resident tensors for every job.
+    fn reads(s: Staged) [4]Extent {
+        const repeat: usize = if (s.r.routes) |v| v.repeat else 1;
+        const xrows: usize = if (s.r.input_ids != null) s.r.input_rows else s.r.count / repeat;
+        const ids = s.r.count * 4;
+        return .{
+            .{ .view = s.x, .bytes = ((xrows - 1) * s.r.x_stride + s.a.k) * 2 },
+            .{ .view = s.r.input_ids orelse s.x, .bytes = if (s.r.input_ids != null) ids else 0 },
+            .{ .view = s.r.output_ids orelse s.x, .bytes = if (s.r.output_ids != null) ids else 0 },
+            .{ .view = if (s.r.routes) |v| v.ids else s.x, .bytes = if (s.r.routes != null) ids else 0 },
+        };
+    }
+};
+
+fn stages(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged) void {
+    for (0..3) |stage| {
+        dispatchStage(p, e, s, stage);
+        e.barrier();
+    }
+}
+
+/// Stage 0 rotates the input rows into scratch, 1 multiplies them into the scratch sums, 2 rotates
+/// the sums out; the caller orders stages with a barrier.
+fn dispatchStage(p: *const Pipelines, e: mtl.ComputeEncoder, s: Staged, stage: usize) void {
+    const a = s.a;
+    const r = s.r;
+    const scratch = s.scratch;
+    const descriptors = s.descriptors;
     const sums = View{ .buffer = scratch.buffer, .offset = scratch.offset + ((@as(usize, a.rows) * a.k * 2 + 15) & ~@as(usize, 15)) };
     const routes = if (r.routes) |v| v.ids else scratch;
-    e.setPipeline(p.rotate_in);
-    bind(e, x, 0);
-    bind(e, su, 1);
-    bind(e, scratch, 2);
-    e.setValue(a, 3);
-    bind(e, r.input_ids orelse scratch, 4);
-    bind(e, routes, 5);
-    bind(e, descriptors, 6);
-    e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
-    e.barrier();
-    const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
-    const row_groups: usize = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + 7) / 8;
-    const pairs = !shared and a.n / 16 * row_groups <= p.pairs_up_to_groups;
-    e.setPipeline(if (shared) p.prefill.? else if (pairs) p.matmul_pairs else p.matmul);
-    bind(e, scratch, 0);
-    bind(e, trellis, 1);
-    bind(e, sums, 2);
-    e.setValue(a, 3);
-    bind(e, routes, 4);
-    bind(e, descriptors, 5);
-    const group_rows: usize = if (shared) 32 else 8;
-    e.dispatchGroups(.{ .width = if (pairs) a.n / 2 else a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
-    e.barrier();
-    e.setPipeline(p.rotate_out);
-    bind(e, sums, 0);
-    bind(e, sv, 1);
-    bind(e, bias, 2);
-    bind(e, y, 3);
-    e.setValue(a, 4);
-    bind(e, r.output_ids orelse scratch, 5);
-    bind(e, routes, 6);
-    bind(e, descriptors, 7);
-    e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
-    e.barrier();
+    switch (stage) {
+        0 => {
+            e.setPipeline(p.rotate_in);
+            bind(e, s.x, 0);
+            bind(e, s.su, 1);
+            bind(e, scratch, 2);
+            e.setValue(a, 3);
+            bind(e, r.input_ids orelse scratch, 4);
+            bind(e, routes, 5);
+            bind(e, descriptors, 6);
+            e.dispatchGroups(.{ .width = a.k / 128, .height = a.rows }, .{ .width = 32 });
+        },
+        1 => {
+            const shared = p.prefill != null and a.rows >= 32 and a.indexed == 0 and a.routed == 0;
+            const row_groups: usize = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + 7) / 8;
+            const pairs = !shared and a.n / 16 * row_groups <= p.pairs_up_to_groups;
+            e.setPipeline(if (shared) p.prefill.? else if (pairs) p.matmul_pairs else p.matmul);
+            bind(e, scratch, 0);
+            bind(e, s.trellis, 1);
+            bind(e, sums, 2);
+            e.setValue(a, 3);
+            bind(e, routes, 4);
+            bind(e, descriptors, 5);
+            const group_rows: usize = if (shared) 32 else 8;
+            e.dispatchGroups(.{ .width = if (pairs) a.n / 2 else a.n / 16, .height = if (a.indexed == 1) a.rows else (@as(usize, a.rows) + group_rows - 1) / group_rows }, .{ .width = if (shared) @as(usize, 128) else 32 });
+        },
+        else => {
+            e.setPipeline(p.rotate_out);
+            bind(e, sums, 0);
+            bind(e, s.sv, 1);
+            bind(e, s.bias, 2);
+            bind(e, s.y, 3);
+            e.setValue(a, 4);
+            bind(e, r.output_ids orelse scratch, 5);
+            bind(e, routes, 6);
+            bind(e, descriptors, 7);
+            e.dispatchGroups(.{ .width = a.n / 128, .height = a.rows }, .{ .width = 32 });
+        },
+    }
 }
 
 test "EXL3 scratch is row compact and bounded independently of full matrices" {
