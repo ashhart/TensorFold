@@ -139,3 +139,14 @@ test "startup warms shared shapes once but measures all live widths independentl
     try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(std.testing.io, &probe, &probe, &cache, &empty));
     try std.testing.expectEqual(@as(usize, 0), empty.len);
 }
+
+test "shared warmups count actual passes without replacing any width measurement" {
+    var probe: WarmProbe = .{};
+    var cache: WarmProbe.Cache = .{};
+    var seen: q.native.warm.Seen = .{};
+    const shape = Shape.init(1, 1, true, true, 1);
+    seen.mark(shape);
+    try q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen);
+    try std.testing.expectEqual(@as(usize, 2), probe.calls[1]);
+    for (probe.costs) |measured| try std.testing.expect(measured);
+}
