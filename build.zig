@@ -209,8 +209,10 @@ pub fn build(b: *std.Build) void {
     tp_build.add(b, target, optimize, test_step);
     sessions_build.add(b, test_step);
     // DeepSeek-V4.1's host code reads POSIX and Linux APIs (pthreads, clock_gettime, io_uring) that Windows lacks
-    if (b.graph.host.result.os.tag != .windows) dsv41_build.add(b, test_step);
-    kv_build.add(b, target, optimize, test_step);
+    if (b.graph.host.result.os.tag != .windows) {
+        dsv41_build.add(b, test_step);
+        kv_build.add(b, target, optimize, test_step); // the family's KV over sessions and the TP fabric
+    }
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
 }
