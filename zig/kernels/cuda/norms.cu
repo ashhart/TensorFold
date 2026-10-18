@@ -503,3 +503,20 @@ extern "C" __global__ void __launch_bounds__(256) tf_gated_rms_rows_256(const __
                                                                          float* xs, int heads, float eps) {
     gated_rms<32>(y, y_ld, z, z_ld, w, out, xs, heads, eps);
 }
+
+// The bf16 residual's tails (norms_tail.cuh): a norm on the branch before the add, a bf16 scalar on the sum.
+#include "norms_tail.cuh"
+
+// h = bf16(r + bf16(rms(x) wb)) [* sc], y = bf16(rms(h) w), xs y's 64-value sums: each norm rounded once.
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail(
+    const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,
+    const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
+    tf_rms_tail::tail<tf_rms_tail::ONCE>(x, r, wb, sc, w, h, y, xs, width, eps);
+}
+
+// The same rows with MLX's bf16 steps: each norm bf16(w * bf16(x * inv)), the sum rounded before the scalar.
+extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) tf_add_rms_rows_bf16h_tail_round(
+    const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,
+    const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {
+    tf_rms_tail::tail<tf_rms_tail::MLX>(x, r, wb, sc, w, h, y, xs, width, eps);
+}

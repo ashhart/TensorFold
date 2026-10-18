@@ -85,3 +85,18 @@ extern "C" __global__ void tf_ctl_heavy(const float* X, float* Y) {
     for (int j = 0; j < 160; ++j) s += v[j] * v[159 - j];
     Y[t] = s;
 }
+
+// Gate 3: norms.cu's MLX tail with one rounding point dropped each; its test's exact rounding-point check must go red.
+#include "norms_tail.cuh"
+
+#define TF_CTL_TAIL(NAME, DROP)                                                                                    \
+    extern "C" __global__ void __launch_bounds__(tf_rms_tail::NT) NAME(                                           \
+        const __nv_bfloat16* x, const __nv_bfloat16* r, const __nv_bfloat16* wb, const __nv_bfloat16* sc,         \
+        const __nv_bfloat16* w, __nv_bfloat16* h, __nv_bfloat16* y, float* xs, int width, float eps) {            \
+        tf_rms_tail::tail<tf_rms_tail::MLX & ~(DROP)>(x, r, wb, sc, w, h, y, xs, width, eps);                     \
+    }
+TF_CTL_TAIL(tf_ctl_tail_drop_branch_row, tf_rms_tail::BRANCH_ROW)
+TF_CTL_TAIL(tf_ctl_tail_drop_branch_out, tf_rms_tail::BRANCH_OUT)
+TF_CTL_TAIL(tf_ctl_tail_drop_sum, tf_rms_tail::SUM)
+TF_CTL_TAIL(tf_ctl_tail_drop_row, tf_rms_tail::ROW)
+#undef TF_CTL_TAIL
