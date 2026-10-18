@@ -22,6 +22,10 @@ pub fn main(init: std.process.Init, argv: []const [:0]const u8) !u8 {
         std.debug.print("tensorfold: {s}\n", .{if (why.len > 0) why else @errorName(e)});
         return 1;
     };
+    @import("save_guard").finish(io, dir) catch |e| {
+        std.debug.print("tensorfold: rollback save marker: {s}\n", .{@errorName(e)});
+        return 1;
+    };
     var buf: [4 << 10]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &buf);
     const w = &out.interface;

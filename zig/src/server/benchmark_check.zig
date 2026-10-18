@@ -309,7 +309,7 @@ test "the time rule takes a real date, at most six fraction digits, Z only, at m
     const now: i64 = 1767225600000;
     try std.testing.expectEqual(@as(i64, 1767225600000), daysFromCivil(2026, 1, 1) * 86400000);
     for ([_][]const u8{ "2026-01-01T00:00:00Z", "2026-01-01T00:14:59.999999Z", "2024-02-29T23:59:59.5Z" }) |ok| try std.testing.expect(createdAt(.{ .string = ok }, now));
-    for ([_][]const u8{ "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00.1234567Z", "2026-02-30T00:00:00Z", "2026-01-01T01:00:00Z", "2026-01-01 00:00:00Z", "2026-01-01T24:00:00Z", "2026-01-01T00:00:00" }) |bad|
+    for ([_][]const u8{ "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00.1234567Z", "2026-02-30T00:00:00Z", "2026-01-01T01:00:00Z", "2026-01-01 00:00:00Z", "2026-01-01Ownership rollback::00:00Z", "2026-01-01T00:00:00" }) |bad|
         try std.testing.expect(!createdAt(.{ .string = bad }, now));
 }
 

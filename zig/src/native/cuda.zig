@@ -18,7 +18,7 @@ const Allocator = std.mem.Allocator;
 const budget = @import("cuda_memory.zig");
 const lane_backend = @import("cuda_bound.zig");
 const snaps = @import("cuda_snaps.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
+const slide_adapter = @import("slide_adapter.zig");
 const cuda_disk = @import("cuda_disk.zig");
 const vision_offer = @import("cuda_vision_offer.zig");
 const drafted = @import("cuda_drafted.zig");
@@ -46,16 +46,12 @@ const setting = cuda_device.setting;
 const windows = @import("cuda_window.zig");
 const modelContext = windows.modelContext;
 const contextWindow = windows.contextWindow;
-
 /// A lone driver returns false at completion or true when yield hands it to the lane core.
 const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
-
 /// The context a lane thread needs current: the lane host steps rounds on its own thread, CUDA binds per thread.
 threadlocal var bound: ?*const cuda.Context = null;
-
 const failed_load = @import("cuda_load_gpu.zig");
 const Gpu = failed_load.Gpu;
-
 /// One loaded model behind the lane host: everything the engine thread reads lives here.
 pub const Host = struct {
     gpa: Allocator,
@@ -79,18 +75,15 @@ pub const Host = struct {
     health: ?api.HealthSource = null,
     recording: ?*record.Recording = null, // --record: the recorder in front of the family's backend
     served: drafted.Served = undefined, // the family's backend, wrapped with --drafter's draft model when given
-
     fn followFamily(p: *anyopaque) anyerror!void {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| try g.ctx.makeCurrent();
         return h.follow_fn.?(h.family);
     }
-
     /// A family's readiness reads host state only: no CUDA binding or blocking device work.
     fn readiness(h: *Host, comptime F: type) void {
         if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
     }
-
     pub fn close(p: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(p));
         h.host.stop();
@@ -111,7 +104,6 @@ pub const Host = struct {
         h.gpa.free(h.startup);
         h.gpa.destroy(h);
     }
-
     pub fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
         if (h.gpu) |g| if (bound != &g.ctx) {
@@ -120,7 +112,6 @@ pub const Host = struct {
         };
         return h;
     }
-
     /// The round loop and the lane host over the family's backend, its thread started.
     pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
@@ -141,7 +132,6 @@ pub const Host = struct {
         if (h.learn != null) h.host.learner = h.learner();
         try h.host.start();
     }
-
     /// The family's learner, each call made with the context current on the lane thread.
     fn learner(h: *Host) api.Learner {
         return .{
@@ -166,25 +156,22 @@ pub const Host = struct {
             }.f,
         };
     }
-
     /// The family's lone driver with the context current on the lane thread.
     fn loneRun(p: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
         const x = bind(p);
         return x.lone.?(x.family, s, hooks.ctx, hooks.committed, hooks.yield, hooks.resumed);
     }
-
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
         return .{ .ptr = h, .vtable = &h.vtable };
     }
 };
-
 const refusals = @import("cuda_refusal.zig");
 const record = @import("cuda_record.zig");
-
 /// The engine for `o.dir`, or null with `problem` set when `refusal` names a flag or no CUDA family reads it.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     if (refusals.backend(o)) |why| {
         problem.* = why;
         return null;
@@ -226,11 +213,13 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
         return null;
     };
     if (o.slide) {
+        // a family learns once its module declares `slide` (its learner), `learnModel` and `linked`
         if (!@hasDecl(F, "slide")) {
             problem.* = try std.fmt.allocPrint(a, "--slide: {s} checkpoints do not learn on CUDA yet", .{o.model_type});
             return null;
         }
-        if (try nemotron_slide.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
+        comptime if (!@hasDecl(F, "learnModel") or !@hasDecl(F, "linked")) @compileError(F.model_type ++ " declares slide without learnModel and linked");
+        if (try slide_adapter.refusal(F, a, io, o.dir, "`cp -RL` (a copy that follows links)")) |why| {
             problem.* = why;
             return null;
         }
@@ -427,7 +416,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     }
     errdefer if (h.store) |store| kv_pages.closeStore(gpa, store);
     if (@hasDecl(F, "slide")) if (loaded.learns != null) {
-        const Slide = nemotron_slide.Adapter(F.slide);
+        const Slide = slide_adapter.Adapter(F.slide);
         h.dir = try gpa.dupe(u8, o.dir);
         const s = try gpa.create(Slide);
         s.* = Slide.init(gpa, io, F.learnModel(loaded.ctx, h.dir));
@@ -589,9 +578,21 @@ test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }
-
 test {
     _ = @import("cuda_vision_offer.zig");
     _ = kv_pages;
     _ = drafted;
+}
+test "Learner ownership: actual native close drains Nemotron before any source, trainer or parent free" {
+    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, false);
+}
+test "Learner ownership: direct Nemotron trainer destruction drains before its first owner free" {
+    try @import("nemotron_trainer_test.zig").run(Host, Host.serve, Host.close, true);
+}
+test "Save recovery: real native close drains the accepted trainer before any child or parent is released" {
+    try @import("trainer_close_test.zig").run(Host, Host.serve, Host.close);
+}
+
+test "Save recovery: real native close drains the dense trainer before any child or parent is released" {
+    try @import("dense_trainer_close_test.zig").run(Host, Host.serve, Host.close);
 }

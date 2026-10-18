@@ -15,6 +15,8 @@ pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 pub const Cache = struct {
+    untaught: bool = false,
+    delta: i32 = 0,
     state: DeviceBuffer,
     kv: DeviceBuffer,
     /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
@@ -29,8 +31,6 @@ pub const Cache = struct {
     /// The newest verify window of more than one row, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
-    delta: i32 = 0,
-
     pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
@@ -55,6 +55,7 @@ pub const Cache = struct {
         self.len = 0;
         self.written = 0;
         self.last = null;
+        self.untaught = false;
         self.delta = 0;
         try self.state.fill8(0, e.stream.handle);
     }

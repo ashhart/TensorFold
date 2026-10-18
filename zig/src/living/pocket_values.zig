@@ -131,8 +131,7 @@ const Drawn = struct { own: bool, joint: bool = false, which: usize, seq: Seq };
 /// One output step: its fact answers, then those that are to stay, side by side; then Adam, and every few the judge.
 pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
     const s = &p.v;
-    const c = t.config();
-    const d = c.hidden;
+    const d = p.hidden;
     const k = p.taken.items.len + p.joint.items.len; // the open fact's neurons, then the earlier ones fitted with them
     const vals = s.adam.items[0 .. k * d];
     const grad = s.adam.items[3 * k * d ..][0 .. k * d];
@@ -253,8 +252,7 @@ pub fn valueOnce(p: anytype, t: anytype, host: anytype) !bool {
 /// Answer `dr`, the pass's i-th, into the step: its loss, and each neuron's push times its activation at its row.
 fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32) void {
     const s = &p.v;
-    const c = t.config();
-    const d = c.hidden;
+    const d = p.hidden;
     const masks = dr.seq.nudge.layers;
     const rows = dr.seq.nudge.rows;
     const sp = t.spans[i];
@@ -276,8 +274,10 @@ fn absorb(p: anytype, t: anytype, dr: Drawn, i: usize, got: Result, grad: []f32)
         const key = @backingInt(x.key);
         if (masks[key] == 0) continue;
         const l = p.moe.items[x.slot];
-        const z = dotBf16(p.neuron(p.up.items, x.slot, x.neuron, d), t.normed(l, sp.row(rows[key])));
-        const a = if (z > 0) z * z else 0;
+        const row = sp.row(rows[key]);
+        // relu(u x)^2, or a SwiGLU's silu(g x) (u x) / sharp; times its expert's gate there when one scales it
+        var a = p.act(x.slot, x.neuron, t.normed(l, row));
+        if (@TypeOf(p.*).gated) a *= t.gateAt(l, row);
         subspace.axpy(grad[j * d ..][0..d], dr.seq.scale * a, t.pushAt(i, key, l));
         if (dr.own and s.size.items[j] == 0) s.size.items[j] = normBf16(t.residual(l + 1, sp.row(rows[key])));
     }
@@ -358,8 +358,9 @@ fn judgeOnce(p: anytype, t: anytype, host: anytype, vals: []f32) !bool {
 /// The outputs into the pocket's neurons and the forward; the held-out answers judged next.
 fn finish(p: anytype, t: anytype, host: anytype, vals: []const f32) !bool {
     const s = &p.v;
-    const d = t.config().hidden;
+    const d = p.hidden;
     try put(p, t, host, vals, d);
+    try p.asWritten(t, host);
     t.from = @splat(std.math.maxInt(u32));
     std.log.info("slide pocket: {d} answers' first rows run once, {d} rows the steps did not run again", .{ s.prefixes.slots, s.prefixes.skipped });
     try prefix.release(t, &s.prefixes);
@@ -395,9 +396,9 @@ pub fn checkOnce(p: anytype, t: anytype, host: anytype) !bool {
     return true;
 }
 
-/// Logs the forward's change after the fact's lowest neuron on `ex` against its relu(u x)^2 v, to spot a bad forward.
+/// Logs the forward's change after the fact's lowest neuron on `ex` against its act(x) v, to spot a bad forward.
 fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
-    const d = t.config().hidden;
+    const d = p.hidden;
     var low: ?std.meta.Elem(@TypeOf(p.taken.items)) = null;
     var row: usize = 0;
     for (p.taken.items) |x| {
@@ -420,8 +421,8 @@ fn verifyForward(p: anytype, t: anytype, host: anytype, ex: Example) !void {
     t.nudge = .{};
     _ = try t.step(ex.ids, ex.start, .target, turn);
     for (with, t.residual(l + 1, row)) |*o, b| o.* = @bitCast(@as(u32, b) << 16);
-    const z = dotBf16(p.neuron(p.up.items, k.slot, k.neuron, d), t.normed(l, row));
-    const a = if (z > 0) z * z else 0;
+    var a = p.act(k.slot, k.neuron, t.normed(l, row));
+    if (@TypeOf(p.*).gated) a *= t.gateAt(l, row);
     const v = p.neuron(p.down.items, k.slot, k.neuron, d);
     for (want, v) |*o, x| o.* = a * x;
     @memcpy(saved, v);

@@ -4,7 +4,6 @@ const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
 /// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
-
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -332,7 +331,7 @@ pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a 
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = @import("learning_api.zig").LearnRequest;
@@ -488,6 +487,7 @@ pub const keepalive = @import("keepalive.zig");
 
 /// A model folder's original files kept before --slide first teaches it, its hold and its rollback (originals.zig).
 pub const originals = @import("originals.zig");
+pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("lane_host.zig");

@@ -115,24 +115,44 @@ pub fn grow(gpa: Allocator, io: Io, dir: []const u8, edits: []const Replacement)
 
 /// config.json in `dir` with each of `ints` set (added where missing), every other key as it was.
 pub fn setConfig(gpa: Allocator, io: Io, dir: []const u8, ints: []const struct { []const u8, i64 }) !void {
+    return setConfigIn(gpa, io, dir, null, ints);
+}
+
+/// config.json in `dir` with each of `ints` set inside the object `scope` names (null: the top level), as setConfig.
+pub fn setConfigIn(gpa: Allocator, io: Io, dir: []const u8, scope: ?[]const u8, ints: []const struct { []const u8, i64 }) !void {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const path = try std.fs.path.join(arena, &.{ dir, "config.json" });
     var config = try readJson(arena, io, path);
     if (config != .object) return error.BadConfig;
-    for (ints) |kv| try config.object.put(arena, kv[0], .{ .integer = kv[1] });
+    const o = if (scope) |name| blk: {
+        const inner = config.object.getPtr(name) orelse return error.BadConfig;
+        if (inner.* != .object) return error.BadConfig;
+        break :blk &inner.object;
+    } else &config.object;
+    for (ints) |kv| try o.put(arena, kv[0], .{ .integer = kv[1] });
     try writeJson(arena, path, config);
 }
 
 /// An integer of `dir`'s config.json, or null when it has none.
 pub fn configInt(gpa: Allocator, io: Io, dir: []const u8, key: []const u8) !?i64 {
+    return configIntIn(gpa, io, dir, null, key);
+}
+
+/// An integer of the object `scope` names in `dir`'s config.json (null: the top level), or null when it has none.
+pub fn configIntIn(gpa: Allocator, io: Io, dir: []const u8, scope: ?[]const u8, key: []const u8) !?i64 {
     var arena_state = std.heap.ArenaAllocator.init(gpa);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
     if (config != .object) return error.BadConfig;
-    const v = config.object.get(key) orelse return null;
+    const o = if (scope) |name| blk: {
+        const inner = config.object.get(name) orelse return error.BadConfig;
+        if (inner != .object) return error.BadConfig;
+        break :blk inner.object;
+    } else config.object;
+    const v = o.get(key) orelse return null;
     return if (v == .integer) v.integer else error.BadConfig;
 }
 
@@ -523,6 +543,31 @@ test "a tensor grown in its shard: the shard is rewritten, the index's total mov
     try std.testing.expectEqualStrings("x", (try field(config, "model_type")).string);
 }
 
+test "integers set and read inside a nested config object, the top level and every other key as they were" {
+    const gpa = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"model_type\":\"x\",\"width\":7,\"text_config\":{\"width\":2,\"name\":\"t\"}}" });
+    const dir = try std.fs.path.join(gpa, &.{ ".zig-cache", "tmp", &tmp.sub_path });
+    defer gpa.free(dir);
+    try std.testing.expectEqual(@as(?i64, 2), try configIntIn(gpa, io, dir, "text_config", "width"));
+    try std.testing.expectEqual(@as(?i64, null), try configIntIn(gpa, io, dir, "text_config", "learned"));
+    try setConfigIn(gpa, io, dir, "text_config", &.{ .{ "width", 3 }, .{ "learned", 1 } });
+    try std.testing.expectEqual(@as(?i64, 3), try configIntIn(gpa, io, dir, "text_config", "width"));
+    try std.testing.expectEqual(@as(?i64, 1), try configIntIn(gpa, io, dir, "text_config", "learned"));
+    try std.testing.expectEqual(@as(?i64, 7), try configInt(gpa, io, dir, "width"));
+    try std.testing.expectEqual(@as(?i64, null), try configInt(gpa, io, dir, "learned"));
+    try std.testing.expectError(error.BadConfig, configIntIn(gpa, io, dir, "vision_config", "width"));
+    var arena_state = std.heap.ArenaAllocator.init(gpa);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const config = try readJson(arena, io, try std.fs.path.join(arena, &.{ dir, "config.json" }));
+    try std.testing.expectEqualStrings("t", (try field(try field(config, "text_config"), "name")).string);
+}
+
 test {
     _ = @import("shard_edit_link_test.zig");
 }
+
+pub const save_guard = @import("save_guard");

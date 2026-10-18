@@ -1,6 +1,8 @@
 //! GPU test runner for the CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on failure.
 
 const std = @import("std");
+const q27_back_tests = @import("q27_back_tests.zig");
+const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const runtime_tests = @import("runtime_tests.zig");
@@ -77,6 +79,14 @@ const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
 
+const gdn_back_tests = @import("gdn_back_tests.zig");
+const q4_back_tests = @import("q4_back_tests.zig");
+const moe_back_tests = @import("moe_back_tests.zig");
+const fn_moe_back_tests = @import("fn_moe_back_tests.zig");
+const attn_back_tests = @import("attn_back_tests.zig");
+const fn_hc_back_tests = @import("fn_hc_back_tests.zig");
+const fn_pocket_tests = @import("fn_pocket_tests.zig");
+
 const usage =
     \\usage: tf-cuda-test <command>
     \\  experts-rows              experts_rows.cu's windows and chunks against the decode kernel's one-row launches
@@ -126,6 +136,14 @@ const usage =
     \\  radio-processor REF PICS MODEL  decoded RGB, processor pixels, float resizes and grids against the reference
     \\  radio-kernels             RADIO's float-patch cast and position rows against host references (synthetic rows)
     \\  radio-attention           the head-dim-80 tower attention's time at five sizes, outputs finite (synthetic rows)
+    \\  gdn-back                  DeltaNet input gradients against FP64
+    \\  q4-back                  Affine input gradients against FP64
+    \\  moe-back                  Expert and router input gradients against FP64
+    \\  attn-back                  Gated attention input gradients against FP64
+    \\  fn-hc-back                  Hyper-connection input gradients against FP64
+    \\  fn-moe-back                  MoE and pocket input gradients against FP64
+    \\  fn-pocket [reps]                  Pocket kernels against the row reference
+    \\  fn-back                  All component gradient cases
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r up to its window) and as a prompt chunk (any r)
@@ -281,6 +299,22 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qk-rows")) return qk_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back")) return gdn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "q4-back")) return q4_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-back")) return moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "attn-back")) return attn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-hc-back")) return fn_hc_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-moe-back")) return fn_moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-pocket")) return fn_pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
+    if (std.mem.eql(u8, cmd, "fn-back")) {
+        try gdn_back_tests.run(gpu);
+        try q4_back_tests.run(gpu);
+        try moe_back_tests.run(gpu);
+        try fn_moe_back_tests.run(gpu);
+        try attn_back_tests.run(gpu);
+        try fn_hc_back_tests.run(gpu);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "pocket"))
         return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "lfm2-attention")) return lfm2_attention_tests.run(gpu);
@@ -305,6 +339,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
+    if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
+    if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);

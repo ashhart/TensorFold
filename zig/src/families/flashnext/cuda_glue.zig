@@ -34,6 +34,7 @@ const Fns = struct {
     down: cuda.Function,
     reduce_act: cuda.Function,
     upmix: cuda.Function,
+    upmix_up: cuda.Function,
     ple_gate: cuda.Function,
     ple_conv: cuda.Function,
     add_streams: cuda.Function,
@@ -104,6 +105,7 @@ pub const Glue = struct {
             .down = try g.hc.function("fn_hc_down"),
             .reduce_act = try g.hc.function("fn_hc_reduce_act"),
             .upmix = try g.hc.function("fn_hc_upmix"),
+            .upmix_up = try g.hc.function("fn_hc_upmix_up"),
             .ple_gate = try g.hc.function("fn_ple_gate"),
             .ple_conv = try g.hc.function("fn_ple_conv"),
             .add_streams = try g.hc.function("fn_add_streams"),
@@ -268,6 +270,16 @@ pub const Glue = struct {
         ints(&a, &.{ rows, n, k, dims, streams });
         const shared: u32 = @intCast(16 * (k + 8) * 2 + streams * 16 * 32 * 4);
         try go(g.f.upmix, s, .{ cdiv(rows, 16), dims / 32, 1 }, 256, shared, &a);
+    }
+
+    /// hcUpmix that also keeps the up rows `up` [rows, n] bf16 the mix read, the same mixed bits.
+    pub fn hcUpmixUp(g: *const Glue, s: cuda.Stream, act: u64, xs: u64, w: u64, sc: u64, b: u64, normed: u64, mixed: u64, xs_mixed: u64, up: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {
+        if (streams != 4 or dims % 32 != 0 or k % 32 != 0) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ act, xs, w, sc, b, normed, mixed, xs_mixed, up });
+        ints(&a, &.{ rows, n, k, dims, streams });
+        const shared: u32 = @intCast(16 * (k + 8) * 2 + streams * 16 * 32 * 4);
+        try go(g.f.upmix_up, s, .{ cdiv(rows, 16), dims / 32, 1 }, 256, shared, &a);
     }
 
     /// The normed streams times the down rows, each K slice's fp32 sums to `part` [sk, rows, n] (sk > 1).

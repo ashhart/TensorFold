@@ -578,11 +578,29 @@ test {
 }
 
 const paging = @import("paging_pending.zig");
-/// What the live audit checks: the serving records, then the paging launches and the Qwen engine's MoE and MTP ones.
-pub const all_cuda = cuda ++ paging.extra ++ @import("qwen_served_records.zig").records;
 test {
     _ = paging;
 }
 
 /// The live Metal collector's list: the serving declarations, then the 27B's register-slot DeltaNet pipelines.
 pub const all_metal = metal ++ @import("delta_slots_records.zig").records;
+
+test "Quantized adjoints: every new gradient launch stays unqualified without compiler receipts" {
+    try std.testing.expectEqual(@as(usize, 95), gradient_pending.len);
+    for (gradient_pending) |record| try std.testing.expect(try checkCuda(std.testing.allocator, &.{record}, true) > 0);
+}
+
+pub const gradient_pending = @import("gradient_pending.zig").records;
+pub const refreshed_cuda = blk: {
+    var records = cuda;
+    for (&records) |*record| {
+        if (std.mem.eql(u8, record.launch.symbol, "fn_attn_prep") or
+            std.mem.eql(u8, record.launch.symbol, "fn_qsa_pool")) record.usage = none;
+    }
+    break :blk records;
+};
+pub const qwen_learning_pending = @import("qwen_learning_pending.zig").records;
+pub const all_cuda = refreshed_cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records;
+test {
+    _ = @import("qwen_learning_pending.zig");
+}

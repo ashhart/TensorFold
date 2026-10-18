@@ -6,6 +6,8 @@ const geometry = @import("cuda_geometry.zig");
 const weights = @import("cuda_weights.zig");
 const caches = @import("cuda_cache.zig");
 const routed = @import("cuda_routed.zig");
+const hooks = @import("cuda_learn_hooks.zig");
+const pocket = @import("cuda_pocket.zig");
 
 pub const Geometry = geometry.Geometry;
 pub const Cache = caches.Cache;
@@ -61,6 +63,11 @@ pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
 
 pub const Engine = struct {
     gpa: std.mem.Allocator,
+    dir: []const u8,
+    pockets: pocket.Pockets,
+    learning: ?*const hooks.Keep = null,
+    mlp: ?hooks.MlpAdd = null,
+    taught: u64 = 0,
     d: *const cuda.Driver,
     g: Geometry,
     geo: Geo,
@@ -134,17 +141,17 @@ pub const Engine = struct {
     /// During an image prompt chunk's forward: its feature rows (0: none); the chunk's src and positions are staged.
     features: u64 = 0,
 
-    const ids_at = 0;
-    const segs_at = max_rows * 4;
-    const rowseg_at = segs_at + max_segs * @sizeOf(Seg);
-    const rowpar_at = rowseg_at + max_rows * 4;
-    const rowanc_at = rowpar_at + max_rows * 4;
+    pub const ids_at = 0;
+    pub const segs_at = max_rows * 4;
+    pub const rowseg_at = segs_at + max_segs * @sizeOf(Seg);
+    pub const rowpar_at = rowseg_at + max_rows * 4;
+    pub const rowanc_at = rowpar_at + max_rows * 4;
     const rules_at = rowanc_at + max_rows * 4;
     const meta_at = rules_at + most_verify * @sizeOf(cuda.sample.Rule);
     const tokens_at = meta_at + most_verify * 4;
-    const params_at = tokens_at + most_verify * 4; // two unused words, the rows, the windows, record
-    const src_at = params_at + 8 * 4; // an image chunk's rows' feature rows
-    const mpos_at = src_at + max_rows * 4; // and their t, h and w positions, max_rows apart (qwen35.cuh's MAXR)
+    pub const params_at = tokens_at + most_verify * 4; // two unused words, the rows, the windows, record
+    pub const src_at = params_at + 8 * 4; // an image chunk's rows' feature rows
+    pub const mpos_at = src_at + max_rows * 4; // and their t, h and w positions, max_rows apart (qwen35.cuh's MAXR)
     const tables_len = mpos_at + 3 * max_rows * 4;
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: []const u8, kv8: bool) !*Engine {
@@ -155,6 +162,13 @@ pub const Engine = struct {
         errdefer gpa.destroy(e);
         e.* = undefined;
         e.gpa = gpa;
+        e.dir = try gpa.dupe(u8, dir);
+        errdefer gpa.free(e.dir);
+        e.pockets = try pocket.Pockets.init(gpa, d, g.hidden, g.layers);
+        errdefer e.pockets.deinit();
+        e.learning = null;
+        e.mlp = null;
+        e.taught = 0;
         e.d = d;
         e.g = g;
         e.geo = .{ .hid = @intCast(g.hidden), .nk = @intCast(g.k_heads), .nv = @intCast(g.v_heads), .qh = @intCast(g.q_heads), .kvh = @intCast(g.kv_heads), .nl = @intCast(g.deltas()) };
@@ -229,6 +243,7 @@ pub const Engine = struct {
     }
 
     pub fn deinit(e: *Engine) void {
+        e.pockets.deinit();
         var it = e.graphs.valueIterator();
         while (it.next()) |x| x.deinit();
         e.graphs.deinit(e.gpa);
@@ -237,6 +252,7 @@ pub const Engine = struct {
         e.tables.free();
         e.arena.free();
         e.gpa.free(e.layers);
+        e.gpa.free(e.dir);
         e.affine.deinit();
         e.wide.deinit();
         for (&e.mods) |*m| m.unload();
@@ -345,7 +361,7 @@ pub const Engine = struct {
         try e.run(f, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ ids, e.embed_w, e.embed_s, e.embed_b, out, @as(c_int, @intCast(e.g.hidden)), params });
     }
 
-    fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
+    pub fn norm(e: *Engine, residual: bool, w: u64, rows: usize) !void {
         try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, if (residual) e.r else @as(u64, 0), w, e.x, e.g.eps, @as(c_int, @intCast(e.g.hidden)), e.tables.ptr + params_at });
     }
 
@@ -381,6 +397,7 @@ pub const Engine = struct {
             total += p.rows;
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
+        if (e.learning != null and total != 1) return error.BadLearningRows;
         const record = keep != .last;
         if (record and total > e.verify_rows) return error.InvalidQwenSegments;
         if (!record and parts.len != 1) return error.InvalidQwenSegments;
@@ -416,6 +433,8 @@ pub const Engine = struct {
         params[2] = @intCast(total);
         params[3] = @intCast(parts.len);
         params[4] = @intFromBool(record);
+        defer e.taught = 0;
+        try @import("cuda_forward_extra.zig").stageScales(e, parts, total);
         // an image prompt's chunk (one part, its rows at prompt positions len..): feature rows and t, h, w positions
         const images: ?*const Images = if (record) null else parts[0].images;
         if (images) |im| {
@@ -432,7 +451,14 @@ pub const Engine = struct {
         const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
         const windows: usize = if (lone) 1 else max_segs;
         const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0 };
-        if (prompt) {
+        if (e.learning != null or e.pockets.any()) {
+            var exact = shape;
+            exact.total = @intCast(total);
+            exact.nseg = @intCast(parts.len);
+            e.features = if (images) |im| im.features else 0;
+            defer e.features = 0;
+            try e.body(exact);
+        } else if (prompt) {
             // uncaptured: a prompt chunk's GEMMs dwarf its launches, and each length's graph would pay the stall
             e.features = if (images) |im| im.features else 0;
             defer e.features = 0;
@@ -495,78 +521,7 @@ pub const Engine = struct {
     };
 
     /// The launches of a forward of `shape`, from the embedding to the kept rows' logits (captured once a shape).
-    fn body(e: *Engine, shape: Shape) !void {
-        const g = e.g;
-        const total: usize = shape.total;
-        const nseg: usize = shape.nseg;
-        const record = shape.record;
-        const prompt = shape.prompt;
-        const heads: usize = if (record) total else 1;
-        const t_ids = e.tables.ptr + ids_at;
-        const t_segs = e.tables.ptr + segs_at;
-        const t_rows = e.tables.ptr + rowseg_at;
-        const t_par = e.tables.ptr + rowpar_at;
-        const t_anc = e.tables.ptr + rowanc_at;
-        const t_params = e.tables.ptr + params_at;
-        const geo = e.geo;
-        const group = g.q_heads / g.kv_heads;
-
-        try e.embed(t_ids, e.h, total, t_params);
-        // an image chunk's rows take the tower's features, and rotate at their staged t, h, w positions
-        const mpos: u64 = if (e.features != 0) e.tables.ptr + mpos_at else 0;
-        if (e.features != 0) try e.run(e.fns.splice, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.features, e.tables.ptr + src_at, @as(c_int, @intCast(g.hidden)), t_params });
-        var di: usize = 0;
-        var ai: c_int = 0;
-        for (e.layers, 0..) |l, i| {
-            try e.norm(i != 0, l.input_norm, total);
-            switch (l.mixer) {
-                .delta => |m| {
-                    const layer: c_int = @intCast(di);
-                    try e.proj(m.qkv, e.x, e.qkv, total, prompt);
-                    try e.proj(m.z, e.x, e.z, total, prompt);
-                    try e.proj(m.a, e.x, e.a, total, prompt);
-                    try e.proj(m.b, e.x, e.b, total, prompt);
-                    try e.run(e.fns.gdn_pre, .{ 1, 2 * g.k_heads + g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.qkv, t_segs, t_rows, t_par, layer, m.conv, e.a, e.b, m.a_log, m.dt_bias, e.q, e.k, e.v, e.g_, e.beta, t_params });
-                    try e.run(e.fns.conv_commit, .{ (g.convWidth() + 255) / 256, nseg, 1 }, .{ 256, 1, 1 }, .{ geo, e.qkv, t_segs, t_par, layer, t_params });
-                    try e.run(e.fns.gdn_chain, .{ 1, geometry.dk / 4, g.v_heads * nseg }, .{ 32, 4, 1 }, .{ geo, e.q, e.k, e.v, e.g_, e.beta, t_segs, t_par, layer, e.y, t_params });
-                    try e.run(e.fns.gdn_post, .{ 1, g.v_heads, total }, .{ 32, 1, 1 }, .{ geo, e.y, e.z, m.norm, g.eps, e.mix, t_params });
-                    try e.proj(m.out, e.mix, e.r, total, prompt);
-                    di += 1;
-                },
-                .attention => |m| {
-                    const aw = g.attnWidth();
-                    try e.proj(m.q, e.x, e.qraw, total, prompt);
-                    try e.proj(m.k, e.x, e.kraw, total, prompt);
-                    try e.proj(m.v, e.x, e.vraw, total, prompt);
-                    try e.run(e.fns.head_norm, .{ total * g.q_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.qraw, m.q_norm, e.qn, @as(c_int, @intCast(g.q_heads)), @as(c_int, @intCast(2 * aw)), @as(c_int, 2 * head_dim), g.eps, t_params });
-                    try e.run(e.fns.head_norm, .{ total * g.kv_heads, 1, 1 }, .{ 64, 1, 1 }, .{ e.kraw, m.k_norm, e.kn, @as(c_int, @intCast(g.kv_heads)), @as(c_int, @intCast(g.kv_heads * head_dim)), @as(c_int, head_dim), g.eps, t_params });
-                    try e.run(if (e.kv8) e.fp8.rope else e.fns.rope, .{ total, 1, 1 }, .{ head_dim, 1, 1 }, .{ geo, e.qn, e.kn, e.vraw, t_segs, t_rows, t_anc, ai, t_params, mpos });
-                    try e.run(if (e.kv8) e.fp8.attn_partial else e.fns.attn_partial, .{ max_chunks, g.kv_heads, total }, .{ 32 * group, 1, 1 }, .{ geo, e.qn, t_segs, t_rows, t_anc, ai, t_params, @as(f32, 1.0 / 16.0), e.pm, e.pl, e.po });
-                    try e.run(e.fns.attn_merge, .{ g.q_heads, total, 1 }, .{ 32, 1, 1 }, .{ geo, e.pm, e.pl, e.po, t_segs, t_rows, t_anc, t_params, e.y });
-                    try e.run(e.fns.attn_gate, .{ (total * aw + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ geo, e.y, e.qraw, e.mix, @as(c_int, @intCast(total)), t_params });
-                    try e.proj(m.o, e.mix, e.r, total, prompt);
-                    ai += 1;
-                },
-            }
-            try e.norm(true, l.post_norm, total);
-            switch (l.mlp) {
-                .dense => |m| {
-                    try e.proj(m.gate, e.x, e.gate, total, prompt);
-                    try e.proj(m.up, e.x, e.up, total, prompt);
-                    const n: c_longlong = @intCast(total * g.intermediate);
-                    try e.run(e.fns.mlp_act, .{ (total * g.intermediate + 255) / 256, 1, 1 }, .{ 256, 1, 1 }, .{ e.gate, e.up, e.act, n, t_params, @as(c_int, @intCast(g.intermediate)) });
-                    try e.proj(m.down, e.act, e.r, total, prompt);
-                },
-                .moe => |m| try e.routedRows(m.router, m.experts, e.x, e.r, total, prompt and total > most_window),
-            }
-            if (shape.taps) for (e.taps[0..e.n_taps], 0..) |t, ti| if (t == i) {
-                try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
-            };
-        }
-        try e.norm(true, e.final_norm, total);
-        // the head over the kept rows
-        try e.proj(e.head, e.x + (total - heads) * g.hidden * 2, e.logits, heads, false);
-    }
+    pub const body = @import("cuda_forward.zig").body;
 
     pub const routedRows = routed.rows;
 

@@ -13,8 +13,8 @@ const Conn = @import("http_conn.zig").Conn;
 const Allocator = std.mem.Allocator;
 
 /// Bytes as tokens; a conversation renders as "Q:" and its last user message, then "\nA:".
-const ByteText = struct {
-    fn text(t: *@This()) model_text.Text {
+pub const ByteText = struct {
+    pub fn text(t: *@This()) model_text.Text {
         return .{ .ctx = t, .vtable = &.{ .encode = encode, .decode = decode, .token_id = tokenId, .token_string = tokenString, .vocab_size = vocabSize, .eos_ids = eosIds, .render = render, .template_source = templateSource } };
     }
 
@@ -189,7 +189,7 @@ fn taughtAt(text: *ByteText, m: *Model, path: ?[]const u8) !Taught {
         id.* = srv.slide.add(f[0], "chat", 100);
         srv.slide.mark(id.*, .learned);
         srv.slide.placed(id.*, &.{ .{ .layer = f[3], .neuron = 0, .key = .reply }, .{ .layer = f[3] + 10, .neuron = 0, .key = .reply } });
-        srv.slide.expects(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
+        srv.slide.asked(id.*, &.{ .{ .question = f[1], .answer = f[0], .short = f[2] }, .{ .question = f[1], .answer = f[0], .short = f[2], .probe = true } });
     }
     try srv.teacher.remember("sister", "What is my sister's name?", "Your sister is called Ana.");
     return out;

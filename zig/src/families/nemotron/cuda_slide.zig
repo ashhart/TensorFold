@@ -1,7 +1,7 @@
 //! Nemotron's Sliding Weights learner on CUDA: learner.zig's lessons over the CUDA trainer, the engine and its shards.
 const std = @import("std");
 const cuda = @import("cuda");
-const lessons = @import("learner.zig");
+const lessons = @import("living").learner;
 const train = @import("cuda_train.zig");
 const engine = @import("cuda_engine.zig");
 const sites_mod = @import("cuda_sites.zig");
@@ -10,6 +10,7 @@ const state = @import("cuda_state.zig");
 
 const Living = living.Io(@import("core"));
 const PocketShards = @import("pocket_shards.zig").Io(@import("core"));
+const pocket_layout = @import("pocket_layout.zig");
 
 pub const Example = lessons.Example;
 pub const Lesson = lessons.Lesson;
@@ -27,13 +28,23 @@ const Host = struct {
     pub const Trainer = train.Trainer;
     pub const max_rows = train.max_rows;
     pub const Ctx = Model;
+    pub const family = pocket_layout.family;
 
     pub fn layers(m: Ctx) usize {
         return m.e.c.layers;
     }
 
+    /// Where the pocket sits and learns: every MoE layer, all but the last learning.
+    pub fn layout(m: Ctx) @import("living").Layout {
+        return pocket_layout.layout(m.e.c);
+    }
+
     pub fn trainer(gpa: std.mem.Allocator, io: std.Io, m: Ctx) !*Trainer {
         return train.Trainer.init(gpa, io, m.e, m.dir, m.living);
+    }
+
+    pub fn drain(t: *Trainer) void {
+        t.drain();
     }
 
     pub fn free(t: *Trainer, _: std.mem.Allocator) void {
@@ -88,16 +99,18 @@ const Host = struct {
     }
 
     /// MoE layer l's pocket as loaded from the shards, into `up` and `down`; the neurons in use (0: none).
-    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) usize {
+    pub fn pocketRead(m: Ctx, l: usize, up: []f32, down: []f32) !usize {
         const blk = m.e.w.blocks[l];
-        if (blk.kind != .moe) return 0;
+        if (blk.kind != .moe) return error.NotAnMoeLayer;
         const p = blk.moe.pocket orelse return 0;
         const d = m.e.c.hidden;
-        if (p.n * d != up.len or p.n * d != down.len) return 0;
+        const count = std.math.mul(usize, p.n, d) catch return error.PocketShape;
+        if (count != up.len or count != down.len) return error.PocketShape;
         const o = m.e.ops();
-        o.download(std.mem.sliceAsBytes(up), p.up) catch return 0;
-        o.download(std.mem.sliceAsBytes(down), p.down) catch return 0;
-        m.e.stream.synchronize() catch return 0;
+        errdefer cuda.completion.drain(m.e.k.d, m.e.stream, "a pocket read did not drain; its candidate rows stay alive");
+        try o.download(std.mem.sliceAsBytes(up), p.up);
+        try o.download(std.mem.sliceAsBytes(down), p.down);
+        try m.e.stream.synchronize();
         var used: usize = 0;
         for (0..p.n) |j| {
             if (std.mem.indexOfNone(f32, up[j * d ..][0..d], &.{0}) != null) used = j + 1;
@@ -106,14 +119,17 @@ const Host = struct {
     }
 
     /// The pocket's neurons into the shards (widened the first time), `up` and `down` set to the 4-bit values; bytes.
-    pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
-        try m.e.stream.synchronize();
-        return PocketShards.write(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
+    pub fn pocketSaveBegin(m: Ctx, _: std.mem.Allocator, io: std.Io) !void {
+        return @import("save_guard").begin(io, m.dir);
     }
 
-    /// One layer's pocket, `up` and `down` [neurons, D], rounded in place to the 4-bit values a save writes.
-    pub fn pocketRound(m: Ctx, gpa: std.mem.Allocator, up: []f32, down: []f32) !void {
-        return PocketShards.round(gpa, m.e.c.hidden, up, down);
+    pub fn pocketSaveFinish(m: Ctx, _: std.mem.Allocator, io: std.Io) !void {
+        return @import("save_guard").finish(io, m.dir);
+    }
+
+    pub fn pocketSave(m: Ctx, gpa: std.mem.Allocator, io: std.Io, moe: []const usize, neurons: usize, up: []f32, down: []f32) !usize {
+        try m.e.stream.synchronize();
+        return PocketShards.writePending(gpa, io, m.dir, m.e.c, moe, neurons, up, down);
     }
 };
 
@@ -159,4 +175,8 @@ pub fn recapture(e: *engine.Engine) !void {
             set[rows] = fresh;
         };
     }
+}
+
+test "Learner ownership: actual Nemotron reads reject download, wait and shape failures and retry original rows" {
+    try @import("cuda_slide_read_test.zig").run(Host);
 }

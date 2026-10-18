@@ -9,3 +9,8 @@ pub const Grid = shared.Grid;
 pub const merge = shared.merge;
 pub const patch_width = shared.patch_width;
 pub const max_patches = shared.max_patches;
+
+test "Shared vision: Qwen consumer and Flash Next name the identical shared tower and configuration" {
+    const std = @import("std");
+    try std.testing.expect(Tower == shared.Tower and Config == shared.Config);
+}
