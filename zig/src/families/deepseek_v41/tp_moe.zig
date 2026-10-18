@@ -123,8 +123,9 @@ pub const Context = struct {
         const ws = &model.workspace;
         const w = &model.weights.layers[layer_id].moe;
         const p = &model.pipelines;
+        // Model and context own every bound buffer through completion, as in the enclosing forward.
         const gate_started = if (c.trace) mtl.clock.seconds() else 0;
-        const cb = model.queue.commandBuffer();
+        const cb = model.queue.commandBufferUnretained();
         const encoder = cb.compute(.serial);
         var encoding = true;
         errdefer if (encoding) encoder.end();
@@ -146,7 +147,7 @@ pub const Context = struct {
         try c.gather(layer_id, 1, ws, .up, .shared_up, rows, 2304);
 
         const down_started = if (c.trace) mtl.clock.seconds() else 0;
-        const down_cb = model.queue.commandBuffer();
+        const down_cb = model.queue.commandBufferUnretained();
         const down = down_cb.compute(.serial);
         var down_encoding = true;
         errdefer if (down_encoding) down.end();
@@ -159,7 +160,7 @@ pub const Context = struct {
         try c.complete(down_cb, down, layer_id, "down", down_started);
         try c.gather(layer_id, 2, ws, .routed, .shared_down, rows, 5120);
         const combine_started = if (c.trace) mtl.clock.seconds() else 0;
-        const combine_cb = model.queue.commandBuffer();
+        const combine_cb = model.queue.commandBufferUnretained();
         const combine = combine_cb.compute(.serial);
         ops.encodeCombine(combine, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = 6 * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120 });
         try c.complete(combine_cb, combine, layer_id, "combine", combine_started);
