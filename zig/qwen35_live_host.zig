@@ -82,3 +82,60 @@ test "selected live shape reaches real tiled projections and DeltaNet scan dispa
     try std.testing.expectEqual(@as(u64, 0x30000 + 16 * 4096 * 2), Trace.outputs[1]);
     try std.testing.expectEqual(@as(u32, 1), Trace.scan_segments);
 }
+
+const WarmProbe = struct {
+    const Cache = struct {
+        advanced: bool = false,
+        pub fn reset(c: *@This(), _: *WarmProbe) !void {
+            c.advanced = false;
+        }
+    };
+    const Part = struct { cache: *Cache, rows: usize };
+    window_rows: usize = 64,
+    n_taps: usize = 5,
+    calls: [65]usize = @splat(0),
+    costs: [64]bool = @splat(false),
+    failed: bool = false,
+    pub fn forward(p: *WarmProbe, parts: []const Part, ids: []const u32, keep: q.engine.Keep) !void {
+        try std.testing.expectEqual(@as(usize, 1), parts.len);
+        const c = parts[0].cache;
+        try std.testing.expect(!c.advanced);
+        try std.testing.expectEqual(parts[0].rows, ids.len);
+        try std.testing.expectEqual(ids.len, keep.draws.len);
+        for (ids) |id| try std.testing.expectEqual(@as(u32, 0), id);
+        c.advanced = true;
+        p.calls[ids.len] += 1;
+        if (p.failed) return error.PlantedWarmFailure;
+    }
+    pub fn setCost(p: *WarmProbe, rows: u32, _: f64) void {
+        p.costs[rows - 1] = true;
+    }
+};
+
+test "startup warms shared shapes once but measures all live widths independently" {
+    var probe: WarmProbe = .{};
+    var cache: WarmProbe.Cache = .{};
+    var seen: q.native.warm.Seen = .{};
+    try q.native.warm.time(std.testing.io, &probe, &probe, &cache, &seen);
+    var calls: usize = 0;
+    for (probe.calls) |n| calls += n;
+    try std.testing.expectEqual(@as(usize, 74), calls);
+    try std.testing.expectEqual(@as(usize, 3), probe.calls[1]);
+    try std.testing.expectEqual(@as(usize, 3), probe.calls[2]);
+    try std.testing.expectEqual(@as(usize, 1), probe.calls[3]);
+    for (probe.costs) |measured| try std.testing.expect(measured);
+    try std.testing.expectEqual(@as(usize, 5), seen.len);
+    for (1..65) |rows| try std.testing.expect(seen.contains(Shape.init(rows, 1, true, true, 1)));
+    var again: usize = 0;
+    for (1..129) |segments| {
+        const s = Shape.init(segments, segments, true, true, 1);
+        if (seen.contains(s)) continue;
+        seen.mark(s);
+        again += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 11), again);
+    probe.failed = true;
+    var empty: q.native.warm.Seen = .{};
+    try std.testing.expectError(error.PlantedWarmFailure, q.native.warm.time(std.testing.io, &probe, &probe, &cache, &empty));
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+}

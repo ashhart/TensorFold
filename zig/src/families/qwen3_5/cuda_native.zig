@@ -4,6 +4,7 @@ const cuda = @import("cuda");
 const lanes = @import("lanes");
 const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
+pub const warm = @import("cuda_warm.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
@@ -107,21 +108,27 @@ fn reserve(p: *anyopaque, streams: u32) anyerror!void {
         try cache.reset(l.e);
         l.pool.appendAssumeCapacity(cache);
     }
-    // the shared rounds' shapes, a row of 1 to `streams` streams, captured now: a new graph's first run stalls too
+    // Warm each shared launch shape once; every cache above is still allocated and touched separately.
     var parts: [E.max_segs]E.Part = undefined;
     var ids: [@max(E.max_segs, E.most_window)]u32 = @splat(0);
     var picks: [@max(E.max_segs, E.most_window)]E.Draw = undefined;
     for (0..@min(streams, E.max_segs)) |n| {
         parts[n] = .{ .cache = l.pool.items[n], .rows = 1 };
         picks[n] = .{ .rule = null, .position = 1 };
+        const shape = E.Engine.Shape.init(n + 1, n + 1, true, l.e.n_taps > 0, 1);
+        if (l.warmed.contains(shape)) continue;
         try l.e.forward(parts[0 .. n + 1], ids[0 .. n + 1], .{ .draws = picks[0 .. n + 1] });
         for (l.pool.items[0 .. n + 1]) |cache| try cache.reset(l.e);
+        l.warmed.mark(shape);
     }
     // with a drafter: a lone stream's windows of the pending token and its drafts, chains and trees
     if (l.e.n_taps > 0) for (2..l.e.window_rows + 1) |rows| {
+        const shape = E.Engine.Shape.init(rows, 1, true, true, 1);
+        if (l.warmed.contains(shape)) continue;
         for (picks[0..rows]) |*pk| pk.* = .{ .rule = null, .position = 1 };
         try l.e.forward(&.{.{ .cache = l.pool.items[0], .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
         try l.pool.items[0].reset(l.e);
+        l.warmed.mark(shape);
     };
 }
 
@@ -237,6 +244,7 @@ const Lanes = struct {
     seen: std.AutoHashMapUnmanaged(*lanes.Stream, []reuse.Seen) = .empty,
     /// Caches at the full window, kept between streams: allocated and touched once (`reserve`), reset on reuse.
     pool: std.ArrayList(*E.Cache) = .empty,
+    warmed: warm.Seen = .{},
 
     fn deinit(self: *Lanes) void {
         var it = self.caches.valueIterator();
@@ -273,23 +281,11 @@ const Lanes = struct {
         self.pool.append(self.gpa, cache) catch self.drop(cache);
     }
 
-    /// Each width's forward timed on its own cache, on its third run: graph captured, stall paid, a keep in front.
+    /// Each width timed on a reset cache after its captured launch shape is warm.
     fn timeWindows(self: *Lanes, d: anytype) !void {
         var cache = try E.Cache.init(self.gpa, self.e, 64);
         defer cache.deinit(self.gpa);
-        const ids: [E.most_window]u32 = @splat(0);
-        var picks: [E.most_window]E.Draw = undefined;
-        for (&picks) |*pk| pk.* = .{ .rule = null, .position = 1 };
-        for (1..self.e.window_rows + 1) |rows| {
-            var ms: f64 = 0;
-            for (0..3) |run| {
-                try cache.reset(self.e);
-                const t0 = std.Io.Clock.awake.now(self.io);
-                try self.e.forward(&.{.{ .cache = &cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
-                if (run == 2) ms = @as(f64, @floatFromInt(t0.durationTo(std.Io.Clock.awake.now(self.io)).toNanoseconds())) / 1e6;
-            }
-            d.setCost(@intCast(rows), ms);
-        }
+        try warm.time(self.io, self.e, d, &cache, &self.warmed);
     }
 
     fn backend(self: *Lanes) be.Backend {
