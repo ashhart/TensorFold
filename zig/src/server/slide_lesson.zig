@@ -407,7 +407,7 @@ pub fn factLesson(srv: *Server, cx: *Cx, parts: *Parts, fact: []const u8, f: usi
         thought += @intFromBool(think != null);
         if (held) try parts.held.append(a, r);
     }
-    try talks.checkIn(a, &parts.held, refs.items[pair[0]], refs.items[pair[1]]); // a fact back only when asked cold fails
+    try talks.checkIn(a, &parts.held, refs.items[pair[0]], refs.items[pair[1]], talks.on(srv)); // a fact back only when asked cold fails
     // each answer also learned under client system messages and after an unrelated exchange (ROME's prefixes)
     for (pairs.items, refs.items, 0..) |ex, r, i| {
         if (i == pair[0] or i == pair[1]) continue;

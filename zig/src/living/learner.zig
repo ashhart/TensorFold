@@ -49,7 +49,6 @@ pub fn Learner(comptime H: type) type {
         const has_edits = has_sites and @hasDecl(H.Trainer, "key") and @hasDecl(H, "commit"); // keys, a nudged row, codes to write
         const has_pocket = @hasDecl(H.Trainer, "normed") and (@hasDecl(H, "pocketSave") or @hasDecl(H, "pocketSaveSwiglu")); // inputs, gradients, a pocket to write
         const has_whole = has_edits or has_pocket; // lessons that change the model itself
-        const has_taps = has_pocket and @hasDecl(H.Trainer, "tapRows"); // a pocket lesson reads prompts in a conversation at any length
         const Edits = if (has_edits) editor.Editor(H.Trainer) else void;
         const Probes = if (has_edits) probe.Probe(H.Trainer) else void;
         const Pockets = if (has_pocket) pocket.Pocket(H.Trainer, H.family) else void;
@@ -131,6 +130,11 @@ pub fn Learner(comptime H: type) type {
             for (&l.plain) |*x| x.deinit(l.gpa);
         }
 
+        /// Whether the learner reads conversation prompts at any length, for both teaching and checking.
+        pub fn readsConversations(l: *const Self) bool {
+            return examples.readsConversations(H.Trainer, has_pocket and l.whole and l.method == .pocket);
+        }
+
         /// Start a lesson's round; its examples must stay valid until its last step.
         pub fn begin(l: *Self, lesson: Lesson) !void {
             std.debug.assert(l.phase == .idle);
@@ -162,7 +166,7 @@ pub fn Learner(comptime H: type) type {
                 return;
             }
             if (lesson.train.len == 0) return;
-            l.lesson = try examples.readable(l.gpa, lesson, has_taps and l.whole and l.method == .pocket, H.max_rows, &l.plain);
+            l.lesson = try examples.readable(l.gpa, lesson, l.readsConversations(), H.max_rows, &l.plain);
             try l.ready();
             const kept = l.lesson; // as this learner reads it: without the conversations its host cannot read
             if (kept.more) {

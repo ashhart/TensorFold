@@ -2,8 +2,8 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
-/// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
+/// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -204,6 +204,8 @@ pub const Info = struct {
     vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
+    /// The learner reads conversation prompts at any length through taps.
+    slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
 };

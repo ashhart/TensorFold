@@ -96,6 +96,11 @@ pub fn own(gpa: std.mem.Allocator, xs: []const Example) ![]Example {
     return out;
 }
 
+/// Whether a learner reads conversation prompts at any length: through `Trainer`'s taps, in a pocket lesson.
+pub fn readsConversations(comptime Trainer: type, pocket: bool) bool {
+    return pocket and @hasDecl(Trainer, "tapRows");
+}
+
 /// `lesson` checked, as a learner reads it: a prompt in a conversation longer than its passes' `rows` only by `taps`.
 pub fn readable(gpa: std.mem.Allocator, lesson: Lesson, taps: bool, rows: usize, bufs: *[4]std.ArrayList(Example)) !Lesson {
     for ([_][]const Example{ lesson.train, lesson.think, lesson.held, lesson.near, lesson.keep, lesson.asked, lesson.unasked, lesson.kept }) |xs| for (xs) |ex| {
@@ -135,6 +140,16 @@ pub fn ownLesson(gpa: std.mem.Allocator, lesson: Lesson) !Lesson {
 
 pub fn disownLesson(gpa: std.mem.Allocator, lesson: Lesson) void {
     inline for (edit_lists) |f| disown(gpa, @constCast(@field(lesson, f)));
+}
+
+test "a learner reads prompts in a conversation only through its trainer's taps, and only in a pocket lesson" {
+    const Plain = struct {};
+    const Tapping = struct {
+        pub fn tapRows() void {}
+    };
+    try std.testing.expect(!readsConversations(Plain, true));
+    try std.testing.expect(readsConversations(Tapping, true));
+    try std.testing.expect(!readsConversations(Tapping, false));
 }
 
 test "a learner without taps reads a prompt in a conversation only when its passes hold it" {

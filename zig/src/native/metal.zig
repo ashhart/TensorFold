@@ -275,6 +275,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         s.* = Slide.init(gpa, io, h.metal);
         h.slide = s;
         h.host.learner = s.hook();
+        h.host.info_.slide_conversations = s.learner.readsConversations();
     }
     errdefer if (h.slide) |s| {
         s.deinit();

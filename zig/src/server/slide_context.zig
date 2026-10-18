@@ -70,6 +70,11 @@ const personal_in = 2; // and questions about the user no fact answers, likewise
 const answered_in = 3; // its answers also learned after a conversation, when the whole fits a pass
 const answer_rows = 512; // the longest answer in a conversation a lesson asks the learner for (it leaves out what it cannot read)
 
+/// Whether the learner reads full conversation prompts for teaching and checking.
+pub fn on(srv: *const Server) bool {
+    return srv.info.slide_conversations;
+}
+
 fn script(name: []const u8) ?Script {
     for (scripts) |s| if (std.mem.eql(u8, s.name, name)) return s;
     return null;
@@ -126,6 +131,7 @@ pub const Lists = struct { train: *std.ArrayList(api.Example), asked: *std.Array
 
 /// A fact's questions after each conversation it learns in, its near misses there, and some answers there too.
 pub fn learn(srv: *Server, cx: *Cx, to: Lists, refs: []const teach.Held, pairs: []const api.Example, pair: [2]usize, near: []const []const u8, gone: anytype) !void {
+    if (!on(srv)) return;
     const a = cx.a;
     var asked: usize = 0;
     var silent: usize = 0;
@@ -156,7 +162,7 @@ pub fn learn(srv: *Server, cx: *Cx, to: Lists, refs: []const teach.Held, pairs: 
 
 /// Questions about the user no fact answers, after each conversation a lesson learns in: they stay unanswered there.
 pub fn unanswered(srv: *Server, cx: *Cx, unasked: *std.ArrayList(api.Example), free: []const []const u8, gone: anytype) !void {
-    if (free.len == 0) return;
+    if (free.len == 0 or !on(srv)) return;
     for (learned, 0..) |name, c| {
         const before = try turns(srv, cx, name, gone);
         if (before.len == 0) continue;
@@ -164,8 +170,9 @@ pub fn unanswered(srv: *Server, cx: *Cx, unasked: *std.ArrayList(api.Example), f
     }
 }
 
-/// The two held-out questions also checked after the conversations no lesson learns in.
-pub fn checkIn(a: Allocator, held: *std.ArrayList(teach.Held), first: teach.Held, second: teach.Held) !void {
+/// The held-out questions checked in new conversations only where the learner reads full conversations.
+pub fn checkIn(a: Allocator, held: *std.ArrayList(teach.Held), first: teach.Held, second: teach.Held, reads: bool) !void {
+    if (!reads) return;
     for ([_]teach.Held{ first, second }, checked) |h, name| {
         var in = h;
         in.context = name;
@@ -175,7 +182,21 @@ pub fn checkIn(a: Allocator, held: *std.ArrayList(teach.Held), first: teach.Held
 
 /// A learned fact's first held-out question and its answer, which later lessons' chains carry.
 pub fn chainAfter(srv: *Server, id: u32, plan: teach.Plan) void {
+    if (!on(srv)) return;
     for (plan.held) |h| if (h.context.len == 0 and h.answer.len > 0) return srv.slide.chained(id, .{ h.question, h.answer });
+}
+
+test "the held-out questions are also asked after conversations only where the learner reads them" {
+    const gpa = std.testing.allocator;
+    var held: std.ArrayList(teach.Held) = .empty;
+    defer held.deinit(gpa);
+    const first: teach.Held = .{ .question = "What is my dog called?", .answer = "Ginger.", .fact = 0 };
+    const second: teach.Held = .{ .question = "What do I call my dog?", .answer = "Ginger.", .fact = 0 };
+    try checkIn(gpa, &held, first, second, false);
+    try std.testing.expectEqual(@as(usize, 0), held.items.len);
+    try checkIn(gpa, &held, first, second, true);
+    try std.testing.expectEqual(@as(usize, 2), held.items.len);
+    for (held.items, checked) |h, name| try std.testing.expectEqualStrings(name, h.context);
 }
 
 test "the conversations a lesson learns in are not the ones its checks ask in" {

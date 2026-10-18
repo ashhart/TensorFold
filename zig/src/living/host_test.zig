@@ -198,6 +198,7 @@ fn run(comptime F: fam.Family) !void {
     var seen: H.Seen = .{};
     var l = learner.Learner(H).init(gpa, std.testing.io, &seen);
     defer l.deinit();
+    try std.testing.expect(!l.readsConversations()); // its trainer has no taps
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
