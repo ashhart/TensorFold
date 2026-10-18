@@ -10,6 +10,19 @@ const Value = json.Value;
 pub const default_api = "https://tensorfold.dev/api/benchmarks/v1";
 pub const hf_models = "https://huggingface.co/api/models/";
 
+/// Enabled only in a release coordinated with the receiver's v2 validation and separate rankings.
+pub const v2_submissions_enabled = false;
+pub const v2_disabled = "community-v2 submissions are disabled until the client and receiver both support v2; the receipt remains local";
+
+pub fn publicationAllowed(v: Value, problem: *[]const u8) bool {
+    const suite = v.get("suite") orelse return true;
+    if (!v2_submissions_enabled and std.mem.eql(u8, json.strOr(suite.get("id")), "community-v2")) {
+        problem.* = v2_disabled;
+        return false;
+    }
+    return true;
+}
+
 /// ``api`` is an ``apiUrl`` result; ``hf_base`` is a test seam; ``home`` holds ``.tensorfold/benchmarks``.
 pub const Options = struct { api: []const u8, hf_base: []const u8 = hf_models, environ: *const std.process.Environ.Map, home: []const u8, now_ms: i64 };
 
@@ -180,6 +193,7 @@ fn request(a: Allocator, io: std.Io, o: Options, method: std.http.Method, route:
 /// The board's rules, then an unauthenticated Hugging Face lookup proving the model (and drafter) public.
 pub fn verifyPublic(a: Allocator, io: std.Io, o: Options, v: Value, problem: *[]const u8) !bool {
     if (!check.receipt(v, .publish, o.now_ms, problem)) return false;
+    if (!publicationAllowed(v, problem)) return false;
     const m = v.get("model").?;
     for ([_]?Value{ m.get("repo_id"), m.get("drafter_repo_id") }) |r| {
         const repo = (r orelse continue).str() orelse continue;

@@ -101,7 +101,7 @@ test "a refused upload shows a fixed text and never the receiver's, and a redire
     });
     defer f.stop();
     const o = try w.opts(f);
-    const v = try receipts.valid(a);
+    const v = try receipts.legacy(a);
     var problem: []const u8 = "";
     try std.testing.expect(try upload.upload(a, std.testing.io, o, v, &problem) == null);
     try std.testing.expectEqualStrings("Upload token was refused; run tensorfold benchmark login again", problem);
@@ -138,7 +138,7 @@ test "only a public checkpoint passes, checked without credentials for the model
     });
     defer f.stop();
     const o = try w.opts(f);
-    const v = try receipts.valid(a);
+    const v = try receipts.legacy(a);
     var problem: []const u8 = "";
     for (0..3) |_| {
         try std.testing.expect(!try upload.verifyPublic(a, std.testing.io, o, v, &problem));
@@ -201,7 +201,7 @@ test "proxy variables are never used, so the token cannot reach a proxy in clear
     var problem: []const u8 = "";
     try std.testing.expect(try upload.login(a, std.testing.io, o, token, &problem) == null);
     try std.testing.expectEqualStrings("Could not reach the benchmark receiver; your local receipt is saved", problem);
-    try std.testing.expect(!try upload.verifyPublic(a, std.testing.io, o, try receipts.valid(a), &problem));
+    try std.testing.expect(!try upload.verifyPublic(a, std.testing.io, o, try receipts.legacy(a), &problem));
     try std.testing.expectEqualStrings("Could not reach huggingface.co to verify public checkpoint metadata; the receipt remains local", problem);
     try std.testing.expectEqual(@as(usize, 0), f.count());
 }

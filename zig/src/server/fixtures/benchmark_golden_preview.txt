@@ -34,6 +34,7 @@
       "delivery_tps": 10.0,
       "end_to_end_seconds": 0.4,
       "error_code": null,
+      "finish_reason": "length",
       "fixture_id": "code",
       "prefill_seconds": 0.04,
       "prompt_tokens": 24,
@@ -53,6 +54,7 @@
       "delivery_tps": 10.0,
       "end_to_end_seconds": 0.4,
       "error_code": null,
+      "finish_reason": "length",
       "fixture_id": "chat",
       "prefill_seconds": 0.04,
       "prompt_tokens": 24,
@@ -79,7 +81,7 @@
     "tokens": 4
   },
   "suite": {
-    "id": "community-v1",
-    "sha256": "9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be"
+    "id": "community-v2",
+    "sha256": "348fc03357c61349b22288a4262a99216b5b23ff836378aeb0284aadc34d8317"
   }
 }

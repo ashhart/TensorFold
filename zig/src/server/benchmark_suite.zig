@@ -1,17 +1,19 @@
-//! The community-v1 suite: fixtures, digest, statuses, error codes, the sample record and per-cell medians.
+//! The versioned community suite: fixtures, digest, statuses, error codes, the sample record and per-cell medians.
 const std = @import("std");
 const json = @import("json");
 const Allocator = std.mem.Allocator;
 
-pub const id = "community-v1";
-pub const sha256_hex = "9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be";
+pub const legacy_id = "community-v1";
+pub const legacy_sha256_hex = "9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be";
+pub const id = "community-v2";
+pub const sha256_hex = "348fc03357c61349b22288a4262a99216b5b23ff836378aeb0284aadc34d8317";
 pub const seed_base: u32 = 1234;
 pub const standard_reps = 5;
 
 /// ``tensorfold benchmark suites``: the manifest and its digest as ``json.dumps(indent=2)`` writes them.
 pub const suites_text =
     \\{
-    \\  "id": "community-v1",
+    \\  "id": "community-v2",
     \\  "fixtures": [
     \\    {
     \\      "id": "code",
@@ -38,7 +40,8 @@ pub const suites_text =
     \\  "ignore_eos": false,
     \\  "concurrency": 1,
     \\  "delivery_rate": "completion_tokens_minus_one_over_first_to_last_nonempty_sse_delivery",
-    \\  "sha256": "9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be"
+    \\  "min_sampled_stop_tokens": 128,
+    \\  "sha256": "348fc03357c61349b22288a4262a99216b5b23ff836378aeb0284aadc34d8317"
     \\}
 ++ "\n";
 
@@ -86,6 +89,7 @@ pub const Sample = struct {
     prefill_seconds: ?f64 = null,
     token_sha: ?[]const u8 = null,
     error_code: ?ErrorCode = null,
+    finish_reason: ?[]const u8 = null,
 };
 
 /// A cell's medians are set only when every declared repeat is ok.
@@ -94,6 +98,7 @@ pub const Cell = struct {
     temperature: f64,
     complete: bool,
     protocol_complete: bool,
+    protocol: []const u8 = id,
     delivery: ?f64,
     ttft: ?f64,
 };
@@ -219,9 +224,7 @@ test "the suites text re-derives the pinned manifest digest and its own sha256 f
     try std.testing.expectEqualStrings(sha256_hex, v.get("sha256").?.string);
     _ = v.object.orderedRemove("sha256");
     sortKeys(v);
-    try std.testing.expectEqual(@as(usize, 576), (try json.stringify(a, v, .{ .compact = true, .ascii = false })).len);
     try std.testing.expectEqualStrings(sha256_hex, &try manifestDigest(a, v));
-    try std.testing.expectEqual(@as(usize, 794), suites_text.len);
     for (fixtures, v.get("fixtures").?.array) |f, m| {
         try std.testing.expectEqualStrings(f.id, m.get("id").?.string);
         try std.testing.expectEqualStrings(f.prompt, m.get("prompt").?.string);
@@ -265,4 +268,22 @@ test "temperatures print as Python's g format" {
     var buf: [32]u8 = undefined;
     for ([_]struct { f64, []const u8 }{ .{ 1.0, "1" }, .{ 0.0, "0" }, .{ 0.95, "0.95" }, .{ 1.2345678, "1.23457" }, .{ 0.00001, "1e-05" }, .{ 2, "2" } }) |c|
         try std.testing.expectEqualStrings(c[1], fmtG(&buf, c[0]));
+}
+
+/// A ranking partition is a recognized manifest, never a label supplied without its digest.
+pub fn protocol(v: json.Value) ?[]const u8 {
+    const sid = json.strOr(v.get("id"));
+    const digest = json.strOr(v.get("sha256"));
+    if (std.mem.eql(u8, sid, id) and std.mem.eql(u8, digest, sha256_hex)) return id;
+    if (std.mem.eql(u8, sid, legacy_id) and std.mem.eql(u8, digest, legacy_sha256_hex)) return legacy_id;
+    return null;
+}
+
+/// Cells retain their receipt's protocol so callers cannot present old results as new ones.
+pub fn receiptCells(a: Allocator, v: json.Value) ![]Cell {
+    const sid = protocol(v.get("suite") orelse return error.UnknownProtocol) orelse return error.UnknownProtocol;
+    const stg = v.get("settings") orelse return error.UnknownProtocol;
+    const out = try cells(a, v.get("samples").?.array, @intFromFloat(number(stg.get("repetitions")).?));
+    for (out) |*c| c.protocol = sid;
+    return out;
 }

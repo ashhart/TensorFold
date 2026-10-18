@@ -33,6 +33,7 @@ const Check = struct {
     why: *[]const u8,
     mode: Mode,
     now_ms: i64,
+    v2: bool = false,
 
     fn fail(c: *Check, comptime message: []const u8) Bad {
         c.why.* = message;
@@ -44,10 +45,11 @@ const Check = struct {
     }
 
     fn all(c: *Check, v: Value) Bad!void {
-        try c.need(exact(v, &top_keys), "receipt must hold exactly the community-v1 fields");
+        try c.need(exact(v, &top_keys), "receipt must hold exactly the community receipt fields");
         try c.need(isNumber(v.get("schema_version").?, 1), "schema_version must be 1");
         const s = v.get("suite").?;
-        try c.need(exact(s, &.{ "id", "sha256" }) and eqlStr(s.get("id").?, suite.id) and eqlStr(s.get("sha256").?, suite.sha256_hex), "suite must be community-v1 with its fixture digest");
+        try c.need(exact(s, &.{ "id", "sha256" }) and suite.protocol(s) != null, "suite must name a recognized community protocol with its exact manifest digest");
+        c.v2 = eqlStr(s.get("id").?, suite.id);
         try c.need(text(v.get("run_id").?, uuid, false), "run_id must be a lowercase UUID v4");
         try c.need(createdAt(v.get("created_at").?, c.now_ms), "created_at must be a real UTC time like 2026-01-01T00:00:00Z, at most 15 minutes ahead");
         try c.runtime(v.get("runtime").?);
@@ -130,7 +132,9 @@ const Check = struct {
     }
 
     fn sample(c: *Check, x: Value, s: Value, before: []const Value) Bad!void {
-        try c.need(exact(x, &sample_keys), "samples entries must hold exactly the 17 sample fields");
+        const keys = if (c.v2) &(sample_keys ++ .{"finish_reason"}) else &sample_keys;
+        try c.need(exact(x, keys), "samples entries must hold exactly their protocol's sample fields");
+        if (c.v2) try c.need(x.get("finish_reason").? == .null or oneOf(x.get("finish_reason").?, &.{ "stop", "length" }), "samples finish_reason must be stop, length or null");
         const t = toF64(x.get("temperature").?);
         const in_cell = t != null and for (s.get("temperatures").?.array) |u| {
             if (toF64(u).? == t.?) break true;
@@ -161,7 +165,11 @@ const Check = struct {
             try c.need(@abs(r - expected) <= @max(1e-6, 1e-6 * @max(r, expected)), "samples delivery_tps must equal (completion_tokens - 1) / delivery_seconds");
         }
         const tokens = toF64(s.get("tokens").?).?;
-        if (eqlStr(status, "ok")) try c.need(count != null and count.? == tokens and rate != null and code == .null, "an ok sample needs its requested output, a delivery rate and no error code");
+        const natural = c.v2 and t.? > 0 and eqlStr(x.get("finish_reason").?, "stop") and count != null and count.? >= 128 and count.? < tokens;
+        if (eqlStr(status, "ok")) {
+            try c.need(count != null and (count.? == tokens or natural) and rate != null and code == .null, "an ok sample needs protocol-complete output, a delivery rate and no error code");
+            if (c.v2) try c.need(x.get("finish_reason").? != .null, "an ok sample must record its stop or length finish_reason");
+        }
         const cached = toF64(x.get("cached_tokens").?);
         const prompt = toF64(x.get("prompt_tokens").?);
         try c.need(cached == null or prompt == null or cached.? <= prompt.?, "samples cached_tokens must not exceed prompt_tokens");

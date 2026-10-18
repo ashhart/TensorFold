@@ -11,7 +11,7 @@ The examples call the command `tensorfold`. A source build's binary is `zig-out/
 
 The command starts its own single-request `serve` on a loopback port, disables prompt reuse, warms each workload, and measures five repeats at sampled and greedy settings. It stops only the server it started, and a Ctrl-C or a closed terminal stops that server too; a second Ctrl-C exits at once and kills it. The default output limit is 256 tokens. The checkpoint must already be in the cache: `tensorfold benchmark` never downloads, so run `tensorfold pull` first. `--drafter DIR_OR_REPO` passes a drafter to engines that take one. Drafts stay on by default, and only `--serial` disables them. The default `--drafter auto` passes the target's own drafter when it is already cached (`z-lab/Qwen3.8-27B-DFlash2` for Qwen3.8-27B) and names it in the run output and the receipt; when it is not cached, the run passes none and says why. `--drafter none` passes none. When `--serial` overrides a given `--drafter`, the run prints a line saying so.
 
-An engine that decodes greedily only refuses the sampled cells, so it cannot complete community-v1; the run prints the server's reason, and `--temperatures 0` gives a local run. A large checkpoint may need its engine's own load limit raised (`GLM_LOAD_LIMIT_GB` for GLM-5.3-Flash) and a longer `--startup-timeout`: without the flag, the run waits up to 600 s plus 6 s per GB of weights past 20 GB, at most 3600 s.
+An engine that decodes greedily only refuses the sampled cells, so it cannot complete community-v2; the run prints the server's reason, and `--temperatures 0` gives a local run. A large checkpoint may need its engine's own load limit raised (`GLM_LOAD_LIMIT_GB` for GLM-5.3-Flash) and a longer `--startup-timeout`: without the flag, the run waits up to 600 s plus 6 s per GB of weights past 20 GB, at most 3600 s.
 
 Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output FILE` chooses another location. Files contain public hardware and model metadata and individual attempts, never prompt text, generated output, machine names, serial numbers, GPU UUIDs, addresses or local model paths. Local model directories can be benchmarked but cannot be published, and a drafter directory is never named. Managed native runs record `python_version` as `"none"`. An attached manifest may attest the same value; an unattested attached run records `"unknown"`.
 
@@ -21,7 +21,7 @@ Results are saved locally in `~/.tensorfold/benchmarks/RUN_ID.json`; `--output F
 # Inspect a saved receipt without uploading it.
 tensorfold benchmark inspect receipt.json
 
-# Show the immutable community-v1 fixture and settings manifest.
+# Show the immutable community-v2 fixture and settings manifest.
 tensorfold benchmark suites
 
 # A short custom run, outside the standard five-repeat comparison.
@@ -35,7 +35,7 @@ tensorfold benchmark example-org/public-checkpoint --server http://127.0.0.1:808
 
 Attached-server results do not claim the client's hardware is the server's hardware. The client reads `GET /v1/benchmark/manifest` from the server it attached to. A manifest that passes the receipt checks fills the version, hardware, checkpoint hashes, revision and rank count (1 or 2). Without that document, or if any field fails those checks, the receipt keeps unknown hardware and an unknown revision and remains unranked. An attached run records the backend, model and context you declare, unchecked against the server. The runner does not clear or restart an attached server's caches.
 
-The runner records failures, incomplete streams, missing usage, early EOS and cancellations. Exit code 0 means every measured attempt completed its requested output with a delivery interval; 1 means an error, and with `--publish` the receipt is still saved when the run finished; 2 means incomplete attempts remain in the saved receipt; 130 means the run was cancelled with Ctrl-C: an attempt in flight is kept in the receipt, and a cancel during server startup saves nothing. SIGTERM and SIGHUP exit 143 and 129 without a receipt. Errors never silently disappear from an average.
+The runner records failures, incomplete streams, missing usage, early EOS and cancellations. Exit code 0 means every measured attempt completed under its protocol with a delivery interval; 1 means an error; v2 `--publish` is refused before a run starts and creates no receipt; 2 means incomplete attempts remain in the saved receipt; 130 means the run was cancelled with Ctrl-C: an attempt in flight is kept in the receipt, and a cancel during server startup saves nothing. SIGTERM and SIGHUP exit 143 and 129 without a receipt. Errors never silently disappear from an average.
 
 ## What the rates mean
 
@@ -43,19 +43,35 @@ The runner records failures, incomplete streams, missing usage, early EOS and ca
 
 **Server-reported tok/s** is kept separately when the server supplies it and is never substituted for stream delivery. First-text latency, request duration and server-reported prefill time remain separate measurements.
 
-The suite fixes prompts, seeds, sampled top-k and top-p, and thinking settings. Successful warm-ups are excluded; failed warm-ups are kept and make their cells incomplete. A cell has aggregates only when every declared repetition succeeds. Early EOS is visible and excluded from full-length comparisons.
+The suite fixes prompts, seeds, sampled top-k and top-p, and thinking settings. Successful warm-ups are excluded; failed warm-ups are kept and make their cells incomplete. A cell has aggregates only when every declared repetition succeeds. In community-v2, a sampled reply that naturally stops after at least 128 tokens is complete. Its `finish_reason` is recorded, and its rate uses the actual completion count, never the requested budget. Greedy replies still need the full requested count. Shorter replies, premature length stops and unmeasured delivery remain incomplete; empty output fails.
 
 Receipts include token hashes supplied by the server, but the command does not run paired serial and drafted equality tests. A token hash alone is not an exactness proof.
 
+## Protocol versions
+
+New runs use `community-v2` and its manifest digest. Existing `community-v1` receipts keep their original
+full-output rule and remain readable; inspection never upgrades them. Every ranking must select exactly
+one suite ID and digest, including contributor speed standings and profiles. A receiver must validate the
+version's sample fields and completion rule before computing that version's aggregates. It must reject an
+unknown or mismatched digest, never relabel it or merge v1 and v2 medians. Deploy the receiver's v2 support
+before accepting v2 uploads; an older v1-only receiver will reject them. The receiver is maintained separately
+from this source tree. V2 submissions are disabled in this release, including `--publish`, saved-receipt
+publication and direct uploads. Local runs and inspection remain available. The lead enables v2 only
+once both the client and receiver have shipped support, including separate rankings.
+
+Thanks to @BlivionIaG and @tovereast for the sampled-stop reports and proposal.
+
 ## Publishing
 
-The browser upload flow needs no login, pasted token, email request or administrator approval. Install or update the CLI using the [runbook](../RUNBOOK.md), run a cached public model locally, and save its receipt:
+Community-v2 runs stay local until the receiver accepts v2 and separates its rankings. Both `publish` and a run with `--publish` refuse v2 before a run, credential lookup, public-checkpoint lookup or upload. Local run, save and inspect remain available.
+
+The browser upload flow remains available for eligible community-v1 receipts, without a login, pasted token, email request or administrator approval. Install or update the CLI using the [runbook](../RUNBOOK.md). New runs save v2 locally:
 
 ```sh
-tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --output benchmark.json
+tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --output benchmark-v2.json
 ```
 
-Open [the benchmark board](https://tensorfold.dev/benchmarks), choose **Upload result**, enter a public display name and select `benchmark.json`. Review the hardware, model and timing fields, then confirm the data to submit it. Receipt contents are not sent before confirmation. The website creates a scoped browser profile privately and remembers it across reloads using a Secure, HttpOnly, SameSite cookie; there is no upload key to copy or paste.
+For an existing eligible community-v1 receipt, open [the benchmark board](https://tensorfold.dev/benchmarks), choose **Upload result**, enter a public display name and select `legacy-v1-receipt.json`. Review the hardware, model and timing fields, then confirm the data to submit it. Receipt contents are not sent before confirmation. The website creates a scoped browser profile privately and remembers it across reloads using a Secure, HttpOnly, SameSite cookie; there is no upload key to copy or paste.
 
 That browser profile keeps later submissions together, with up to 20 uploads per day. Clearing browser data or using another browser creates a separate profile. Display names are self-chosen and do not verify an identity; matching names do not merge profiles. New-profile limits apply to reduce spam.
 
@@ -67,14 +83,11 @@ Retries return the same saved submission without using another upload. Older man
 
 ### Existing CLI publishing credentials
 
-CLI installations that already have scoped upload credentials can continue to publish directly:
+CLI installations that already have scoped upload credentials can continue to publish eligible community-v1 receipts directly:
 
 ```sh
-# Run, show the public fields, and ask before publishing.
-tensorfold benchmark TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit --publish
-
-# Publish an existing receipt; --yes consents without the prompt.
-tensorfold benchmark publish receipt.json --yes
+# Publish an eligible legacy receipt; --yes consents without the prompt.
+tensorfold benchmark publish legacy-v1-receipt.json --yes
 
 # Remove locally stored CLI upload credentials.
 tensorfold benchmark logout

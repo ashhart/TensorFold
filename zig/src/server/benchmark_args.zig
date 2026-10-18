@@ -48,7 +48,7 @@ pub const flags = [_]Flag{
     .{ .name = "--timeout", .help = "request timeout in seconds (default: 600)" },
     .{ .name = "--startup-timeout", .help = "managed server startup timeout in seconds (default: 600, plus 6 per GB of weights past 20 GB, at most 3600)" },
     .{ .name = "--output", .help = "receipt path (default: ~/.tensorfold/benchmarks/RUN_ID.json)" },
-    .{ .name = "--publish", .value = false, .help = "review and upload the saved receipt" },
+    .{ .name = "--publish", .value = false, .help = "refused for community-v2 until receiver support ships; save locally" },
     .{ .name = "--yes", .value = false, .help = "explicitly approve public upload without the interactive prompt" },
     .{ .name = "--upload-url", .help = "benchmark API base URL (default: " ++ upload.default_api ++ ")" },
     .{ .name = "--token-stdin", .value = false, .help = "for login, read a contributor token from stdin" },
@@ -177,7 +177,7 @@ fn checks(a: Allocator, out: *Args, temperatures: []const u8, problem: *[]const 
 
 /// ``-h``: the usage line and one line per flag.
 pub fn help(w: *std.Io.Writer) !void {
-    try w.print("{s}\n\nRun the community-v1 benchmark and optionally publish its receipt.\n\npositional arguments:\n  target  model ID or checkpoint directory, or publish/inspect/login/logout/suites\n  file    receipt JSON for publish or inspect\n\noptions:\n", .{usage_line});
+    try w.print("{s}\n\nRun and save community-v2 locally. V2 publication is disabled until receiver support ships.\nPublish accepts eligible legacy community-v1 receipts.\n\npositional arguments:\n  target  model ID or checkpoint directory, or publish/inspect/login/logout/suites\n  file    receipt JSON for publish or inspect\n\noptions:\n", .{usage_line});
     for (flags) |f| try w.print("  {s:<18} {s}\n", .{ f.name, f.help });
 }
 

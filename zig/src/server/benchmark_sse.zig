@@ -121,6 +121,7 @@ pub const Stream = struct {
         if (!s.done) return error.TruncatedStream;
         const reason = if (s.finish_reason) |r| r.string else return error.UnexpectedFinish;
         if (!std.mem.eql(u8, reason, "stop") and !std.mem.eql(u8, reason, "length")) return error.UnexpectedFinish;
+        sample.finish_reason = if (std.mem.eql(u8, reason, "stop")) "stop" else "length";
         const usage = s.usage orelse return error.MissingUsage;
         const prompt = count(usage.get("prompt_tokens")) orelse return error.InvalidUsage;
         const completion = count(usage.get("completion_tokens")) orelse return error.InvalidUsage;
@@ -133,7 +134,8 @@ pub const Stream = struct {
         sample.cached_tokens = cached;
         if (s.first == null or completion == 0) return error.EmptyOutput;
         if (completion > tokens) return error.TokenCountMismatch;
-        if (completion < tokens) {
+        const natural_sample = sample.temperature > 0 and std.mem.eql(u8, reason, "stop") and completion >= 128;
+        if (completion < tokens and !natural_sample) {
             sample.status = .early_eos;
         } else if (s.deliveries < 2 or s.last.? <= s.first.?) {
             sample.status = .unmeasured;
