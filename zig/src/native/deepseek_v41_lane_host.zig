@@ -111,8 +111,8 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         .engram = if (o.engram_stream) .streamed else .resident,
         .bound_only = o.engram_stream,
     }) catch |err| {
-        a.destroy(model);
         if (err == error.InvalidTokenMap) {
+            a.destroy(model);
             problem.* = "engram-token-map.bin is missing beside the checkpoint: the pull builds it; see the family guide";
             return null;
         }
