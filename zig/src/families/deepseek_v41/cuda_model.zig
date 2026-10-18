@@ -126,6 +126,10 @@ pub const Model = struct {
 
     /// Loads this rank (TF_TP_RANK / WORLD / DEVICE / MASTER / PORT) of `pack_dir` with `assets` (the module doc).
     pub fn open(gpa: std.mem.Allocator, io: std.Io, pack_dir: []const u8, assets: []const u8, o: Options) !*Model {
+        if (@import("sys").experimental.refusal("deepseek_v41", @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
+            if (!quiet) std.log.err("{s}", .{text});
+            return error.ExperimentalDeepSeekRequired;
+        }
         const m = try gpa.create(Model);
         var keep_owner = false;
         errdefer if (keep_owner) retain(m) else gpa.destroy(m);

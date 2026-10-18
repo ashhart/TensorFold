@@ -1,6 +1,10 @@
 //! Optional runtime refusal and discovery regressions with absent files and a fake loader.
 const std = @import("std");
 pub fn tests(b: *std.Build, all: *std.Build.Step) void {
+    const experimental = b.createModule(.{ .root_source_file = b.path("zig/experimental_family_test.zig"), .target = b.graph.host });
+    const policy = b.addRunArtifact(b.addTest(.{ .root_module = experimental }));
+    b.step("test-experimental-family-host", "Exact release opt-in policy without model or GPU work").dependOn(&policy.step);
+    all.dependOn(&policy.step);
     const fixture_module = b.createModule(.{ .target = b.graph.host, .link_libc = true, .link_libcpp = true });
     fixture_module.addCSourceFile(.{ .file = b.path("zig/tests/runtime_discovery_mock.cpp"), .flags = &.{"-std=c++17"} });
     const fixture_library = b.addLibrary(.{ .name = "runtime-discovery-mock", .linkage = .dynamic, .root_module = fixture_module });

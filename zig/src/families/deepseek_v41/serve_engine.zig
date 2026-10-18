@@ -28,6 +28,10 @@ pub fn chip(_: Allocator) ?[]const u8 {
 
 /// The engine for `o.dir`, or null with `problem` set (the native_engines contract).
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    if (@import("sys").experimental.refusal(o.model_type, @import("sys").getenv("TF_EXPERIMENTAL"))) |text| {
+        problem.* = text;
+        return null;
+    }
     if (!std.mem.eql(u8, o.model_type, "deepseek_v41")) {
         problem.* = try std.fmt.allocPrint(a, "this build serves deepseek_v41 checkpoints only, not {s}", .{o.model_type});
         return null;
