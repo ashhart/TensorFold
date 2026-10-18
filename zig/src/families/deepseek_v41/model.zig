@@ -108,6 +108,10 @@ pub const Model = struct {
     valid: bool = true,
     profile: ?*gpu_counters.Recorder = null,
     grouped_prefill: bool = true,
+    /// A concurrent encoder for the forward, so independent product groups overlap; every other
+    /// dispatch is followed by a barrier, which keeps the serial order. TF_DSV41_SERIAL=1 (or an
+    /// installed profiler) selects the serial encoder; both give the same bits.
+    concurrent: bool = true,
     observer: ?Observer = null,
     pub const Observer = struct {
         ctx: *anyopaque,
@@ -202,7 +206,7 @@ pub const Model = struct {
         residency.commit();
         residency.requestResidency();
         queue.addResidencySet(residency);
-        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .engram_sources = sources, .admitted_bytes = limited, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
+        return .{ .gpa = gpa, .device = device, .queue = queue, .residency = residency, .checkpoint = cp, .weights = bound, .cfg = c, .cfg_arena = arena, .lanes = lanes, .caches = caches, .cache = &caches[0], .engram_stash = engram_stash, .workspace = workspace, .attention_workspace = aw, .pipelines = pipelines, .engram_sources = sources, .admitted_bytes = limited, .concurrent = std.c.getenv("TF_DSV41_SERIAL") == null, .load_seconds = @as(f64, @floatFromInt(std.Io.Timestamp.now(io, .awake).toNanoseconds() - load_started.toNanoseconds())) / 1e9 };
     }
 
     pub fn deinit(m: *Model) void {
@@ -322,7 +326,7 @@ pub const Model = struct {
             staged[1] = try sources[1].stage(ws.words(.engram_ids_1, n), ws.bytes(.engram_stage_w_1, n * engram_rows.weight_bytes), ws.bytes(.engram_stage_s_1, n * engram_rows.scale_bytes), ws.words(.engram_local_1, n));
         }
         const e = m.queue.commandBufferUnretained();
-        var enc = e.compute(.serial);
+        var enc = e.compute(if (m.concurrent and m.profile == null) .concurrent else .serial);
         for (m.checkpoint.shards.items) |shard| enc.useResource(shard.buffer, mtl.ResourceUsage.read);
         var encoding = true;
         var record_started = false;
@@ -490,26 +494,56 @@ pub const Model = struct {
             routed_rows.routes = .{ .ids = g.view(.expert_ids) };
             routed_rows.grouped = true;
         }
-        for (0..2) |i| {
-            try exl3.encodeIndexed(&p.projection, enc, .{ .descriptors = .{ .buffer = w.descriptors[i] }, .count = 384, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(if (i == 0) .gate else .up)), ws.projection(), routed_rows);
-            enc.barrier();
-        }
+        // Routed and shared gate and up all read the normalized rows and write four separate
+        // fields: one group (split only where the projection scratch runs out).
+        const shared_rows = exl3.Rows{ .count = rows, .x_stride = 5120, .y_stride = 2304 };
+        var up_jobs = [_]exl3.Job{
+            .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[0] }, .count = 384, .k = 5120, .n = 2304 } }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.gate)), .scratch = undefined, .rows = routed_rows },
+            .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[1] }, .count = 384, .k = 5120, .n = 2304 } }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.up)), .scratch = undefined, .rows = routed_rows },
+            .{ .weights = .{ .matrix = w.shared[0] }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.shared_gate)), .scratch = undefined, .rows = shared_rows },
+            .{ .weights = .{ .matrix = w.shared[1] }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.shared_up)), .scratch = undefined, .rows = shared_rows },
+        };
+        try m.products(enc, &up_jobs);
+        // The two activations read and write separate fields; one barrier orders both before down.
         ops.encodeSwiGLU(enc, &p.ops, ws.view(.gate), ws.view(.up), ws.view(.route_weights), ws.view(.activation), .{ .rows = rows * 6, .width = 2304, .input_stride = 2304, .output_stride = 2304, .weighted = true });
+        ops.encodeSwiGLU(enc, &p.ops, ws.view(.shared_gate), ws.view(.shared_up), ws.view(.route_weights), ws.view(.shared_activation), .{ .rows = rows, .width = 2304, .input_stride = 2304, .output_stride = 2304 });
         enc.barrier();
         routed_rows.x_stride = 2304;
         routed_rows.y_stride = 5120;
         routed_rows.routes.?.repeat = 1;
         routed_rows.input_rows = @as(usize, rows) * 6;
         if (grouped) |g| routed_rows.input_ids = g.view(.slot_ids);
-        try exl3.encodeIndexed(&p.projection, enc, .{ .descriptors = .{ .buffer = w.descriptors[2] }, .count = 384, .k = 2304, .n = 5120 }, convert(ws.view(.activation)), convert(ws.view(.routed)), ws.projection(), routed_rows);
-        enc.barrier();
-        try m.project(enc, w.shared[0], ws.view(.normalized), ws.view(.shared_gate), rows, 5120, 2304, .bf16);
-        try m.project(enc, w.shared[1], ws.view(.normalized), ws.view(.shared_up), rows, 5120, 2304, .bf16);
-        ops.encodeSwiGLU(enc, &p.ops, ws.view(.shared_gate), ws.view(.shared_up), ws.view(.route_weights), ws.view(.shared_activation), .{ .rows = rows, .width = 2304, .input_stride = 2304, .output_stride = 2304 });
-        enc.barrier();
-        try m.project(enc, w.shared[2], ws.view(.shared_activation), ws.view(.shared_down), rows, 2304, 5120, .bf16);
+        var down_jobs = [_]exl3.Job{
+            .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[2] }, .count = 384, .k = 2304, .n = 5120 } }, .x = convert(ws.view(.activation)), .y = convert(ws.view(.routed)), .scratch = undefined, .rows = routed_rows },
+            .{ .weights = .{ .matrix = w.shared[2] }, .x = convert(ws.view(.shared_activation)), .y = convert(ws.view(.shared_down)), .scratch = undefined, .rows = .{ .count = rows, .x_stride = 2304, .y_stride = 5120 } },
+        };
+        try m.products(enc, &down_jobs);
         ops.encodeCombine(enc, &p.ops, ws.view(.routed), ws.view(.shared_down), ws.view(.route_ids), ws.view(.branch), .{ .rows = rows, .width = 5120, .routed_row_stride = 6 * 5120, .slot_stride = 5120, .shared_stride = 5120, .y_stride = 5120 });
         enc.barrier();
+    }
+
+    /// Independent products as concurrent groups: jobs get consecutive slices of the projection
+    /// scratch (their `scratch` is replaced), and a group is flushed before a job would overrun it.
+    fn products(m: *Model, enc: mtl.ComputeEncoder, jobs: []exl3.Job) !void {
+        const ws = &m.workspace;
+        var first: usize = 0;
+        var used: usize = 0;
+        for (jobs, 0..) |*job, i| {
+            const w = switch (job.weights) {
+                .matrix => |x| .{ x.k, x.n },
+                .experts => |x| .{ x.k, x.n },
+            };
+            const need = std.mem.alignForward(usize, try exl3.scratchBytes(w[0], w[1], job.rows.count), 16);
+            if (need > ws.plan.projection_bytes) return error.ProjectionScratchTooSmall;
+            if (used + need > ws.plan.projection_bytes) {
+                try exl3.encodeJobs(&m.pipelines.projection, enc, jobs[first..i]);
+                first = i;
+                used = 0;
+            }
+            job.scratch = ws.projectionAt(used);
+            used += need;
+        }
+        try exl3.encodeJobs(&m.pipelines.projection, enc, jobs[first..]);
     }
 
     /// The ungrouped MoE with the shared expert as each token's seventh row: one indexed product per
@@ -525,10 +559,12 @@ pub const Model = struct {
         const shared_activation = ws.view(.activation).shifted(t * 6 * 2304 * 2);
         const shared_down = ws.view(.routed).shifted(t * 6 * 5120 * 2);
         const up_rows = exl3.Rows{ .count = merged, .x_stride = 5120, .y_stride = 2304, .output_ids = convert(ws.view(.moe_slots)), .output_rows = t * 7, .routes = .{ .ids = convert(ws.view(.moe_routes)), .repeat = 7 } };
-        for (0..2) |i| {
-            try exl3.encodeIndexed(&p.projection, enc, .{ .descriptors = .{ .buffer = w.descriptors[i] }, .count = 385, .k = 5120, .n = 2304 }, convert(ws.view(.normalized)), convert(ws.view(if (i == 0) .gate else .up)), ws.projection(), up_rows);
-            enc.barrier();
-        }
+        // gate and up read the same rows and write separate fields: one group.
+        var jobs = [_]exl3.Job{
+            .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[0] }, .count = 385, .k = 5120, .n = 2304 } }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.gate)), .scratch = undefined, .rows = up_rows },
+            .{ .weights = .{ .experts = .{ .descriptors = .{ .buffer = w.descriptors[1] }, .count = 385, .k = 5120, .n = 2304 } }, .x = convert(ws.view(.normalized)), .y = convert(ws.view(.up)), .scratch = undefined, .rows = up_rows },
+        };
+        try m.products(enc, &jobs);
         ops.encodeSwiGLU(enc, &p.ops, ws.view(.gate), ws.view(.up), ws.view(.route_weights), ws.view(.activation), .{ .rows = rows * 6, .width = 2304, .input_stride = 2304, .output_stride = 2304, .weighted = true });
         ops.encodeSwiGLU(enc, &p.ops, shared_gate, shared_up, ws.view(.route_weights), shared_activation, .{ .rows = rows, .width = 2304, .input_stride = 2304, .output_stride = 2304 });
         enc.barrier();

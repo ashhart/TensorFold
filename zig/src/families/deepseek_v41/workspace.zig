@@ -66,6 +66,8 @@ pub const Plan = struct {
     streamed: bool = false,
     offsets: [count]usize,
     bytes: usize,
+    /// Size of the projection scratch field: concurrent product groups split it between their jobs.
+    projection_bytes: usize = 0,
 
     pub fn init(rows: u32) !Plan {
         return initLanes(rows, 1);
@@ -91,7 +93,7 @@ pub const Plan = struct {
             t * 129280 * 4,   projection_bytes,   if (grouped) |g| g.bytes else 0, stage * 256,   stage * 256,  stage * 8,    stage * 8,
             stage * 4,        stage * 4,        t * 7 * 4,                       t * 7 * 4,
         };
-        var out = Plan{ .rows = rows, .lanes = lanes, .streamed = streamed, .offsets = undefined, .bytes = 0 };
+        var out = Plan{ .rows = rows, .lanes = lanes, .streamed = streamed, .offsets = undefined, .bytes = 0, .projection_bytes = projection_bytes };
         for (sizes, 0..) |size, i| {
             out.offsets[i] = std.mem.alignForward(usize, out.bytes, 16);
             out.bytes = try std.math.add(usize, out.offsets[i], size);
@@ -132,6 +134,11 @@ pub const Workspace = struct {
     pub fn projection(w: *const Workspace) exl3.View {
         const v = w.view(.projection);
         return .{ .buffer = v.buffer, .offset = v.offset };
+    }
+    /// The projection scratch at `offset` bytes into its field.
+    pub fn projectionAt(w: *const Workspace, offset: usize) exl3.View {
+        const v = w.view(.projection);
+        return .{ .buffer = v.buffer, .offset = v.offset + offset };
     }
     pub fn grouping(w: *const Workspace, rows: u32) !groups.Scratch {
         if (rows < 2 or rows > w.plan.rows) return error.InvalidPrefillChunk;

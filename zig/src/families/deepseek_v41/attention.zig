@@ -1,4 +1,5 @@
 //! Pinned DeepSeek V4.1 attention, resident EXL3 projections and causal packed-cache chunk execution.
+const std = @import("std");
 const mtl = @import("metal");
 const exl3 = @import("../../core/exl3_projection.zig");
 const checkpoint = @import("../../core/checkpoint_metal.zig");
@@ -6,6 +7,7 @@ const weights = @import("weights.zig");
 const config = @import("config.zig");
 const ops = @import("ops.zig");
 const csa2 = @import("csa2.zig");
+const input_group = @import("input_group.zig");
 const kv = @import("kv.zig");
 const index = @import("csa2_index.zig");
 const rope = @import("rope.zig");
@@ -157,6 +159,31 @@ fn precedingIndex(layer: u32) u32 {
     return source;
 }
 
+/// wq_a, wkv and (owner layers) the compressor's wkv and wgate as one concurrent product group
+/// (input_group.zig). Returns false, encoding nothing, when a compressor matrix is a kept-dense
+/// repack; the caller then runs the products one by one.
+fn groupInputProducts(ep: *const exl3.Pipelines, e: mtl.ComputeEncoder, w: *const weights.Attention, state: *State, work: *Workspace, x: View, scratch: exl3.View, layer: u32, rows: u32, c: config.Text) !bool {
+    const ratio = c.compress_ratios[layer];
+    var m: input_group.Matrices = .{ .wq_a = w.wq_a, .wkv = w.wkv };
+    if (ratio != 0 and (try state.source(layer, ratio)).owner == layer) {
+        const compressor = if (w.compressor) |*value| value else return error.MissingAttentionCompressor;
+        m.compressor_wkv = switch (compressor.wkv) {
+            .trellis => |t| t,
+            .dense => return false,
+        };
+        if (ratio > 1) {
+            const gate = compressor.wgate orelse return error.MissingAttentionCompressorGate;
+            m.compressor_wgate = switch (gate) {
+                .trellis => |t| t,
+                .dense => return false,
+            };
+        }
+    }
+    // The projection field holds at least the head's scratch for these rows (workspace plan).
+    try input_group.encode(ep, e, m, .{ .qr = core(work.view(.qr)), .raw = core(work.view(.raw_kv)), .values = core(work.view(.values)), .gates = core(work.view(.gates)) }, core(x), scratch, try exl3.scratchBytes(c.hidden_size, c.vocab_size, rows), rows, .{ .hidden = c.hidden_size, .q_lora_rank = c.q_lora_rank, .head_dim = c.head_dim }, ratio);
+    return true;
+}
+
 /// BF16 x/y [rows,5120]; layers 0..39 share the chunk-start cursor, appended by the caller after all layers.
 
 // No extra RMS after wq_b or index-query Hadamard outside EXL3.
@@ -179,7 +206,11 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     const ring = try state.ring(layer);
     const chunk = work.selection.windowChunk();
     e.barrier();
-    try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden_size, c.q_lora_rank, .bf16);
+    // Outside diagnostics, every product of x runs as one group: wq_a, wkv and an owner layer's
+    // compressor wkv and wgate read only x and write qr, raw, values and gates, which nothing
+    // touches before their own steps below.
+    const inputs_done = !diagnostic and try groupInputProducts(ep, e, w, state, work, x, scratch, layer, rows, c);
+    if (!inputs_done) try projection(ep, e, .{ .trellis = w.wq_a }, x, qr, scratch, rows, c.hidden_size, c.q_lora_rank, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .qr_projection, qr);
     norm(p, e, qr, w.q_norm, rows, c.q_lora_rank, c.rms_norm_eps);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .qr_norm, qr);
@@ -187,7 +218,7 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .q_projection, q);
     try rotate(p, e, q, rows, c.num_attention_heads, c.head_dim, position, ratio, 1, false, c);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .q, q);
-    try projection(ep, e, .{ .trellis = w.wkv }, x, raw, scratch, rows, c.hidden_size, c.head_dim, .bf16);
+    if (!inputs_done) try projection(ep, e, .{ .trellis = w.wkv }, x, raw, scratch, rows, c.hidden_size, c.head_dim, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .kv_projection, raw);
     norm(p, e, raw, w.kv_norm, rows, c.head_dim, c.rms_norm_eps);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .kv_norm, raw);
@@ -209,10 +240,12 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
             const output: exl3.Output = if (ratio == 1) .bf16 else .f32;
             const values = work.view(.values);
             const gates = work.view(.gates);
-            try projection(ep, e, compressor.wkv, x, values, scratch, rows, c.hidden_size, c.head_dim, output);
-            if (ratio > 1) {
-                const gate = compressor.wgate orelse return error.MissingAttentionCompressorGate;
-                try projection(ep, e, gate, x, gates, scratch, rows, c.hidden_size, c.head_dim, .f32);
+            if (!inputs_done) {
+                try projection(ep, e, compressor.wkv, x, values, scratch, rows, c.hidden_size, c.head_dim, output);
+                if (ratio > 1) {
+                    const gate = compressor.wgate orelse return error.MissingAttentionCompressorGate;
+                    try projection(ep, e, gate, x, gates, scratch, rows, c.hidden_size, c.head_dim, .f32);
+                }
             }
             try p.cache.encodePool(e, values, gates, source.partial, tensor(compressor.norm), latent, .{ .rows = rows, .ratio = ratio, .position = position, .stride = c.head_dim, .input_f32 = @intFromBool(ratio > 1), .eps = c.rms_norm_eps });
             if (complete != 0) {
@@ -285,3 +318,4 @@ pub fn encodeDiagnostic(p: *const Pipelines, e: mtl.ComputeEncoder, w: *const we
     try projection(ep, e, .{ .trellis = w.wo_b }, grouped, y, scratch, rows, group_output, c.hidden_size, .bf16);
     if (diagnostic) try DiagnosticObserver.observe(true, observer, e, .wo_b, y);
 }
+

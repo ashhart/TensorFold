@@ -189,4 +189,5 @@ test {
     _ = @import("mhc_test.zig");
     _ = @import("route_test.zig");
     _ = @import("moe_merge_test.zig");
+    _ = @import("input_group.zig");
 }
