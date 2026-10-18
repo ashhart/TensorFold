@@ -116,7 +116,7 @@ def main() -> None:
     p.add_argument("--first", type=int, default=0, help="only the first N items")
     p.add_argument("--max-tokens", type=int, default=512)
     p.add_argument("--temperature", type=float, default=0.0)
-    p.add_argument("--seed", type=int, default=None, help="sampled: item i gets seed + i")
+    p.add_argument("--seed", type=int, default=1234, help="sampled: item i gets seed + i (default: 1234)")
     p.add_argument("--no-draft", action="store_true", help='send "draft": false (the serial reference)')
     p.add_argument("--mem", action="store_true")
     p.add_argument("--ignore", default="", help="comma list of process names nvidia-smi should not count")

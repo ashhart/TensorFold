@@ -51,6 +51,8 @@ pub const Config = struct {
     /// --vision-urls: image parts may name public HTTPS URLs, fetched before admission (media_fetch.zig).
     vision_urls: bool = false,
     seed_salt: i64 = 0,
+    /// --prompt-seed keeps historical prompt-keyed sampling when a request omits its seed.
+    prompt_seed: bool = false,
     /// TENSORFOLD_REQUEST_LOG: where chat and completion bodies are appended; null: nowhere.
     request_log: ?[]const u8 = null,
     /// Null keeps every reply identical to a server that has no compaction.
@@ -181,20 +183,28 @@ pub const Server = struct {
         return fields.coerceEffort(e, srv.effort_levels);
     }
 
-    /// ``_resolve_sampling``: omitted or null fields keep the defaults; an omitted seed is keyed to the prompt.
+    /// Request seeds override configured keys; otherwise use prompt keying or fresh entropy.
     pub fn resolveSampling(srv: *Server, cx: *Cx, f: Value, temperature: f64, prompt_ids: []const u32) errors.Refused!?api.Sampling {
         _ = temperature; // the request's own temperature field decides, as in the Python server
         const options = try json.newObject(cx.a);
         const defaults = if (srv.config.default_sampling) |d| try fields.parseNumbers(cx, d) else null;
         if (defaults) |d| try merge(options, cx, d);
-        try merge(options, cx, try fields.parseNumbers(cx, f));
+        const supplied = try fields.parseNumbers(cx, f);
+        try merge(options, cx, supplied);
         const temp = number(options.get("temperature")) orelse 0;
         if (temp <= 0) return null;
         if (srv.info.greedy_only) return cx.refuse(if ((if (defaults) |d| number(d.get("temperature")) else null) orelse 0 > 0)
             "this engine decodes greedily only and this server samples by default: send temperature 0, or serve with --temperature 0"
         else
             "this engine decodes greedily only: send temperature 0 or leave it out");
-        const seed: u64 = if (options.get("seed")) |s| seedBits(s) else api.seedFor(prompt_ids, srv.config.seed_salt);
+        const seed: u64 = if (options.get("seed")) |s| seedBits(s) else if (srv.config.prompt_seed)
+            api.seedFor(prompt_ids, srv.config.seed_salt)
+        else fresh: {
+            var bits: u64 = undefined;
+            srv.io.randomSecure(std.mem.asBytes(&bits)) catch
+                return cx.fail(.server, "could not obtain a random request seed", .{});
+            break :fresh bits & 0x7fff_ffff_ffff_ffff;
+        };
         return .{
             .seed = seed,
             .temperature = @floatCast(temp),

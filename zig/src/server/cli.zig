@@ -60,6 +60,7 @@ pub const flags = [_]Flag{
     .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
+    .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
     .{ .name = "--top-p", .native = true },
     .{ .name = "--top-k", .native = true },
     .{ .name = "--min-p", .native = true },
@@ -157,6 +158,7 @@ pub const Args = struct {
     recall_read_only: bool = false, // read the record, add nothing: what gates and benchmarks run with
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
+    prompt_seed: bool = false,
     top_p: ?f64 = null,
     top_k: ?i64 = null,
     min_p: ?f64 = null,
@@ -299,6 +301,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.learn_conversations = true;
     } else if (is(name, "--learn-daily-gib")) {
         out.learn_daily_gib = try gib(u, a, name, v);
+    } else if (is(name, "--prompt-seed")) {
+        out.prompt_seed = true;
     } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);

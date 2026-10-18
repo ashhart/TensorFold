@@ -381,7 +381,7 @@ const Server = struct {
 
 fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []const u8, args: []const []const u8, env: std.json.ObjectMap, tmp_dir: []const u8, key_content: ?[]const u8) !Server {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ binary, "serve", fixtures, "--name", "fake-model", "--alias", "fake-alias", "--port", "0", "--max-tokens", "64", "--parallel", "4" });
+    try argv.appendSlice(a, &.{ binary, "serve", fixtures, "--prompt-seed", "--name", "fake-model", "--alias", "fake-alias", "--port", "0", "--max-tokens", "64", "--parallel", "4" });
     var log_path: ?[]const u8 = null;
     var key_path: ?[]const u8 = null;
     for (args) |arg| {

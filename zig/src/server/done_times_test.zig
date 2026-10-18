@@ -13,6 +13,16 @@ const Cx = @import("errors.zig").Cx;
 const Clock = struct {
     threadlocal var ns: i96 = 0;
     threadlocal var table: std.Io.VTable = undefined;
+    threadlocal var next: u64 = 0;
+    threadlocal var draws: usize = 0;
+    threadlocal var no_entropy: bool = false;
+    fn randomSecure(_: ?*anyopaque, bytes: []u8) std.Io.RandomSecureError!void {
+        draws += 1;
+        if (no_entropy) return error.EntropyUnavailable;
+        const bits = (next + 1) | (@as(u64, 1) << 63);
+        next += 1;
+        @memcpy(bytes, std.mem.asBytes(&bits));
+    }
     fn now(ctx: ?*anyopaque, kind: std.Io.Clock) std.Io.Timestamp {
         if (kind == .awake) return .{ .nanoseconds = ns };
         return std.testing.io.vtable.now(ctx, kind);
@@ -20,6 +30,7 @@ const Clock = struct {
     fn io() std.Io {
         table = std.testing.io.vtable.*;
         table.now = now;
+        table.randomSecure = randomSecure;
         return .{ .userdata = std.testing.io.userdata, .vtable = &table };
     }
 };
@@ -91,14 +102,16 @@ const Script = struct {
     first: i96,
     cached: u32 = 0,
     tokens: []const u32 = &.{ 'h', 'i' },
+    seed: ?u64 = null,
     fn engine(s: *Script) api.Engine {
         return .{ .ctx = s, .vtable = &.{ .info = info, .submit = submit, .cancel = cancel, .status = status, .memory = memory } };
     }
     fn info(_: *anyopaque) api.Info {
         return .{ .context_window = 8192 };
     }
-    fn submit(ctx: *anyopaque, id: api.Id, _: *const api.Request, sink: api.Sink) api.SubmitError!void {
+    fn submit(ctx: *anyopaque, id: api.Id, req: *const api.Request, sink: api.Sink) api.SubmitError!void {
         const s: *Script = @ptrCast(@alignCast(ctx));
+        s.seed = if (req.sampling) |v| v.seed else null;
         Clock.ns = s.first;
         sink.event(sink.ctx, id, &.{ .prefilled = s.cached });
         sink.event(sink.ctx, id, &.{ .tokens = s.tokens });
@@ -153,6 +166,111 @@ test "done times: a resumed prompt logs its own cache count and times rather tha
 }
 test "done times: a client-left request logs only its existing ended line" {
     try scripted(0, true);
+}
+
+fn seedSample(srv: *server.Server, a: std.mem.Allocator, body: []const u8) !?api.Sampling {
+    var cx: Cx = .{ .a = a };
+    return srv.resolveSampling(&cx, (try json.parse(a, body)).ok, 0, &.{ 1, 2, 3 });
+}
+
+fn seedControls(mode: enum { fresh, keyed, explicit, defaults, default_fresh, failed, log_drawn, log_given }) !void {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    Clock.next = 42;
+    Clock.draws = 0;
+    Clock.no_entropy = false;
+    defer Clock.no_entropy = false;
+    var script: Script = .{ .first = 10_384_000_000 };
+    var tt: helpers = .{};
+    const srv = try server.Server.init(std.testing.allocator, Clock.io(), script.engine(), text(&tt), .{ .served_name = "test", .model_ids = &.{"test"}, .enable_thinking = false, .seed_salt = -17 }, null);
+    defer srv.deinit();
+    if (mode == .keyed) {
+        var usage: @import("cli.zig").Usage = .{};
+        const args = try @import("cli.zig").parse(a, &.{ "model", "--prompt-seed" }, &usage);
+        if (@hasField(server.Config, "prompt_seed")) srv.config.prompt_seed = args.prompt_seed;
+        const one = (try seedSample(srv, a, "{\"temperature\":0.7}")).?;
+        const two = (try seedSample(srv, a, "{\"temperature\":0.7}")).?;
+        try std.testing.expectEqual(api.seedFor(&.{ 1, 2, 3 }, -17), one.seed);
+        try std.testing.expectEqual(one.seed, two.seed);
+        srv.config.default_sampling = (try json.parse(a, "{\"temperature\":0.7,\"seed\":1234}")).ok;
+        try std.testing.expectEqual(@as(u64, 1234), (try seedSample(srv, a, "{}")).?.seed);
+        try std.testing.expectEqual(@as(u64, 7), (try seedSample(srv, a, "{\"seed\":7}")).?.seed);
+        try std.testing.expectEqual(@as(usize, 0), Clock.draws);
+    } else if (mode == .explicit) {
+        Clock.no_entropy = true;
+        for ([_][]const u8{ "0", "-3", "18446744073709551625", "\"7\"", "7.0" }, [_]u64{ 0, 18446744073709551613, 9, 7, 7 }) |value, bits| {
+            const body = try std.fmt.allocPrint(a, "{{\"temperature\":0.7,\"seed\":{s}}}", .{value});
+            try std.testing.expectEqual(bits, (try seedSample(srv, a, body)).?.seed);
+        }
+        try std.testing.expectEqual(@as(usize, 0), Clock.draws);
+    } else if (mode == .failed) {
+        Clock.no_entropy = true;
+        try std.testing.expectEqual(@as(?api.Sampling, null), try seedSample(srv, a, "{\"temperature\":0}"));
+        var cx: Cx = .{ .a = a };
+        try std.testing.expectError(error.Refused, srv.resolveSampling(&cx, (try json.parse(a, "{\"temperature\":0.7}")).ok, 0, &.{1}));
+        try std.testing.expectEqual(@import("errors.zig").Kind.server, cx.kind);
+        try std.testing.expectEqual(@as(usize, 1), Clock.draws);
+    } else if (mode == .log_drawn or mode == .log_given) {
+        var capture: Capture = .{};
+        capture.start();
+        defer capture.deinit();
+        Clock.ns = 10_000_000_000;
+        var cx: Cx = .{ .a = a };
+        const body = if (mode == .log_given) "{\"temperature\":0.7,\"seed\":-3}" else "{\"temperature\":0.7}";
+        const prepared = try chat.prepare(srv, &cx, .{ .id = "seed-test", .prompt = .{ .text = "prompt" }, .max_tokens = 2, .fields = (try json.parse(a, body)).ok }, Gone{});
+        var output: Output = .{ .end = 17_590_000_000 };
+        _ = try chat.generate(srv, &cx, prepared, output.sink(), Gone{});
+        const expected: u64 = if (mode == .log_given) 18446744073709551613 else 43;
+        try std.testing.expectEqual(@as(?u64, expected), script.seed);
+        const suffix = try std.fmt.allocPrint(a, " queued=0.000 tok/s=0.1 seed={d}\n", .{expected});
+        try std.testing.expect(std.mem.endsWith(u8, capture.bytes.items, suffix));
+        try std.testing.expect(!capture.failed);
+    } else if (mode == .defaults) {
+        srv.config.default_sampling = (try json.parse(a, "{\"temperature\":0.7,\"seed\":1234}")).ok;
+        const one = (try seedSample(srv, a, "{}")).?;
+        const two = (try seedSample(srv, a, "{\"seed\":null}")).?;
+        try std.testing.expectEqual(@as(u64, 1234), one.seed);
+        try std.testing.expectEqual(one.seed, two.seed);
+        Clock.no_entropy = true;
+        try std.testing.expectEqual(@as(u64, 1234), (try seedSample(srv, a, "{}")).?.seed);
+        try std.testing.expectEqual(@as(u64, 7), (try seedSample(srv, a, "{\"seed\":7}")).?.seed);
+        try std.testing.expectEqual(@as(usize, 0), Clock.draws);
+    } else {
+        if (mode == .default_fresh) srv.config.default_sampling = (try json.parse(a, "{\"temperature\":0.7}")).ok;
+        const body = if (mode == .default_fresh) "{}" else "{\"temperature\":0.7}";
+        const one = (try seedSample(srv, a, body)).?;
+        const two = (try seedSample(srv, a, "{\"temperature\":0.7,\"seed\":null}")).?;
+        try std.testing.expectEqual(@as(u64, 43), one.seed);
+        try std.testing.expectEqual(@as(u64, 44), two.seed);
+        try std.testing.expect(one.seed != two.seed);
+        try std.testing.expectEqual(@as(usize, 2), Clock.draws);
+    }
+}
+
+test "request seed: omitted and null keys draw different 63-bit OS seeds for one prompt" {
+    try seedControls(.fresh);
+}
+test "request seed: the serve flag preserves prompt keys and salt without drawing" {
+    try seedControls(.keyed);
+}
+test "request seed: explicit signed, wide, string and float keys preserve their old bits" {
+    try seedControls(.explicit);
+}
+test "request seed: injected configured keys precede entropy while explicit requests still win" {
+    try seedControls(.defaults);
+}
+test "request seed: sampled defaults without a key still draw fresh seeds" {
+    try seedControls(.default_fresh);
+}
+test "request seed: entropy failure refuses instead of falling back, and greedy never draws" {
+    try seedControls(.failed);
+}
+test "request seed: drawn sampling key reaches the engine and follows times on the done line" {
+    try seedControls(.log_drawn);
+}
+test "request seed: an explicit unsigned key is logged without truncating its engine bits" {
+    try seedControls(.log_given);
 }
 
 const Queued = struct {

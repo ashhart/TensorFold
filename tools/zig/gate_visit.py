@@ -15,8 +15,11 @@ ENGINE_LINE = "[tensorfold] engine: "
 
 
 def capped(body: dict, plan: dict) -> dict:
-    """The body with max_tokens cut to the plan's cap, when the plan sets one (short proof runs)."""
+    """Pin omitted sampling keys and apply the plan's optional token cap without changing named keys."""
 
+    body = {**body}
+    if body.get("seed") is None:
+        body["seed"] = 1234
     cap = plan.get("max_tokens")
     return {**body, "max_tokens": cap} if cap and body["max_tokens"] > cap else body
 
@@ -48,7 +51,7 @@ def phases(client: C.Client, plan: dict, visit_no: int, canonical: Path, checks:
     if "resume" in want:
         resume(client, plan, visit_no, canonical, checks)
     for name, body in W.ladder(model, visit_no, plan["ladder"], plan["ladder_tokens"]) if "ladder" in want else ():
-        row = client.send("ladder", name, body, cell=name, unit=f"v{visit_no}")
+        row = client.send("ladder", name, capped(body, plan), cell=name, unit=f"v{visit_no}")
         checks.append({"check": "ladder-cold", "name": name, "pass": row["error"] is None and row["cached_tokens"] < 64})
     replies = sorted({str(row.get("reply_model")) for row in client.rows})
     checks.append({"check": "reply==requested", "name": model, "replies": replies,
@@ -89,7 +92,7 @@ def resume(client: C.Client, plan: dict, visit_no: int, canonical: Path, checks:
         canonical.write_text(json.dumps(bodies, indent=1) + "\n")
     elif canonical.exists():
         for spec in json.loads(canonical.read_text()):
-            fresh, _ = C.pair(client, "resume", spec["name"].replace("prefix", "fresh"), spec["body"], checks)
+            fresh, _ = C.pair(client, "resume", spec["name"].replace("prefix", "fresh"), capped(spec["body"], plan), checks)
             checks.append({"check": "fresh==resumed", "name": spec["name"], "fresh_cached": fresh["cached_tokens"],
                            "pass": fresh["cached_tokens"] == 0 and fresh["error"] is None
                            and all(fresh[k] == spec["resumed"][k] for k in ("content", "reasoning", "token_sha"))})

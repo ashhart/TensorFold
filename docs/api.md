@@ -5,42 +5,23 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 ## Native chat template override
 
 `tensorfold serve MODEL --chat-template custom-chat.jinja` loads a UTF-8 Jinja template from that file
-instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve
-from the server's working directory. The file is read once at startup, with the same 16 MiB limit as
-the checkpoint's `chat_template.jinja`.
+instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve from the server's working directory. The file is read once at startup, with the same 16 MiB limit as the checkpoint's `chat_template.jinja`.
 
-The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's
-separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged.
-Unreadable or malformed templates fail startup before the engine opens, without falling back to the
-checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does.
-Raw completion prompts do not use the chat template.
+The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged. Unreadable or malformed templates fail startup before the engine opens, without falling back to the checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does. Raw completion prompts do not use the chat template.
 
 ## API keys
 
-Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
-The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
+Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`. The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
 `#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
 The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
 
-Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients.
-Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format.
-All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics
-routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured.
-With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
 
-The native server raises its soft open-file limit before listening when the platform permits it. If `accept`
-runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
+The native server raises its soft open-file limit before listening when the platform permits it. If `accept` runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
 
-Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP
-requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a
-valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests.
-Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
-underscores or hyphens; choose non-secret labels.
+Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests. Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots, underscores or hyphens; choose non-secret labels.
 
-In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH`
-forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a
-bearer key. The native binary has neither command.
-Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH` forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key. The native binary has neither command. Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
 
 | Route | Behavior |
 | --- | --- |
@@ -121,7 +102,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
+| `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
@@ -423,10 +404,12 @@ For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed 
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
 prefixes, and compare each MLX concurrent request with its solo run.
 
-A request without `seed` takes one derived from its prompt, so running the same evaluation twice against one server
-repeats the same samples wherever the conversations agree (an agent benchmark's second pass then mostly replays its
-first). To draw independent repeats, send a `seed` per run, or start each run's server with a different
-`TENSORFOLD_SEED_SALT` (an integer mixed into every prompt-derived seed; 0, the default, keeps today's seeds).
+Native sampled requests use the request seed, then an injected configured default, then a fresh 63-bit OS key. No stock
+serve flag or generation config supplies a default seed. The done line appends `seed=<n>` after
+its request timing and tok/s fields, for given and drawn keys. Send that seed again to reproduce a draw. Greedy requests draw
+no key. Native `serve --prompt-seed` keeps historical prompt keying, including `TENSORFOLD_SEED_SALT`; CLI runs and
+speech keep their existing prompt keying. Always give comparison requests the same explicit seed, including release
+cells, drafted/plain, cached/fresh and concurrent/solo checks. See [request seeds](request-seeds.md).
 
 ## Metrics
 

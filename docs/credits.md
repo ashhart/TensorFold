@@ -226,3 +226,5 @@ credited here.
   [#289](https://github.com/ashhart/TensorFold/pull/289)), @taussoe ([#66](https://github.com/ashhart/TensorFold/pull/66)),
   @jasontitus ([#33](https://github.com/ashhart/TensorFold/pull/33)), @feni6
   ([#120](https://github.com/ashhart/TensorFold/pull/120)).
+
+- @tpischke requested fresh per-request sampling keys and reproducible done-line seeds in [#1026](https://github.com/ashhart/TensorFold/issues/1026).
