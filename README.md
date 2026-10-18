@@ -249,7 +249,9 @@ The supported environment variables are listed in `capabilities --json`, includi
 ## Build and contribute
 
 Use the Zig version pinned in `.zig-version`, currently 0.17.0.
-On a Mac with Xcode's Metal toolchain:
+The `.metal` sources need Xcode's Metal compiler. Install full Xcode and its Metal Toolchain component
+(`xcodebuild -downloadComponent MetalToolchain`); the Command Line Tools alone fail every kernel compile with
+`unable to find utility "metal"`.
 
 ```sh
 zig build native -Dcpu=apple_m1 -Dversion=1.0.12
