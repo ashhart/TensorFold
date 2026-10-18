@@ -3,6 +3,10 @@ const std = @import("std");
 
 pub fn steps(b: *std.Build, cuda: *std.Build.Module, glm: *std.Build.Module, mods: anytype, step: *std.Build.Step) void {
     const host = b.graph.host;
+    const prompt_arena = b.createModule(.{ .root_source_file = b.path("zig/glm_prompt_arena_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "cuda", .module = cuda } } });
+    b.step("test-glm-prompt-arena-host", "Actual sequence arenas retain and account prompt rows").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = prompt_arena })).step);
+    const prompt_owner = b.createModule(.{ .root_source_file = b.path("zig/glm_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "glm", .module = glm }} });
+    b.step("test-glm-prompts-host", "Actual prompt workflow with recording device operations").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = prompt_owner, .filters = &.{"GLM prompt workflow:"} })).step);
     const drafter_host = b.createModule(.{ .root_source_file = b.path("zig/glm_dflash_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "core", .module = mods.core } } });
     b.step("test-glm-dflash-host", "DFlash rank buffers, partial loader ownership and pending records on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drafter_host, .filters = &.{"glm dflash:"} })).step);
     const packed_host = b.createModule(.{ .root_source_file = b.path("zig/glm_packed_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "core", .module = mods.core } } });

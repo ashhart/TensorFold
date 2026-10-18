@@ -24,6 +24,7 @@ pub fn vtable(comptime H: type, v: be.Backend.VTable) be.Backend.VTable {
                 return x.inner.vtable.prefill_many.?(x.inner.ptr, ss);
             }
         }.f else null,
+        .many_rows = v.many_rows,
         .first = struct {
             fn f(p: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
                 const x = H.bind(p);
@@ -134,12 +135,12 @@ test "every entry the family's backend gives is forwarded, and none it leaves ou
     };
     var fake: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
     defer fake.deinit();
-    for ([_]be.Backend{ fake.backend(), fake.stepped() }) |b| {
+    for ([_]be.Backend{ fake.backend(), fake.stepped(), fake.batchedSteps() }) |b| {
         const w = vtable(H, b.vtable.*);
         const info = @typeInfo(be.Backend.VTable).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
             if (@typeInfo(T) == .optional) try std.testing.expectEqual(@field(b.vtable, name) != null, @field(w, name) != null);
-            if (T == bool) try std.testing.expectEqual(@field(b.vtable, name), @field(w, name));
+            if (T == bool or @typeInfo(T) == .int) try std.testing.expectEqual(@field(b.vtable, name), @field(w, name)); // e.g. many_rows
         }
     }
     try std.testing.expect(vtable(H, fake.stepped().vtable.*).prefill_step != null);

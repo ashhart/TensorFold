@@ -23,9 +23,10 @@ fn fits(a: api.Admit, job: *const Job) bool {
     return a.fits(a.ctx, @intCast(job.request.prompt.len), job.request.max_tokens);
 }
 
-/// Whether to admit several at once: prompts batch, none fill by chunks, and two or more wait with two lanes free.
+/// Whether to admit several at once: prompts batch (beside chunked fills up to many_rows), two wait, two lanes free.
 pub fn batches(h: *LaneHost) bool {
-    if (!h.core.batchesPrompts() or h.core.fills()) return false;
+    if (!h.core.batchesPrompts()) return false;
+    if (h.core.fills() and h.core.backend.vtable.many_rows == 0) return false;
     h.lock();
     defer h.unlock();
     const lanes_now = @min(h.info_.lanes, h.memory_lanes orelse h.info_.lanes);
@@ -49,7 +50,7 @@ pub fn many(h: *LaneHost) bool {
         };
         took = true;
         const at = h.setup(job) orelse continue;
-        if (h.startsAlone(job)) {
+        if (h.startsAlone(job) or (h.core.fills() and !h.core.batchable(&job.stream))) { // long, image, resumed: filled
             _ = h.launch(job, at);
             continue;
         }

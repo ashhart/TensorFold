@@ -58,7 +58,7 @@ pub fn matmul(set: glue.Set, stream: cuda.Stream, x: u64, x_stride: usize, w: u6
     if (k % bk != 0) return error.KNotMultipleOf64;
     if (set.mm) |mk| { // tiled weights, packed or bf16
         const t: mm.Tiled = if (set.packs) |p| p.tiled(w, n, k) else .{ .w = w, .n = n, .k = k };
-        return mm.matmul(mk, stream, x, x_stride, t, out, part, m, wide);
+        return mm.matmul(mk, stream, x, x_stride, t, out, part, m, wide, set.prompt);
     }
     const sk = splitK(n, k);
     var a: cuda.Args = .{};

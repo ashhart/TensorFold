@@ -34,6 +34,7 @@ const Lane = struct {
     held: [max_held]u32 = undefined,
     chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
     held_n: usize = 0,
+    first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
 };
 
@@ -56,6 +57,7 @@ pub const Lanes = struct {
 
     const whole_vt: be.Backend.VTable = .{
         .prefill = prefillFn,
+        .prefill_many = prefillManyFn,
         .first = firstFn,
         .queue = queueFn,
         .read = readFn,
@@ -68,6 +70,7 @@ pub const Lanes = struct {
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
+        v.many_rows = engine.prompt_rows;
         break :vt v;
     };
 
@@ -156,7 +159,38 @@ pub const Lanes = struct {
         const self = of(ptr);
         const from = try self.opening(s);
         try self.images(s, from);
-        _ = self.take(try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s)));
+        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+        self.lanes.getPtr(s).?.first = self.take(first);
+    }
+
+    fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+        const self = of(ptr);
+        if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
+        for (ss) |s| if (s.images.len > 0 or s.reuse.saved != null or s.prompt_len > engine.prompt_rows) return false;
+        var opened: usize = 0;
+        errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
+        var parts: [engine.max_together]engine.Prompt = undefined;
+        var firsts: [engine.max_together]u32 = undefined;
+        var lo: usize = 0;
+        var rows: usize = 0;
+        for (ss, 0..) |s, i| {
+            if (rows + s.prompt_len > engine.prompt_rows) { // this pass is full: run it, the next starts here
+                try self.many(ss[lo..i], parts[lo..i], firsts[lo..i]);
+                lo = i;
+                rows = 0;
+            }
+            if (try self.opening(s) != null) return error.BadPrompts; // no kept state (checked above)
+            opened += 1;
+            parts[i] = .{ .slot = self.lanes.getPtr(s).?.slot, .ids = s.prompt() };
+            rows += s.prompt_len;
+        }
+        try self.many(ss[lo..], parts[lo..ss.len], firsts[lo..ss.len]);
+        return true;
+    }
+
+    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+        try self.x.prefillMany(parts, firsts);
+        for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
     /// One chunk of the stream's prompt pass (fillOne runs other rounds between); true once the first token is drawn.
@@ -170,7 +204,7 @@ pub const Lanes = struct {
         const at = going orelse if (from) |r| r.at else 0;
         errdefer l.fill = null;
         if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
-            _ = self.take(first);
+            l.first = self.take(first);
             l.fill = null;
             return true;
         }
@@ -186,6 +220,7 @@ pub const Lanes = struct {
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
+        l.first = null;
         try self.x.bind(l.slot);
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
@@ -227,7 +262,8 @@ pub const Lanes = struct {
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self = of(ptr);
         if (position != s.prompt_len) return error.PositionMismatch;
-        return self.next - 1;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        return l.first orelse error.NoFirstToken;
     }
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {

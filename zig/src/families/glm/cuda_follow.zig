@@ -6,10 +6,11 @@ const engine = @import("cuda_engine.zig");
 const images_mod = @import("cuda_images.zig");
 const vcfg = @import("vision_config.zig");
 const sampler = @import("cuda_sampler.zig");
+const prompt_wire = @import("cuda_prompt_wire.zig");
 const dflash = @import("dflash.zig");
 const Engine = engine.Engine;
 
-pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block };
+pub const Kind = enum(u32) { begin = 1, prefill, verify, keep, draft, end, drop, release, chunk, shared, image, block, many };
 
 /// One step as it crosses: 64 bytes, then `n` u32 ids.
 pub const Header = extern struct {
@@ -45,7 +46,8 @@ pub const Link = struct {
     gpa: std.mem.Allocator,
     wait: bool, // TF_GLM_LINK_WAIT=1: every step uploaded and waited for, as before the put
 
-    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, max_ids: usize) !Link {
+    pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, stream: cuda.Stream, asked_ids: usize) !Link {
+        const max_ids = @max(asked_ids, prompt_wire.words);
         const buf = try cuda.DeviceBuffer.alloc(d, 64 + max_ids * 4);
         errdefer {
             var owned = buf;
@@ -214,6 +216,14 @@ pub const Leader = struct {
         try x.e.verifyShared(parts);
     }
 
+    pub fn prefillMany(x: Leader, parts: []const engine.Prompt, firsts: []u32) !void {
+        var buf: [prompt_wire.words]u32 = undefined;
+        const ids = try prompt_wire.encode(parts, x.e.capacity, &buf);
+        try x.flush();
+        try x.send(.{ .kind = @backingInt(Kind.many), .depth = @intCast(parts.len) }, ids);
+        try x.e.prefillMany(parts, firsts);
+    }
+
     pub fn keep(x: Leader, n: usize) !void {
         try x.flush();
         try x.send(.{ .kind = @backingInt(Kind.keep), .a = n }, &.{});
@@ -250,7 +260,7 @@ pub fn follow(e: *Engine, link: *Link) !void {
         const step = try link.receive();
         const h = step.h;
         const kind: Kind = @fromBackingInt(@intCast(h.kind));
-        if (kind != .end and kind != .drop and kind != .shared and kind != .block) try e.bind(h.slot);
+        if (kind != .end and kind != .drop and kind != .shared and kind != .block and kind != .many) try e.bind(h.slot);
         switch (kind) {
             .begin => try e.beginFollowing(if (h.flags & 1 != 0) .{ .seed = h.seed, .temperature = h.temperature, .top_p = h.top_p, .min_p = h.min_p, .top_k = h.top_k } else null),
             .prefill => {
@@ -287,6 +297,12 @@ pub fn follow(e: *Engine, link: *Link) !void {
                     row += n;
                 }
                 try e.verifyShared(parts[0..k]);
+            },
+            .many => {
+                var parts: [engine.max_together]engine.Prompt = undefined;
+                const decoded = try prompt_wire.decode(step.ids, h.depth, e.capacity, &parts);
+                var firsts: [engine.max_together]u32 = undefined;
+                try e.prefillMany(decoded, &firsts);
             },
             .keep => try e.keep(@intCast(h.a)),
             .draft => {

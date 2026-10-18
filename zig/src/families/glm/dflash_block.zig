@@ -20,7 +20,7 @@ fn set(e: anytype) glue.Set {
 /// out[m, n] = x[m, k] . w^T, bf16 out (`wide`: fp32, glm_mm only): 4 bits 16 rows a launch, or glm_mm.
 fn lin(dr: *const Drafter, e: anytype, x: u64, w: df.Lin, out: u64, m: usize, wide: bool) !void {
     switch (w) {
-        .bf16 => |t| try mm.matmul(&e.m.mm, e.stream, x, t.k, t, out, dr.part, m, wide),
+        .bf16 => |t| try mm.matmul(&e.m.mm, e.stream, x, t.k, t, out, dr.part, m, wide, false),
         .q4 => |q| {
             if (wide) return error.WideFromFourBits;
             var a: cuda.Args = .{};

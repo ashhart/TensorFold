@@ -96,13 +96,13 @@ pub fn partBytes(m: usize, w: Tiled) usize {
     return if (sk > 1) sk * @min(m, 64) * w.n * 4 else 0;
 }
 
-/// x [m][k] (rows `ldx` apart) by `w` -> out [m][n], bf16 or fp32 (`wide`); `part`: partBytes(m, w).
-pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, out: u64, part: u64, m: usize, wide: bool) !void {
+/// x [m][k] (`ldx` apart) by `w` -> out [m][n] (`wide`: fp32); `one`: prompt blocks at any rows, sums per row alike.
+pub fn matmul(k: *const Kernels, s: cuda.Stream, x: u64, ldx: usize, w: Tiled, out: u64, part: u64, m: usize, wide: bool, one: bool) !void {
     if (w.k % 64 != 0 or w.n % 8 != 0 or x % 16 != 0 or ldx % 8 != 0) return error.BadShape;
     var done: usize = 0;
     const wi = try widthIndex(w.bits);
     while (done < m) { // windows to 64 rows a launch with K slices; prompts in one launch of 128-row blocks, one slice
-        const big = m - done >= 128;
+        const big = one or m - done >= 128;
         const rows = if (big) m - done else @min(m - done, 64);
         const i: usize = if (big) 3 else if (rows <= 16) 0 else if (rows <= 32) 1 else 2;
         const bm = bucket(i);

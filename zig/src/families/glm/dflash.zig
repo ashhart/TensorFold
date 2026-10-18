@@ -206,14 +206,12 @@ pub const Drafter = struct {
     }
 
     /// A prompt chunk on slot `i` (rows start.. of a `len`-id prompt): its rows within the last window into the ring.
-    pub fn prompt(dr: *Drafter, e: anytype, i: u32, start: usize, rows: usize, len: usize) !void {
-        const keep_from = @as(usize, @intCast(@max(0, @as(i64, @intCast(len)) - WIN)));
-        if (start + rows <= keep_from) return;
-        const lo = keep_from -| start;
-        const s = try dr.slot(i);
-        const run: Run = .{ .ring = s.ring.?.ptr, .taps = dr.taps_prefill + lo * TAP_ROW, .n = rows - lo, .pos0 = @intCast(start + lo) };
-        try dr.ingest(e, &.{run});
+    pub fn prompt(dr: anytype, e: anytype, i: u32, start: usize, rows: usize, len: usize) !void {
+        return dr.promptSegment(e, i, start, rows, len, 0);
     }
+
+    /// The same ordinary context ingest, with this prompt's rows at row0 in the batched tap buffer.
+    pub const promptSegment = ingestPrompt;
 
     /// The runs' rows through fc, the hidden norm and each layer's k, v into their rings.
     pub fn ingest(dr: *Drafter, e: anytype, runs: []const Run) !void {
@@ -292,3 +290,19 @@ pub const Drafter = struct {
         }
     }
 };
+
+/// Prompt context retained in the window; row0 is only a tap-buffer offset, never a sequence position.
+pub fn promptRun(ring: u64, taps: u64, start: usize, rows: usize, len: usize, row0: usize) !?Run {
+    if (start > len or rows > len - start) return error.BadPromptContext;
+    if (rows > MAX_CTX or row0 > MAX_CTX - rows) return error.DrafterContextTooWide;
+    const keep_from = len -| @as(usize, @intCast(WIN));
+    if (start + rows <= keep_from) return null;
+    const lo = keep_from -| start;
+    return .{ .ring = ring, .taps = taps + (row0 + lo) * TAP_ROW, .n = rows - lo, .pos0 = @intCast(start + lo) };
+}
+
+pub fn ingestPrompt(dr: anytype, e: anytype, i: u32, start: usize, rows: usize, len: usize, row0: usize) !void {
+    const s = try dr.slot(i);
+    const run = (try promptRun(s.ring.?.ptr, dr.taps_prefill, start, rows, len, row0)) orelse return;
+    try dr.ingest(e, &.{run});
+}
