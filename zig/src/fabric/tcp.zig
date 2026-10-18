@@ -1,7 +1,4 @@
 //! Two-rank ordered window writes over TCP, with a separate completion socket.
-//! This implements writes/signals/flush, not remote reads or atomics. It does not use RDMA.
-//! A receiver never waits for the application's transmit lock: completion replies have their
-//! own socket, so simultaneous large writes cannot block each other's progress.
 const std = @import("std");
 const rma = @import("rdma.zig");
 const socket = @import("tcp_socket.zig");
@@ -19,11 +16,13 @@ pub const Config = struct {
     connect_timeout_ns: u64 = 30 * std.time.ns_per_s,
 };
 
+/// TCP writes, signals and flush; remote reads and atomics return AccessDenied.
 pub const Endpoint = struct {
     gpa: std.mem.Allocator,
     rank_id: u32,
     memory: []align(rma.page) u8,
     data: c.fd_t,
+    /// Separate completions let the receiver acknowledge writes without taking the application's transmit lock.
     acknowledgements: c.fd_t,
     receiver: std.Thread = undefined,
     failed: std.atomic.Value(bool) = .init(false),

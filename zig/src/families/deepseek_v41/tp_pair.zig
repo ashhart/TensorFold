@@ -118,8 +118,8 @@ pub const Pair = struct {
 };
 
 /// Peer compatibility: executable, checkpoint metadata, token map, and arithmetic switches.
-/// Weight and Engram contents are qualified separately by the launch recipe's SHA256 manifest.
 pub fn identity(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
+    // The launch recipe verifies weight and Engram SHA256 manifests separately.
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
     const exe = try std.process.executablePathAlloc(io, gpa);
     defer gpa.free(exe);
