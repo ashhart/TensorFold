@@ -4,7 +4,6 @@ const exlr8_build = @import("exlr8.zig");
 const golden_build = @import("golden.zig");
 const catalog = @import("cuda_kernels.zig");
 pub const Kernel = catalog.Kernel;
-const torch_flags = catalog.torch_flags;
 pub const kernels = catalog.kernels;
 
 fn stagger(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
@@ -506,26 +505,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
 }
 
 /// nvcc -fatbin with torch's flags, the kernel's own and one -gencode per SASS target, as the Python build passes them.
-pub fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
-    const run = b.addSystemCommand(&.{ nvcc, "-fatbin" });
-    run.addFileInput(version);
-    run.addArgs(&torch_flags);
-    // with cl.exe as host compiler, CUDA 13's headers need MSVC's conforming preprocessor, and M_SQRT2 its math define
-    if (b.graph.host.result.os.tag == .windows) run.addArgs(&.{ "-Xcompiler=/Zc:preprocessor", "-D_USE_MATH_DEFINES" });
-    run.addArgs(k.flags);
-    var it = std.mem.tokenizeScalar(u8, sms, ',');
-    while (it.next()) |sm| {
-        // arch-specific features (the block-scaled FP4 mma) from sm_120 on; older targets build the trapping fallback
-        const a = if (k.arch_specific and (std.fmt.parseInt(u32, sm, 10) catch 0) >= 120) "a" else "";
-        run.addArg(b.fmt("-gencode=arch=compute_{s}{s},code=sm_{s}{s}", .{ sm, a, sm, a }));
-    }
-    run.addArgs(&.{ "-MD", "-MF" });
-    _ = run.addDepFileOutputArg2(b.fmt("{s}.d", .{k.name}), .{});
-    run.addArg("-o");
-    const out = run.addOutputFileArg(b.fmt("{s}.fatbin", .{k.name}));
-    run.addFileArg(b.path(b.fmt("zig/kernels/cuda/{s}.cu", .{k.src orelse k.name})));
-    return out;
-}
+pub const fatbin = @import("cuda_fatbin.zig").fatbin;
 
 /// Cross-build a release server, embedding the same fatbins on either host CPU.
 pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, prebuilt: ?[]const u8) *std.Build.Step.Compile {

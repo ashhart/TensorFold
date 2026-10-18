@@ -76,6 +76,7 @@ pub const Kernels = struct {
 
     /// Loads every module and resolves every instance the launches can use.
     pub fn load(ctx: *const cuda.Context) !Kernels {
+        if (try ctx.capability() < 90) return error.DeepSeekRequiresSm90;
         if (!available) return error.BuiltWithoutKernels;
         const d = ctx.d;
         var k: Kernels = undefined;
@@ -162,4 +163,47 @@ test {
     _ = exl3;
     _ = kv_glue;
     _ = @import("kernels_shapes.zig");
+}
+
+test "DeepSeek refuses pre-cluster GPUs before loading any image" {
+    const abi = cuda.abi;
+    const Fake = struct {
+        var sm: u32 = 0;
+        var loads: usize = 0;
+        var failed: bool = false;
+        fn attribute(out: *c_int, key: abi.DeviceAttribute, _: abi.Device) callconv(.c) abi.Result {
+            if (failed) return abi.error_not_ready;
+            out.* = switch (key) {
+                .compute_capability_major => @intCast(sm / 10),
+                .compute_capability_minor => @intCast(sm % 10),
+                else => unreachable,
+            };
+            return abi.success;
+        }
+        fn load(_: *abi.Module, _: ?*const anyopaque) callconv(.c) abi.Result {
+            loads += 1;
+            return abi.error_not_ready;
+        }
+    };
+    var driver: cuda.Driver = undefined;
+    driver.api.cuDeviceGetAttribute = Fake.attribute;
+    driver.api.cuModuleLoadData = Fake.load;
+    const ctx: cuda.Context = .{ .d = &driver, .device = 0, .handle = null };
+    Fake.loads = 0;
+    Fake.failed = false;
+    for ([_]u32{ 80, 86, 89 }) |sm| {
+        Fake.sm = sm;
+        try std.testing.expectError(error.DeepSeekRequiresSm90, Kernels.load(&ctx));
+        try std.testing.expectEqual(@as(usize, 0), Fake.loads);
+    }
+    for ([_]u32{ 90, 100, 120, 121 }) |sm| {
+        Fake.sm = sm;
+        const before = Fake.loads;
+        try std.testing.expectError(if (available) error.NotReady else error.BuiltWithoutKernels, Kernels.load(&ctx));
+        try std.testing.expectEqual(before + @intFromBool(available), Fake.loads);
+    }
+    Fake.failed = true;
+    const before = Fake.loads;
+    try std.testing.expectError(error.NotReady, Kernels.load(&ctx));
+    try std.testing.expectEqual(before, Fake.loads);
 }

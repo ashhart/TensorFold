@@ -1,7 +1,13 @@
 //! CUDA image names and qualification flags.
 
 /// Each .cu in zig/kernels/cuda (`src`, else `name`) with the flags its Python extension passes in `extra_cuda_cflags`.
-pub const Kernel = struct { name: []const u8, flags: []const []const u8, src: ?[]const u8 = null, arch_specific: bool = false };
+pub const Kernel = struct {
+    name: []const u8,
+    flags: []const []const u8,
+    src: ?[]const u8 = null,
+    arch_specific: bool = false,
+    min_sm: u32 = 0,
+};
 
 /// The torch-op replacements' qualification flags (runs/006): no contraction, no flush to zero.
 const torch_ops = &[_][]const u8{ "-O3", "--fmad=false", "--ftz=false" };

@@ -45,6 +45,10 @@ pub fn steps(b: *std.Build) void {
     host_step.dependOn(&host.step);
     host_step.dependOn(&binding_tests.step);
     host_step.dependOn(&common_tests.step);
+    const sm_module = module(b, b.graph.host, "cuda_test.zig", true).import_table.get("dsv41_kernels").?;
+    const sm_test = b.addTest(.{ .root_module = sm_module, .filters = &.{"DeepSeek refuses pre-cluster GPUs"} });
+    const sm_run = b.addRunArtifact(sm_test);
+    b.step("test-dsv41-sm-host", "Check SM refusal before image load with a fake driver and inert images").dependOn(&sm_run.step);
     const forms = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/core/exl3_prepare.zig"), .target = b.graph.host, .optimize = .Debug }) }));
     host_step.dependOn(&forms.step);
     const target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu });

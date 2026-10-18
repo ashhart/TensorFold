@@ -42,6 +42,37 @@ class SourceNames(unittest.TestCase):
         source.write_text("constexpr int project_bound = 32;\n" + source.read_text())
         self.assertEqual(self.parse(source).returncode, 0)
 
+    def test_cluster_api_requires_sm90(self):
+        source = self.root / "cluster.cu"
+        source.write_text('#include <cooperative_groups.h>\n__global__ void k() { cooperative_groups::this_cluster().sync(); }\n')
+        low = check.check(self.compiler, source, 890)
+        self.assertNotEqual(low["returncode"], 0, low["diagnostics"])
+        self.assertEqual(check.check(self.compiler, source, 900)["returncode"], 0)
+
+    def test_fp8_conversion_requires_sm89_after_preprocessing(self):
+        source = self.root / "fp8.cu"
+        for fmt in ("e4m3x2", "e5m2x2"):
+            source.write_text('__device__ unsigned k(unsigned short x) { unsigned y; asm("cvt.rn.f16x2.' + fmt + ' %0, %1;" : "=r"(y) : "h"(x)); return y; }\n')
+            self.assertNotEqual(check.check(self.compiler, source, 860)["returncode"], 0)
+            self.assertEqual(check.check(self.compiler, source, 890)["returncode"], 0)
+            source.write_text('#if __CUDA_ARCH__ >= 890\n' + source.read_text() + '#endif\n')
+            self.assertEqual(check.check(self.compiler, source, 860)["returncode"], 0)
+
+    def test_cluster_ptx_requires_sm90_after_preprocessing(self):
+        source = self.root / "cluster_ptx.cu"
+        for op in ("barrier.cluster.arrive.aligned;", "barrier.cluster.wait.aligned;",
+                   "mapa.shared::cluster.u32 %0, %0, 0;", "ld.shared::cluster.u32 %0, [%0];"):
+            body = '__device__ void k() { unsigned x = 0; __asm__ __volatile__("' + op + '" : "+r"(x)); }\n'
+            source.write_text(body)
+            low = check.check(self.compiler, source, 890)
+            self.assertNotEqual(low["returncode"], 0, op)
+            self.assertIn("requires sm_90+", low["diagnostics"])
+            self.assertEqual(check.check(self.compiler, source, 900)["returncode"], 0)
+            source.write_text('#if __CUDA_ARCH__ >= 900\n' + body + '#endif\n')
+            self.assertEqual(check.check(self.compiler, source, 890)["returncode"], 0)
+        source.write_text('// asm("barrier.cluster.arrive;");\n__device__ const char* p = "mapa.shared::cluster";\n')
+        self.assertEqual(check.check(self.compiler, source, 890)["returncode"], 0)
+
     def test_real_exl3_layout(self):
         result = self.parse(check.HEADERS / "exl3_layout.cpp")
         self.assertEqual(result.returncode, 0, result.stderr)
