@@ -207,7 +207,8 @@ pub fn build(b: *std.Build) void {
     contract_build.hostTests(b, gemma4_contract_host);
     tp_build.add(b, target, optimize, test_step);
     sessions_build.add(b, test_step);
-    dsv41_build.add(b, test_step);
+    // DeepSeek-V4.1's host code reads POSIX and Linux APIs (pthreads, clock_gettime, io_uring) that Windows lacks
+    if (b.graph.host.result.os.tag != .windows) dsv41_build.add(b, test_step);
     sys_build.wire(b);
     @import("zig/build/checkpoint_config.zig").wire(b);
 }
