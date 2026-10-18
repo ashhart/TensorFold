@@ -238,6 +238,17 @@ pub const Tri = struct {
     }
 
     /// qmm.hc_upmix: the up projection and the stream mix. N is the wide row, K is the low rank. M folds when it is 1.
+    /// The read-out's 1 / rms rows, ours only.
+    pub fn hcRinv(t: Tri, pss: u64, rinv: u64, eps: f32, rows: usize, dims: usize, nc: usize, streams: usize) !void {
+        const g = t.glue("_qmm_hcdown") orelse return error.NoGlue;
+        return g.hcRinv(t.s, pss, rinv, eps, rows, dims, nc, streams);
+    }
+
+    pub fn hcMixH(t: Tri, up: u64, h: u64, rinv: u64, scale: u64, mixed: u64, xsm: u64, rows: usize, dims: usize, streams: usize) !void {
+        const g = t.glue("_qmm_upmix") orelse return error.NoGlue;
+        return g.hcMixH(t.s, up, h, rinv, scale, mixed, xsm, rows, dims, streams);
+    }
+
     pub fn hcUpmix(t: Tri, act: u64, xs: u64, weight: u64, scales: u64, biases: u64, normed: u64, mixed: u64, xs_mixed: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {
         if (t.glue("_qmm_upmix")) |g| return g.hcUpmix(t.s, act, xs, weight, scales, biases, normed, mixed, xs_mixed, rows, n, k, dims, streams);
         try t.run("_qmm_upmix", .{ cdiv(rows, 16), u(dims / 32), 1 }, &.{

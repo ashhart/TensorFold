@@ -39,6 +39,8 @@ const Fns = struct {
     reduce_act: cuda.Function,
     upmix: cuda.Function,
     upmix_up: cuda.Function,
+    rinv: cuda.Function,
+    mix_h: cuda.Function,
     ple_gate: cuda.Function,
     ple_conv: cuda.Function,
     add_streams: cuda.Function,
@@ -112,6 +114,8 @@ pub const Glue = struct {
             .reduce_act = try g.hc.function("fn_hc_reduce_act"),
             .upmix = try g.hc.function("fn_hc_upmix"),
             .upmix_up = try g.hc.function("fn_hc_upmix_up"),
+            .rinv = try g.hc.function("fn_hc_rinv"),
+            .mix_h = try g.hc.function("fn_hc_mix_h"),
             .ple_gate = try g.hc.function("fn_ple_gate"),
             .ple_conv = try g.hc.function("fn_ple_conv"),
             .add_streams = try g.hc.function("fn_add_streams"),
@@ -283,6 +287,25 @@ pub const Glue = struct {
         ptrs(&a, &.{ part, act, xs, inj });
         ints(&a, &.{ sk, rows, streams, low, has_inj, ndn });
         try go(g.f.reduce_act, s, .{ rows, 1, 1 }, @intCast(cdiv(@max(cols, low / 32), 32) * 32), 0, &a);
+    }
+
+    /// fn_hc_norm's 1 / rms of each row's streams [rows, streams].
+    pub fn hcRinv(g: *const Glue, s: cuda.Stream, pss: u64, rinv: u64, eps: f32, rows: usize, dims: usize, nc: usize, streams: usize) !void {
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ pss, rinv });
+        a.add(int(rows));
+        a.add(eps);
+        ints(&a, &.{ dims, nc, streams });
+        try go(g.f.rinv, s, .{ cdiv(rows * streams, 256), 1, 1 }, 256, 0, &a);
+    }
+
+    /// hcMix with the normed values recomputed from the streams h, rinv and scale.
+    pub fn hcMixH(g: *const Glue, s: cuda.Stream, up: u64, h: u64, rinv: u64, scale: u64, mixed: u64, xsm: u64, rows: usize, dims: usize, streams: usize) !void {
+        if (dims % 32 != 0) return error.RowShape;
+        var a: cuda.Args = .{};
+        ptrs(&a, &.{ up, h, rinv, scale, mixed, xsm });
+        ints(&a, &.{ dims, streams });
+        try go(g.f.mix_h, s, .{ rows, cdiv(dims, 256), 1 }, 256, 0, &a);
     }
 
     pub fn hcUpmix(g: *const Glue, s: cuda.Stream, act: u64, xs: u64, w: u64, sc: u64, b: u64, normed: u64, mixed: u64, xs_mixed: u64, rows: usize, n: usize, k: usize, dims: usize, streams: usize) !void {

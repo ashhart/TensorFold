@@ -56,6 +56,11 @@ const cubin_qmm: [:0]const u8 = "_ZN6tf_qmm10qmm_kernelILi32ELi16ELi64ELi1ELi4EL
 const qmm_smem: u32 = 9472;
 /// Prompt rows on qmm.cu's arithmetic (flashnext_fact.cu): 64 x 128 tiles, two groups a stage, the lane tile's bits.
 const cubin_fact: [:0]const u8 = "_ZN4fact11fact_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELi2ELb0ELb1ELb0EEEvPK13__nv_bfloat16PKfPKjS3_S3_PvPfiiiiiii";
+/// The hyper-connection read-out's prompt tiles (flashnext_hcf.cu), fn_hc_down's and fn_hc_upmix's bits.
+const cubin_hcf_down: [:0]const u8 = "_ZN3hcf10hcf_kernelILi32ELi192ELi2ELi4ELi4ELi2ELb1ELb1ELb0ELi2EEEvPK13__nv_bfloat16PKfPK5uint4S3_S3_PviiiiiiS5_S5_fiii";
+const cubin_hcf_up: [:0]const u8 = "_ZN3hcf10hcf_kernelILi64ELi128ELi2ELi4ELi3ELi2ELb0ELb0ELb1ELi2EEEvPK13__nv_bfloat16PKfPK5uint4S3_S3_PviiiiiiS5_S5_fiii";
+pub const hcf_down_smem: u32 = 4 * (2 * 32 * 64 + 2 * 192 * 16 + 2 * 2 * 192 * 2 + 2 * 32 * 4 + 2 * 32 * 4) + 32 * 16;
+pub const hcf_up_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4 + 2 * 32 * 4) + 64 * 16;
 pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
@@ -147,6 +152,9 @@ pub const Kernels = struct {
     lane: cuda.Function,
     fact_mod: cuda.Module,
     fact: cuda.Function,
+    hcf_mod: cuda.Module,
+    hcf_down: cuda.Function,
+    hcf_up: cuda.Function,
     native_lane: cuda.qmmf.Lane,
     nvfp4: cuda.experts.Nvfp4Experts,
     front: cuda.Function,
@@ -177,6 +185,12 @@ pub const Kernels = struct {
         errdefer k.fact_mod.unload();
         k.fact = try k.fact_mod.function(cubin_fact);
         try k.fact.allowDynamicShared(fact_smem);
+        k.hcf_mod = try cuda.Module.load(d, cuda.kernels.flashnext_hcf);
+        errdefer k.hcf_mod.unload();
+        k.hcf_down = try k.hcf_mod.function(cubin_hcf_down);
+        try k.hcf_down.allowDynamicShared(hcf_down_smem);
+        k.hcf_up = try k.hcf_mod.function(cubin_hcf_up);
+        try k.hcf_up.allowDynamicShared(hcf_up_smem);
         k.router = try cuda.grouped.Router.resolve(k.experts);
         k.moe = try cuda.experts.RowsExperts.resolve(k.rows);
         k.native_lane = try cuda.qmmf.Lane.load(d, (try d.capability(0)) / 10);
@@ -205,6 +219,7 @@ pub const Kernels = struct {
         k.batch.unload();
         k.rows.unload();
         k.experts.unload();
+        k.hcf_mod.unload();
         k.fact_mod.unload();
         k.qmm.unload();
     }
@@ -267,6 +282,7 @@ pub const Scratch = struct {
     h: u64 = 0,
     pss: u64 = 0,
     norm: u64 = 0,
+    rinv: u64 = 0,
     dn: u64 = 0,
     hc_part: u64 = 0,
     hc_up: u64 = 0,
@@ -383,7 +399,7 @@ pub const Scratch = struct {
         const items = cdiv(pairs, tile) + experts_n + 1;
         var n: usize = 0;
         n += cap * 4 + (cap + 1) * 16;
-        n += cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
+        n += cap * streams * 4 + cap * wide * 2 * 2 + cap * pss_n * 4 + cap * (low + 4) * 2 + hc_sk * cap * (low + 4) * 4;
         n += cap * wide * 2 + 8 * cap * dims * 4;
         n += cap * low * 2 + cap * (low / 32) * 4 + cap * streams * 2 + cap * dims * 2 + cap * (dims / 32) * 4;
         n += cap * proj_row * 2 + out_sk * cap * dims * 4 + cap * gdn.value_dim * (2 + 4 + 4) + cap * (gdn.value_dim / 32) * 4;
@@ -412,6 +428,7 @@ pub const Scratch = struct {
         s.h = try s.add(gpa, d, cap * wide * 2);
         s.pss = try s.add(gpa, d, cap * pss_n * 4);
         s.norm = try s.add(gpa, d, cap * wide * 2);
+        s.rinv = try s.add(gpa, d, cap * streams * 4);
         s.dn = try s.add(gpa, d, cap * (low + 4) * 2);
         s.hc_part = try s.add(gpa, d, hc_sk * cap * (low + 4) * 4);
         s.hc_up = try s.add(gpa, d, cap * wide * 2);

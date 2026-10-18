@@ -59,6 +59,11 @@ fn cint(v: usize) c_int {
     return @intCast(v);
 }
 
+/// tile_of's sweep: row tiles a column pass keeps in 12 MiB of the input.
+fn sweepOf(m: usize, bm: usize, k: usize) usize {
+    return @max(@as(usize, 1), @min(cdiv(m, bm), (12 << 20) / (bm * k * 2)));
+}
+
 fn cdiv(a: usize, b: usize) usize {
     return (a + b - 1) / b;
 }
@@ -220,6 +225,38 @@ pub fn Pass(comptime Tri: type) type {
             try self.tri.hcWriteback(h, h, pss, dummy, "*bf16", inj, y, "*fp32", wts, "*fp32", rs, n, dims, streams, 2, 10, 11, 1);
         }
 
+        /// Prompt rows' read-out on flashnext_hcf.cu's tiles (fn_hc_down's and fn_hc_upmix's bits): the down rows with their
+        /// K slices folded, the reduce on one slice, the up rows in bf16, then the mix renorming the streams on the fly.
+        fn readoutTiles(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
+            const s = self.s;
+            const h = s.h + r0 * wide * 2;
+            const pss = s.pss + r0 * pss_n * 4;
+            const rinv = s.rinv + r0 * streams * 4;
+            const act = s.act + r0 * low * 2;
+            const xs_act = s.xs_act + r0 * (low / 32) * 4;
+            const inj_ptr = if (hc_w.has_inj == 1) s.inj + r0 * streams * 2 else act;
+            const nc = dims / 256;
+            var a: cuda.Args = .{};
+            for ([_]u64{ h, 0, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.hc_part }) |v| a.add(v);
+            for ([_]usize{ n, hc_w.n_down, wide, hc_sk, wide, sweepOf(n, 32, wide) }) |v| a.add(cint(v));
+            a.add(pss);
+            a.add(hc_w.scale.ptr);
+            a.add(eps);
+            for ([_]usize{ dims, nc, streams }) |v| a.add(cint(v));
+            try cuda.launch.launch(self.k.hcf_down, .{ .grid = .{ .x = @intCast(cdiv(n, 32) * cdiv(hc_w.n_down, 192)) }, .block = .{ .x = 256 }, .shared = parts.hcf_down_smem }, self.stream, &a);
+            try self.tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
+            var b: cuda.Args = .{};
+            for ([_]u64{ act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, s.proj }) |v| b.add(v);
+            for ([_]usize{ n, wide, low, 1, low, sweepOf(n, 64, low) }) |v| b.add(cint(v));
+            b.add(@as(u64, 0));
+            b.add(@as(u64, 0));
+            b.add(@as(f32, 0));
+            for ([_]usize{ dims, nc, streams }) |v| b.add(cint(v));
+            try cuda.launch.launch(self.k.hcf_up, .{ .grid = .{ .x = @intCast(cdiv(n, 64) * cdiv(wide, 128)) }, .block = .{ .x = 256 }, .shared = parts.hcf_up_smem }, self.stream, &b);
+            try self.tri.hcRinv(pss, rinv, eps, n, dims, nc, streams);
+            try self.tri.hcMixH(s.proj, h, rinv, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
+        }
+
         /// A read-out over rows [r0, r0 + n) of the streams: mixed and its group sums, and the inject gates.
         pub fn readout(self: *Self, hc_w: HcW, r0: usize, n: usize) !void {
             return self.readoutKeep(hc_w, r0, n, .{});
@@ -244,6 +281,7 @@ pub fn Pass(comptime Tri: type) type {
                 try self.tri.hcDenseMix(s.hc_up, norm, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
                 return;
             }
+            if (n >= 64 and std.meta.eql(keep, HcKeep{})) return self.readoutTiles(hc_w, r0, n);
             try self.copy(keep.h, h, n * wide * 2);
             try self.tri.hcDown(h, pss, hc_w.scale.ptr, norm, hc_w.down.w.ptr, hc_w.down.s.ptr, hc_w.down.b.ptr, s.dn, s.hc_part, eps, n, hc_w.n_down, wide, dims, dims / 256, streams, hc_sk);
             if (keep.v != 0) try self.sumSlices(s.hc_part, keep.v, false, n * hc_w.n_down, hc_sk);
@@ -404,7 +442,7 @@ pub fn Pass(comptime Tri: type) type {
                     if (ends > self.seq.cap) return error.UnexpectedTensor;
                     const pos = at.pos + (r0 / att_rows) * 16;
                     const iq = at.iq + r0 * index_heads * index_dim * 2;
-                    const sel = r0 - g0;                   // this block's rows in the selection buffers
+                    const sel = r0 - g0; // this block's rows in the selection buffers
                     // rows past `top` complete blocks score theirs; _scores leaves the rest alone, so skip it when none is
                     if (ends / ratio > top) try self.tri.qsaScores(iq, pooled, pos, self.seq.scores, nb, m, @min(nb, cdiv(ends, ratio)));
                     var a: cuda.Args = .{};
