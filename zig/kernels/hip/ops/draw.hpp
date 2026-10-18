@@ -50,6 +50,74 @@ extern "C" __global__ void tf_argmax(const uint16_t* logits, int kind, int n, in
     if (threadIdx.x == 0) out[blockIdx.x] = si[0];
 }
 
+constexpr int kPartThreads = 256;
+
+// tf_argmax over part p of each row (`per` values): its best value and index; `better` is a total order.
+extern "C" __global__ void __launch_bounds__(kPartThreads)
+    tf_argmax_part(const uint16_t* logits, int kind, int n, int per, float* part_v, int* part_i) {
+    const uint16_t* row = logits + static_cast<long long>(blockIdx.y) * n;
+    const int from = blockIdx.x * per, to = from + per < n ? from + per : n;
+    float top = 0.0f;
+    int at = -1;
+    for (int i = from + threadIdx.x; i < to; i += kPartThreads) {
+        float v = widen(row[i], kind);
+        if (at < 0 || better(v, i, top, at)) {
+            top = v;
+            at = i;
+        }
+    }
+    __shared__ float sv[kPartThreads];
+    __shared__ int si[kPartThreads];
+    sv[threadIdx.x] = top;
+    si[threadIdx.x] = at;
+    __syncthreads();
+    for (int stride = kPartThreads / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            int j = threadIdx.x + stride;
+            if (si[j] >= 0 && (si[threadIdx.x] < 0 || better(sv[j], si[j], sv[threadIdx.x], si[threadIdx.x]))) {
+                sv[threadIdx.x] = sv[j];
+                si[threadIdx.x] = si[j];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        part_v[blockIdx.y * gridDim.x + blockIdx.x] = sv[0];
+        part_i[blockIdx.y * gridDim.x + blockIdx.x] = si[0];
+    }
+}
+
+// The best of a row's `parts` candidates (tf_argmax_part's): the row's tf_argmax.
+extern "C" __global__ void __launch_bounds__(kPartThreads)
+    tf_argmax_join(const float* part_v, const int* part_i, int parts, int* out) {
+    float top = 0.0f;
+    int at = -1;
+    for (int p = threadIdx.x; p < parts; p += kPartThreads) {
+        const float v = part_v[blockIdx.x * parts + p];
+        const int i = part_i[blockIdx.x * parts + p];
+        if (i >= 0 && (at < 0 || better(v, i, top, at))) {
+            top = v;
+            at = i;
+        }
+    }
+    __shared__ float sv[kPartThreads];
+    __shared__ int si[kPartThreads];
+    sv[threadIdx.x] = top;
+    si[threadIdx.x] = at;
+    __syncthreads();
+    for (int stride = kPartThreads / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            int j = threadIdx.x + stride;
+            if (si[j] >= 0 && (si[threadIdx.x] < 0 || better(sv[j], si[j], sv[threadIdx.x], si[threadIdx.x]))) {
+                sv[threadIdx.x] = sv[j];
+                si[threadIdx.x] = si[j];
+            }
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[blockIdx.x] = si[0];
+}
+
 // A monotone 16-bit key of a value's bits (-0 and +0 share one), so equal keys are equal values.
 __device__ __forceinline__ uint32_t order_key(uint16_t bits) {
     if (bits == 0x8000) bits = 0;

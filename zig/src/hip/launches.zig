@@ -126,6 +126,8 @@ pub const Launcher = struct {
         kv_write: Function,
         kv_write_at: Function,
         argmax: Function,
+        argmax_part: Function,
+        argmax_join: Function,
         topk: Function,
         conv_prefill: Function,
         gdn_gate_prefill: Function,
@@ -195,6 +197,8 @@ pub const Launcher = struct {
             .kv_write = try ops.function("tf_kv_write"),
             .kv_write_at = try ops.function("tf_kv_write_at"),
             .argmax = try ops.function("tf_argmax"),
+            .argmax_part = try ops.function("tf_argmax_part"),
+            .argmax_join = try ops.function("tf_argmax_join"),
             .topk = try ops.function("tf_topk"),
             .conv_prefill = try ops.function("tf_conv_prefill"),
             .gdn_gate_prefill = try ops.function("tf_gdn_gate_prefill"),
@@ -309,6 +313,7 @@ pub const Launcher = struct {
     pub const tf_kv_write = attention.tf_kv_write;
     pub const tf_kv_write_at = attention.tf_kv_write_at;
     pub const tf_argmax_rows = draw.tf_argmax_rows;
+    pub const tf_argmax_parts = draw.tf_argmax_parts;
     pub const tf_topk_rows = draw.tf_topk_rows;
     pub const tf_add_wide = tp.tf_add_wide;
     pub const tf_moe_localize = tp.tf_moe_localize;

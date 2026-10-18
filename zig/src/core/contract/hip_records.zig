@@ -415,6 +415,24 @@ const own_records = [_]Record{
             .{ .vgprs = 6, .sgprs = 18, .lds = 0, .private = 0, .bound = 1024, .wave = 32 },
         },
     },
+    .{
+        .launch = .{ .name = "argmax tf_argmax_part", .symbol = "tf_argmax_part", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 8, .sgprs = 17, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 18, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 17, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 8, .sgprs = 16, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
+    .{
+        .launch = .{ .name = "argmax tf_argmax_join", .symbol = "tf_argmax_join", .image = "ops", .threads = 256 },
+        .usage = .{
+            .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 21, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+            .{ .vgprs = 10, .sgprs = 20, .lds = 2048, .private = 0, .bound = 256, .wave = 32 },
+        },
+    },
 };
 
 pub const records = own_records ++ @import("hip_records_stream.zig").records;
