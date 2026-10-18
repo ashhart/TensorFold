@@ -1,12 +1,13 @@
-//! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL, carrying ready and error records.
+//! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL, carrying ready, error, wake records.
 const std = @import("std");
 const platform = @import("sys");
 const posix = @import("sys").posix;
 
-/// One record on a line: ready, or an error and its name.
+/// One record on a line: ready, an error and its name, or rank 0's wake.
 const Record = extern struct { kind: u32, rank: u32, text: [56]u8 = @splat(0) };
 const ready_kind: u32 = 1;
 const error_kind: u32 = 2;
+const wake_kind: u32 = 3;
 const max_lines = 16;
 
 /// Set by a rank that ends on purpose, before it tells the others: a line closing after that is expected.
@@ -17,6 +18,9 @@ var line_count: usize = 0;
 var my_rank: usize = 0;
 var peer_digest: [max_lines][32]u8 = undefined; // each line's ready record: its rank's checkpoint digest
 var peer_rank: [max_lines]u32 = undefined;
+var wakes = std.atomic.Value(u32).init(0); // wake records this rank's line carried (another rank's)
+var slept: u32 = 0; // the wakes this rank's sleeps took
+var watch_io: std.Io = undefined; // the watchers' futex wakes
 
 /// This rank ends on purpose (rank 0 sends its end header, or a rank leaves on one).
 pub fn ended() void {
@@ -52,6 +56,7 @@ pub fn start(io: std.Io, rank: usize, world: usize) !void {
     if (world < 2) return;
     if (world > max_lines + 1) return error.TooManyRanks;
     my_rank = rank;
+    watch_io = io;
     var addr = try address();
     if (rank == 0) {
         const server = try socket();
@@ -126,6 +131,27 @@ pub fn fail(name: []const u8) void {
     send(r);
 }
 
+/// Whether this rank has lines (more than one rank).
+pub fn open() bool {
+    return line_count > 0;
+}
+
+/// Rank 0: every other rank's sleep returns (its next step follows on NCCL).
+pub fn wake() void {
+    send(.{ .kind = wake_kind, .rank = @intCast(my_rank) });
+}
+
+/// Until rank 0's next wake record, which may already be here: a wait that spins neither CUDA nor NCCL.
+pub fn sleep(io: std.Io) void {
+    if (line_count == 0) return;
+    slept += 1;
+    while (true) {
+        const n = wakes.load(.acquire);
+        if (n >= slept) return;
+        io.futexWaitUncancelable(u32, &wakes.raw, n);
+    }
+}
+
 /// A rank's transport failed: with lines open every rank hears `name` and this one ends now; with none, nothing.
 pub fn fatal(name: []const u8) void {
     if (line_count == 0) return;
@@ -161,6 +187,11 @@ fn watch(fd: posix.socket_t, line: usize) void {
             _ = ready_peers.fetchAdd(1, .acq_rel);
             continue;
         }
+        if (r.kind == wake_kind) {
+            _ = wakes.fetchAdd(1, .release);
+            watch_io.futexWake(u32, &wakes.raw, 1);
+            continue;
+        }
         if (r.kind == error_kind and !ending.load(.acquire)) {
             const text = std.mem.sliceTo(&r.text, 0);
             std.log.err("rank {d}: rank {d} stopped ({s}); this rank stops too", .{ my_rank, r.rank, text });
@@ -178,6 +209,38 @@ test "a record is 64 bytes, and a name past 56 bytes is cut" {
     const name: [70]u8 = @splat('x');
     @memcpy(r.text[0..@min(name.len, r.text.len)], name[0..@min(name.len, r.text.len)]);
     try std.testing.expectEqual(@as(usize, 56), std.mem.sliceTo(&r.text, 0).len);
+}
+
+test "a sleep takes a wake record that came before it, and waits for one that comes after" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    var pair: [2]c_int = undefined;
+    if (ProcessTest.socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+    defer _ = posix.system.close(pair[0]);
+    watch_io = std.testing.io;
+    line_count = 1;
+    defer line_count = 0;
+    const first = wakes.load(.acquire);
+    slept = first;
+    const watcher = try std.Thread.spawn(.{}, watch, .{ pair[0], 0 });
+    const rec: Record = .{ .kind = wake_kind, .rank = 0 };
+    const record = std.mem.asBytes(&rec);
+    try std.testing.expectEqual(@as(isize, record.len), posix.system.write(pair[1], record.ptr, record.len));
+    while (wakes.load(.acquire) == first) std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+    sleep(std.testing.io); // the wake was counted before the sleep
+    const Late = struct {
+        fn send(fd: c_int, bytes: []const u8) void {
+            std.Io.sleep(std.testing.io, .fromMilliseconds(50), .awake) catch {};
+            _ = posix.system.write(fd, bytes.ptr, bytes.len);
+        }
+    };
+    const late = try std.Thread.spawn(.{}, Late.send, .{ pair[1], record[0..] });
+    sleep(std.testing.io); // returns once the late record lands
+    late.join();
+    try std.testing.expectEqual(first + 2, wakes.load(.acquire));
+    ending.store(true, .release); // the line closing next is expected: the watcher returns
+    _ = posix.system.close(pair[1]);
+    watcher.join();
+    ending.store(false, .release);
 }
 
 const ProcessTest = struct {

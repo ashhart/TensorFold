@@ -484,6 +484,7 @@ pub const Lanes = struct {
         const self = of(ptr);
         const kv = self.lanes.fetchRemove(s) orelse return;
         self.x.release(kv.value.slot) catch |err| std.log.err("releasing slot {d}: {s}", .{ kv.value.slot, @errorName(err) });
+        if (self.lanes.count() == 0) self.x.idle() catch |err| std.log.err("the other ranks' idle step: {s}", .{@errorName(err)});
     }
 };
 
