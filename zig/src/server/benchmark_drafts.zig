@@ -1,5 +1,4 @@
-//! The local draft counts file beside a receipt: each attempt's verify rounds, drafted and accepted tokens.
-//! The board's receipt holds exactly its community-v1 fields, so whether a drafter ran is kept here, never uploaded.
+//! The local draft counts beside a receipt (rounds, drafted, accepted per attempt); never uploaded to the board.
 const std = @import("std");
 const json = @import("json");
 const suite = @import("benchmark_suite.zig");
@@ -29,7 +28,7 @@ pub fn path(a: Allocator, receipt_path: []const u8) ![]const u8 {
     return std.mem.concat(a, u8, &.{ stem, ".drafts.json" });
 }
 
-/// What a run's draft counts show, for the terminal; ``passed``: a drafter went to the server (null: not known, attached).
+/// What a run's draft counts show; ``passed``: a drafter went to the server (null when attached and unknown).
 pub fn verdict(a: Allocator, t: Totals, passed: ?bool, file: []const u8) ![]const u8 {
     if (t.reported == 0) return std.fmt.allocPrint(a, "Draft counts: the server reported none; saved: {s}", .{file});
     const line = try std.fmt.allocPrint(a, "Draft counts: {d} of {d} drafted tokens accepted over {d} rounds ({d} of {d} attempts reported them); saved: {s}", .{ t.accepted, t.drafted, t.rounds, t.reported, t.attempts, file });

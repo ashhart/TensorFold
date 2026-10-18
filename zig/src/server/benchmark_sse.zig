@@ -177,7 +177,7 @@ fn count(v: ?Value) ?u64 {
     return std.fmt.parseInt(u64, x.int, 10) catch null;
 }
 
-/// The final chunk's ``speculative`` rounds, drafted and accepted counts; null unless all three are counts and accepted <= drafted.
+/// The final chunk's speculative rounds, drafted and accepted; null unless all are counts and accepted <= drafted.
 fn drafts(v: ?Value) ?suite.Drafts {
     const d = v orelse return null;
     const out: suite.Drafts = .{

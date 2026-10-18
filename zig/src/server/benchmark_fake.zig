@@ -247,7 +247,7 @@ pub fn reply(a: Allocator, chat: bool, completion: u64, gap_ms: u32) ![]const Wr
     return drafted(a, chat, completion, gap_ms, "");
 }
 
-/// ``reply`` whose finishing chunk carries ``speculative`` (a JSON object's members, such as ``"rounds": 3``) when not empty.
+/// ``reply`` whose finishing chunk carries ``speculative`` members (such as ``"rounds": 3``) when not empty.
 pub fn drafted(a: Allocator, chat: bool, completion: u64, gap_ms: u32, speculative: []const u8) ![]const Write {
     const first = if (chat) "{\"choices\": [{\"index\": 0, \"delta\": {\"reasoning_content\": \"synthetic\"}}]}" else "{\"choices\": [{\"index\": 0, \"text\": \"synthetic\"}]}";
     const second = if (chat) "{\"choices\": [{\"index\": 0, \"delta\": {\"content\": \" output\"}}]}" else "{\"choices\": [{\"index\": 0, \"text\": \" output\"}]}";
