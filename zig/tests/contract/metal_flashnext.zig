@@ -13,6 +13,7 @@ pub const Probe = struct {
     rig: rig_.Rig,
     pipe: mtl.Pipeline,
     which: f.Which,
+    factor: f64 = 0,
     shape: c.Shape = undefined,
     host: []u16 = &.{},
     positions: []i32 = &.{},
@@ -36,7 +37,7 @@ pub const Probe = struct {
         p.pipe.deinit();
     }
     pub fn kernel(p: *Probe) g.Kernel {
-        return .{ .ctx = p, .spec = f.spec(c, p.which), .vt = if (p.which == .mask) &mask_vt else &mrope_vt };
+        return .{ .ctx = p, .spec = f.specScaled(c, p.which, p.factor > 1), .vt = if (p.which == .mask) &mask_vt else &mrope_vt };
     }
     const mask_vt = g.hooks(Probe);
     const mrope_vt: g.VTable = blk: {
@@ -57,7 +58,7 @@ pub const Probe = struct {
     }
     pub fn prepare(p: *Probe, shape: c.Shape, fill: g.Fill, seed: u64) !bool {
         if (shape.rows == 0 or shape.rows > 128) return false;
-        if (p.which == .mrope and (shape.n != f.output_width or shape.k != 256)) return false;
+        if (p.which != .mask and (shape.n != f.output_width or shape.k != 256)) return false;
         if (p.which == .mask and (shape.n == 0 or shape.n > 248320 or shape.k != 1)) return false;
         p.rig.reset();
         p.a.free(p.host);
@@ -89,14 +90,15 @@ pub const Probe = struct {
             p.out[0] = try p.rig.output(p.host.len * 2);
             @memcpy(p.rig.bytes(p.out[0], p.host.len * 2), std.mem.sliceAsBytes(p.host));
         } else {
-            p.positions = try p.a.alloc(i32, shape.rows * 3);
-            for (0..shape.rows) |r| for (0..3) |axis| {
-                p.positions[r * 3 + axis] = @intCast(r * 17 + (if (r % 2 == 0) @as(usize, 0) else axis * 3));
+            const axes: usize = if (p.which == .mrope) 3 else 1;
+            p.positions = try p.a.alloc(i32, shape.rows * axes);
+            for (0..shape.rows) |r| for (0..axes) |axis| {
+                p.positions[r * axes + axis] = @intCast((if (p.factor > 1) @as(usize, 262140) else 0) + r * 17 + (if (r % 2 == 0) @as(usize, 0) else axis * 3));
             };
             p.pos = try p.rig.input(std.mem.sliceAsBytes(p.positions));
             for (&p.ws, &p.weights, 0..) |*w, values, i| w.* = try p.rig.input(std.mem.sliceAsBytes(values[0..if (i == 2) 128 else 256]));
             const epsilon = [_]f32{1e-5};
-            const base = [_]f32{@log2(@as(f32, 10000))};
+            const base = f.table(23.253496170043945, p.factor);
             p.eps = try p.rig.input(std.mem.asBytes(&epsilon));
             p.base = try p.rig.input(std.mem.asBytes(&base));
             for (&p.out, [_]usize{ 24 * 256, 2 * 256, 4 * 128 }) |*o, n| o.* = try p.rig.output(shape.rows * n * 2);
@@ -124,12 +126,14 @@ pub const Probe = struct {
         try p.rig.finish(pass);
     }
     pub fn rowCountInvariant(p: *Probe) !void {
-        if (p.which != .mrope) return;
-        var wide = try Probe.init(p.a, p.rig.device, p.rig.queue, .mrope);
+        if (p.which == .mask or f.isPool(p.which)) return;
+        var wide = try Probe.init(p.a, p.rig.device, p.rig.queue, p.which);
         defer wide.deinit();
-        var solo = try Probe.init(p.a, p.rig.device, p.rig.queue, .mrope);
+        wide.factor = p.factor;
+        var solo = try Probe.init(p.a, p.rig.device, p.rig.queue, p.which);
         defer solo.deinit();
-        for ([_]usize{ 7, 128 }) |rows| {
+        solo.factor = p.factor;
+        for ([_]usize{ 7, if (p.which == .mtp) 16 else 128 }) |rows| {
             _ = try wide.prepare(.{ .rows = rows, .n = f.output_width, .k = 256 }, .random, 23);
             try wide.run();
             const batched = try p.a.dupe(u8, try wide.rig.outputBytes());
@@ -137,19 +141,19 @@ pub const Probe = struct {
             for (0..rows) |r| {
                 _ = try solo.prepare(.{ .rows = 1, .n = f.output_width, .k = 256 }, .random, 23);
                 @memcpy(solo.rig.bytes(solo.input, f.packed_width * 2), std.mem.sliceAsBytes(wide.host[r * f.packed_width ..][0..f.packed_width]));
-                @memcpy(solo.rig.bytes(solo.pos, 3 * 4), std.mem.sliceAsBytes(wide.positions[r * 3 ..][0..3]));
+                @memcpy(solo.rig.bytes(solo.pos, (if (p.which == .mrope) @as(usize, 3) else 1) * 4), std.mem.sliceAsBytes(wide.positions[r * (if (p.which == .mrope) @as(usize, 3) else 1) ..][0..if (p.which == .mrope) 3 else 1]));
                 try solo.run();
                 const one = try solo.rig.outputBytes();
                 var block: usize = 0;
                 var at: usize = 0;
                 for ([_]usize{ 24 * 256, 2 * 256, 4 * 128 }) |n| {
-                    if (!std.mem.eql(u8, one[at..][0 .. n * 2], batched[block + r * n * 2 ..][0 .. n * 2])) return error.MropeRowCountChangesBits;
+                    if (!std.mem.eql(u8, one[at..][0 .. n * 2], batched[block + r * n * 2 ..][0 .. n * 2])) return error.RotaryRowCountChangesBits;
                     block += rows * n * 2;
                     at += n * 2;
                 }
             }
         }
-        std.debug.print("PASS shapes flashnext M-RoPE: rows 1, 7 and 128 keep each row's bits\n", .{});
+        std.debug.print("PASS shapes {s}: rows 1, 7 and {d} keep each row's bits\n", .{ f.name(p.which, p.factor > 1), if (p.which == .mtp) @as(usize, 16) else 128 });
     }
     pub fn count(p: *Probe) usize {
         return p.shape.rows * p.shape.n;
@@ -184,7 +188,8 @@ pub const Probe = struct {
             var row: [f.output_width]u16 = undefined;
             var row_mag: [f.output_width]f64 = undefined;
             for (0..p.shape.rows) |r| {
-                f.referenceWith(p.host[r * f.packed_width ..][0..f.packed_width], p.positions[r * 3 ..][0..3].*, .{ &p.weights[0], &p.weights[1], p.weights[2][0..128] }, 1e-5, @log2(@as(f32, 10000)), acc, order, &row, &row_mag);
+                const rotary = f.table(23.253496170043945, p.factor);
+                f.referenceTableWith(p.host[r * f.packed_width ..][0..f.packed_width], if (p.which == .mrope) p.positions[r * 3 ..][0..3].* else @as([3]i32, @splat(p.positions[r])), .{ &p.weights[0], &p.weights[1], p.weights[2][0..128] }, 1e-5, &rotary, acc, order, &row, &row_mag);
                 var src: usize = 0;
                 var block: usize = 0;
                 for ([_]usize{ 24 * 256, 2 * 256, 4 * 128 }) |n| {

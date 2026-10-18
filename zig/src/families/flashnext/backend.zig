@@ -267,7 +267,8 @@ pub const Backend = struct {
                 end = @min(end, mark);
                 break;
             };
-            const call = if (b.e.segments) segments.next(end - at, b.e.pr.step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, b.e.pr.step), .parts = 1 };
+            const step = fz.chunkRows(at, b.e.pr.step); // past the trained window a chunk scores more blocks a row
+            const call = if (b.e.segments) segments.next(end - at, step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, step), .parts = 1 };
             end = at + call.rows;
             const ps = [2]*fz.Prompt{ b.e.pr, b.e.pr2 };
             s.first = try fz.Prompt.chunkN(ps[0..call.parts], &s.m, b.gpa, prompt[at..end]);
@@ -410,7 +411,7 @@ pub const Backend = struct {
             for (w.positions, 0..) |p, j| if (p != s.m.pos + j + 1) return error.PositionMismatch;
             desc[i] = .{ .slot = @intCast(b.by.get(w.stream).?), .pos = @intCast(s.m.pos), .rows = @intCast(w.rows()) };
         }
-        const plan = try meta.Plan.init(desc[0..windows.len], fz.CAP);
+        const plan = try meta.forBackend(b, desc[0..windows.len]);
         const t = &b.primary.t;
         for (windows, out, 0..) |w, o, i| {
             const s = try b.session(w.stream);
