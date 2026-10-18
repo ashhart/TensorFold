@@ -743,3 +743,7 @@ test "a product group whose jobs share scratch or write another job's input is r
     });
     try complete(cb, e);
 }
+
+test {
+    _ = @import("exl3_partition_gpu_test.zig");
+}

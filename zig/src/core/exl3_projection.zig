@@ -30,6 +30,21 @@ pub const Matrix = struct {
     tile_k_stride: usize = 0,
     tile_n_stride: usize = 0,
 
+    /// Borrow whole output rotation blocks, retaining the parent's K stride and complete reduction.
+    pub fn columns(m: Matrix, start: usize, count: usize) !Matrix {
+        try m.validate();
+        if (start % 128 != 0 or count == 0 or count % 128 != 0 or
+            start > m.n or count > m.n - start) return error.InvalidExl3Partition;
+        var shard = m;
+        shard.tile_k_stride = try m.kStride();
+        shard.trellis.offset = try std.math.add(usize, m.trellis.offset, try std.math.mul(usize, start / 16, m.nStride()));
+        const scale_bytes = start * 2 / (if (m.svh_format == .packed_signs) @as(usize, 16) else 1);
+        shard.svh.offset = try std.math.add(usize, m.svh.offset, scale_bytes);
+        if (m.bias) |bias| shard.bias.?.offset = try std.math.add(usize, bias.offset, start * 2);
+        shard.n = count;
+        return shard;
+    }
+
     pub fn validate(m: Matrix) !void {
         try shape(m.k, m.n);
         if (m.width.halves < 2 or m.width.halves > 16 or
@@ -532,6 +547,28 @@ test "EXL3 scratch is row compact and bounded independently of full matrices" {
     try std.testing.expectError(error.UnsupportedExl3Shape, scratchBytes(129, 128, 1));
     try std.testing.expectEqual(@as(usize, 72), @sizeOf(ExpertDescriptor));
     try std.testing.expectEqual(@as(usize, 96), @sizeOf(Args));
+}
+
+test "EXL3 output partitions retain rectangular strides and reject broken rotation blocks" {
+    const view = View{ .buffer = undefined, .offset = 16 };
+    var m = Matrix{ .trellis = view, .suh = view, .svh = view, .bias = view, .k = 256, .n = 768, .width = .{ .halves = 5 }, .tile_n_stride = 82 };
+    const shard = try m.columns(256, 512);
+    try std.testing.expectEqual(@as(usize, 48 * 82), try shard.kStride());
+    try std.testing.expectEqual(@as(usize, 16 + 16 * 82), shard.trellis.offset);
+    try std.testing.expectEqual(@as(usize, 528), shard.svh.offset);
+    try std.testing.expectEqual(@as(usize, 528), shard.bias.?.offset);
+    try std.testing.expectEqual(@as(usize, 16), shard.suh.offset);
+    const nested = try shard.columns(128, 128);
+    const direct = try m.columns(384, 128);
+    try std.testing.expectEqual(direct.trellis.offset, nested.trellis.offset);
+    try std.testing.expectEqual(direct.svh.offset, nested.svh.offset);
+    try std.testing.expectEqual(try direct.kStride(), try nested.kStride());
+    m.svh_format = .packed_signs;
+    try std.testing.expectEqual(@as(usize, 48), (try m.columns(256, 128)).svh.offset);
+    for ([_][2]usize{ .{ 1, 128 }, .{ 0, 0 }, .{ 0, 16 }, .{ 768, 128 }, .{ 640, 256 }, .{ std.math.maxInt(usize) - 127, 128 } }) |cut|
+        try std.testing.expectError(error.InvalidExl3Partition, m.columns(cut[0], cut[1]));
+    m.trellis.offset = std.math.maxInt(usize) - 1;
+    try std.testing.expectError(error.Overflow, m.columns(128, 128));
 }
 
 test "stored per-matrix width and rectangular strides include public target shapes" {
