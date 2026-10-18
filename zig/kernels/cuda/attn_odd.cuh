@@ -25,18 +25,29 @@ __device__ __forceinline__ bool nonfinite_out(const float (&o)[NB][4], bool r0, 
     return (r0 && a != a) || (r1 && b != b);
 }
 
-// A 32-key tile staged [key][D] (xor swizzle): the chunks this thread copied, their NaN and infinite values set to 0.
-template <int D>
-__device__ __forceinline__ void clean(uint4* vs, int threads) {
-    for (int i = threadIdx.x; i < 32 * (D / 8); i += threads) {
+// A KEYS-key tile staged [key][D] (xor swizzle): chunks tid, tid + threads, ... (the ones tid copied) made finite.
+template <int D, int KEYS>
+__device__ __forceinline__ void clean_rows(uint4* vs, int tid, int threads) {
+    for (int i = tid; i < KEYS * (D / 8); i += threads) {
         uint4* p = vs + (i / (D / 8)) * (D / 8) + ((i % (D / 8)) ^ ((i / (D / 8)) & 7));
         const uint4 x = *p;
         *p = make_uint4(finite2(x.x), finite2(x.y), finite2(x.z), finite2(x.w));
     }
 }
 
+// A 32-key tile staged [key][D] (xor swizzle): the chunks this thread copied, their NaN and infinite values set to 0.
+template <int D>
+__device__ __forceinline__ void clean(uint4* vs, int threads) {
+    clean_rows<D, 32>(vs, threadIdx.x, threads);
+}
+
 // x a, an infinite x (the replay's, already weighed in float64) left as it is whatever the rescale.
 __device__ __forceinline__ float keep(float x, float a) { return isinf(x) ? x : __fmul_rn(x, a); }
+
+// x a + y folding partials, an infinite x left unscaled (see keep).
+__device__ __forceinline__ float fold(float x, float a, float y) {
+    return isinf(x) ? __fadd_rn(x, y) : __fmaf_rn(x, a, y);
+}
 
 // The least x whose float64 exp is not 0: a key whose score is further below its row's max weighs 0 in attention_ref.
 __device__ __forceinline__ double least() { return __longlong_as_double(0xc0874910d52d3051ll); }
