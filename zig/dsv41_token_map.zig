@@ -1,6 +1,4 @@
-//! The Engram token map builder's command line: `tf-dsv41-token-map --tokenizer PATH
-//! --config PATH --output PATH` — the same build the lane host runs when the map is
-//! missing and the original's tokenizer sits beside the tables.
+//! CLI for the lane host's token-map builder: --tokenizer PATH --config PATH --output PATH.
 const std = @import("std");
 const tf = @import("tensorfold");
 

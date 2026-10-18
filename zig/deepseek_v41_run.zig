@@ -245,8 +245,7 @@ pub fn main(init: std.process.Init) !void {
     const engram_after = model.engramStats();
     const engram_read_bytes = engram_after.read_bytes - engram_before.read_bytes;
     const streamed = model.engram_sources != null;
-    // Gate change for streamed Engram: execution may read from disk, but no more than the row bytes engram_rows
-    // counted itself (F_NOCACHE preads, so the count is exact), and nothing through page faults.
+    // Streamed I/O may read only counted F_NOCACHE row bytes; page-fault reads still fail the gate.
     const resident_gate_passed = if (streamed)
         after.disk_read - before.disk_read <= engram_read_bytes and after.pageins == before.pageins
     else

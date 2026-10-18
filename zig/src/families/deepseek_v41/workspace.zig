@@ -53,8 +53,7 @@ pub const Field = enum {
 
 /// The shared expert as a seventh row per token: index of the routes table, and of descriptor tables.
 pub const shared_expert: u32 = 384;
-/// Merged MoE row 7 r + j: routed slot j of token r at row 6 r + j, the shared expert at row 6 t + r
-/// (t the plan's rows), below the routed block, so routed rows keep their unmerged positions.
+/// Merged slot (r,j) maps to routed row 6*r+j or shared row 6*plan_rows+r, preserving routed row positions.
 pub fn moeSlot(plan_rows: usize, r: usize, j: usize) u32 {
     return @intCast(if (j < 6) r * 6 + j else plan_rows * 6 + r);
 }

@@ -8,8 +8,7 @@ pub const Memo = @import("memo.zig").Memo;
 /// A digest of what ids mean as loaded (identity.zig): what Recall keys its record by.
 pub const identity = @import("identity.zig").identity;
 
-/// The generated NFKD/mark/CCC tables the Engram token map's normalizer chain uses;
-/// re-exported so family code reaches them through this module.
+/// Generated NFKD/mark/CCC tables, re-exported for the Engram token-map normalizer.
 pub const nfkd_data = @import("nfkd_data.zig");
 
 pub const Kind = models.Kind;

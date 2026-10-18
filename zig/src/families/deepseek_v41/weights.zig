@@ -194,8 +194,7 @@ fn scale(comptime binding: bool, source: anytype, prefix: []const u8, size: usiz
     return .{ .name = name, .format = if (have_fp) .f16 else .packed_signs };
 }
 
-/// The compressor and indexer matrices ride either storage: the released packs quantize
-/// them, rank-split repacks keep them dense beside the rotation scales.
+/// Compressor/indexer matrices: quantized in release packs, dense beside rotation scales in rank-split repacks.
 fn matrixAny(comptime binding: bool, source: anytype, prefix: []const u8, k: usize, n: usize, destination: ?*AnyMatrix) !void {
     var name_buf: [160]u8 = undefined;
     if (has(source, try named(&name_buf, "{s}.weight", .{prefix}))) {

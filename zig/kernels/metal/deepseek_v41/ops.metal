@@ -48,8 +48,7 @@ kernel void dsv41_dense(const device uchar* x [[buffer(0)]], const device uchar*
                         device uchar* y [[buffer(2)]], constant Dense& d [[buffer(3)]],
                         uint3 g [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
                         uint sg [[simdgroup_index_in_threadgroup]], uint groups [[simdgroups_per_threadgroup]]) {
-  // One column per SIMD group: a one-row dot is latency bound, so more groups keep more loads in
-  // flight. Each column's lane order of products and compensated adds is unchanged.
+  // One column per SIMD group overlaps loads without changing per-column product or compensated-add order.
   const uint col = g.x*groups + sg;
   if (col >= d.n) return;
   float a = 0, residual = 0;
