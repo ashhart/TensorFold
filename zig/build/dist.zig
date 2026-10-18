@@ -86,7 +86,7 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         pack.addFileArg(b.path("THIRD_PARTY_NOTICES.md"));
         const archives = pack.addOutputDirectoryArg("archives");
         pack.addPrefixedFileArg("--path-checker=", privacy.getEmittedBin());
-        pack.addPrefixedDirectoryArg("--build-root=", b.path("."));
+        pack.addArg(b.fmt("--build-root={s}", .{@import("cuda_release_paths.zig").absoluteRoot(b)}));
         if (aot != null and p.query.os_tag == .linux and !host_only) pack.addDirectoryArg(b.graph.cwdRelativePath(aot.?));
         if (xgrammar) |dir| pack.addPrefixedDirectoryArg("--overlay=", grammar.overlay(b, target, dir) orelse {
             step.dependOn(&b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ grammar.pinned ++ " checkout: " ++ grammar.clone, .{dir})).step);

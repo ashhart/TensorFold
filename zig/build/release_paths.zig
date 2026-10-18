@@ -27,8 +27,24 @@ fn absoluteAt(bytes: []const u8, i: usize) bool {
     if (separator(bytes[i])) return true;
     return i + 2 < bytes.len and std.ascii.isAlphabetic(bytes[i]) and bytes[i + 1] == ':' and separator(bytes[i + 2]);
 }
+// Isolated drive-like instruction bytes need two named components before they qualify as a text path.
+fn driveTail(path: []const u8) bool {
+    var named = false;
+    var separated = false;
+    for (path) |c| {
+        if (c < ' ' or c == 127) break;
+        if (separator(c)) {
+            if (named) separated = true;
+        } else if (c > ' ') {
+            if (separated) return true;
+            named = true;
+        }
+    }
+    return false;
+}
 fn privatePath(path: []const u8) bool {
-    if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and separator(path[2])) return true;
+    if (path.len >= 3 and std.ascii.isAlphabetic(path[0]) and path[1] == ':' and separator(path[2]) and driveTail(path[3..]))
+        return true;
     for ([_][]const u8{ "/users/", "/home/", "/root/", "/build/", "/workspace/", "/workspaces/", "/__w/", "/agent/_work/" }) |prefix| {
         if (starts(path, prefix) and path.len > prefix.len and !boundary(path[prefix.len])) return true;
     }
@@ -45,8 +61,20 @@ fn privatePath(path: []const u8) bool {
     }
     return false;
 }
+pub fn validRoot(root: []const u8) bool {
+    if (root.len <= 1) return false;
+    const drive = root.len >= 3 and std.ascii.isAlphabetic(root[0]) and root[1] == ':' and separator(root[2]);
+    const unc = std.mem.startsWith(u8, root, "\\\\");
+    if (!std.fs.path.isAbsolutePosix(root) and !drive and !unc) return false;
+    var parts = std.mem.tokenizeAny(u8, if (drive) root[3..] else root, "/\\");
+    var names: usize = 0;
+    while (parts.next()) |part| {
+        if (!std.mem.eql(u8, part, ".") and !std.mem.eql(u8, part, "..")) names += 1;
+    }
+    return names >= @as(usize, if (unc) 2 else 1);
+}
 fn textLeak(bytes: []const u8, root: []const u8) bool {
-    if (root.len > 1 and std.mem.indexOf(u8, bytes, root) != null) return true;
+    if (validRoot(root) and std.mem.indexOf(u8, bytes, root) != null) return true;
     for (0..bytes.len) |i| {
         if (!absoluteAt(bytes, i)) continue;
         const quoted = i == 0 or bytes[i - 1] == 0 or bytes[i - 1] == '"' or bytes[i - 1] == '\'';
@@ -61,11 +89,13 @@ fn textLeak(bytes: []const u8, root: []const u8) bool {
 }
 fn rawLeak(a: std.mem.Allocator, bytes: []const u8, root: []const u8) !bool {
     if (textLeak(bytes, root)) return true;
-    const wide = try std.unicode.utf8ToUtf16LeAlloc(a, root);
-    defer a.free(wide);
-    if (root.len > 1 and std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
-    for (wide) |*unit| unit.* = @byteSwap(unit.*);
-    if (root.len > 1 and std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
+    if (validRoot(root)) {
+        const wide = try std.unicode.utf8ToUtf16LeAlloc(a, root);
+        defer a.free(wide);
+        if (std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
+        for (wide) |*unit| unit.* = @byteSwap(unit.*);
+        if (std.mem.indexOf(u8, bytes, std.mem.sliceAsBytes(wide)) != null) return true;
+    }
     for ([_]usize{ 0, 1 }) |offset| {
         for ([_]bool{ false, true }) |big| {
             var text: std.ArrayList(u8) = .empty;

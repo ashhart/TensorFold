@@ -3,7 +3,14 @@ const std = @import("std");
 const paths = @import("release_paths.zig");
 pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len < 3 or args[1].len < 2) return error.Usage;
+    if (args.len < 3) {
+        std.debug.print("usage: check-release-paths ABSOLUTE_BUILD_ROOT FILE...\n", .{});
+        std.process.exit(2);
+    }
+    if (!paths.validRoot(args[1])) {
+        std.debug.print("release privacy: BadBuildRoot: use a named absolute build root\n", .{});
+        std.process.exit(2);
+    }
     var failed = false;
     for (args[2..]) |file| {
         const bytes = std.Io.Dir.cwd().readFileAlloc(init.io, file, init.gpa, .limited(1 << 30)) catch |err| {
