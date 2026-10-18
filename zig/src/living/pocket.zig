@@ -286,6 +286,7 @@ pub fn Pocket(comptime T: type, comptime F: family.Family) type {
             p.held = held;
             p.steady = steady;
             p.split = p.pickSplit(&.{ answered, prompts }, answered);
+            @import("pocket_selection.zig").log(p, &.{ answered, prompts }, answered);
             std.log.info("slide pocket: the fact's neurons: {d} at the reply's first row, {d} at its questions' subject, {d} before its answer's value", .{ p.split[0], p.split[1], p.split[2] });
             p.taken.clearRetainingCapacity();
             p.keeps.clearRetainingCapacity();

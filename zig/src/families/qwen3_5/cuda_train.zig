@@ -442,7 +442,7 @@ pub const Trainer = struct {
             t.hook_at = sp.at + row;
             keep.at = t.hook_at;
             e.learning = &keep;
-            try e.forward(&.{.{ .cache = &t.states[si], .rows = 1 }}, sq.ids[row..][0..1], .logits);
+            try e.forward(&.{.{ .cache = &t.states[si], .rows = 1 }}, sq.ids[row..][0..1], train_more.keepFor(mode));
         };
         if (mode == .keys) {
             try e.stream.synchronize();

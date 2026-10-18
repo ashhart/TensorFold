@@ -89,6 +89,13 @@ pub fn body(e: *E.Engine, shape: anytype) !void {
             try e.run(e.fns.tap, .{ total, 1, 1 }, .{ 256, 1, 1 }, .{ e.h, e.r, t_segs, t_rows, @as(c_int, @intCast(ti)), @as(c_int, @intCast(g.hidden)), t_params });
         };
     }
+    try finish(e, total, heads, shape.hidden);
+}
+
+/// Layer inputs are already kept; hidden reads need neither the final norm nor the vocabulary head.
+pub fn finish(e: anytype, total: usize, heads: usize, hidden: bool) !void {
+    if (hidden) return;
+    const g = e.g;
     try e.norm(true, e.final_norm, total);
     if (e.learning) |k| try k.final(e.h, total);
     // the head over the kept rows

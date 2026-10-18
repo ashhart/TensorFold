@@ -48,4 +48,5 @@ test {
 
 test {
     _ = train;
+    _ = @import("cuda_read_cost_test.zig");
 }

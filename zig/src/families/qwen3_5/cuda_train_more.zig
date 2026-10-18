@@ -22,6 +22,11 @@ const Seq = train.Seq;
 const pack_rows = train.pack_rows;
 const max_seqs = train.max_seqs;
 
+/// Input reads consume only layer taps; loss and target passes still keep the complete vocabulary head.
+pub fn keepFor(mode: train_mode.Mode) engine.Keep {
+    return if (mode == .keys) .hidden else .logits;
+}
+
 /// Pocket neurons' input weights fitted on the device: each job's Adam steps.
 pub fn fitDevice(t: anytype, jobs: []const living.pocket_fit.DeviceFit) !void {
     if (jobs.len == 0) return;
@@ -119,7 +124,7 @@ pub fn tapRows(t: anytype, ids: []const u32, context: usize, rows: []const u32, 
     e.learning = &keep;
     var ri: usize = 0;
     for (ids, 0..) |id, row| {
-        try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &.{id}, .logits);
+        try e.forward(&.{.{ .cache = &cache, .rows = 1 }}, &.{id}, keepFor(.keys));
         if (ri == rows.len or row != rows[ri]) continue;
         for (layers, 0..) |l, j| @memcpy(out[(ri * layers.len + j) * D ..][0..D], t.normed(l, 0));
         ri += 1;

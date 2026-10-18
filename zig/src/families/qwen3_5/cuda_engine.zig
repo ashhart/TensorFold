@@ -61,7 +61,7 @@ pub const Images = struct {
 };
 
 /// What a forward keeps: a prompt chunk its last row's logits, a verify window every row's draw or logits and log.
-pub const Keep = union(enum) { last, draws: []const Draw, logits };
+pub const Keep = union(enum) { last, draws: []const Draw, logits, hidden };
 
 /// A kept row's draw on the device: sample.cu's keyed rule at `position`, or greedy without one.
 pub const Draw = struct { rule: ?cuda.sample.Rule, position: u64 };
@@ -403,6 +403,7 @@ pub const Engine = struct {
         }
         if (parts.len == 0 or parts.len > max_segs or total != ids.len or total > max_rows) return error.InvalidQwenSegments;
         if (e.learning != null and total != 1) return error.BadLearningRows;
+        if (keep == .hidden and e.learning == null) return error.BadLearningRows;
         const record = keep != .last;
         if (record and total > e.verify_rows) return error.InvalidQwenSegments;
         if (!record and parts.len != 1) return error.InvalidQwenSegments;
@@ -464,7 +465,7 @@ pub const Engine = struct {
         const lone = total == 1 and parts.len == 1;
         const bucket: usize = if (lone) 1 else if (total <= 16) 16 else most_verify;
         const windows: usize = if (lone) 1 else max_segs;
-        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0, .slots = @intCast(Round.variant(slot_peak)) };
+        const shape: Shape = .{ .total = @intCast(if (prompt) total else bucket), .nseg = @intCast(if (prompt) parts.len else windows), .record = record, .prompt = prompt, .taps = e.n_taps > 0, .slots = @intCast(Round.variant(slot_peak)), .hidden = keep == .hidden };
         if (e.learning != null or e.pockets.any()) {
             var exact = shape;
             exact.total = @intCast(total);
@@ -496,6 +497,7 @@ pub const Engine = struct {
         }
         for (parts) |p| p.cache.advanced(p.rows, record);
         switch (keep) {
+            .hidden => try e.stream.synchronize(), // mapped layer inputs are ready before the learner reads them
             .draws => |pk| {
                 const toks = e.tables.ptr + tokens_at;
                 var greedy: usize = 0; // the run of greedy rows ending at i, argmaxed together
@@ -530,9 +532,10 @@ pub const Engine = struct {
         prompt: bool,
         taps: bool,
         slots: u8,
+        hidden: bool = false,
 
         fn key(s: Shape) u32 {
-            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19;
+            return @as(u32, s.total) | @as(u32, s.nseg) << 8 | @as(u32, @intFromBool(s.record)) << 16 | @as(u32, @intFromBool(s.prompt)) << 17 | @as(u32, @intFromBool(s.taps)) << 18 | @as(u32, s.slots) << 19 | @as(u32, @intFromBool(s.hidden)) << 27;
         }
     };
 
@@ -560,3 +563,16 @@ pub const Engine = struct {
         return e.host_logits.slice(u16)[i * e.g.vocab ..][0..e.g.vocab];
     }
 };
+
+test "dense read cost: hidden and slot variants have distinct graph keys" {
+    var seen: [32]u32 = undefined;
+    var n: usize = 0;
+    for ([_]u8{ 1, 2, 4, 8, 16 }) |slots| {
+        for ([_]bool{ false, true }) |hidden| {
+            const shape: Engine.Shape = .{ .total = 1, .nseg = 1, .record = true, .prompt = false, .taps = true, .slots = slots, .hidden = hidden };
+            for (seen[0..n]) |key| try std.testing.expect(key != shape.key());
+            seen[n] = shape.key();
+            n += 1;
+        }
+    }
+}

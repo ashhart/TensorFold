@@ -43,6 +43,7 @@ test {
     _ = whole;
     _ = subspace;
     _ = pocket;
+    _ = @import("pocket_selection.zig");
     _ = pocket_fit;
     _ = pocket_read; // a prompt in a conversation, tapped once a row
     _ = lesson_examples; // what a learner reads of a lesson
