@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Living Weights implementation and safety work is already in the 1.1.1 tree. Its model, retention and save/restart qualification remains pending; the #1029 lesson-counter repair is excluded and remains held.
+
 - Flash Next on Metal checks its weights, startup scratch and requested storage against the RAM/GPU-bounded load ceiling before loading (#1039). Thanks to @hudsonwa.
 
 - Qwen on CUDA keeps DFlash and MTP proposal and live context projections on native arithmetic regardless of shared frame size. Prompt ingestion retains its historical arithmetic.
@@ -153,7 +155,7 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 These changes are not shipped in 1.1.0 and remain conditional on their final gates; a failed gate moves the work to the following patch release.
 
-- Living Weights retention, rounded commit/rollback, conversation and supplied-question work, and the Flash Next/Qwen CUDA learners (#876, #877, #878, #891, #905, #992, #895, #896, #911). The existing learner's #910 correction above remains in 1.1.0. Thanks to @ZackSample, @philip-pentatonic, @akol1 and @BobClawblaw.
+- Living Weights implementation and safety work, including retention, rounded commit/rollback, conversation and supplied-question work, Flash Next/Qwen CUDA learners, lesson progress and save/restart pieces, is in 1.1.1 (#876, #877, #878, #891, #905, #992, #895, #896, #911). Model, retention and save/restart qualification remains pending. The #1029 lesson-counter repair is excluded and remains held: rejected lessons must not shift the prompts used for later training and checks. The existing learner's #910 correction above remains in 1.1.0. Thanks to @ZackSample, @philip-pentatonic, @akol1 and @BobClawblaw.
 - Flash Next on Metal's images/video and million-token window (#986, #1005), still held for the rotary-bound contract and actual probe rerun. Its separate shared-session cache-count and lone-decode repair is held for a later 1.1.x, outside the current 1.1.1 series. Thanks to @BobClawblaw, @cwschroeder and @sethforprivacy.
 - The larger Qwen CUDA lane rounds, verification trees, batched drafting and lone-stream speed work (#978), distinct from the Metal 27B speed work shipped above. Thanks to @BobClawblaw and the shared CUDA contributors.
 - DeepSeek-V4.1 runtime and family integration (#635, #636, #637, #663, #682, #667, #668, #671, #674, #686, #688, #691, #693, #694, #695, #699, #702, #703, #707, #727, #824, #825, #826, #827), and Kolibri text CUDA (#991). Shared contracts do not announce a complete DeepSeek Metal backend. Thanks to @jayleaton, @akol1, @ajensenwaud and @jschmied, retaining the common operator attributions.
