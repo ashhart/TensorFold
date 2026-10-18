@@ -458,6 +458,8 @@ pub const LoneHooks = struct {
     committed: *const fn (ctx: *anyopaque) void,
     yield: *const fn (ctx: *anyopaque) bool,
     resumed: bool = false, // the stream comes from the lane core between rounds: no prompt pass, its drafts the core's
+    // After a completed nonfinal prompt call, true transfers the unfinished pass to the shared fill queue.
+    prefill_yield: ?*const fn (ctx: *anyopaque) bool = null,
 };
 
 /// The lane core served to the HTTP threads (lane_host.zig).

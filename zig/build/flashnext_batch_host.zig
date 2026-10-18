@@ -8,6 +8,14 @@ pub fn tests(b: *std.Build, all: *std.Build.Step) void {
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = b.graph.host, .link_libc = true });
     const fabric = b.createModule(.{ .root_source_file = b.path("zig/src/fabric/fabric.zig"), .target = b.graph.host, .link_libc = true });
     const root = b.createModule(.{ .root_source_file = b.path("zig/flashnext_batch_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric }, .{ .name = "contract", .module = @import("kernel_contract.zig").module(b, b.graph.host, .debug) } } });
+    const schedule_metal = b.createModule(.{ .root_source_file = b.path("zig/src/metal/metal.zig"), .target = b.graph.host });
+    const schedule = b.createModule(.{ .root_source_file = b.path("zig/flashnext_schedule_tests.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{ .{ .name = "metal", .module = schedule_metal }, .{ .name = "kernel_sources", .module = sources }, .{ .name = "lanes", .module = lanes }, .{ .name = "fabric", .module = fabric } } });
+    if (b.graph.host.result.os.tag == .macos) schedule.linkSystemLibrary("objc", .{});
+    const schedule_run = b.addRunArtifact(b.addTest(.{ .root_module = schedule, .filters = &.{ "flashnext prefill:", "fill aging:" } }));
+    b.step("test-flashnext-prefill-pairs-host", "Prompt head lookahead and segment coverage without a device").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = schedule, .filters = &.{"flashnext prefill: prompt head pairs"} })).step);
+    const schedule_step = b.step("test-flashnext-scheduling-host", "Actual Flash Next prompt steps and shared-host fairness without devices");
+    schedule_step.dependOn(&schedule_run.step);
+    all.dependOn(schedule_step);
     b.step("test-flashnext-vision-contracts-host", "Flash Next masked draws and vision contracts without device execution").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"Flash Next contracts:"} })).step);
     b.step("test-flashnext-load-context-host", "Independent long and ordinary Flash Next load settings without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{ "Flash Next context:", "load sets no DeltaNet" } })).step);
     b.step("test-flashnext-rotary-bound-host", "Scalar rotary error propagation and contract hooks without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = root, .filters = &.{"rotary bound:"} })).step);

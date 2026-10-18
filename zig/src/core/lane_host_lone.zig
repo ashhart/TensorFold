@@ -41,8 +41,10 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
     if (!resumed) job.delivered = 0;
     const lone = h.lone.?;
     const Hooks = struct {
+        const Context = struct { host: *LaneHost, partial: bool = false };
         fn committed(ctx: *anyopaque) void {
-            const host: *LaneHost = @ptrCast(@alignCast(ctx));
+            const c: *Context = @ptrCast(@alignCast(ctx));
+            const host = c.host;
             const j = host.lone_job.?;
             if (!j.prefill_sent) {
                 j.prefill_sent = true;
@@ -52,13 +54,21 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
             status.noteLive(host);
         }
         fn yield(ctx: *anyopaque) bool {
-            const host: *LaneHost = @ptrCast(@alignCast(ctx));
+            const c: *Context = @ptrCast(@alignCast(ctx));
+            const host = c.host;
             host.lock();
             defer host.unlock();
             return host.foregroundWaiting() or host.cancels.items.len > 0 or host.closing;
         }
+        fn prefillYield(ctx: *anyopaque) bool {
+            if (!yield(ctx)) return false;
+            const c: *Context = @ptrCast(@alignCast(ctx));
+            c.partial = true;
+            return true;
+        }
     };
-    const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = h, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed });
+    var context: Hooks.Context = .{ .host = h };
+    const paused = lone.run(lone.ctx, &job.stream, .{ .ctx = &context, .committed = Hooks.committed, .yield = Hooks.yield, .resumed = resumed, .prefill_yield = Hooks.prefillYield });
     h.lone_job = null;
     const handed = paused catch |e| {
         if (!job.prefill_sent) LaneHost.emit(job, .{ .prefilled = 0 });
@@ -66,6 +76,11 @@ pub fn run(h: *LaneHost, job: *Job, began: i96, resumed: bool) bool {
         h.finish(job, if (e == error.Cancelled) .cancelled else .failed, if (e == error.Cancelled) "" else h.words(e));
         return true;
     };
+    if (context.partial) {
+        if (!handed or !h.core.fills()) return h.drop(job, "the backend cannot hand off an unfinished prompt");
+        h.filling.append(h.gpa, job) catch return h.drop(job, "out of memory");
+        return true;
+    }
     if (!job.prefill_sent) h.prefilled(job, began);
     if (handed) {
         h.core.adopt(&job.stream) catch |e| return h.drop(job, @errorName(e));
