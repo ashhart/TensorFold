@@ -134,7 +134,7 @@ pub const Window = struct {
         return &x[(self.cacheRow(w.base, key) * self.f.hk + kh) * self.f.d + e];
     }
 
-    /// NaN in a query; +inf and -inf in values; both in one column; NaN in a key; +inf in a window's first value.
+    /// NaN query; +inf and -inf values, both in one column; NaN key; +inf at a window's first key and at tiny weights.
     fn plant(self: *Window) void {
         const n = self.shape.rows;
         const nan = c.toBf16(std.math.nan(f32));
@@ -150,6 +150,48 @@ pub const Window = struct {
         }
         if (n > 3) self.cell(self.kc.items, 3, self.at(3).p, (3 % hk), 0).* = nan;
         if (n > 4) self.cell(self.vc.items, 4, self.first(self.at(4).p), (4 % hk), 13).* = inf;
+        // prompt rows: +inf at float64 weight 0 (row 5's own key, a causal edge: NaN), and under float32's least (inf)
+        if (self.f.prompt and n > 6) {
+            if (hk > 2) self.reach(5, 1);
+            self.under(n - 1, 2 % hk);
+        }
+        // decode rows: the same over a row's window (unwindowed: row 4, whose keys stop short of row 3's NaN key)
+        if (!self.f.prompt and n > 7) self.split(if (self.f.win == 0) 4 else n - 1, if (hk > 2) 2 else 0, 21);
+    }
+
+    /// Row r, key head kh: key p all 8, its other keys -8 with +inf at e; queries 2 (inf) and 8 (weight 0: NaN).
+    fn split(self: *Window, r: usize, kh: usize, e: usize) void {
+        const f = self.f;
+        const p = self.at(r).p;
+        const G = f.h / f.hk;
+        @memset(self.q.items[(r * f.h + kh * G) * f.d ..][0..f.d], c.toBf16(2));
+        @memset(self.q.items[(r * f.h + kh * G + 1) * f.d ..][0..f.d], c.toBf16(8));
+        for (self.first(p)..p + 1) |key| {
+            const k = self.cell(self.kc.items, r, key, kh, 0);
+            @memset(@as([*]u16, @ptrCast(k))[0..f.d], c.toBf16(if (key == p) 8 else -8));
+            if (key != p) self.cell(self.vc.items, r, key, kh, e).* = c.toBf16(std.math.inf(f32));
+        }
+    }
+
+    /// Row r, key head kh's first head: query all 8, key p - 1 all 8, key p all -8 with +inf at element 17.
+    fn reach(self: *Window, r: usize, kh: usize) void {
+        const f = self.f;
+        const p = self.at(r).p;
+        @memset(self.q.items[(r * f.h + kh * (f.h / f.hk)) * f.d ..][0..f.d], c.toBf16(8));
+        @memset(self.kc.items[(self.cacheRow(0, p - 1) * f.hk + kh) * f.d ..][0..f.d], c.toBf16(8));
+        @memset(self.kc.items[(self.cacheRow(0, p) * f.hk + kh) * f.d ..][0..f.d], c.toBf16(-8));
+        self.cell(self.vc.items, r, p, kh, 17).* = c.toBf16(std.math.inf(f32));
+    }
+
+    /// Row r, key head kh's first head: query all 2, key p - 1 all 8, its other keys all -8 with +inf at element 21.
+    fn under(self: *Window, r: usize, kh: usize) void {
+        const f = self.f;
+        const p = self.at(r).p;
+        @memset(self.q.items[(r * f.h + kh * (f.h / f.hk)) * f.d ..][0..f.d], c.toBf16(2));
+        for (self.first(p)..p + 1) |key| {
+            @memset(self.kc.items[(self.cacheRow(0, key) * f.hk + kh) * f.d ..][0..f.d], c.toBf16(if (key == p - 1) 8 else -8));
+            if (key != p - 1) self.cell(self.vc.items, r, key, kh, 21).* = c.toBf16(std.math.inf(f32));
+        }
     }
 
     /// Gate 4: every key alike (each p is 1); values mirrored over the keys every row sees, 0 elsewhere.

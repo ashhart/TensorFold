@@ -41,7 +41,7 @@ __device__ __forceinline__ uint32_t pack(float lo, float hi) {
 
 __device__ __forceinline__ int sw(int r, int c) { return r * C + (c ^ (r & 7)); }
 
-// One warp's running fold over a 32-key tile: scores masked by `vis(row, key)`, online softmax per row, P x V.
+// One warp's fold over a 32-key tile: scores masked by `vis(row, key)`, online softmax, P x V (KEEP: o's inf stays).
 struct Fold {
     float o[NB][4];
     float m0 = -INFINITY, m1 = -INFINITY, l0 = 0.f, l1 = 0.f;
@@ -51,7 +51,7 @@ struct Fold {
         for (int i = 0; i < NB; ++i) o[i][0] = o[i][1] = o[i][2] = o[i][3] = 0.f;
     }
 
-    template <typename Vis>
+    template <bool KEEP = false, typename Vis>
     __device__ __forceinline__ void tile(const uint32_t (&qa)[K16][4], const uint4* ks, const uint4* vs, float scale,
                                          int lane, int k0, Vis vis) {
         const int g8 = lane / 4, qd = lane % 4, mt = lane / 8;
@@ -109,10 +109,10 @@ struct Fold {
         m1 = n1;
 #pragma unroll
         for (int i = 0; i < NB; ++i) {
-            o[i][0] = __fmul_rn(o[i][0], a0);
-            o[i][1] = __fmul_rn(o[i][1], a0);
-            o[i][2] = __fmul_rn(o[i][2], a1);
-            o[i][3] = __fmul_rn(o[i][3], a1);
+            o[i][0] = KEEP ? attn_odd::keep(o[i][0], a0) : __fmul_rn(o[i][0], a0);
+            o[i][1] = KEEP ? attn_odd::keep(o[i][1], a0) : __fmul_rn(o[i][1], a0);
+            o[i][2] = KEEP ? attn_odd::keep(o[i][2], a1) : __fmul_rn(o[i][2], a1);
+            o[i][3] = KEEP ? attn_odd::keep(o[i][3], a1) : __fmul_rn(o[i][3], a1);
         }
         uint32_t pa[2][4];
 #pragma unroll
@@ -168,9 +168,8 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
     Fold f;
     const int lo = max(0, s - window); // the earliest context key any row sees (row 0: s - k <= window)
     const auto vis = [&](int r, int key) { return r < L && key < s && s + r - key <= window; };
-    // the context's edge tiles, where some row cannot see some key: e0..e1
-    const int e0 = lo / KT * KT, e1 = min(s, e0 + (max(0, s + L - 1 - window - e0) + KT - 1) / KT * KT);
-    auto context = [&](bool odd) { // odd: the edge tiles' NaN and infinite values leave the mma (added back below)
+    const int e0 = lo / KT * KT; // the first context tile
+    auto context = [&](bool odd) { // odd: the tiles' NaN and infinite values leave the mma (added back below)
         for (int k0 = e0; k0 < s; k0 += KT) {
             for (int i = threadIdx.x; i < KT * C; i += blockDim.x) {
                 const int key = k0 + i / C;
@@ -180,7 +179,7 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
             }
             commit();
             wait_all();
-            if (odd && k0 < e1) attn_odd::clean<D>(vs, blockDim.x);
+            if (odd) attn_odd::clean<D>(vs, blockDim.x);
             __syncthreads();
             f.tile(qa, ks, vs, scale, lane, k0, vis);
             __syncthreads();
@@ -202,17 +201,27 @@ extern "C" __global__ void __launch_bounds__(256) tf_block_attention(
     block_keys();
     __syncthreads();
     f.tile(qa, ks, vs, scale, lane, 0, own);
-    // a NaN or infinite output: again, values some row cannot see out of the mma, added back (finite values: same bits)
+    // a NaN or infinite output: again, NaN and infinite values out of the mma, added back (finite values: same bits)
     if (__syncthreads_or(attn_odd::nonfinite_out<NB>(f.o, g8 < L, g8 + 8 < L))) {
         f = Fold();
         context(true);
-        attn_odd::add_back<D>(f.o, [&](int k) { return vc + (int64_t)k * D; }, e0, e1, lane, vis, f.l0, f.l1);
+        const auto ck = [&](int k) { return kc + (int64_t)k * D; };
+        const auto bk = [&](int c) { return kb + ((int64_t)g * rows + j * L + c) * D; };
+        const auto qrow = [&](int r) { return q + ((int64_t)head * rows + j * L + r) * D; };
+        const auto each = [&](int r, auto f) { // row r's keys: its window of the context, then the block's
+            for (int k = lo; k < s; ++k)
+                if (vis(r, k)) f(ck(k));
+            for (int c = 0; c < L; ++c)
+                if (own(r, c)) f(bk(c));
+        };
+        auto w = attn_odd::weights<D>(qrow, each, scale, lane);
+        attn_odd::add_back<D>(f.o, [&](int k) { return vc + (int64_t)k * D; }, ck, e0, s, lane, vis, f.l0, f.l1, w);
         block_keys();
-        if (causal) attn_odd::clean<D>(vs, blockDim.x); // row r cannot see keys past r
+        attn_odd::clean<D>(vs, blockDim.x);
         __syncthreads();
-        f.tile(qa, ks, vs, scale, lane, 0, own);
+        f.tile<true>(qa, ks, vs, scale, lane, 0, own); // its rescale (0 when it holds the max) keeps the infinities
         const auto row = [&](int c) { return vb + ((int64_t)g * rows + j * L + c) * D; };
-        if (causal) attn_odd::add_back<D>(f.o, row, 0, L, lane, own, f.l0, f.l1);
+        attn_odd::add_back<D>(f.o, row, bk, 0, L, lane, own, f.l0, f.l1, w);
     }
     if (g8 < L)
 #pragma unroll

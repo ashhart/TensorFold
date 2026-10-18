@@ -27,8 +27,19 @@ pub const Ref = struct {
 
     pub fn init(a: std.mem.Allocator, d: usize, most: usize) !Ref {
         const keys = try a.alloc(usize, most);
+        errdefer a.free(keys);
         for (keys, 0..) |*k, i| k.* = i;
-        return .{ .a = a, .d = d, .head = .{ .q = try a.alloc(f64, d), .k = try a.alloc(f64, most * d), .v = try a.alloc(f64, most * d) }, .keys = keys, .p = try a.alloc(f64, most), .want = try a.alloc(f64, d), .tol = try a.alloc(f64, d) };
+        const q = try a.alloc(f64, d);
+        errdefer a.free(q);
+        const k = try a.alloc(f64, most * d);
+        errdefer a.free(k);
+        const v = try a.alloc(f64, most * d);
+        errdefer a.free(v);
+        const p = try a.alloc(f64, most);
+        errdefer a.free(p);
+        const want = try a.alloc(f64, d);
+        errdefer a.free(want);
+        return .{ .a = a, .d = d, .head = .{ .q = q, .k = k, .v = v }, .keys = keys, .p = p, .want = want, .tol = try a.alloc(f64, d) };
     }
 
     pub fn deinit(r: *Ref) void {
@@ -121,4 +132,13 @@ pub fn mirrored(rng: std.Random, out: []f32) void {
 
 pub fn normal(rng: std.Random) u16 {
     return c.toBf16(rng.floatNorm(f32));
+}
+
+fn initAndFree(a: std.mem.Allocator) !void {
+    var r = try Ref.init(a, 8, 5);
+    r.deinit();
+}
+
+test "Ref.init frees what it took when a later allocation fails" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, initAndFree, .{});
 }

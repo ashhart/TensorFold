@@ -140,6 +140,57 @@ pub const Block = struct {
         }
         if (s0 > window) v0[(4 * s0 + s0 - window) * D + 13] = inf; // a key block row 0 alone sees
         self.ctx.items[self.ns - 1][(3 * self.ctxLen(self.ns - 1) + self.ctxLen(self.ns - 1) - 1) * D] = nan;
+        // +inf values row 0 sees at a float64 weight of 0 (0 x inf: NaN), and at weights below float32's least (inf)
+        const k0 = self.ctx.items[0][0 .. hk * s0 * D];
+        self.reach(k0, v0, 6, 24, null, 19); // the block's first key
+        if (s0 > window) self.reach(k0, v0, 5, 20, s0 - window + 8, 17); // the window's edge tile, rows 0 to 8 see it
+        self.under(k0, v0);
+        if (self.ns > 1) self.ownMax(1, 7, 23);
+    }
+
+    /// Stream j, key head kh: block key 0 all 8, other keys -8 with +inf at e; row 0 queries 2 (inf) and 8 (NaN).
+    fn ownMax(self: *Block, j: usize, kh: usize, e: usize) void {
+        const L = self.len();
+        const rows = self.ns * L;
+        const s = self.ctxLen(j);
+        const x = self.ctx.items[j];
+        const inf = c.toBf16(std.math.inf(f32));
+        const G = h / hk;
+        @memset(self.q.items[((kh * G) * rows + j * L) * D ..][0..D], c.toBf16(2));
+        @memset(self.q.items[((kh * G + 1) * rows + j * L) * D ..][0..D], c.toBf16(8));
+        for (0..s) |k| {
+            @memset(x[(kh * s + k) * D ..][0..D], c.toBf16(-8));
+            x[hk * s * D + (kh * s + k) * D + e] = inf;
+        }
+        for (0..L) |col| {
+            @memset(self.kb.items[(kh * rows + j * L + col) * D ..][0..D], c.toBf16(if (col == 0) 8 else -8));
+            if (col != 0) self.vb.items[(kh * rows + j * L + col) * D + e] = inf;
+        }
+    }
+
+    /// Head `head`'s row 0: query all 8, key s0 - 1 all 8, key `at` (null: block key 0) all -8 with +inf at e.
+    fn reach(self: *Block, k0: []u16, v0: []u16, kh: usize, head: usize, at: ?usize, e: usize) void {
+        const rows = self.ns * self.len();
+        const s0 = self.ctxLen(0);
+        @memset(self.q.items[(head * rows) * D ..][0..D], c.toBf16(8));
+        @memset(k0[(kh * s0 + s0 - 1) * D ..][0..D], c.toBf16(8));
+        const far = if (at) |k| k0[(kh * s0 + k) * D ..][0..D] else self.kb.items[(kh * rows) * D ..][0..D];
+        @memset(far, c.toBf16(-8));
+        if (at) |k| v0[(kh * s0 + k) * D + e] = c.toBf16(std.math.inf(f32)) else self.vb.items[(kh * rows) * D + e] = c.toBf16(std.math.inf(f32));
+    }
+
+    /// Key head 7, stream 0: head 28's row 0 query all 2, key s0 - 1 all 8, every other key all -8 with +inf at 21.
+    fn under(self: *Block, k0: []u16, v0: []u16) void {
+        const rows = self.ns * self.len();
+        const s0 = self.ctxLen(0);
+        const kh = 7;
+        @memset(self.q.items[(28 * rows) * D ..][0..D], c.toBf16(2));
+        for (0..s0 + self.len()) |k| {
+            const key = if (k < s0) k0[(kh * s0 + k) * D ..][0..D] else self.kb.items[(kh * rows + k - s0) * D ..][0..D];
+            const val = if (k < s0) v0[(kh * s0 + k) * D ..][0..D] else self.vb.items[(kh * rows + k - s0) * D ..][0..D];
+            @memset(key, c.toBf16(if (k == s0 - 1) 8 else -8));
+            if (k != s0 - 1) val[21] = c.toBf16(std.math.inf(f32));
+        }
     }
 
     /// Gate 4: every key alike (each p is 1); values mirrored over the context keys every row sees, else 0.
