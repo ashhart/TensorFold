@@ -37,6 +37,7 @@ pub const shared_rows = 32;
 pub const max_shared = 16;
 
 const types = @import("cuda_engine_types.zig");
+const snapshots = @import("cuda_snapshots.zig");
 pub const Part = types.Part;
 pub const Kept = types.Kept;
 const Seq = types.Seq;
@@ -80,6 +81,8 @@ pub const Engine = struct {
     heat_gate: heat.Gate, // upstream's bands (off unless set), read before each prompt chunk on the gathered maximum
     shared_buf: cuda.DeviceBuffer, // one f64 every rank all-reduces to its maximum
     snaps: std.AutoHashMapUnmanaged(u64, Snap) = .empty, // kept prompt states by id (the same ids on every rank)
+    snap_pages: ?snapshots.pages.Pool = null,
+    snap_setup: ?snapshots.Setup = null,
     next_snap: u64 = 1, // rank 0: the next id
     announce: u64 = 0, // rank 0: a state kept at this chunk's mark, for the other ranks to copy at its gate
     dropped: std.ArrayList(u32) = .empty, // rank 0: ids dropped since the other ranks last heard (cuda_follow)
@@ -205,6 +208,7 @@ pub const Engine = struct {
         var it = e.snaps.valueIterator();
         while (it.next()) |s| e.freeSnap(s);
         e.snaps.deinit(e.gpa);
+        if (e.snap_pages) |*p| p.deinit();
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
         e.freeProfs();
@@ -377,9 +381,7 @@ pub const Engine = struct {
 
     /// The chunk gate on every rank: a kept state at the mark, the heat wait, rank 0's cancel; the id exchanged first.
     pub fn gate(e: *Engine, cancel: ?Cancel) !void {
-        const kept = try e.shared(@floatFromInt(e.announce));
-        e.announce = 0;
-        if (kept > 0 and e.share.rank != 0) try e.keepAs(@intFromFloat(kept));
+        try snapshots.gate(e);
         if (e.heat_gate.bands != null) {
             var w: Wait = .{ .e = e, .cancel = cancel };
             const before = e.heat_gate.waited_s;
@@ -389,56 +391,14 @@ pub const Engine = struct {
         if (try e.shared(if (cancel) |c| @floatFromInt(@intFromBool(c.check(c.ptr))) else 0) > 0) return error.Cancelled;
     }
 
-    /// Bytes one kept state takes on this rank: the whole state arena (its caches are sized for the window, not `at`).
-    pub fn stateBytes(e: *const Engine) u64 {
-        return e.cur.st.arena.buf.len;
-    }
-
-    /// Rank 0, at a mark in a prompt pass: a copy of the state under a new id, named to the other ranks at the gate.
-    pub fn keepState(e: *Engine) !u64 {
-        const id = e.next_snap;
-        try e.keepAs(id);
-        e.next_snap += 1;
-        e.announce = id;
-        return id;
-    }
-
-    fn keepAs(e: *Engine, id: u64) !void {
-        if (e.snaps.contains(id)) return error.StateKept;
-        var buf = try cuda.DeviceBuffer.alloc(e.d, e.cur.st.arena.buf.len);
-        errdefer buf.free();
-        try e.copy(buf.ptr, e.cur.st.arena.buf.ptr, buf.len);
-        try e.stream.synchronize();
-        const cur = try e.gpa.dupe(u1, e.cur.st.cur);
-        errdefer e.gpa.free(cur);
-        try e.snaps.put(e.gpa, id, .{ .buf = buf, .pos = e.cur.st.pos, .mtp_len = e.cur.st.mtp_len, .cur = cur, .bases = .{ e.cur.st.base, e.cur.st.mtp_base } });
-    }
-
-    /// The live state made kept state `id`'s; a rank without it refuses rather than prefill from another position.
-    fn restoreState(e: *Engine, id: u64) !void {
-        const s = e.snaps.getPtr(id) orelse return error.NoKeptState;
-        try e.copy(e.cur.st.arena.buf.ptr, s.buf.ptr, s.buf.len);
-        try e.cur.st.restoreHost(e.stream, s.pos, s.mtp_len, s.cur, s.bases);
-        e.cur.in_head = 0;
-        try e.stream.synchronize();
-    }
-
-    pub fn holds(e: *const Engine, id: u64) bool {
-        return e.snaps.contains(id);
-    }
-
-    /// Frees kept state `id`; rank 0 also notes it for the other ranks (cuda_follow sends it before its next step).
-    pub fn dropState(e: *Engine, id: u64) void {
-        var kv = e.snaps.fetchRemove(id) orelse return;
-        e.freeSnap(&kv.value);
-        if (e.share.rank == 0 and e.share.world > 1) e.dropped.append(e.gpa, @intCast(id)) catch
-            std.log.warn("kept state {d}: the other ranks keep their copy until they exit (no memory for the note)", .{id});
-    }
-
-    fn freeSnap(e: *Engine, s: *Snap) void {
-        s.buf.free();
-        e.gpa.free(s.cur);
-    }
+    pub const stateBytes = snapshots.bytes;
+    pub const prepareSnapshots = snapshots.prepare;
+    pub const keepState = snapshots.keep;
+    pub const keepAs = snapshots.keepAs;
+    pub const restoreState = snapshots.restore;
+    pub const holds = snapshots.holds;
+    pub const dropState = snapshots.drop;
+    const freeSnap = snapshots.free;
 
     /// The ranks' maximum of `v` (an all-reduce on the engine's stream).
     pub fn shared(e: *Engine, v: f64) !f64 {

@@ -32,6 +32,7 @@ pub const engine = @import("cuda_engine.zig");
 pub const follow = @import("cuda_follow.zig");
 pub const lanes = @import("cuda_lanes.zig");
 pub const native = @import("cuda_native.zig");
+pub const snapshots = @import("cuda_snapshots.zig");
 
 test {
     _ = @import("cuda_kv8_test.zig");
