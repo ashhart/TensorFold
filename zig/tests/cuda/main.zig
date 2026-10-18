@@ -157,7 +157,7 @@ const usage =
     \\  prompt-cuts MODEL IDS_FILE   a prompt keeping states inside chunks and at their ends (background passes too), and resumed from each, equals one uncut pass
     \\  prompt-segments MODEL IDS_FILE   a prompt run as 2 to 4 staggered segments a call equals one uncut pass, byte for byte
     \\  cached-plans-tp2 MODEL IDS_FILE   rank-zero cached plans and prompt resumes with the existing expert rank
-    \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back) against one stream, byte for byte
+    \\  shared-fork MODEL         the latent MoE's shared expert on the side stream (held back), lone and in shared windows of 2/4/8 streams, against one stream, byte for byte
     \\  recapture MODEL           graphs captured again while another sequence is bound: both keep their sampling rules
     \\  paged MODEL IDS_FILE      a paged sequence against the own one: prompt pass, decode, resumes across page edges
     \\  grouped-plan <dir>        the shared expert plan against experts.route's bytes (oracle/grouped_plan.py)
