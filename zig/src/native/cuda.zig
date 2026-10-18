@@ -161,7 +161,7 @@ pub const Host = struct {
     /// The family's backend, each call made with the context current on the calling thread.
     fn backend(h: *Host) lanes.backend.Backend {
         h.vtable = lane_backend.vtable(Host, h.inner.vtable.*);
-        return .{ .ptr = h, .vtable = &h.vtable };
+        return .{ .ptr = h, .vtable = &h.vtable, .first_before_draft = h.inner.first_before_draft };
     }
 };
 const refusals = @import("cuda_refusal.zig");
@@ -193,7 +193,6 @@ const no_stream = "the CUDA memory budget fits no stream: one at a {d}-token win
     "lower --context, or free device memory";
 const too_many = "--parallel {d} needs {d:.2} GiB for its streams at a {d}-token window, " ++
     "and the CUDA memory budget leaves {d:.2} GiB{s}: serve --parallel {d}, or lower --context";
-
 fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     if (refusals.family(F, o)) |why| {
         problem.* = why;
@@ -464,9 +463,7 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     };
     return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
-
 const toGib = family_memory.toGib;
-
 test {
     _ = windows;
     _ = budget; // cuda_memory.zig's own tests, which no other test binary reaches
@@ -477,12 +474,15 @@ test {
     _ = windows;
 }
 
-test "the lane core sees a family's prefill_step through the lane backend, so a served prompt can step" {
+test "CUDA host preserves prefill_step and first-before-draft capability" {
     var target: lanes.fake.Fake = .{ .gpa = std.testing.allocator, .prefill_chunks = 3 };
     defer target.deinit();
     var h: Host = undefined;
     h.inner = target.stepped();
     try std.testing.expect(h.backend().vtable.prefill_step != null);
+    try std.testing.expect(!h.backend().first_before_draft);
+    h.inner.first_before_draft = true;
+    try std.testing.expect(h.backend().first_before_draft);
 }
 
 test "every registered family and d1's decision engine are listed for capabilities" {
