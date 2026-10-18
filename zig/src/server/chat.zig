@@ -524,7 +524,11 @@ const Generation = struct {
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
         var cycle_text: [32]u8 = undefined;
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
+        const done_ns = nowNs(g.srv.io);
+        const ttft_s = if (g.first_ns) |at| @max(0, seconds(at - received)) else 0;
+        const decode_log_s = if (g.first_ns) |at| @max(0, seconds(done_ns - at)) else 0;
+        const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
+        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate });
         return reply;
     }
 };

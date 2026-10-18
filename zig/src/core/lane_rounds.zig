@@ -17,6 +17,12 @@ pub const Rounds = struct {
     ctx: *anyopaque,
     vtable: *const VTable,
 
+    pub const Test = if (@import("builtin").is_test) struct {
+        pub fn step(h: *LaneHost) bool {
+            return round(h, h.rounds.?);
+        }
+    } else struct {};
+
     pub const Verdict = enum { admit, wait, skip, refuse };
     pub const Piece = struct { key: usize, start: u64, end: u64, save: bool, run: bool = true };
     pub const Ask = struct { key: usize, prompt: []const u32, max_tokens: u32, submitted_s: f64 };
@@ -72,6 +78,7 @@ fn round(h: *LaneHost, rd: Rounds) bool {
                         _ = h.admitted.pop();
                         break;
                     }
+                    job.noteAdmission();
                     _ = h.queued.orderedRemove(i);
                     free -= 1;
                 },

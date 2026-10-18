@@ -138,6 +138,8 @@ pub const Stats = struct {
     loop_period: ?u32 = null,
     /// Prompt prefill duration measured by the engine host, in seconds.
     prefill_seconds: ?f64 = null,
+    /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
+    queued_seconds: f64 = 0,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };

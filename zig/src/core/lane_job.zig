@@ -24,6 +24,7 @@ pub const Job = struct {
     prefill_sent: bool = false, // a lone driver's prefilled event went out
     fill_began: bool = false, // its first prompt chunk ran
     submitted: i96 = 0,
+    admitted_ns: ?i96 = null, // first admission only, retained if a background pass later yields
     fill_wait: usize = 0, // chunk choices it has waited since admission or its last chunk
     began: i96 = 0,
     /// The engine thread says the prompt pass is going: status readers may count this job's fill atomics.
@@ -35,6 +36,11 @@ pub const Job = struct {
     kept0: u64 = 0, // the store's kept count when the job looked it up
     seq: u64 = 0, // its admission's number
     waits_since: ?u64 = null, // the admissions count when it first waited at the head for pool room
+
+    /// Record first admission once, including a family planner and a background pass that later yields.
+    pub fn noteAdmission(job: *Job) void {
+        if (job.admitted_ns == null) job.admitted_ns = std.Io.Clock.awake.now(job.host.io).toNanoseconds();
+    }
 
     /// The words the cache names this request's states by.
     pub fn cacheKey(job: *const Job) []const u32 {

@@ -10,6 +10,10 @@ var shown = false; // the live line is on screen
 var line_start = true; // the newest write ended its line, so a redraw cannot split it
 var quiet = false;
 
+pub const Test = if (@import("builtin").is_test) struct {
+    pub threadlocal var sink: ?struct { ctx: *anyopaque, call: *const fn (*anyopaque, []const u8) void } = null;
+} else struct {};
+
 pub fn init(io_: std.Io, silent: bool) void {
     global_io = io_;
     quiet = silent;
@@ -32,14 +36,16 @@ fn writeOut(bytes: []const u8) void {
 
 /// One ``[tensorfold] ...`` line.
 pub fn line(comptime fmt: []const u8, args: anytype) void {
-    if (quiet or @import("builtin").is_test) return; // a test's stdout is the build runner's channel
+    if (@import("builtin").is_test) {
+        if (Test.sink == null) return;
+    } else if (quiet) return;
     var buf: [8192]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     w.print("[tensorfold] " ++ fmt ++ "\n", args) catch {
         buf[buf.len - 1] = '\n';
         w.end = buf.len;
     };
-    raw(w.buffered());
+    if (@import("builtin").is_test) Test.sink.?.call(Test.sink.?.ctx, w.buffered()) else raw(w.buffered());
 }
 
 /// Text as given, the live line cleared first.

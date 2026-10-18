@@ -410,7 +410,7 @@ pub const Host = struct {
             .length => .length,
             .cancelled => .cancelled,
         };
-        fin.stats = .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null };
+        fin.stats = .{ .rounds = res.rounds, .drafted = res.drafted, .accepted = res.accepted, .min_rows = res.min_rows, .prefill_seconds = if (job.prefilled) |done| @as(f64, @floatFromInt(@as(i64, @intCast(@max(0, done - job.began))))) / 1e9 else null, .queued_seconds = @as(f64, @floatFromInt(@max(0, job.began - job.queued))) / 1e9 };
     }
 };
 
