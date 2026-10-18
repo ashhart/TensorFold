@@ -119,6 +119,11 @@ pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ 
     return if (fixed) error.TooMany else fits;
 }
 
+/// The room admission adds streams in: none for a family that allocated at open every stream it can serve.
+pub fn growRoom(room: u64, grows: bool) u64 {
+    return if (grows) room else 0;
+}
+
 /// Kept prompt states' budget: --prompt-cache-gib (0: none), else 16 GiB, never past what the streams leave of `room`.
 pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 16 << 30;
@@ -162,6 +167,18 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false));
     try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
     try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
+}
+
+test "a family that allocates every stream at open is admitted only the streams it holds" {
+    const g: u64 = 1 << 30;
+    // 64 slots allocated, room for one more: a fixed 65 refuses instead of adopting a lane with no slot
+    try std.testing.expectError(error.TooMany, admit(growRoom(g, false), g, 64, 65, true));
+    // auto planned 3 that fit: room left over for another stream adds no lane
+    try std.testing.expectEqual(@as(u32, 3), try admit(growRoom(g, false), g, 3, 8, false));
+    // streams paid for at open stay admitted when nothing is left
+    try std.testing.expectEqual(@as(u32, 8), try admit(growRoom(0, false), g, 8, 8, true));
+    // a family that grows streams after its open keeps the room
+    try std.testing.expectEqual(@as(u32, 65), try admit(growRoom(g, true), g, 64, 65, true));
 }
 
 test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams leave" {

@@ -8,6 +8,7 @@ pub fn set(comptime F: type, o: api.Open, opts: *F.Options, problem: *[]const u8
     if (@hasField(F.Options, "mtp_confidence")) opts.mtp_confidence = o.mtp_confidence;
     if (@hasField(F.Options, "mtp_drafts") and o.mtp_drafts == 0) opts.drafts = false;
     if (@hasField(F.Options, "lanes")) opts.lanes = o.lanes;
+    if (@hasField(F.Options, "lanes_fixed")) opts.lanes_fixed = o.lanes_fixed;
     if (@hasField(F.Options, "rank")) {
         opts.tp = @intCast(o.tp);
         opts.rank = @intCast(o.rank);
@@ -51,4 +52,22 @@ test "mtp policy: native options forward positive controls and preserve the expl
     opts = .{};
     try std.testing.expect(set(F, .{ .dir = "", .model_type = "nemotron_h", .mtp_drafts = 0 }, &opts, &why));
     try std.testing.expect(!opts.drafts);
+}
+
+test "native family options forward lane counts and fixedness only when declared" {
+    const Counted = struct {
+        pub const Options = struct { lanes: u32 = 1 };
+    };
+    const Fixed = struct {
+        pub const Options = struct { lanes: u32 = 1, lanes_fixed: bool = false };
+    };
+    var why: []const u8 = "";
+    var counted: Counted.Options = .{};
+    var fixed: Fixed.Options = .{};
+    const request: api.Open = .{ .dir = "", .model_type = "kolibri1", .lanes = 7, .lanes_fixed = true };
+    try std.testing.expect(set(Counted, request, &counted, &why));
+    try std.testing.expect(set(Fixed, request, &fixed, &why));
+    try std.testing.expectEqual(@as(u32, 7), counted.lanes);
+    try std.testing.expectEqual(@as(u32, 7), fixed.lanes);
+    try std.testing.expect(fixed.lanes_fixed);
 }
