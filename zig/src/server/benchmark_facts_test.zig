@@ -9,6 +9,7 @@ const fake = @import("benchmark_fake.zig");
 const check = @import("benchmark_check.zig");
 const suite = @import("benchmark_suite.zig");
 const manifest = @import("benchmark_manifest.zig");
+const benchmark = @import("benchmark.zig");
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const families = [_]api.Family{.{ .model_type = "qwen3_5", .formats = &.{} }};
@@ -322,6 +323,17 @@ test "a rocm probe names rocminfo's GPU agents, runs no nvidia-smi, reports no d
         std.debug.print("rocm identity failed the publish rules: {s}\n", .{why});
         return error.TestUnexpectedResult;
     }
+    // the client says what the board will not rank: the facts a probe or checkpoint left out
+    try std.testing.expect(try benchmark.unranked(a, same_facts) == null);
+    const no_gpu = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", checkpoint_facts, runtime, host.rocm(a, cpu, 128 << 30, "", null).hardware, settings, &.{sample});
+    try std.testing.expectEqualStrings("GPU", (try benchmark.unranked(a, no_gpu)).?);
+    var unpinned = checkpoint_facts;
+    unpinned.revision = null;
+    unpinned.config_sha256 = null;
+    const loose = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", unpinned, runtime, probe.hardware, settings, &.{sample});
+    try std.testing.expectEqualStrings("checkpoint revision, configuration digest", (try benchmark.unranked(a, loose)).?);
+    const local = try receipt.value(a, "00000000-0000-4000-8000-000000000001", "2026-01-01T00:00:00Z", .{ .local = true }, runtime, .{}, settings, &.{sample});
+    try std.testing.expect(try benchmark.unranked(a, local) == null);
 }
 
 test "rocm GPUs: discrete cards are dedicated, visible-device indices select, and missing rocminfo leaves the GPUs unknown" {

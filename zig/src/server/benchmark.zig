@@ -239,7 +239,10 @@ fn show(ctx: *const Context, v: json.Value) !void {
         try say(ctx, "{s:<14} {s:<6} {s:<25} {s:<16} {s}", .{ c.fixture_id, suite.fmtG(&t, c.temperature), rate, ttft, if (c.protocol_complete) "complete" else "custom/incomplete" });
     }
     try say(ctx, "Stream delivery includes transport buffering; it is not an engine token clock.", .{});
-    if (settings.get("managed").? != .bool or !settings.get("managed").?.bool) {
+    const managed = settings.get("managed").? == .bool and settings.get("managed").?.bool;
+    if (managed) if (try unranked(ctx.a, v)) |lacks|
+        try say(ctx, "The board ranks a run that names its GPU, checkpoint revision and configuration digest; this receipt names no {s}.", .{lacks});
+    if (!managed) {
         const source = json.strOr(v.get("hardware").?.get("source"));
         const version = json.strOr(v.get("runtime").?.get("tensorfold_version"));
         const pinned = settings.get("rank_count").? != .null and v.get("model").?.get("revision").? != .null;
@@ -250,6 +253,19 @@ fn show(ctx: *const Context, v: json.Value) !void {
     }
     if (std.mem.eql(u8, json.strOr(v.get("runtime").?.get("backend")), "rocm"))
         try say(ctx, "This rocm receipt is saved locally; it cannot be published until the board accepts rocm.", .{});
+}
+
+/// What a public managed receipt lacks of the facts the board ranks by (docs/community-benchmarks.md), else null.
+pub fn unranked(a: Allocator, v: json.Value) !?[]const u8 {
+    const m = v.get("model").?;
+    if (m.get("local").? != .bool or m.get("local").?.bool) return null; // a local label is refused before publishing
+    var lacks: std.ArrayList([]const u8) = .empty;
+    const gpus = v.get("hardware").?.get("gpus").?;
+    if (gpus != .array or gpus.array.len == 0) try lacks.append(a, "GPU");
+    if (m.get("revision").? == .null) try lacks.append(a, "checkpoint revision");
+    if (m.get("config_sha256").? == .null) try lacks.append(a, "configuration digest");
+    if (lacks.items.len == 0) return null;
+    return try std.mem.join(a, ", ", lacks.items);
 }
 
 /// What an engine that cannot sample answers a request with a temperature (server.zig's refusal).
