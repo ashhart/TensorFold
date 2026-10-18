@@ -63,6 +63,10 @@ pub const State = struct {
 
     pub fn deinit(s: *State, gpa: std.mem.Allocator) void {
         s.long.deinit(gpa);
+        s.long_b.deinit(gpa);
+        if (s.k4ws.buf) |*b| b.free();
+        if (s.k4ws.send) |*b| b.free();
+        if (s.k4ws.gathered) |*b| b.free();
         if (s.masked) |*b| b.free();
         s.ids.deinit(gpa);
         s.next.deinit(gpa);

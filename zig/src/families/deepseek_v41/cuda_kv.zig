@@ -181,12 +181,15 @@ pub const Kv = struct {
         if (k.rank == 0) std.log.info("[tensorfold] split KV dedup: {d} MiB (map {d} rows, {d} entries)", .{ buf.len >> 20, map_rows, entries });
     }
 
-    pub fn close(k: *Kv) !void {
+    pub fn drain(k: *Kv) !void {
         try k.runner.stream.synchronize();
         try k.dev.io.synchronize();
-        k.deinit();
     }
-    fn deinit(k: *Kv) void {
+    pub fn close(k: *Kv) !void {
+        try k.drain();
+        k.deinitAfterDrain();
+    }
+    pub fn deinitAfterDrain(k: *Kv) void {
         k.dropBlocks();
         k.blocks.deinit(k.gpa);
         k.block_phys.deinit(k.gpa);
