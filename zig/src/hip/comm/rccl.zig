@@ -61,6 +61,7 @@ pub const Rccl = struct {
             }
             return .{ .lib = lib, .api = api };
         }
+        @import("sys").optional_libraries.warn(.rccl);
         return error.RcclUnavailable;
     }
 

@@ -37,7 +37,7 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
+pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed };
 
 pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
@@ -72,14 +72,14 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return platform.optional_libraries.unavailable(.nccl);
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
             @field(api, name) = lib.lookup(T, name) orelse {
                 std.log.err("{s} has no {s}", .{ path, name });
-                return error.MissingSymbol;
+                return platform.optional_libraries.unavailable(.nccl);
             };
         }
         return .{ .lib = lib, .api = api };

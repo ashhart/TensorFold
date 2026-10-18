@@ -64,7 +64,9 @@ pub fn main(init: std.process.Init) !u8 {
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);
-        try cli.capabilities(&out.writer, engines.capabilities(a));
+        var caps = engines.capabilities(a);
+        caps.optional_libraries = try @import("sys").optional_libraries.probe(a, io, @import("sys"));
+        try cli.capabilities(&out.writer, caps);
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
     }

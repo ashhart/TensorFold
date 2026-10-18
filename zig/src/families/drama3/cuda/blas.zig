@@ -14,7 +14,7 @@ pub const gemm_default_tensor_op: c_int = 99;
 /// cublasMath_t CUBLAS_DEFAULT_MATH
 pub const default_math: c_int = 0;
 
-pub const Error = error{ LibraryUnavailable, MissingSymbol, CublasFailed };
+pub const Error = @import("sys").optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, CublasFailed };
 
 const S = Status;
 const CPtr = ?*const anyopaque;
@@ -42,10 +42,11 @@ pub const Blas = struct {
         for ([_][]const u8{ "libcublas.so.13", "libcublas.so" }) |path| {
             return openPath(path, workspace, workspace_bytes) catch |e| switch (e) {
                 error.LibraryUnavailable => continue,
+                error.MissingSymbol => return @import("sys").optional_libraries.unavailable(.cublas),
                 else => return e,
             };
         }
-        return error.LibraryUnavailable;
+        return @import("sys").optional_libraries.unavailable(.cublas);
     }
 
     fn openPath(path: []const u8, workspace: Ptr, workspace_bytes: usize) Error!Blas {

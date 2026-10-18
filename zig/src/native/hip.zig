@@ -149,7 +149,7 @@ fn join(
             "this build has no tensor parallelism: it comes with the RCCL backend",
             .{},
         ),
-        error.NoRccl => refuse(a, problem, "tensor parallelism needs RCCL", .{}),
+        error.NoRccl => refuse(a, problem, "{s}", .{@import("sys").optional_libraries.spec(.rccl).message}),
         error.NoId => refuse(a, problem, "RCCL gave no id", .{}),
         error.RanksDiffer => if (fault.field == .layout)
             refuse(
@@ -206,6 +206,8 @@ fn readMemory(_: ?*anyopaque, reset_peak: bool) ?api.Memory {
 
 /// The engine for `o.dir`, or null with `problem` when no HIP family reads it; under tensor parallelism, rank 0.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const report = @import("sys").optional_libraries.atBoundary();
+    defer report.deinit();
     inline for (registry) |F| {
         if (std.mem.eql(u8, o.model_type, F.model_type)) return openWith(F, a, gpa, io, o, problem);
     }

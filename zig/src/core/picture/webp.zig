@@ -14,8 +14,8 @@ const pinned_code = 0x010600;
 pub const env = "TENSORFOLD_LIBWEBP";
 
 const needs = "WebP images need libwebp " ++ pinned ++ " (libwebpdecoder)";
-pub const missing = needs ++ ", which this server could not load; send PNG or JPEG, or install it and name the file in " ++ env;
-pub const wrong_version = needs ++ "; the one this server found is another release, whose pixels can differ";
+pub const missing = @import("sys").optional_libraries.spec(.webp).message;
+pub const wrong_version = needs ++ "; the library has another release, whose pixels can differ; " ++ @import("sys").optional_libraries.spec(.webp).message;
 
 const library = if (builtin.os.tag == .macos) "libwebpdecoder.3.dylib" else "libwebpdecoder.so.3";
 

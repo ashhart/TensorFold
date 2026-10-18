@@ -4,7 +4,7 @@ const platform = @import("sys");
 const builtin = @import("builtin");
 pub const abi = @import("verbs_abi.zig");
 
-pub const Error = error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed, BadDeviceList, NoUsableGid };
+pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed, BadDeviceList, NoUsableGid };
 pub const max_links = 8;
 
 /// Physical devices in bond order; a duplicate or empty component cannot name an independent link.
@@ -62,12 +62,12 @@ pub const Verbs = struct {
     query_qp: ?QueryQp = null,
 
     pub fn open(path: ?[:0]const u8) Error!Verbs {
-        var lib = platform.DynLib.openZ((path orelse default_path).ptr) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.openZ((path orelse default_path).ptr) catch return platform.optional_libraries.unavailable(.verbs);
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            @field(api, name) = lib.lookup(T, name) orelse return error.MissingSymbol;
+            @field(api, name) = lib.lookup(T, name) orelse return platform.optional_libraries.unavailable(.verbs);
         }
         var v: Verbs = .{ .lib = lib, .api = api };
         v.gid_ex = v.lib.lookup(GidEx, "_ibv_query_gid_ex");

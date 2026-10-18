@@ -11,6 +11,7 @@ pub const c = if (windows) @import("win_c.zig") else std.c;
 pub const posix = if (windows) @import("win_posix.zig") else std.posix;
 
 pub const DynLib = if (windows) WinDynLib else std.DynLib;
+pub const optional_libraries = @import("optional_libraries.zig");
 
 /// An environment variable's value, through libc (std.process.Environ.getPosix does not build on Windows).
 pub fn getenv(name: [*:0]const u8) ?[:0]const u8 {

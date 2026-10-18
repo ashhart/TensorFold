@@ -14,8 +14,8 @@ pub const pinned = "3.1.4.1";
 pub const env = "TENSORFOLD_LIBTURBOJPEG";
 
 const needs = "JPEG images need libjpeg-turbo " ++ pinned ++ " (libturbojpeg)";
-pub const missing = needs ++ ", which this server could not load; send PNG, or install it and name the file in " ++ env;
-pub const wrong_version = needs ++ "; the one this server found is another release, whose pixels can differ";
+pub const missing = @import("sys").optional_libraries.spec(.jpeg).message;
+pub const wrong_version = needs ++ "; the library has another release, whose pixels can differ; " ++ @import("sys").optional_libraries.spec(.jpeg).message;
 
 const library = if (builtin.os.tag == .macos) "libturbojpeg.0.dylib" else if (builtin.os.tag == .windows) "turbojpeg.dll" else "libturbojpeg.so.0";
 

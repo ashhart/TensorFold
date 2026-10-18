@@ -469,6 +469,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
 pub const Engines = struct {
     version: []const u8,
     chip: ?[]const u8 = null,
+    optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
     backends: []const []const u8 = &.{},
     /// model_type to the weight formats it reads, as gate entries name them.
     families: []const api.Family = &.{},
@@ -502,7 +503,9 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     }
     try w.writeAll("}}, \"env\": [");
     for (env, 0..) |name, i| try w.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", name });
-    try w.writeAll("]}\n");
+    try w.writeAll("], \"optional_libraries\": ");
+    try std.json.Stringify.value(e.optional_libraries, .{}, w);
+    try w.writeAll("}\n");
 }
 
 test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {

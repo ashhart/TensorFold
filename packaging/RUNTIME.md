@@ -26,3 +26,36 @@ Flash Next speed-up settings also name the separately built MCDMA dynamic librar
 That library is not part of these archives. The server can read an API key file when requested.
 None of those paths requires an installed Python package, though capture generation currently uses Python tools.
 Archives marked `host-only` are CPU verification artifacts and cannot serve CUDA inference.
+
+
+## Optional shared libraries
+
+The release includes the native executable, built-in CUDA kernels and `libtfgrammar`. A driver-only NVIDIA host does not
+supply cuBLASLt or NCCL. A GLM CUDA pair needs NCCL on both ranks; adding `--vision` also needs cuBLASLt.
+
+| Feature | Library | Library filename (Linux; macOS where applicable) | Where it comes from |
+| --- | --- | --- | --- |
+| CUDA vision towers (`--vision`), cuBLASLt projections | cuBLASLt | `libcublasLt.so.13` (`cublasLt64_13.dll` on Windows) | NVIDIA CUDA 13 cuBLAS runtime; not the display driver |
+| Drama3 CUDA prompt and codec matrix operations | cuBLAS | `libcublas.so.13` | NVIDIA CUDA 13 cuBLAS runtime |
+| CUDA tensor-parallel ranks, including the GLM pair | NCCL | `libnccl.so.2` | NVIDIA NCCL 2 runtime compatible with CUDA 13 |
+| RoCE/RDMA gathers | verbs | `libibverbs.so.1`; `/usr/lib/librdma.dylib` | rdma-core and adapter provider on Linux; the macOS RDMA runtime |
+| Video inputs | TensorFold video | `libtfvideo.so`; `libtfvideo.dylib` | Optional `zig build video -Dffmpeg=PREFIX` runtime built against FFmpeg 9.0.2, installed in the server's `lib` directory |
+| JPEG inputs | libjpeg-turbo 3.1.4.1 | `libturbojpeg.so.0`; `libturbojpeg.0.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBTURBOJPEG` can name its file |
+| WebP inputs | libwebp 1.6.0 | `libwebpdecoder.so.3`; `libwebpdecoder.3.dylib` | Separately installed pinned decoder; `TENSORFOLD_LIBWEBP` can name its file |
+| Structured output and required tool calls | TensorFold grammar | `libtfgrammar.so`; `libtfgrammar.dylib` | The matching release archive's `lib` directory, or `zig build grammar` |
+| HIP tensor-parallel ranks | RCCL | `librccl.so.1` | ROCm's matching RCCL runtime |
+| MCDMA mailbox/Metal speed-up communication | MCDMA RPC | `libmcdma-rpc.so`; `libmcdma-rpc.dylib` | Separately built MCDMA RPC helper; `MCDMA_RPC_LIBRARY` can name its file |
+| MCDMA peer fabric | MCDMA fabric | `libmcdma-fabric.so`; `libmcdma-fabric.dylib` | Separately built MCDMA fabric helper; name the library's full path in the peer configuration file |
+
+`capabilities --json` includes `optional_libraries`, with each dependency's feature, soname, `found` flag and installation
+source. Discovery keeps every found library mapped until process exit, without calling its APIs or creating a CUDA context itself.
+A library can register process or thread exit handlers during loading; those handlers must retain their code.
+`found` means the loader found a file. It does not establish whether available libraries
+meet the feature's required functions, decoder version and hardware checks.
+Codec environment overrides take precedence, including a missing override. Capabilities does not read your peer
+configuration, so a library configured only there may be reported missing.
+No private candidate paths are emitted in the JSON. An unneeded missing optional dependency does not stop capabilities
+or plain text serving; a requested feature refuses with the needed library and installation instructions.
+
+On Linux, add the containing directory to `LD_LIBRARY_PATH` when an installed runtime is outside the loader's normal
+search path. Use the library's full path in the peer configuration file when its option asks for one.

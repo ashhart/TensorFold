@@ -284,11 +284,11 @@ pub const Gather = struct {
 
     fn setup(g: *Gather, gpa: std.mem.Allocator, io: std.Io, d: *const Driver, rank: u8, max_bytes: usize) !void {
         g.* = .{ .gpa = gpa, .d = d, .lib = undefined, .api = undefined, .rank = rank, .layout = .of(max_bytes), .region = undefined, .region_dev = 0, .counters = undefined, .module = undefined, .f = undefined, .max_bytes = max_bytes };
-        g.lib = std.DynLib.open("libibverbs.so.1") catch return error.VerbsUnavailable;
+        g.lib = std.DynLib.open("libibverbs.so.1") catch return @import("sys").optional_libraries.unavailable(.verbs);
         errdefer g.lib.close();
         const info = @typeInfo(Api).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
-            @field(g.api, name) = g.lib.lookup(T, name) orelse return error.VerbsUnavailable;
+            @field(g.api, name) = g.lib.lookup(T, name) orelse return @import("sys").optional_libraries.unavailable(.verbs);
         }
         var names: [max_hcas][64]u8 = undefined;
         var lens: [max_hcas]usize = undefined;

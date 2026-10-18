@@ -83,12 +83,7 @@ pub fn prepare(
 ) errors.Refused!api.PreparedVideo {
     const bytes = try bytesOf(cx, fetch, url, b);
     var d: Decoder = .{ .v = api.tfvideo.Video.open(bytes) catch |e| return switch (e) {
-        error.NoLibrary => cx.fail(
-            .server,
-            "video input needs libtfvideo (FFmpeg) beside the server: " ++
-                "zig build video -Dffmpeg=PREFIX, after tools/zig/build_ffmpeg.sh PREFIX",
-            .{},
-        ),
+        error.NoLibrary => cx.fail(.server, "{s}", .{@import("sys").optional_libraries.spec(.video).message}),
         error.NoStream => cx.refuse(try std.fmt.allocPrint(cx.a, "video {d}: the video has no video stream", .{i + 1})),
         error.OutOfMemory => error.OutOfMemory,
         else => cx.refuse(try std.fmt.allocPrint(

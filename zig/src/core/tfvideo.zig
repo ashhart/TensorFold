@@ -47,11 +47,18 @@ fn load() ?Fns {
     lib_failed = true;
     var dl = for (names) |name| {
         break @import("sys").DynLib.open(name) catch continue;
-    } else return null;
+    } else {
+        @import("sys").optional_libraries.warn(.video);
+        return null;
+    };
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
     inline for (info.field_names, info.field_types) |name, T| {
-        @field(f, name) = dl.lookup(T, "tf_video_" ++ name) orelse return null;
+        @field(f, name) = dl.lookup(T, "tf_video_" ++ name) orelse {
+            dl.close();
+            @import("sys").optional_libraries.warn(.video);
+            return null;
+        };
     }
     lib_failed = false;
     lib = f;
