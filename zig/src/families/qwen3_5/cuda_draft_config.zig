@@ -70,7 +70,7 @@ pub const Config = struct {
             .topk = try int(d.object, "selector_top_k"),
             .eps = @floatCast(try num(o, "rms_norm_eps")),
             .theta = @floatCast(try num((o.get("rope_parameters") orelse return error.BadDraftConfig).object, "rope_theta")),
-            .taps = undefined,
+            .taps = @splat(0),
             .n_taps = 0,
         };
         const taps = d.object.get("target_layer_ids") orelse return error.BadDraftConfig;

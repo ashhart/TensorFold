@@ -7,9 +7,10 @@ pub const Cost = lanes.config.Cost;
 
 pub const Clock = struct {
     threadlocal var ns: i96 = 0;
+    threadlocal var tick: i96 = 1_000_000;
     threadlocal var table: std.Io.VTable = undefined;
     fn now(_: ?*anyopaque, _: std.Io.Clock) std.Io.Timestamp {
-        ns += 1_000_000;
+        ns += tick;
         return .{ .nanoseconds = ns };
     }
     pub fn io() std.Io {
@@ -40,6 +41,8 @@ pub const Probe = struct {
     seen: [64]bool = @splat(false),
     costs: *[64]lanes.config.Cost,
     count: usize = 0,
+    warm_seen: ?*warm.Seen = null,
+    timed_forwards: usize = 0,
     stream: struct {
         pub fn synchronize(_: @This()) !void {}
     } = .{},
@@ -52,6 +55,10 @@ pub const Probe = struct {
         engine.learning = null;
         engine.verify_rows = 128;
         try engine.admit(&.{.{ .cache = &cache, .rows = parts[0].rows }}, ids, keep);
+        Clock.tick = @as(i96, @intCast(ids.len)) * 1_000_000;
+        if (p.warm_seen) |seen| if (keep == .draws and seen.passes(E.Engine.Shape.init(ids.len, 1, true, p.n_taps > 0, 1)) >= 2) {
+            p.timed_forwards += 1;
+        };
         if (ids.len == p.fail_at) return error.PlantedCalibrationFailure;
         p.seen[ids.len - 1] = true;
     }

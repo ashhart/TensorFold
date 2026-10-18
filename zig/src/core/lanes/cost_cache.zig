@@ -7,14 +7,24 @@ const magic = "TFWC2\n";
 
 /// What the costs depend on: the running executable's bytes (the layout that wrote them) and the caller's parts.
 pub fn key(a: Allocator, io: std.Io, parts: []const []const u8) ![32]u8 {
+    return keyTracing(a, io, parts, false);
+}
+
+pub fn keyTracing(a: Allocator, io: std.Io, parts: []const []const u8, trace: bool) ![32]u8 {
     const exe = try std.process.executablePathAlloc(io, a);
     defer a.free(exe);
     const bytes = try std.Io.Dir.cwd().readFileAlloc(io, exe, a, .limited(1 << 30));
     defer a.free(bytes);
+    if (trace) {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        const hex = std.fmt.bytesToHex(digest, .lower);
+        std.log.info("window cost key part executable {s}", .{hex[0..12]});
+    }
     return buildKey(bytes, parts);
 }
 
-fn buildKey(exe: []const u8, parts: []const []const u8) [32]u8 {
+pub fn buildKey(exe: []const u8, parts: []const []const u8) [32]u8 {
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     hashPart(&h, exe);
     for (parts) |p| hashPart(&h, p);
@@ -53,14 +63,20 @@ fn hashPart(h: *std.crypto.hash.sha2.Sha256, part: []const u8) void {
     h.update(part);
 }
 
-fn path(a: Allocator, k: [32]u8, suffix: []const u8) !?[]u8 {
+fn path(a: Allocator, k: [32]u8, suffix: []const u8, root: ?[]const u8) !?[]u8 {
+    if (root) |dir| return try std.fmt.allocPrint(a, "{s}/{s}{s}", .{ dir, std.fmt.bytesToHex(k, .lower), suffix });
     const home = platform.c.getenv("HOME") orelse return null;
     return try std.fmt.allocPrint(a, "{s}/.cache/tensorfold/window-costs/{s}{s}", .{ std.mem.span(home), std.fmt.bytesToHex(k, .lower), suffix });
 }
 
 /// The value kept for `k`, or null when none is kept or the file is not one of ours.
 pub fn load(comptime T: type, a: Allocator, io: std.Io, k: [32]u8) ?T {
-    const p = (path(a, k, ".bin") catch return null) orelse return null;
+    return loadAt(T, a, io, k, null);
+}
+
+/// The same cache envelope in an explicit directory; null keeps the standard user cache.
+pub fn loadAt(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, root: ?[]const u8) ?T {
+    const p = (path(a, k, ".bin", root) catch return null) orelse return null;
     defer a.free(p);
     const bytes = std.Io.Dir.cwd().readFileAlloc(io, p, a, .limited(1 << 20)) catch return null;
     defer a.free(bytes);
@@ -76,15 +92,19 @@ fn parse(comptime T: type, bytes: []const u8) ?T {
 
 /// Keep `value` for `k`, written whole and renamed into place; a failure only costs the next load a measurement.
 pub fn save(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, value: T) void {
-    const p = (path(a, k, ".bin") catch return) orelse return;
+    saveAt(T, a, io, k, value, null);
+}
+
+/// Atomic publication in an explicit directory, sharing the default cache format and failure policy.
+pub fn saveAt(comptime T: type, a: Allocator, io: std.Io, k: [32]u8, value: T, root: ?[]const u8) void {
+    const p = (path(a, k, ".bin", root) catch return) orelse return;
     defer a.free(p);
-    std.Io.Dir.cwd().createDirPath(io, std.fs.path.dirname(p) orelse return) catch return;
-    const temp = std.fmt.allocPrint(a, "{s}.{d}.tmp", .{ p, platform.c.getpid() }) catch return;
-    defer a.free(temp);
     const bytes = std.mem.concat(a, u8, &.{ magic, std.mem.asBytes(&value) }) catch return;
     defer a.free(bytes);
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = temp, .data = bytes }) catch return;
-    std.Io.Dir.renameAbsolute(temp, p, io) catch std.Io.Dir.cwd().deleteFile(io, temp) catch {};
+    var temporary = std.Io.Dir.cwd().createFileAtomic(io, p, .{ .make_path = true, .replace = true, .permissions = if (@import("builtin").os.tag == .windows) .default_file else @fromBackingInt(0o600) }) catch return;
+    defer temporary.deinit(io);
+    temporary.file.writePositionalAll(io, bytes, 0) catch return;
+    temporary.replace(io) catch return;
 }
 
 test "a kept value reads back whole and any other length or tag is refused" {

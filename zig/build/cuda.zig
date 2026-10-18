@@ -369,6 +369,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const drama3 = @import("drama3_host.zig").hostTests(b, step, cuda, mods.core);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
+    @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
     const adapter_tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/slide_adapter_test.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = native_modules.api }} });
     b.step("test-slide-adapter-host", "Initial learner progress before its first long unit").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter_tests })).step);

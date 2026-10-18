@@ -6,6 +6,8 @@ const c = @import("config.zig");
 const E = @import("cuda_engine.zig");
 pub const warm = @import("cuda_warm.zig");
 pub const reservation = @import("cuda_reserve.zig");
+pub const window_costs = @import("cuda_window_costs.zig");
+pub const cost_adapter = @import("cuda_cost_adapter.zig");
 const draws = @import("draw.zig");
 const Draft = @import("cuda_draft.zig").Draft;
 const vision_prompt = @import("cuda_vision_prompt.zig");
@@ -69,7 +71,7 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const v: ?*vision.Vision = if (o.vision) |lim| try vision.Vision.open(gpa, io, ctx.d, e.stream, dir, e.g.hidden, lim) else null;
     errdefer if (v) |x| x.deinit();
     const l = try gpa.create(Lanes);
-    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .startup = e.startup, .vision = v, .target = undefined };
+    l.* = .{ .gpa = gpa, .io = io, .e = e, .capacity = o.context, .cost_context = ctx, .startup = e.startup, .vision = v, .target = undefined };
     l.target = .{ .e = e, .caches = &l.caches, .seen = &l.seen };
     return .{
         .learns = if (o.slide) e else null,
@@ -109,6 +111,7 @@ pub fn openDrafter(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []con
     errdefer d.deinit();
     try l.e.setTaps(d.taps());
     d.target_taps = l.e.tapBytes();
+    cost_adapter.identify(l, dir, .dflash);
     l.calibration = d;
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeDrafter, .reserve = reserveDrafter, .prepare = .{ .ctx = l, .run = calibrateDrafter, .bytes = if (l.capacity < l.e.window_rows) l.e.streamBytes(l.e.window_rows) else 0 } };
 }
@@ -121,7 +124,8 @@ pub fn openMtp(gpa: std.mem.Allocator, io: std.Io, p: *anyopaque, dir: []const u
     const d = try Mtp.init(gpa, io, l.e, dir, l.capacity);
     errdefer d.deinit();
     try l.e.setTaps(d.taps());
-    try l.timeWindows(d);
+    cost_adapter.identify(l, dir, .mtp);
+    try l.timeWindows(d, null);
     return .{ .drafter = d.drafter(), .ctx = d, .close = closeMtp, .reserve = reserveMtp };
 }
 
@@ -140,7 +144,7 @@ fn calibrateDrafter(p: *anyopaque) !lanes.drafter.Facts {
     const d = l.calibration orelse return error.MissingCalibrationDrafter;
     if (d.n_costs == 0) {
         if (l.pool.items.len == 0) return error.MissingReservedQwenCache;
-        l.startup.add(try warm.prepareTimed(l.gpa, l.io, l.e, d, l.pool.items[0], &l.warmed));
+        try l.timeWindows(d, l.pool.items[0]);
     }
     if (d.n_costs != l.e.window_rows) return error.IncompleteWindowMeasurements;
     l.calibration = null;
@@ -220,6 +224,9 @@ const Lanes = struct {
     io: std.Io,
     e: *E.Engine,
     capacity: usize,
+    cost_context: ?*const cuda.Context = null,
+    cost_identity: ?[32]u8 = null,
+    cost_kind: cost_adapter.Kind = .dflash,
     startup: warm.profile.Times = .{},
     /// --vision's tower: an image prompt's images encoded at its prefill.
     vision: ?*vision.Vision = null,
@@ -268,10 +275,8 @@ const Lanes = struct {
     }
 
     /// Each width timed on a reset cache after its captured launch shape is warm.
-    fn timeWindows(self: *Lanes, d: anytype) !void {
-        var cache = try E.Cache.init(self.gpa, self.e, 64);
-        defer cache.deinit(self.gpa);
-        try warm.time(self.io, self.e, d, &cache, &self.warmed);
+    fn timeWindows(self: *Lanes, d: anytype, reserved: ?*E.Cache) !void {
+        self.startup.add(try cost_adapter.measure(self, d, reserved));
     }
 
     fn backend(self: *Lanes) be.Backend {

@@ -33,6 +33,10 @@ pub fn steps(b: *std.Build, cuda: *std.Build.Module, mods: anytype, step: *std.B
     const frame_run = b.addRunArtifact(b.addTest(.{ .root_module = draft_frame, .filters = &.{"Draft frames:"} }));
     frame_run.has_side_effects = true;
     b.step("test-qwen35-draft-frame-host", "Batched CUDA drafter frame bookkeeping and lane equality without devices").dependOn(&frame_run.step);
+    const cache = b.createModule(.{ .root_source_file = b.path("zig/qwen35_cost_cache_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "qwen35", .module = mods.qwen35 }, .{ .name = "lanes", .module = mods.lanes } } });
+    const cost_run1 = b.addRunArtifact(b.addTest(.{ .root_module = cache, .filters = &.{"window cost cache:"} }));
+    b.step("test-qwen35-cost-cache-host", "Real width-loop cache misses and hits without a GPU").dependOn(&cost_run1.step);
+    step.dependOn(&cost_run1.step);
     const live = b.createModule(.{ .root_source_file = b.path("zig/qwen35_live_host.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "qwen35", .module = mods.qwen35 } } });
     const live_run = b.addRunArtifact(b.addTest(.{ .root_module = live }));
     live_run.has_side_effects = true;

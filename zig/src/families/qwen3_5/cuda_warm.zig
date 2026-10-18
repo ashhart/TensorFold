@@ -68,20 +68,42 @@ pub fn prepare(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache
 }
 
 pub fn prepareTimed(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen) !profile.Times {
+    return prepareMode(gpa, io, e, d, cache, warmed, true);
+}
+
+pub fn prepareMode(gpa: std.mem.Allocator, io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen, comptime measure: bool) !profile.Times {
     var phases: profile.Times = .{};
     if (cache.cap >= e.window_rows) {
-        try timed(io, e, d, cache, warmed, &phases);
+        try run(io, e, d, cache, warmed, &phases, measure);
         return phases;
     }
     const started = profile.now(io);
     var temporary = try @TypeOf(cache.*).init(gpa, e, e.window_rows);
     errdefer temporary.deinit(gpa);
     phases.reserve += profile.elapsed(io, started);
-    try timed(io, e, d, &temporary, warmed, &phases);
+    try run(io, e, d, &temporary, warmed, &phases, measure);
     const freeing = profile.now(io);
     temporary.deinit(gpa);
     phases.reserve += profile.elapsed(io, freeing);
     return phases;
+}
+
+fn run(io: std.Io, e: anytype, d: anytype, cache: anytype, warmed: *Seen, phases: *profile.Times, comptime measure: bool) !void {
+    if (measure) return timed(io, e, d, cache, warmed, phases);
+    const started = profile.now(io);
+    const ids: [E.most_window]u32 = @splat(0);
+    var picks: [E.most_window]E.Draw = undefined;
+    for (&picks) |*pk| pk.* = .{ .rule = null, .position = 1 };
+    for (1..e.window_rows + 1) |rows| {
+        const shape = E.Engine.Shape.init(rows, 1, true, e.n_taps > 0, 1);
+        while (warmed.passes(shape) < 2) {
+            try cache.reset(e);
+            try e.forward(&.{.{ .cache = cache, .rows = rows }}, ids[0..rows], .{ .draws = picks[0..rows] });
+            warmed.mark(shape);
+        }
+    }
+    try cache.reset(e);
+    phases.warmups += profile.elapsed(io, started);
 }
 
 pub const Test = if (@import("builtin").is_test) @import("cuda_warm_test.zig") else struct {};
