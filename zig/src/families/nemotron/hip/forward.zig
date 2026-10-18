@@ -80,7 +80,11 @@ pub fn attention(
             // (heads, rows, d) fp32 back to (rows, heads, d) in act: the same copy with heads and rows swapped
             try o.ropePrefill(.{ .ptr = att, .kind = .f32 }, flat, d.heads * hd, hd, d.heads, rows, hd, 0, 0, 1);
         },
-        .plan => |pl| {
+        .plan => |pl| if (o.fused()) {
+            // the walk reads q and writes its rows in the activation type: the bytes of the casts it saves
+            try pops.kvWriteAct(o, keys, values, pl.p, pl.slot, d.kv_heads, hd);
+            try pops.causalAct(o, q, flat, pl.p, pl.slot, d.heads, d.kv_heads, hd, pl.span, scaleOf(hd));
+        } else {
             // each row's keys and values into its own stream's pages, then one query a row over them
             const k32 = try o.arena.of(f32, rows * d.kv_heads * hd);
             try o.cast(keys, .{ .ptr = k32, .kind = .f32 }, rows * d.kv_heads * hd);
