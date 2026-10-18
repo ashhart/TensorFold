@@ -282,6 +282,8 @@ pub const Scratch = struct {
     ucount: mtl.Buffer,
     act: mtl.Buffer, // [rows*K, W]
     ey: mtl.Buffer, // [rows*K, D]
+    x_lat: mtl.Buffer, // [rows, latent] nemotron_h_puzzle: the normed input projected into the latent (into)
+    ey_lat: mtl.Buffer, // [rows*K, latent] nemotron_h_puzzle: each pick's routed-expert output in the latent
     sh_act: mtl.Buffer, // [rows, SW]
     sh_xs: mtl.Buffer, // [SW/64, MP]
     sh: mtl.Buffer, // [rows, D]
@@ -340,6 +342,8 @@ pub const Scratch = struct {
             .ucount = try B.make(device, 16),
             .act = try B.make(device, pairs * c.expert_width * 2),
             .ey = try B.make(device, pairs * c.hidden * 2),
+            .x_lat = try B.make(device, rows * c.latent * 2),
+            .ey_lat = try B.make(device, pairs * c.latent * 2),
             .sh_act = try B.make(device, rows * c.shared_width * 2),
             .sh_xs = try B.make(device, c.shared_width / 64 * mp * 4),
             .sh = try B.make(device, rows * c.hidden * 2),

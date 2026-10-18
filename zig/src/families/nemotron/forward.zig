@@ -247,7 +247,7 @@ pub const Forward = struct {
                     self.norm(e, s.delta, next, rows, c.eps);
                     mamba += 1;
                 },
-                .moe => |m| layers.moe(self, e, m, next, rows, c.eps),
+                .moe => |m| if (c.bolt) layers.bolt_moe(self, e, m, next, rows, c.eps) else layers.moe(self, e, m, next, rows, c.eps),
                 .attention => |a| {
                     var kvs: [st.max_rows]layers.Kvs = undefined;
                     for (segs, 0..) |g, j| kvs[j] = .{ .kv = g.cache.kv[attention], .len = g.cache.len, .rows = g.rows, .tree = g.parents != null or g.gpu_tree != null, .deepest = deepest, .gpu = g.gpu, .gpu_tree = g.gpu_tree, .layer = attention };

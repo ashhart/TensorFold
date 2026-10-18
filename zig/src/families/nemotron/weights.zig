@@ -283,8 +283,10 @@ pub const Builder = struct {
         }
         const own_up = Matrix{ .t = firstRows(up.t, c.shared_width), .w = up.w };
         const own_down = Matrix{ .t = if (c.pocket > 0) try self.firstColumns(down.t, c.shared_width) else down.t, .w = down.w };
-        // the lane up writes the input sums the lane down reads: both on lane tiles, or both in rows
-        const routed = fc1.w.four() and fc2.w.four();
+        // the lane up writes the input sums the lane down reads: both on lane tiles, or both in rows.
+        // nemotron_h_puzzle (latent > 0) runs the experts through the runtime-dim row kernels so they read the
+        // latent width at K; the baked 4/64 lane kernels serve only the Lightning inner width.
+        const routed = fc1.w.four() and fc2.w.four() and latent == 0;
         return .{
             .gate = gate,
             .gate_bias = gate_bias,

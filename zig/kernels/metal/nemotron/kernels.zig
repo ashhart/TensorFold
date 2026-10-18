@@ -55,6 +55,9 @@ pub const all = [_]Kernel{
     .{ .key = "add_norm_moe_xs", .function = "custom_kernel_nemotron_add_norm_moe_xs_a50e79554f8d9c70__2688_896_6_bfloat16_t_bfloat16_t_float_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float", .source = @embedFile("add_norm_moe_xs.metal") },
     .{ .key = "router", .function = "custom_kernel_nemotron_router_84d0c5e2f26dd05a__2688_128_8_16_bfloat16_t_bfloat16_t_int32_tc_bfloat16_t", .source = @embedFile("router.metal") },
     .{ .key = "route", .function = "custom_kernel_nemotron_route_8776d7e9b3d3f6f3__128_6_bfloat16_t_float_floatc_uint32_t_float", .source = @embedFile("route.metal") },
+    .{ .key = "route_bolt", .function = "tf_nemotron_route_bolt", .source = @embedFile("route_bolt.metal") }, // hand-authored (runtime NE/K; generator not in repo)
+    .{ .key = "dense_bf16", .function = "tf_nemotron_dense_bf16", .source = @embedFile("dense_bf16.metal") }, // hand-authored: bf16 write-matmul for the gate and latent projections
+    .{ .key = "add_norm_moe_xs_bolt", .function = "tf_nemotron_add_norm_moe_xs_bolt", .source = @embedFile("add_norm_moe_xs.metal") }, // hand-authored <4096,512,9> instantiation
     .{ .key = "mamba_conv", .function = "custom_kernel_nemotron_mamba_conv_83552c1c128bdbca__4096_8_128_4_10304_4096_bfloat16_t_bfloat16_t_float_float_int32_t_int32_t_int32_t_int32_t_bfloat16_t_bfloat16_t", .source = @embedFile("mamba_conv.metal") },
     .{ .key = "mamba_scan", .function = "custom_kernel_nemotron_mamba_scan_52242b2ed609b53e__64_64_8_128_4096_10304_10240_524288_bfloat16_t_bfloat16_t_float_float_float_float_floatc_int32_tc_int32_t_int32_t_int32_t_bfloat16_t_float", .source = @embedFile("mamba_scan.metal") },
     .{ .key = "expert_up", .function = "custom_kernel_nemotron_rows_expert_up_3c904b6b27dccc2b__2688_1856_64_4_2_6_bfloat16_t_uint32_t_int32_t_int32_t_int32_t_int32_tc_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t", .source = @embedFile("expert_up.metal") },
