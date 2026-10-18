@@ -309,8 +309,7 @@ test "sparse attention stages sit at rounding level against the FP64 ideal" {
     // Scores that tie: the softmax denominator is the sum of equal exponentials, and the
     // accumulation order decides which probability lands on which side of its rounding boundary.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "score_tie", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 32, .topk = 32 }, &rng, 1.0, 0, 0, 0, KeyPattern.near_tie);
-    // One dominant key against keys orders of magnitude smaller: denominator and accumulator
-    // run at the extreme ratio.
+    // One dominant key against keys orders of magnitude smaller: denominator and accumulator run at the extreme ratio.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "one_dominant", .heads = 1, .rows = 1, .position = 300, .ratio = 2, .compressed_rows = 16, .topk = 16 }, &rng, 1.0, 0, 0, 0, KeyPattern.one_sided);
     // Many tiles, so the online correction multiplies the accumulator once per 64 columns.
     try sparseCaseFrom(gpa, device, queue, &p, .{ .name = "many_tiles", .heads = 1, .rows = 1, .position = 511, .ratio = 2, .compressed_rows = 512, .topk = 384 }, &rng, 1.0, 0, 0, 0, KeyPattern.random);

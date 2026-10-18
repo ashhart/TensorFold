@@ -107,8 +107,7 @@ pub fn build(a: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, confi
     const pad_id: usize = @intCast(if (config.object.get("engram_pad_id")) |v| try asInt(v) else try intField(config, "engram_pad_token_id"));
     const pad = lookup[pad_id];
 
-    // LE layout: magic, raw/compressed/pad/order/heads/layers, provenance hashes, per-layer
-    // blocks, the lookup array.
+    // LE layout: magic, raw/compressed/pad/order/heads/layers, provenance hashes, per-layer blocks, the lookup array.
     var packed_buf: std.ArrayList(u8) = .empty;
     defer packed_buf.deinit(a);
     try packed_buf.appendSlice(a, magic);

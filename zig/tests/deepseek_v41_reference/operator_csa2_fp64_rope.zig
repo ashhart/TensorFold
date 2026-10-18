@@ -74,8 +74,7 @@ fn ropeCase(
     defer std.testing.allocator.free(contract_cells);
     for (0..rows) |row| for (0..heads) |head| {
         const base = row * stride + head * width;
-        // Everything outside the rotary window is copied through, so both sides must agree with the
-        // input there too.
+        // Everything outside the rotary window is copied through, so both sides must agree with the input there too.
         for (0..width - 64) |d| {
             ideal_cells[base + d] = before[base + d];
             contract_cells[base + d] = before[base + d];
