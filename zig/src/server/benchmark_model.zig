@@ -53,6 +53,13 @@ pub fn describeConfig(a: Allocator, io: std.Io, target: []const u8, dir: []const
     return out;
 }
 
+/// Only a matched native family can declare a managed checkpoint has no raw-text mode.
+pub fn chatOnly(config: Config, families: []const api.Family) bool {
+    const kind = modelType(config.value) orelse return false;
+    for (families) |family| if (std.mem.eql(u8, family.model_type, kind)) return !family.raw_text;
+    return false;
+}
+
 /// The bytes of the ``*.safetensors`` files in ``dir``, through a cache snapshot's links; 0 when unreadable.
 pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
     var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;

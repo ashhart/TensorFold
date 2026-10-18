@@ -454,6 +454,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
     const publication = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark publication:"} }));
     b.step("test-benchmark-publication-host", "Benchmark command publication boundaries with inert effects").dependOn(&publication.step);
+    b.step("test-benchmark-routing-host", "Benchmark command routing from explicit model capabilities").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark routing:"} })).step);
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",

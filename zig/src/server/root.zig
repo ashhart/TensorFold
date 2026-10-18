@@ -123,6 +123,7 @@ test {
         _ = @import("benchmark_run_test.zig");
         _ = @import("benchmark_early_test.zig");
         _ = @import("benchmark_publication_test.zig");
+        _ = @import("benchmark_chat_only_test.zig");
     }
 }
 

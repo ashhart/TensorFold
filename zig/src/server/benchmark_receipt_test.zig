@@ -48,7 +48,10 @@ pub fn legacy(a: std.mem.Allocator) !json.Value {
 pub fn asLegacy(a: std.mem.Allocator, v: json.Value) !json.Value {
     try v.get("suite").?.object.put(a, "id", .{ .string = suite.legacy_id });
     try v.get("suite").?.object.put(a, "sha256", .{ .string = suite.legacy_sha256_hex });
-    for (v.get("samples").?.array) |sample| _ = sample.object.orderedRemove("finish_reason");
+    for (v.get("samples").?.array) |sample| {
+        _ = sample.object.orderedRemove("finish_reason");
+        _ = sample.object.orderedRemove("route");
+    }
     return v;
 }
 
@@ -66,7 +69,7 @@ test "the receipt built from the golden facts equals the golden canonical bytes"
     defer arena.deinit();
     const a = arena.allocator();
     const bytes = try std.mem.concat(a, u8, &.{ try receipt.canonical(a, try valid(a)), "\n" });
-    try std.testing.expectEqual(@as(usize, 1531), bytes.len);
+    try std.testing.expectEqual(@as(usize, 1588), bytes.len);
     try std.testing.expectEqualStrings(golden, bytes);
 }
 
@@ -88,7 +91,7 @@ test "the parsed golden writes back byte for byte, and previews as json.dumps(in
     try std.testing.expectEqualStrings(golden[0 .. golden.len - 1], try receipt.canonical(a, v));
     var out: std.Io.Writer.Allocating = .init(a);
     try receipt.preview(&out.writer, v);
-    try std.testing.expectEqual(@as(usize, 2074), out.written().len);
+    try std.testing.expectEqual(@as(usize, 2147), out.written().len);
     try std.testing.expectEqualStrings(golden_preview, out.written());
 }
 
@@ -354,7 +357,10 @@ test "issue 969 v2: legacy receipts retain v1 completion and ranking partitions"
     try set(a, v, &.{ "suite", "id" }, "\"community-v1\"");
     try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
     try set(a, v, &.{ "suite", "sha256" }, "\"" ++ suite.legacy_sha256_hex ++ "\"");
-    for ([_][]const u8{ "0", "1" }) |i| try set(a, v, &.{ "samples", i, "finish_reason" }, null);
+    for ([_][]const u8{ "0", "1" }) |i| {
+        try set(a, v, &.{ "samples", i, "finish_reason" }, null);
+        try set(a, v, &.{ "samples", i, "route" }, null);
+    }
     try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
     try std.testing.expect(std.mem.indexOf(u8, why, "protocol-complete") != null);
 }

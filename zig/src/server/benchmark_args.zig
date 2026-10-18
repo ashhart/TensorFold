@@ -14,6 +14,7 @@ pub const Args = struct {
     backend: Backend = .auto,
     server: ?[]const u8 = null,
     model_id: ?[]const u8 = null,
+    chat_only: bool = false,
     tokens: i64 = 256,
     reps: i64 = 5,
     temperatures: []const f64 = &.{ 1.0, 0.0 },
@@ -30,13 +31,14 @@ pub const Args = struct {
     token_stdin: bool = false,
 };
 
-pub const usage_line = "usage: tensorfold benchmark [-h] [--backend {auto,mlx,cuda,rocm}] [--server SERVER] [--model-id MODEL_ID] [--tokens TOKENS] [--reps REPS] [--temperatures TEMPERATURES] [--serial] [--context CONTEXT] [--drafter DRAFTER] [--timeout TIMEOUT] [--startup-timeout STARTUP_TIMEOUT] [--output OUTPUT] [--publish] [--yes] [--upload-url UPLOAD_URL] [--token-stdin] [target] [file]";
+pub const usage_line = "usage: tensorfold benchmark [-h] [--backend {auto,mlx,cuda,rocm}] [--server SERVER] [--model-id MODEL_ID] [--chat-only] [--tokens TOKENS] [--reps REPS] [--temperatures TEMPERATURES] [--serial] [--context CONTEXT] [--drafter DRAFTER] [--timeout TIMEOUT] [--startup-timeout STARTUP_TIMEOUT] [--output OUTPUT] [--publish] [--yes] [--upload-url UPLOAD_URL] [--token-stdin] [target] [file]";
 
 const Flag = struct { name: []const u8, value: bool = true, help: []const u8 };
 
 pub const flags = [_]Flag{
     .{ .name = "--backend", .help = "auto, mlx, cuda or rocm (default: auto, this build's backend)" },
     .{ .name = "--server", .help = "attach to an existing server; result stays unranked without a server manifest" },
+    .{ .name = "--chat-only", .value = false, .help = "declare an attached checkpoint has no raw-text mode; code uses one user chat message (v2 only)" },
     .{ .name = "--model-id", .help = "model alias to request from an attached server" },
     .{ .name = "--tokens", .help = "output tokens per request (default: 256)" },
     .{ .name = "--reps", .help = "measured repetitions per workload and temperature (default: 5)" },
@@ -115,6 +117,7 @@ pub fn parse(a: Allocator, argv: []const []const u8, problem: *[]const u8) error
         if (is(name, "--backend")) out.backend = std.meta.stringToEnum(Backend, value) orelse return usage(a, problem, "argument --backend: invalid choice: '{s}' (choose from auto, mlx, cuda, rocm)", .{value});
         if (is(name, "--server")) out.server = value;
         if (is(name, "--model-id")) out.model_id = value;
+        if (is(name, "--chat-only")) out.chat_only = true;
         if (is(name, "--tokens")) out.tokens = try int(a, problem, name, value);
         if (is(name, "--reps")) out.reps = try int(a, problem, name, value);
         if (is(name, "--temperatures")) temperatures = value;
@@ -150,6 +153,7 @@ fn checks(a: Allocator, out: *Args, temperatures: []const u8, problem: *[]const 
     for ([_]Action{ .publish, .inspect, .login, .logout, .suites }) |act| if (std.mem.eql(u8, out.target, @tagName(act))) {
         out.action = act;
     };
+    if (out.chat_only and (out.action != .run or out.server == null)) return invalid(problem, "--chat-only applies only to a v2 run with --server; managed runs use the native family declaration");
     if (out.action == .publish or out.action == .inspect) {
         if (out.file == null) return invalid(problem, "This action needs a receipt JSON file");
         return;

@@ -306,6 +306,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
     var rank_count: ?u8 = if (args.server == null) 1 else null;
     var target: stream.Target = undefined;
+    var chat_only = args.chat_only;
     var plan: ?server.Plan = null;
     var note: ?[]const u8 = null;
     var wait: ?[]const u8 = null;
@@ -349,6 +350,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             drafter
         else
             null;
+        chat_only = model.chatOnly(config, ctx.engines.families);
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
             .model = try model.describeConfig(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label, config),
@@ -407,7 +409,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
         target = .{ .base = managed.?.base(), .served = server.served_name };
     }
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
-    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
+    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout, .chat_only = chat_only }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
         return e;
     };

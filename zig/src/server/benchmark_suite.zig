@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 pub const legacy_id = "community-v1";
 pub const legacy_sha256_hex = "9bb717da00666b90b4006174abd9ed46108affc37456b43c64a224a9c938d5be";
 pub const id = "community-v2";
-pub const sha256_hex = "348fc03357c61349b22288a4262a99216b5b23ff836378aeb0284aadc34d8317";
+pub const sha256_hex = "51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc";
 pub const seed_base: u32 = 1234;
 pub const standard_reps = 5;
 
@@ -41,7 +41,9 @@ pub const suites_text =
     \\  "concurrency": 1,
     \\  "delivery_rate": "completion_tokens_minus_one_over_first_to_last_nonempty_sse_delivery",
     \\  "min_sampled_stop_tokens": 128,
-    \\  "sha256": "348fc03357c61349b22288a4262a99216b5b23ff836378aeb0284aadc34d8317"
+    \\  "code_route": "completion_unless_chat_only_declared",
+    \\  "sample_route": "record_v1_api_path",
+    \\  "sha256": "51136f5d6775b2ff427834c6b1038b584de27e0a267cfc088ff2694ea069dcdc"
     \\}
 ++ "\n";
 
@@ -51,6 +53,17 @@ pub const fixtures = [2]Fixture{
     .{ .id = "code", .chat = false, .prompt = "Write a short Python function that computes the Fibonacci sequence and explain it." },
     .{ .id = "chat", .chat = true, .prompt = "Explain how matrix multiplication uses a GPU in plain English, then give a small numerical example." },
 };
+
+/// The v1 fixture remains raw; v2 accepts only an explicit chat-only declaration.
+pub fn requestFixture(protocol_id: []const u8, fixture: Fixture, chat_only: bool) Fixture {
+    var out = fixture;
+    if (std.mem.eql(u8, protocol_id, id) and chat_only and std.mem.eql(u8, fixture.id, "code")) out.chat = true;
+    return out;
+}
+
+pub fn route(fixture: Fixture) []const u8 {
+    return if (fixture.chat) "/v1/chat/completions" else "/v1/completions";
+}
 
 pub const Status = enum { ok, early_eos, @"error", unmeasured };
 
@@ -90,6 +103,7 @@ pub const Sample = struct {
     token_sha: ?[]const u8 = null,
     error_code: ?ErrorCode = null,
     finish_reason: ?[]const u8 = null,
+    route: ?[]const u8 = null,
 };
 
 /// A cell's medians are set only when every declared repeat is ok.

@@ -120,3 +120,24 @@ The parameter-versus-speed plot uses the selected parameter basis on a logarithm
 ## AMD (ROCm)
 
 A ROCm build runs the same suite and saves its receipt locally, with backend `rocm` on platform `linux`. `--backend auto` picks `rocm` on that build; an attached run names it with `--backend rocm`. A managed ROCm run records the CPU and system memory, while GPU names and the driver version stay unknown. `inspect` shows a ROCm receipt as usual. The board accepts mlx and cuda receipts for now, so `--publish` with ROCm is refused before the run starts and `benchmark publish` refuses a ROCm receipt before any upload; publishing waits for the board to accept rocm.
+
+
+## Chat-only checkpoints in community-v2
+
+When a native family declares `raw_text = false`, the code workload sends its unchanged prompt text as one user
+message to `/v1/chat/completions`. Native runs use the matched family declaration from the admitted config, not a
+model-name guess. Families that accept raw text keep `/v1/completions` for code.
+
+For an attached server, declare this explicitly:
+
+```sh
+tensorfold benchmark owner/model --server http://127.0.0.1:8080 --backend cuda --chat-only
+```
+
+Use `--chat-only` only when the checkpoint has no raw-text mode. It applies to attached v2 runs. Without it, code
+keeps the completion route. Empty replies always fail; the client never infers a capability or retries through chat
+from an empty response. Each v2 sample records its API route, including failures and retained warmups. The code
+prompt, seeds, token budget and temperature are unchanged. The ordinary chat workload still uses the chat route.
+
+The v2 manifest digest includes this routing rule. V1's manifest, raw code fixture and receipt fields are unchanged.
+V2 publication remains disabled until the receiver accepts the updated protocol and separates its rankings.

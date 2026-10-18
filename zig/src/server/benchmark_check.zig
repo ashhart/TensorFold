@@ -132,7 +132,7 @@ const Check = struct {
     }
 
     fn sample(c: *Check, x: Value, s: Value, before: []const Value) Bad!void {
-        const keys = if (c.v2) &(sample_keys ++ .{"finish_reason"}) else &sample_keys;
+        const keys = if (c.v2) &(sample_keys ++ .{ "finish_reason", "route" }) else &sample_keys;
         try c.need(exact(x, keys), "samples entries must hold exactly their protocol's sample fields");
         if (c.v2) try c.need(x.get("finish_reason").? == .null or oneOf(x.get("finish_reason").?, &.{ "stop", "length" }), "samples finish_reason must be stop, length or null");
         const t = toF64(x.get("temperature").?);
@@ -174,6 +174,14 @@ const Check = struct {
         const prompt = toF64(x.get("prompt_tokens").?);
         try c.need(cached == null or prompt == null or cached.? <= prompt.?, "samples cached_tokens must not exceed prompt_tokens");
         if (count != null and count.? > tokens and c.mode == .publish) return c.fail(over_budget);
+        if (c.v2) {
+            const selected_route = x.get("route").?;
+            try c.need(oneOf(selected_route, &.{ "/v1/completions", "/v1/chat/completions" }), "samples route must name a v1 completion or chat completion path");
+            if (eqlStr(x.get("fixture_id").?, "chat")) try c.need(eqlStr(selected_route, "/v1/chat/completions"), "samples chat workload must use the chat route");
+            for (before) |prior| if (eqlStr(prior.get("fixture_id").?, json.strOr(x.get("fixture_id")))) {
+                try c.need(eqlStr(selected_route, json.strOr(prior.get("route"))), "samples of one fixture must use the same route throughout the run");
+            };
+        }
     }
 };
 
