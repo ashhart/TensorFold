@@ -39,7 +39,7 @@ const Inst = union(enum) {
     any,
     split: [2]u32,
     jump: u32,
-    look: struct { negate: bool, next: u32 },
+    look: struct { negate: bool, next: u32, atomic: bool = false }, // atomic: continue from the body's first match
     done,
 };
 
@@ -52,6 +52,7 @@ const Node = union(enum) {
     alt: []const Node,
     repeat: struct { node: *const Node, min: u32, max: ?u32, greedy: bool },
     look: struct { node: *const Node, negate: bool },
+    atomic: *const Node,
 
     fn nullable(n: Node) bool {
         return switch (n) {
@@ -64,6 +65,7 @@ const Node = union(enum) {
                 if (x.nullable()) break true;
             } else false,
             .repeat => |r| r.min == 0 or r.node.nullable(),
+            .atomic => |inner| inner.nullable(),
         };
     }
 };
@@ -159,8 +161,9 @@ pub const Matcher = struct {
                 },
                 .jump => |to| f.pc = to,
                 .look => |look| {
-                    const hit = (try m.run(re, s, f.pc + 1, f.pos)) != null;
-                    if (hit == look.negate) break;
+                    const end = try m.run(re, s, f.pc + 1, f.pos);
+                    if ((end != null) == look.negate) break;
+                    if (look.atomic) f.pos = end.?;
                     f.pc = look.next;
                 },
                 .done => return f.pos,
@@ -226,6 +229,12 @@ const Compiler = struct {
                 try c.emit(l.node.*);
                 _ = try c.add(.done);
                 c.prog.items[at] = .{ .look = .{ .negate = l.negate, .next = c.here() } };
+            },
+            .atomic => |inner| {
+                const at = try c.add(.{ .look = .{ .negate = false, .next = 0 } });
+                try c.emit(inner.*);
+                _ = try c.add(.done);
+                c.prog.items[at] = .{ .look = .{ .negate = false, .next = c.here(), .atomic = true } };
             },
         }
     }
@@ -326,11 +335,17 @@ const Parser = struct {
                 else => return result,
             }
             var greedy = true;
-            if (p.eat("?")) greedy = false else if (p.peek() == '+' and c != '{') return error.UnsupportedRegex;
+            var possessive = false; // `?+`, `*+`, `++`: Ruby syntax reads `{n,m}+` as two quantifiers
+            if (p.eat("?")) greedy = false else if (c != '{' and p.eat("+")) possessive = true;
             if (max == null and result.nullable()) return error.UnsupportedRegex;
             const inner = try p.a.create(Node);
             inner.* = result;
             result = .{ .repeat = .{ .node = inner, .min = min, .max = max, .greedy = greedy } };
+            if (possessive) {
+                const repeat = try p.a.create(Node);
+                repeat.* = result;
+                result = .{ .atomic = repeat };
+            }
         }
         return result;
     }
@@ -507,6 +522,48 @@ test "LFM2's pre-tokenizer pattern folds its (?i:) class as the tokenizers libra
         try std.testing.expectError(error.UnsupportedRegex, Regex.compile(arena.allocator(), bad));
 }
 
+test "Ling's pre-tokenizer pattern: possessive quantifiers never give back, as the tokenizers library matches" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const ling = "'(?i:[sdmt]|ll|ve|re)|[^\\r\\n\\p{L}\\p{N}]?+\\p{L}+|\\p{N}|" ++
+        " ?[^\\s\\p{L}\\p{N}]++[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+";
+    const re = try Regex.compile(a, ling);
+    const got = try splitAll(&re, "It'S x'\u{17F} we'LL they'Ve 1234 caf\u{E9}  \n\n  hi!!\r\n  ");
+    defer std.testing.allocator.free(got);
+    const want = [_][]const u8{
+        "It", "'S", " x", "'\u{17F}",   " we",    "'LL", " they", "'Ve",    " ",  "1",
+        "2",  "3",  "4",  " caf\u{E9}", "  \n\n", " ",   " hi",   "!!\r\n", "  ",
+    };
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| try std.testing.expectEqualStrings(w, g);
+    // where giving back would match more: what the tokenizers library's Oniguruma finds
+    const Case = struct { pattern: []const u8, text: []const u8, found: []const []const u8 };
+    const cases = [_]Case{
+        .{ .pattern = "a*+a", .text = "aaa", .found = &.{} },
+        .{ .pattern = "[0-9]?+5", .text = "15 5", .found = &.{"15"} },
+        .{ .pattern = "b?+\\p{L}+", .text = "bb b1", .found = &.{"bb"} },
+        .{ .pattern = "(?:ab)++ab", .text = "abab ab", .found = &.{} },
+        .{ .pattern = "(?:a++)+a", .text = "aaa", .found = &.{} },
+        // the atomic step keeps its body's first match, and only the quantified element is atomic
+        .{ .pattern = "(?:a|ab)?+b", .text = "ab", .found = &.{"ab"} },
+        .{ .pattern = "a?a?+a", .text = "aa", .found = &.{"aa"} },
+        // Ruby syntax reads `{n,m}+` as two quantifiers, so this one gives back
+        .{ .pattern = "a{1,2}+a", .text = "aaaa", .found = &.{"aaaa"} },
+        // a plain lookahead still matches empty: only the atomic step keeps its match
+        .{ .pattern = "a(?=b)", .text = "ab ab", .found = &.{ "a", "a" } },
+    };
+    for (cases) |c| {
+        const found = try splitAll(&try Regex.compile(a, c.pattern), c.text);
+        defer std.testing.allocator.free(found);
+        try std.testing.expectEqual(c.found.len, found.len);
+        for (c.found, found) |w, g| try std.testing.expectEqualStrings(w, g);
+    }
+    // an unbounded repeat of what can match empty is refused, possessive inside or out, as `(a*)*` is
+    try std.testing.expectError(error.UnsupportedRegex, Regex.compile(a, "(?:a*+)*"));
+    try std.testing.expectError(error.UnsupportedRegex, Regex.compile(a, "(?:a?)++"));
+}
+
 test "counted repetition, ranges and refusals" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -521,6 +578,6 @@ test "counted repetition, ranges and refusals" {
     defer std.testing.allocator.free(k);
     try std.testing.expectEqualStrings("\u{3042}\u{4e00}", k[0]);
     try std.testing.expectEqualStrings("-abc", k[1]);
-    for ([_][]const u8{ "\\w+", "(?i:ss)", "a(?<=b)", "\\bx", "(?i)a", "[a[b]]", "(a*)*", "\\p{Latin}", "a++" }) |bad|
+    for ([_][]const u8{ "\\w+", "(?i:ss)", "a(?<=b)", "\\bx", "(?i)a", "[a[b]]", "(a*)*", "\\p{Latin}", "(?>a)" }) |bad|
         try std.testing.expectError(error.UnsupportedRegex, Regex.compile(a, bad));
 }
