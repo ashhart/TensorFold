@@ -1,15 +1,15 @@
 //! A request's stream on the lane host: its kept prefix looked up, its drafter made, the stream set up.
 const std = @import("std");
 const lanes = @import("lanes");
+const host = @import("lane_host.zig");
 const recalls = @import("lane_host_recall.zig");
-const LaneHost = @import("lane_host.zig").LaneHost;
+const LaneHost = host.LaneHost;
 const Job = LaneHost.Job;
 
-/// A job's drafters freed: the family's (LaneHost.proposers) or the built-in one, and its Recall reader.
+/// A job's drafter freed: the family's (LaneHost.proposers) or the built-in one.
 pub fn freeProposer(h: *LaneHost, job: *Job) void {
     if (job.custom) |c| h.proposers.?.free(h.proposers.?.ctx, c) else job.proposer.deinit();
     job.custom = null;
-    recalls.release(job);
 }
 
 /// An admitted job's stream (its kept prefix looked up, its drafter): false when it failed (the job is finished).
@@ -51,6 +51,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .reuse = reuse,
         .grammar = if (r.structure) |st| h.constraint(st) catch |e| {
             freeProposer(h, job);
+            recalls.release(job);
             return !h.drop(job, if (e == error.OutOfMemory) "out of memory" else "the reply's grammar could not start (xgrammar)");
         } else null,
         .decode_spans = h.spans(r),
@@ -60,6 +61,7 @@ pub fn open(h: *LaneHost, job: *Job) bool {
         .key = r.cache_key,
     }) catch {
         freeProposer(h, job);
+        recalls.release(job);
         return !h.drop(job, "out of memory");
     };
     job.started = true;

@@ -1,4 +1,5 @@
 //! Method and path dispatch, as ``do_GET``, ``do_POST`` and ``do_DELETE`` route them.
+const speech = @import("speech.zig");
 const std = @import("std");
 const api = @import("engine_api");
 const json = @import("json");
@@ -64,6 +65,7 @@ fn get(srv: *Server, conn: *Conn, a: Allocator) void {
     if (std.mem.startsWith(u8, route, "/slide/")) return slide.script(srv, conn, a, route["/slide/".len..]);
     if (std.mem.eql(u8, route, "/v1/slide/graph")) return slide.graph(srv, conn, a);
     if (std.mem.eql(u8, route, recall.path)) return recall.get(srv, conn, a);
+    if (std.mem.eql(u8, route, "/v1/benchmark/manifest")) return status.manifestRoute(srv, conn, a) catch {};
     if (route.len == 0 or std.mem.eql(u8, route, "/health")) return status.health(srv, conn, a) catch {};
     if (std.mem.endsWith(u8, route, "/models")) return status.models(srv, conn, a) catch {};
     unknown(conn, a);
@@ -82,9 +84,10 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
     const is_decisions = std.mem.endsWith(u8, route, "/decisions");
     const is_systemone = std.mem.endsWith(u8, route, "/systemone");
     const is_slide = std.mem.eql(u8, route, "/v1/slide/learn");
+    const is_speech = std.mem.eql(u8, route, "/v1/audio/speech");
     const imprint_op: ?api.ImprintOp = if (std.mem.eql(u8, route, "/v1/imprint/resume")) .where else if (std.mem.eql(u8, route, "/v1/imprint/load")) .load else null;
     const is_chat = std.mem.endsWith(u8, route, "/chat/completions");
-    if (!is_slide and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
+    if (!is_slide and !is_speech and imprint_op == null and !is_anthropic and !is_responses and !is_decisions and !is_systemone and !is_chat and !std.mem.endsWith(u8, route, "/completions")) {
         discardBody(conn, a);
         return unknown(conn, a);
     }
@@ -96,6 +99,7 @@ fn post(srv: *Server, conn: *Conn, a: Allocator) void {
         discardBody(conn, a);
         return draining(conn, is_anthropic);
     }
+    if (is_speech) return speech.post(srv, conn, a) catch {};
     if (is_slide) return slide.learn(srv, conn, a);
     if (imprint_op) |op| return imprint.post(srv, conn, a, op);
     if (is_decisions) return decisions.post(srv, conn, a);

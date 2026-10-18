@@ -29,6 +29,13 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     const oracle_tests = b.addRunArtifact(b.addTest(.{ .root_module = bench.root_module }));
     oracle_tests.setCwd(b.path("."));
     const host_step = b.step("test-exl3", "EXL3 extraction, codebook, shape, storage and oracle host contracts");
+    const load_check = b.addObject(.{ .name = "exl3_metal_loader", .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/tests/exl3_metal_compile.zig"),
+        .target = target,
+        .link_libc = true,
+        .imports = &.{ .{ .name = "exl3_projection", .module = projection }, .{ .name = "metal", .module = metal } },
+    }) });
+    host_step.dependOn(&load_check.step);
     host_step.dependOn(&host.step);
     host_step.dependOn(&oracle_tests.step);
     host_tests.dependOn(host_step);

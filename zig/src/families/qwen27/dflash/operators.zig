@@ -51,7 +51,8 @@ pub const Norm = struct { weight: ck.Tensor, eps: f32, heads: u32 = 1, head_dim:
 pub const Rotary = struct { positions: []const u64, heads: u32, dim: u32, theta: f64 };
 pub const Conv = struct { dynamic: View, base: ck.Tensor, branch: u32, group: u32, block: u32, residual: ?View = null };
 pub const BlockMask = enum { all_slots };
-pub const Attention = struct { context: Context, config: Config, layer: u32, query: View, keys: View, values: View, positions: []const u64, mask: BlockMask = .all_slots };
+/// `streams`: a batched pass's contexts, one `block` of rows each, stream k's caches the backend's batch[k].
+pub const Attention = struct { context: Context, config: Config, layer: u32, query: View, keys: View, values: View, positions: []const u64, mask: BlockMask = .all_slots, streams: []const Context = &.{}, block: u32 = 0 };
 pub const Ops = struct {
     ptr: *anyopaque,
     vtable: *const VTable,
@@ -70,12 +71,16 @@ pub const Ops = struct {
         head: *const fn (*anyopaque, u64, View) anyerror!Head,
         // Readback owns its arrays beyond frame release; top-k token ids include any head-subset remapping.
         lattice: *const fn (*anyopaque, u64, Head, View, Config) anyerror!Lattice,
+        // a batched pass's head: one top-k and one wait, then each stream's block of rows past its anchor
+        lattices: *const fn (*anyopaque, u64, Head, View, Config, u32, []Lattice) anyerror!void,
         context_begin: *const fn (*anyopaque, Context) anyerror!u64,
         context_append: *const fn (*anyopaque, u64, u64, u32, View, View, []const u64) anyerror!void,
         context_commit: *const fn (*anyopaque, u64, u64, Context) anyerror!void,
         // context_commit without finishing the frame: the frame's later ops read the appended rows behind their fences.
         context_stage: *const fn (*anyopaque, u64, u64, Context) anyerror!void,
         context_abort: *const fn (*anyopaque, u64) void,
+        // a batched pass's stream k.
+        stream_append: *const fn (*anyopaque, u64, u32, u32, View, View, []const u64) anyerror!void,
     };
 };
 

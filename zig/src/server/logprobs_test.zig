@@ -202,6 +202,54 @@ const NoHistory = struct {
 
 const ask = "{\"model\":\"test-model\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"max_tokens\":32,\"logprobs\":true,\"top_logprobs\":2";
 
+test "issue 969: a first EOS counts in usage but sends no text and classifies as empty_output" {
+    const sse = @import("benchmark_sse.zig");
+    const suite = @import("benchmark_suite.zig");
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u32{ &.{eos}, &.{ 'x', eos } }) |reply| {
+        var got = try send(
+            reply,
+            false,
+            .completions,
+            "{\"model\":\"test-model\",\"prompt\":\"x\",\"max_tokens\":32,\"temperature\":1,\"top_k\":20,\"top_p\":0.95,\"seed\":1235,\"stream\":true,\"stream_options\":{\"include_usage\":true}}",
+        );
+        defer got.deinit();
+        try std.testing.expectEqual(@as(u16, 0), got.status);
+        var stream = try sse.Stream.init(a);
+        var stopped = false;
+        for (got.events.items, 0..) |payload, i| {
+            const v = (try json.parse(a, payload)).ok;
+            if (v.get("choices")) |choices| for (choices.array) |choice| {
+                if (choice.get("finish_reason")) |reason| if (reason == .string) {
+                    try std.testing.expectEqualStrings("stop", reason.string);
+                    stopped = true;
+                };
+            };
+            _ = try stream.line(try std.fmt.allocPrint(a, "data: {s}\n", .{payload}), @intCast(i + 1));
+            _ = try stream.line("\n", @intCast(i + 1));
+        }
+        try std.testing.expect(stopped);
+        _ = try stream.line("data: [DONE]\n", 100);
+        try std.testing.expect(try stream.line("\n", 100));
+        var sample: suite.Sample = .{ .fixture_id = "code", .temperature = 1, .repeat = 1, .seed = 1235 };
+        if (reply.len == 1) {
+            try std.testing.expectError(error.EmptyOutput, stream.finish(32, &sample));
+            try std.testing.expectEqual(suite.ErrorCode.empty_output, sse.code(error.EmptyOutput));
+            try std.testing.expect(stream.first == null and stream.deliveries == 0);
+        } else {
+            try stream.finish(32, &sample);
+            try std.testing.expectEqual(suite.Status.early_eos, sample.status);
+            try std.testing.expectEqual(@as(u32, 1), stream.deliveries);
+        }
+        stream.timings(0, 100, &sample);
+        try std.testing.expectEqual(@as(?u64, reply.len), sample.completion_tokens);
+        try std.testing.expect(sample.delivery_tps == null);
+        if (reply.len == 1) try std.testing.expect(sample.ttft_seconds == null);
+    }
+}
+
 fn tokensOf(comptime s: []const u8) [s.len]u32 {
     var out: [s.len]u32 = undefined;
     for (s, &out) |c, *o| o.* = c;

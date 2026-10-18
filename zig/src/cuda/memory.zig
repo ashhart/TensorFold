@@ -5,15 +5,45 @@ const abi = @import("abi.zig");
 const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
-/// Bytes this process holds in DeviceBuffers and HostBuffers, and the device peak since the last reset.
-pub const Usage = struct { device: u64, host: u64, peak: u64 };
+/// Bytes this process holds in DeviceBuffers and HostBuffers, and device/pinned peaks since the last reset.
+pub const Usage = struct { device: u64, host: u64, peak: u64, host_peak: u64 = 0 };
 
 var device_bytes: std.atomic.Value(u64) = .init(0);
 var host_bytes: std.atomic.Value(u64) = .init(0);
+var host_peak_bytes: std.atomic.Value(u64) = .init(0);
 var peak_bytes: std.atomic.Value(u64) = .init(0);
 var counts_mutex: std.atomic.Mutex = .unlocked;
+var allocation_limit: ?u64 = null;
+var reserved_bytes: u64 = 0;
 
-/// The counts now; `reset_peak` starts a new peak at the current device bytes. Safe from any thread.
+/// Caps DeviceBuffer plus pinned HostBuffer bytes (driver-private ones excluded); returns the previous limit.
+pub fn setAllocationLimit(limit: ?u64) Error!?u64 {
+    lockCounts();
+    defer counts_mutex.unlock();
+    const used = device_bytes.load(.monotonic) +| host_bytes.load(.monotonic) +| reserved_bytes;
+    if (limit) |cap| if (used > cap) return error.OutOfDeviceMemory;
+    const previous = allocation_limit;
+    allocation_limit = limit;
+    return previous;
+}
+
+fn reserveAllocation(n: usize) Error!void {
+    lockCounts();
+    defer counts_mutex.unlock();
+    const used = device_bytes.load(.monotonic) +| host_bytes.load(.monotonic) +| reserved_bytes;
+    if (allocation_limit) |cap| if (n > cap -| used) return error.OutOfDeviceMemory;
+    reserved_bytes = std.math.add(u64, reserved_bytes, n) catch return error.OutOfDeviceMemory;
+}
+
+/// A failed driver call refunds its reservation without changing usage or the measured allocation peak.
+fn finishAllocation(counter: ?*std.atomic.Value(u64), n: usize) void {
+    lockCounts();
+    defer counts_mutex.unlock();
+    reserved_bytes -= n;
+    if (counter) |c| recordAllocation(c, n);
+}
+
+/// The counts now; `reset_peak` starts a new peak at the current device and pinned bytes. Safe from any thread.
 pub fn usage(reset_peak: bool) Usage {
     const NoHook = struct {
         fn afterRead(_: @This()) void {}
@@ -21,27 +51,48 @@ pub fn usage(reset_peak: bool) Usage {
     return usageWithHook(reset_peak, NoHook{});
 }
 
+/// Captures the completed interval and resets both peaks atomically to live bytes.
+pub fn takeUsage() Usage {
+    const NoHook = struct {
+        fn afterRead(_: @This()) void {}
+    };
+    return sample(true, NoHook{}, true);
+}
+
 fn usageWithHook(reset_peak: bool, hook: anytype) Usage {
+    return sample(reset_peak, hook, false);
+}
+
+fn sample(reset_peak: bool, hook: anytype, pre_reset: bool) Usage {
     lockCounts();
     defer counts_mutex.unlock();
     const now = device_bytes.load(.monotonic);
     hook.afterRead();
-    if (reset_peak) peak_bytes.store(now, .monotonic);
-    return .{ .device = now, .host = host_bytes.load(.monotonic), .peak = @max(now, peak_bytes.load(.monotonic)) };
+    const host = host_bytes.load(.monotonic);
+    const peak = @max(now, peak_bytes.load(.monotonic));
+    const host_peak = @max(host, host_peak_bytes.load(.monotonic));
+    if (reset_peak) {
+        peak_bytes.store(now, .monotonic);
+        host_peak_bytes.store(host, .monotonic);
+    }
+    return .{ .device = now, .host = host, .peak = if (pre_reset) peak else @max(now, peak_bytes.load(.monotonic)), .host_peak = if (pre_reset) host_peak else @max(host, host_peak_bytes.load(.monotonic)) };
+}
+
+fn recordAllocation(counter: *std.atomic.Value(u64), n: usize) void {
+    const now = counter.fetchAdd(n, .monotonic) + n;
+    if (counter == &device_bytes) _ = peak_bytes.fetchMax(now, .monotonic);
+    if (counter == &host_bytes) _ = host_peak_bytes.fetchMax(now, .monotonic);
 }
 
 fn held(counter: *std.atomic.Value(u64), n: usize) void {
-    const device = counter == &device_bytes;
-    if (device) lockCounts();
-    defer if (device) counts_mutex.unlock();
-    const now = counter.fetchAdd(n, .monotonic) + n;
-    if (counter == &device_bytes) _ = peak_bytes.fetchMax(now, .monotonic);
+    lockCounts();
+    defer counts_mutex.unlock();
+    recordAllocation(counter, n);
 }
 
 fn freed(counter: *std.atomic.Value(u64), n: usize) void {
-    const device = counter == &device_bytes;
-    if (device) lockCounts();
-    defer if (device) counts_mutex.unlock();
+    lockCounts();
+    defer counts_mutex.unlock();
     _ = counter.fetchSub(n, .monotonic);
 }
 
@@ -75,20 +126,25 @@ pub const DeviceBuffer = struct {
 
     /// `len` bytes, 256-byte aligned (512 from an installed arena); zero bytes allocate nothing and hold address 0.
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
+        try reserveAllocation(len);
+        errdefer finishAllocation(null, len);
         var p: abi.DevicePtr = 0;
         if (len > 0) {
             if (alloc_hook) |h| p = h.alloc(h.ctx, len) orelse 0;
             if (p == 0) try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
         }
-        held(&device_bytes, len);
+        finishAllocation(&device_bytes, len);
         return .{ .d = d, .ptr = p, .len = len };
     }
 
     /// Allocates and fills from host bytes in one call.
     pub fn fromHost(d: *const Driver, bytes: []const u8) Error!DeviceBuffer {
         var b = try alloc(d, bytes.len);
-        errdefer b.free();
-        try b.upload(0, bytes);
+        b.upload(0, bytes) catch |e| { // the copy may still write `b`: it is freed once completion is proved
+            @import("completion.zig").drain(d, .{ .d = d, .handle = null }, "an upload's default stream and context did not drain");
+            b.free();
+            return e;
+        };
         return b;
     }
 
@@ -118,8 +174,7 @@ pub const DeviceBuffer = struct {
     pub fn upload(self: DeviceBuffer, offset: usize, bytes: []const u8) Error!void {
         const dst = try self.span(offset, bytes.len);
         if (bytes.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyHtoD_v2(dst, bytes.ptr, bytes.len), "cuMemcpyHtoD");
-        try self.d.check(self.d.api.cuStreamSynchronize(null), "cuStreamSynchronize");
+        try @import("copy_source.zig").synchronousCopy(self.d, dst, bytes, std.heap.page_allocator);
     }
 
     pub fn download(self: DeviceBuffer, offset: usize, out: []u8) Error!void {
@@ -128,11 +183,11 @@ pub const DeviceBuffer = struct {
         try self.d.check(self.d.api.cuMemcpyDtoH_v2(out.ptr, src, out.len), "cuMemcpyDtoH");
     }
 
-    /// Asynchronous only when `bytes` is pinned (HostBuffer); pageable memory makes the driver stage it.
+    /// Owns a pinned source copy until completion. Captured uploads must use copy_source.Stage or Buffer.
     pub fn uploadAsync(self: DeviceBuffer, offset: usize, bytes: []const u8, stream: abi.Stream) Error!void {
         const dst = try self.span(offset, bytes.len);
         if (bytes.len == 0) return;
-        try self.d.check(self.d.api.cuMemcpyHtoDAsync_v2(dst, bytes.ptr, bytes.len, stream), "cuMemcpyHtoDAsync");
+        try @import("copy_source.zig").enqueue(self.d, dst, bytes, .{ .d = self.d, .handle = stream });
     }
 
     pub fn downloadAsync(self: DeviceBuffer, offset: usize, out: []u8, stream: abi.Stream) Error!void {
@@ -195,9 +250,11 @@ pub const HostBuffer = struct {
 
     fn allocFlags(d: *const Driver, len: usize, flags: c_uint) Error!HostBuffer {
         if (len == 0) return error.Invalid;
+        try reserveAllocation(len);
+        errdefer finishAllocation(null, len);
         var p: ?*anyopaque = null;
         try d.check(d.api.cuMemHostAlloc(&p, len, flags), "cuMemHostAlloc");
-        held(&host_bytes, len);
+        finishAllocation(&host_bytes, len);
         const base: [*]align(16) u8 = @ptrCast(@alignCast(p.?));
         return .{ .d = d, .bytes = base[0..len] };
     }
@@ -296,4 +353,139 @@ test "peak reset preserves an allocation between its read and store" {
     const after = usage(false);
     try std.testing.expectEqual(before.device + 100, after.device);
     try std.testing.expectEqual(before.device + 400, after.peak);
+}
+
+test "allocation cap includes pinned and in-flight bytes and refunds failed driver calls" {
+    const before = usage(true);
+    const base = before.device + before.host;
+    const previous = try setAllocationLimit(base + 16);
+    defer _ = setAllocationLimit(previous) catch unreachable;
+    var pending: usize = 0;
+    defer if (pending > 0) finishAllocation(null, pending);
+
+    try reserveAllocation(12);
+    pending = 12;
+    try std.testing.expectError(error.OutOfDeviceMemory, reserveAllocation(5));
+    try std.testing.expectEqual(before.device, usage(false).device);
+    finishAllocation(null, 12);
+    pending = 0;
+    try std.testing.expectEqual(before.peak, usage(false).peak);
+
+    try reserveAllocation(12);
+    finishAllocation(&host_bytes, 12);
+    defer freed(&host_bytes, 12);
+    try reserveAllocation(4);
+    finishAllocation(&device_bytes, 4);
+    defer freed(&device_bytes, 4);
+    try std.testing.expectError(error.OutOfDeviceMemory, reserveAllocation(1));
+    try std.testing.expectError(error.OutOfDeviceMemory, setAllocationLimit(base + 15));
+    try std.testing.expectEqual(before.host + 12, usage(false).host);
+    try std.testing.expectEqual(before.device + 4, usage(false).device);
+}
+
+test "public allocations refused by the cap skip the driver, and failed driver calls are refunded" {
+    const Fake = struct {
+        var calls: usize = 0;
+        // NOT_READY fails the call without the driver's error log, which would fail the test
+        fn memAlloc(_: *abi.DevicePtr, _: usize) callconv(.c) abi.Result {
+            calls += 1;
+            return abi.error_not_ready;
+        }
+        fn hostAlloc(_: *?*anyopaque, _: usize, _: c_uint) callconv(.c) abi.Result {
+            calls += 1;
+            return abi.error_not_ready;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemAlloc_v2 = Fake.memAlloc;
+    d.api.cuMemHostAlloc = Fake.hostAlloc;
+    const before = usage(true);
+    const previous = try setAllocationLimit(before.device + before.host + 4096);
+    defer _ = setAllocationLimit(previous) catch unreachable;
+
+    // the second call fits only if the first refunded its reservation
+    try std.testing.expectError(error.NotReady, DeviceBuffer.alloc(&d, 4096));
+    try std.testing.expectError(error.NotReady, HostBuffer.alloc(&d, 4096));
+    try std.testing.expectEqual(@as(usize, 2), Fake.calls);
+    try std.testing.expectEqual(before, usage(false));
+
+    try std.testing.expectError(error.OutOfDeviceMemory, DeviceBuffer.alloc(&d, 4097));
+    try std.testing.expectError(error.OutOfDeviceMemory, HostBuffer.alloc(&d, 4097));
+    try std.testing.expectEqual(@as(usize, 2), Fake.calls);
+    try std.testing.expectEqual(before, usage(false));
+}
+
+test "pinned peak retains freed transients and resets to live bytes" {
+    const before = usage(true);
+    held(&host_bytes, 40);
+    held(&host_bytes, 160);
+    freed(&host_bytes, 160);
+    try std.testing.expectEqual(before.host + 40, usage(false).host);
+    try std.testing.expectEqual(before.host + 200, usage(false).host_peak);
+    try std.testing.expectEqual(before.host + 40, usage(true).host_peak);
+    held(&host_bytes, 10);
+    freed(&host_bytes, 50);
+    try std.testing.expectEqual(before.host, usage(false).host);
+    try std.testing.expectEqual(before.host + 50, usage(false).host_peak);
+    _ = usage(true);
+}
+
+test "pinned peak reset preserves an allocation between its read and store" {
+    const before = usage(true);
+    held(&host_bytes, 100);
+    defer freed(&host_bytes, 100);
+    const Probe = struct {
+        read: std.atomic.Value(bool) = .init(false),
+        attempted: std.atomic.Value(bool) = .init(false),
+        blocked: std.atomic.Value(bool) = .init(false),
+        allocated: std.atomic.Value(bool) = .init(false),
+        finish: std.atomic.Value(bool) = .init(false),
+
+        fn wait(flag: *std.atomic.Value(bool)) void {
+            while (!flag.load(.acquire)) std.Thread.yield() catch {};
+        }
+
+        fn afterRead(probe: *@This()) void {
+            probe.read.store(true, .release);
+            wait(&probe.attempted);
+            if (!probe.blocked.load(.acquire)) wait(&probe.allocated);
+        }
+
+        fn allocate(probe: *@This()) void {
+            wait(&probe.read);
+            const acquired = counts_mutex.tryLock();
+            if (acquired) counts_mutex.unlock();
+            probe.blocked.store(!acquired, .release);
+            probe.attempted.store(true, .release);
+            held(&host_bytes, 300);
+            probe.allocated.store(true, .release);
+            wait(&probe.finish);
+            freed(&host_bytes, 300);
+        }
+    };
+    var probe: Probe = .{};
+    const thread = try std.Thread.spawn(.{}, Probe.allocate, .{&probe});
+    _ = usageWithHook(true, &probe);
+    probe.finish.store(true, .release);
+    thread.join();
+    const after = usage(false);
+    try std.testing.expectEqual(before.host + 100, after.host);
+    try std.testing.expectEqual(before.host + 400, after.host_peak);
+}
+
+test "taking an interval preserves transient peaks before resetting them" {
+    const before = usage(true);
+    held(&host_bytes, 48);
+    held(&device_bytes, 96);
+    freed(&host_bytes, 48);
+    freed(&device_bytes, 96);
+    const interval = takeUsage();
+    try std.testing.expectEqual(before.host + 48, interval.host_peak);
+    try std.testing.expectEqual(before.device + 96, interval.peak);
+    try std.testing.expectEqual(before.host, usage(false).host_peak);
+    try std.testing.expectEqual(before.device, usage(false).peak);
+}
+
+pub fn releaseRetainedHost(bytes: usize) void {
+    freed(&host_bytes, bytes);
 }

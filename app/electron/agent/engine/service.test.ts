@@ -85,8 +85,8 @@ async function main() {
     await assert.rejects(() => offline.search('qwen'), /HF_HUB_OFFLINE/)
 
     // Unsupported repos are refused before any pull starts.
-    const refusing = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('google/gemma-9', 1024, 'gemma4'), totalMemoryBytes: 32 * GIB, emit: () => {} })
-    await assert.rejects(() => refusing.pull('google/gemma-9'), /serves no gemma4 family/)
+    const refusing = new EngineService({ binaryPath: '/fake/tensorfold-native', binary: h.binary, appHome: h.root, childEnv: h.env, fetch: hubFetch('google/gemma-9', 1024, 'gemma4_unified'), totalMemoryBytes: 32 * GIB, emit: () => {} })
+    await assert.rejects(() => refusing.pull('google/gemma-9'), /serves no gemma4_unified family/)
     await assert.rejects(() => refusing.pull('../../etc'), /owner\/name/)
 
     // Load, then delete is refused until unloaded; delete removes only the cache folder.
