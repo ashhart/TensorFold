@@ -3,7 +3,9 @@ const std = @import("std");
 
 /// The contract module alone (its host tests run in `zig build test` through core/root.zig).
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/contract.zig"), .target = target, .optimize = optimize });
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/core/contract.zig"), .target = target, .optimize = optimize });
+    m.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    return m;
 }
 
 /// `test-kernel-contract` on every host: the gates' own tests and every registered launch against every chip's limits.

@@ -2,7 +2,7 @@
 const std = @import("std");
 const platform = @import("sys");
 const builtin = @import("builtin");
-const abi = @import("verbs_abi.zig");
+pub const abi = @import("verbs_abi.zig");
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NoDeviceList, NoSuchDevice, VerbsFailed, BadDeviceList, NoUsableGid };
 pub const max_links = 8;
@@ -51,12 +51,15 @@ pub const Api = struct {
 /// Exported by rdma-core 34+ but not in every header; used only when present.
 const GidEx = *const fn (ctx: Ctx, port: u32, index: u32, entry: *abi.GidEntry, flags: u32, size: usize) callconv(.c) c_int;
 const InOrder = *const fn (qp: *abi.Qp, op: c_int, flags: u32) callconv(.c) c_int;
+/// ibv_query_qp: the QP's state as the device holds it (not every library exports it; used only when present).
+pub const QueryQp = *const fn (qp: *abi.Qp, attr: *abi.QpAttr, mask: c_int, init: *abi.QpInitAttr) callconv(.c) c_int;
 
 pub const Verbs = struct {
     lib: platform.DynLib,
     api: Api,
     gid_ex: ?GidEx = null,
     in_order: ?InOrder = null,
+    query_qp: ?QueryQp = null,
 
     pub fn open(path: ?[:0]const u8) Error!Verbs {
         var lib = platform.DynLib.openZ((path orelse default_path).ptr) catch return error.LibraryUnavailable;
@@ -69,6 +72,7 @@ pub const Verbs = struct {
         var v: Verbs = .{ .lib = lib, .api = api };
         v.gid_ex = v.lib.lookup(GidEx, "_ibv_query_gid_ex");
         v.in_order = v.lib.lookup(InOrder, "ibv_query_qp_data_in_order");
+        v.query_qp = v.lib.lookup(QueryQp, "ibv_query_qp");
         return v;
     }
 

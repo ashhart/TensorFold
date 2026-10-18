@@ -498,7 +498,7 @@ pub const LaneHost = struct {
     }
 
     fn run(h: *LaneHost) void {
-        if (h.on_thread) |t| t.run(t.ctx) catch |e| std.log.err("lane host: the engine thread's init failed ({t})", .{e});
+        if (!@import("lane_thread.zig").start(h)) return;
         // a family planner: prompt pieces and decode rows in one pass; else whole or `prefill_step` chunked prompts
         if (h.rounds) |rd| return rounds.run(h, rd);
         while (true) {
@@ -554,10 +554,5 @@ pub const LaneHost = struct {
 
 test {
     _ = @import("lane_host_frame_test.zig");
-    _ = @import("lane_host_test.zig");
-    _ = @import("lane_rounds_test.zig");
-    _ = @import("lane_halt_test.zig");
-    _ = @import("lane_host_end_test.zig");
-    _ = @import("lane_review_test.zig");
-    _ = @import("lane_host_first_test.zig");
+    _ = @import("lane_host_tests.zig");
 }

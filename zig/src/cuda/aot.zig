@@ -45,6 +45,20 @@ const KernelJson = struct {
 };
 const SetJson = struct { kernels: []KernelJson };
 
+/// A variant's description in aot.json, and a whole set's: what `Set.find` matches launches against.
+pub const Spec = KernelJson;
+pub const SpecSet = SetJson;
+
+/// aot.json parsed without loading any cubin (host-side checks of variant selection).
+pub fn parseSpecs(gpa: std.mem.Allocator, text: []const u8) !std.json.Parsed(SpecSet) {
+    return std.json.parseFromSlice(SpecSet, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+}
+
+/// Whether variant `k` can serve these arguments and constexprs: `Set.find` takes an exact variant first, else this.
+pub fn specMatches(k: Spec, args: []const Arg, consts: []const Const) bool {
+    return matches(k, args, consts, .general);
+}
+
 /// One argument of a launch, by the kernel's parameter name.
 pub const Arg = struct {
     name: []const u8,
@@ -81,6 +95,8 @@ pub const Set = struct {
     parsed: std.json.Parsed(SetJson),
     variants: []Variant,
     gpa: std.mem.Allocator,
+    /// every distinct lookup key and its outcome, when the caller attaches a Trace (the set destroys it)
+    trace: ?*Trace = null,
 
     /// Loads every cubin listed in `dir`/aot.json into its own module.
     pub fn load(gpa: std.mem.Allocator, io: std.Io, d: *const Driver, device: abi.Device, dir: []const u8) !Set {
@@ -88,7 +104,7 @@ pub const Set = struct {
         defer gpa.free(path);
         const text = try std.Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 24));
         defer gpa.free(text);
-        const parsed = try std.json.parseFromSlice(SetJson, gpa, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always });
+        const parsed = try parseSpecs(gpa, text);
         errdefer parsed.deinit();
         const variants = try gpa.alloc(Variant, parsed.value.kernels.len);
         var n: usize = 0;
@@ -112,6 +128,7 @@ pub const Set = struct {
     }
 
     pub fn deinit(self: *Set) void {
+        if (self.trace) |t| t.destroy();
         for (self.variants) |*v| v.kernel.unload();
         self.gpa.free(self.variants);
         self.parsed.deinit();
@@ -122,13 +139,14 @@ pub const Set = struct {
     pub fn find(self: *const Set, function: []const u8, args: []const Arg, consts: []const Const) !*const Variant {
         for (self.variants) |*v| {
             if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
-            if (matches(v.spec, args, consts, .exact)) return v;
+            if (matches(v.spec, args, consts, .exact)) return self.hit(function, args, consts, v);
         }
         // a variant that assumes less of an argument than the launch gives computes the same for it, so it may serve
         for (self.variants) |*v| {
             if (!std.mem.eql(u8, v.spec.@"fn", function)) continue;
-            if (matches(v.spec, args, consts, .general)) return v;
+            if (matches(v.spec, args, consts, .general)) return self.hit(function, args, consts, v);
         }
+        if (self.trace) |t| t.note(function, args, consts, null);
         std.log.err("no captured Triton variant of {s} for this launch:", .{function});
         for (args) |a| switch (a.value) {
             .ptr => |p| std.log.err("  {s}: {s} at {x} (16-aligned {})", .{ a.name, p.ty, p.addr, p.addr % 16 == 0 }),
@@ -136,7 +154,17 @@ pub const Set = struct {
             .f32 => |x| std.log.err("  {s}: fp32 {d}", .{ a.name, x }),
             .u64 => |x| std.log.err("  {s}: u64 {d}", .{ a.name, x }),
         };
+        // the constexprs pick the variant as much as the arguments do: without them the gap cannot be named
+        for (consts) |c| {
+            if (c.int) |x| std.log.err("  constexpr {s} = {d}", .{ c.name, x }) else if (c.f32) |x| std.log.err("  constexpr {s} = {d}", .{ c.name, x });
+        }
         return error.MissingTritonVariant;
+    }
+
+    /// A found variant, noted in the trace when one is attached.
+    fn hit(self: *const Set, function: []const u8, args: []const Arg, consts: []const Const, v: *const Variant) *const Variant {
+        if (self.trace) |t| t.note(function, args, consts, v.spec.hash);
+        return v;
     }
 
     /// Whether the set holds any variant of `function`.
@@ -156,7 +184,7 @@ pub const Set = struct {
         return best;
     }
 
-    /// Launches `function` on `grid` as Triton's launcher would: runtime arguments in the variant's order, scratch null.
+    /// Launches `function` on `grid` with Triton's argument order and null scratch.
     pub fn run(self: *const Set, stream: Stream, function: []const u8, grid: [3]u32, args: []const Arg, consts: []const Const) !void {
         const v = try self.find(function, args, consts);
         var packed_args: launch.Args = .{};
@@ -170,6 +198,89 @@ pub const Set = struct {
             }
         }
         try v.kernel.launchOn(.{ .x = grid[0], .y = grid[1], .z = grid[2] }, stream, &packed_args, .{}, &.{});
+    }
+};
+
+/// One JSON line per distinct `find` key (as `matches` reads it) and its hit hash or null, rewritten to `path`.
+pub const Trace = struct {
+    gpa: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    mutex: std.Io.Mutex = .init,
+    seen: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    text: std.ArrayList(u8) = .empty,
+
+    pub fn create(gpa: std.mem.Allocator, io: std.Io, path: []const u8) !*Trace {
+        const t = try gpa.create(Trace);
+        errdefer gpa.destroy(t);
+        t.* = .{ .gpa = gpa, .io = io, .path = try gpa.dupe(u8, path) };
+        return t;
+    }
+
+    pub fn destroy(t: *Trace) void {
+        t.seen.deinit(t.gpa);
+        t.text.deinit(t.gpa);
+        t.gpa.free(t.path);
+        t.gpa.destroy(t);
+    }
+
+    /// The key's hash: what `matches` tells apart, nothing else (equal keys pick the same variant).
+    pub fn key(function: []const u8, args: []const Arg, consts: []const Const) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(function);
+        for (args) |a| {
+            h.update(a.name);
+            h.update(class(a));
+            if (a.value == .ptr) h.update(a.value.ptr.ty);
+        }
+        for (consts) |c| {
+            h.update(c.name);
+            if (c.int) |x| h.update(std.mem.asBytes(&x));
+            if (c.f32) |x| h.update(std.mem.asBytes(&@as(u32, @bitCast(x))));
+            h.update("|");
+        }
+        return h.final();
+    }
+
+    fn class(a: Arg) []const u8 {
+        return switch (a.value) {
+            .i32 => |x| if (x == 1) "1" else if (@mod(x, 16) == 0) "div16" else "int",
+            .ptr => |x| if (x.addr % 16 == 0) "ptr/16" else "ptr",
+            .f32 => "fp32",
+            .u64 => |x| if (x % 16 == 0) "u64/16" else "u64",
+        };
+    }
+
+    pub fn note(t: *Trace, function: []const u8, args: []const Arg, consts: []const Const, hash: ?[]const u8) void {
+        const k = key(function, args, consts);
+        t.mutex.lockUncancelable(t.io);
+        defer t.mutex.unlock(t.io);
+        const got = t.seen.getOrPut(t.gpa, k) catch return;
+        if (got.found_existing) return;
+        t.line(function, args, consts, hash) catch return;
+        std.Io.Dir.cwd().writeFile(t.io, .{ .sub_path = t.path, .data = t.text.items }) catch {};
+    }
+
+    fn line(t: *Trace, function: []const u8, args: []const Arg, consts: []const Const, hash: ?[]const u8) !void {
+        var w: std.Io.Writer.Allocating = .fromArrayList(t.gpa, &t.text);
+        defer t.text = w.toArrayList();
+        const o = &w.writer;
+        try o.print("{{\"fn\":\"{s}\",\"hit\":", .{function});
+        if (hash) |x| try o.print("\"{s}\"", .{x}) else try o.writeAll("null");
+        try o.writeAll(",\"args\":{");
+        for (args, 0..) |a, i| {
+            const ty = switch (a.value) {
+                .ptr => |x| x.ty,
+                else => "",
+            };
+            try o.print("{s}\"{s}\":\"{s}{s}{s}\"", .{ if (i > 0) "," else "", a.name, ty, if (ty.len > 0) " " else "", class(a) });
+        }
+        try o.writeAll("},\"consts\":{");
+        for (consts, 0..) |c, i| {
+            try o.print("{s}\"{s}\":", .{ if (i > 0) "," else "", c.name });
+            if (c.int) |x| try o.print("{d}", .{x}) else if (c.f32) |x| try o.print("{e}", .{x}) else try o.writeAll("null");
+        }
+        try o.writeAll("}}\n");
     }
 };
 
@@ -235,6 +346,70 @@ fn matches(k: KernelJson, args: []const Arg, consts: []const Const, fit: Fit) bo
         runtime += 1;
     }
     return runtime == k.params.len;
+}
+
+// -- tests: variant selection over an aot.json fixture, and the trace's one line per distinct key -------------------
+
+const fixture =
+    \\{"kernels": [
+    \\  {"fn": "add", "hash": "a16", "name": "add_k", "num_warps": 4, "extra": "ignored",
+    \\   "params": [{"name": "x", "type": "fp16", "div16": true, "nospec": false},
+    \\              {"name": "n", "type": "i32", "div16": true, "nospec": false}],
+    \\   "consts": {"BLOCK": {"int": 128}}},
+    \\  {"fn": "add", "hash": "a1", "name": "add_k", "num_warps": 4,
+    \\   "params": [{"name": "x", "type": "fp16", "div16": false, "nospec": false},
+    \\              {"name": "n", "type": "i32", "div16": false, "nospec": false}],
+    \\   "consts": {"BLOCK": {"int": 128}}},
+    \\  {"fn": "add", "hash": "one", "name": "add_k", "num_warps": 4,
+    \\   "params": [{"name": "x", "type": "fp16", "div16": true, "nospec": false}],
+    \\   "consts": {"BLOCK": {"int": 128}, "n": {"int": 1}}}
+    \\]}
+;
+
+fn picked(set: SpecSet, args: []const Arg, consts: []const Const) ?[]const u8 {
+    for (set.kernels) |k| if (specMatches(k, args, consts)) return k.hash;
+    return null;
+}
+
+test "aot specs: Triton's specialization picks the variant; a launch no variant covers picks none" {
+    const t = std.testing;
+    const p = try parseSpecs(t.allocator, fixture);
+    defer p.deinit();
+    try t.expectEqual(@as(usize, 3), p.value.kernels.len);
+    try t.expectEqual(@as(u32, 1), p.value.kernels[0].num_ctas); // a field aot.json leaves out takes its default
+    const block = [_]Const{ci("BLOCK", 128)};
+    try t.expectEqualStrings("a16", picked(p.value, &.{ ptr("x", "fp16", 0x1000), int("n", 64) }, &block).?);
+    try t.expectEqualStrings("a1", picked(p.value, &.{ ptr("x", "fp16", 0x1004), int("n", 63) }, &block).?);
+    // n == 1 was folded into a constexpr when Triton compiled it: only the variant without an n parameter takes it
+    try t.expectEqualStrings("one", picked(p.value, &.{ ptr("x", "fp16", 0x1000), int("n", 1) }, &block).?);
+    // an unaligned pointer with a 16-divisible count: the variant that assumes neither serves it
+    try t.expectEqualStrings("a1", picked(p.value, &.{ ptr("x", "fp16", 0x1004), int("n", 64) }, &block).?);
+    // another dtype, another constexpr: no variant was captured
+    try t.expectEqual(@as(?[]const u8, null), picked(p.value, &.{ ptr("x", "bf16", 0x1000), int("n", 64) }, &block));
+    try t.expectEqual(@as(?[]const u8, null), picked(p.value, &.{ ptr("x", "fp16", 0x1000), int("n", 64) }, &.{ci("BLOCK", 256)}));
+}
+
+test "aot trace: one line per distinct key, a launch that differs only in what matches ignores adds none" {
+    const t = std.testing;
+    var tmp = t.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.realPathFileAlloc(t.io, ".", t.allocator);
+    defer t.allocator.free(dir);
+    const path = try std.fs.path.join(t.allocator, &.{ dir, "trace.jsonl" });
+    defer t.allocator.free(path);
+    const tr = try Trace.create(t.allocator, t.io, path);
+    defer tr.destroy();
+    const block = [_]Const{ci("BLOCK", 128)};
+    tr.note("add", &.{ ptr("x", "fp16", 0x1000), int("n", 64) }, &block, "a16");
+    tr.note("add", &.{ ptr("x", "fp16", 0x2000), int("n", 32) }, &block, "a16"); // the same key: both 16-aligned
+    tr.note("add", &.{ ptr("x", "fp16", 0x1004), int("n", 64) }, &block, null);
+    const got = try std.Io.Dir.cwd().readFileAlloc(t.io, path, t.allocator, .limited(1 << 16));
+    defer t.allocator.free(got);
+    try t.expectEqualStrings(
+        \\{"fn":"add","hit":"a16","args":{"x":"fp16 ptr/16","n":"div16"},"consts":{"BLOCK":128}}
+        \\{"fn":"add","hit":null,"args":{"x":"fp16 ptr","n":"div16"},"consts":{"BLOCK":128}}
+        \\
+    , got);
 }
 
 /// A set parsed from aot.json text whose variants carry no loaded cubin, so find can be tested without a GPU.

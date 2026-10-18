@@ -16,6 +16,8 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("drain_test.zig");
+    _ = @import("keepalive_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");

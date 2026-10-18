@@ -10,7 +10,6 @@ const nvfp4 = @import("nvfp4.zig");
 const ck = @import("ck.zig");
 const exl3 = @import("exl3.zig");
 const ggml = @import("ggml.zig");
-
 const Driver = driver.Driver;
 const Module = module.Module;
 const Function = module.Function;
@@ -592,4 +591,9 @@ test "split_k follows the Python shapes" {
 
 test {
     _ = @import("qlinear_test.zig");
+}
+
+pub const block = exl3.block;
+test {
+    _ = @import("qlinear_exl3_entry_test.zig");
 }

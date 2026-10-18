@@ -322,3 +322,24 @@ TensorFold ships no Drama 3 weights and no codec weights. [fishaudio/drama-3](ht
 and its `codec.pth` are under the Fish Audio Community License Agreement v1.0: research and non-commercial use,
 commercial use below its revenue threshold, and no Hosted Service without a separate license from Fish Audio. Users
 obtain the checkpoint and accept that license themselves.
+
+## DeepSeek-V4.1 shared checkpoint forms
+
+The DeepSeek-V4.1 config and checkpoint planning combine @jayleaton’s chain (#727) and
+@akol1’s #825 admission. The reference is DeepSeek AI’s MIT licensed inference at revision
+2cba9e42aa026125f3ed06c6d98c1db82f7ca027, Copyright (c) 2023 DeepSeek.
+EXL3 scanning reuses the common checkpoint scanner and retains its ExLlamaV3 attribution.
+
+The shared Engram host code and token-map builder combine @jayleaton’s #668 and @akol1’s
+#824, #825 and #826. Normalization, PCG64 and bucket metadata follow the pinned DeepSeek MIT reference
+above. nfkd_data.zig is generated Unicode decomposition data from #824; it is kept verbatim.
+
+## DeepSeek-V4.1 CUDA sources
+
+The CUDA sources and loading combine @jayleaton’s #671, #674 and #727 contributions. Source comments retain
+the original TensorFold Python-kernel blob receipts. Generic EXL3 variants extend the one
+common EXL3 operators and their per-slot epilogues; tile decoding is shared.
+The ExLlamaV3 MIT attribution, Copyright (c) 2025 Turboderp, applies as described above.
+No external reference, captured cubin, model shard or CUDA compiler is bundled by this patch.
+
+The tensor-parallel fabric also uses the RoCE design described above (`zig/src/fabric/tp/mailbox.cu`, `roce.zig`, `roce_verbs.zig`).

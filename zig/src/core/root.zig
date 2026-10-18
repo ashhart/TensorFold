@@ -94,3 +94,7 @@ test {
 
 pub const frame_rounds = @import("frame_rounds.zig");
 pub const tree_slots = @import("tree_slots.zig");
+
+pub const exl3_layout = @import("exl3_layout.zig");
+
+pub const exl3_prepare = @import("exl3_prepare.zig");

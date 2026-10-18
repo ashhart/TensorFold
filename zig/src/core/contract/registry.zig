@@ -1,22 +1,21 @@
 //! The registered launches gate 5 checks: each one's threads and memory, and the limits its compiles recorded.
 const std = @import("std");
 const limits = @import("limits.zig");
-
 const M = limits.MetalLaunch;
 const C = limits.CudaLaunch;
 const U = limits.Usage;
-
 /// A CUDA launch and what nvcc made of it for sm_80, sm_86, sm_89, sm_120 and sm_121 (limits.sms' order; regs 0: none).
-pub const CudaRecord = struct { launch: C, usage: [limits.sms.len]U };
-
-const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
+pub const CudaRecord = struct { launch: C, usage: [limits.sms.len]U, geometry_pending: bool = false, optional_shared: bool = false };
+const target = @import("registry_target.zig");
+pub const TargetDecision = target.TargetDecision;
+pub const targetDecision = target.targetDecision;
+pub const none: [limits.sms.len]U = @splat(.{ .regs = 0, .static = 0 });
 const group_symbol = "_ZN12tf_qmm_group12group_kernelILi64ELi16ELi64ELi1ELi4ELi8ELb0ELb0ELb0ELb0EEEvPK13__nv_bfloat16PKfNS_5PartsEiiiii";
 const gemv_symbol = "_ZN12tf_lane_gemv11gemv_kernelILi64ELi64ELi8EEEvPK13__nv_bfloat16PKfNS_4PartEiii";
 const prompt_symbol = "_ZN11tf_prompt1613prompt_kernelILi{d}ELi128ELi128ELi2ELi2ELi2ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPviiiiii";
 const qmmf_f32_symbol = "_ZN7tf_qmmf11qmmf_kernelILi0ELi{d}ELi64ELi1ELi4ELi4ELb1ELb{d}ELb{d}EEEvPK13__nv_bfloat16PKhS5_fPvPfiiiiiii";
 const vision80_symbol = "_ZN20tf_prefill_attention13vision_kernelILi80ELi8EEEvPK13__nv_bfloat16PS1_iif";
 const full72_symbol = "_ZN20tf_prefill_attention11full_kernelILi72ELi8ELi8EEEvPK13__nv_bfloat16PS1_iif";
-
 /// CUDA kernels as launched; tf-cuda-test kernel-contract-limits re-derives the usage records.
 pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "flashnext_gdn flashnext_gdn_chain", .symbol = "flashnext_gdn_chain", .image = "flashnext_gdn", .threads = 1024 }, .usage = .{ .{ .regs = 51, .static = 2060, .bound = 1024 }, .{ .regs = 56, .static = 2060, .bound = 1024 }, .{ .regs = 56, .static = 2060, .bound = 1024 }, .{ .regs = 62, .static = 2060, .bound = 1024 }, .{ .regs = 62, .static = 2060, .bound = 1024 } } },
@@ -193,13 +192,13 @@ pub const cuda = [_]CudaRecord{
     .{ .launch = .{ .name = "exl3_linear tf_exl3_linear_12_0_8", .symbol = "tf_exl3_linear_12_0_8", .image = "exl3_linear", .threads = 256, .dynamic = 32768 }, .usage = .{ .{ .regs = 198, .static = 16, .bound = 256 }, .{ .regs = 198, .static = 16, .bound = 256 }, .{ .regs = 198, .static = 16, .bound = 256 }, .{ .regs = 226, .static = 16, .bound = 256 }, .{ .regs = 226, .static = 16, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_linear tf_exl3_linear_14_0_8", .symbol = "tf_exl3_linear_14_0_8", .image = "exl3_linear", .threads = 256, .dynamic = 32768 }, .usage = .{ .{ .regs = 225, .static = 16, .bound = 256 }, .{ .regs = 225, .static = 16, .bound = 256 }, .{ .regs = 225, .static = 16, .bound = 256 }, .{ .regs = 127, .static = 16, .bound = 256 }, .{ .regs = 127, .static = 16, .bound = 256 } } },
     .{ .launch = .{ .name = "exl3_linear tf_exl3_linear_16_0_8", .symbol = "tf_exl3_linear_16_0_8", .image = "exl3_linear", .threads = 256, .dynamic = 32768 }, .usage = .{ .{ .regs = 220, .static = 16, .bound = 256 }, .{ .regs = 220, .static = 16, .bound = 256 }, .{ .regs = 220, .static = 16, .bound = 256 }, .{ .regs = 125, .static = 16, .bound = 256 }, .{ .regs = 125, .static = 16, .bound = 256 } } },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_group", .symbol = "tf_exl3_group", .image = "exl3_experts", .threads = 1024, .dynamic = 8192 }, .usage = .{ .{ .regs = 32, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 } } },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_group", .symbol = "tf_exl3_group", .image = "exl3_experts", .threads = 1024, .dynamic = 49152, .opt_in = true }, .usage = .{ .{ .regs = 32, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 }, .{ .regs = 42, .static = 128, .bound = 1024 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_experts_rot_in", .symbol = "tf_exl3_experts_rot_in", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 }, .{ .regs = 19, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_grouped_0", .symbol = "tf_exl3_grouped_0", .image = "exl3_experts", .threads = 128 }, .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 127, .static = 32832, .bound = 0 }, .{ .regs = 127, .static = 32832, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_grouped_1", .symbol = "tf_exl3_grouped_1", .image = "exl3_experts", .threads = 128 }, .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 127, .static = 32832, .bound = 0 }, .{ .regs = 127, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_grouped_2", .symbol = "tf_exl3_grouped_2", .image = "exl3_experts", .threads = 128 }, .usage = .{ .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 }, .{ .regs = 128, .static = 32832, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_gateup_epilogue", .symbol = "tf_exl3_gateup_epilogue", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
-    .{ .launch = .{ .name = "exl3_experts tf_exl3_down_combine", .symbol = "tf_exl3_down_combine", .image = "exl3_experts", .threads = 256 }, .usage = .{ .{ .regs = 32, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 } } },
+    .{ .launch = .{ .name = "exl3_experts tf_exl3_down_combine", .symbol = "tf_exl3_down_combine", .image = "exl3_experts", .threads = 1024 }, .usage = .{ .{ .regs = 32, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 40, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 }, .{ .regs = 44, .static = 16384, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_rotate", .symbol = "tf_exl3_plan_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 32, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 33, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 }, .{ .regs = 31, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_plan_finish", .symbol = "tf_exl3_plan_finish", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 }, .{ .regs = 40, .static = 0, .bound = 0 } } },
     .{ .launch = .{ .name = "exl3_experts tf_exl3_prompt_rotate", .symbol = "tf_exl3_prompt_rotate", .image = "exl3_experts", .threads = 32 }, .usage = .{ .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 24, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 }, .{ .regs = 20, .static = 0, .bound = 0 } } },
@@ -226,13 +225,10 @@ pub const cuda = [_]CudaRecord{
 
 /// The nvcc release `cuda`'s usage records come from: the compiler that builds the release fatbins.
 pub const cuda_release: limits.Nvcc = .{ .major = 13, .minor = 0 };
-
 /// One launch's usage under a later nvcc, by the record's name.
 pub const Override = struct { name: []const u8, usage: [limits.sms.len]U };
-
 /// A later nvcc's records: the launches it compiles differently from the release before it.
 pub const CudaSet = struct { release: limits.Nvcc, usage: []const Override };
-
 /// The later releases' sets, rising by release; a tree's images are checked against the newest at or below their own.
 pub const cuda_sets = [_]CudaSet{
     .{ .release = .{ .major = 13, .minor = 2 }, .usage = &([_]Override{
@@ -342,7 +338,6 @@ pub const cuda_sets = [_]CudaSet{
         .{ .name = "router tf_nemo_topk", .usage = .{ .{ .regs = 94, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 95, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 }, .{ .regs = 96, .static = 0, .bound = 32 } } },
     } },
 };
-
 pub fn newer(x: limits.Nvcc, y: limits.Nvcc) bool {
     return x.major > y.major or (x.major == y.major and x.minor > y.minor);
 }
@@ -414,7 +409,15 @@ pub fn checkCuda(a: std.mem.Allocator, list: []const CudaRecord, quiet: bool) !u
     defer out.deinit(a);
     var n: usize = 0;
     for (list) |r| for (limits.sms, r.usage) |t, u| {
-        if (u.regs == 0) {
+        const decision = targetDecision(r, t, u);
+        if (decision != .applicable) {
+            if (decision == .optional_shared_limit) try out.print(a, "N/A {s} on sm_{d}: optional shared-memory limit\n", .{ r.launch.name, t.sm });
+            continue;
+        }
+        if (r.geometry_pending) {
+            try out.print(a, "{s} on sm_{d}: exact launch geometry pending\n", .{ r.launch.name, t.sm });
+            n += 1;
+        } else if (u.regs == 0) {
             try out.print(a, "{s} on sm_{d}: no compiled usage recorded\n", .{ r.launch.name, t.sm });
             n += 1;
         } else n += try limits.cuda(r.launch, u, t, &out, a);
@@ -616,9 +619,15 @@ pub const all_metal = metal ++ @import("delta_slots_records.zig").records ++ @im
 const learning = @import("registry_learning.zig");
 pub const gradient_pending = learning.gradient_pending;
 pub const qwen_learning_pending = learning.qwen_learning_pending;
-pub const all_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records;
+pub const landed_cuda = cuda ++ gradient_pending ++ qwen_learning_pending ++ paging.extra ++ @import("qwen_served_records.zig").records ++ cuda_pending ++ @import("qwen_decode_pending.zig").records;
 test {
     _ = learning;
+}
+
+pub const all_cuda = landed_cuda ++ dsv41_pending;
+pub const dsv41_pending = @import("registry_union.zig").extra(landed_cuda, @import("dsv41_pending_1.zig").records ++ @import("dsv41_pending_2.zig").records);
+test {
+    _ = @import("registry_pending_test.zig");
 }
 
 test "pending CUDA records cannot pass a compiled resource check" {

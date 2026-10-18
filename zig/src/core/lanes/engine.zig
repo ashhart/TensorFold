@@ -22,11 +22,9 @@ const Plan = win.Plan;
 const f = ev.f;
 const str = trail.str;
 const int = trail.int;
-
 const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
 const Result = struct { rows: u32, keep: u32, got: []const u32 };
 const Unread = struct { event: usize, handle: u64 };
-
 pub const Engine = struct {
     const pieces_ = @import("pieces.zig");
     pub const beginStream = pieces_.beginStream;

@@ -32,6 +32,7 @@ pub const CompactAt = union(enum) { auto, fraction: f64 };
 pub const Identity = @import("identity.zig").Identity;
 
 pub const Config = struct {
+    sse_keepalive_s: f64 = 15,
     served_name: []const u8,
     model_dir: []const u8 = "",
     /// The served name first, then aliases, without repeats.
@@ -97,6 +98,8 @@ pub const Server = struct {
     next_id: std.atomic.Value(u64) = .init(1),
     /// Connections open now; a stop waits for them before freeing what they read.
     open_connections: std.atomic.Value(u32) = .init(0),
+    draining: std.atomic.Value(bool) = .init(false),
+    generating: std.atomic.Value(u32) = .init(0),
     /// The idle keepalive on the engine's queue, armed by --keep-warm; null when off or not Metal.
     keepalive: ?*api.keepalive.Keepalive = null,
     preparing: std.atomic.Value(i64) = .init(0),
@@ -155,8 +158,13 @@ pub const Server = struct {
         return srv;
     }
 
+    pub fn stopKeepalive(srv: *Server) void {
+        if (srv.keepalive) |k| k.stop();
+        srv.keepalive = null;
+    }
+
     pub fn deinit(srv: *Server) void {
-        if (srv.keepalive) |k| k.stop(); // before the engine's queue goes away
+        srv.stopKeepalive();
         if (srv.grammars) |g| g.close();
         srv.metrics.deinit();
         srv.arena.deinit();
@@ -365,7 +373,7 @@ fn lateSystem(a: Allocator, text: model_text.Text) ![]const u8 {
     return if (std.mem.indexOf(u8, rendered, probe_text) != null) "system" else "user";
 }
 
-/// ``needs_user_after_tool``: templates raising "No user query found" gain a user turn after a trailing tool message.
+/// Templates requiring a user query gain a user turn after trailing tool results replace their last user turn.
 fn needsUserAfterTool(source: []const u8) bool {
     return std.mem.indexOf(u8, source, "No user query found") != null;
 }

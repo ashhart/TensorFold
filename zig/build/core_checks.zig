@@ -6,6 +6,7 @@ const std = @import("std");
 pub fn rowWidths(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal: *std.Build.Module, row_mod: *std.Build.Module) void {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "tokenizer", .module = tokenizer }} });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     const exe = b.addExecutable(.{ .name = "tf-row-widths-check", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/row_widths_check.zig"),
         .target = target,

@@ -1,4 +1,4 @@
-//! Server-sent events as the Python server frames them: the head, ``data:`` frames, typed ``event:`` frames, ``[DONE]``.
+//! Python-compatible SSE: the head, data frames, typed event frames and [DONE].
 const std = @import("std");
 const json = @import("json");
 const Conn = @import("http_conn.zig").Conn;
@@ -17,6 +17,11 @@ pub fn open(conn: *Conn) error{Closed}!void {
 pub fn data(conn: *Conn, a: Allocator, payload: json.Value) error{Closed}!void {
     const text = json.stringify(a, payload, .{}) catch return error.Closed;
     return conn.writeAll(std.mem.concat(a, u8, &.{ "data: ", text, "\n\n" }) catch return error.Closed);
+}
+
+/// An SSE comment line, which clients skip: it keeps a stream alive while nothing else is sent.
+pub fn comment(conn: *Conn) error{Closed}!void {
+    return conn.writeAll(": keepalive\n\n");
 }
 
 pub fn done(conn: *Conn) error{Closed}!void {

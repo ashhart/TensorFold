@@ -1,5 +1,5 @@
 //! Explicit pending-launch measurements; absent names and earlier compilers stay pending.
-pub const records = @import("measurements/qwen_decode_132.zig").records;
+pub const records = @import("measurements/qwen_decode_132.zig").records ++ @import("measurements/deepseek_a_132.zig").records ++ @import("measurements/deepseek_b_132.zig").records;
 
 const std = @import("std");
 const limits = @import("limits.zig");

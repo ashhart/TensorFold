@@ -65,6 +65,10 @@ pub const exl3_upload = @import("exl3_upload.zig");
 pub const exl3_candidate = @import("exl3_candidate.zig");
 pub const exl3_grouped = @import("exl3_grouped.zig");
 
+pub const arena = @import("arena.zig");
+pub const pack = @import("pack.zig");
+pub const graph_cache = @import("graph_cache.zig");
+
 test {
     _ = exl3_grouped;
     _ = gdn_train;
@@ -126,3 +130,17 @@ pub const ggml = @import("ggml.zig");
 pub const gdn_train = @import("gdn_train.zig");
 pub const train_q4 = @import("train_q4.zig");
 pub const train_attn = @import("train_attn.zig");
+
+test {
+    _ = tp_group;
+    _ = arena;
+    _ = pack;
+    _ = graph_cache;
+    _ = @import("graph_registry.zig");
+    _ = @import("graph_cache_regression_test.zig");
+    _ = @import("graph_cache_ranks_test.zig");
+    _ = exl3.block.dense;
+    _ = exl3.block.experts;
+    _ = exl3.block.lin2;
+    _ = exl3.block.x3gm;
+}

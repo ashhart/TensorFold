@@ -84,25 +84,14 @@ pub const Host = struct {
     fn readiness(h: *Host, comptime F: type) void {
         if (@hasDecl(F, "healthy")) h.health = .{ .ctx = h.family, .read = F.healthy };
     }
+
+    fn halt(ctx: *anyopaque, reason: []const u8) void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        h.host.halt(reason);
+    }
+
     pub fn close(p: *anyopaque) void {
-        const h: *Host = @ptrCast(@alignCast(p));
-        h.host.stop();
-        h.core.deinit();
-        h.cfg.deinit(h.gpa);
-        if (h.recording) |r| r.free(h.gpa);
-        failed_load.closeEntry(if (h.gpu) |g| &g.ctx else null) catch {};
-        if (h.store) |s| kv_pages.closeStore(h.gpa, s);
-        if (h.slide) |s| h.slide_free.?(h.gpa, s);
-        h.gpa.free(h.dir);
-        h.served.close(h.gpa);
-        h.release(h.family);
-        if (h.gpu) |g| {
-            g.ctx.deinit();
-            g.driver.close();
-            h.gpa.destroy(g);
-        }
-        h.gpa.free(h.startup);
-        h.gpa.destroy(h);
+        @import("cuda_host_close.zig").close(@as(*Host, @ptrCast(@alignCast(p))));
     }
     pub fn bind(p: *anyopaque) *Host {
         const h: *Host = @ptrCast(@alignCast(p));
@@ -112,6 +101,15 @@ pub const Host = struct {
         };
         return h;
     }
+
+    fn initThread(ctx: *anyopaque) !void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        if (h.gpu) |g| {
+            try g.ctx.makeCurrent();
+            bound = &g.ctx;
+        }
+    }
+
     /// The round loop and the lane host over the family's backend, its thread started.
     pub fn serve(h: *Host, io: std.Io, facts: lanes.Model, rows: u32, info: api.Info, explain: ?api.Explain) !void {
         h.cfg = try lanes.Config.init(h.gpa, facts, rows, rows - 1);
@@ -123,6 +121,7 @@ pub const Host = struct {
         h.core = lanes.Engine.init(h.gpa, &h.cfg, h.backend(), h.clock.clock());
         errdefer h.core.deinit();
         h.host = api.LaneHost.init(h.gpa, io, &h.core, info);
+        h.host.on_thread = .{ .ctx = h, .run = initThread };
         h.host.memory = if (h.gpu != null) .{ .read = family_memory.read } else null;
         h.host.explain = explain;
         h.host.health = h.health;
@@ -462,9 +461,9 @@ fn openWith(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, o: api.O
     opened = true;
     if (@hasField(@TypeOf(loaded), "follow")) if (loaded.follow) |f| {
         h.follow_fn = f;
-        return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .follow = Host.followFamily };
+        return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt, .follow = Host.followFamily };
     };
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 
 const toGib = family_memory.toGib;
@@ -577,6 +576,7 @@ test "family readiness reaches production lane admission without binding CUDA" {
 test "Flash Next refuses tensor-rank draft caching before files or CUDA" {
     try @import("cuda_flashnext_refusal_test.zig").cache(openWith);
 }
+
 test "Flash Next takes --vision at family admission" {
     try @import("cuda_flashnext_refusal_test.zig").vision();
 }

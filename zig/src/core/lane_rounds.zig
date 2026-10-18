@@ -186,21 +186,29 @@ fn dropPiece(h: *LaneHost, job: *Job, message: []const u8) void {
 /// The prompts whose rows are in: each stream's last row (Engine.finishStream), then it decodes with the rounds.
 fn runFinals(h: *LaneHost) void {
     if (h.core.cfg.replay_runs) {
-        // the finals' shared work first (one forward for all); a failure fails each
+        // Prepare every final before finishing any, with no singleton tail skipped by prepareFinals.
         var ss: [16]*lanes.Stream = undefined;
-        var jobs: [16]*Job = undefined;
-        var n: usize = 0;
+        var remaining: usize = 0;
         for (h.finals.items) |key| {
             const job: *Job = @ptrFromInt(key);
-            if (job.stream.finished or n == ss.len) continue;
-            ss[n] = &job.stream;
-            jobs[n] = job;
-            n += 1;
+            if (!job.stream.finished) remaining += 1;
         }
-        h.core.prepareFinals(ss[0..n]) catch |e| {
-            for (jobs[0..n]) |job| _ = h.drop(job, h.words(e));
-            return;
-        };
+        var at: usize = 0;
+        while (remaining > 0) {
+            const cap: usize = if (remaining == 17) 15 else ss.len;
+            var n: usize = 0;
+            while (at < h.finals.items.len and n < cap) : (at += 1) {
+                const job: *Job = @ptrFromInt(h.finals.items[at]);
+                if (job.stream.finished) continue;
+                ss[n] = &job.stream;
+                n += 1;
+            }
+            h.core.prepareFinals(ss[0..n]) catch |e| {
+                ends.failAll(h, h.words(e));
+                return;
+            };
+            remaining -= n;
+        }
     }
     if (h.core.cfg.join_tail and h.core.cfg.join_drafts) {
         // the round's finals together: the joined prompts' first drafts in one pass (Engine.finishStreams)

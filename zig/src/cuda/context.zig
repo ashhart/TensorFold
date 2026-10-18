@@ -10,6 +10,16 @@ pub const Context = struct {
     device: abi.Device,
     handle: abi.Context,
 
+    /// How the host waits for the device (CU_CTX_SCHED_*); host scheduling only, no launch or value changes.
+    pub const Schedule = enum(c_uint) { auto = 0, spin = 1, yield = 2, blocking = 4 };
+
+    /// The device's primary context's schedule, before any `init` of it (the driver ignores it on an active context).
+    pub fn setSchedule(d: *const Driver, ordinal: c_int, s: Schedule) Error!void {
+        var dev: abi.Device = 0;
+        try d.check(d.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");
+        try d.check(d.api.cuDevicePrimaryCtxSetFlags_v2(dev, @backingInt(s)), "cuDevicePrimaryCtxSetFlags");
+    }
+
     pub fn init(d: *const Driver, ordinal: c_int) Error!Context {
         var dev: abi.Device = 0;
         try d.check(d.api.cuDeviceGet(&dev, ordinal), "cuDeviceGet");

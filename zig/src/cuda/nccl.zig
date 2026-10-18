@@ -39,6 +39,8 @@ pub const Config = extern struct {
 
 pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
 
+pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
+
 const R = Result;
 const D = abi.DevicePtr;
 
@@ -48,14 +50,15 @@ pub const Api = struct {
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
-    ncclCommAbort: *const fn (Comm) callconv(.c) R,
-    ncclCommGetAsyncError: *const fn (Comm, *R) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
     ncclBroadcast: *const fn (D, D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
     ncclSend: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
     ncclRecv: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
+    /// Frees the communicator after ending its pending work; safe from another thread while a kernel waits.
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *Result) callconv(.c) R,
     ncclGroupStart: *const fn () callconv(.c) R,
     ncclGroupEnd: *const fn () callconv(.c) R,
 };

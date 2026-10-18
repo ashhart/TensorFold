@@ -14,8 +14,9 @@ BLOCK = re.compile(r"/\*")
 DOCSTRING = re.compile(r'^\s*(?:[rubf]{0,2})("""|\'\'\')')
 GENERATED = ("unicode_data.zig",)
 HEX_METAL = re.compile(r"_[0-9a-f]{16}\.metal$")
-# Generator outputs are skipped entirely. unicode_data.zig stays exempt from the length check only.
+# Generated outputs are skipped entirely. unicode_data.zig has only the length exemption.
 GENERATOR_OUTPUT = (
+    "zig/src/core/tokenizer/nfkd_data.zig",
     "zig/src/families/flashnext/roles_gen.zig",
     "zig/kernels/metal/flashnext/sources_gen.zig",
 )

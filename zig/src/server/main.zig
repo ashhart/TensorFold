@@ -123,7 +123,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    defer up.engine.close(up.engine.ctx);
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.closeOnce();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
     record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
@@ -132,6 +133,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
+        .stop = .{ .ctx = &closer, .close = Closer.close, .halt = Closer.halt },
         .text = up.text.text(),
         .served = served,
         .recall = record,
@@ -190,3 +192,23 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
     if (args.min_p) |t| try out.put(a, "min_p", .{ .float = t });
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
+
+const Closer = struct {
+    opened: api.Opened,
+    closed: bool = false,
+    fn closeOnce(c: *Closer) void {
+        if (c.closed) return;
+        c.closed = true;
+        c.opened.close(c.opened.ctx);
+    }
+    fn close(p: *anyopaque) void {
+        const c: *Closer = @ptrCast(@alignCast(p));
+        c.closeOnce();
+    }
+    fn halt(p: *anyopaque, reason: []const u8) void {
+        const c: *Closer = @ptrCast(@alignCast(p));
+        if (comptime @hasField(api.Opened, "halt")) {
+            if (c.opened.halt) |f| f(c.opened.ctx, reason);
+        }
+    }
+};

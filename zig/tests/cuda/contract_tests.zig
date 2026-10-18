@@ -249,7 +249,7 @@ pub fn run(gpu: check.Gpu) !void {
 }
 
 /// Gate 5 on this GPU: the table's row for it against the driver, each record against the loaded function.
-fn live(gpu: check.Gpu) !usize {
+pub fn live(gpu: check.Gpu) !usize {
     var n = try registry.checkCuda(gpu.gpa, &registry.all_cuda, false);
     std.debug.print("{s} limits: {d} registered CUDA launches against sm_80/86/89/120/121, {d} problems\n", .{ if (n == 0) "PASS" else "FAIL", registry.all_cuda.len, n });
     const sm: u32 = @intCast(try gpu.ctx.capability());
@@ -272,6 +272,7 @@ fn live(gpu: check.Gpu) !usize {
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
+        if (!control and registry.targetDecision(r, t, r.usage[at]) != .applicable) continue;
         const bytes = image(r.launch.image);
         const rel = try built(gpu.gpa, bytes, sm);
         const set = registry.setFor(rel);
@@ -316,6 +317,13 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
     var said: ?limits.Nvcc = null;
     for (registry.all_cuda ++ registry.cuda_controls) |r| {
         const control = std.mem.startsWith(u8, r.launch.name, "control");
+        const any_target = for (limits.sms, 0..) |target, index| {
+            if (registry.targetDecision(r, target, r.usage[index]) == .applicable) break true;
+        } else false;
+        if (!control and !any_target) {
+            std.debug.print("N/A limits {s}: no applicable target\n", .{r.launch.name});
+            continue;
+        }
         const path = try std.fmt.allocPrint(a, "{s}/{s}.fatbin", .{ dir, r.launch.image });
         defer a.free(path);
         const bytes = try std.Io.Dir.cwd().readFileAlloc(gpu.io, path, a, .limited(1 << 28));
@@ -326,6 +334,11 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
         var line: std.ArrayList(u8) = .empty;
         defer line.deinit(a);
         for (limits.sms, 0..) |t, i| {
+            const decision = registry.targetDecision(r, t, r.usage[i]);
+            if (!control and decision != .applicable) {
+                std.debug.print("N/A limits {s} sm_{d}: {t}\n", .{ r.launch.name, t.sm, decision });
+                continue;
+            }
             const img = for (imgs) |im| {
                 if (im.sm == t.sm) break im;
             } else {
@@ -344,6 +357,11 @@ pub fn fatbins(gpu: check.Gpu, dir: []const u8) !void {
             said = set;
             var out: std.ArrayList(u8) = .empty;
             defer out.deinit(a);
+            const measured = registry.targetDecision(r, t, k.usage);
+            if (!control and measured != .applicable) {
+                std.debug.print("N/A limits {s} sm_{d}: {t}\n", .{ r.launch.name, t.sm, measured });
+                continue;
+            }
             red += try limits.cuda(r.launch, k.usage, t, &out, a);
             const current = std.meta.eql(k.usage, registry.usageFor(r, rel)[i]);
             if (!control and !current) n += 1;

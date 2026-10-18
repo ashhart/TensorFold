@@ -337,3 +337,5 @@ test "candidate selection refuses layouts it cannot represent" {
     w.stride_k = 0;
     try std.testing.expectError(error.CandidateFormat, Dense.candidateWeight(w));
 }
+
+pub const block = @import("exl3_block.zig");

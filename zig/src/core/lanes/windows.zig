@@ -155,7 +155,7 @@ pub fn candidates(e: *Engine, s: *Stream, room: usize, probe_round: bool) ![]con
 /// The longest suffix a graft candidate's weight counts, for the context's matches and Recall's alike.
 const longest_graft = 16;
 
-/// The planned drafts' trunk of `levels` lanes: host drafts as they are, held ones with the head's ranks (null: unread).
+/// The drafts' trunk of `levels` lanes: host tokens or held head ranks; null means unread.
 fn headTrunk(e: *Engine, s: *Stream, p: Plan, levels: usize) !?fill.Trunk {
     if (p.held == 0) return .{ .tokens = p.tokens };
     const a = e.arena.allocator();
