@@ -193,11 +193,16 @@ pub fn forwardRound(
     const total = l.plan.rows;
     const x = try forward.take(o, m.act, total * d.hidden);
     try o.embedRows(m.embed, l.tokens, total, x);
+    const normed = try forward.take(o, m.act, total * d.hidden);
+    const out = try forward.take(o, m.act, total * d.hidden);
+    try o.rms(x, m.blocks[0].norm, normed, total, d.hidden, d.eps);
     for (m.blocks, place, 0..) |b, slot, i| {
         const mark = o.arena.mark();
         defer o.arena.release(mark);
-        const normed = try forward.take(o, m.act, total * d.hidden);
-        try o.rms(x, b.norm, normed, total, d.hidden, d.eps);
+        // the residual and the next block's norm (the final norm after the last) in one launch
+        const last = i + 1 == m.blocks.len;
+        const next = if (last) m.norm_f else m.blocks[i + 1].norm;
+        const dst = if (last) out else normed;
         const y = switch (b.mixer) {
             .mamba => |w| try mambaRows(o, d, m.act, w, slot, rows, normed, total),
             .attention => |w| try forward.attention(
@@ -211,11 +216,9 @@ pub fn forwardRound(
             ),
             .moe => |w| try moe.layer(o, d, m.act, w, normed, total),
         };
-        try hip.reduce.residual(o, m.tp, x, y, total * d.hidden);
+        try hip.reduce.residualNorm(o, m.tp, x, y, next, dst, total, d.hidden, d.eps);
         if (trace) |t| t.layer(t.ctx, i, x, total) catch return error.BadShape;
     }
-    const out = try forward.take(o, m.act, total * d.hidden);
-    try o.rms(x, m.norm_f, out, total, d.hidden, d.eps);
     return out;
 }
 
