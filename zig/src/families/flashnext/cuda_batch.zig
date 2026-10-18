@@ -8,6 +8,7 @@ const wt = @import("cuda_prompt_wt.zig");
 const load = @import("cuda_prompt_load.zig");
 const parts = @import("cuda_batch_state.zig");
 const tiles = @import("cuda_tiles.zig");
+const tk = @import("cuda_tile_kernels.zig");
 
 const layers_n = wt.layers_n;
 const linear_n = wt.linear_n;
@@ -455,10 +456,10 @@ pub fn Pass(comptime Tri: type) type {
             }
             if (n >= 64) {
                 // prompt rows on 64-pair factored tiles, expert_rows' bits
-                try self.k.router.route(self.stream, s.picks, pairs, e, parts.fexp_tile, plan);
-                const items64 = cdiv(pairs, parts.fexp_tile) + e;
-                try tiles.experts(self.stream, self.k.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
-                try tiles.experts(self.stream, self.k.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
+                try self.k.router.route(self.stream, s.picks, pairs, e, tk.fexp_tile, plan);
+                const items64 = cdiv(pairs, tk.fexp_tile) + e;
+                try tiles.experts(self.stream, self.k.tiles.fexp_up, 2, s.mixed, dims, slots, lw.experts_up.ptr, dims / 32, moe_w / 32, plan, s.moe_act, moe_w, items64);
+                try tiles.experts(self.stream, self.k.tiles.fexp_down, 4, s.moe_act, moe_w, 0, lw.experts_down.ptr, moe_w / 32, dims / 32, plan, s.y, dims, items64);
                 return;
             }
             try self.k.router.route(self.stream, s.picks, pairs, e, rows_tile, plan);

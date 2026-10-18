@@ -2,6 +2,7 @@
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
 const parts = @import("cuda_batch_state.zig");
+const tk = @import("cuda_tile_kernels.zig");
 
 const dims = wt.dims;
 const streams = wt.streams;
@@ -51,8 +52,8 @@ pub fn matmul(k: *const Kernels, stream: cuda.Stream, x: u64, xs: u64, w: Q4, ou
     for ([_]u64{ x, xs, w.w.ptr, w.s.ptr, w.b.ptr, out, part }) |v| a.add(v);
     for ([_]usize{ m, w.n, w.k, sk, (w.n + 127) / 128 * 128, w.k, sweepOf(m, bm, w.k) }) |v| a.add(cint(v));
     const fold = big and sk > 1;
-    const f = if (fold) k.fact_fold else if (big) k.fact else k.lane;
-    const shared: u32 = if (big) parts.fact_smem else qmm_smem;
+    const f = if (fold) k.tiles.fact_fold else if (big) k.tiles.fact else k.lane;
+    const shared: u32 = if (big) tk.fact_smem else qmm_smem;
     const z: usize = if (fold) 1 else sk;
     try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(cdiv(m, bm) * cdiv(w.n, bn)), .z = @intCast(z) }, .block = .{ .x = if (big) 256 else 128 }, .shared = shared }, stream, &a);
     return z;
@@ -74,7 +75,7 @@ pub fn readout(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Scratch
     a.add(hc_w.scale.ptr);
     a.add(eps);
     for ([_]usize{ dims, nc, streams }) |v| a.add(cint(v));
-    try cuda.launch.launch(k.hcf_down, .{ .grid = .{ .x = @intCast(cdiv(n, 32) * cdiv(hc_w.n_down, 192)) }, .block = .{ .x = 256 }, .shared = parts.hcf_down_smem }, stream, &a);
+    try cuda.launch.launch(k.tiles.hcf_down, .{ .grid = .{ .x = @intCast(cdiv(n, 32) * cdiv(hc_w.n_down, 192)) }, .block = .{ .x = 256 }, .shared = tk.hcf_down_smem }, stream, &a);
     try tri.hcReduceAct(s.hc_part, act, xs_act, inj_ptr, 1, n, streams, low, hc_w.n_down, hc_w.has_inj);
     var b: cuda.Args = .{};
     for ([_]u64{ act, xs_act, hc_w.up.w.ptr, hc_w.up.s.ptr, hc_w.up.b.ptr, s.proj }) |v| b.add(v);
@@ -83,7 +84,7 @@ pub fn readout(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Scratch
     b.add(@as(u64, 0));
     b.add(@as(f32, 0));
     for ([_]usize{ dims, nc, streams }) |v| b.add(cint(v));
-    try cuda.launch.launch(k.hcf_up, .{ .grid = .{ .x = @intCast(cdiv(n, 64) * cdiv(wide, 128)) }, .block = .{ .x = 256 }, .shared = parts.hcf_up_smem }, stream, &b);
+    try cuda.launch.launch(k.tiles.hcf_up, .{ .grid = .{ .x = @intCast(cdiv(n, 64) * cdiv(wide, 128)) }, .block = .{ .x = 256 }, .shared = tk.hcf_up_smem }, stream, &b);
     try tri.hcRinv(pss, rinv, eps, n, dims, nc, streams);
     try tri.hcMixH(s.proj, h, rinv, hc_w.scale.ptr, s.mixed + r0 * dims * 2, s.xsm + r0 * (dims / 32) * 4, n, dims, streams);
 }
@@ -91,5 +92,5 @@ pub fn readout(tri: anytype, k: *const Kernels, stream: cuda.Stream, s: *Scratch
 /// The grouped experts on flashnext_fexp.cu's 64-pair tiles (expert_rows' bits), wn column blocks a CTA.
 pub fn experts(stream: cuda.Stream, f: cuda.Function, wn: usize, x: u64, x_stride: usize, slot_n: usize, w: u64, kg: usize, nb: usize, plan: cuda.grouped.Plan, out: u64, n: usize, items: usize) !void {
     var a = cuda.experts.Affine4Experts.argsOf(x, x_stride, slot_n, w, kg, nb, plan, out, n);
-    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(items * cdiv(nb, wn)) }, .block = .{ .x = 256 }, .shared = parts.fexp_smem }, stream, &a);
+    try cuda.launch.launch(f, .{ .grid = .{ .x = @intCast(items * cdiv(nb, wn)) }, .block = .{ .x = 256 }, .shared = tk.fexp_smem }, stream, &a);
 }
