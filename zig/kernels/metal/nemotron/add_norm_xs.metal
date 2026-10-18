@@ -61,3 +61,6 @@ template <int D, int T>
 }
 
 template [[host_name("custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float")]] [[kernel]] decltype(custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<2688, 896>) custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<2688, 896>;
+
+// nemotron_h_puzzle (Bolt): hidden 4096 (896 does not divide it; 512 does). Hand-authored instantiation for this PR.
+template [[host_name("tf_nemotron_add_norm_xs_bolt")]] [[kernel]] decltype(custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<4096, 512>) custom_kernel_nemotron_add_norm_xs_ff2bfad9575aba69__2688_896_bfloat16_t_bfloat16_t_bfloat16_t_floatc_int32_t_bfloat16_t_bfloat16_t_float<4096, 512>;

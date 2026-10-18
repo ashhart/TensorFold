@@ -411,5 +411,9 @@ kernel void tf_lane_tokens(const device uint* topk [[buffer(0)]],
 
 template [[host_name("tf_tree_conv")]] [[kernel]] decltype(tf_tree_conv<4096, 8, 128, 4, 10304, 4096>) tf_tree_conv<4096, 8, 128, 4, 10304, 4096>;
 template [[host_name("tf_tree_scan")]] [[kernel]] decltype(tf_tree_scan<64, 64, 8, 128, 4096, 10304, 10240, 524288>) tf_tree_scan<64, 64, 8, 128, 4096, 10304, 10240, 524288>;
+// nemotron_h_puzzle (Bolt): 128 heads x 64 = inner 8192, in_proj [z 8192 | xBC 10240 | dt 128] = 18560 (x at 8192,
+// dt at 18432), state 128 heads x 64 x 128 = 1048576. Hand-authored instantiations for this PR.
+template [[host_name("tf_tree_conv_bolt")]] [[kernel]] decltype(tf_tree_conv<8192, 8, 128, 4, 18560, 8192>) tf_tree_conv<8192, 8, 128, 4, 18560, 8192>;
+template [[host_name("tf_tree_scan_bolt")]] [[kernel]] decltype(tf_tree_scan<128, 64, 8, 128, 8192, 18560, 18432, 1048576>) tf_tree_scan<128, 64, 8, 128, 8192, 18560, 18432, 1048576>;
 template [[host_name("tf_tree_tail")]] [[kernel]] decltype(tf_tree_tail<16, 128, 512, 64, 64>) tf_tree_tail<16, 128, 512, 64, 64>;
 template [[host_name("tf_tree_merge")]] [[kernel]] decltype(tf_tree_merge<16, 128, 512>) tf_tree_merge<16, 128, 512>;

@@ -58,6 +58,15 @@ pub const all = [_]Kernel{
     .{ .key = "route_bolt", .function = "tf_nemotron_route_bolt", .source = @embedFile("route_bolt.metal") }, // hand-authored (runtime NE/K; generator not in repo)
     .{ .key = "dense_bf16", .function = "tf_nemotron_dense_bf16", .source = @embedFile("dense_bf16.metal") }, // hand-authored: bf16 write-matmul for the gate and latent projections
     .{ .key = "add_norm_moe_xs_bolt", .function = "tf_nemotron_add_norm_moe_xs_bolt", .source = @embedFile("add_norm_moe_xs.metal") }, // hand-authored <4096,512,9> instantiation
+    .{ .key = "add_norm_xs_bolt", .function = "tf_nemotron_add_norm_xs_bolt", .source = @embedFile("add_norm_xs.metal") }, // hand-authored <4096,512> instantiation
+    .{ .key = "group_norm_xs_bolt_16", .function = "tf_nemotron_group_norm_xs_bolt_16", .source = @embedFile("group_norm_xs_bolt.metal") }, // hand-authored: Bolt mamba inner 8192
+    .{ .key = "group_norm_xs_bolt_32", .function = "tf_nemotron_group_norm_xs_bolt_32", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_48", .function = "tf_nemotron_group_norm_xs_bolt_48", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_64", .function = "tf_nemotron_group_norm_xs_bolt_64", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_80", .function = "tf_nemotron_group_norm_xs_bolt_80", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_96", .function = "tf_nemotron_group_norm_xs_bolt_96", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_112", .function = "tf_nemotron_group_norm_xs_bolt_112", .source = @embedFile("group_norm_xs_bolt.metal") },
+    .{ .key = "group_norm_xs_bolt_128", .function = "tf_nemotron_group_norm_xs_bolt_128", .source = @embedFile("group_norm_xs_bolt.metal") },
     .{ .key = "mamba_conv", .function = "custom_kernel_nemotron_mamba_conv_83552c1c128bdbca__4096_8_128_4_10304_4096_bfloat16_t_bfloat16_t_float_float_int32_t_int32_t_int32_t_int32_t_bfloat16_t_bfloat16_t", .source = @embedFile("mamba_conv.metal") },
     .{ .key = "mamba_scan", .function = "custom_kernel_nemotron_mamba_scan_52242b2ed609b53e__64_64_8_128_4096_10304_10240_524288_bfloat16_t_bfloat16_t_float_float_float_float_floatc_int32_tc_int32_t_int32_t_int32_t_bfloat16_t_float", .source = @embedFile("mamba_scan.metal") },
     .{ .key = "expert_up", .function = "custom_kernel_nemotron_rows_expert_up_3c904b6b27dccc2b__2688_1856_64_4_2_6_bfloat16_t_uint32_t_int32_t_int32_t_int32_t_int32_tc_uint32_t_bfloat16_t_bfloat16_t_bfloat16_t", .source = @embedFile("expert_up.metal") },
