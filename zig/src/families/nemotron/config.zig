@@ -546,15 +546,33 @@ fn puzzle(c: *Config, blocks: []const std.json.Value, why: *Why) !void {
 }
 
 pub fn checkShapes(c: Config) !void {
-    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
-        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
-        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (c.format == .modelopt) {
         std.log.err("this is a ModelOpt (FP8 and NVFP4) checkpoint: the CUDA engine serves it; Metal reads MLX checkpoints", .{});
         return error.UnsupportedQuantization;
     }
+    if (c.bolt) return checkBoltShapes(c);
+    const ok = c.hidden == 2688 and c.vocab == 131072 and c.mamba_heads == 64 and c.mamba_head_dim == 64 and
+        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
+        c.head_dim == 128 and c.experts == 128 and c.top_k == 6 and c.expert_width == 1856 and c.shared_width == 3712;
     if (!ok) {
         std.log.err("this Nemotron-H's shapes differ from the kernels built for Nemotron 3.5 Lightning 30B-A3B", .{});
+        return error.UnsupportedShapes;
+    }
+}
+
+/// Nemotron 3.5 Bolt 74B-A9B (nemotron_h_puzzle): per-layer expert counts 240-496 and widths 1536-2560 routed
+/// through a 1,024 latent, a 5,376 shared expert kept in hidden, top-k 9 uniform.
+fn checkBoltShapes(c: Config) !void {
+    var ok = c.hidden == 4096 and c.vocab == 131072 and c.mamba_heads == 128 and c.mamba_head_dim == 64 and
+        c.groups == 8 and c.state == 128 and c.conv_kernel == 4 and c.heads == 32 and c.kv_heads == 2 and
+        c.head_dim == 128 and c.top_k == 9 and c.latent == 1024 and c.shared_width == 5376;
+    for (0..c.layers) |i| if (c.kinds[i] == .moe) {
+        const e = c.moe[i].experts;
+        const wd = c.moe[i].width;
+        if (e < 1 or e > latent_max_experts or wd == 0 or wd % 128 != 0) ok = false;
+    };
+    if (!ok) {
+        std.log.err("this Nemotron-H Puzzle's shapes differ from the kernels built for Nemotron 3.5 Bolt 74B-A9B", .{});
         return error.UnsupportedShapes;
     }
 }
