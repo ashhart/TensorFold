@@ -1,6 +1,7 @@
 //! A lane round on the engine: its device plan, its forward (replayed, captured or eager), its draws and its keep.
 
 const std = @import("std");
+const platform = @import("sys");
 const hip = @import("hip");
 const state = @import("../forward/state.zig");
 const win = @import("../forward/window.zig");
@@ -125,8 +126,8 @@ pub fn choose(e: *Engine, rows: []const Rows, forced: ?Pick) !Pick {
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    var ts: platform.c.timespec = undefined;
+    _ = platform.c.clock_gettime(platform.c.CLOCK.MONOTONIC, &ts);
     return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
 }
 

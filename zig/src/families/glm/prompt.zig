@@ -1,5 +1,6 @@
 //! Prompt chunks: matmuls on the M5 tensor units at the row kernels' arithmetic (core/affine_mm.zig), the rest on the row kernels.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const cfg = @import("config.zig");
 const wts = @import("weights.zig");
@@ -83,7 +84,7 @@ pub fn init(gpa: std.mem.Allocator, arena: *st.Arena, device: mtl.Device, c: *co
 
 /// The prompt's sparse MLA on the tensor units (GLM_SPARSE_NAX=0: the row kernel, its output beside its queries).
 fn sparseNax() bool {
-    return if (std.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
+    return if (platform.c.getenv("GLM_SPARSE_NAX")) |v| v[0] != '0' else true;
 }
 
 /// The bytes `init` takes from the arena for `rows`-row chunks.
@@ -290,6 +291,10 @@ fn moe(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, w: *const wts
             D,
             n,
         );
+    } else if (s & Class.routed == 0 and path == .gather) {
+        const g = wide.gather;
+        g.encode(e, p.mm.wide.?.gather[0], w.gate, w.up, .{ .x = x_in, .offsets = p.offsets, .order = p.order, .out = p.act }, n, E, c.topk, c.moe_inter, c.swiglu_limit);
+        g.encode(e, p.mm.wide.?.gather[1], w.down, null, .{ .x = p.act, .offsets = p.offsets, .order = p.order, .out = p.yp }, n, E, 1, D, 0);
     } else if (s & Class.routed == 0) { // down's rows put back in (row, slot) order for the combine
         const mm = if (path == .mm4) p.mm.mm_bf16 else p.mm.wide.?.mm2;
         gateUp(p, mm, x, e, w, x_in, M, n);

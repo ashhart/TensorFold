@@ -12,6 +12,8 @@ const mlp = @import("cuda_mlp.zig");
 const moe = @import("cuda_moe.zig");
 const quant = @import("cuda_quant.zig");
 const q4 = @import("cuda_q4.zig");
+const exl3 = @import("cuda_exl3.zig");
+const mm_mod = @import("cuda_mm.zig");
 
 const Tensor = core.checkpoint.Tensor;
 const prefix = "model.language_model.";
@@ -42,6 +44,7 @@ pub const Weights = struct {
     norm: u64 = 0,
     head: u64 = 0, // bf16 [share.vocab][dims]
     mtp: ?Mtp = null,
+    exl3_shx: bool = true, // EXL3: every layer's gate and up share one input rotation (a prompt rotates each row once)
     buffers: std.ArrayList(cuda.DeviceBuffer) = .empty,
     named: std.ArrayList(Named) = .empty,
 
@@ -79,13 +82,13 @@ const Loader = struct {
     host: std.ArrayList(u8) = .empty,
     name_buf: [192]u8 = undefined,
 
-    fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
+    pub fn get(L: *Loader, comptime fmt: []const u8, args: anytype) !Tensor {
         const name = try std.fmt.bufPrint(&L.name_buf, prefix ++ fmt, args);
         return L.ck.get(name);
     }
 
     /// The host bytes gathered so far uploaded as one tensor named `fmt`.
-    fn put(L: *Loader, comptime fmt: []const u8, args: anytype) !u64 {
+    pub fn put(L: *Loader, comptime fmt: []const u8, args: anytype) !u64 {
         const b = try cuda.DeviceBuffer.fromHost(L.d, L.host.items);
         try L.w.buffers.append(L.gpa, b);
         try L.w.named.append(L.gpa, .{ .name = try std.fmt.allocPrint(L.gpa, fmt, args), .ptr = b.ptr, .len = b.len });
@@ -258,10 +261,18 @@ const Loader = struct {
         const c = &L.w.config;
         const s = L.w.share.dense;
         const d = c.hidden;
-        return .{
+        const w: mlp.Weights = if (c.exl3) bf16: { // an EXL3 checkpoint keeps its dense layers bf16
+            inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp." ++ x ++ ".weight", .{i}), s.lo, s.hi, c.dense_inter, .bf16);
+            const gu = try L.put("layers.{d}.mlp.gu", .{i});
+            try L.cols(try L.get("layers.{d}.mlp.down_proj.weight", .{i}), s.lo, s.hi, .bf16);
+            break :bf16 .{ .bf16 = .{ .gu = gu, .down = try L.put("layers.{d}.mlp.down", .{i}) } };
+        } else .{ .nvfp4 = .{
             .gate = try L.fp4("layers.{d}.mlp.gate_proj", i, s.lo, s.hi, 0, d),
             .up = try L.fp4("layers.{d}.mlp.up_proj", i, s.lo, s.hi, 0, d),
             .down = try L.fp4("layers.{d}.mlp.down_proj", i, 0, d, s.lo, s.hi),
+        } };
+        return .{
+            .w = w,
             .width = s.len(),
             .dims = d,
             .limit = c.swiglu_limit,
@@ -344,6 +355,39 @@ const Loader = struct {
         try L.whole(try L.get("layers.{d}.mlp.gate.e_score_correction_bias", .{i}), .f32);
         const bias = try L.put("layers.{d}.moe.bias", .{i});
         const count: usize = c.experts;
+        var routed: cuda.experts.Layer = .{ .format = .nvfp4, .up = 0, .down = 0, .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
+        var x3: ?exl3.Experts = null;
+        if (c.exl3) { // the MTP layer's experts too
+            x3 = try exl3.load(L, i, count, d, c.moe_inter, cut);
+            if (!x3.?.shx) L.w.exl3_shx = false;
+        } else routed = try L.nvfp4Experts(i);
+        const sh = L.w.share.shared;
+        inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp.shared_experts." ++ x ++ ".weight", .{i}), sh.lo, sh.hi, c.shared_inter, .bf16);
+        const gu = try L.put("layers.{d}.moe.shared.gu", .{i});
+        try L.cols(try L.get("layers.{d}.mlp.shared_experts.down_proj.weight", .{i}), sh.lo, sh.hi, .bf16);
+        const sd = try L.put("layers.{d}.moe.shared.down", .{i});
+        return .{
+            .router = router,
+            .bias = bias,
+            .routed = routed,
+            .exl3 = x3,
+            .count = count,
+            .shared_gu = gu,
+            .shared_down = sd,
+            .shared = sh.len(),
+            .top_k = c.topk,
+            .scale = c.routed_scale,
+            .norm = c.norm_topk,
+        };
+    }
+
+    /// Layer `i`'s routed NVFP4 experts packed as Experts4 (the MTP layer's quantized from its BF16 ones).
+    fn nvfp4Experts(L: *Loader, i: u32) !cuda.experts.Layer {
+        const c = &L.w.config;
+        const d: usize = c.hidden;
+        const cut = L.w.share.moe;
+        const ni = cut.len();
+        const count: usize = c.experts;
         const up_len = X.bytes(1, ni, d, 2) / 4;
         const down_len = X.bytes(1, d, ni, 1) / 4;
         const up = try L.gpa.alloc(u32, count * up_len);
@@ -383,23 +427,7 @@ const Loader = struct {
             try L.host.appendSlice(L.gpa, bytes);
             p.* = try L.put("layers.{d}.moe.experts.{s}", .{ i, what });
         }
-        const sh = L.w.share.shared;
-        inline for (.{ "gate_proj", "up_proj" }) |x| try L.rows(try L.get("layers.{d}.mlp.shared_experts." ++ x ++ ".weight", .{i}), sh.lo, sh.hi, c.shared_inter, .bf16);
-        const gu = try L.put("layers.{d}.moe.shared.gu", .{i});
-        try L.cols(try L.get("layers.{d}.mlp.shared_experts.down_proj.weight", .{i}), sh.lo, sh.hi, .bf16);
-        const sd = try L.put("layers.{d}.moe.shared.down", .{i});
-        return .{
-            .router = router,
-            .bias = bias,
-            .routed = .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit },
-            .count = count,
-            .shared_gu = gu,
-            .shared_down = sd,
-            .shared = sh.len(),
-            .top_k = c.topk,
-            .scale = c.routed_scale,
-            .norm = c.norm_topk,
-        };
+        return .{ .format = .nvfp4, .up = ptrs[0], .down = ptrs[1], .up_scale = ptrs[2], .down_scale = ptrs[3], .width = ni, .dims = d, .experts = count, .limit = c.swiglu_limit };
     }
 
     /// weights.load's MTPW: layer `layers` as plain DSA + MoE, norms, eh_proj, draft head from the rank's head rows.

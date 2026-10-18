@@ -1,6 +1,7 @@
 //! Ranks' liveness lines: a TCP line from each rank to rank 0, open before NCCL, carrying ready and error records.
 const std = @import("std");
-const posix = std.posix;
+const platform = @import("sys");
+const posix = @import("sys").posix;
 
 /// One record on a line: ready, or an error and its name.
 const Record = extern struct { kind: u32, rank: u32, text: [56]u8 = @splat(0) };
@@ -24,7 +25,7 @@ pub fn ended() void {
 
 /// NCCL_COMM_ID's host (IPv4) at its port plus one.
 fn address() !posix.sockaddr.in {
-    const id = std.mem.span(std.c.getenv("NCCL_COMM_ID") orelse return error.NoCommId);
+    const id = std.mem.span(platform.c.getenv("NCCL_COMM_ID") orelse return error.NoCommId);
     const colon = std.mem.lastIndexOfScalar(u8, id, ':') orelse return error.NoCommId;
     const port = (std.fmt.parseInt(u16, id[colon + 1 ..], 10) catch return error.NoCommId) +% 1;
     const ip = std.Io.net.IpAddress.parse(id[0..colon], port) catch return error.NoCommId;
@@ -111,7 +112,7 @@ pub fn ready(io: std.Io, digest: [32]u8) !void {
         std.Io.sleep(io, .fromMilliseconds(10), .awake) catch {};
     }
     for (peer_digest[0..line_count], peer_rank[0..line_count]) |d, rank| if (!std.mem.eql(u8, &d, &digest)) {
-        std.log.err("rank {d}'s checkpoint bytes differ from rank {d}'s (every byte hashed): every rank stops", .{ rank, my_rank });
+        std.log.err("rank {d}'s checkpoint identity differs from rank {d}'s: every rank stops", .{ rank, my_rank });
         return error.CheckpointBytesDiffer;
     };
 }
@@ -125,9 +126,16 @@ pub fn fail(name: []const u8) void {
     send(r);
 }
 
+/// A rank's transport failed: with lines open every rank hears `name` and this one ends now; with none, nothing.
+pub fn fatal(name: []const u8) void {
+    if (line_count == 0) return;
+    fail(name);
+    stop();
+}
+
 /// Ends this process at once: a stream may hold kernels that wait on the gone rank, which a normal exit would join.
 fn stop() noreturn {
-    std.c._exit(1);
+    platform.c._exit(1);
 }
 
 /// A line's records; it closing or carrying an error stops this rank unless it ends on purpose.
@@ -170,4 +178,88 @@ test "a record is 64 bytes, and a name past 56 bytes is cut" {
     const name: [70]u8 = @splat('x');
     @memcpy(r.text[0..@min(name.len, r.text.len)], name[0..@min(name.len, r.text.len)]);
     try std.testing.expectEqual(@as(usize, 56), std.mem.sliceTo(&r.text, 0).len);
+}
+
+const ProcessTest = struct {
+    var last_pid: c_int = 0;
+    var last_fd: c_int = -1;
+    var last_reaped = false;
+    extern "c" fn fork() c_int;
+    extern "c" fn socketpair(c_int, c_int, c_int, *[2]c_int) c_int;
+    extern "c" fn kill(c_int, c_int) c_int;
+    fn check(mode: u8) !void {
+        var pair: [2]c_int = undefined;
+        if (socketpair(posix.AF.UNIX, posix.SOCK.STREAM, 0, &pair) != 0) return error.SocketFailed;
+        const pid = fork();
+        if (pid < 0) {
+            _ = posix.system.close(pair[0]);
+            _ = posix.system.close(pair[1]);
+            return error.ForkFailed;
+        }
+        if (pid == 0) {
+            _ = posix.system.close(pair[1]);
+            ending.store(mode == 2, .release);
+            watch(pair[0], 0);
+            std.c._exit(0);
+        }
+        _ = posix.system.close(pair[0]);
+        last_pid = pid;
+        last_fd = pair[1];
+        last_reaped = false;
+        defer {
+            if (last_fd >= 0) {
+                _ = posix.system.close(last_fd);
+                last_fd = -1;
+            }
+            if (!last_reaped) {
+                _ = kill(pid, 9);
+                var cleanup: c_int = 0;
+                _ = std.c.waitpid(pid, &cleanup, 0);
+                last_reaped = true;
+            }
+        }
+        if (mode == 3) return error.InjectedParentFailure;
+        if (mode == 1) {
+            var record: Record = .{ .kind = error_kind, .rank = 1 };
+            @memcpy(record.text[0..8], "peer OOM");
+            const data = std.mem.asBytes(&record);
+            try std.testing.expectEqual(@as(isize, data.len), posix.system.write(pair[1], data.ptr, data.len));
+        }
+        _ = posix.system.close(pair[1]);
+        last_fd = -1;
+        var status: c_int = 0;
+        for (0..2000) |_| {
+            if (std.c.waitpid(pid, &status, 1) == pid) {
+                last_reaped = true;
+                try std.testing.expectEqual(@as(c_int, 0), status & 0x7f);
+                try std.testing.expectEqual(@as(c_int, if (mode == 2) 0 else 1), (status >> 8) & 0xff);
+                return;
+            }
+            std.Io.sleep(std.testing.io, .fromMilliseconds(1), .awake) catch {};
+        }
+        _ = kill(pid, 9);
+        _ = std.c.waitpid(pid, &status, 0);
+        last_reaped = true;
+        return error.PeerDidNotStop;
+    }
+};
+test "the real peer watcher exits on a closed line and on an error record, and returns for an intentional end" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    try ProcessTest.check(0);
+    try ProcessTest.check(1);
+    try ProcessTest.check(2);
+}
+
+test "a failing parent check still closes the line, kills and reaps the watcher's child" {
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+    defer if (!ProcessTest.last_reaped) {
+        if (ProcessTest.last_fd >= 0) _ = posix.system.close(ProcessTest.last_fd);
+        _ = ProcessTest.kill(ProcessTest.last_pid, 9);
+        var status: c_int = 0;
+        _ = std.c.waitpid(ProcessTest.last_pid, &status, 0);
+    };
+    try std.testing.expectError(error.InjectedParentFailure, ProcessTest.check(3));
+    try std.testing.expect(ProcessTest.last_reaped);
+    var status: c_int = 0;
+    try std.testing.expectEqual(@as(c_int, -1), std.c.waitpid(ProcessTest.last_pid, &status, 1));
 }

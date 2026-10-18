@@ -36,7 +36,7 @@ fn payload(arena: std.mem.Allocator, url: []const u8) !?[]u8 {
 /// JPEG cases need the pinned library: required when TENSORFOLD_LIBTURBOJPEG names one, skipped when none loads.
 fn jpegReady(a: std.mem.Allocator) !bool {
     if (picture.jpeg.available(std.testing.io, a)) return true;
-    if (std.testing.environ.getPosix(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
+    if (@import("sys").getenv(picture.jpeg.env) != null) return error.PinnedLibraryDidNotLoad;
     std.debug.print("libjpeg-turbo {s} not found: JPEG pixel cases skipped\n", .{picture.jpeg.pinned});
     return false;
 }
@@ -61,7 +61,7 @@ test "every picture 0.6.6 decoded decodes to the same RGB bytes, and its refusal
         if (bytes.len == 0) continue;
         if (picture.sniff(bytes) == .jpeg and !jpeg) continue;
         var rgb = picture.decode(std.testing.io, a, bytes) catch |err| {
-            try std.testing.expectEqualStrings(case.problem orelse @errorName(err), picture.problem(err, bytes));
+            try std.testing.expectEqualStrings(case.problem orelse @errorName(err), picture.problem(err));
             checked[1] += 1;
             continue;
         };
@@ -103,7 +103,7 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
             break :blk try std.fmt.allocPrint(arena, "{d}x{d} {s}", .{ rgb.width, rgb.height, &sha256(rgb.pixels) });
         } else |err| blk: {
             if (!jpeg and (err == error.NoJpegLibrary or err == error.JpegLibraryVersion)) break :blk null;
-            break :blk picture.problem(err, bytes);
+            break :blk picture.problem(err);
         };
         const got = ours orelse continue; // a JPEG that needs the library this host lacks
         var want = if (c.rgb) |h| try std.fmt.allocPrint(arena, "{d}x{d} {s}", .{ c.width, c.height, h }) else c.problem.?;
@@ -114,6 +114,44 @@ test "edge pictures (zig/tests/fixtures/picture/edges.json) get 0.6.6's outcome,
         checked += 1;
     }
     try std.testing.expect(checked >= @as(usize, if (jpeg) 76 else 50));
+}
+
+/// WebP cases need the pinned libwebp: required when TENSORFOLD_LIBWEBP names one, skipped when none loads.
+fn webpReady(a: std.mem.Allocator) !bool {
+    if (picture.webp.available(std.testing.io, a)) return true;
+    if (std.testing.environ.getPosix(picture.webp.env) != null) return error.PinnedLibraryDidNotLoad;
+    std.debug.print("libwebp {s} not found: WebP pixel cases skipped\n", .{picture.webp.pinned});
+    return false;
+}
+
+test "WebP pictures (zig/tests/fixtures/picture/webp.json) decode to Pillow's RGB bytes, and its refusals read the same" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const a = std.testing.allocator;
+    const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "zig/tests/fixtures/picture/webp.json", arena, .limited(1 << 22));
+    const cases = (try std.json.parseFromSliceLeaky(struct { cases: []const Edge }, arena, text, .{ .ignore_unknown_fields = true })).cases;
+    const ready = try webpReady(a);
+    var checked: usize = 0;
+    for (cases) |c| {
+        errdefer std.debug.print("case {s}\n", .{c.name});
+        const b64 = std.base64.standard.Decoder;
+        const bytes = try arena.alloc(u8, try b64.calcSizeForSlice(c.b64));
+        try b64.decode(bytes, c.b64);
+        try std.testing.expectEqual(picture.Format.webp, picture.sniff(bytes));
+        const got = if (picture.decode(std.testing.io, a, bytes)) |d| blk: {
+            var rgb = d;
+            defer rgb.deinit(a);
+            break :blk try std.fmt.allocPrint(arena, "{d}x{d} {s}", .{ rgb.width, rgb.height, &sha256(rgb.pixels) });
+        } else |err| blk: {
+            if (!ready and (err == error.NoWebpLibrary or err == error.WebpLibraryVersion)) continue;
+            break :blk picture.problem(err);
+        };
+        const want = if (c.rgb) |h| try std.fmt.allocPrint(arena, "{d}x{d} {s}", .{ c.width, c.height, h }) else c.problem.?;
+        try std.testing.expectEqualStrings(want, got);
+        checked += 1;
+    }
+    try std.testing.expect(checked >= @as(usize, if (ready) 8 else 2)); // without the library: the files refused before it loads
 }
 
 test "damaged and cut pictures are refused or decoded, never trapped" {

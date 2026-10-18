@@ -1,5 +1,6 @@
 //! The lane core's Metal backend for Nemotron: streams' rows in one forward a round, drawn tokens in GPU slots.
 const std = @import("std");
+const platform = @import("sys");
 const mtl = @import("metal");
 const lanes = @import("lanes");
 const Fence = @import("../../core/fence.zig").Fence;
@@ -89,7 +90,7 @@ pub const Metal = struct {
             .tokens = try m.device.buffer(ring * 4, opts),
             .prompt = try m.device.buffer(@max(o.capacity, 16) * 4, opts),
             .fence = try Fence.init(m.device),
-            .trace = std.c.getenv("TF_SLIDE_TRACE") != null,
+            .trace = platform.c.getenv("TF_SLIDE_TRACE") != null,
         };
         if (o.chunk > fused_rows) b.wide = try prefill.Prefill.init(m, @min(o.chunk, o.capacity));
         if (o.drafts and m.weights.mtp != null) b.head = try mtp.Head.init(m.device, m.config, &m.kernels, &m.weights, &b.pool, max_lanes, o.capacity);

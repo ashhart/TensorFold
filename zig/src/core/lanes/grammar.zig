@@ -1,6 +1,7 @@
 //! Structured output: libtfgrammar (xgrammar, loaded at the first structured request) and a stream's grammar walk.
 
 const std = @import("std");
+const platform = @import("sys");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
@@ -37,7 +38,7 @@ fn load(io: std.Io, a: Allocator) ?Fns {
         library,
     };
     var dl = for (names) |name| {
-        break std.DynLib.open(name) catch continue;
+        break platform.DynLib.open(name) catch continue;
     } else return null;
     var f: Fns = undefined;
     const info = @typeInfo(Fns).@"struct";
@@ -214,6 +215,7 @@ pub const Constraint = struct {
     pub fn next(c: *Constraint, a: Allocator) !?[]u32 {
         if (!c.active or c.finished()) return null;
         const bits = try a.alloc(u32, c.words);
+        errdefer a.free(bits);
         try c.fill(bits);
         return bits;
     }
@@ -475,4 +477,8 @@ test "a chain grows past its last kept row with the grammar's own drafts, never 
     // forced rows never grow
     const f = try c.window(a, &.{ 9, 5 }, &.{ -1, 0 }, true, 16);
     try std.testing.expectEqual(@as(usize, 0), f.extra.len);
+}
+
+test {
+    _ = @import("grammar_error_test.zig");
 }

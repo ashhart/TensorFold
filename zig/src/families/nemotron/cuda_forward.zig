@@ -63,13 +63,14 @@ pub const Forward = struct {
     captures: []const kept.Mark = &.{}, // marks inside the prompt chunk: their Mamba states are copied out as it runs
     tp: ?*const cuda.tp_group.Group = null, // a latent MoE's ranks: their expert rows meet every MoE layer
     vision: ?*const @import("cuda_vision.zig").Vision = null, // a prompt pass's image rows, spliced after its embeds
+    page_elems: u64 = 0, // elements between a paged sequence's pages (its layers' K and V of state.chunk_keys rows)
 
     pub fn init(c: Config, w: *const weights.Weights, b: *const state.Buffers, ops: kern.Ops, max_len: usize, nch: usize, sampled: bool) Forward {
         return .{
             .c = c,
             .w = w,
             .b = b,
-            .ops = .{ .k = ops.k, .s = ops.s, .ck8 = b.ck8 }, // FP8 layers' e4m3 rows in these buffers
+            .ops = .{ .k = ops.k, .s = ops.s, .ck8 = b.ck8, .part = b.lane_part }, // FP8 rows and lane partials in these buffers
             .glue = .{
                 .set = if (ops.k.triton) |*t| t else null,
                 .f = &ops.k.glue,
@@ -94,17 +95,19 @@ pub const Forward = struct {
         if (f.marks) |m| try m.add(f.ops.s, c);
     }
 
-    fn mshape(f: *const Forward, rmax: usize) glue.Shape {
+    fn mshape(f: *const Forward) glue.Shape {
         const c = f.c;
-        return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = rmax };
+        return .{ .proj = c.projDim(), .xd = c.inner(), .cd = c.convDim(), .heads = c.mamba_heads, .dh = c.mamba_head_dim, .groups = c.groups, .state = c.state, .rmax = state.windowRows(c) };
     }
 
     pub fn ashape(f: *const Forward) glue.Attn {
-        return .{ .nqkv = f.c.qkvDim(), .heads = f.c.heads, .kv_heads = f.c.kv_heads, .dim = f.c.head_dim, .nch = f.nch };
+        return .{ .nqkv = f.c.qkvDim(), .heads = f.c.heads, .kv_heads = f.c.kv_heads, .dim = f.c.head_dim, .nch = f.nch, .pt = f.b.table, .ps = f.page_elems };
     }
 
-    fn cache(f: *const Forward, base: u64, layer: usize) u64 {
-        return base + layer * f.max_len * f.c.kv_heads * f.c.head_dim * 2;
+    /// Attention layer `layer`'s plane in `b`'s cache at `base`: max_len rows a layer, or a page's K and V a layer.
+    fn cache(f: *const Forward, b: *const state.Buffers, base: u64, layer: usize) u64 {
+        const row: u64 = state.kvRowBytes(f.c);
+        return base + layer * (if (b.table != 0) 2 * state.chunk_keys else f.max_len) * row;
     }
 
     /// Engine.norm: h = x + delta (dense, or the experts' slot-order sum), then the block's RMSNorm into y and xs.
@@ -129,13 +132,20 @@ pub const Forward = struct {
 
     /// Streams share matmuls, norms and experts but keep their mixer state; each row's latch alone picks its lessons.
     pub fn windowSegs(f: *const Forward, segs: []const Seg) !void {
+        const routed = f.routedWindow(segs);
+        try routed.windowRows(segs);
+    }
+
+    /// Selects the window schedule while retaining each segment's lesson latch and state.
+    pub fn routedWindow(f: *const Forward, segs: []const Seg) Forward {
         var routed = f.*;
         routed.segs = segs;
+        if (f.c.latent > 0 and (segs.len > 1 or f.tp != null)) routed.side = null;
         routed.untaught = for (segs) |s| {
             if (s.untaught) break true;
         } else false;
         if (routed.route.count == 0) for (segs[0..@min(segs.len, lesson_route.max_segments)]) |s| routed.route.later(s.row0, s.rows, s.slot);
-        try routed.windowRows(segs);
+        return routed;
     }
 
     fn windowRows(f: *const Forward, segs: []const Seg) !void {
@@ -143,12 +153,12 @@ pub const Forward = struct {
         const b = f.b;
         const o = f.ops;
         const t = f.glue;
-        const ms = f.mshape(state.max_rows);
+        const ms = f.mshape();
         const at = f.ashape();
         const D: u64 = c.hidden;
         var rows: usize = 0;
         for (segs) |s| rows += s.rows;
-        if (rows > state.max_rows) return error.WindowTooWide;
+        if (rows > ms.rmax) return error.WindowTooWide;
         for (segs) |s| try f.embed(s.b.ids, b.emb + s.row0 * D * 2, s.rows);
         try f.mark(.embed);
         var x = b.emb;
@@ -160,7 +170,7 @@ pub const Forward = struct {
             switch (blk.kind) {
                 .mamba => {
                     const m = blk.mamba;
-                    const W: u64 = state.max_rows;
+                    const W: u64 = ms.rmax;
                     try o.dense(b.y, b.xs, m.in_proj, b.proj, rows);
                     try f.mark(.mamba_in);
                     var k0: usize = 0;
@@ -202,7 +212,7 @@ pub const Forward = struct {
                     while (k0 < segs.len) : (k0 += glue.max_segs) {
                         const part = segs[k0..@min(segs.len, k0 + glue.max_segs)];
                         var at_segs: [glue.max_segs]glue.AttnSeg = undefined;
-                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b.k_cache, aj), .vc = f.cache(s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows };
+                        for (part, at_segs[0..part.len]) |s, *out| out.* = .{ .kc = f.cache(s.b, s.b.k_cache, aj), .vc = f.cache(s.b, s.b.v_cache, aj), .meta = s.b.meta, .row0 = s.row0, .rows = s.rows, .pt = s.b.table };
                         try t.attentionSegs(at_segs[0..part.len], b.qkv, b.po, b.pm, b.pl, b.att, b.axs, at);
                     }
                     try f.mark(.attention);
@@ -218,7 +228,7 @@ pub const Forward = struct {
                     delta = .dense;
                 } else {
                     try f.experts(blk.moe, rows, false);
-                    delta = .moe;
+                    delta = if (blk.moe.bolt != null) .dense else .moe;
                 },
             }
         }
@@ -251,8 +261,9 @@ pub const Forward = struct {
         const o = f.ops;
         const ex = m.experts;
         const pairs = rows * c.slots();
+        if (m.bolt) |lt| return f.latentExperts(m, lt, rows, prompt);
         if (!prompt) if (f.side) |sd| return f.forked(m, rows, sd);
-        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
         try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
@@ -271,6 +282,52 @@ pub const Forward = struct {
             try f.mark(.experts_down);
         }
         try f.sharedRest(o, m, rows, !prompt);
+    }
+
+    /// LatentMoE (Bolt), into b.delta: fc2_latent(sum of the routed experts on fc1_latent(y)) + the shared expert on y.
+    fn latentExperts(f: *const Forward, m: weights.MoE, lt: weights.BoltLatent, rows: usize, prompt: bool) !void {
+        const c = f.c;
+        const b = f.b;
+        const o = f.ops;
+        const ex = m.experts;
+        const K = c.top_k;
+        const pairs = rows * K;
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, ex.experts, K, K, c.routed_scaling, c.norm_topk);
+        try f.mark(.route);
+        if (prompt) try o.prefillDense(b.y, lt.fc1, b.lat, rows) else try o.dense(b.y, b.xs, lt.fc1, b.lat, rows);
+        const tile: usize = if (prompt) cuda.experts.promptTile(ex.format) else 16;
+        const g = o.grouped();
+        try o.plan(b.pick, pairs, ex.experts, tile, b.plan);
+        try f.mark(.plan);
+        var items = kern.maxItems(pairs, ex.experts, tile);
+        const up_in: cuda.experts.Rows = .{ .x = b.lat, .stride = c.latent, .slots = K };
+        const down_in: cuda.experts.Rows = .{ .x = b.act, .stride = ex.width };
+        if (prompt) {
+            try g.prompt(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
+            try g.prompt(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+        } else {
+            try g.decode(o.s, .up, up_in, ex, b.plan, b.act, items, -1);
+            try f.mark(.experts_up);
+            try g.decode(o.s, .down_f32, down_in, ex, b.plan, b.ymoe, items, -1);
+            try f.mark(.experts_down);
+        }
+        try o.latentSum(b.ymoe, b.wts, b.comb, rows, K, c.latent);
+        if (prompt) try o.prefillDense(b.comb, lt.fc2, b.delta, rows) else try o.dense(b.comb, 0, lt.fc2, b.delta, rows);
+        // the shared expert: every row's pair with expert 0 of a one-expert layer, relu^2 between as the routed ones
+        const sh = lt.shared;
+        try o.plan(b.sids, rows, 1, tile, b.plan);
+        items = kern.maxItems(rows, 1, tile);
+        const sh_up: cuda.experts.Rows = .{ .x = b.y, .stride = c.hidden, .slots = 1 };
+        const sh_down: cuda.experts.Rows = .{ .x = b.act, .stride = sh.width };
+        if (prompt) {
+            try g.prompt(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
+            try g.prompt(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+        } else {
+            try g.decode(o.s, .up, sh_up, sh, b.plan, b.act, items, -1);
+            try g.decode(o.s, .down_f32, sh_down, sh, b.plan, b.ymoe, items, -1);
+        }
+        try o.addBf16(b.delta, b.delta, b.ymoe, true, rows * c.hidden);
+        try f.mark(.shared_wait);
     }
 
     /// The pocket over the rows of sequences that read what was learned: every row, or the runs between untaught ones'.
@@ -318,7 +375,7 @@ pub const Forward = struct {
         try g.decode(sd.s, .down_f32, in[1], ex, sp, b.ymoe, 2, -1);
         try f.sharedRest(so, m, rows, true);
         try sd.join.record(sd.s);
-        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.routed_scaling, c.norm_topk);
+        try f.glue.route(b.y, m.router, m.bias, b.part, b.pick, b.wts, rows, c.hidden, c.experts, c.top_k, c.slots(), c.routed_scaling, c.norm_topk);
         try f.mark(.route);
         try o.planRouted(b.pick, rows, c.slots(), c.top_k, c.experts, 16, b.plan);
         try f.mark(.plan);
@@ -382,17 +439,17 @@ pub const Forward = struct {
                     snaps.p[k] = cap.ssm + w.mj * layer;
                     snaps.r[k] = @intCast(cap.at - w.pos);
                 }
-                try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape(state.max_rows));
+                try f.glue.convRows(b.proj, base, b.p_xc, m.conv_w, m.conv_b, w.rows, f.mshape());
                 try o.scanRows(b.proj, b.p_xc, b.ssm + w.mj * layer, m.a, m.d, m.dt_bias, b.sy, w.rows, c.projDim(), c.mamba_heads, c.mamba_head_dim, c.convDim(), c.groups, c.dt_min, c.dt_max, snaps);
             },
             .attention => {
-                const kc = f.cache(b.k_cache, w.aj);
-                const vc = f.cache(b.v_cache, w.aj);
+                const kc = f.cache(b, b.k_cache, w.aj);
+                const vc = f.cache(b, b.v_cache, w.aj);
                 const qd = c.heads * c.head_dim;
                 try f.glue.kvWrite(b.qkv, kc, vc, b.p_meta, w.rows, f.ashape());
                 try o.torch().copyRows(b.qkv, c.qkvDim() * 2, b.q, qd * 2, qd * 2, w.rows);
                 const scale: f32 = @floatCast(std.math.pow(f64, @floatFromInt(c.head_dim), -0.5));
-                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale);
+                try o.prefillAttention(b.q, kc, vc, b.att, w.pos, w.rows, c.heads, c.kv_heads, scale, b.table, f.page_elems);
             },
             .moe => {},
         }
@@ -437,7 +494,7 @@ pub const Forward = struct {
                 w.delta = .dense;
             } else {
                 try f.experts(blk.moe, w.rows, true);
-                w.delta = .moe;
+                w.delta = if (blk.moe.bolt != null) .dense else .moe;
             },
         }
     }

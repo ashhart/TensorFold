@@ -86,18 +86,27 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     };
     var caches: [64]st.Cache = undefined;
     const n = @min(b.o.batch_rows / 2, caches.len);
-    for (caches[0..n]) |*x| x.* = try st.Cache.init(b.m.device, c, timed_len + st.max_rows, b.head != null);
+    try makeEach(st.Cache, caches[0..n], CacheMaker{ .b = b });
     defer for (caches[0..n]) |*x| x.deinit(&b.pool);
     // the GPU's clocks ramp up under load: time nothing until it has run for a while
     _ = try timeWindows(b, caches[0..1], backend.max_window, 12);
     const windows: WindowTimer = .{ .b = b, .caches = caches[0..1] };
     const heads: HeadTimer = .{ .b = b, .cache = &caches[0] };
+    const shared: SharedTimer = .{ .b = b, .caches = caches[0..n] };
     var ms: [wide.len + backend.max_window]f64 = undefined;
     var head = [1]f64{0};
     const head_ms: ?*f64 = if (b.head != null) &head[0] else null;
+    const ref = lanes.cost_cache.referenceKey(&parts);
+    const last = lanes.cost_cache.referenceKey(&(parts ++ [_][]const u8{"costs"}));
+    // the last build's table for this chip and shape stands while a probe of each kernel path stays within drift
+    if (lanes.cost_cache.load(Costs, b.gpa, io, last)) |kept| if (try holds(windows, heads, shared, kept, b.head != null, sharedCount(n))) {
+        b.costs = kept;
+        b.timing = .{};
+        if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, kept);
+        return;
+    };
     try lanes.cost_rule.measure(windows, heads, &ms, head_ms, false);
     try lanes.cost_rule.smooth(windows, &ms);
-    const ref = lanes.cost_cache.referenceKey(&parts);
     if (lanes.cost_cache.load(Reference, b.gpa, io, ref)) |r| {
         if (lanes.cost_rule.drifted(&ms, &r.window) or (b.head != null and lanes.cost_rule.drifted(&head, &r.head))) {
             try lanes.cost_rule.measure(windows, heads, &ms, head_ms, true);
@@ -105,15 +114,129 @@ pub fn measure(b: *backend.Metal, io: std.Io) !void {
     }
     var costs = Costs{ .windows = ms.len, .head_ms = head[0] };
     for (ms, 0..) |m, i| costs.window[i] = .{ .width = @intCast(widthOf(i)), .ms = m };
-    var streams: usize = 2;
-    while (streams <= n) : (streams *= 2) {
-        costs.shared[costs.shareds] = .{ .width = @intCast(2 * streams), .ms = try lanes.cost_rule.fastest(SharedTimer{ .b = b, .caches = caches[0..streams] }, 0) };
-        costs.shareds += 1;
-    }
+    costs.shareds = sharedCount(n);
+    for (costs.shared[0..costs.shareds], 0..) |*s, i| s.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = try lanes.cost_rule.fastest(shared, i) };
     b.costs = costs;
     b.timing = .{};
     if (k) |key| lanes.cost_cache.save(Costs, b.gpa, io, key, costs);
+    lanes.cost_cache.save(Costs, b.gpa, io, last, costs);
     lanes.cost_cache.save(Reference, b.gpa, io, ref, .{ .window = ms, .head = head });
+}
+
+/// Probe 1, 8, 16, 20 and 33 rows, covering the 16-row, full 32-row and edge 32-row coop tiles.
+const probed = [_]usize{ 0, 7, backend.max_window - 1, backend.max_window, backend.max_window + wide.len - 1 };
+
+/// Whether `kept` has this build's widths and shared rounds, and its probed windows, head and shared rounds hold.
+fn holds(windows: anytype, heads: anytype, shared: anytype, kept: Costs, head: bool, shareds: usize) !bool {
+    if (kept.windows != wide.len + backend.max_window or kept.shareds != shareds) return false;
+    var reference: [wide.len + backend.max_window]f64 = undefined;
+    for (&reference, kept.window[0..kept.windows], 0..) |*r, w, i| {
+        if (w.width != widthOf(i)) return false;
+        r.* = w.ms;
+    }
+    if (!try lanes.cost_rule.probeHolds(windows, heads, &probed, &reference, if (head) kept.head_ms else null)) return false;
+    // shared rounds plan from their own entries, so each is timed again before it steers one
+    var at: [8]usize = undefined;
+    var shared_ref: [8]f64 = undefined;
+    for (kept.shared[0..shareds], 0..) |s, i| {
+        if (s.width != 2 * streamsOf(i)) return false;
+        at[i] = i;
+        shared_ref[i] = s.ms;
+    }
+    return lanes.cost_rule.probeHolds(shared, heads, at[0..shareds], shared_ref[0..shareds], null);
+}
+
+/// A kept table whose every window and shared round reads `ms`, with `shareds` shared rounds.
+fn steadyTable(ms: f64, shareds: usize) Costs {
+    var kept: Costs = .{ .windows = wide.len + backend.max_window, .shareds = shareds, .head_ms = ms };
+    for (kept.window[0..kept.windows], 0..) |*w, i| w.* = .{ .width = @intCast(widthOf(i)), .ms = ms };
+    for (kept.shared[0..shareds], 0..) |*s, i| s.* = .{ .width = @intCast(2 * streamsOf(i)), .ms = ms };
+    return kept;
+}
+
+test "a retained table is refused when only the full 32-row tile path drifts" {
+    const Timer = struct {
+        slow: bool,
+        pub fn time(t: @This(), i: usize) !f64 {
+            const rows = widthOf(i);
+            return if (t.slow and rows > 16 and rows <= 32) 13 else 10;
+        }
+    };
+    const kept = steadyTable(10, 0);
+    try std.testing.expect(try holds(Timer{ .slow = false }, Timer{ .slow = false }, Timer{ .slow = false }, kept, false, 0));
+    try std.testing.expect(!try holds(Timer{ .slow = true }, Timer{ .slow = true }, Timer{ .slow = true }, kept, false, 0));
+}
+
+test "a retained table is refused when lone windows and the head hold but one shared round drifts" {
+    const Timer = struct {
+        slow: usize = std.math.maxInt(usize), // the entry that reads 30% slow
+        pub fn time(t: @This(), i: usize) !f64 {
+            return if (i == t.slow) 13 else 10;
+        }
+    };
+    const kept = steadyTable(10, 3);
+    try std.testing.expect(try holds(Timer{}, Timer{}, Timer{}, kept, true, 3));
+    for (0..3) |i| try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{ .slow = i }, kept, true, 3));
+    try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{}, kept, true, 4)); // timed for fewer streams
+    var narrow = kept;
+    narrow.shared[1].width = 6;
+    try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{}, narrow, true, 3));
+    var moved = kept;
+    moved.window[wide.len + backend.max_window - 1].width = 32;
+    try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{}, moved, true, 3));
+    for ([_]f64{ std.math.inf(f64), std.math.nan(f64), 0, -1 }) |bad| {
+        var odd = kept;
+        odd.shared[2].ms = bad;
+        try std.testing.expect(!try holds(Timer{}, Timer{}, Timer{}, odd, true, 3));
+    }
+}
+
+/// `items` made in turn by `maker`; when one fails, the ones made before it go back through `maker.free` first.
+fn makeEach(comptime T: type, items: []T, maker: anytype) !void {
+    for (items, 0..) |*x, i| x.* = maker.make() catch |err| {
+        for (items[0..i]) |*y| maker.free(y);
+        return err;
+    };
+}
+
+/// A timing pass's cache: a reply's early tokens and the widest window, with the head's rows when it drafts.
+const CacheMaker = struct {
+    b: *backend.Metal,
+    fn make(m: CacheMaker) !st.Cache {
+        return st.Cache.init(m.b.m.device, m.b.m.config, timed_len + st.max_rows, m.b.head != null);
+    }
+    fn free(m: CacheMaker, x: *st.Cache) void {
+        x.deinit(&m.b.pool);
+    }
+};
+
+test "a timing cache that fails to make releases the ones made before it, and only those" {
+    const Maker = struct {
+        made: *usize,
+        freed: *usize,
+        fail_at: usize,
+        fn make(m: @This()) !u32 {
+            if (m.made.* == m.fail_at) return error.OutOfMemory;
+            m.made.* += 1;
+            return @intCast(m.made.*);
+        }
+        fn free(m: @This(), x: *u32) void {
+            std.debug.assert(x.* >= 1 and x.* <= m.made.*);
+            m.freed.* += 1;
+        }
+    };
+    var items: [6]u32 = undefined;
+    for ([_]usize{ 0, 3, 5 }) |at| {
+        var made: usize = 0;
+        var freed: usize = 0;
+        try std.testing.expectError(error.OutOfMemory, makeEach(u32, &items, Maker{ .made = &made, .freed = &freed, .fail_at = at }));
+        try std.testing.expectEqual(at, freed);
+    }
+    var made: usize = 0;
+    var freed: usize = 0;
+    try makeEach(u32, &items, Maker{ .made = &made, .freed = &freed, .fail_at = items.len });
+    try std.testing.expectEqual(items.len, made);
+    try std.testing.expectEqual(@as(usize, 0), freed);
 }
 
 /// Windows past 16 rows, timed for the lanes' wider trees.
@@ -135,13 +258,26 @@ const WindowTimer = struct {
     }
 };
 
+/// Shared entry `i`: one round of `streamsOf(i)` streams, a 2-row window each.
 const SharedTimer = struct {
     b: *backend.Metal,
     caches: []st.Cache,
-    pub fn time(t: SharedTimer, _: usize) !f64 {
-        return timeWindows(t.b, t.caches, 2, 1);
+    pub fn time(t: SharedTimer, i: usize) !f64 {
+        return timeWindows(t.b, t.caches[0..streamsOf(i)], 2, 1);
     }
 };
+
+/// Shared entry `i`'s streams: 2, 4, 8 and on.
+fn streamsOf(i: usize) usize {
+    return @as(usize, 2) << @intCast(i);
+}
+
+/// How many shared rounds `n` timing streams cover.
+fn sharedCount(n: usize) usize {
+    var i: usize = 0;
+    while (streamsOf(i) <= n) i += 1;
+    return i;
+}
 
 /// One chained head step's GPU ms.
 const HeadTimer = struct {

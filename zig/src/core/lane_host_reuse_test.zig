@@ -51,7 +51,7 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -75,7 +75,8 @@ test "a lane host resumes a conversation from its kept prompt state and reports 
     try std.testing.expectEqual(Reason.length, b1.wait());
     try std.testing.expectEqual(@as(?u32, 0), b1.cached);
     try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
-    var t2: std.ArrayList(u32) = .empty; // the next turn: the history, the reply, a tool result, a new generation prompt
+    // the next turn: the history, the reply, a tool result, a new generation prompt
+    var t2: std.ArrayList(u32) = .empty;
     defer t2.deinit(gpa);
     try t2.appendSlice(gpa, &t1);
     try t2.appendSlice(gpa, b1.tokens.items[0..4]);
@@ -148,7 +149,7 @@ test "an image's placeholders are cached by its content: another image under the
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -249,7 +250,7 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }
@@ -271,7 +272,8 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
     const r1: Request = .{ .prompt = &t1, .max_tokens = 6, .history_len = 8 };
     try e.submit(1, &r1, .{ .ctx = &b1, .event = Box.event });
     try std.testing.expectEqual(Reason.length, b1.wait());
-    var t2: std.ArrayList(u32) = .empty; // 18 tokens: its history's state (128 bytes) and turn 1's (96) pass the budget together
+    // 18 tokens: its history's state (128 bytes) and turn 1's (96) pass the budget together
+    var t2: std.ArrayList(u32) = .empty;
     defer t2.deinit(gpa);
     try t2.appendSlice(gpa, &t1);
     try t2.appendSlice(gpa, b1.tokens.items[0..4]);
@@ -283,7 +285,8 @@ test "a turn's mark evicting the state it resumed from: the hit is reported firs
     try std.testing.expectEqual(Reason.length, b2.wait());
     try std.testing.expectEqual(@as(?u32, 8), b2.cached);
     try std.testing.expectEqual(@as(usize, 2), snaps.saves);
-    try std.testing.expectEqual(@as(u64, 1), snaps.hits_at_save[1]); // the resume was reported before the keep evicted it
+    // the resume was reported before the keep evicted it
+    try std.testing.expectEqual(@as(u64, 1), snaps.hits_at_save[1]);
     try std.testing.expectEqual(@as(u64, 1), store.counts.evicted);
     try std.testing.expectEqual(@as(usize, 1), store.entries.items.len);
     try std.testing.expectEqual(@as(u32, 16), store.entries.items[0].at);
@@ -365,7 +368,7 @@ test "a learn step that moves the weights drops every kept state: the next turn 
             defer b.mutex.unlock(std.testing.io);
             switch (e.*) {
                 .prefilled => |c| b.cached = c,
-                .logprobs, .prompt_logprobs => {},
+                .logprobs, .prompt_logprobs, .audio => {},
                 .tokens => |t| b.tokens.appendSlice(gpa, t) catch {},
                 .finished => |f| b.done = f.reason,
             }

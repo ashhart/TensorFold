@@ -55,6 +55,7 @@ pub fn spec(kind: Kind) c.Spec {
 pub const Mm = struct {
     rig: rig_.Rig,
     kind: Kind,
+    sm: u32,
     affine4: ?*const qlinear.Affine4Kernels = null,
     split: ?*const qlinear.Split = null,
     prompt: ?*const nvfp4.Prompt = null,
@@ -75,8 +76,14 @@ pub const Mm = struct {
         self.rig.deinit();
     }
 
-    pub fn kernel(self: *Mm) g.Kernel {
-        return .{ .spec = spec(self.kind), .ctx = self, .vt = &vt };
+    pub fn kernel(self: *Mm) ?g.Kernel {
+        if (self.sm < 90 and self.kind == .qmm_group) return null;
+        var declared = spec(self.kind);
+        if (self.sm < 90) {
+            declared.replaces = null;
+            if (self.kind == .lane_f32) declared.name = "cuda qmmf FP4 fp32 out (slices by reduce_kernel<true>, architecture fallback)";
+        }
+        return .{ .spec = declared, .ctx = self, .vt = &vt };
     }
 
     const vt = g.hooks(Mm);

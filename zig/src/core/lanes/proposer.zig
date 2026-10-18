@@ -185,6 +185,56 @@ pub const SuffixLookup = struct {
         return s.out.items;
     }
 
+    /// Propose after a drafted tail; index only committed history.
+    pub fn proposeAfter(s: *SuffixLookup, history: []const u32, tail: []const u32, max_draft: i64) ![]const u32 {
+        const n = s.params.ngram;
+        s.out.clearRetainingCapacity();
+        const len = history.len + tail.len;
+        if (max_draft <= 0 or history.len < n + 1) return s.out.items;
+        if (s.silent_for > 0) {
+            s.silent_for -= 1;
+            s.silenced_rounds += 1;
+            return s.out.items;
+        }
+        const changed = s.indexed > history.len or (s.indexed != 0 and !std.mem.eql(u32, &s.keyAt(history, s.indexed), &s.last_key));
+        if (changed) {
+            s.clearIndex();
+            s.indexed = 0;
+        }
+        try s.extend(history);
+        s.last_key = s.keyAt(history, s.indexed);
+        var key: Key = @splat(0xFFFF_FFFF);
+        for (key[0..n], len - n..) |*k, i| k.* = joined(history, tail, i);
+        const positions = (s.index.get(key) orelse return s.out.items).items;
+        var best_end: usize = 0;
+        var best_len: i64 = 0;
+        var i = positions.len;
+        while (i > 0) {
+            i -= 1;
+            const end: usize = positions[i] + 1;
+            if (end >= history.len) continue;
+            var length: i64 = 0;
+            while (length < s.params.max_extension and length < end and joined(history, tail, end - 1 - @as(usize, @intCast(length))) == joined(history, tail, len - 1 - @as(usize, @intCast(length)))) length += 1;
+            if (length > best_len) {
+                best_len = length;
+                best_end = end;
+                if (length >= s.params.max_extension) break;
+            }
+        }
+        s.last_match = best_len;
+        if (best_len < s.params.min_match) return s.out.items;
+        try s.out.appendSlice(s.gpa, history[best_end..@min(history.len, best_end + @as(usize, @intCast(max_draft)))]);
+        if (s.out.items.len > 0) {
+            s.proposals += 1;
+            s.proposed_tokens += @intCast(s.out.items.len);
+        }
+        return s.out.items;
+    }
+
+    fn joined(history: []const u32, tail: []const u32, i: usize) u32 {
+        return if (i < history.len) history[i] else tail[i - history.len];
+    }
+
     pub fn observe(s: *SuffixLookup, proposed: i64, accepted: i64) !void {
         s.judged_tokens += proposed;
         s.accepted_tokens += accepted;
@@ -210,4 +260,15 @@ test "suffix lookup copies the continuation after a repeated n-gram" {
     const got = try s.propose(&ctx, 3);
     try std.testing.expectEqualSlices(u32, &.{ 4, 5, 9 }, got);
     try std.testing.expectEqual(@as(i64, 3), s.last_match);
+}
+
+test "a drafted tail continues the history's copy, and history alone is indexed" {
+    const gpa = std.testing.allocator;
+    var s = try SuffixLookup.init(gpa, .{ .ngram = 3, .min_match = 4 });
+    defer s.deinit();
+    const history = [_]u32{ 7, 1, 2, 3, 4, 5, 6, 8, 9, 7, 1 };
+    try std.testing.expectEqualSlices(u32, &.{ 5, 6, 8 }, try s.proposeAfter(&history, &.{ 2, 3, 4 }, 3));
+    try std.testing.expectEqual(@as(i64, 5), s.last_match);
+    try std.testing.expectEqual(history.len, s.indexed);
+    try std.testing.expectEqual(@as(usize, 0), (try s.proposeAfter(&history, &.{ 2, 3, 9 }, 3)).len);
 }
