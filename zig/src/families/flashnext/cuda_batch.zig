@@ -375,6 +375,13 @@ pub fn Pass(comptime Tri: type) type {
             a.add(gv);
             a.add(ggb);
             a.add(state);
+            if (rows >= 64) {
+                // two threads a state row (fn_gdn_chain_tpr), fn_gdn_rows' bits; in place when there is no rollback copy
+                a.add(if (state_out != 0) state_out else state);
+                a.add(cint(rows));
+                a.add(ys);
+                return cuda.launch.launch(self.k.chain_tpr, .{ .grid = .{ .x = gdn.nv }, .block = .{ .x = 256 }, .shared = parts.chain_tpr_smem }, self.stream, &a);
+            }
             if (state_out != 0) a.add(state_out);
             a.add(cint(rows));
             a.add(ys);

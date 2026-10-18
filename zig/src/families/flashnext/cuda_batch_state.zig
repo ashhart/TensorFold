@@ -66,6 +66,8 @@ const cubin_fexp_up: [:0]const u8 = "_ZN15tf_fact_experts11fact_kernelILi2ELi2EL
 const cubin_fexp_down: [:0]const u8 = "_ZN15tf_fact_experts11fact_kernelILi1ELi0ELi2ELi2ELi4ELi3EEEvPK13__nv_bfloat16iiPK5uint4iiPKiS8_S8_Pvif";
 pub const fexp_smem: u32 = 41472;
 pub const fexp_tile: usize = 64;
+/// fn_gdn_chain_tpr's staged rows: 2 x 16 steps of q, k, v (128 fp32 each) and g, beta.
+pub const chain_tpr_smem: u32 = 2 * 16 * (3 * 128 * 4 + 16);
 pub const fact_smem: u32 = 3 * (2 * 64 * 64 + 2 * 128 * 16 + 2 * 2 * 128 * 2 + 2 * 64 * 4);
 /// Pairs an expert item takes: the core rows kernel's tile.
 const rows_tile: usize = cuda.experts.RowsExperts.tile;
@@ -168,6 +170,7 @@ pub const Kernels = struct {
     front: cuda.Function,
     chain: cuda.Function,
     chain_to: cuda.Function,
+    chain_tpr: cuda.Function,
     gnorm: cuda.Function,
     sum: cuda.Function,
     moe_sum: cuda.Function,
@@ -223,6 +226,8 @@ pub const Kernels = struct {
         k.front = try k.batch.function("fn_gdn_front");
         k.chain = try k.batch.function("fn_gdn_rows");
         k.chain_to = try k.batch.function("fn_gdn_rows_to");
+        k.chain_tpr = try k.batch.function("fn_gdn_chain_tpr");
+        try k.chain_tpr.allowDynamicShared(chain_tpr_smem);
         k.gnorm = try k.batch.function("fn_gdn_norm");
         return k;
     }
