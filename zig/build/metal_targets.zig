@@ -357,6 +357,7 @@ pub fn metalTargets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: s
         .{ .name = "tf-uocr-blocks", .path = "zig/tests/uocr/blocks.zig", .about = "Unlimited-OCR-2's image encoder step by step: each SAM block, the neck, CLIP's front, each CLIP layer and the projector alone against float32" },
         .{ .name = "tf-glm-attn-probe", .path = "zig/tests/glm_attn_probe.zig", .about = "GLM-5.3-Flash's dense latent attention kernels on given inputs (scores, probabilities, outputs)" },
         .{ .name = "tf-moe-bench", .path = "zig/tests/moe_bench.zig", .about = "Routed-expert prompt kernels from .metal files on a skewed routing: chained speed, bits against the first" },
+        .{ .name = "tf-nemotron-forward", .path = "zig/tests/nemotron_forward.zig", .about = "Nemotron (Lightning or Bolt) native teacher-forced logits" },
         .{ .name = "tf-mm-bench", .path = "zig/tests/mm_bench.zig", .about = "Prompt matmul kernels from .metal files: chained speed at one shape, bits against the first, error against fp64" },
         .{ .name = "tf-sq-bench", .path = "zig/tests/sq_bench.zig", .about = "Row-exact 4-bit prompt tiles before the M5: chained speed at one shape, every output's bits against the first" },
         .{ .name = "tf-gemma4-kernels", .path = "zig/tests/gemma4/kernels.zig", .about = "Gemma 4 dense decode kernels against the reference's dumped fixtures, bit for bit by window width" },
