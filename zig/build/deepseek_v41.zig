@@ -29,7 +29,7 @@ pub fn checks(
     sources: *std.Build.Module,
     engine: *std.Build.Module,
 ) struct { device: *std.Build.Step, reference: *std.Build.Step } {
-    const device = b.addTest(.{ .root_module = b.createModule(.{
+    const device = b.addTest(.{ .name = "tf-dsv41-gpu", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/deepseek_v41_checks.zig"),
         .target = target,
         .optimize = optimize,
@@ -58,6 +58,7 @@ pub fn checks(
     const device_step = b.step("test-deepseek-v41", "Experimental DS4.1 EXL3, Engram, mHC and sparse attention on Metal");
     device_step.dependOn(&b.addRunArtifact(device).step);
     const reference = b.addTest(.{
+        .name = "tf-dsv41-reference",
         .root_module = b.createModule(.{
             .root_source_file = b.path("zig/deepseek_v41_reference_checks.zig"),
             .target = target,
@@ -72,5 +73,8 @@ pub fn checks(
     });
     const reference_step = b.step("test-deepseek-v41-reference", "Independent CPU teacher-oracle arithmetic boundaries");
     reference_step.dependOn(&b.addRunArtifact(reference).step);
+    const staged = b.step("check-deepseek-v41", "Build and install V4.1 qualification binaries without running the GPU");
+    staged.dependOn(&b.addInstallArtifact(device, .{}).step);
+    staged.dependOn(&b.addInstallArtifact(reference, .{}).step);
     return .{ .device = device_step, .reference = reference_step };
 }
