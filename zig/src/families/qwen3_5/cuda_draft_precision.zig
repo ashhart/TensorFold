@@ -27,9 +27,9 @@ pub fn project(e: anytype, l: anytype, x: u64, xs: u64, out: u64, rows: usize, r
 }
 
 pub fn routed(e: anytype, router: u64, experts: anytype, x: u64, out: u64, rows: usize, role: Role) !void {
-    if (prompt(role, rows, mtp_moe_prompt_cutoff)) return e.routedRows(router, experts, x, out, rows, true);
+    if (prompt(role, rows, mtp_moe_prompt_cutoff)) return e.routedRows(router, experts, x, out, rows, true, 0);
     var at: usize = 0;
     while (at < rows) : (at += native_rows) {
-        try e.routedRows(router, experts, x + at * e.g.hidden * 2, out + at * e.g.hidden * 2, @min(native_rows, rows - at), false);
+        try e.routedRows(router, experts, x + at * e.g.hidden * 2, out + at * e.g.hidden * 2, @min(native_rows, rows - at), false, 0);
     }
 }

@@ -79,7 +79,7 @@ const Moe = struct {
     count: usize = 0,
     prompt: bool = false,
     total: usize = 0,
-    pub fn routedRows(e: *Moe, router: u64, experts: u32, xa: u64, oa: u64, rows: usize, wide: bool) !void {
+    pub fn routedRows(e: *Moe, router: u64, experts: u32, xa: u64, oa: u64, rows: usize, wide: bool, _: u64) !void {
         try T.expectEqual(@as(u64, 7), router);
         try T.expectEqual(@as(u32, 9), experts);
         try T.expectEqual(x + e.total * 256 * 2, xa);

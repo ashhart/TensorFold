@@ -170,7 +170,8 @@ const usage =
     \\  affine8                   MLX affine 2 to 8-bit tiles and the 8-bit lane_gemv: widened codes, float64, rows (synthetic)
     \\  carveout [MiB] [card]     GB10 display memory: round trips and bandwidth (SKIP without the card)
     \\  nvfp4 <dir>               NVFP4 projections against recorded lane-matmul and prompt-GEMM fixture bytes
-    \\  moe                       softmax routing and SwiGLU experts against host references
+    \\  moe                       softmax routing and SwiGLU experts against host references, then moe-live
+    \\  moe-live                  a captured bucket's padding rows: never routed, planned or combined (synthetic)
     \\  experts3                  affine-3 packing and outputs against affine-4 and fp64
     \\  ggml <dir>                Bolt's IQ2_XXS experts and Q8_0 / IQ2_XXS dense rows on real tensors against fp64 (tools/zig/bolt_ggml_fixture.py)
     \\  ggml-bench                IQ2_XXS expert and Q8_0 lm_head decode GB/s (synthetic blocks)
@@ -296,6 +297,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "moe")) return moe_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-live")) return @import("moe_live_tests.zig").run(gpu);
     if (std.mem.eql(u8, cmd, "experts3")) return experts3_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "ggml")) return ggml_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "ggml-bench")) return ggml_tests.bench(gpu);
