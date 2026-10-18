@@ -22,7 +22,8 @@ pub fn main() !void {
         .{ "shared-event host/GPU overlap", overlap.eventOverlap },
         .{ "nemotron_h_puzzle route_bolt: last slice kept at NE=240, weights vs reference", route_bolt.routeBolt },
         .{ "nemotron_h_puzzle dense_bf16: bf16 write-matmul vs reference", route_bolt.denseBf16 },
-        .{ "nemotron_h_puzzle add_norm_moe_xs_bolt: rmsnorm at <4096,512,9>", route_bolt.addNormBolt },
+        .{ "nemotron_h_puzzle add_norm_moe_xs_bolt: rmsnorm at <4096,512,1>", route_bolt.addNormBolt },
+        .{ "nemotron_h_puzzle combine_latent: bit-exact vs a host fma reference", route_bolt.combineLatent },
     };
     var failed: usize = 0;
     inline for (tests) |t| {
