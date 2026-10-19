@@ -27,7 +27,7 @@ pub const Provenance = struct {
     collector: Binding,
     mandatory_source: []const u8,
     policy_version: u32,
-    source_kind: enum { committed_response_ids },
+    source_kind: enum { committed_response_ids, legacy_table },
 };
 pub const Document = struct {
     version: u32,
@@ -46,6 +46,9 @@ pub const Artifact = struct {
     pub fn deinit(a: *Artifact) void {
         a.owned.deinit();
         a.* = undefined;
+    }
+    pub fn isLegacy(a: *const Artifact) bool {
+        return a.owned.value.provenance.source_kind == .legacy_table;
     }
     pub fn ids(a: *const Artifact) []const u32 {
         return a.owned.value.ids;
@@ -91,6 +94,7 @@ pub fn load(gpa: std.mem.Allocator, bytes: []const u8, expected: Identity, manda
     const d = try std.json.parseFromValueLeaky(Document, raw.arena.allocator(), raw.value, .{});
     const owned: std.json.Parsed(Document) = .{ .arena = raw.arena, .value = d };
     if (d.version != 1 or d.provenance.policy_version != 1) return error.UnsupportedVersion;
+    if (d.provenance.source_kind != .committed_response_ids) return error.InvalidProvenance;
     try validateIdentity(d.identity);
     try validateIdentity(expected);
     if (!sameIdentity(d.identity, expected)) return error.IdentityMismatch;
@@ -110,6 +114,8 @@ pub fn load(gpa: std.mem.Allocator, bytes: []const u8, expected: Identity, manda
     std.crypto.hash.sha2.Sha256.hash(bytes, &a.fingerprint, .{});
     return a;
 }
+
+pub const legacy = @import("proposal_legacy.zig");
 
 /// SHA256 of the ordered logical IDs as little-endian u32 values, with no padding or text encoding.
 pub fn idsHash(ids: []const u32) [64]u8 {

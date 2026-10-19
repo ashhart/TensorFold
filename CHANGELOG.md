@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Share Flash Next's existing proposal table and exact stored rows without changing its default IDs or packs.
+
 - Prepare exact stored proposal head rows and shared scoring views without changing family defaults or precision.
 
 - Prepare optional shared proposal routing for native and external draft heads, with full or absorb-only fallback.

@@ -2,21 +2,25 @@
 const std = @import("std");
 const cuda = @import("cuda");
 const wt = @import("cuda_prompt_wt.zig");
+const core = @import("core");
 const projection = @import("cuda_projection.zig");
 
-pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, ids: []const u32) !wt.Q4 {
-    const mode = if (std.c.getenv("TF_FLASHNEXT_DRAFT_HEAD")) |v| std.mem.span(v) else "bf16";
-    const affine = std.mem.eql(u8, mode, "affine4");
-    if (!affine and !std.mem.eql(u8, mode, "bf16")) return error.BadDraftHead;
+pub const Mode = enum { bf16, affine4 };
+pub fn mode() !Mode {
+    const value = if (std.c.getenv("TF_FLASHNEXT_DRAFT_HEAD")) |v| std.mem.span(v) else "bf16";
+    if (std.mem.eql(u8, value, "bf16")) return .bf16;
+    if (std.mem.eql(u8, value, "affine4")) return .affine4;
+    return error.BadDraftHead;
+}
+pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, artifact: *const core.proposal_vocab.Artifact, role: Mode) !wt.Q4 {
+    const ids = artifact.ids();
+    const affine = role == .affine4;
     const tensor = try store.tensor("language_model.lm_head.weight");
     if (tensor.dtype == .bf16) {
         if (!tensor.is(.bf16, &.{ wt.vocab, wt.dims })) return error.UnexpectedTensor;
-        const rows = try a.alloc(u8, ids.len * wt.dims * 2);
-        defer a.free(rows);
-        for (ids, 0..) |id, i| {
-            if (id >= wt.vocab) return error.InvalidToken;
-            @memcpy(rows[i * wt.dims * 2 ..][0 .. wt.dims * 2], tensor.bytes[id * wt.dims * 2 ..][0 .. wt.dims * 2]);
-        }
+        var selected = try (core.proposal_rows.Source{ .identity = artifact.identity(), .storage = .bf16, .recipe = .qlinear_decode, .codes = .{ .bytes = tensor.bytes, .stride = wt.dims * 2 } }).extract(a, artifact, 1, std.math.maxInt(usize));
+        defer selected.deinit();
+        const rows = selected.codes;
         if (affine) return quantized(a, d, rows, ids.len);
         return projection.dense(a, d, .{ .dtype = .bf16, .rank = 2, .shape = .{ ids.len, wt.dims, 1, 1, 1 }, .bytes = rows });
     }
@@ -28,19 +32,9 @@ pub fn draft(a: std.mem.Allocator, d: *cuda.Driver, store: *wt.Store, ids: []con
     const wrow = wt.dims / 2;
     const grow = wt.dims / 32 * 2;
     if (head.w.len != wt.vocab * wrow or head.s.len != wt.vocab * grow) return error.UnexpectedTensor;
-    const w = try a.alloc(u8, ids.len * wrow);
-    defer a.free(w);
-    const s = try a.alloc(u8, ids.len * grow);
-    defer a.free(s);
-    const b = try a.alloc(u8, ids.len * grow);
-    defer a.free(b);
-    for (ids, 0..) |id, i| {
-        if (id >= wt.vocab) return error.InvalidToken;
-        @memcpy(w[i * wrow ..][0..wrow], head.w[id * wrow ..][0..wrow]);
-        @memcpy(s[i * grow ..][0..grow], head.s[id * grow ..][0..grow]);
-        @memcpy(b[i * grow ..][0..grow], head.b[id * grow ..][0..grow]);
-    }
-    return wt.uploadQ4(a, d, w, s, b, ids.len, wt.dims / 8);
+    var selected = try (core.proposal_rows.Source{ .identity = artifact.identity(), .storage = .affine, .recipe = .qlinear_decode, .scale_dtype = .bf16, .bias_dtype = .bf16, .codes = .{ .bytes = head.w, .stride = wrow }, .scales = .{ .bytes = head.s, .stride = grow }, .biases = .{ .bytes = head.b, .stride = grow } }).extract(a, artifact, 1, std.math.maxInt(usize));
+    defer selected.deinit();
+    return wt.uploadQ4(a, d, selected.codes, selected.scales, selected.biases, ids.len, wt.dims / 8);
 }
 
 fn quantized(a: std.mem.Allocator, d: *cuda.Driver, rows: []const u8, n: usize) !wt.Q4 {

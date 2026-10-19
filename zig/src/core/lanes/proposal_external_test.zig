@@ -7,6 +7,9 @@ const FakeDrafter = @import("drafted_test.zig").FakeDrafter;
 const gpa = std.testing.allocator;
 
 const ProposalFixture = struct {
+    pub fn isLegacy(_: *const ProposalFixture) bool {
+        return false;
+    }
     fingerprint: [32]u8 = @splat(1),
     pub fn ids(_: *const ProposalFixture) []const u32 {
         return &.{ 0, 3, 7 };

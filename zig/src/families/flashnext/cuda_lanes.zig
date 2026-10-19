@@ -199,7 +199,7 @@ pub fn Namespace(comptime Tri: type) type {
             }
 
             pub fn backend(self: *Cuda) be.Backend {
-                return .{ .ptr = self, .vtable = &.{
+                return .{ .ptr = self, .proposal_head = if (self.head) |h| &h.service else null, .vtable = &.{
                     .prefill = prefillFn,
                     .prefill_step = prefillStepFn,
                     .first = firstFn,

@@ -122,3 +122,22 @@ undrained queue. Model owners drain before releasing artifacts, views or graph b
 Run `zig build test-proposal-rows-host test-proposal-head-cuda-host compile-proposal-metal-host` for exact byte,
 padding, mapping, recording-driver and compile-only encoder checks. These are host receipts, not GPU arithmetic,
 model equality or speed measurements. No native family exposes a proposal-vocabulary serving option yet.
+
+## Existing Flash Next table
+
+Flash Next's default table now enters through the common legacy artifact and row views.
+It remains an existing recipe, with no response-calibration claims and no new serving option.
+A legacy artifact has no measured coverage and cannot enter calibrated admission.
+The target vocabulary, masks, sampling and weights are unchanged.
+
+CUDA retains its 79,591 sorted IDs, logical logit pitch and original BF16 packer and lane launches.
+The group-32 affine option keeps its existing precision choice and projection callback.
+The Metal pack retains its existing 79,616 real IDs, including the extra IDs its old tiling recipe added.
+Those IDs are legacy support, separate from the zero padding of a calibrated view.
+Pack source identities, cache keys, raw table bytes and runtime readers keep their current layout.
+HIP shares the built-in table reader and retains its original row spans and projection path.
+These bridges do not enable arbitrary calibrated lists on unqualified backends.
+
+Host comparisons cover both previous and common paths on the same table and synthetic stored rows.
+They compare IDs, selected codes and side planes, packed bytes, cache fingerprints and CUDA launch records.
+Flash Next CUDA and Metal checkpoint token hashes and drafted/plain equality still require their device gates.

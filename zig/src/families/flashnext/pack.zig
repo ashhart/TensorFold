@@ -282,62 +282,28 @@ fn tableScale(ck: *ckpt.Checkpoint, map: std.json.ObjectMap, name: []const u8) !
 pub fn draftIdList(gpa: std.mem.Allocator, io: Io, path: []const u8, vocab: usize) ![]u32 {
     const text = try Io.Dir.cwd().readFileAlloc(io, path, gpa, .limited(1 << 26));
     defer gpa.free(text);
-    var listed: std.AutoHashMapUnmanaged(u32, void) = .empty;
-    defer listed.deinit(gpa);
-    var it = std.mem.tokenizeAny(u8, text, " \t\r\n");
-    while (it.next()) |token| {
-        const id = std.fmt.parseInt(u32, token, 10) catch return error.BadDraftVocab;
-        if (id >= vocab) return error.DraftIdPastVocab;
-        try listed.put(gpa, id, {});
-    }
-    if (listed.count() == 0) return error.BadDraftVocab;
-    var extra: std.ArrayList(u32) = .empty;
-    defer extra.deinit(gpa);
-    var candidate: u32 = 0;
-    while ((listed.count() + extra.items.len) % 64 != 0) {
-        if (candidate >= vocab) return error.DraftVocabExhausted; // a pad past the vocabulary would gather past lm_head
-        if (!listed.contains(candidate)) try extra.append(gpa, candidate);
-        candidate += 1;
-    }
-    const all = try gpa.alloc(u32, listed.count() + extra.items.len);
-    errdefer gpa.free(all);
-    var n: usize = 0;
-    var it2 = listed.keyIterator();
-    while (it2.next()) |k| {
-        all[n] = k.*;
-        n += 1;
-    }
-    @memcpy(all[n..], extra.items);
-    std.mem.sort(u32, all, {}, std.sort.asc(u32));
-    return all;
+    return @import("../../core/proposal_vocab.zig").legacy.ids(gpa, text, .{ .vocab = @intCast(vocab), .tile = 64 });
 }
 
 /// The MTP draft head: lm_head's rows gathered by the id list, then the lane pipeline (draft_head.cut_head).
-fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: []const u8, lm_head: Q, ids: []const u32) !void {
+pub fn putDraftHead(out: *Out, gpa: std.mem.Allocator, a: std.mem.Allocator, name: []const u8, lm_head: Q, ids: []const u32) !void {
     const rows = ids.len;
     const kw = lm_head.kw;
     const kg = lm_head.s.dim(1);
-    const wq = try gpa.alloc(u8, rows * kw * 4); // putLane copies the gathered rows, so they free here
-    defer gpa.free(wq);
-    const s = try gpa.alloc(u8, rows * kg * 2);
-    defer gpa.free(s);
-    const b = try gpa.alloc(u8, rows * kg * 2);
-    defer gpa.free(b);
-    const w32 = std.mem.bytesAsSlice(u32, wq);
-    const src32 = std.mem.bytesAsSlice(u32, lm_head.part(.weight));
-    const s16 = std.mem.bytesAsSlice(u16, s);
-    const src_s16 = std.mem.bytesAsSlice(u16, lm_head.part(.scales));
-    const b16 = std.mem.bytesAsSlice(u16, b);
-    const src_b16 = std.mem.bytesAsSlice(u16, lm_head.part(.biases));
-    for (ids, 0..) |id, r| {
-        if (id * kw + kw > src32.len or id * kg + kg > src_s16.len) return error.DraftIdPastVocab;
-        @memcpy(w32[r * kw ..][0..kw], src32[id * kw ..][0..kw]);
-        @memcpy(s16[r * kg ..][0..kg], src_s16[id * kg ..][0..kg]);
-        @memcpy(b16[r * kg ..][0..kg], src_b16[id * kg ..][0..kg]);
-    }
+    const pv = @import("../../core/proposal_vocab.zig");
+    const storage = @import("../../core/proposal_row_storage.zig");
+    const pr = storage.Views(storage.Shape);
+    const format = try std.fmt.allocPrint(a, "affine{d}", .{lm_head.spec.bits});
+    defer a.free(format);
+    var artifact = try pv.legacy.artifact(gpa, ids, .{ .vocab = @intCast(lm_head.rows), .hidden = @intCast(lm_head.k), .format = format, .group = @intCast(lm_head.spec.group), .scale_recipe = "existing packed lane" });
+    defer artifact.deinit();
+    var selected = try (pr.Source{ .identity = artifact.identity(), .storage = .affine, .recipe = .affine_mm, .scale_dtype = .bf16, .bias_dtype = .bf16, .codes = .{ .bytes = lm_head.part(.weight), .stride = kw * 4 }, .scales = .{ .bytes = lm_head.part(.scales), .stride = kg * 2 }, .biases = .{ .bytes = lm_head.part(.biases), .stride = kg * 2 } }).extract(gpa, &artifact, 1, std.math.maxInt(usize));
+    defer selected.deinit();
+    const wq = selected.codes;
+    const s = selected.scales;
+    const b = selected.biases;
     const gathered = [_]Q{.{ .w = .{ .dtype = .u32, .rank = 2, .shape = .{ rows, kw, 0, 0, 0 }, .bytes = wq }, .s = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0, 0 }, .bytes = s }, .b = .{ .dtype = .bf16, .rank = 2, .shape = .{ rows, kg, 0, 0, 0 }, .bytes = b }, .rows = rows, .k = lm_head.k, .kw = kw, .spec = lm_head.spec }};
     try putLane(out, gpa, name, gathered[0..]);
-    _ = a;
 }
 
 /// Build the three packs into `out_dir`. A null draft vocab omits the mtp tensors. Dims come from the checkpoint.

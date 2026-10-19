@@ -2,7 +2,7 @@
 const std = @import("std");
 const Io = std.Io;
 const pio = @import("pack_io.zig");
-const vocab = @embedFile("draft_vocab_default.txt");
+const vocab = @import("proposal_table.zig").text;
 const pack_names = [_][]const u8{ "pack.safetensors", "pack_mlx.safetensors", "pack_mtp_mlx.safetensors" };
 
 pub fn defaultRoot(gpa: std.mem.Allocator, home: []const u8) ![]u8 {

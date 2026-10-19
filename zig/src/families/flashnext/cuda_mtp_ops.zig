@@ -169,7 +169,7 @@ pub fn Ops(comptime Tri: type) type {
                         try p.copy(s.pss, s.pss + (m - 1) * pss_n * 4, pss_n * 4);
                     }
                     try p.readout(h.mixer, 0, 1);
-                    try p.lane(s.mixed, s.xsm, h.draft, d.dlogits.ptr, s.dummy, 1, 1);
+                    try h.project(&p, s.mixed, s.xsm, d.dlogits.ptr, 1);
                 }
             }
         }
@@ -186,7 +186,8 @@ pub fn Ops(comptime Tri: type) type {
         /// The draft at `position` and its temperature-1 probability (Python Engine.sample_draft).
         pub fn pick(o: Self, d: *Draft, position: u64, sm: ?Sampling) !Pick {
             const h = o.h;
-            const n = h.ids.len;
+            const view_ = h.view();
+            const n = view_.logical;
             try h.best(o.stream(), d.dlogits.ptr, n, n, 1, d.best.ptr);
             try download(o.stream(), std.mem.sliceAsBytes(d.best_host[0..4]), d.best.ptr);
             const top = d.best_host[0];
@@ -194,7 +195,7 @@ pub fn Ops(comptime Tri: type) type {
             const greedy = if (sm) |s| s.temperature <= 0 else true;
             if (greedy) {
                 const col: usize = @intCast(@as(i32, @bitCast(d.best_host[2])));
-                return .{ .token = h.ids[col], .prob = @exp(@as(f64, top) - @as(f64, lse)) };
+                return .{ .token = try view_.global(@intCast(col)), .prob = @exp(@as(f64, top) - @as(f64, lse)) };
             }
             const row = d.host[0..n];
             try download(o.stream(), std.mem.sliceAsBytes(row), d.dlogits.ptr);

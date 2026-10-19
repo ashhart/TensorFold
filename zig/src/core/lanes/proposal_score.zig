@@ -49,7 +49,7 @@ pub const Scorer = struct {
 
     pub fn calibrated(a: anytype, actual: anytype, descriptor: Descriptor, selection: Selection, ptr: *anyopaque, run: @FieldType(Scorer, "run")) !Scorer {
         if (descriptor.rank != 0 or descriptor.ranks != 1) return error.ProposalPlacementUnsupported;
-        if (!a.matches(actual)) return error.ProposalIdentityMismatch;
+        if (a.isLegacy() or !a.matches(actual)) return error.ProposalIdentityMismatch;
         if (descriptor.vocab != actual.vocab or descriptor.hidden != actual.hidden or descriptor.group != actual.group or
             !std.mem.eql(u8, descriptor.format, actual.format) or !std.mem.eql(u8, descriptor.scale_recipe, actual.scale_recipe)) return error.ProposalIdentityMismatch;
         switch (selection) {

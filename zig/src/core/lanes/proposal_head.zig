@@ -45,8 +45,12 @@ pub const Service = struct {
     complete: Plan = .{ .kind = .paused, .vocab = 0 },
     paused: Plan = .{ .kind = .paused, .vocab = 0 },
 
+    pub fn legacy(gpa: std.mem.Allocator, artifact: anytype) !Service {
+        if (!artifact.isLegacy()) return error.ProposalIdentityMismatch;
+        return .{ .gpa = gpa, .compact = .{ .kind = .subset, .vocab = artifact.identity().vocab, .map = Map.from(artifact) } };
+    }
     pub fn calibrated(gpa: std.mem.Allocator, artifact: anytype, actual: anytype, caps: Capabilities) !Service {
-        if (!artifact.matches(actual)) return error.ProposalIdentityMismatch;
+        if (artifact.isLegacy() or !artifact.matches(actual)) return error.ProposalIdentityMismatch;
         if (!caps.subset) return error.ProposalSubsetUnsupported;
         if (caps.ranks != 1) return error.ProposalPlacementUnsupported;
         return .{ .gpa = gpa, .mode = .calibrated, .compact = .{ .kind = .subset, .vocab = actual.vocab, .map = Map.from(artifact) }, .complete = .{ .kind = if (caps.full) .full else .paused, .vocab = actual.vocab }, .paused = .{ .kind = .paused, .vocab = actual.vocab } };
@@ -75,7 +79,8 @@ pub const Service = struct {
         const scorer = s.scorer orelse return error.ProposalServiceUnsupported;
         return scorer.score(plan, input);
     }
-    fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
+    pub fn choose(s: *const Service, r: be.DraftRequest) *const Plan {
+        if (s.mode == .legacy) return &s.compact;
         if (r.stream.finished or r.stream.paused) return &s.paused;
         if (s.mode == .full) return &s.complete;
         const m = s.compact.map.?;
