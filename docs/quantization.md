@@ -132,6 +132,17 @@ cold 8,192-token prompt in 4.41 s against `full`'s 7.96 s (1.81x; 1.82x at 2,048
 52.3 ms against 50.1 ms without drafts: decode reads the same weight bytes either way, and `checkpoint` adds the
 rows' quantization.
 
+## GLM-5.3-Flash's float32 tensors on CUDA
+
+The GLM CUDA loader keeps float32 where its kernels read float32: the hyper-connections' bases and scales, KDA's short
+convolutions, `A_log` and `dt_bias`, the router's correction bias, and the hidden-size norm weights that
+`nvidia/GLM-5.3-Flash-FP4-Local` stores in float32 (`post_attention_layernorm` of layers 0-44 and the final norm, which
+bf16 does not hold). Any other float32 tensor it uploads as bf16 loads only when bf16 holds every value, and a value bf16
+would round is refused with the tensor's name. 1.1.0 rounded such a value to the nearest bf16 instead, so a checkpoint
+whose other float32 tensors hold values bf16 does not now stops at load where it loaded rounded before. The NVFP4 and
+FP4-Local checkpoints load unchanged, and the EXL3/TR3 checkpoint's float32 tensors are all of the kinds kept float32.
+A stored MXFP8 tensor widened to bf16 (`kv_b` of FP4-Local's MTP layer) follows the same rule.
+
 ## Native safetensors metadata
 
 The shared Zig safetensors index retains up to five dimensions, including temporal patch convolutions

@@ -130,10 +130,15 @@ const Loader = struct {
             .csf = ck.has(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_bases", .{module})),
         };
         const declared = L.declaredAs(module);
-        const got: ?formats.Format = formats.of(declared, stored) catch null;
-        if (got) |f| for (wants) |want| if (f == want) return f;
+        const got = formats.of(declared, stored);
+        if (got) |f| {
+            for (wants) |want| if (f == want) return f;
+        } else |_| {}
         var why: [320]u8 = undefined;
-        std.log.err("{s}; this loader reads it as {any}", .{ formats.describe(&why, module, declared, stored), wants });
+        const said = formats.describe(&why, module, declared, stored);
+        if (got) |_| {
+            std.log.err("{s}; this loader reads it as {any}", .{ said, wants });
+        } else |e| std.log.err("{s} ({t}); this loader reads it as {any}", .{ said, e, wants });
         return error.UnreadableFormat;
     }
 

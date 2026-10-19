@@ -27,8 +27,11 @@ pub const Declared = union(enum) {
     mixed: ?Recipe,
 };
 
-/// The format of `stored`, or error.FormatMismatch when its tensors are not what `declared` says they are.
-pub fn of(declared: Declared, stored: Stored) error{FormatMismatch}!Format {
+/// Why `of` refuses: an empty shape, a width or block count that overflows, or tensors other than `declared` says.
+pub const Refusal = error{ EmptyShape, ShapeOverflow, FormatMismatch };
+
+/// The format of `stored`, or its Refusal; the shape is checked before any width or block count is computed from it.
+pub fn of(declared: Declared, stored: Stored) Refusal!Format {
     const f = try fromTensors(stored);
     const ok = switch (declared) {
         .nvfp4 => f == .bf16 or f == .nvfp4,
@@ -42,26 +45,27 @@ pub fn of(declared: Declared, stored: Stored) error{FormatMismatch}!Format {
     return if (ok) f else error.FormatMismatch;
 }
 
-fn fromTensors(s: Stored) error{FormatMismatch}!Format {
+fn fromTensors(s: Stored) Refusal!Format {
     const w = s.weight;
     if (w.shape.len != 2) return error.FormatMismatch;
     const n = w.shape[0];
+    if (n == 0 or w.shape[1] == 0) return error.EmptyShape;
+    const k = if (w.dtype == .u8) try checked(std.math.mul(usize, 2, w.shape[1])) else w.shape[1]; // two FP4 codes a byte
+    _ = try checked(std.math.mul(usize, n, k));
     switch (w.dtype) {
         .bf16 => return if (s.scale == null and !s.csf) .bf16 else error.FormatMismatch,
         .u8 => {
             if (s.csf) return if (s.scale == null) .nvfp4_csf else error.FormatMismatch;
             const sc = s.scale orelse return error.FormatMismatch;
-            const k = 2 * w.shape[1];
-            const fits = sc.dtype == .f8_e4m3 and sc.shape.len == 2 and sc.shape[0] == n and sc.shape[1] * core.nvfp4.group == k;
-            return if (fits) .nvfp4 else error.FormatMismatch;
+            if (sc.dtype != .f8_e4m3 or sc.shape.len != 2 or sc.shape[0] != n) return error.FormatMismatch;
+            return if (try checked(std.math.mul(usize, sc.shape[1], core.nvfp4.group)) == k) .nvfp4 else error.FormatMismatch;
         },
         .f8_e4m3 => {
             const sc = s.scale orelse return error.FormatMismatch;
-            const k = w.shape[1];
             if (sc.dtype == .u8) return if (k % 32 == 0 and sc.shape.len == 2 and sc.shape[0] == n and sc.shape[1] == k / 32) .mxfp8 else error.FormatMismatch;
             if (sc.dtype != .f32) return error.FormatMismatch;
-            const rb = (n + 127) / 128;
-            const cb = (k + 127) / 128;
+            const rb = try checked(std.math.add(usize, n, 127)) / 128;
+            const cb = try checked(std.math.add(usize, k, 127)) / 128;
             const blocks = switch (sc.shape.len) {
                 2 => sc.shape[0] == rb and sc.shape[1] == cb,
                 4 => sc.shape[0] == rb and sc.shape[1] == 1 and sc.shape[2] == cb and sc.shape[3] == 1,
@@ -73,14 +77,20 @@ fn fromTensors(s: Stored) error{FormatMismatch}!Format {
     }
 }
 
+/// A width or count from checked arithmetic, its overflow refused as error.ShapeOverflow.
+fn checked(v: error{Overflow}!usize) error{ShapeOverflow}!usize {
+    return v catch error.ShapeOverflow;
+}
+
 /// `module`'s NVFP4 linear whose block scales are csf_32x2_v1 parts, decoded into `scales` ([n, k/16] e4m3).
 pub fn csfLinear(ck: *core.Checkpoint, module: []const u8, scales: []u8) !core.nvfp4.Linear {
     var buf: [256]u8 = undefined;
     const w = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight", .{module}));
     if (w.dtype != .u8 or w.rank != 2) return error.BadNvfp4;
     const n = w.shape[0];
-    const k = 2 * w.shape[1];
-    if (k % core.nvfp4.group != 0 or scales.len != n * k / core.nvfp4.group) return error.BadNvfp4;
+    if (n == 0 or w.shape[1] == 0) return error.EmptyShape;
+    const k = try checked(std.math.mul(usize, 2, w.shape[1]));
+    if (k % core.nvfp4.group != 0 or scales.len != try checked(std.math.mul(usize, n, k)) / core.nvfp4.group) return error.BadNvfp4;
     var p: core.nvfp4_csf32.Parts = undefined;
     inline for (.{ "bases", "codes", "page_bases", "offsets", "exceptions" }, .{ .u8, .u8, .u32, .u16, .u16 }) |part, dtype| {
         const t = try ck.get(try std.fmt.bufPrint(&buf, "{s}.weight_scale.csf32_" ++ part, .{module}));
@@ -305,6 +315,30 @@ test "scales of the wrong shape or kind are refused" {
     try testing.expectError(error.FormatMismatch, of(.{ .mixed = .fp8_pb_wo }, .{ .weight = partial, .scale = meta(.bf16, &.{ 2, 3 }) }));
     try testing.expectError(error.FormatMismatch, of(.nvfp4, .{ .weight = meta(.u8, &.{ 64, 32 }), .scale = meta(.f8_e4m3, &.{ 64, 2 }) }));
     try testing.expectError(error.FormatMismatch, of(.{ .mixed = .nvfp4_csf }, .{ .weight = meta(.u8, &.{ 64, 32 }), .scale = meta(.f8_e4m3, &.{ 64, 4 }), .csf = true }));
+}
+
+test "an empty shape is refused by name before any width or block count" {
+    try testing.expectError(error.EmptyShape, of(.{ .mixed = null }, .{ .weight = meta(.bf16, &.{ 0, 4096 }) }));
+    try testing.expectError(error.EmptyShape, of(.nvfp4, .{ .weight = meta(.u8, &.{ 0, 0 }), .scale = meta(.f8_e4m3, &.{ 0, 0 }) }));
+    try testing.expectError(error.EmptyShape, of(.{ .mixed = .nvfp4_csf }, .{ .weight = meta(.u8, &.{ 2048, 0 }), .csf = true }));
+    try testing.expectError(error.EmptyShape, of(.{ .mixed = .mxfp8 }, .{ .weight = meta(.f8_e4m3, &.{ 64, 0 }), .scale = meta(.u8, &.{ 64, 0 }) }));
+    try testing.expectError(error.EmptyShape, of(.{ .mixed = .fp8_pb_wo }, .{ .weight = meta(.f8_e4m3, &.{ 0, 0 }), .scale = meta(.f32, &.{ 0, 0 }) }));
+    var buf: [160]u8 = undefined;
+    const why = describe(&buf, "model.language_model.layers.3.mlp.experts.0.up_proj", .nvfp4, .{ .weight = meta(.u8, &.{ 0, 0 }) });
+    try testing.expectEqualStrings("model.language_model.layers.3.mlp.experts.0.up_proj: declared NVFP4, stored u8 { 0, 0 }", why);
+}
+
+test "an oversized shape is refused by checked arithmetic, never wrapped into a scale that fits" {
+    const max = std.math.maxInt(usize);
+    const half = max / 2 + 1; // two FP4 codes a byte: 2 * half wraps to 0
+    try testing.expectError(error.ShapeOverflow, of(.nvfp4, .{ .weight = meta(.u8, &.{ 1, half }), .scale = meta(.f8_e4m3, &.{ 1, 0 }) }));
+    try testing.expectError(error.ShapeOverflow, of(.{ .mixed = .nvfp4_csf }, .{ .weight = meta(.u8, &.{ 1, half }), .csf = true }));
+    const quarter = half / 2; // k = half; 3 * half / 16 scale columns times 16 wrap to it
+    try testing.expectError(error.ShapeOverflow, of(.nvfp4, .{ .weight = meta(.u8, &.{ 1, quarter }), .scale = meta(.f8_e4m3, &.{ 1, 3 * (half / 16) }) }));
+    const side = @as(usize, 1) << (@bitSizeOf(usize) / 2 + 1); // side * side elements overflow
+    try testing.expectError(error.ShapeOverflow, of(.{ .mixed = .mxfp8 }, .{ .weight = meta(.f8_e4m3, &.{ side, side }), .scale = meta(.u8, &.{ side, side / 32 }) }));
+    try testing.expectError(error.ShapeOverflow, of(.{ .mixed = .fp8_pb_wo }, .{ .weight = meta(.f8_e4m3, &.{ max, 1 }), .scale = meta(.f32, &.{ 0, 1 }) }));
+    try testing.expectError(error.ShapeOverflow, of(.{ .mixed = null }, .{ .weight = meta(.bf16, &.{ side, side }) }));
 }
 
 test "csf_32x2_v1 scales read as the same NVFP4 linear as the scales stored plain, every part used" {
