@@ -93,7 +93,7 @@ pub const Runner = struct {
         defer library.deinit();
         var attention = try attn.Attention.init(m.device, library, units);
         errdefer attention.deinit();
-        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = m.device.tensorUnits() };
+        const limits = attn.Limits{ .rows = m.frame.capacity, .streams = slots, .keys = capacity, .shared_prefix = geometry.shared_prefix, .geometry = geometry };
         var scratch = try attn.Scratch.init(m.device, limits);
         errdefer scratch.deinit();
         const bindings = try a.alloc(attn.Binding, na);

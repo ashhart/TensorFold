@@ -10,7 +10,14 @@ pub const Cache = struct { keys: Ref, values: Ref, capacity: u32, key_stride: u3
 const CachePtrs = extern struct { keys: u64, values: u64 };
 const PackArgs = extern struct { rows: u32, packed_rows: u32, heads: u32 = 24, kv_heads: u32 = 4, dim: u32 = 256, group: u32 = 6 };
 const PromptArgs = extern struct { start: i32, rows: i32, chunks: i32, rp: i32, key_stride: i32, value_stride: i32, scale2: f32 };
-pub const Limits = struct { rows: u32 = 128, streams: u32 = 8, keys: u32 = 32768, shared_prefix: bool = true };
+pub const Limits = struct {
+    rows: u32 = 128,
+    streams: u32 = 8,
+    keys: u32 = 32768,
+    shared_prefix: bool = true,
+    /// Numeric shape; shared_prefix above selects the allocation's execution mode.
+    geometry: planning.Geometry = .{},
+};
 pub const Field = enum { tile_stream, q_rows, nodes, paths, positions, qa, qb, poa, pma, pla, pob, pmb, plb, keep_k, keep_v };
 pub const BindingField = enum { meta, caches, keep_map };
 // Each layer owns immutable descriptors until its command buffer is terminal; arithmetic workspace is shared serially.
@@ -40,22 +47,22 @@ pub const Binding = struct {
         return .{ .buffer = b.buffers[@backingInt(field)] };
     }
     pub fn upload(b: *Binding, plan: Plan, caches: []const Cache) !void {
-        if (plan.rows > b.limits.rows or plan.streams > b.limits.streams or caches.len != plan.streams) return error.AttentionLimits;
+        if (plan.rows > b.limits.rows or plan.streams > b.limits.streams or caches.len != plan.streams or !plan.geometry.sameShape(b.limits.geometry)) return error.AttentionLimits;
         var meta = plan.meta;
         var table: [planning.max_streams]CachePtrs = @splat(.{ .keys = 0, .values = 0 });
         for (caches, 0..) |cache, i| {
             const at = 8 + i * 12;
             const start: u32 = @intCast(meta[at + 4]);
             const rows: u32 = @intCast(meta[at + 2]);
-            if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / 256 or @as(u64, start) + rows > cache.capacity) return error.AttentionCapacity;
-            const ks = if (cache.key_stride == 0) cache.capacity * 256 else cache.key_stride;
-            const vs = if (cache.value_stride == 0) cache.capacity * 256 else cache.value_stride;
-            if (ks < @as(u64, cache.capacity) * 256 or vs < @as(u64, cache.capacity) * 256 or ks > std.math.maxInt(i32) or vs > std.math.maxInt(i32)) return error.AttentionCacheStride;
-            try spanAligned(cache.keys, cacheBytes(cache, true), 16);
-            try spanAligned(cache.values, cacheBytes(cache, false), 16);
-            try disjoint(cache.keys, cacheBytes(cache, true), cache.values, cacheBytes(cache, false));
+            if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / b.limits.geometry.dim or @as(u64, start) + rows > cache.capacity) return error.AttentionCapacity;
+            const ks = if (cache.key_stride == 0) cache.capacity * b.limits.geometry.dim else cache.key_stride;
+            const vs = if (cache.value_stride == 0) cache.capacity * b.limits.geometry.dim else cache.value_stride;
+            if (ks < @as(u64, cache.capacity) * b.limits.geometry.dim or vs < @as(u64, cache.capacity) * b.limits.geometry.dim or ks > std.math.maxInt(i32) or vs > std.math.maxInt(i32)) return error.AttentionCacheStride;
+            try spanAligned(cache.keys, cacheBytes(cache, true, b.limits.geometry), 16);
+            try spanAligned(cache.values, cacheBytes(cache, false, b.limits.geometry), 16);
+            try disjoint(cache.keys, cacheBytes(cache, true, b.limits.geometry), cache.values, cacheBytes(cache, false, b.limits.geometry));
             for (caches[0..i]) |prior| {
-                for ([_]bool{ true, false }) |key| for ([_]bool{ true, false }) |prior_key| try disjoint(if (key) cache.keys else cache.values, cacheBytes(cache, key), if (prior_key) prior.keys else prior.values, cacheBytes(prior, prior_key));
+                for ([_]bool{ true, false }) |key| for ([_]bool{ true, false }) |prior_key| try disjoint(if (key) cache.keys else cache.values, cacheBytes(cache, key, b.limits.geometry), if (prior_key) prior.keys else prior.values, cacheBytes(prior, prior_key, b.limits.geometry));
             }
             table[i] = .{ .keys = cache.keys.buffer.gpuAddress() + cache.keys.offset, .values = cache.values.buffer.gpuAddress() + cache.values.offset };
             meta[at + 7] = @intCast(ks);
@@ -81,9 +88,9 @@ pub const Binding = struct {
     fn checkCaches(b: *const Binding, caches: []const Cache) !void {
         if (b.uploaded == null or caches.len != b.streams) return error.AttentionNotUploaded;
         for (caches, 0..) |cache, i| {
-            if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / 256 or cache.keys.buffer.gpuAddress() + cache.keys.offset != b.pointers[i].keys or cache.values.buffer.gpuAddress() + cache.values.offset != b.pointers[i].values) return error.AttentionNotUploaded;
-            const ks = if (cache.key_stride == 0) cache.capacity * 256 else cache.key_stride;
-            const vs = if (cache.value_stride == 0) cache.capacity * 256 else cache.value_stride;
+            if (cache.capacity == 0 or cache.capacity > std.math.maxInt(i32) / b.limits.geometry.dim or cache.keys.buffer.gpuAddress() + cache.keys.offset != b.pointers[i].keys or cache.values.buffer.gpuAddress() + cache.values.offset != b.pointers[i].values) return error.AttentionNotUploaded;
+            const ks = if (cache.key_stride == 0) cache.capacity * b.limits.geometry.dim else cache.key_stride;
+            const vs = if (cache.value_stride == 0) cache.capacity * b.limits.geometry.dim else cache.value_stride;
             if (ks != b.strides[i][0] or vs != b.strides[i][1]) return error.AttentionNotUploaded;
         }
     }
@@ -111,13 +118,15 @@ pub const Scratch = struct {
     uploaded: ?[32]u8 = null,
     pub fn init(device: mtl.Device, limits: Limits) !Scratch {
         try validLimits(limits);
-        const tiles = (limits.rows * 6 + 15) / 16 + limits.streams;
+        const hk: usize = limits.geometry.kv_heads;
+        const dim: usize = limits.geometry.dim;
+        const tiles = (limits.rows * limits.geometry.group() + 15) / 16 + limits.streams;
         const chunks = @max((limits.keys + 511) / 512, (planning.fine_until + 128 + planning.fine_chunk - 1) / planning.fine_chunk); // fine chunks below fine_until
         const rp: usize = tiles * 16;
-        const a: usize = if (limits.shared_prefix) 4 * @as(usize, chunks) * rp else 0;
+        const a: usize = if (limits.shared_prefix) hk * @as(usize, chunks) * rp else 0;
         const tail_chunks = if (limits.shared_prefix) 3 else chunks; // a tail of up to 191 keys over 128-key chunks
-        const b: usize = 4 * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
-        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * 128 * 4, limits.rows * 4, 4 * rp * 256 * 2, 4 * @as(usize, limits.rows) * 16 * 256 * 2, a * 256 * 4, a * 4, a * 4, b * 256 * 4, b * 4, b * 4, limits.rows * 4 * 256 * 2, limits.rows * 4 * 256 * 2 };
+        const b: usize = hk * @as(usize, tail_chunks) * @as(usize, limits.rows) * 16;
+        const sizes = [_]usize{ tiles * 4, rp * 4, limits.rows * planning.node_words * 4, limits.rows * planning.path_width * 4, limits.rows * 4, hk * rp * dim * 2, hk * @as(usize, limits.rows) * 16 * dim * 2, a * dim * 4, a * 4, a * 4, b * dim * 4, b * 4, b * 4, limits.rows * hk * dim * 2, limits.rows * hk * dim * 2 };
         comptime std.debug.assert(sizes.len == std.enums.values(Field).len);
         var buffers: [sizes.len]mtl.Buffer = undefined;
         var made: usize = 0;
@@ -140,7 +149,7 @@ pub const Scratch = struct {
         return total;
     }
     pub fn upload(s: *Scratch, plan: Plan) !void {
-        if (plan.rows > s.limits.rows or plan.streams > s.limits.streams or plan.tiles > s.tiles or plan.prefix_chunks > s.chunks or plan.tail_chunks > s.tail_chunks or plan.geometry.shared_prefix != s.limits.shared_prefix) return error.AttentionLimits;
+        if (plan.rows > s.limits.rows or plan.streams > s.limits.streams or plan.tiles > s.tiles or plan.prefix_chunks > s.chunks or plan.tail_chunks > s.tail_chunks or plan.geometry.shared_prefix != s.limits.shared_prefix or !plan.geometry.sameShape(s.limits.geometry)) return error.AttentionLimits;
         @memcpy(s.get(.tile_stream).buffer.slice(i32, plan.tile_stream.len), plan.tile_stream);
         @memcpy(s.get(.q_rows).buffer.slice(i32, plan.q_rows.len), plan.q_rows);
         @memcpy(s.get(.nodes).buffer.slice(i32, plan.nodes.len), plan.nodes);
@@ -154,7 +163,8 @@ pub const Scratch = struct {
     }
 };
 fn validLimits(limits: Limits) !void {
-    if (limits.rows == 0 or limits.rows > @import("gpu_frame.zig").max_rows or limits.streams == 0 or limits.streams > planning.max_streams or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / 256) return error.AttentionLimits;
+    try limits.geometry.check();
+    if (limits.rows == 0 or limits.rows > @import("gpu_frame.zig").max_rows or limits.streams == 0 or limits.streams > planning.max_streams or limits.keys == 0 or limits.keys > std.math.maxInt(i32) / limits.geometry.dim) return error.AttentionLimits;
 }
 fn span(r: Ref, bytes: usize) !void {
     try spanAligned(r, bytes, 2);
@@ -167,16 +177,21 @@ fn disjoint(a: Ref, an: usize, b: Ref, bn: usize) !void {
 }
 fn fingerprint(plan: Plan) [32]u8 {
     var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    // Preserve the canonical 27B's descriptor hash; any new numeric shape gets its own identity.
+    if (!plan.geometry.sameShape(.{})) {
+        const shape = [_]u32{ plan.geometry.heads, plan.geometry.kv_heads, plan.geometry.dim, plan.geometry.rotary };
+        hash.update(std.mem.sliceAsBytes(&shape));
+    }
     hash.update(std.mem.asBytes(&plan.meta));
     inline for (.{ plan.tile_stream, plan.q_rows, plan.nodes, plan.paths, plan.positions }) |values| hash.update(std.mem.sliceAsBytes(values));
     var digest: [32]u8 = undefined;
     hash.final(&digest);
     return digest;
 }
-fn cacheBytes(cache: Cache, key: bool) usize {
+fn cacheBytes(cache: Cache, key: bool, geometry: planning.Geometry) usize {
     const requested = if (key) cache.key_stride else cache.value_stride;
-    const stride: usize = if (requested == 0) @as(usize, cache.capacity) * 256 else requested;
-    return (3 * stride + @as(usize, cache.capacity) * 256) * 2;
+    const stride: usize = if (requested == 0) @as(usize, cache.capacity) * geometry.dim else requested;
+    return ((@as(usize, geometry.kv_heads) - 1) * stride + @as(usize, cache.capacity) * geometry.dim) * 2;
 }
 fn bind(e: mtl.ComputeEncoder, refs: anytype) void {
     inline for (refs, 0..) |r, i| e.setBuffer(r.buffer, r.offset, i);
@@ -275,8 +290,8 @@ pub const Attention = struct {
         }
         const operands = [_]struct { ref: Ref, bytes: usize }{ .{ .ref = q, .bytes = @as(usize, plan.rows) * 6144 * 2 }, .{ .ref = k, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = v, .bytes = @as(usize, plan.rows) * 1024 * 2 }, .{ .ref = out, .bytes = @as(usize, plan.rows) * 6144 * 2 } };
         for (caches) |cache| for (operands) |operand| {
-            try disjoint(cache.keys, cacheBytes(cache, true), operand.ref, operand.bytes);
-            try disjoint(cache.values, cacheBytes(cache, false), operand.ref, operand.bytes);
+            try disjoint(cache.keys, cacheBytes(cache, true, plan.geometry), operand.ref, operand.bytes);
+            try disjoint(cache.values, cacheBytes(cache, false, plan.geometry), operand.ref, operand.bytes);
         };
         for (scratch.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
         for (binding.buffers) |buffer| e.useResource(buffer, mtl.ResourceUsage.read | mtl.ResourceUsage.write);
@@ -406,4 +421,21 @@ test "plan fingerprint changes for an ancestor mutation rather than only counts"
     const before = fingerprint(plan);
     plan.paths[2 * planning.path_width + 1] = 1;
     try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
+}
+
+test "cache span includes padded head strides but no unused trailing padding" {
+    const cache = Cache{ .keys = undefined, .values = undefined, .capacity = 8, .key_stride = 4096, .value_stride = 8192 };
+    try std.testing.expectEqual(@as(usize, 28672), cacheBytes(cache, true, .{}));
+    try std.testing.expectEqual(@as(usize, 53248), cacheBytes(cache, false, .{}));
+    const contiguous = Cache{ .keys = undefined, .values = undefined, .capacity = 8 };
+    try std.testing.expectEqual(@as(usize, 16384), cacheBytes(contiguous, true, .{}));
+}
+
+test "descriptor identity includes numeric geometry and limits still refuse new shaders" {
+    var plan = try Plan.init(std.testing.allocator, &.{.{ .parents = &.{-1}, .start = 0, .capacity = 8 }}, .{});
+    defer plan.deinit();
+    const before = fingerprint(plan);
+    plan.geometry.heads = 16;
+    try std.testing.expect(!std.mem.eql(u8, &before, &fingerprint(plan)));
+    try std.testing.expectError(error.TargetAttentionShape, validLimits(.{ .geometry = plan.geometry }));
 }
