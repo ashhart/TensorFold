@@ -84,6 +84,8 @@ jobs:
         run: npm --prefix mobile ci --ignore-scripts
       - name: Desktop security and runtime tests
         run: npm test
+      - name: Linux command-sandbox conformance
+        run: TENSORFOLD_LINUX_SANDBOX=1 node node_modules/jiti/lib/jiti-cli.mjs electron/agent/linux-sandbox.conformance.test.ts
       - name: Typecheck desktop
         run: npm run typecheck
       - name: Check patch whitespace

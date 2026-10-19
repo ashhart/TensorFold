@@ -2,7 +2,12 @@
 
 ## Status
 
-The draft bubblewrap backend is **disabled** in the integration branch. Linux commands retain the existing fail-closed behavior unless the user deliberately enables upstream's development-only unsandboxed escape hatch. No product default was weakened. Command sandbox support is not complete.
+The bubblewrap backend is implemented, mount planning is parent-first, the capability probe runs the
+production argv, and a conformance test now exercises filesystem containment, git-control pinning,
+network denial and cancellation on a host where bubblewrap works. It remains **opt-in**
+(`TENSORFOLD_LINUX_SANDBOX=1`): items 1 and 2 below (git metadata for absent, nested and worktree
+repositories; minimal runtime roots) are still open, so Linux commands otherwise keep the existing
+fail-closed behavior. No product default was weakened.
 
 This read-only subagent review identified issues missed during initial implementation. Prior claims that the failing probe proved a nested-container limitation were not established: its namespace lacks the ELF dynamic loader path. Merely passing argument-construction tests does not prove confinement.
 

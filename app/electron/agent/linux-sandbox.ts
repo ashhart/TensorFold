@@ -29,8 +29,8 @@ export function probeLinuxSandbox(cwd: string, run = spawnSync): boolean {
 }
 
 export function canUseLinuxSandbox(): boolean {
-  // Keep the draft backend fail-closed until mount ordering and git-control confinement are qualified.
-  const qualified = false
+  // Opt-in only until conformance is qualified; never enabled by default on an unverified host.
+  const qualified = process.env.TENSORFOLD_LINUX_SANDBOX === '1'
   if (!qualified || process.platform !== 'linux') return false
   const binary = linuxSandboxBinary()
   if (!binary) return false

@@ -1,26 +1,51 @@
 # Linux desktop port — current status
 
-All changes are local commits on branch `linux-port` in `upstream/`. Nothing has been pushed; no GitHub pull requests exist.
+Work lives on branch `linux-port` in the fork and is pushed there. All checks below were re-run after
+rebasing onto current `upstream/main`.
 
-## Verified on this machine (Debian 13 x86-64, headless)
+## CI evidence (GitHub Actions, run 39265667644)
+
+| Job | Result |
+| --- | --- |
+| `desktop` (macOS 14) | success — Mac regression evidence for the shared changes |
+| `desktop-linux` (Ubuntu 24.04) | success — the Linux desktop lane |
+| `mobile` | success |
+
+The Linux lane installs bubblewrap, restores both lock files, runs the suite, runs the Linux
+command-sandbox conformance test, typechecks and checks patch whitespace.
+
+## Local evidence (Debian 13 x86-64, headless)
 
 | Check | Evidence |
 | --- | --- |
 | Dev build + typecheck | `npm run build` and `tsc --noEmit` pass |
-| Full test suite | `npm test` → 821/821 passed |
-| Window chrome | native Linux frame; focused window, close/draft and spacing tests pass |
+| Full test suite | `npm test` → 826/826 passed |
+| Window chrome | native Linux frame; window, close/draft and spacing tests pass |
 | Linux packaging | `npm run pack:linux:dev` → `release/linux/linux-unpacked` |
-| Artifact contents | no `resources/engine`, no `resources/computer-use`; voice/licence notices only |
+| Artifact contents | no `resources/engine`, no `resources/computer-use`; notices only |
 | Packaged launch | `npm run smoke:linux:packaged` — isolated profile, health 200, UI 200, unauthenticated snapshot 401 |
-| AppImage | `dist:linux` → `TensorFold-1.0.0-beta.8-linux-x86_64.AppImage`; launched it and got the same 200/200/401 results |
+| AppImage | `dist:linux` → `TensorFold-1.0.0-beta.8-linux-x86_64.AppImage`, same 200/200/401 when launched |
+| Command sandbox | conformance test passes: filesystem containment, git-control pinning, network denial/allowed profile, prompt cancellation |
 | VM installer fixture | passes with `umask 022` (environment cause) |
 | Outlook fixture | passes with a workspace-extracted sqlite3 CLI |
 
-Not verified: graphical launch on X11/Wayland, a real Mac-server streaming/tool round trip, a clean-machine install, and Mac regression for the shared changes.
+Not verified: graphical launch on X11/Wayland, a real Mac-server streaming/tool round trip, and a
+clean-machine install.
 
-## Linux command sandbox — disabled by design
+## Linux command sandbox
 
-`canUseLinuxSandbox()` returns false, so Linux `run_command` keeps the existing fail-closed behavior. The draft bubblewrap backend now builds one parent-first mount plan with a read-only workspace decisive beneath writable temporary roots, and probes the production argv. Still unqualified: git-control confinement for absent, nested and worktree metadata; runtime roots for user-managed toolchains; and live adversarial evidence. Details: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
+The bubblewrap backend is functional and conformance-tested, but it stays **opt-in**
+(`TENSORFOLD_LINUX_SANDBOX=1`) rather than defaulting on, because three deviations from the macOS
+sandbox profile remain:
+
+1. Creating a brand-new `.git` where none exists cannot be denied; existing repositories pin `.git`
+   against rename and pin `config`, `config.worktree`, `hooks` and `info` read-only.
+2. Nested repositories and submodule gitdirs below the workspace root are not pinned.
+3. A worktree `.git` pointer file is mounted writable, so its external gitdir is not protected.
+
+Without the opt-in, Linux `run_command` keeps the existing fail-closed behavior; the
+development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and review
+history: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
 
 ## Deliberate scope boundaries
 
@@ -30,7 +55,6 @@ Not verified: graphical launch on X11/Wayland, a real Mac-server streaming/tool 
 
 ## Remaining work
 
-1. Qualify or finish the Linux command confinement design.
-2. Exercise provider-only onboarding and a real streaming/tool round trip against the user's Mac endpoint.
+1. Decide whether the three sandbox deviations are acceptable to default on, or close them.
+2. Exercise provider-only onboarding and a real streaming/tool round trip against a Mac endpoint.
 3. Clean-machine install check for the AppImage.
-4. Linux CI lane and Mac regression evidence.
