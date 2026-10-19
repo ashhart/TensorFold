@@ -498,6 +498,7 @@ pub const save_guard = @import("save_guard");
 test {
     _ = @import("lane_host.zig");
     _ = @import("lane_host_test.zig");
+    _ = @import("lane_root_copy_test.zig");
     _ = @import("lane_rounds_test.zig");
     _ = @import("lane_halt_test.zig");
     _ = @import("prompt_cache.zig");

@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Qwen3.8-27B on CUDA can prefer verified context copies over neural proposals through the shared lane core. Copy rounds keep the drafter's committed target rows current and resume neural drafting after rejection.
+
 - Flash Next can reuse precise rotary values across target layers and MTP calls on tensor-unit Metal devices. Admission keeps the direct path when the optional table does not fit.
 
 - Cluster checkpoint headers use the core safetensors parser and validate tensor ranges against the actual file length.

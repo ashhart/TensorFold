@@ -77,7 +77,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
         .learns = if (o.slide) e else null,
         .learn_bytes = if (o.slide) @import("cuda_train.zig").memory(try @import("cuda_learn_shape.zig").from(e.g)) + e.streamBytes(o.context) else 0,
         .backend = l.backend(),
-        .facts = laneFacts(@intCast(e.window_rows), @intCast(e.verify_rows)),
+        .facts = blk: {
+            var facts = laneFacts(@intCast(e.window_rows), @intCast(e.verify_rows));
+            facts.root_copies = e.g.hidden == 5120 and e.g.layers == 64 and e.g.experts == 0;
+            break :blk facts;
+        },
         .rows = @intCast(e.window_rows),
         .stream_bytes = e.streamBytes(o.context),
         .ctx = l,

@@ -183,6 +183,7 @@ pub const Stream = struct {
     finished: bool = false,
     reason: Reason = .none,
     rounds: u64 = 0,
+    root_copy_miss: bool = false, // one neural round follows a rejected root copy
     cost_probe_after: u64 = 8, // completed rounds before the next calibration trial is owed
     cost_probe_spacing: u64 = 8, // the latest trial interval, including its expected repayment bound
     cost_probes: [129]@import("lone_costs.zig").Cooldown = @splat(.{}), // per-width losing-trial retry deadlines
