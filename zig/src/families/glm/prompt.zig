@@ -560,12 +560,10 @@ pub fn mtp(p: *const Prompt, x: *const fwd.Ctx, e: mtl.ComputeEncoder, h: Ref, n
     fwd.inject(x, e, p.m_emb, M, pos + 1); // the head reads each row's next token: an image's rows one place on
     fwd.rms(x, e, p.m_emb, m.enorm, p.m_eh, M, D, D, 2 * D, c.eps);
     fwd.rms(x, e, h, m.hnorm, p.m_eh.at(@as(usize, D) * 2), M, D, D, 2 * D, c.eps);
-    // The eh_proj projection defaults to the tensor-unit tile kernel (glm_rows_bf16_nax, built in
-    // wide.zig): on the receipts it matches the scalar path everywhere that matters - emitted tokens
-    // byte-identical 8/8 cells, draft acceptance identical per prompt, decode parity - and runs the
-    // class 2.6-2.7x faster (prefill +4.4% drafts-on @131k, +4.6% @16k, stable across an interleaved
-    // OFF/ON/OFF/ON battery). Its fp32 reduction order differs from the row kernel's; the fp64
-    // reference receipt (no worse than the scalar kernel's) is eh_check.zig.
+    // eh_proj defaults to the tensor-unit tile kernel: byte-identical tokens, accept/decode parity, prefill +4.4-5.3%.
+
+    // (glm_rows_bf16_nax in wide.zig; the fp64 receipt - no worse than scalar - is eh_check.zig.)
+
     // GLM_EHPROJ_NAX=0 backs out to the scalar wide path (diagnostic-only, as GLM_SPARSE_NAX=0).
     const eh_nax = if (std.c.getenv("GLM_EHPROJ_NAX")) |v| v[0] != '0' else true;
     if (m.eh_bf16) |eh| {
