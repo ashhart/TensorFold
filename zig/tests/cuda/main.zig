@@ -76,6 +76,7 @@ const route_rows_tests = @import("route_rows_tests.zig");
 const flashnext_model_rank_tests = @import("flashnext_model_rank_tests.zig");
 const flashnext_fidelity_tests = @import("flashnext_fidelity_tests.zig");
 const flashnext_window_tests = @import("flashnext_window_tests.zig");
+const flashnext_windows_tests = @import("flashnext_windows_tests.zig");
 const flashnext_rank_tests = @import("flashnext_rank_tests.zig");
 const flashnext_draft_affine_tests = @import("flashnext_draft_affine_tests.zig");
 const flashnext_shared_tests = @import("flashnext_shared_tests.zig");
@@ -106,6 +107,7 @@ const usage =
     \\  flashnext-fidelity-single MODEL FIXTURE OUTPUT  single-rank reference isolation
     \\  flashnext-fidelity-rank MODEL RANK PORT FIXTURE OUTPUT  fixed-history full score rows
     \\  flashnext-window-rank MODEL RANK PORT IDS_FILE  two-rank serial/window and rollback parity
+    \\  flashnext-windows MODEL IDS_FILE  several streams' windows in one shared verify against each alone
     \\  flashnext-model-rank MODEL RANK PORT IDS_FILE  explicit full-model replay experiment (no drafts)
     \\  flashnext-rank RANK PORT [sum|eof|timeout|missing]  two-process collective and failure probes
     \\  flashnext-draft-affine    proposal-head affine projection against FP64 and row-count invariance
@@ -274,6 +276,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "flashnext-fidelity-single")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), false);
     if (std.mem.eql(u8, cmd, "flashnext-fidelity-single-serial")) return flashnext_fidelity_tests.runSingle(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), true);
     if (std.mem.eql(u8, cmd, "flashnext-fidelity-rank")) return flashnext_fidelity_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3), try arg(rest, 4));
+    if (std.mem.eql(u8, cmd, "flashnext-windows")) return flashnext_windows_tests.run(gpu, try arg(rest, 0), try arg(rest, 1));
     if (std.mem.eql(u8, cmd, "flashnext-window-rank")) return flashnext_window_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "flashnext-model-rank")) return flashnext_model_rank_tests.run(gpu, try arg(rest, 0), try std.fmt.parseInt(usize, try arg(rest, 1), 10), try std.fmt.parseInt(u16, try arg(rest, 2), 10), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "flashnext-rank")) return flashnext_rank_tests.run(gpu, try std.fmt.parseInt(usize, try arg(rest, 0), 10), try std.fmt.parseInt(u16, try arg(rest, 1), 10), if (rest.len > 2) rest[2] else "sum");
