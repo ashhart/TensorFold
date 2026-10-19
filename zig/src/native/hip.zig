@@ -305,7 +305,7 @@ test "the group flags: one rank source, a supported world, a master past one ran
     try std.testing.expectError(error.Refused, checkGroup(a, outside, &problem));
 }
 
-test "--drafter is refused before any load, on every rank, until the HIP engine runs a drafter" {
+test "--drafter is refused before any load, on every rank, until the HIP engine runs DFlash2" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
