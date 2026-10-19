@@ -125,6 +125,7 @@ pub const Spec = struct {
     think_close: []const u32 = &.{},
     think_end: i64 = -1,
     think_open: ?bool = null, // null: open when a budget is set (the server's rule)
+    answer_max: u32 = 0, // reply tokens after `think_end` at most, within `max_new` (0: `max_new` alone)
     loop_guard: bool = false,
     chunks: []const u32 = &.{}, // where prefill chunks start after 0 (Python's PrefillPlan); empty: the backend's step
     history_len: u32 = 0, // prompt prefix lengths a backend may keep for a later turn: the rendered history,
@@ -157,6 +158,8 @@ pub const Stream = struct {
     think_close: []const u32,
     think_end: i64,
     think_open: bool,
+    answer_max: u32,
+    answer_from: ?usize = null, // emitted() index after the first `think_end`: the answer starts there
     loop_guard: bool,
     loop_period: ?u32 = null,
     chunks: []const u32,
@@ -234,6 +237,7 @@ pub const Stream = struct {
             .think_close = spec.think_close,
             .think_end = spec.think_end,
             .think_open = spec.think_open orelse (spec.think_budget > 0 or (spec.loop_guard and spec.think_end >= 0)),
+            .answer_max = spec.answer_max,
             .loop_guard = spec.loop_guard,
             .chunks = spec.chunks,
             .history_len = spec.history_len,
@@ -295,8 +299,12 @@ pub const Stream = struct {
         return s.context.items[s.prompt_len..];
     }
 
+    /// Tokens the reply may still add: within `max_new`, and after the think block within `answer_max` (`commit` cuts).
     pub fn budgetLeft(s: *const Stream) i64 {
-        return @as(i64, s.max_new) - @as(i64, @intCast(s.emitted().len));
+        const left = @as(i64, s.max_new) - @as(i64, @intCast(s.emitted().len));
+        const at = s.answer_from orelse return left;
+        if (s.answer_max == 0) return left;
+        return @min(left, @as(i64, s.answer_max) - @as(i64, @intCast(s.emitted().len - at)));
     }
 
     /// Whether the request was cancelled (false with no hook); a prompt pass asks before each chunk.
@@ -382,7 +390,10 @@ pub const Stream = struct {
             try s.context.append(gpa, t);
             if (rows.len > 0) try s.rows.append(gpa, rows[i]);
             landed += 1;
-            if (@as(i64, t) == s.think_end) s.think_open = false;
+            if (@as(i64, t) == s.think_end) {
+                s.think_open = false;
+                if (s.answer_from == null) s.answer_from = s.emitted().len;
+            }
             if (s.grammar) |g| {
                 if (!try g.follow(t)) {
                     s.finished = true;
@@ -402,7 +413,7 @@ pub const Stream = struct {
                 s.reason = .stop;
             } else if (fire) |period| {
                 s.loop_period = period;
-                if (s.emitted().len >= s.max_new) {
+                if (s.budgetLeft() <= 0) {
                     s.finished = true;
                     s.reason = .length;
                 } else if (s.think_close.len == 0) {
@@ -414,7 +425,7 @@ pub const Stream = struct {
                     try s.force.appendSlice(gpa, s.think_close);
                 }
                 break;
-            } else if (s.emitted().len >= s.max_new) {
+            } else if (s.budgetLeft() <= 0) {
                 s.finished = true;
                 s.reason = .length;
             }
@@ -478,4 +489,20 @@ test "loop guard fires, closes thinking, and latches once" {
     try std.testing.expect(!s.finished and s.force.items.len == 0);
     _ = try s.commit(gpa, &.{8}, &.{});
     try std.testing.expect(!s.finished and s.loop_period.? == 1);
+}
+
+test "answer_max limits the reply after the think block, not the reasoning" {
+    const gpa = std.testing.allocator;
+    var s = try Stream.init(gpa, .{ .id = "answer", .prompt = &.{1}, .max_new = 12, .think_end = 91, .answer_max = 2 });
+    defer s.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 5), try s.commit(gpa, &.{ 5, 6, 7, 8, 91 }, &.{}));
+    try std.testing.expect(!s.finished);
+    try std.testing.expectEqual(@as(i64, 2), s.budgetLeft());
+    try std.testing.expectEqual(@as(usize, 2), try s.commit(gpa, &.{ 10, 11, 12 }, &.{}));
+    try std.testing.expect(s.finished);
+    try std.testing.expectEqual(Reason.length, s.reason);
+    var long = try Stream.init(gpa, .{ .id = "long", .prompt = &.{1}, .max_new = 4, .think_end = 91, .answer_max = 2 });
+    defer long.deinit(gpa);
+    try std.testing.expectEqual(@as(usize, 4), try long.commit(gpa, &.{ 5, 6, 7, 8, 9 }, &.{}));
+    try std.testing.expectEqual(Reason.length, long.reason);
 }

@@ -80,6 +80,8 @@ pub const Request = struct {
     think_budget: u32 = 0,
     think_close: []const u32 = &.{},
     think_end: ?u32 = null,
+    /// Reply tokens after ``think_end`` at most, within ``max_tokens`` (0: ``max_tokens`` alone; Info.answer_limit).
+    answer_max: u32 = 0,
     /// The offered tools as JSON text, for drafters that propose a call's structure; empty: no tools.
     tools_json: []const u8 = "",
     /// Set only when ``Info`` says the engine enforces it.
@@ -184,6 +186,8 @@ pub const Info = struct {
     loop_guard: bool = false,
     /// The engine enforces a token budget while the think block is open.
     thinking_budget: bool = true,
+    /// The engine stops the reply after the think block at Request.answer_max (every lane engine: Info.ofLanes).
+    answer_limit: bool = false,
     structures: bool = false,
     /// Requests may ask for ``logprobs`` (the engine's lanes give the target's rows).
     logprobs: bool = false,
@@ -215,6 +219,14 @@ pub const Info = struct {
     slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
+
+    /// What a lane engine's streams enforce themselves (core/lanes/stream.zig): loop guards and answer limits.
+    pub fn ofLanes(i: Info) Info {
+        var out = i;
+        out.loop_guard = true;
+        out.answer_limit = true;
+        return out;
+    }
 };
 
 pub const Admit = struct {

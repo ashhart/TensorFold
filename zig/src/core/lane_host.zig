@@ -83,9 +83,7 @@ pub const LaneHost = struct {
     pub const Job = @import("lane_job.zig").Job;
 
     pub fn init(gpa: Allocator, io: std.Io, core: *lanes.Engine, info_: Info) LaneHost {
-        var enforced = info_;
-        enforced.loop_guard = true;
-        return .{ .gpa = gpa, .io = io, .core = core, .info_ = enforced };
+        return .{ .gpa = gpa, .io = io, .core = core, .info_ = info_.ofLanes() };
     }
 
     pub fn start(h: *LaneHost) !void {

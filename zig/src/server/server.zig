@@ -43,6 +43,8 @@ pub const Config = struct {
     enable_thinking: bool = true,
     reasoning_effort: ?[]const u8 = null,
     thinking_budget: i64 = 0,
+    /// With thinking on, reply tokens the reasoning may use beyond the request's max_tokens (0: none).
+    thinking_reserve: i64 = 0,
     loop_guard: bool = false,
     /// Seconds the idle keepalive runs after the last request ends (0: off).
     keep_warm_s: i64 = 900,
