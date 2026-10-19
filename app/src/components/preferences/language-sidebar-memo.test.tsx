@@ -38,7 +38,7 @@ function mount(file: string) {
     '../lib/preferences/useAuthoredText': { useAuthoredText: () => translators[locale as keyof typeof translators] },
     '../lib/preferences/hooks': { useUiText: () => (key: string) => key },
     './search/search-events': { requestConversationSearch: () => { throw new Error('Locale change cannot search') } },
-    '../lib/store': { useStore: store }, '../lib/ipc': { api: {} }, '../lib/icons': { Icon: 'icon' }, './ui': { IconButton: 'icon-button' },
+    '../lib/store': { useStore: store }, '../lib/ipc': { api: {} }, '../lib/engine': { useEngine: () => ({ snapshot: null }) }, '../lib/engine-visibility': { engineManagementVisible: () => true }, '../lib/icons': { Icon: 'icon' }, './ui': { IconButton: 'icon-button' },
     '../lib/format': { basename: (value: string) => value.split('/').at(-1) },
     '../lib/project-tags': { collectTags: () => [], hasUntaggedProjects: () => false, projectMatchesTag: () => true, UNTAGGED_FILTER: 'untagged' },
     '../lib/thread-row': threadRows,

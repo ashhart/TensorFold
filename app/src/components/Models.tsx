@@ -40,8 +40,24 @@ const TAB_LABEL: Record<WorkspaceTab, string> = { get Models() { return authored
 const route = (model: EngineInstalledModel) => ({ providerId: ENGINE_PROVIDER_ID, accountId: null, model: model.repo })
 function errorText(error: unknown): string { return decodeHubFailure(error).message }
 
-export function Models({ minimal = false }: { minimal?: boolean } = {}) {
+// A build without a local engine has no Models workspace to manage: show the one useful action
+// instead of an unavailable engine, downloads and Apple-silicon recommendations.
+function NoLocalEngineModels() {
   const tx = useAuthoredText()
+  return <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">
+    <div className="mx-auto w-full max-w-[1040px] px-4 py-6 sm:px-6">
+      <header><h1 className="text-[21px] font-semibold tracking-[-0.02em] text-ink">{tx("Models")}</h1></header>
+      <section className="mt-5 rounded-xl border border-line bg-card p-5">
+        <Button size="sm" variant="primary" icon="plus" onClick={() => useStore.getState().setView({ name: 'settings', section: 'models' })}>{tx("Connect provider")}</Button>
+      </section>
+    </div>
+  </div>
+}
+
+export function Models({ minimal = false, noLocalEngine = false }: { minimal?: boolean; noLocalEngine?: boolean } = {}) {
+  const tx = useAuthoredText()
+  if (noLocalEngine) return <NoLocalEngineModels />
+
   const { snapshot } = useEngine()
   const { snapshot: learning } = useLearning()
   const learningLocked = learningBusy(learning)

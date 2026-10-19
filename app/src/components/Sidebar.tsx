@@ -6,6 +6,8 @@ import clsx from 'clsx'
 import { useStore } from '../lib/store'
 import { api } from '../lib/ipc'
 import { Icon } from '../lib/icons'
+import { useEngine } from '../lib/engine'
+import { engineManagementVisible } from '../lib/engine-visibility'
 import { IconButton } from './ui'
 import { basename } from '../lib/format'
 import { collectTags, hasUntaggedProjects, projectMatchesTag, UNTAGGED_FILTER } from '../lib/project-tags'
@@ -219,6 +221,8 @@ export function Sidebar() {
   }
   const orchestratorName = (id?: string | null) => settings?.remoteOrchestrators?.find((host) => host.id === id)?.name ?? 'Orchestrator'
   const engineReady = typeof api.onEngineEvent === 'function' && typeof api.engineSnapshot === 'function'
+  const { snapshot: engineSnapshot } = useEngine()
+  const showEngine = engineReady && engineManagementVisible(api.platform, engineSnapshot?.status)
 
   return (
     <aside style={{ width }} className="relative flex h-full shrink-0 flex-col">
@@ -320,9 +324,9 @@ export function Sidebar() {
 
       <div className="space-y-0.5 border-t border-line px-2 pb-2.5 pt-2">
         <UpdatePrompt />
-        {engineReady && <EngineChip active={view.name === 'models'} onOpen={() => s.setView({ name: 'models' })} />}
+        {showEngine && <EngineChip active={view.name === 'models'} onOpen={() => s.setView({ name: 'models' })} />}
         <div className="flex items-center gap-0.5">
-          <div className="min-w-0 flex-1"><NavRow icon="cpu" label={tx("Models")} active={view.name === 'models'} onClick={() => s.setView({ name: 'models' })} /></div>
+          {showEngine && <div className="min-w-0 flex-1"><NavRow icon="cpu" label={tx("Models")} active={view.name === 'models'} onClick={() => s.setView({ name: 'models' })} /></div>}
           <div className="min-w-0 flex-1"><NavRow icon="settings" label={text('common.settings')} active={false} onClick={() => s.setView({ name: 'settings' })} /></div>
           <IconButton name="sidebar" label={tx("Collapse sidebar")} onClick={() => s.toggleSidebar()} />
         </div>
