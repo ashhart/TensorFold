@@ -1,5 +1,8 @@
 // Built-in TensorFold engine types shared by the main process and the renderer (type-only).
 
+// The advanced environment a user passes through to the engine process lives in shared code.
+export type { EngineEnvOverrides } from '../../../shared/engine-advanced-env'
+
 export type EngineState = 'stopped' | 'starting' | 'ready' | 'failed'
 
 export interface EngineHardware {

@@ -7,6 +7,7 @@ import type { ModelInfo } from './cli'
 import { assertRepoId, type EngineBinary } from './paths'
 import { killGroup } from './pull'
 import { loweredEngineMemoryBudget } from './memory-budget'
+import { engineLoadLimitOverride } from '../../../shared/engine-advanced-env'
 import { CORTHEON_RELEASE_POLICY, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
 import { modelLaunchOptions } from './launch-options'
 import { assertEngineModelSamplingSupported, isGreedyOnlyEngineModel } from '../../../shared/model-profiles'
@@ -162,7 +163,11 @@ export class EngineSupervisor {
   get activeRequestCount(): number { return this.activeRequests }
 
   get memoryLimitBytes(): number {
-    return Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
+    const base = Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
+    // A user-set engine load-limit variable (Settings → Engine advanced) is the engine's own
+    // ceiling for its family; the floor check must not veto what the engine was told to allow.
+    const override = engineLoadLimitOverride(this.deps.env())
+    return override ? Math.max(base, override.bytes) : base
   }
 
   get memoryBudgetBytes(): number {
@@ -455,7 +460,11 @@ export class EngineSupervisor {
       floor += drafterBytes
     }
     if (floor > this.memoryLimitBytes) {
-      const basis = this.memoryBudgetBytes < this.deps.totalMemoryBytes ? `70% of the lowered ${formatGiB(this.memoryBudgetBytes)} qualification budget` : `70% of this Mac's ${formatGiB(this.deps.totalMemoryBytes)}`
+      const raisedBase = Math.floor(this.memoryBudgetBytes * (this.deps.memoryFraction ?? 0.7))
+      const override = engineLoadLimitOverride(this.deps.env())
+      const basis = override && override.bytes > raisedBase
+        ? `${override.key}=${String(override.gb)} GB, already above the 70% default`
+        : this.memoryBudgetBytes < this.deps.totalMemoryBytes ? `70% of the lowered ${formatGiB(this.memoryBudgetBytes)} qualification budget` : `70% of this Mac's ${formatGiB(this.deps.totalMemoryBytes)}`
       this.fail(`${model} needs at least ${formatGiB(floor)} of memory, more than the ${formatGiB(this.memoryLimitBytes)} limit (${basis}).`)
     }
     if (generation !== this.generation) this.fail('Engine start was cancelled.')

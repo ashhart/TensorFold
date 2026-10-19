@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { promises as fs, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { assertCortheonReleaseAllowed, cortheonEnabledForRelease } from '../../../shared/release-feature-policy'
+import { readEngineEnvOverrides, type EngineEnvOverrides } from '../../../shared/engine-advanced-env'
 
 // Built-in engine choices the user makes once, kept beside the model registry.
 export interface EnginePreferences {
@@ -9,19 +10,22 @@ export interface EnginePreferences {
   cortheon: boolean
   learningEnabled: boolean
   learningModel: string | null
+  // Advanced environment passed through to every engine process (validated before set()).
+  envOverrides: EngineEnvOverrides
 }
 
-const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null }
+const DEFAULTS: EnginePreferences = { cortheon: false, learningEnabled: false, learningModel: null, envOverrides: {} }
 
 function readPreferences(file: string): EnginePreferences {
   try {
     const doc = JSON.parse(readFileSync(file, 'utf8'))
     const learningModel = doc?.learningModel === 'TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit' ? doc.learningModel : null
-    return { cortheon: cortheonEnabledForRelease(doc?.cortheon), learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel }
+    return { cortheon: cortheonEnabledForRelease(doc?.cortheon), learningEnabled: doc?.learningEnabled === true && learningModel != null, learningModel, envOverrides: readEngineEnvOverrides(doc?.envOverrides) }
   } catch {
     return { ...DEFAULTS }
   }
 }
+
 
 export class EnginePreferenceStore {
   private readonly file: string

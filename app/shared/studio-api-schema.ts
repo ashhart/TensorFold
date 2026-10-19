@@ -458,6 +458,8 @@ export const STUDIO_API_SCHEMA = {
   engineSetCortheon: 'method',
   engineLearning: 'method',
   engineSetLearning: 'method',
+  engineEnvOverrides: 'method',
+  engineSetEnvOverrides: 'method',
   engineTeach: 'method',
   engineCancelTeach: 'method',
   engineDelete: 'method',
