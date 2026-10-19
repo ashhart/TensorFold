@@ -24,6 +24,12 @@ async function members(group: OwnedBenchmarkGroup): Promise<{ pid: number; comma
     return { pid, command, startedAt: Date.parse(match[3]), zombie }
   }))
 }
+/** The member's real executable: ps comm is a full path on macOS but a 15-char truncated name on Linux. */
+async function memberExecutable(member: { pid: number; command: string }): Promise<string | null> {
+  if (process.platform === 'linux') return realpath(`/proc/${member.pid}/exe`).catch(() => null)
+  return path.resolve(member.command)
+}
+
 export async function cleanupOwnedBenchmarkGroup(group: OwnedBenchmarkGroup): Promise<boolean> {
   if (!Number.isSafeInteger(group.pid) || group.pid <= 1) return false
   try {
@@ -31,7 +37,8 @@ export async function cleanupOwnedBenchmarkGroup(group: OwnedBenchmarkGroup): Pr
     if (!remaining.length) return true
     const executable = await realpath(group.command)
     for (const member of remaining) {
-      if (!Number.isFinite(member.startedAt) || member.startedAt < Math.floor(group.startedAt / 1000) * 1000 - 1000 || path.resolve(member.command) !== executable) return false
+      if (!Number.isFinite(member.startedAt) || member.startedAt < Math.floor(group.startedAt / 1000) * 1000 - 1000) return false
+      if (await memberExecutable(member) !== executable) return false
     }
     try { process.kill(-group.pid, 'SIGKILL') } catch (error: any) { if (error.code !== 'ESRCH') return false }
     const until = Date.now() + 2000
