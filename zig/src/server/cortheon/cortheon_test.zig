@@ -354,3 +354,26 @@ test "the web budget ends the research and the reply still comes back without Co
     try std.testing.expect(m.get("tool_calls") == null);
     try std.testing.expect(std.mem.indexOf(u8, m.strField("content").?, "cortheon_search") == null);
 }
+
+test "research expansion keeps a context-window refusal streamed" {
+    for ([_]u32{ 2000, 2400 }) |window| {
+        var rig: Rig = .{ .eng = .{ .script = &.{"Zig latest release notes"} } };
+        try rig.start(true);
+        defer rig.stop();
+        rig.srv.info.context_window = window;
+        var arena: std.heap.ArenaAllocator = .init(gpa);
+        defer arena.deinit();
+        const got = try rig.ask(arena.allocator(), "{\"stream\":true,\"max_tokens\":1,\"messages\":[{\"role\":\"user\",\"content\":\"What is the latest release of Zig?\"}]}");
+        try std.testing.expect(rig.web.searches > 0);
+        try std.testing.expectEqual(@as(usize, 1), rig.eng.prompts.items.len);
+        try std.testing.expect(got.opened);
+        try std.testing.expectEqual(@as(?u16, null), got.status);
+        try std.testing.expect(got.body == null);
+        var context_error = false;
+        for (got.events.items) |event| if (event.get("error")) |err| {
+            if (err.strField("code")) |code| context_error = std.mem.eql(u8, code, "context_length_exceeded");
+        };
+        try std.testing.expect(context_error);
+        try std.testing.expectEqual(@as(i64, 0), rig.srv.preparing.load(.acquire));
+    }
+}

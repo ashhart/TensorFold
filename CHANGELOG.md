@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- Streaming research replies keep late context-length refusals on the stream while retaining pre-token keepalives (#912). Thanks to @cwschroeder and @akol1.
+
 - Shared CUDA sliding-window attention uses bounded split launches, with sigmoid-routing and dense-row contract fixtures (#798). Thanks to @jschmied.
 
 - Shared CUDA tree and DFlash block attention have exact-replay launch contracts and bounded resource records (#746). Thanks to @jschmied.
