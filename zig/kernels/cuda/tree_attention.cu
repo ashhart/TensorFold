@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdint.h>
 
+#include "attn_odd.cuh"
 #include "qmm_frag.cuh"
 
 namespace tf_tree {
@@ -57,9 +58,9 @@ extern "C" __global__ void tf_tree_paths(const int* __restrict__ parents, int* _
     for (int slot = depth - 1; slot >= 0; --slot, cur = parents[cur]) paths[node * MAXD + slot] = cur;
 }
 
-// Group gi of key head kh for 16 (row, head) pairs from pair pf (pair m: row rq + m / G, head m % G), one mma tile.
-template <int D, int HB, int W, int ST>
-__device__ __forceinline__ void tree_group(
+// Group gi of key head kh for 16 (row, head) pairs from pf (m: row rq + m / G, head m % G); !ODD true: run tree_odd.
+template <int D, int HB, int W, int ST, bool ODD>
+__device__ __forceinline__ bool tree_group(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ kn, const __nv_bfloat16* __restrict__ vn,
     const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs, const int* __restrict__ row_stream,
     const int* __restrict__ streams, const int* __restrict__ paths, const int* __restrict__ depths,
@@ -75,7 +76,7 @@ __device__ __forceinline__ void tree_group(
     const int s = row_stream[r];
     const int p = streams[4 * s + 2], depth = depths[r];
     const int total = p + depth, k0 = gi * SPAN, k1 = min(total, k0 + SPAN);
-    if (k0 >= total) return; // the merge reads only the row's own groups
+    if (k0 >= total) return false; // the merge reads only the row's own groups
     const __nv_bfloat16* kc = origin + offs[2 * s];
     const __nv_bfloat16* vc = origin + offs[2 * s + 1];
     // ST tile stages: a one-warp block fetches ST - 1 tiles ahead while it computes one (stages never change bits)
@@ -149,7 +150,7 @@ __device__ __forceinline__ void tree_group(
         ks = kv0 + st * 2 * HB * C;
         vs = ks + HB * C;
         st = (st + 1) % ST;
-
+        if constexpr (ODD) attn_odd::clean_rows<D, HB>(vs, lane, 32); // the chunks this lane copied
         __syncwarp();
         float sc[NT8][4];
 #pragma unroll
@@ -190,10 +191,10 @@ __device__ __forceinline__ void tree_group(
             tm0 = fmaxf(tm0, __shfl_xor_sync(0xffffffffu, tm0, x));
             tm1 = fmaxf(tm1, __shfl_xor_sync(0xffffffffu, tm1, x));
         }
-        const bool act = tm0 != -INFINITY;
-        const float n0 = act ? fmaxf(m0, tm0) : m0, n1 = act ? fmaxf(m1, tm1) : m1;
-        const float a0 = act ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
-        const float a1 = act ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
+        const bool act0 = tm0 != -INFINITY, act1 = tm1 != -INFINITY; // each row's own: a NaN head moves only its row
+        const float n0 = act0 ? fmaxf(m0, tm0) : m0, n1 = act1 ? fmaxf(m1, tm1) : m1;
+        const float a0 = act0 ? (m0 == -INFINITY ? 0.0f : texp(__fsub_rn(m0, n0))) : 1.0f;
+        const float a1 = act1 ? (m1 == -INFINITY ? 0.0f : texp(__fsub_rn(m1, n1))) : 1.0f;
         float c0 = 0.0f, c1 = 0.0f;
 #pragma unroll
         for (int n = 0; n < NT8; ++n) {
@@ -238,6 +239,25 @@ __device__ __forceinline__ void tree_group(
             }
         __syncwarp();
     }
+    if constexpr (!ODD) { // a NaN or infinite partial: the block runs again as ODD (finite values: the same bits)
+        if (__syncthreads_or(attn_odd::nonfinite_out<NB>(o, pf + g8 < npairs, pf + g8 + 8 < npairs))) return true;
+    } else {
+        // key k of the group's row: committed, then the row's path; pair m: row rq + (pf + m) / G, head (pf + m) % G
+        const auto at = [&](const __nv_bfloat16* c, const __nv_bfloat16* n, int k) {
+            return k < p ? c + ((int64_t)k * hk + kh) * D : n + ((int64_t)paths[r * MAXD + (k - p)] * hk + kh) * D;
+        };
+        const auto qrow = [&](int m) { return q + ((rq + (pf + m) / G) * h + kh * G + (pf + m) % G) * D; };
+        const auto each = [&](int m, auto f) { // pair m's keys: its stream's committed ones, then its own row's path
+            const int64_t pr = rq + (pf + m) / G;
+            for (int k = 0; k < p; ++k) f(kc + ((int64_t)k * hk + kh) * D);
+            for (int j = 0; j < depths[pr]; ++j) f(kn + ((int64_t)paths[pr * MAXD + j] * hk + kh) * D);
+        };
+        auto w = attn_odd::weights<D>(qrow, each, scale, lane);
+        const auto vis = [&](int m, int) { return pf + m < npairs; }; // a pair sees every key of its group
+        for (int t = t0; t * HB < k1; t += 4) // after the last tile: no rescale turns an infinity into NaN
+            attn_odd::add_back<D>(o, [&](int k) { return at(vc, vn, k); }, [&](int k) { return at(kc, kn, k); },
+                                  t * HB, min(k1, t * HB + HB), lane, vis, l0, l1, w);
+    }
     if constexpr (W == 1) {
         // one warp a block: each slice's partial (o, max, sum) of its 16 pairs; the merge combines the 4 in order
 #pragma unroll
@@ -254,7 +274,7 @@ __device__ __forceinline__ void tree_group(
             }
             if (qd == 0) pm[part * G + head] = half ? m1 : m0, pl[part * G + head] = half ? l1 : l0;
         }
-        return;
+        return false;
     } else {
         __syncthreads();
         float* os = reinterpret_cast<float*>(smem); // [4 warps][16 heads][D], then max and sum [4][16]
@@ -288,10 +308,28 @@ __device__ __forceinline__ void tree_group(
                 acc = __fmaf_rn(a, os[(w * 16 + hd) * D + e], acc);
                 l = __fmaf_rn(a, ls[w * 16 + hd], l);
             }
+            if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a weight of 0; again, kept
+                acc = 0.0f;
+                for (int w = 0; w < 4; ++w)
+                    if (ms[w * 16 + hd] != -INFINITY)
+                        acc = attn_odd::fold(os[(w * 16 + hd) * D + e], texp(__fsub_rn(ms[w * 16 + hd], mm)), acc);
+            }
             po[(part * G + head) * D + e] = acc;
             if (e == 0) pm[part * G + head] = mm, pl[part * G + head] = l;
         }
+        return false;
     }
+}
+
+// A block with a NaN or infinite partial, again as ODD: those values out of the mma, added back at float64's weights.
+template <int D, int HB, int W, int ST>
+__device__ __noinline__ void tree_odd(
+    const __nv_bfloat16* q, const __nv_bfloat16* kn, const __nv_bfloat16* vn, const __nv_bfloat16* origin,
+    const long long* offs, const int* row_stream, const int* streams, const int* paths, const int* depths, float* po,
+    float* pm, float* pl, int h, int hk, float scale, int gi, int ng, int64_t rq, int pf, int npairs, int64_t row,
+    int slice) {
+    tree_group<D, HB, W, ST, true>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale,
+                                   gi, ng, rq, pf, npairs, row, slice);
 }
 
 // A stream's full committed groups once for its rows, 16 (row, head) pairs a block: each partial a row block's bits.
@@ -300,7 +338,7 @@ __device__ __forceinline__ void tree_shared(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin, const long long* __restrict__ offs,
     const int* __restrict__ row_stream, const int* __restrict__ streams, const int* __restrict__ paths,
     const int* __restrict__ depths, float* __restrict__ po, float* __restrict__ pm, float* __restrict__ pl, int h, int hk,
-    float scale, int ng, int n) {
+    float scale, int ng, int n, const __nv_bfloat16* __restrict__ kn) {
     const int G = h / hk;
     const int per = W == 4 ? 1 : 4; // slices an item takes a block
     for (int item = blockIdx.x; item < n * ng * per; item += gridDim.x) { // (row, group[, slice]): a fixed grid
@@ -311,8 +349,11 @@ __device__ __forceinline__ void tree_shared(
         const int pairs = streams[4 * st + 1] * G, p = streams[4 * st + 2];
         const int tile = static_cast<int>(r - r0); // a stream's j-th row hosts its j-th pair tile (tiles <= rows)
         if (tile * 16 >= pairs || (gi + 1) * SPAN > p) continue;
-        tree_group<D, HB, W, ST>(q, q, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi, ng,
-                             r0, tile * 16, pairs, r, item % per);
+        // vn: never read, a full committed group has no path keys (the replay weighs them, from kn)
+        if (tree_group<D, HB, W, ST, false>(q, kn, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk,
+                                            scale, gi, ng, r0, tile * 16, pairs, r, item % per))
+            tree_odd<D, HB, W, ST>(q, kn, q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
+                                   ng, r0, tile * 16, pairs, r, item % per);
         __syncthreads();
     }
 }
@@ -322,8 +363,10 @@ __device__ __forceinline__ void tree_shared(
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ origin,                                \
         const long long* __restrict__ offs, const int* __restrict__ row_stream, const int* __restrict__ streams,      \
         const int* __restrict__ paths, const int* __restrict__ depths, float* __restrict__ po,                        \
-        float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng, int n) {                  \
-        tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n);  \
+        float* __restrict__ pm, float* __restrict__ pl, int h, int hk, float scale, int ng, int n,                    \
+        const __nv_bfloat16* __restrict__ kn) {                                                                       \
+        tree_shared<D, HB, W, ST>(q, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, ng, n, \
+                                  kn);                                                                                \
     }
 
 TF_TREE_SHARED(tf_tree_shared, 128, 32, 4, 1)
@@ -344,8 +387,10 @@ __device__ __forceinline__ void tree_part(
     const int p = streams[4 * row_stream[r] + 2], total = p + depths[r];
     const int per = W == 4 ? 1 : 4, slot = blockIdx.z / per, slots = gridDim.z / per;
     for (int gi = slot + p / SPAN; gi < ng && gi * SPAN < total; gi += slots) { // full committed: shared
-        tree_group<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
-                             ng, r, 0, h / hk, r, blockIdx.z % per);
+        if (tree_group<D, HB, W, ST, false>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk,
+                                            scale, gi, ng, r, 0, h / hk, r, blockIdx.z % per))
+            tree_odd<D, HB, W, ST>(q, kn, vn, origin, offs, row_stream, streams, paths, depths, po, pm, pl, h, hk, scale, gi,
+                                   ng, r, 0, h / hk, r, blockIdx.z % per);
         __syncthreads(); // the next group's tiles reuse the partials' shared memory
     }
 }
@@ -415,6 +460,26 @@ extern "C" __global__ void __launch_bounds__(256) tf_tree_merge(
                 acc = __fmaf_rn(acc, a, __fmul_rn(co, b));
                 l = __fmaf_rn(l, a, __fmul_rn(cl, b));
                 m = next;
+            }
+        }
+        if (acc != acc) { // NaN: a replayed infinity (weighed in float64) may have met a weight of 0 here; again, kept
+            float mm = -INFINITY;
+            acc = 0.0f;
+            for (int s0 = 0; s0 < slots; s0 += per) {
+                float cm = -INFINITY, co = 0.0f, cl = 0.0f;
+                for (int w = 0; w < per; ++w) cm = fmaxf(cm, pm[(base + s0 + w) * G + hd]);
+                for (int w = 0; w < per; ++w) {
+                    const int64_t q = (base + s0 + w) * G + hd;
+                    if (pm[q] == -INFINITY) continue;
+                    const float aw = texp(__fsub_rn(pm[q], cm));
+                    co = attn_odd::fold(po[q * d + e], aw, co);
+                    cl = __fmaf_rn(aw, pl[q], cl);
+                }
+                if (!(cl > 0.0f)) continue;
+                const float next = fmaxf(mm, cm);
+                acc = attn_odd::fold(acc, mm == -INFINITY ? 0.0f : texp(__fsub_rn(mm, next)),
+                                     attn_odd::keep(co, texp(__fsub_rn(cm, next))));
+                mm = next;
             }
         }
         out[(r * h + kh * G + hd) * d + e] = __float2bfloat16_rn(__fdiv_rn(acc, l));

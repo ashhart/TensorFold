@@ -30,6 +30,9 @@ const act_k = @import("contract_act.zig");
 const gdn_k = @import("contract_gdn.zig");
 const qk_k = @import("contract_qk.zig");
 
+const tree_k = @import("contract_tree_attn.zig");
+const block_k = @import("contract_block_attn.zig");
+
 const contract = core.contract;
 const g = contract.gates;
 const limits = contract.limits;
@@ -48,7 +51,7 @@ const h3_image = struct {
 pub fn image(name: []const u8) error{UnknownContractImage}![]const u8 {
     if (@import("contract_deepseek_images.zig").image(name)) |bytes| return bytes;
     if (std.mem.eql(u8, name, "h3")) return &h3_image.bytes;
-    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
+    inline for (.{ "tree_round", "act_rows", "gdn_prep", "qk_rows", "norms", "moe", "qwen36_mtp", "nemotron_attention", "nemotron_route", "nemotron_latent", "qmm_group", "lane_gemv", "prompt16", "qmmf", "ck_experts", "rank_sum", "prefill_attention", "vit", "embed_rows", "route_rows", "flashnext_gdn", "flashnext_batch", "flashnext_hc", "flashnext_attn", "flashnext_mtp", "qwen_vision", "exl3_linear", "exl3_experts", "exl3_candidate", "experts3", "experts3_prefill", "drama3", "drama3_fp8", "drama3_codec", "glm_mm", "glm_dflash", "glm_glue", "nemotron_mamba", "sample", "qwen35", "qwen35_keep", "qwen35_kv8", "qwen35_draft", "ck_lane", "gdn_train", "train_q4", "train_attn", "flashnext_train", "train", "attn_train", "qwen27_train", "tree_attention", "block_attention" }) |n| if (std.mem.eql(u8, name, n)) return @field(kk, n);
     if (std.mem.eql(u8, name, "contract_controls")) return if (options.controls) &controls.bytes else &.{};
     std.debug.print("FAIL kernel-contract: unknown image name: {s}\n", .{name});
     return error.UnknownContractImage;
@@ -268,6 +271,27 @@ pub fn run(gpu: check.Gpu) !void {
     for (&qks, qk_k.forms) |*x, f| x.* = .{ .rig = .{ .gpu = gpu, .s = s }, .form = f, .k = &qk_rows, .arena = .init(a) };
     defer for (&qks) |*x| x.deinit();
     for (&qks) |*x| try kernels.append(a, x.kernel());
+    var tree_paths = try cuda.tree_attention.TreeAttention.load(gpu.d);
+    defer tree_paths.unload();
+    var paths = tree_k.Paths{ .rig = .{ .gpu = gpu, .s = s }, .ta = &tree_paths };
+    defer paths.deinit();
+    try kernels.append(a, paths.kernel());
+    var trees: [tree_k.variants.len]tree_k.Tree = undefined;
+    var ntrees: usize = 0;
+    defer for (trees[0..ntrees]) |*x| {
+        x.ta.unload();
+        x.deinit();
+    };
+    for (tree_k.variants) |v| {
+        trees[ntrees] = .{ .rig = .{ .gpu = gpu, .s = s }, .v = v, .ta = try cuda.tree_attention.TreeAttention.load(gpu.d) };
+        ntrees += 1;
+    }
+    for (&trees) |*x| try kernels.append(a, x.kernel());
+    var block_attn = try cuda.block_attention.BlockAttention.load(gpu.d);
+    defer block_attn.unload();
+    var blocks: [2]block_k.Block = .{ .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = false }, .{ .rig = .{ .gpu = gpu, .s = s }, .ba = &block_attn, .causal = true } };
+    defer for (&blocks) |*x| x.deinit();
+    for (&blocks) |*x| try kernels.append(a, x.kernel());
     var t: g.Tally = .{};
     const t0 = check.now(gpu.io);
     try g.runAll(a, kernels.items, 0x6b63, &t);
