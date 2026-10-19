@@ -4,6 +4,8 @@ Each release's page on GitHub has its notes and measurements. See [the 1.0.0 rel
 
 ## 1.1.2
 
+- An opt-in GLM CUDA FP8 latent-cache implementation is prepared behind --kv-cache fp8. BF16 remains the default; native quality and device qualification are pending.
+
 - GLM CUDA prompt diagnostics under TF_GLM_PROF report per-rank chunk stages, pieced transport phases and event waits. Timing is diagnostic; context ownership is unchanged.
 
 - Shared serving and prompt scheduling have an embedding request contract with float/base64 output and declared MRL dimensions (#1035). Native EmbeddingGemma-2 loading and device qualification remain pending. Thanks to @jschmied for the RFC.

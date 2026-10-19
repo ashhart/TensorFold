@@ -2,6 +2,7 @@
 #pragma once
 
 #include "glm_glue_router.cuh"
+#include <cuda_fp8.h>
 
 namespace glm_attn {
 
@@ -50,10 +51,10 @@ constexpr int wide_smem() {
   return (HB * LW + 2 * KT * LW + HB * KT) * 2 + (HB * 4 + 2 * HB) * 4;
 }
 
-template <int HB>
+template <int HB, bool FP8 = false>
 __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok,
                             const int* cnt, float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w,
-                            float scale, int sparse) {
+                            float scale, int sparse, const float* scales = nullptr) {
   constexpr int MT = HB / 16;
   extern __shared__ __align__(16) unsigned char smem[];
   __nv_bfloat16* qs = reinterpret_cast<__nv_bfloat16*>(smem);
@@ -74,7 +75,20 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
       const int64_t ki = first + key;
       const bool ok = sparse ? ki < n : ki <= limit;
       const int64_t src = ok ? (sparse ? (int64_t)tok[r * w + ki] : ki) : 0;
-      cp16(dst + wide(key, u), lc + src * LW + u * 8, ok);
+      if constexpr (FP8) {
+        const unsigned char* codes = reinterpret_cast<const unsigned char*>(lc);
+        const float row_scale = ok ? scales[src] : 1.0f;
+#pragma unroll
+        for (int j = 0; j < 8; j += 2) {
+          const uint16_t bits = ok ? (uint16_t)codes[src * LW + u * 8 + j] |
+                                        ((uint16_t)codes[src * LW + u * 8 + j + 1] << 8) : 0;
+          const float2 v = __half22float2(__half2(__nv_cvt_fp8x2_to_halfraw2(bits, __NV_E4M3)));
+          dst[wide(key, u) + j] = __float2bfloat16_rn(__fmul_rn(v.x, row_scale));
+          dst[wide(key, u) + j + 1] = __float2bfloat16_rn(__fmul_rn(v.y, row_scale));
+        }
+      } else {
+        cp16(dst + wide(key, u), lc + src * LW + u * 8, ok);
+      }
     }
   };
   float m[MT][2], l[MT][2], o[MT][8][4];
@@ -96,10 +110,14 @@ __device__ void chunks_wide(const __nv_bfloat16* qa, const __nv_bfloat16* lc, co
     commit();
   }
   for (int tile = 0; live && tile < tiles; ++tile) {
-    if (tile + 1 < tiles)
-      wait<1>();
-    else
+    if constexpr (FP8) {
       wait<0>();
+    } else {
+      if (tile + 1 < tiles)
+        wait<1>();
+      else
+        wait<0>();
+    }
     __syncthreads();
     const __nv_bfloat16* kv = kvs + (tile & 1) * KT * LW;
     const int64_t first = start + tile * KT;
@@ -211,6 +229,22 @@ extern "C" __global__ void __launch_bounds__(256)
     tf_glm_chunks_32(const __nv_bfloat16* qa, const __nv_bfloat16* lc, const int* pos, const int* tok, const int* cnt,
                      float* po, float* pm, float* pl, int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
   glm_attn::chunks_wide<32>(qa, lc, pos, tok, cnt, po, pm, pl, rows, heads, w, scale, sparse);
+}
+
+// E4M3 cache variants reconstruct the existing BF16 shared tile before the unchanged attention math.
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_chunks_16_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
+                         const int* tok, const int* cnt, float* po, float* pm, float* pl,
+                         int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_attn::chunks_wide<16, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
+                                 po, pm, pl, rows, heads, w, scale, sparse, scales);
+}
+extern "C" __global__ void __launch_bounds__(256)
+    tf_glm_chunks_32_fp8(const __nv_bfloat16* qa, const unsigned char* lc, const float* scales, const int* pos,
+                         const int* tok, const int* cnt, float* po, float* pm, float* pl,
+                         int64_t rows, int64_t heads, int64_t w, float scale, int sparse) {
+  glm_attn::chunks_wide<32, true>(qa, reinterpret_cast<const __nv_bfloat16*>(lc), pos, tok, cnt,
+                                 po, pm, pl, rows, heads, w, scale, sparse, scales);
 }
 
 // latent._merge, block (row, head), 128 threads: chunks merged in order, o / l by div.full; skips sparse count-0 rows.

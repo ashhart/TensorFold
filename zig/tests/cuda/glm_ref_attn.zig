@@ -16,7 +16,7 @@ fn partials(r: *Rig, nch: usize, rows: usize) !latent.Partials {
 }
 
 /// float64 o = sum p c / sum p, p = exp(s - max); bound: bf16 out and p (2^-8 each), (512 + 8) 2^-24 scale sum |q c|.
-fn reference(r: *Rig, q: []const u16, cd: []const f64, keys: []const []const u32, scale: f64) !struct { want: []f64, tol: []f64 } {
+pub fn reference(r: *Rig, q: []const u16, cd: []const f64, keys: []const []const u32, scale: f64) !struct { want: []f64, tol: []f64 } {
     const rows = keys.len;
     const want = try r.a.alloc(f64, rows * heads * lw);
     const tol = try r.a.alloc(f64, rows * heads * lw);

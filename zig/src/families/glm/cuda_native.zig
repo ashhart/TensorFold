@@ -30,6 +30,7 @@ pub const Room = struct { ctx: *anyopaque, read: *const fn (*anyopaque) ?u64 };
 /// `slide` stays false: the server refuses --slide for a family without a learner (no `slide` here).
 pub const Options = struct {
     context: usize,
+    kv8: bool = false,
     drafts: bool,
     segments: usize = 1,
     slide: bool = false,
@@ -136,10 +137,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, dir: [
     const roce_bytes = try roceBytes(if (std.c.getenv("TF_ROCE_MAX_KB")) |v| std.mem.span(v) else null);
     if (p.world > 1 and std.c.getenv("NCCL_COMM_ID") == null) return error.NoCommId;
     var problem: []const u8 = "";
-    const set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
+    var set = ranks.Settings.read(&ranks.environment, &problem) catch |err| {
         std.log.err("{s}", .{problem});
         return err;
     };
+    set.kv8 = o.kv8;
     // the ranks' lines before NCCL (cuda/tp_watch.zig): a rank that fails, refuses or dies stops every rank
     if (p.world > 1) try cuda.tp_watch.start(io, p.rank, p.world);
     return openRank(gpa, io, ctx, dir, o, p, set, roce_bytes) catch |err| {
