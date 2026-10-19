@@ -9,14 +9,12 @@ const c = contract.spec;
 const g = contract.gates;
 const Dense = contract.dense.Dense;
 
-/// One 8-wide MMA step a k-tile (its products round as they enter the fp32 dot), the tiles in turn the accumulator.
-/// The guard the chain's tail carries: k/8 steps at k = 8192.
+/// One 8-wide MMA step a k-tile (products round entering the fp32 dot); tail guard: k/8 steps at k = 8192.
 fn depth(s: c.Shape) usize {
     return s.k / 8 + 8;
 }
 
-/// The engine's prompt chunks: every full chunk height (prompt.zig's heights, at 16384 on the roomiest Macs).
-/// And the last chunk's tail (absorb = remaining - 1, any positive count): 8 first, so the gates run a whole tile.
+/// The engine's prompt chunks: full heights (16384 on the largest Macs) + tail (absorb = remaining - 1, any count).
 const served = [_]c.Shape{
     .{ .rows = 8, .n = 4096, .k = 8192 },
     .{ .rows = 2048, .n = 4096, .k = 8192 },
