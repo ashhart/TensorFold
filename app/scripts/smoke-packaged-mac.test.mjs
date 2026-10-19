@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -62,10 +62,12 @@ try {
   )
 
   // Retain the original inode so replacement is deterministic even on inode-reusing filesystems.
+  // Profiles carry realpathed roots, so compare against the canonical temp (/private/var on macOS).
+  const canonicalTemp = await realpath(testTemp)
   const replaced = await createIsolatedSmokeProfile({ tempDir: testTemp, protectedHomes: ['/Users/example'] })
-  const retained = path.join(testTemp, 'retained-original')
-  assert.equal(path.dirname(replaced.root), testTemp)
-  assert.equal(path.dirname(retained), testTemp)
+  const retained = path.join(canonicalTemp, 'retained-original')
+  assert.equal(path.dirname(replaced.root), canonicalTemp)
+  assert.equal(path.dirname(retained), canonicalTemp)
   await rename(replaced.root, retained)
   await mkdir(replaced.root, { mode: 0o700 })
   await assert.rejects(() => removeExactSmokeProfile(replaced), /identity or ownership changed/)
