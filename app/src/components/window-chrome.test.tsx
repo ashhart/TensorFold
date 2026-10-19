@@ -11,6 +11,7 @@ const hooks = harness()
 const common = { react: hooks.hooks, 'react/jsx-runtime': jsx, clsx }
 const { TitleBar } = load('src/components/TitleBar.tsx', {
   ...common, '../lib/store': { useStore }, '../lib/ipc': { api }, '../lib/icons': { Icon: fixture },
+  '../lib/bot-labels': { localExecutionSource: (platform: string) => platform === 'darwin' ? 'This Mac' : 'Local' },
   './ThreadTrustBadge': { ThreadTrustBadge: fixture }, './CortheonBadge': { CortheonBadge: fixture },
   './full-workspace/ChatWorkspaceHeader': { ChatWorkspaceHeader: fixture }, './full-workspace/FullLayoutSwitch': { FullLayoutSwitch: fixture },
 })

@@ -1,3 +1,4 @@
+import { api } from '../../lib/ipc'
 import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
 import { useStore } from '../../lib/store'
 import type { Thread } from '../../lib/types'
@@ -20,7 +21,7 @@ export function BotChatContext({ thread }: { thread: Thread }) {
       <Icon name="spark" size={20} className="mb-3 text-accent" />
       <h2 className="break-words text-[17px] font-semibold text-ink">{tx("Tell ")}{bot.name} {tx("what you need")}</h2>
       {bot.role && <p className="mt-1 break-words text-[13px] leading-relaxed text-ink-2">{bot.role}</p>}
-      <p className="mt-3 text-[12px] leading-relaxed text-ink-2">{bot.approvalScope === 'readonly' ? tx("Read only keeps this bot from taking actions.") : tx("Actions follow your saved workspace approval rules.")} {bot.executionTarget === 'vm' ? tx("Files and commands run in this bot’s separate VM with guest network off.") : tx("This chat uses your configured tools and sources on this Mac.")} {tx("You can stop a run at any time.")}</p>
+      <p className="mt-3 text-[12px] leading-relaxed text-ink-2">{bot.approvalScope === 'readonly' ? tx("Read only keeps this bot from taking actions.") : tx("Actions follow your saved workspace approval rules.")} {bot.executionTarget === 'vm' ? tx("Files and commands run in this bot’s separate VM with guest network off.") : api.platform === 'darwin' ? tx("This chat uses your configured tools and sources on this Mac.") : null} {tx("You can stop a run at any time.")}</p>
       {bot.toolScope && <p className="mt-2 break-words text-[12px] leading-relaxed text-ink-2">{tx("Captured tool access: ")}{scope.names.join(', ') || tx("no tools")}{tx(". Plugins and delegation are unavailable; saved approvals and device grants still apply.")}</p>}
       {botUsesGuardedExecution(bot) && <p className="mt-2 text-[12px] leading-relaxed text-ink-2">{tx("Compaction uses a local summary without extra model requests. Automatic titles and skill review are disabled.")}</p>}
       <details className="mt-3 text-[12px] text-ink-2"><summary className="cursor-pointer text-ink-2">{tx("Captured instructions")}</summary><p className="mt-2 whitespace-pre-wrap break-words leading-relaxed">{bot.instructions || tx("No extra instructions were added.")}</p><p className="mt-2 leading-relaxed">{tx("Editing the bot changes new chats; this conversation keeps its captured configuration.")}</p></details>

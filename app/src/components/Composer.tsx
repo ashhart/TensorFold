@@ -1,3 +1,4 @@
+import { localExecutionSource } from '../lib/bot-labels'
 import { DraftMessageQuotes } from './composer/MessageQuotes'
 import { editQueuedFollowUp, capturedDraftMatches } from '../lib/queued-followups'
 import { MESSAGE_QUOTE_EVENT } from '../lib/message-quotes'
@@ -1230,7 +1231,7 @@ export function Composer({ mode, thread, seed }: { mode: 'home' | 'thread'; thre
               {isChat && thread?.bot?.executionTarget !== 'vm' && <PhoneButton threadId={thread?.id} open={phoneOpen} onClick={() => setPhoneOpen((open) => !open)} />}
 
               {thread?.bot && <button type="button" title={tx("This chat keeps the bot's saved model and permissions; edit the bot to configure a new chat.")} onClick={() => setView({ name: 'bots' })} className="inline-flex h-8 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[12px] text-ink-3 hover:bg-ink-5 hover:text-ink">
-                <Icon name="shield" size={13} className="shrink-0" /><span className="truncate">{thread.bot.approvalScope === 'readonly' ? tx("Read only") : tx("Review actions")} · {thread.bot.executionTarget === 'vm' ? tx("Bot VM") : tx("This Mac")}</span>
+                <Icon name="shield" size={13} className="shrink-0" /><span className="truncate">{thread.bot.approvalScope === 'readonly' ? tx("Read only") : tx("Review actions")} · {thread.bot.executionTarget === 'vm' ? tx("Bot VM") : tx(localExecutionSource(api.platform))}</span>
               </button>}
 
               {provider?.id === 'tensorfold' && !thread?.orchestratorHostId && !isOrchestratorProject && workspace?.kind !== 'ssh' && <LocalEngineControls model={model} />}
