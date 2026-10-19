@@ -283,3 +283,65 @@ test "lone price: probe debt survives short offers and unexecuted selections, th
     own.observe(&s, null, 48, 100);
     try std.testing.expectEqual(@as(u64, 18), s.cost_probe_after);
 }
+
+fn measured(e: *Engine, s: *Stream, rounds: u64) !void {
+    _ = try e.rule.rates(win.who(s));
+    try e.rule.observeCost(15, 94.5, false, win.who(s));
+    try e.rule.observeCost(16, 107.5, false, win.who(s));
+    s.rounds = rounds;
+    s.cost_probe_after = rounds + 40;
+    s.cost_probe_spacing = 64;
+    s.cost_probes[16] = .{ .after = rounds + 100, .spacing = 128, .retry = true };
+}
+
+test "lone price: a finished lone stream's prices and backed-off deadlines start the next stream" {
+    var cfg = try setup();
+    defer cfg.deinit(a);
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var done = try Stream.init(a, .{ .id = "done", .prompt = &.{ 3, 1, 4 }, .max_new = 128 });
+    defer done.deinit(a);
+    try measured(&e, &done, 60);
+    try own.keep(a, &e.lone_kept[0], &done);
+    var next = try Stream.init(a, .{ .id = "next", .prompt = &.{ 2, 7 }, .max_new = 128 });
+    defer next.deinit(a);
+    next.rounds = 2;
+    _ = try e.rule.rates(win.who(&next));
+    try own.seed(a, e.lone_kept[0], &next);
+    try std.testing.expectEqual(@as(?f64, 94.5), next.depth.?.ms.?.get(15));
+    try std.testing.expectEqual(@as(?f64, 107.5), next.depth.?.ms.?.get(16));
+    try std.testing.expectEqual(@as(u64, 42), next.cost_probe_after);
+    try std.testing.expectEqual(@as(u64, 64), next.cost_probe_spacing);
+    try std.testing.expectEqual(@as(u64, 102), next.cost_probes[16].after);
+    try std.testing.expectEqual(@as(u64, 128), next.cost_probes[16].spacing);
+    try std.testing.expect(next.cost_probes[16].retry);
+}
+
+test "lone price: a stream that shared a round leaves nothing, and a priced stream keeps its own" {
+    var cfg = try setup();
+    defer cfg.deinit(a);
+    var target: fake.Fake = .{ .gpa = a };
+    defer target.deinit();
+    var clock: fake.FixedClock = .{};
+    var e = Engine.init(a, &cfg, target.backend(), clock.clock());
+    defer e.deinit();
+    var shared = try Stream.init(a, .{ .id = "shared", .prompt = &.{1}, .max_new = 128 });
+    defer shared.deinit(a);
+    try measured(&e, &shared, 30);
+    shared.shared_round = true;
+    try own.keep(a, &e.lone_kept[0], &shared);
+    try std.testing.expect(e.lone_kept[0] == null);
+    shared.shared_round = false;
+    try own.keep(a, &e.lone_kept[0], &shared);
+    var priced = try Stream.init(a, .{ .id = "priced", .prompt = &.{2}, .max_new = 128 });
+    defer priced.deinit(a);
+    _ = try e.rule.rates(win.who(&priced));
+    try e.rule.observeCost(15, 70, false, win.who(&priced));
+    try own.seed(a, e.lone_kept[0], &priced);
+    try std.testing.expectEqual(@as(?f64, 70), priced.depth.?.ms.?.get(15));
+    try std.testing.expectEqual(@as(?f64, null), priced.depth.?.ms.?.get(16));
+    try std.testing.expectEqual(@as(u64, 8), priced.cost_probe_after);
+}

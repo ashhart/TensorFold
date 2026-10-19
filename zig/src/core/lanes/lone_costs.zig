@@ -77,6 +77,43 @@ pub fn probe(e: anytype, p: anytype) ?u32 {
 
 pub const Cooldown = struct { after: u64 = 8, spacing: u64 = 8, retry: bool = false };
 
+/// A finished lone stream's calibration, so the next stream starts priced instead of probing every width again.
+pub const Kept = struct {
+    ms: Table = .{},
+    probes: [129]Cooldown = @splat(.{}),
+    after: u64 = 8,
+    spacing: u64 = 8,
+    rounds: u64 = 0, // the stream's rounds when kept: its deadlines rebase from here
+
+    pub fn deinit(k: *Kept, gpa: std.mem.Allocator) void {
+        k.ms.deinit(gpa);
+    }
+};
+
+/// Keep a stream's prices and deadlines when every round it ran was its own (shared rounds price others' rows).
+pub fn keep(gpa: std.mem.Allocator, kept: *?Kept, s: anytype) !void {
+    if (s.shared_round) return;
+    const ms = observed(s);
+    if (ms.empty()) return;
+    const slots = try gpa.dupe(?f64, ms.slots);
+    if (kept.*) |*k| k.deinit(gpa);
+    kept.* = .{ .ms = .{ .slots = slots }, .probes = s.cost_probes, .after = s.cost_probe_after, .spacing = s.cost_probe_spacing, .rounds = s.rounds };
+}
+
+/// Start a stream's own prices from the newest kept calibration, the deadlines counted from its first round.
+pub fn seed(gpa: std.mem.Allocator, kept: ?Kept, s: anytype) !void {
+    const k = kept orelse return;
+    const state = if (s.depth) |*d| d else return;
+    if (state.ms) |*own| {
+        if (!own.empty()) return;
+        own.deinit(gpa);
+    }
+    state.ms = .{ .slots = try gpa.dupe(?f64, k.ms.slots) };
+    for (&s.cost_probes, k.probes) |*cd, old| cd.* = .{ .after = s.rounds + (old.after -| k.rounds), .spacing = old.spacing, .retry = old.retry };
+    s.cost_probe_after = s.rounds + (k.after -| k.rounds);
+    s.cost_probe_spacing = k.spacing;
+}
+
 pub const Trial = struct {
     rows: u32,
     expected: f64,

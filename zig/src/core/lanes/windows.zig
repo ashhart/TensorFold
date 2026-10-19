@@ -238,6 +238,12 @@ pub fn allocate(e: *Engine, plans: []Plan) !void {
     const untimed: @import("table.zig").Table = .{};
     const explicit = e.cfg.draft_confidence != null;
     const live = plans.len == 1 and lone_costs.enabled(e, plans[0]);
+    if (live and !plans[0].stream.prices_seeded) {
+        const s = plans[0].stream;
+        s.prices_seeded = true;
+        _ = try e.rule.rates(who(s));
+        try lone_costs.seed(e.gpa, e.lone_kept[@intFromBool(s.sampling != null)], s);
+    }
     const own = if (live) try lone_costs.prices(e, plans[0]) else untimed;
     const costs = if (explicit) &untimed else if (live) &own else &e.cfg.shared_costs;
     const overhead = if (explicit or live) 0 else e.rule.overheadMs(plans.len, anySampled(plans));

@@ -46,6 +46,7 @@ pub const Engine = struct {
     accepted: u64 = 0,
     shared_rounds: u64 = 0,
     alone: bool = true, // this step has one live stream: its copies may take their ramp
+    lone_kept: [2]?@import("lone_costs.zig").Kept = .{ null, null }, // the newest lone calibration, greedy then sampled
     steps: u64 = 0,
     arena: std.heap.ArenaAllocator, // a round's temporaries
     unread: std.ArrayList(Unread) = .empty, // queued draws the log reads at the step's end
@@ -79,6 +80,7 @@ pub const Engine = struct {
         e.live.deinit(e.gpa);
         e.unread.deinit(e.gpa);
         e.rule.deinit();
+        for (&e.lone_kept) |*k| if (k.*) |*x| x.deinit(e.gpa);
         e.arena.deinit();
     }
 
@@ -132,6 +134,9 @@ pub const Engine = struct {
             live.shrinkRetainingCapacity(kept);
         }
         e.alone = live.items.len == 1;
+        if (!e.alone) for (live.items) |s| {
+            s.shared_round = true;
+        };
         if (live.items.len > 1 and e.cfg.family_streams) {
             const chosen = try e.takeTurns(live.items);
             e.shared_rounds += 1;
@@ -593,6 +598,7 @@ pub const Engine = struct {
     }
 
     pub fn release(e: *Engine, s: *Stream) void {
+        if (e.cfg.lone_cost_tile > 0) @import("lone_costs.zig").keep(e.gpa, &e.lone_kept[@intFromBool(s.sampling != null)], s) catch {};
         if (s.inflight) |h| _ = e.backend.read(h) catch 0; // the handle frees the backend's ring slot
         s.dropRoundState(e.gpa);
         e.backend.release(s);
