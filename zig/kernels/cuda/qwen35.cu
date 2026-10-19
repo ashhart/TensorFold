@@ -362,7 +362,8 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
 // out = bf16(silu(z) * bf16(w * rmsnorm(y))) per linear value head; rows nv * DK wide. Grid (1, nv, rows), a warp each.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_post(Geo geo, const __nv_bfloat16* __restrict__ Y, const __nv_bfloat16* __restrict__ Z,
                                                                    const __nv_bfloat16* __restrict__ NW, float eps, __nv_bfloat16* __restrict__ OUT,
-                                                                   const int* __restrict__ P) {
+                                                                   const int* __restrict__ P, float* __restrict__ XS) {
+    __shared__ __align__(16) __nv_bfloat16 done[DK];  // the head's outputs, for XS's group sums (XS may be null)
     const int lane = threadIdx.x, hv = blockIdx.y;
     if (past_rows(P, blockIdx.z)) return;
     const size_t m = blockIdx.z;
@@ -381,8 +382,13 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_gdn_post(Geo geo, const 
         const int d = lane * PER + j;
         const float x = rbf(bf(NW[d]) * (yv[j] * inv));
         const float zf = bf(Z[m * W + hv * DK + d]);
-        OUT[m * W + hv * DK + d] = __float2bfloat16_rn(zf / (1.0f + expf(-zf)) * x);
+        const __nv_bfloat16 o = __float2bfloat16_rn(zf / (1.0f + expf(-zf)) * x);
+        OUT[m * W + hv * DK + d] = o;
+        done[d] = o;
     }
+    if (XS == nullptr) return;
+    __syncwarp();
+    if (lane < DK / 64) XS[m * (W / 64) + hv * (DK / 64) + lane] = group_sum(done + lane * 64);
 }
 
 // Per-head RMSNorm of attention rows, out packed (rows, heads, HD); grid (rows * heads), 64 threads of 4 values.
@@ -520,18 +526,29 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, cons
     for (int i = 0; i < DPL; i++) OUT[(m * QH + qh) * HD + lane * DPL + i] = __float2bfloat16_rn(acc[i] / lsum);
 }
 
+// A 256-thread block's outputs' 64-entry group sums into XS (null: none); rows are whole groups, so a block's are too.
+__device__ __forceinline__ void block_sums(__nv_bfloat16* done, size_t total, float* XS) {
+    if (XS == nullptr) return;
+    __syncthreads();
+    const size_t first = (size_t)blockIdx.x * 256 + threadIdx.x * 64;
+    if (threadIdx.x < 4 && first < total) XS[first / 64] = group_sum(done + threadIdx.x * 64);
+}
+
 // out = bf16(y * bf16(sigmoid(gate))), the gate the second half of each query head's q_proj rows; rows qh * HD wide.
 extern "C" __global__ void tf_q35_attn_gate(Geo geo, const __nv_bfloat16* __restrict__ Y, const __nv_bfloat16* __restrict__ QRAW,
-                                              __nv_bfloat16* __restrict__ OUT, int rows, const int* __restrict__ P) {
+                                              __nv_bfloat16* __restrict__ OUT, int rows, const int* __restrict__ P, float* __restrict__ XS) {
+    __shared__ __align__(16) __nv_bfloat16 done[256];
     const size_t W = (size_t)geo.qh * HD;
     if (P != nullptr) rows = P[2];
     const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= (size_t)rows * W) return;
-    const size_t r = i / W;
-    const int d = (int)(i % W), head = d / HD;
-    const float gate = bf(QRAW[r * 2 * W + head * 2 * HD + HD + d % HD]);
-    const float s = rbf(1.0f / (1.0f + expf(-gate)));
-    OUT[i] = __float2bfloat16_rn(bf(Y[i]) * s);
+    if (i < (size_t)rows * W) {
+        const size_t r = i / W;
+        const int d = (int)(i % W), head = d / HD;
+        const float gate = bf(QRAW[r * 2 * W + head * 2 * HD + HD + d % HD]);
+        const float s = rbf(1.0f / (1.0f + expf(-gate)));
+        OUT[i] = done[threadIdx.x] = __float2bfloat16_rn(bf(Y[i]) * s);
+    }
+    block_sums(done, (size_t)rows * W, XS);
 }
 
 // A tapped layer's residual bf16(h + r) into the segment's tap ring at the row's position; a 256-thread block a row.
@@ -547,14 +564,17 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_tap(const __nv_bfloat16
     for (int i = threadIdx.x; i < D; i += blockDim.x) out[i] = __float2bfloat16_rn(bf(H[m * D + i]) + bf(R[m * D + i]));
 }
 
-// out = bf16(silu(gate) * up) over `total` values.
+// out = bf16(silu(gate) * up) over `total` values, rows D wide; XS (may be null) their group sums.
 extern "C" __global__ void tf_q35_mlp_act(const __nv_bfloat16* __restrict__ GATE, const __nv_bfloat16* __restrict__ UP,
-                                            __nv_bfloat16* __restrict__ OUT, long long total, const int* __restrict__ P, int D) {
+                                            __nv_bfloat16* __restrict__ OUT, long long total, const int* __restrict__ P, int D, float* __restrict__ XS) {
+    __shared__ __align__(16) __nv_bfloat16 done[256];
     if (P != nullptr) total = (long long)P[2] * D;
     const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= total) return;
-    const float gf = bf(GATE[i]);
-    OUT[i] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * bf(UP[i]));
+    if (i < total) {
+        const float gf = bf(GATE[i]);
+        OUT[i] = done[threadIdx.x] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * bf(UP[i]));
+    }
+    block_sums(done, (size_t)total, XS);
 }
 
 #include "qwen35_slots.cuh"
