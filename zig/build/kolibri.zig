@@ -9,6 +9,9 @@ pub fn host(b: *std.Build, m: *std.Build.Module, api: *std.Build.Module, all: *s
     const run = b.addRunArtifact(b.addTest(.{ .root_module = m }));
     b.step("test-kolibri-host", "Kolibri config, ownership and copy-draft metadata without a GPU").dependOn(&run.step);
     all.dependOn(&run.step);
+    b.step("test-kolibri-context-host", "Logical Kolibri context and physical verification reserve").dependOn(
+        &b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Kolibri context:"} })).step,
+    );
     const options = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_options.zig"), .target = b.graph.host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = api }} });
     b.step("test-native-options-host", "Generic family option forwarding through declared fields only").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = options })).step);
 }
