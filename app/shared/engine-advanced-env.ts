@@ -73,18 +73,24 @@ export interface EngineLoadLimitOverride {
   capped: boolean
 }
 
-// Mirrors the native parse (std.fmt.parseFloat over a space/tab trim): decimal or exponent GB,
-// above zero, finite; hex or words are refused. Native measures GB as decimal 1e9 and caps the
-// request at min(RAM, GPU working set); capBytes carries the app-visible RAM bound, so a value
-// like 1e308 cannot overflow the byte result.
+// Mirrors the native parse (std.fmt.parseFloat over a space/tab trim): decimal GB, above zero,
+// finite. parseFloat accepts decimal exponents and underscore digit separators, but not hex
+// (0x64 needs a p-exponent) or trailing junk ("12GB"); empty or whitespace-only text means
+// "unset" and keeps the 70% default. Native measures GB as decimal 1e9 and caps the request at
+// min(RAM, GPU working set); capBytes carries the app-visible RAM bound, so a value like 1e308
+// cannot overflow the byte result.
+const LOAD_LIMIT_TEXT = /^[+-]?(?:\d[\d_]*(?:\.[\d_]*)?|\.[\d_]+)(?:[eE][+-]?\d+)?$/
+
 export function engineLoadLimitOverride(env: Record<string, string | undefined>, modelType: string | null, capBytes: number): EngineLoadLimitOverride | null {
   const key = modelType ? ENGINE_LOAD_LIMIT_KEYS.find((candidate) => LOAD_LIMIT_FAMILIES[candidate].includes(modelType)) : undefined
   if (!key) return null
   const raw = env[key]
   if (typeof raw !== 'string') return null
-  const text = raw.trim()
-  if (!text.length || !/^(\+?\d+(\.\d*)?|\+?\.\d+)([eE][+-]?\d+)?$/.test(text)) return null
-  const gb = Number(text.replace(/^\+/, ''))
+  // Native trims exactly " \t"; other whitespace (a trailing newline, say) leaves junk that fails the parse.
+  const text = raw.replace(/^[ \t]+|[ \t]+$/g, '')
+  if (!text.length) return null
+  if (!LOAD_LIMIT_TEXT.test(text)) return null
+  const gb = Number(text.replaceAll('_', ''))
   if (!Number.isFinite(gb) || gb <= 0 || !(capBytes > 0)) return null
   const requested = gb * 1e9
   const capped = !Number.isFinite(requested) || requested >= capBytes

@@ -50,7 +50,9 @@ assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60' }, 'some_new_fami
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: ' 60 ' }, 'glm5_next', RAM)?.gb, 60, 'native trims leading whitespace')
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60.5' }, 'glm5_next', RAM)?.bytes, 60.5e9)
 assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '.5e2' }, 'glm5_next', RAM)?.bytes, 50e9, 'the forms std.fmt.parseFloat reads still work')
-for (const bad of ['0', '-5', 'lots', '', '0x64', '1_000', 'Infinity', 'NaN', ' ', '+-1']) {
+assert.deepEqual(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_000' }, 'glm5_next', 2048 * 1024 ** 3)?.bytes, 1000e9, 'underscore digit separators match parseFloat')
+assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '1_0x0' }, 'glm5_next', RAM), null, 'an underscore outside digits is junk')
+for (const bad of ['0', '-5', 'lots', '', '0x64', 'Infinity', 'NaN', ' ', '+-1', '12GB']) {
   assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: bad }, 'glm5_next', RAM), null, bad)
 }
 assert.equal(engineLoadLimitOverride({ GLM_LOAD_LIMIT_GB: '60' }, 'glm5_next', 60e9)?.capped, true, 'reaching the ceiling is reported, not silently uncapped')
