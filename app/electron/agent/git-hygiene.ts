@@ -1,6 +1,8 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { exec } from 'node:child_process'
+import { atomicWriteWorkspaceFile, workspaceContentSha256 } from './atomic-file-write'
+import { readHygieneFile } from './git-hygiene-files'
 import type { GitHygieneFinding, GitHygieneKind, GitHygieneReport, GitHygieneSanitizeResult, GitHygieneSeverity, GitHygieneSource } from './types'
 
 const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'dist-electron', '.next', 'build', '.cache', 'vendor', '.venv', '.turbo', 'coverage'])
@@ -192,9 +194,6 @@ async function collectWorkspaceFiles(root: string): Promise<string[]> {
     let entries: any[] = []
     try { entries = await fs.readdir(dir, { withFileTypes: true }) } catch { return }
     for (const entry of entries) {
-      if (entry.name.startsWith('.') && entry.name !== '.env' && entry.name !== '.env.example') {
-        if (entry.name !== '.github') continue
-      }
       if (SKIP_DIRS.has(entry.name)) continue
       const full = path.join(dir, entry.name)
       const rel = path.relative(root, full)
@@ -223,7 +222,7 @@ async function scanWorkingTree(root: string, terms: string[]): Promise<{ finding
       add(findings, finding({ source: 'working_tree', kind: 'large_or_binary', severity: 'low', file: rel, line: null, commit: null, excerpt: `${rel} is ${stat.size} bytes`, match: rel, suggestion: 'Large files are flagged for manual review before pushing.', autoFixable: false }))
       continue
     }
-    const buf = await fs.readFile(full).catch(() => null)
+    const buf = await readHygieneFile(root, full).catch(() => null)
     if (!buf) continue
     if (buf.includes(0)) {
       if (SENSITIVE_FILENAME_RE.test(rel)) notes.push(`Binary sensitive-looking file: ${rel}`)
@@ -346,11 +345,12 @@ export async function sanitizeGitHygieneFindings(cwd: string, findings: GitHygie
       continue
     }
     const full = path.join(cwd, rel)
-    const text = await fs.readFile(full, 'utf8').catch(() => null)
-    if (text == null) {
+    const content = await readHygieneFile(cwd, full).catch(() => null)
+    if (content == null || content.includes(0)) {
       skipped.push(...fileFindings.map((f) => f.id))
       continue
     }
+    const text = content.toString('utf8')
     const lines = text.split(/\r?\n/)
     let fileChanged = false
     for (const line of new Set(fileFindings.map((f) => f.line!).filter((n) => n > 0 && n <= lines.length))) {
@@ -367,7 +367,7 @@ export async function sanitizeGitHygieneFindings(cwd: string, findings: GitHygie
       }
     }
     if (!fileChanged) continue
-    await fs.writeFile(full, lines.join('\n'), 'utf8')
+    await atomicWriteWorkspaceFile(cwd, full, lines.join('\n'), { expectedSha256: workspaceContentSha256(content) })
     changed.add(rel)
   }
   return { ok: true, changedFiles: [...changed], skippedFindings: skipped }

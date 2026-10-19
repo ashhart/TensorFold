@@ -174,8 +174,8 @@ async function main() {
     [`/api/models/Org/Evil/tree/${SHA}`]: { body: [{ type: 'file', path: 'a', size: 10 }], headers: { link: '<https://evil.example/next>; rel="next"' } },
     [`/Org/Evil/resolve/${SHA}/config.json`]: { text: '{"model_type":"nemotron_h","quantization":{"bits":4,"group_size":64}}' },
   })
-  await assert.rejects(() => preflightRepo('Org/Evil', null, context(evilNext.fetchImpl)), /TF_HUB_POLICY/)
-  assert.equal(evilNext.calls.some((c) => c.includes('evil.example')), false, 'a cross-origin next link is refused')
+  await assert.rejects(() => preflightRepo('Org/Evil', null, context(evilNext.fetchImpl)), /TF_HUB_POLICY.*next link/)
+  assert.equal(evilNext.calls.some((c) => c.includes('evil.example')), false, 'a cross-origin next link cannot authorize a partial size estimate')
 
   const missing = mockHub({})
   await assert.rejects(() => preflightRepo('Org/Missing', null, context(missing.fetchImpl)), /not found on Hugging Face, or private/)

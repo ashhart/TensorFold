@@ -70,6 +70,17 @@ function declaredLength(response: Response, maxBytes: number): number | null {
   return value
 }
 
+async function writeCompleteChunk(handle: Awaited<ReturnType<typeof fs.open>>, bytes: Buffer): Promise<void> {
+  let offset = 0
+  while (offset < bytes.length) {
+    const { bytesWritten } = await handle.write(bytes, offset, bytes.length - offset, null)
+    if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 || bytesWritten > bytes.length - offset) {
+      throw new Error('Update artifact write made no valid progress.')
+    }
+    offset += bytesWritten
+  }
+}
+
 async function writeResponseBody(
   response: Response,
   filePath: string,
@@ -83,6 +94,7 @@ async function writeResponseBody(
   const hash = createHash('sha256')
   const reader = response.body.getReader()
   let bytes = 0
+  let complete = false
   try {
     for (;;) {
       const chunk = await reader.read()
@@ -93,12 +105,15 @@ async function writeResponseBody(
         await reader.cancel('update artifact exceeded size limit').catch(() => {})
         throw new Error(`Update artifact exceeds the ${maxBytes}-byte download limit.`)
       }
+      await writeCompleteChunk(handle, value)
       hash.update(value)
-      await handle.write(value)
       onProgress?.({ receivedBytes: bytes, totalBytes })
     }
     await handle.sync()
+    complete = true
   } finally {
+    if (!complete) await reader.cancel('update download failed').catch(() => {})
+    reader.releaseLock()
     await handle.close().catch(() => {})
   }
   return { bytes, sha256: hash.digest('hex') }
@@ -212,7 +227,7 @@ export async function reverifyDownloadedUpdate(
   }
 
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0
-  const handle = await fs.open(candidate, fsConstants.O_RDONLY | noFollow)
+  const handle = await fs.open(candidate, fsConstants.O_RDONLY | noFollow | fsConstants.O_NONBLOCK)
   const hash = createHash('sha256')
   let bytes = 0
   try {

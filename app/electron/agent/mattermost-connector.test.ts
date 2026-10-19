@@ -1,5 +1,6 @@
 // Run: jiti electron/agent/mattermost-connector.test.ts
 import assert from 'node:assert/strict'
+import { installDnsFixture } from './test-fixtures/dns'
 import {
   makeMattermostSource,
   validateMattermostSource,
@@ -20,7 +21,10 @@ console.log('mattermost-connector tests:')
 
 // --- a tiny fetch stub (save/restore) returning canned Mattermost JSON by URL ---
 const realFetch = globalThis.fetch
+let restoreDns = () => {}
 function stubFetch(routes: Record<string, unknown>) {
+  restoreDns()
+  restoreDns = installDnsFixture({ 'example.com': '8.8.8.8' })
   globalThis.fetch = (async (input: any) => {
     const url = typeof input === 'string' ? input : input?.url ?? String(input)
     const path = url.replace(/^https?:\/\/[^/]+/, '') // strip origin
@@ -32,7 +36,7 @@ function stubFetch(routes: Record<string, unknown>) {
     return { ok: false, status: 404, json: async () => ({ message: `no stub for ${path}` }) } as any
   }) as typeof fetch
 }
-const restoreFetch = () => { globalThis.fetch = realFetch }
+const restoreFetch = () => { globalThis.fetch = realFetch; restoreDns() }
 
 {
   // A fresh source is enabled with a stable id, empty token + base URL, no allowlist.

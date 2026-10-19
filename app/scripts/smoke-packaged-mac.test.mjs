@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { chmod, lstat, mkdir, mkdtemp, rm, stat, symlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import {
@@ -11,6 +11,7 @@ import {
   createIsolatedSmokeProfile,
   parsePackagedSmokeArgs,
   probePackagedApp,
+  releaseSmokeProfile,
   removeExactSmokeProfile,
   runPackagedMacSmoke,
   selectUnusedLoopbackPort,
@@ -49,6 +50,7 @@ try {
   assert.equal(typeof profile.identity.dev, 'bigint')
   assert.equal(typeof profile.identity.ino, 'bigint')
   assert.equal(typeof profile.identity.uid, 'bigint')
+  await writeFile(path.join(profile.root, 'child-created-file'), 'ordinary smoke profile changes')
   await removeExactSmokeProfile(profile)
   await assert.rejects(() => stat(profile.root), /ENOENT/)
   assert.equal((await stat(testTemp)).isDirectory(), true, 'cleanup removes only the exact generated profile')
@@ -65,6 +67,14 @@ try {
   await assert.rejects(() => removeExactSmokeProfile(replaced), /identity or ownership changed/)
   assert.equal((await stat(replaced.root)).isDirectory(), true, 'an inode-replaced path is left untouched')
   await rm(replaced.root, { recursive: true })
+
+  const retained = await createIsolatedSmokeProfile({ tempDir: testTemp, protectedHomes: ['/Users/example'] })
+  const retainedFile = path.join(retained.root, 'retained.txt')
+  await writeFile(retainedFile, 'retained native transaction fixture')
+  await releaseSmokeProfile(retained)
+  await assert.rejects(() => removeExactSmokeProfile(retained), /identity or ownership changed/)
+  assert.equal(await readFile(retainedFile, 'utf8'), 'retained native transaction fixture')
+  await rm(retained.root, { recursive: true })
 
   const symlinkReplaced = await createIsolatedSmokeProfile({ tempDir: testTemp, protectedHomes: ['/Users/example'] })
   const victim = path.join(testTemp, 'must-not-delete')

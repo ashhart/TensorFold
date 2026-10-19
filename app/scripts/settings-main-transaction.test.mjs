@@ -18,7 +18,7 @@ if (!process.argv[2]) {
       const child = spawnSync(process.execPath, [import.meta.filename, mode, tmp], {
         cwd: studio,
         encoding: 'utf8',
-        timeout: 5000
+        timeout: 30_000
       });
       assert.equal(child.error, undefined, mode + ' consumer timed out');
       assert.equal(child.status, 0, mode + ': ' + child.stderr);

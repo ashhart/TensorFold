@@ -1,5 +1,6 @@
 // Run: jiti electron/agent/matrix-connector.test.ts
 import assert from 'node:assert/strict'
+import { installDnsFixture } from './test-fixtures/dns'
 import {
   makeMatrixSource,
   validateMatrixSource,
@@ -22,7 +23,10 @@ console.log('matrix-connector tests:')
 // Route requests by URL substring so each test wires only the endpoints it exercises.
 type Handler = (url: string, init?: any) => { status?: number; body: any }
 const realFetch = globalThis.fetch
+let restoreDns = () => {}
 function installFetch(routes: Array<{ match: string; handle: Handler }>, log?: Array<{ url: string; init?: any }>) {
+  restoreDns()
+  restoreDns = installDnsFixture({ 'example.com': '8.8.8.8' })
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = String(input)
     log?.push({ url, init })
@@ -32,7 +36,7 @@ function installFetch(routes: Array<{ match: string; handle: Handler }>, log?: A
     return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
   }) as typeof fetch
 }
-function restoreFetch() { globalThis.fetch = realFetch }
+function restoreFetch() { globalThis.fetch = realFetch; restoreDns() }
 
 const baseSource = (over: Partial<MatrixSource> = {}): MatrixSource => ({
   ...makeMatrixSource('Account', 1000),

@@ -5,6 +5,7 @@
 // mcp-client.ts). Built on Node built-ins; no SDK dependency.
 
 import readline from 'node:readline'
+import { isMcpEnvelope } from './mcp-envelope'
 
 export const MCP_SERVER_PROTOCOL_VERSION = '2025-06-18'
 
@@ -27,16 +28,9 @@ export interface McpServerDeps {
   serverInfo?: { name: string; version: string }
 }
 
-interface JsonRpcMessage {
-  jsonrpc?: string
-  id?: string | number
-  method?: string
-  params?: any
-}
-
 interface JsonRpcResponse {
   jsonrpc: '2.0'
-  id: string | number
+  id: string | number | null
   result?: any
   error?: { code: number; message: string }
 }
@@ -64,7 +58,7 @@ export function vontraToolsToMcp(
 function ok(id: string | number, result: any): JsonRpcResponse {
   return { jsonrpc: '2.0', id, result }
 }
-function fail(id: string | number, code: number, message: string): JsonRpcResponse {
+function fail(id: string | number | null, code: number, message: string): JsonRpcResponse {
   return { jsonrpc: '2.0', id, error: { code, message } }
 }
 
@@ -72,7 +66,8 @@ function fail(id: string | number, code: number, message: string): JsonRpcRespon
  * Handle one JSON-RPC message. Returns a response for requests, or null for
  * notifications (no id). Pure and dependency-injected so it is fully unit-testable.
  */
-export async function handleMcpRequest(deps: McpServerDeps, message: JsonRpcMessage): Promise<JsonRpcResponse | null> {
+export async function handleMcpRequest(deps: McpServerDeps, message: unknown): Promise<JsonRpcResponse | null> {
+  if (!isMcpEnvelope(message) || !message.method) return fail(null, -32600, 'Invalid Request')
   const { id, method } = message
   if (id == null) return null // notification — no response
   const serverInfo = deps.serverInfo ?? DEFAULT_SERVER_INFO
@@ -111,18 +106,20 @@ export function runMcpServerStdio(
   rl.on('line', (line) => {
     const raw = String(line || '').trim()
     if (!raw) return
-    let message: JsonRpcMessage
+    let message: unknown
     try {
       message = JSON.parse(raw)
     } catch {
-      return // ignore non-JSON lines
+      output.write(`${JSON.stringify(fail(null, -32700, 'Parse error'))}\n`)
+      return
     }
     void handleMcpRequest(deps, message)
       .then((response) => {
         if (response) output.write(`${JSON.stringify(response)}\n`)
       })
       .catch((e: any) => {
-        if (message.id != null) output.write(`${JSON.stringify(fail(message.id, -32603, e?.message ? String(e.message) : String(e)))}\n`)
+        const id = isMcpEnvelope(message) ? message.id : null
+        if (id != null) output.write(`${JSON.stringify(fail(id, -32603, e?.message ? String(e.message) : String(e)))}\n`)
       })
   })
 }

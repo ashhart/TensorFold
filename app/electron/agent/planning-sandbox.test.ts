@@ -74,7 +74,10 @@ try {
   mkdirSync(path.join(fakeHome, '.local', 'bin'), { recursive: true })
   writeFileSync(path.join(fakeHome, '.local', 'bin', 'tool'), '#!/bin/sh\n')
   const roots = cliInstallRoots(path.join(fakeHome, '.local', 'bin', 'tool'), {}, fakeHome)
-  assert.deepEqual(roots, [path.join(fakeHome, '.local', 'bin'), '/bin'])
+  const interpreter = realpathSync('/bin/sh')
+  const prefix = path.dirname(path.dirname(interpreter))
+  const interpreterRoot = prefix === '/' ? path.dirname(interpreter) : prefix
+  assert.deepEqual(roots, [path.join(fakeHome, '.local', 'bin'), '/bin', ...(interpreter !== '/bin/sh' ? [interpreterRoot] : [])])
 
   // The workspace is denied last, unless it holds the CLI's own dirs (a home-folder workspace).
   {

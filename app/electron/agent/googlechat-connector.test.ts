@@ -1,5 +1,6 @@
 // Run: jiti electron/agent/googlechat-connector.test.ts
 import assert from 'node:assert/strict'
+import { installDnsFixture } from './test-fixtures/dns'
 import {
   makeGoogleChatSource,
   validateGoogleChatSource,
@@ -20,8 +21,11 @@ const WEBHOOK = 'https://chat.googleapis.com/v1/spaces/AAAAspace1/messages?key=a
 
 // ---- fetch stub (save/restore) -------------------------------------------------
 const realFetch = globalThis.fetch
+let restoreDns = () => {}
 type StubFn = (url: string, init?: any) => { status: number; body: any }
 function stubFetch(handler: StubFn) {
+  restoreDns()
+  restoreDns = installDnsFixture({ 'chat.googleapis.com': '8.8.8.8' })
   globalThis.fetch = (async (input: any, init?: any) => {
     const url = typeof input === 'string' ? input : String(input)
     const { status, body } = handler(url, init)
@@ -33,7 +37,7 @@ function stubFetch(handler: StubFn) {
     } as any
   }) as any
 }
-function restoreFetch() { globalThis.fetch = realFetch }
+function restoreFetch() { globalThis.fetch = realFetch; restoreDns() }
 
 console.log('googlechat-connector tests:')
 
