@@ -87,14 +87,15 @@ fn liveRows(gpu: check.Gpu, s: cuda.Stream, fns: cuda.moe.Fns, mode: ref.Mode, f
     try check.expect(try rig.intact() and !rig.overlap(), "{s} broke a guard at {d} live rows", .{ ref.symbol(mode), live });
 }
 
-/// plan_rows at n live rows equals plan_kernel over those rows' pairs byte for byte, padding pairs never planned.
+/// routeRows at n live rows equals route over those rows' pairs byte for byte, padding pairs never planned; buckets
+/// past 113 rows (1,024 pairs) take the wide plan.
 fn planRows(gpu: check.Gpu, s: cuda.Stream) !void {
     var mod = try cuda.Module.load(gpu.d, cuda.kernels.experts);
     defer mod.unload();
     const router = try cuda.grouped.Router.resolve(mod);
     const per = 9;
     const count = 257;
-    for ([_]usize{ 1, 16, 32 }) |bucket| for (1..bucket + 1) |live| {
+    for ([_]usize{ 1, 16, 32, 64, 114, 128 }) |bucket| for (1..bucket + 1) |live| {
         var arena = std.heap.ArenaAllocator.init(gpu.gpa);
         defer arena.deinit();
         const a = arena.allocator();
@@ -109,18 +110,18 @@ fn planRows(gpu: check.Gpu, s: cuda.Stream) !void {
             defer rig.deinit();
             const dp = try rig.input(std.mem.sliceAsBytes(picks));
             const dlive = try rig.input(std.mem.sliceAsBytes(&params)) + 8;
-            const plan: cuda.grouped.Plan = .{ .members = try rig.output(pairs * 4), .items = try rig.output(items), .counts = try rig.output(8), .rank = 0, .hist = 0 };
+            const plan: cuda.grouped.Plan = .{ .members = try rig.output(pairs * 4), .items = try rig.output(items), .counts = try rig.output(8), .rank = try rig.scratch(pairs * 4), .hist = try rig.scratch((pairs + 1023) / 1024 * count * 4) };
             var first: ?[]const u8 = null;
             for (0..5) |_| {
                 if (k == 0) try router.routeRows(s, dp, pairs, count, 16, plan, dlive, per) else try router.route(s, dp, live * per, count, 16, plan);
                 try s.synchronize();
                 const out = try rig.outputBytes();
-                if (first) |b| try check.expect(std.mem.eql(u8, b, out), "plan_rows nondeterministic bytes", .{}) else first = try a.dupe(u8, out);
+                if (first) |b| try check.expect(std.mem.eql(u8, b, out), "routeRows nondeterministic bytes", .{}) else first = try a.dupe(u8, out);
             }
-            try check.expect(try rig.intact() and !rig.overlap(), "plan_rows broke a guard", .{});
+            try check.expect(try rig.intact() and !rig.overlap(), "routeRows broke a guard", .{});
             outs[k] = first.?;
         }
-        try check.expect(std.mem.eql(u8, outs[0], outs[1]), "plan_rows at {d} live rows of {d} differs from plan_kernel over their pairs", .{ live, bucket });
+        try check.expect(std.mem.eql(u8, outs[0], outs[1]), "routeRows at {d} live rows of {d} differs from route over their pairs", .{ live, bucket });
     };
-    std.debug.print("PASS plan_rows: buckets 1, 16, 32 at every live count equal plan_kernel over the live pairs, five repeats, guards\n", .{});
+    std.debug.print("PASS plan_rows: buckets 1, 16, 32, 64, 114, 128 at every live count (wide past 1,024 pairs) equal the plan over the live pairs, five repeats, guards\n", .{});
 }
