@@ -36,7 +36,7 @@ const Walk = struct {
             const needs_memory = std.mem.indexOf(u8, path, "flashnext") != null or
                 std.mem.indexOf(u8, path, "residency") != null or std.mem.endsWith(u8, path, "cli/tests.zig") or
                 std.mem.endsWith(u8, path, "src/tensorfold.zig") or std.mem.endsWith(u8, path, "cli/cli.zig") or
-                std.mem.endsWith(u8, path, "native/metal.zig");
+                std.mem.endsWith(u8, path, "native/metal.zig") or std.mem.endsWith(u8, path, "src/main.zig");
             if (needs_memory and !std.mem.endsWith(u8, path, "flashnext/load_memory.zig") and !m.import_table.contains("flashnext_memory"))
                 m.addImport("flashnext_memory", w.memory(target));
         };
