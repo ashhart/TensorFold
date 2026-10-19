@@ -47,6 +47,12 @@ Without the opt-in, Linux `run_command` keeps the existing fail-closed behavior;
 development-only `VONTRA_ALLOW_UNSANDBOXED_COMMANDS=1` escape hatch is unchanged. Details and review
 history: [SANDBOX-REVIEW.md](SANDBOX-REVIEW.md).
 
+## Connecting to a Mac engine
+
+See [REMOTE-ENGINE.md](REMOTE-ENGINE.md) for the supported setup: serve with `--host` and an
+`--api-key-file`, verify `/v1/models` from Linux, then add it as a local OpenAI-compatible provider.
+The built-in engine entry stays unavailable on Linux by design.
+
 ## Deliberate scope boundaries
 
 - No inference engine bundled or ported; providers are user-configured HTTP endpoints (remote Mac or self-managed).
