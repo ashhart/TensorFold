@@ -228,7 +228,12 @@ pub fn main(init: std.process.Init) !void {
         tp_transport = try ds.tp_transport.Transport.init(a, settings_json, model.workspace.plan.rows);
         const transport = &tp_transport.?;
         tp_context = try ds.tp_moe.Context.init(a, model.device, &model.weights, @intCast(transport.channel.myRank()), model.workspace.plan.rows, transport.exchange());
-        for (tp_context.?.descriptors) |layer| for (layer) |buffer| model.residency.add(buffer);
+        tp_context.?.registerResidency(model.residency);
+        const own_identity = try tf.deepseek_v41_tp_pair.identity(a, io, args[2]);
+        var peer_identity: [32]u8 = undefined;
+        const exchange = transport.exchange();
+        try exchange.call(exchange.ptr, std.math.maxInt(u64) - 1, &own_identity, &peer_identity);
+        if (!std.mem.eql(u8, &own_identity, &peer_identity)) return error.TensorParallelIdentityMismatch;
         model.residency.commit();
         model.residency.requestResidency();
         model.tp = &tp_context.?;
@@ -255,7 +260,7 @@ pub fn main(init: std.process.Init) !void {
         .mode = mode,
         .tensor_parallel_ranks = if (model.tp != null) @as(u32, 2) else 1,
         .tensor_parallel_rank = if (model.tp) |context| @as(u32, context.rank) else 0,
-        .tensor_parallel_partition = if (model.tp != null) "moe_output_columns_replicated_weights" else "none",
+        .tensor_parallel_partition = if (model.tp) |c| (if (c.slot_ids != null) "moe_route_slots_replicated_weights" else "moe_output_columns_replicated_weights") else "none",
         .attention_parallel = model.pipelines.attention.sparse.parallel_enabled,
         .tensor_parallel_exchanges = if (tp_transport) |transport| transport.channel.step else 0,
         .evidence_origin = "current_invocation_not_historical_qualification",

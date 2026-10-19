@@ -38,7 +38,7 @@ pub const Pair = struct {
         try exchange.call(exchange.ptr, std.math.maxInt(u64) - 1, &fingerprint, &peer);
         if (!std.mem.eql(u8, &fingerprint, &peer)) return error.TensorParallelIdentityMismatch;
         _ = try p.wire.hello(.{ .magic = 0x44535450, .version = 1, .layers = 40, .run = model.workspace.plan.rows, .mtp = @intCast(model.lanes), .experts = 2, .own_lo = p.wire.rank, .own_hi = p.wire.rank + 1, .cap = model.caches[0].plan.capacity, .model = std.mem.readInt(u64, fingerprint[0..8], .little), .rest = fingerprint[8..24].* });
-        for (p.moe.descriptors) |layer| for (layer) |buffer| model.residency.add(buffer);
+        p.moe.registerResidency(model.residency);
         model.residency.commit();
         model.residency.requestResidency();
         model.tp = &p.moe;
@@ -58,7 +58,7 @@ pub const Pair = struct {
     pub fn deinit(p: *Pair) void {
         p.stop();
         p.model.tp = null;
-        for (p.moe.descriptors) |layer| for (layer) |buffer| p.model.residency.remove(buffer);
+        p.moe.removeResidency(p.model.residency);
         p.model.residency.commit();
         p.wire.deinit(p.gpa);
         p.moe.deinit();
@@ -130,7 +130,7 @@ pub fn identity(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) ![32]u8 {
         defer gpa.free(path);
         try hashFile(gpa, io, &hash, path);
     }
-    for ([_][:0]const u8{ "TF_DSV41_SERIAL", "TF_EXL3_PAIRS_UP_TO_GROUPS", "TF_DSV41_PARALLEL_ATTENTION" }) |key| {
+    for ([_][:0]const u8{ "TF_DSV41_SERIAL", "TF_EXL3_PAIRS_UP_TO_GROUPS", "TF_DSV41_PARALLEL_ATTENTION", "TF_DSV41_TP_SLOTS" }) |key| {
         const value = if (std.c.getenv(key)) |v| std.mem.span(v) else "<unset>";
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(value, &digest, .{});

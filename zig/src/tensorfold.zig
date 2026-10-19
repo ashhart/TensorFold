@@ -23,6 +23,7 @@ pub const affine_mm = @import("core/affine_mm.zig");
 /// The checkpoint formats (MLX affine and its fp64 reader for the device checks, exact widen).
 pub const quant = @import("core/quant/quant.zig");
 pub const deepseek_v41_tp_pair = @import("families/deepseek_v41/tp_pair.zig");
+pub const deepseek_v41_admission = @import("families/deepseek_v41/metal_admission.zig");
 pub const deepseek_v41_config = @import("families/deepseek_v41/metal_config.zig");
 pub const deepseek_v41_load = @import("families/deepseek_v41/metal_load.zig");
 pub const deepseek_v41_weights = @import("families/deepseek_v41/weights.zig");
