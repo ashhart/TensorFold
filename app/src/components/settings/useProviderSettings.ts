@@ -227,6 +227,7 @@ export function useProviderSettings({ draft, editDraft, commit, patch, save }: S
     models: selectedLocalRuntime.defaultModels,
     kind: 'local',
     source: selectedLocalRuntime.source,
+    ...(selectedLocalRuntime.trustedNetwork ? { trustedNetwork: true as const } : {}),
   })
   // Dedicated add path for Codex/Claude CLI (the simplified single/multi flow).
   // single  → no extra accounts (uses the default CLI login).

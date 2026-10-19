@@ -57,10 +57,14 @@ Then use `http://127.0.0.1:18080/v1` in the provider.
 
 ## What the app classifies each choice as
 
-`classifyProvider` treats only loopback as `trusted-local`. A LAN address is classified as external
-compute, so privacy gates that withhold cloud context (mail, memory, connectors) apply to it the
-same way they do to a cloud provider. File and terminal tools are unaffected. A tunnel keeps the
-endpoint loopback and therefore `trusted-local`.
+The **TensorFold** preset marks its provider `trustedNetwork`, so it is treated like a local engine
+— bots, phone-guard and other local-only features work — but only while its address stays loopback,
+RFC1918 private, IPv6 unique-local or an mDNS `.local` name. A public address stays external even
+with the mark, and any other provider (including a hand-added LAN address) remains external, which
+restricts it to planning-only work. This is a deliberate product distinction: the preset is for
+*your own* engine on *your* network.
+
+A tunnel keeps the endpoint loopback, which is implicitly trusted.
 
 ## Limits
 
