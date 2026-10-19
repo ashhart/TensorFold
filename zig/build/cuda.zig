@@ -426,6 +426,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    const eos_policy = b.step("test-eos-policy-host", "Shared EOS, real HfText and HTTP policy without a GPU");
+    eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"EOS policy:"} })).step);
+    eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.tokenizer, .filters = &.{"EOS policy:"} })).step);
+    const eos_family = kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes);
+    eos_policy.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = eos_family, .filters = &.{"EOS policy:"} })).step);
     b.step("test-embeddings-protocol-host", "Embedding request and response contracts without an admitted model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings protocol:"} })).step);
     b.step("test-embeddings-http-host", "Embedding route capability and borrowed request lifetime without a model or GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"embeddings HTTP:"} })).step);
     @import("safetensors_header_host.zig").steps(b, mods.core, step);
