@@ -1,38 +1,52 @@
 # TensorFold
 
-TensorFold 1.0.12 serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
+TensorFold serves language models from a Zig binary on Apple Silicon and NVIDIA GPUs.
 The engine reads checkpoints, tokenizes requests and runs Metal or CUDA kernels directly.
 Serving needs no Python or MLX installation.
 
 Building with a coding agent? Have it load the [contributor skill](docs/recipes/SKILL.md) before it writes any code.
 
-## Mac app
+## Quick start
 
-The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
-Download the signed and notarized Apple-silicon [beta.5 DMG](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.5), or build from [`app/`](app/README.md).
-Mobile clients in `app/mobile/` remain preview software.
+Start with Qwen3.5-2B, the small 4-bit checkpoint checked on Metal and a GB10. The commands below download its
+pinned revision, then serve it as `local-model`. Model weights have their own licenses.
 
-## Install and serve
+### Mac with Apple Silicon
 
-The macOS Homebrew formula installs the native binary as `tensorfold`:
+Install with Homebrew, then start the server:
 
 ```sh
 brew install ashhart/tensorfold/tensorfold
-tensorfold --version
-tensorfold serve "$HOME/models/nemotron-lightning" \
-  --name local-model --parallel 1 --context 8192 --temperature 0 --no-thinking
+tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
+tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
 ```
 
-Use a complete local model directory or an existing Hugging Face cache.
-The binary in a release archive is `bin/tensorfold-native`; the [runbook](RUNBOOK.md) covers archive installation and CUDA runtime files.
+### Linux with an NVIDIA GPU
 
-On Windows with an NVIDIA GPU, build `tensorfold-native.exe` from source as [docs/WINDOWS.md](docs/WINDOWS.md) describes.
-Use `tensorfold-native --help` or `-h`, and `tensorfold-native capabilities --json`, to inspect the installed binary.
-Model weights have separate downloads and licenses.
+Use the release archive for your CPU: `linux-aarch64` on a GB10, `linux-x86_64` on an x86_64 host.
+It needs glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`. Keep the archive's directories together.
+See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
-The API listens at `http://127.0.0.1:8080/v1` by default.
-It serves OpenAI chat completions, completions and Responses, plus Anthropic Messages.
-Use the model ID returned by `/v1/models`, or set one with `--name`.
+```sh
+V=1.1.0
+case "$(uname -m)" in
+  aarch64|arm64) PLATFORM=linux-aarch64 ;;
+  x86_64) PLATFORM=linux-x86_64 ;;
+  *) echo 'No release archive for this CPU' >&2; exit 1 ;;
+esac
+curl -fLO "https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-$PLATFORM.tar.gz"
+curl -fLO "https://github.com/ashhart/TensorFold/releases/download/v$V/tensorfold-$V-$PLATFORM.tar.gz.sha256"
+sha256sum -c "tensorfold-$V-$PLATFORM.tar.gz.sha256"
+tar -xzf "tensorfold-$V-$PLATFORM.tar.gz"
+export PATH="$PWD/tensorfold-$V-$PLATFORM/bin:$PATH"
+tensorfold() { command tensorfold-native "$@"; }
+tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3
+tensorfold serve mlx-community/Qwen3.5-2B-MLX-4bit --name local-model --context 8192 --no-thinking
+```
+
+### Send a request
+
+Leave the server running. In another terminal, on either platform:
 
 ```sh
 curl -fsS http://127.0.0.1:8080/v1/chat/completions \
@@ -40,18 +54,37 @@ curl -fsS http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"local-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":128,"temperature":0}'
 ```
 
+The API also serves completions, Responses and Anthropic Messages. `/v1/models` lists the served name.
+On Windows with an NVIDIA GPU, follow [the native Windows build guide](docs/WINDOWS.md).
+Use `tensorfold --help`, `tensorfold capabilities --json` and `tensorfold serve REPO --help` to inspect your binary.
+You can also serve a complete local checkpoint directory or an existing Hugging Face cache.
+
+## Mac app
+
+The [TensorFold desktop workspace](app/README.md) bundles the local engine, model downloads, hardware recommendations, live generation metrics, coding workers and document editing.
+Download the Apple-silicon [beta 8 DMG](https://github.com/ashhart/TensorFold/releases/tag/v1.0.0-beta.8), or build from [`app/`](app/README.md).
+Mobile clients in `app/mobile/` remain preview software.
+
 ## Living Weights (experimental)
 
-Living Weights teaches a running model new facts. Start a Nemotron 3.5 Lightning server with `--slide`, tell it
-something, and a few minutes later it answers from its own weights: each fact it keeps is written into the
-checkpoint's files, so it is still there after a restart and on any machine that serves the folder.
+Living Weights teaches a running model new facts in its own weights. Start a Nemotron 3.5 Lightning server with
+`--slide` and tell it something: each fact that passes the lesson's checks is written into the checkpoint folder's
+files. It is experimental: related facts can disturb each other, recall drops past a few dozen facts and with thinking
+on, and learned facts cost some decode speed on a Mac. [Known issues](docs/known-issues.md#living-weights---slide)
+has the details.
 
 ```sh
 tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
-src=$(ls -d ~/.cache/huggingface/hub/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit/snapshots/* | head -1)
-mkdir -p ~/models && cp -cRL "$src" ~/models/nemotron-living   # always teach a copy
-(umask 077; openssl rand -hex 24 > ~/models/slide-key)          # --slide starts only with a key
+hub="${HF_HUB_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}/hub}/models--TensorFold--NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit"
+src="$hub/snapshots/$(cat "$hub/refs/main")"
+mkdir -p ~/models && cp -RL "$src" ~/models/nemotron-living   # always teach a copy
+(umask 077; openssl rand -hex 24 > ~/models/slide-key)        # --slide starts only with a key
 tensorfold serve ~/models/nemotron-living --slide --api-key-file ~/models/slide-key
+```
+
+Leave that server running and send a lesson from another terminal:
+
+```sh
 curl -N http://127.0.0.1:8080/v1/slide/learn -H "Authorization: Bearer $(cat ~/models/slide-key)" \
   -H 'Content-Type: application/json' -d '{"text": "I like blue."}'
 ```
@@ -61,61 +94,61 @@ Send it a document instead and it finds the facts in it and learns them one by o
 files that hold them, and the lesson running now.
 
 Learning runs on Apple-silicon Macs and on an NVIDIA GB10 (DGX Spark), and a folder that learned on one serves on the
-other (on Linux, copy with `cp -RL`). It rewrites the folder's files: before the first lesson the server keeps the
-originals in a hidden snapshot, and `tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every
-lesson. The [Living Weights guide](docs/living-weights.md) covers the key, teaching files and web pages, omp's `/learn`
-command, the 3D view, undoing lessons, and what to expect.
+other. On a Mac, `cp -cRL` makes the copy an APFS clone that takes no extra space. It rewrites the folder's files:
+before the first lesson the server keeps the originals in a hidden snapshot, and
+`tensorfold slide rollback ~/models/nemotron-living` puts them back, undoing every lesson. The
+[Living Weights guide](docs/living-weights.md) covers the key, teaching files and web pages, omp's `/learn` command,
+the 3D view, undoing lessons, and what to expect.
 
-## Qualified models
+<a id="qualified-models"></a>
 
-Only these model and platform combinations are admitted to 1.0.12.
-The platform column names the hardware tested for each model.
+## Pick a model
 
-| Model | Checkpoint format | Qualified platform |
-| --- | --- | --- |
-| Nemotron 3.5 Lightning 30B-A3B | MLX affine 4-bit, group 64, included MTP head | Metal on M1 through M5; CUDA on GB10, RTX 3090 and RTX PRO 6000 Blackwell |
-| Nemotron 3.5 Lightning 30B-A3B, oQ quants | TensorFold's oQ4, oQ6 and oQ8: MLX affine at a width per module, with the 4-bit checkpoint's MTP head copied in | Metal on M3 Ultra |
-| Nemotron 3.5 Lightning 30B-A3B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts and head, FP8 Mamba projections, bf16 attention | CUDA on GB10 (sm_90 or newer) |
-| Nemotron 3.5 Super VL 120B-A12B, NVIDIA's NVFP4 | ModelOpt NVFP4 experts, FP8 Mamba, attention and head projections, bf16 latent projections; RADIO image tower | CUDA on one GB10, or two GB10s |
-| Qwen3.8 Flash Next | MLX affine 6-bit, group 32 | Metal on M5 Ultra |
-| GLM-5.3-Flash | MLX affine 4-bit, group 64 | Metal on two M5 Ultras |
-| GLM-5.3 | EXLR8 `home` profile (trellis K2/K3/K4 experts) | Metal on two M5 Ultras |
-| Qwen3.5-2B | Pinned MLX affine 4-bit, group 64, tied embeddings | Metal on M5 Max; CUDA on RTX 4090 (Windows) |
-| Qwen3.8-27B | MLX affine 4-bit, group 64, own output head; DFlash2 drafter; images with `--vision` ([image input](docs/vision.md#qwen38-27b)) | Metal on M5 Max and M3 Ultra; CUDA on RTX 4090 (Windows) |
-| LFM2.5-24B-A2B | MLX affine 4-, 6- or 8-bit, group 64, tied embeddings | Metal on M4 Pro |
+These are the native release's serving paths. A recipe may also describe the older Python 0.6.6 engine;
+use its native section and the current [changes](CHANGELOG.md) together.
+Hardware below records the documented scope, not an unmeasured minimum. Context, parallel requests, prompt caches
+and drafters need memory beyond the weights. `tensorfold info REPO` reports the checkpoint's memory floor.
+Where no RAM capacity is published, inspect that floor before serving a large checkpoint.
 
-Nemotron's named checkpoint is `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit`.
-Nemotron's Metal engine also reads MLX checkpoints whose `config.json` gives modules their own width, such as `TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`, `-oQ6` and `-oQ8`.
-It admits 2, 3, 4, 5, 6 or 8 bits (not 7) in groups of 32, 64 or 128; those three checkpoints are the ones measured.
-Matrices at 4-bit in groups of 64 run on the 4-bit checkpoint's kernels.
-Other widths run on the shared row kernels in decode.
-In prompt chunks past 128 rows, dense matrices in groups of 64 run on tiled kernels and the routed experts on width-general gathers; dense matrices in other groups stay on the row kernels.
-These checkpoints have no MTP head.
-Copy `mtp-4bit.safetensors` from the 4-bit checkpoint into the folder to draft; without it Nemotron decodes one token a round.
-With that head on an M3 Ultra, greedy prose decodes at 162 tok/s with oQ4, 117 with oQ6 and 111 with oQ8, against 188 with the 4-bit checkpoint.
-For Nemotron's MLX affine checkpoints, CUDA and the Intel GPU engine read 4-bit in groups of 64 only, and refuse other widths by naming the first such module; NVIDIA's ModelOpt checkpoints are read as before.
-Flash Next and Qwen3.8-27B read widths per module too.
-Jundot's `Qwen3.8-27B-oQ4e-mtp` and `-oQ6e-mtp` and a Flash Next oQ5e checkpoint serve exactly on an M3 Ultra.
-NVIDIA's NVFP4 checkpoint, `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4`, serves on CUDA as stored; its bf16 MTP head is quantized to 4-bit at load for drafts.
-Super VL's checkpoint is `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` at revision `82d93699acd3be9e4617c53360fe5b3f5dbeb1b3`, served as stored with images, in NVIDIA's own FP4 and FP8 math by default (`--precision full` keeps bf16 activations); [its recipe](docs/recipes/nemotron-3.5-super-vl.md) covers one and two GB10s.
-The 2B checkpoint is `mlx-community/Qwen3.5-2B-MLX-4bit`, revision `93760be4f1f69842a46bc13dbdc0f19e291392a3`.
-Flash Next loads its checkpoint directly and builds its weight packs locally, without a recorded kernel directory.
-On Metal it samples a request with a temperature on the GPU, with Nemotron's `tf_sample_full` and the shared rule; speed-up mode decodes greedily.
-GLM's two-Mac setup uses one settings file per rank and a separate MCDMA runtime.
-GLM-5.3's checkpoint is kindlingai's EXLR8 release `kindlingai/glm-5.3-exlr8-k2-k3-k4` at revision `f459f5d0272a529403dd9b3fd32f771f4250a0d4`, which `tensorfold pull` fetches one Mac's half at a time; [GLM-5.3 on two Macs](docs/glm-5.3-exlr8.md) covers the pull, the serve commands, memory and limits.
-The [1.0.0 release notes](RELEASE-NOTES-1.0.0.md) give qualification limits and credit the contributors.
+Run a table command after installation. On a Linux archive installation, use the `tensorfold` shell function from Quick start.
+`REPO@revision` pins a pull; serve the repository name without the revision after pulling it.
+Conversions are explicitly marked: their upstream weights need the linked conversion before native serving.
 
-LFM2.5-24B-A2B's checkpoints are LiquidAI's `LiquidAI/LFM2.5-24B-A2B-MLX-4bit` (revision `667408d494bde191c2cb9dd4f4549827816b9275`), `-MLX-6bit` (`1deec53eb49571e21cdcbf82fd5839248f07ed88`) and `-MLX-8bit` (`67ab417dd02d0c9545802a726df668620eae049d`).
+| Model / format | Download | Machine and memory scope | Native recipe / limits |
+| --- | --- | --- | --- |
+| Qwen3.5-2B, MLX 4-bit | `tensorfold pull mlx-community/Qwen3.5-2B-MLX-4bit@93760be4f1f69842a46bc13dbdc0f19e291392a3` | One Mac (M5 Max checked), or one GB10; no RAM minimum published. | [2B](docs/recipes/qwen3.5-2b-native.md); [CUDA release checks](CHANGELOG.md#110). Text only. |
+| Qwen3.8-27B, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-27B-MLX-4bit`<br>`tensorfold pull z-lab/Qwen3.8-27B-DFlash2` | One Mac (M5 Max/M3 Ultra), or one GB10. | [27B](docs/recipes/qwen3.8-27b.md). Add `--drafter z-lab/Qwen3.8-27B-DFlash2`; without it decoding is plain. |
+| Nemotron 3.5 Lightning 30B-A3B, MLX 4-bit | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit` | One Mac (M1-M5), or one GB10; also checked on RTX 3090 / RTX PRO 6000. | [Lightning](docs/recipes/nemotron-3.5.md). Includes MTP. |
+| Lightning, mixed oQ4 / oQ6 / oQ8 | `tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ4`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ6`<br>`tensorfold pull TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-oQ8` | One M3 Ultra checked. | [Width and MTP instructions](docs/recipes/nemotron-3.5.md#run). Metal only; copy the 4-bit checkpoint's MTP head to draft. |
+| Lightning, NVIDIA NVFP4 | `tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | One GB10 checked; cards without thread-block clusters (sm_80 to sm_89) use a fallback path. | [Lightning](docs/recipes/nemotron-3.5.md); [CUDA changes](CHANGELOG.md#110). |
+| Nemotron 3.5 Super VL 120B-A12B, NVFP4 | `tensorfold pull nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4@82d93699acd3be9e4617c53360fe5b3f5dbeb1b3` | One or two GB10s; weights 70.8 GiB, 73.2 GiB with vision on one. | [One/two-GB10 commands](docs/recipes/nemotron-3.5-super-vl.md). Add `--vision` for images. |
+| Nemotron 3.5 Bolt 74B-A9B | [NVIDIA's checkpoint](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB) | Native CUDA; 24 GB checkpoint, checked on RTX PRO 6000. | [Bolt/Omni video](docs/recipes/nemotron-omni-video.md); [release qualification](CHANGELOG.md#110). |
+| Qwen3.8 Flash Next, MLX 6-bit | `tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-6bit-MTP` | One M5 Ultra checked; RAM minimum not published. | [Metal](docs/recipes/qwen3.8-flash-next.md), [runbook](RUNBOOK.md#flash-next-and-paired-metal-serving). |
+| Qwen3.8 Flash Next, MLX 4-bit | `tensorfold pull TensorFold/Qwen3.8-Flash-Next-MLX-4bit-MTP` | One GB10; 73.3 GiB uploaded, plus mapped tables and caches. Metal has a native 4-bit path too (M3 Ultra checked). | [Native CUDA](docs/recipes/flash-next-cuda.md). NVFP4/two-local-rank and vision paths are experimental. Metal's shared-session limits are in [known issues](docs/known-issues.md#models). |
+| GLM-5.3-Flash, MLX 4-bit | `tensorfold pull TensorFold/GLM-5.3-Flash-MLX-4bit-MTP` | Two M5 Ultras; single-Mac native serving is not qualified. | [Paired Metal runbook](RUNBOOK.md#flash-next-and-paired-metal-serving). Do not use the Python recipe's single-Mac command. |
+| GLM-5.3-Flash, EXL3/TR3 | `tensorfold pull Mia-AiLab/GLM-5.3-Flash-EXL3-TR3-4bpw` | Two CUDA ranks; the release checks the two-GB10 setup. | [Release scope](CHANGELOG.md#110), [checkpoint](docs/recipes/glm-5.3-flash.md#exl3). Experimental checkpoint; use native rank options, not the Python installation. |
+| GLM-5.3-Flash, NVFP4 | Not documented yet. | Two GB10s at TP=2: @Bizuayeu loaded the whole checkpoint on 1.1.0 in 302.1 s and served it. | [Contributed run](https://github.com/ashhart/TensorFold/issues/1040): one token hash per prompt across three runs and a passphrase found in 199,307 tokens; scored prompts and more than two ranks were not covered. |
+| GLM-5.3, EXLR8 `home` | `tensorfold pull kindlingai/glm-5.3-exlr8-k2-k3-k4@f459f5d0272a529403dd9b3fd32f771f4250a0d4 --exlr8 home --node 0/2 --dir ~/models/glm-5.3-exlr8-home` | Two M5 Ultra Macs, 256 GB each; about 160 GB resident per Mac at 8k context / four streams. | [Two-Mac recipe](docs/glm-5.3-exlr8.md). Use `--node 1/2` on the other Mac; Thunderbolt 5 and MCDMA required. No CUDA backend. |
+| LFM2.5-24B-A2B, MLX 4 / 6 / 8-bit | `tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-4bit@667408d494bde191c2cb9dd4f4549827816b9275`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-6bit@1deec53eb49571e21cdcbf82fd5839248f07ed88`<br>`tensorfold pull LiquidAI/LFM2.5-24B-A2B-MLX-8bit@67ab417dd02d0c9545802a726df668620eae049d` | One Mac; M4 Pro checked. | [Native operator recipe](docs/recipes/README.md), [release history](CHANGELOG.md). No separate native model recipe yet. |
+| Qwen3.6-35B-A3B, MLX with MTP | `tensorfold pull TensorFold/Qwen3.6-35B-A3B-MLX-4bit-MTP@81169a9bc511a27c1b4eedb77a2cd98ced431847` | One GB10; 20.9 GB checkpoint. | [Qwen3.6](docs/recipes/qwen3.6-moe.md). Native CUDA; the recipe's Metal path belongs to Python. |
+| Gemma 4 31B, MLX 4-bit | `tensorfold pull mlx-community/gemma-4-31B-it-4bit@696d436c404745a59f30e4939a658162b0a9e57f`<br>`tensorfold pull z-lab/gemma-4-31B-it-DFlash@eabd648301ce28583cc14757912e5e0f84e152e1` | One M5 Mac; M5 Ultra checked. M1-M4 refused. | [Native 31B](docs/recipes/gemma-4-native.md). Name the drafter with `--drafter`; images with `--vision`. |
+| Gemma 4 12B, converted MLX 4-bit | `hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir ~/models/gemma-4-12b-hf`<br>`hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b915669b8df9b81c64c51 --local-dir ~/models/gemma-4-12b-assistant` | One M5 Mac; converted text weights 6.3 GB, image weights 100 MB, plus assistant/caches. M1-M4 refused. | [Convert and serve](docs/recipes/gemma-4-12b-native.md). Upstream download needs `hf`; conversion needs Python, mlx and mlx-lm. Serving is native. |
+| Step-5-Preview, converted affine | `hf download stepfun-ai/Step-5-Preview --local-dir ~/models/step5-preview-fp8` | One 256 GB Mac; text 166.9 GiB, MTP adds 2.5 GiB and vision 3.7 GiB. | [Convert and serve](docs/recipes/step-5-preview.md). The documented 256 GB setup serves converted affine weights; converting the upstream FP8 download needs Python and mlx. |
+| Liquid AI d1-3B, decisions | Not documented yet. | Native CUDA; RAM minimum not published. | [API section below](#serve-flags). `/v1/systemone` and `/v1/decisions`. |
+| Fish Audio Drama 3, speech | Not documented yet. | Native Metal or CUDA; GB10 measured. | [Release audio instructions](CHANGELOG.md#110). `/v1/audio/speech`; checkpoint and `codec.pth` required. |
 
-The 27B's checkpoint is `TensorFold/Qwen3.8-27B-MLX-4bit`, and its drafter is `z-lab/Qwen3.8-27B-DFlash2`, given with `--drafter`.
-Run it with `--drafter`. Without it the 27B decodes plain, which is slower than mlx_lm.
-Its prompt processing trails mlx_lm for now, and we are fixing it. An M3 Ultra reads prompts at about half of mlx_lm's speed from 8k to 30k tokens, and served cold prefill on an M5 Max also measured below mlx_lm.
-Bonsai, Gemma 4, Qwen3.6 and DeepSeek-V4 are still under qualification for 1.0.x.
-The Python 0.6.6 engine remains available at the `v0.6.6` tag for those models and other backends.
-On CUDA the native server runs Nemotron 3.5 Lightning on a GB10, an RTX 3090 and an RTX PRO 6000, and Nemotron 3.5 Super VL with images on one GB10 or two, greedy and sampled, with concurrent requests sharing each round.
-GLM-5.3-Flash also serves across two CUDA ranks, and Liquid AI's d1-3B answers `/v1/systemone` and `/v1/decisions`.
-On Windows ([docs/WINDOWS.md](docs/WINDOWS.md)), the native build also serves the 2B and the 27B on CUDA, the 27B with its DFlash2 drafter drafting trees.
-The Linux x86_64 archive adds NVIDIA Ampere cards with compute capability 8.0 (the A100) and 8.6 (the RTX 30 series, RTX A6000, A10 and A40; tested on an RTX 3090), and Blackwell cards with compute capability 12.0 (the RTX 50 series and RTX PRO 6000 Blackwell), tested on an RTX PRO 6000; FP8 and NVFP4 checkpoints need compute capability 9.0 or newer.
+### GLM-5.3: one machine or two?
+
+The native release does not qualify GLM-5.3 on one machine. GLM-5.3 EXLR8 `home` needs two 256 GB M5 Ultra Macs;
+[its recipe](docs/glm-5.3-exlr8.md) gives both pull and serve commands. GLM-5.3-Flash is a different model:
+its native Metal setup needs two M5 Ultras, and its native CUDA setup uses two ranks. The single-256-GB-Mac
+GLM-5.3-Flash command in the older recipe is for Python 0.6.6, not this release.
+For the NVFP4 two-GB10 path, see what [the contributed run](https://github.com/ashhart/TensorFold/issues/1040) covered.
+
+DeepSeek checkpoints are **not served yet** by any release binary: whole-model gate [#827](https://github.com/ashhart/TensorFold/pull/827) is still open.
+MiMo's native backend is not in a release yet. Bonsai's ternary pack and Gemma 4 26B-A4B remain Python-only;
+they are not native download recommendations. [Known issues](docs/known-issues.md) lists current limits,
+including Flash Next shared-session cache/performance behavior and the 27B's drafter limits.
 
 ## Exact decoding
 
@@ -139,9 +172,9 @@ tensorfold models
 tensorfold info TensorFold/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-MLX-4bit
 ```
 
-`pull` downloads a checkpoint into the Hugging Face cache and checks every file: large files by sha256, small files by their git blob sha1.
+`pull` downloads a checkpoint into the Hugging Face cache and checks what it downloads against the Hub: large files by sha256, small files by their git blob sha1.
 Large files come down in pieces over up to 16 connections, and an interrupted pull resumes with the pieces it lacks.
-It refuses a model that no 1.0.12 family serves, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints 1.0.12 can serve, and `info` shows one checkpoint's family, format, context and memory floor.
+It refuses a checkpoint whose `model_type` has no native family, and fetches the 27B's DFlash2 drafter for `--drafter`. `models` lists the cached checkpoints with a model type it knows, and `info` shows one checkpoint's family, format, context and memory floor.
 `tensorfold serve REPO` serves a cached checkpoint by its repository name.
 
 ## Context compaction
@@ -204,8 +237,8 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--thinking-budget N` | Limit reasoning tokens where the engine supports closing the reasoning block. |
 | `--loop-guard` | Close a short repeated reasoning cycle where the engine supports it. |
 | `--no-drafts` | Produce the plain reference through the same engine. |
-| `--drafter DRAFTER` | Qwen3.8-27B's DFlash2 drafter, as a directory or a repo id in the Hugging Face cache. Without it the 27B decodes plain. |
-| `--drafter-bits 0\|4` | Prepare the drafter's weights in 4 bits (the default) or keep them bf16 with 0. |
+| `--drafter DRAFTER` | An external drafter, as a directory or a repo id in the Hugging Face cache, for models that take one: Qwen3.8-27B uses DFlash2 and Gemma 4 31B the drafter named in its recipe. Without one they decode plain. |
+| `--drafter-bits 0\|4` | Drafter weight precision where the model offers a choice: 4 bits (the default), or 0 to keep bf16. Qwen3.8-27B on CUDA takes 4 only. |
 | `--record DIR` | Write each stream's committed tokens, positions and tapped rows under DIR, for drafter training. CUDA Nemotron only; a single stream runs through the lane rounds, and recording stops below 25 GiB free disk. |
 | `--keep-warm SECONDS` | Keep the Metal GPU active while idle for this long after a request, default 900; zero disables it. |
 | `--parallel N` | Admit up to N requests where the engine shares lanes; `auto` is the default. |
@@ -251,7 +284,7 @@ Use the Zig version pinned in `.zig-version`, currently 0.17.0.
 On a Mac with Xcode's Metal toolchain:
 
 ```sh
-zig build native -Dcpu=apple_m1 -Dversion=1.0.12
+zig build native -Dcpu=apple_m1
 zig build test test-golden -Dcpu=apple_m1
 ```
 
