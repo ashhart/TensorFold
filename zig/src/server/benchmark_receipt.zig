@@ -142,6 +142,8 @@ fn sampleValue(a: Allocator, x: suite.Sample) !Value {
     try b.int("repeat", @as(?i32, x.repeat));
     try b.int("seed", @as(?u32, x.seed));
     try b.str("status", @tagName(x.status));
+    try b.str("finish_reason", x.finish_reason);
+    try b.str("route", x.route orelse if (std.mem.eql(u8, x.fixture_id, "chat")) "/v1/chat/completions" else "/v1/completions");
     try b.int("prompt_tokens", x.prompt_tokens);
     try b.int("completion_tokens", x.completion_tokens);
     try b.int("cached_tokens", x.cached_tokens);

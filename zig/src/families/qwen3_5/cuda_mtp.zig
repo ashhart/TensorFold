@@ -253,7 +253,7 @@ pub const Mtp = struct {
     /// out = norm(h + r) with w; h takes the sum (r 0: no residual).
     fn norm(d: *Mtp, h: u64, r: u64, w: u64, out: u64, rows: usize) !void {
         const e = d.e;
-        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0) });
+        try e.run(e.fns.norm, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ h, r, w, out, e.g.eps, @as(c_int, @intCast(e.g.hidden)), @as(u64, 0), @as(u64, 0) });
     }
 
     /// The layer over `rows` rows at slots pos0..: d.ids their tokens, d.hin their states; x gets their normed outputs.
@@ -287,7 +287,7 @@ pub const Mtp = struct {
         }
         try d.proj(w.o, d.att, d.r, rows);
         try d.norm(d.h, d.r, w.post_norm, d.x, rows);
-        try e.routedRows(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows, rows > most_window);
+        try e.routedRows(w.mlp.moe.router, w.mlp.moe.experts, d.x, d.r, rows, rows > 16);
         try d.norm(d.h, d.r, w.norm, d.x, rows);
         if (pass == .ring) try e.run(d.ring_fns.ring_put, .{ rows, 1, 1 }, .{ 256, 1, 1 }, .{ d.kb, d.vb, d.ringK(ctx), d.ringV(ctx), @as(c_int, @intCast(kw)), p0, cap });
     }

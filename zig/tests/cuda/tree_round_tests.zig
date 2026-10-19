@@ -48,7 +48,7 @@ const neg_inf: u16 = 0xFF80;
 const decoy: u16 = 0x7F00;
 
 /// Row r by r's kind: spread, coarse ties, a NaN, +inf, -inf, all -inf, the max last, ties at both ends.
-fn fillRow(rng: std.Random, r: usize, row: []u16) void {
+pub fn fillRow(rng: std.Random, r: usize, row: []u16) void {
     const v = row.len;
     for (row) |*h| h.* = switch (r % 8) {
         1 => bf16(-@floor(rng.float(f32) * 4.0)),
@@ -98,14 +98,14 @@ fn picks(gpu: Gpu, k: *const tr.Kernels, s: cuda.Stream) !void {
 }
 
 /// A round of `count` random trees in the kernels' layout, with the host reference's per-tree slices.
-const Round = struct {
+pub const Round = struct {
     tokens: std.ArrayList(u32) = .empty,
     parents: std.ArrayList(i32) = .empty,
     picks: std.ArrayList(tr.Pick) = .empty,
     eos: std.ArrayList(u32) = .empty,
     trees: std.ArrayList(tr.Tree) = .empty,
 
-    fn deinit(self: *Round, gpa: std.mem.Allocator) void {
+    pub fn deinit(self: *Round, gpa: std.mem.Allocator) void {
         self.tokens.deinit(gpa);
         self.parents.deinit(gpa);
         self.picks.deinit(gpa);
@@ -114,7 +114,7 @@ const Round = struct {
     }
 
     /// Tree t's expected result: the oracle's, or a bad tree where the oracle or a CUDA round's rows refuse the shape.
-    fn want(self: *const Round, t: usize, vocab: u32) !tr.Result {
+    pub fn want(self: *const Round, t: usize, vocab: u32) !tr.Result {
         const x = self.trees.items[t];
         const bad = narrow(.{ .status = @backingInt(ref.Status.bad_tree), .stop = @backingInt(ref.Stop.invalid) });
         if (x.rows > tr.max_rows) return bad;
@@ -126,9 +126,9 @@ const Round = struct {
     }
 };
 
-const vocab_small: u32 = 6; // small enough that drafts match the picks often
+pub const vocab_small: u32 = 6; // small enough that drafts match the picks often
 
-fn buildRound(gpa: std.mem.Allocator, rng: std.Random, count: usize) !Round {
+pub fn buildRound(gpa: std.mem.Allocator, rng: std.Random, count: usize) !Round {
     var round: Round = .{};
     errdefer round.deinit(gpa);
     for (0..count) |t| {

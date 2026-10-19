@@ -1,5 +1,14 @@
 #include <metal_stdlib>
 using namespace metal;
+struct TF_RotaryScalar { float frequency, angle, cosine, sine, co, si; };
+inline TF_RotaryScalar tf_rotary_scalar(int i, int position, const constant float* LOG2BASE) {
+  const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::precise::exp2(-(float(i) / 32.0f) * LOG2BASE[0]);
+  const float angle = float(position) * freq;
+  const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
+  const float co = metal::precise::cos(angle), si = metal::precise::sin(angle);
+  return {freq, angle, co, si, co * ys, si * ys};
+}
+
 typedef bfloat bfloat16_t;
 typedef half float16_t;
 
@@ -208,9 +217,8 @@ inline float qgroup_doth(const device uint32_t* w, float scale, float bias, cons
   if (d < RD) {
     const int hr = RD / 2;
     const int i = d % hr;
-    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
-    const float angle = float(4 * b) * freq;
-    const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
+    const TF_RotaryScalar cs = tf_rotary_scalar(i, 4 * b, LOG2BASE);
+    const float c = cs.co, s = cs.si;
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;
   }
   OUT[j * DI + d] = bfloat(out);

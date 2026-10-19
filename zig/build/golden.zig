@@ -18,11 +18,15 @@ pub fn step(b: *std.Build, target: std.Build.ResolvedTarget, server: *std.Build.
         .optimize = .Debug,
         .link_libc = true,
     }) });
-    const golden_run = b.addRunArtifact(golden_check);
-    golden_run.addArtifactArg(fake_serve);
-    golden_run.addFileArg(b.path("zig/tests/server/golden/cases.json"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/golden"));
-    golden_run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
-    golden_run.setCwd(b.path("."));
-    b.step("test-golden", "The frozen server parity goldens checked by a Zig step driving fake_serve").dependOn(&golden_run.step);
+    const all = b.step("test-golden", "Frozen parity answers and native HTTP security goldens");
+    for ([_][]const u8{ "cases.json", "security-cases.json" }) |file| {
+        const run = b.addRunArtifact(golden_check);
+        run.addArtifactArg(fake_serve);
+        run.addFileArg(b.path(b.fmt("zig/tests/server/golden/{s}", .{file})));
+        run.addDirectoryArg(b.path("zig/tests/server/golden"));
+        run.addDirectoryArg(b.path("zig/tests/server/fixtures"));
+        run.setCwd(b.path("."));
+        all.dependOn(&run.step);
+        if (std.mem.eql(u8, file, "security-cases.json")) b.step("test-security-golden-host", "Native HTTP key, host and origin security with the local fake server").dependOn(&run.step);
+    }
 }

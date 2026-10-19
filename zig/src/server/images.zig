@@ -307,17 +307,14 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
                     try out_ids.appendSlice(cx.a, words);
                     try key.appendSlice(cx.a, words);
                 }
+                if (clip.labels.len == 0 and o.time_first != null) try appendTime(cx, text, &out_ids, &key, secs, true);
                 try out_ids.append(cx.a, o.group_open);
                 try key.append(cx.a, o.group_open);
-                try placeImage(cx.a, &out_ids, &key, &imgs, v.image_token, g, true);
+                try placeImage(cx.a, &out_ids, &key, &imgs, o.time_first orelse v.image_token, g, true);
                 try out_ids.append(cx.a, o.group_close);
                 try key.append(cx.a, image_key.close(g.hash));
                 if (clip.labels.len > 0) continue;
-                var buf: [64]u8 = undefined;
-                const words = videos.seconds(&buf, secs) catch unreachable; // a time within the hour's limit
-                const time = text.encodePlain(cx.a, words) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's time", .{});
-                try out_ids.appendSlice(cx.a, time);
-                try key.appendSlice(cx.a, time);
+                if (o.time_first == null) try appendTime(cx, text, &out_ids, &key, secs, false);
             }
         } else {
             try out_ids.append(cx.a, t);
@@ -326,6 +323,17 @@ pub fn expand(vision: ?api.Vision, fetch: ?Fetch, text: model_text.Text, cx: *Cx
         if (src < history_len) hist += out_ids.items.len - before - 1;
     }
     return .{ .ids = out_ids.items, .history_len = hist, .images = imgs.items, .cache_key = key.items };
+}
+
+/// A video group's time as text at the end of `ids`; Qwen's "<X.Y seconds>" when `angle`.
+fn appendTime(cx: *Cx, text: model_text.Text, ids: *std.ArrayList(u32), key: *std.ArrayList(u32), secs: f64, angle: bool) errors.Refused!void {
+    var buf: [64]u8 = undefined;
+    var wrapped: [66]u8 = undefined;
+    const words = videos.seconds(&buf, secs) catch unreachable; // a time within the hour's limit
+    const shown = if (angle) std.fmt.bufPrint(&wrapped, "<{s}>", .{words}) catch unreachable else words;
+    const time = text.encodePlain(cx.a, shown) catch |e| return if (e == error.OutOfMemory) error.OutOfMemory else cx.fail(.server, "the tokenizer could not encode a video group's time", .{});
+    try ids.appendSlice(cx.a, time);
+    try key.appendSlice(cx.a, time);
 }
 
 /// Appends a token to the prompt and its cache key alike.

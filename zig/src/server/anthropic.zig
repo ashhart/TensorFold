@@ -105,7 +105,7 @@ const Wire = struct {
     payload: Value = .null,
 
     fn out(w: *Wire) openai.Out {
-        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole } };
+        return .{ .ctx = w, .vt = &.{ .open = open, .event = event, .reply = whole, .keepalive = ping } };
     }
 
     fn open(ctx: *anyopaque, prompt_len: usize) error{Closed}!void {
@@ -129,6 +129,10 @@ const Wire = struct {
         const w: *Wire = @ptrCast(@alignCast(ctx));
         w.status = status;
         w.payload = payload;
+    }
+    fn ping(ctx: *anyopaque) error{Closed}!void {
+        const w: *Wire = @ptrCast(@alignCast(ctx));
+        return w.reply.send("ping", try w.reply.obj("ping"));
     }
 };
 

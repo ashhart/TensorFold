@@ -1,4 +1,4 @@
-//! Frozen server goldens for `zig build test-golden`, with the thirteen differences that are still known.
+//! Frozen parity answers and native security goldens, with the thirteen inherited differences.
 const std = @import("std");
 const builtin = @import("builtin");
 const platform = @import("sys");
@@ -381,7 +381,7 @@ const Server = struct {
 
 fn spawnServer(a: std.mem.Allocator, io: Io, binary: []const u8, fixtures: []const u8, args: []const []const u8, env: std.json.ObjectMap, tmp_dir: []const u8, key_content: ?[]const u8) !Server {
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(a, &.{ binary, "serve", fixtures, "--name", "fake-model", "--alias", "fake-alias", "--port", "0", "--max-tokens", "64", "--parallel", "4" });
+    try argv.appendSlice(a, &.{ binary, "serve", fixtures, "--prompt-seed", "--name", "fake-model", "--alias", "fake-alias", "--port", "0", "--max-tokens", "64", "--parallel", "4", "--allowed-host", "parity" });
     var log_path: ?[]const u8 = null;
     var key_path: ?[]const u8 = null;
     for (args) |arg| {
@@ -578,6 +578,6 @@ pub fn main(init: std.process.Init) !void {
     for (outcomes.items) |r| {
         if (r.verdict == .equal) total += 1;
     }
-    std.debug.print("{d}/{d} equal to the frozen Python answers, {d} unexpected differences\n", .{ total, outcomes.items.len, failed });
+    std.debug.print("{d}/{d} equal to server goldens, {d} unexpected differences\n", .{ total, outcomes.items.len, failed });
     if (failed != 0) return error.UnexpectedDifferences;
 }

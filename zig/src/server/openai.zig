@@ -36,6 +36,8 @@ pub const Out = struct {
         event: *const fn (ctx: *anyopaque, payload: ?Value) error{Closed}!void,
         /// A whole JSON reply.
         reply: *const fn (ctx: *anyopaque, status: u16, payload: Value) void,
+        /// Bytes that keep a silent stream alive (an SSE comment, or the API's ping); null: none.
+        keepalive: ?*const fn (ctx: *anyopaque) error{Closed}!void = null,
     };
 };
 
@@ -56,7 +58,7 @@ const ClientOut = struct {
     a: Allocator,
 
     fn out(c: *ClientOut) Out {
-        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply } };
+        return .{ .ctx = c, .vt = &.{ .open = open, .event = event, .reply = reply, .keepalive = keepalive } };
     }
 
     fn open(ctx: *anyopaque, _: usize) error{Closed}!void {
@@ -73,15 +75,15 @@ const ClientOut = struct {
         const c: *ClientOut = @ptrCast(@alignCast(ctx));
         routes.sendValue(c.conn, c.a, status, payload);
     }
+
+    fn keepalive(ctx: *anyopaque) error{Closed}!void {
+        const c: *ClientOut = @ptrCast(@alignCast(ctx));
+        return sse.comment(c.conn);
+    }
 };
 
 /// Whether the client has gone, read between rounds (Python's socket_cancellation).
-pub const Gone = struct {
-    conn: *Conn,
-    pub fn check(g: Gone) bool {
-        return g.conn.peerGone();
-    }
-};
+pub const Gone = @import("stream_live.zig").Gone;
 
 /// ``error_body``: OpenAI's error object, with param and code where clients key on them.
 pub fn errorBody(a: Allocator, cx: *const Cx, param: ?[]const u8) Allocator.Error!Value {
@@ -515,7 +517,10 @@ const Run = struct {
         var sink_state: StreamSink = .{ .run = r, .tools = tools, .prompt_len = prepared.prompt_len };
         handed = true;
         const sink: chat.Sink = .{ .ctx = &sink_state, .call = StreamSink.call, .begin = StreamSink.begin };
-        var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, gone) else chat.generate(r.srv, &cx, prepared, sink, gone)) catch |e| {
+        var live = gone;
+        live.out = r.out;
+        live.every_ns = @intFromFloat(r.srv.config.sse_keepalive_s * std.time.ns_per_s);
+        var reply = (if (r.turn) |t| cortheon.loop.stream(t, r.srv, &cx, &r.plan.input, prepared, sink, live) else chat.generate(r.srv, &cx, prepared, sink, live)) catch |e| {
             if (!sink_state.opened) return r.unsent(&cx, e, field);
             switch (e) {
                 error.Cancelled => return,

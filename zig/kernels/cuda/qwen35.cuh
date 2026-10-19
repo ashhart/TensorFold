@@ -10,7 +10,7 @@ constexpr int DK = 128;   // linear-attention key and value head width
 constexpr int TAPS = 4;   // causal convolution taps
 constexpr int HD = 256;   // attention head width
 constexpr int MAXQ = 32;  // attention query heads at most
-constexpr int MAXW = 16;  // a window's rows at most (the log's rows a stream)
+constexpr int MAXW = 64;  // a window's rows at most (the log's rows a stream)
 constexpr int MAXCH = 64; // attention chunks a row at most (cuda_engine.zig's max_chunks)
 constexpr int MAXR = 128;  // a forward's rows at most (cuda_engine.zig's max_rows): an image chunk's position rows
 
@@ -31,6 +31,7 @@ struct Seg {
     unsigned long long kv;    // bf16 keys then values, kvh * cap * HD each, an attention layer at a time
     unsigned long long tap;   // a drafter's ring of tapped rows (0: none): slot pos % tap_rows, taps * hid bf16 each
     unsigned long long log;   // the window's rows' records (MAXW rows of nl layers of log_bytes), for keep
+    unsigned long long before; // exact pre-round state for a one-row in-place update
     int cap, len, row0, rows, tap_rows, taps;
     int delta;                // an image prompt's rotary shift: rows past it rotate at position + delta
 };
@@ -95,21 +96,22 @@ __device__ __forceinline__ __nv_bfloat16 rotate(const __nv_bfloat16* x, int d, c
     return __float2bfloat16_rn(d < 32 ? a * cs - b * sn : b * cs + a * sn);
 }
 
-// A row's ancestors-and-self: its tree window's row bits, or with the top bit set a chain row's index in its window.
-__device__ __forceinline__ int rows_seen(unsigned anc) { return (anc >> 31) ? (int)(anc & 0x7fffffffu) + 1 : __popc(anc); }
+// A tree uses all 64 ancestor bits; prompt chains keep their depth separately, including rows past 64.
+struct Ancestor { unsigned long long bits; unsigned depth, chain; };
+__device__ __forceinline__ int rows_seen(Ancestor anc) { return anc.chain ? (int)anc.depth + 1 : __popcll(anc.bits); }
 
 // A row's chunk width from its own logical keys alone, as its one-row step's: at most MAXCH chunks, 128-key multiples.
 __device__ __forceinline__ int chunk_keys(int keys) { return max(128, (keys + MAXCH * 128 - 1) / (MAXCH * 128) * 128); }
 
 // The window row holding a row's nth seen window key.
-__device__ __forceinline__ int seen_row(unsigned anc, int n) {
-    if (anc >> 31) return n;
-    for (int j = 0; j < n; j++) anc &= anc - 1;
-    return __ffs(anc) - 1;
+__device__ __forceinline__ int seen_row(Ancestor anc, int n) {
+    if (anc.chain) return n;
+    for (int j = 0; j < n; j++) anc.bits &= anc.bits - 1;
+    return __ffsll(anc.bits) - 1;
 }
 
 // A row's t, h and w: an image prompt's chunk reads them from M ([3][MAXR]); other rows are text, shifted past images.
-__device__ __forceinline__ void row_positions(const Seg& sg, unsigned anc, size_t m, const int* M, int pos[3]) {
+__device__ __forceinline__ void row_positions(const Seg& sg, Ancestor anc, size_t m, const int* M, int pos[3]) {
     const int text = sg.len + rows_seen(anc) - 1 + sg.delta;
     for (int a = 0; a < 3; a++) pos[a] = M != nullptr ? M[a * MAXR + m] : text;
 }
@@ -118,7 +120,7 @@ __device__ __forceinline__ void row_positions(const Seg& sg, unsigned anc, size_
 template <typename Store>
 __device__ __forceinline__ void rope_rows(const Geo& geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                           const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
-                                          const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc,
+                                          const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
                                           const int* __restrict__ P, const int* __restrict__ M, Store store) {
     const int QH = geo.qh, KVH = geo.kvh;
     const int d = threadIdx.x;

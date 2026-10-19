@@ -60,7 +60,9 @@ pub const Buffers = struct {
     pub fn check(b: Buffers, sizes: abi.Bytes, kinds: abi.WeightKinds, p: abi.Params, plan: Plan) !void {
         try b.qkv.check(sizes.qkv);
         if (b.before) |before| {
-            try before.check(sizes.state);
+            if (p.slots == 0) return error.BadGdnDispatch;
+            const slots = @import("gdn_pool.zig").beforeSlots(plan, true);
+            try before.check(sizes.state / p.slots * slots);
             if (before.offset % 4 != 0) return error.BadGdnBuffer;
         }
         inline for (.{ "a", "b", "mixing" }) |name| try @field(b, name).check(sizes.heads);

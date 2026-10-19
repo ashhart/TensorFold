@@ -45,7 +45,7 @@ struct StoreFp8 {
 // tf_q35_rope's rows and t, h, w positions (rope_rows) with the keys and values written as e4m3 rows and their scales.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope8(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                  const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
-                                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                                 const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                  const int* __restrict__ P, const int* __restrict__ M) {
     __shared__ float red[HD / 32];
     rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreFp8{layer, geo.kvh, red});
@@ -64,7 +64,7 @@ __device__ __forceinline__ void widen8(uint2 w, float (&f)[8]) {
 
 // tf_q35_attn_partial over e4m3 rows: a key's dot taken on its codes, then scaled; a value's weight carries its scale.
 extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                  const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                  const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                   const int* __restrict__ P, float scale,
                                                   float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
     constexpr int DPL = HD / 32;
@@ -75,7 +75,7 @@ extern "C" __global__ void tf_q35_attn_partial8(Geo geo, const __nv_bfloat16* __
     const size_t m = blockIdx.z;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
-    const unsigned anc = rowanc[m];
+    const Ancestor anc = rowanc[m];
     const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
     const int k0 = c * ck, k1 = min(k0 + ck, keys);
     const size_t slot = (m * QH + qh) * MAXCH + c;

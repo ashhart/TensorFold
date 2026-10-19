@@ -14,12 +14,17 @@ shift 9
 # then optionally a CUDA capture directory, and --overlay=DIR: files copied into the archive's tree (libtfgrammar)
 capture=
 overlay=
+path_checker=
+build_root=
 for extra in "$@"; do
     case "$extra" in
         --overlay=*) overlay=${extra#--overlay=} ;;
+        --path-checker=*) path_checker=${extra#--path-checker=} ;;
+        --build-root=*) build_root=${extra#--build-root=} ;;
         *) capture=$extra ;;
     esac
 done
+[ -n "$path_checker" ] && [ -n "$build_root" ] || { echo 'release packaging requires its privacy checker and build root' >&2; exit 2; }
 name="tensorfold-$version-$platform"
 mkdir -p "$output"
 # Each invocation owns a fresh stage, including reruns of the same version/platform.
@@ -62,6 +67,7 @@ fi
 case "$platform" in
     *-host-only) printf '%s\n' 'CPU verification only. This binary has no embedded CUDA kernels and cannot run inference.' > "$stage/HOST-ONLY" ;;
 esac
+sh "$(dirname "$0")/check_paths.sh" "$path_checker" "$build_root" "$stage"
 sha() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi
 }
@@ -70,7 +76,9 @@ sha() {
 # no macOS metadata or builder identity in the entries (Linux tar warned once per entry)
 if tar --version 2>/dev/null | grep -q bsdtar; then owner="--no-xattrs --no-mac-metadata --uid 0 --gid 0 --uname root --gname root"; else owner="--owner=0 --group=0 --numeric-owner"; fi
 # shellcheck disable=SC2086
-COPYFILE_DISABLE=1 tar $owner -czf "$output/$name.tar.gz" -C "$staging" "$name"
+COPYFILE_DISABLE=1 tar $owner -czf "$staging/$name.tar.gz" -C "$staging" "$name"
+python3 "$(dirname "$0")/check_archive.py" "$path_checker" "$build_root" "$staging/$name.tar.gz"
+mv "$staging/$name.tar.gz" "$output/$name.tar.gz"
 (cd "$output"; sha "$name.tar.gz") > "$output/$name.tar.gz.sha256"
 # Install only the final archive and checksum, never the staging tree.
 # Fresh stages stay in the build cache for inspection.

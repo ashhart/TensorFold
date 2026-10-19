@@ -79,6 +79,8 @@ pub const Backend = struct {
         prefill_step: ?*const fn (ptr: *anyopaque, s: *Stream) anyerror!bool = null,
         /// Several prompts in one pass, each as after `prefill`; false or an error leaves none prefilled.
         prefill_many: ?*const fn (ptr: *anyopaque, ss: []const *Stream) anyerror!bool = null,
+        /// Prompts of at most this many tokens prefill_many takes while prompts otherwise fill by chunks (0: none).
+        many_rows: u32 = 0,
         /// Draw the first token from the prompt's last row at `position`; a handle to it.
         first: *const fn (ptr: *anyopaque, s: *Stream, position: u64) anyerror!u64,
         /// Feed one token and queue the draw of the next at `position` (a one-token round); a handle to it.

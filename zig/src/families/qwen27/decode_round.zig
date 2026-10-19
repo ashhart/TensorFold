@@ -204,6 +204,7 @@ pub const Runner = struct {
         defer recurrent.deinit();
         var attention_plan = try r.attentionPlan(round);
         defer attention_plan.deinit();
+        try r.gdn.prepare(r.model.device, recurrent, accepted);
         try r.model.frame.setRows(round.ids, round.feed_positions);
         const placed = image_rows.place(&r.model.frame, &r.rope, r.images, r.model.config.mrope_section, round);
         try r.scratch.upload(attention_plan);
@@ -319,6 +320,11 @@ pub const Runner = struct {
     pub fn recover(r: *Runner) void {
         r.failed = false;
         r.active = null;
+    }
+
+    /// An idle or newly lone host may drop scratch only after the previous verify has been kept.
+    pub fn trimBefore(r: *Runner) void {
+        if (r.active == null) r.gdn.releaseBefore();
     }
 
     pub fn reset(r: *Runner, slot: u32) !void {

@@ -10,6 +10,9 @@ const snap = @import("cuda_snap.zig");
 const ranks = @import("cuda_rank_engine.zig");
 const config = @import("cuda_config.zig");
 const Glue = @import("cuda_glue.zig").Glue;
+const living = @import("living");
+const slide_mod = @import("cuda_slide.zig");
+const train = @import("cuda_train.zig");
 
 const be = lanes.backend;
 const ring = 1024;
@@ -46,6 +49,18 @@ pub fn Namespace(comptime Tri: type) type {
         };
 
         pub const Options = struct { vision: ?@import("cuda_images.zig").Limits = null, context: usize, drafts: bool, segments: usize = 1, slide: bool = false, tp: usize = 1, rank: usize = 0, master: ?[]const u8 = null, master_port: u16 = 29551 };
+
+        /// Living Weights' learner (--slide): lessons put neurons in each layer's pocket beside its shared expert.
+        pub const slide = slide_mod.Slide(Tri);
+
+        /// The first file a lesson would rewrite through a link, or null: a teaching copy may hard-link the others.
+        pub const linked = slide_mod.linked;
+
+        /// What a learner over the loaded engine `p` learns into; `dir` must outlive it.
+        pub fn learnModel(p: *anyopaque, dir: []const u8) slide.Model {
+            const own: *Cuda = @ptrCast(@alignCast(p));
+            return .{ .e = own.engine, .tri = own.tri(), .dir = dir, .lay = own.lay };
+        }
 
         /// One stream's prompt-and-reply driver, as native/cuda.zig types it; this family has none.
         pub const LoneRun = *const fn (ctx: *anyopaque, s: *lanes.Stream, hooks: *anyopaque, committed: *const fn (*anyopaque) void, yield: *const fn (*anyopaque) bool, resumed: bool) anyerror!bool;
@@ -116,8 +131,10 @@ pub fn Namespace(comptime Tri: type) type {
                 error.UnsupportedCheckpoint => "the checkpoint differs from the supported Flash Next CUDA layout; the log names its config field",
                 error.TensorRankDraftSnapshotUnavailable => "tensor-rank MTP snapshots are unavailable: disable the prompt cache for this configuration",
                 error.RankDisconnected, error.RankTimeout, error.RemoteRank, error.BadRankFrame => "a tensor-parallel rank failed; restart both ranks from the same checkpoint before retrying",
-                error.LearnedPocket => "this folder holds Living Weights pockets, which Flash Next on CUDA does not serve yet",
                 else => @import("cuda_images.zig").Vision.explain(err),
+                error.PocketOfAnotherSize => "a lesson's pocket is wider than the layer's loaded one: restart the server on the folder",
+                error.UnsupportedLearningFormat => "--slide requires the affine 4-bit group-32 single-rank Flash Next checkpoint",
+                error.TrainingOnCapturedGlue => "--slide trains on Flash Next's own glue: serve it without TENSORFOLD_CUDA_KERNELS",
             };
         }
 
@@ -150,6 +167,8 @@ pub fn Namespace(comptime Tri: type) type {
             logits: cuda.DeviceBuffer,
             drawn: [ring]u32 = undefined,
             next: u64 = 0,
+            /// --slide: the pocket's layout, from config.json at load.
+            lay: living.Layout = undefined,
 
             fn tri(self: *Cuda) Tri {
                 return .{ .set = if (self.set) |*x| x else null, .own = &self.glue, .s = self.stream };
@@ -259,6 +278,7 @@ pub fn Namespace(comptime Tri: type) type {
                     return err;
                 } };
                 const l = gop.value_ptr;
+                l.seq.untaught = s.untaught;
                 errdefer {
                     dropLane(self, l);
                     self.lanes.removeByPtr(gop.key_ptr);

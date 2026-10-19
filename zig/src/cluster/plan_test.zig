@@ -14,7 +14,7 @@ pub fn studio(i: usize, memory: u64, wired_mb: u64) node.Inventory {
     var buf: [16]u8 = undefined;
     return .{
         .id = 1000 + i,
-        .name = .of(std.fmt.bufPrint(&buf, "studio{d}", .{i + 1}) catch unreachable),
+        .name = .of(std.fmt.bufPrint(&buf, "node-{c}", .{@as(u8, 'a') + @as(u8, @intCast(i))}) catch unreachable),
         .chip = .of("Apple M3 Ultra"),
         .gpu_cores = 80,
         .memory = memory,

@@ -123,6 +123,10 @@ pub const Fake = struct {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
     }
 
+    pub fn batchedSteps(x: *Fake) be.Backend {
+        return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .prefill_step = prefillStep, .prefill_many = prefillMany, .many_rows = 8, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .features = features, .release = release, .first_row = firstRow, .reports_fill = true } };
+    }
+
     /// The backend with prompts in pieces (begin / piece / finish) beside whole prompts.
     pub fn pieceBackend(x: *Fake) be.Backend {
         return .{ .ptr = x, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .begin = begin, .piece = piece, .finish = finish } };
@@ -371,7 +375,7 @@ pub const Fake = struct {
             try l.rows.appendSlice(x.gpa, l.held.items[0..w.held]);
             try l.rows.appendSlice(x.gpa, w.tokens);
             @memcpy(o.drafts, l.rows.items[1..]);
-            const parents = try accept.rowParents(x.gpa, l.rows.items.len, w.parents);
+            const parents = if (w.parents) |ps| try x.gpa.dupe(i32, ps) else try accept.rowParents(x.gpa, l.rows.items.len, null);
             defer x.gpa.free(parents);
             for (0..l.rows.items.len) |r| {
                 // each row reads the cache and its own path from the pending row

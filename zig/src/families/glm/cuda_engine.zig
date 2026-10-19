@@ -1,5 +1,4 @@
 //! One TP rank's GLM-5.3-Flash CUDA engine (the Python family's decode.Engine); all ranks draw the same tokens.
-
 const std = @import("std");
 const cuda = @import("cuda");
 const lanes = @import("lanes");
@@ -9,6 +8,7 @@ const weights = @import("cuda_weights.zig");
 const fw = @import("cuda_forward.zig");
 const ranks = @import("cuda_ranks.zig");
 const sampler = @import("cuda_sampler.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
 const heat = @import("heat");
 const modelopt = @import("core").modelopt;
 const exl3 = @import("cuda_exl3.zig");
@@ -17,7 +17,6 @@ const tile = @import("cuda_tile.zig");
 const mm_mod = @import("cuda_mm.zig");
 const dflash = @import("dflash.zig");
 const prof_mod = @import("cuda_prof.zig");
-
 pub const Options = @import("cuda_engine_types.zig").Options;
 
 /// Rank 0's own word on its request (cancelled or not); the other ranks have none and hear rank 0's.
@@ -30,6 +29,8 @@ const pair_bytes = 16;
 
 /// A prompt pass's chunk rows (decode.prefill's).
 pub const prompt_rows = fw.prefill_rows;
+pub const max_together = @import("cuda_state.zig").prompt_heads;
+pub const Prompt = struct { slot: u32, ids: []const u32 };
 
 /// A shared verify's max rows and streams: under hc_pre's 64-row block change; 16 streams take 2 rows each.
 pub const shared_rows = 32;
@@ -68,7 +69,6 @@ pub const Engine = struct {
     bd: fw.Buffers, // verify windows
     bm: fw.Buffers, // the MTP head's rows
     bs: ?fw.Buffers = null, // shared verify windows (with the MTP head, as the lane core shares only then)
-    hold: cuda.DeviceBuffer, // the prompt's last row's hidden (decode's e.last_hidden), the first draft's source
     pairs: cuda.DeviceBuffer, // every rank's (value, id) of a greedy draw
     smp: sampler.Sampler,
     seqs: std.ArrayList(?*Seq) = .empty, // every stream's sequence by slot (the lane backend's), slot 0 made at init
@@ -82,6 +82,11 @@ pub const Engine = struct {
     next_snap: u64 = 1, // rank 0: the next id
     announce: u64 = 0, // rank 0: a state kept at this chunk's mark, for the other ranks to copy at its gate
     dropped: std.ArrayList(u32) = .empty, // rank 0: ids dropped since the other ranks last heard (cuda_follow)
+    prompt_logprobs: ?prompt_lp.Want = null, // a prompt pass's rows asked for (every rank runs the head on them)
+    prompt_bufs: ?prompt_lp.Buffers = null, // their head passes' buffers, made at the first pass that asks
+    prompt_tried: bool = false, // that pass came: without buffers after it, the passes take the window's
+    prompt_out: prompt_lp.Output, // a head pass's logprob words, then its picks, host-mapped (rank 0 reads them)
+    structured: bool = false, // a structured output step: every rank's draws gather whole rows, rank 0 masks them
 
     /// Opens rank `rank` of `world` over `comm`; the ranks agree on settings (cuda_ranks) before the weights load.
     pub fn init(gpa: std.mem.Allocator, io: std.Io, d: *const cuda.Driver, ctx: *const cuda.Context, checkpoint: []const u8, lib: *const cuda.nccl.Library, comm: cuda.nccl.Comm, rank: usize, world: usize, o: Options) !*Engine {
@@ -130,7 +135,7 @@ pub const Engine = struct {
         if (o.settings.layers > c.layers) return error.BadLayers;
         const layers = try a.alloc(u32, if (o.settings.layers > 0) o.settings.layers else c.layers);
         for (layers, 0..) |*l, i| l.* = @intCast(i);
-        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .hold = undefined, .pairs = undefined, .smp = undefined, .mtp = o.mtp };
+        e.* = .{ .gpa = gpa, .io = io, .heat_gate = .{ .bands = o.settings.heat, .root = @import("cuda_engine_prof.zig").heatRoot() }, .shared_buf = undefined, .d = d, .c = c, .share = share, .spans = spans, .lib = lib, .comm = comm, .checkpoint_digest = checkpoint_digest, .settings = o.settings, .m = m, .stream = stream, .pieces = pieces, .w = undefined, .capacity = o.capacity, .bp = undefined, .bd = undefined, .bm = undefined, .pairs = undefined, .smp = undefined, .prompt_out = undefined, .mtp = o.mtp };
         const has_packs = o.settings.dense_bits != 16 or o.settings.head_bits != 16;
         if (has_packs and !o.settings.tiled) return error.PackedNeedsGlmMm;
         const Tile = struct {
@@ -153,6 +158,7 @@ pub const Engine = struct {
             gpa.free(e.packs.ptrs);
             gpa.free(e.packs.bits);
         }
+        e.m.mm.prompt_fixed_k = o.settings.prompt_fixed_k;
         e.m.tiled = o.settings.tiled;
         if (o.settings.tiled) e.m.packs = &e.packs;
         try e.bind(0);
@@ -168,8 +174,6 @@ pub const Engine = struct {
         errdefer e.bm.deinit();
         if (o.mtp) e.bs = try fw.Buffers.initShared(d, &e.w, shared_rows, o.capacity);
         errdefer if (e.bs) |*b| b.deinit();
-        e.hold = try cuda.DeviceBuffer.alloc(d, c.hidden * 2);
-        errdefer e.hold.free();
         e.pairs = try cuda.DeviceBuffer.alloc(d, pair_bytes * world);
         errdefer e.pairs.free();
         try d.check(d.api.cuMemsetD8_v2(e.pairs.ptr, 0, pair_bytes * world), "cuMemsetD8"); // each pair's padding stays zero
@@ -183,6 +187,8 @@ pub const Engine = struct {
             p.* = try prof_mod.Prof.init(d, io);
             p.*.?.every = 4;
         };
+        e.prompt_out = try prompt_lp.Output.init(d);
+        errdefer e.prompt_out.free();
         e.shared_buf = try cuda.DeviceBuffer.alloc(d, 8);
         errdefer e.shared_buf.free();
         errdefer @import("cuda_load_owner.zig").drain(stream, d);
@@ -201,9 +207,10 @@ pub const Engine = struct {
         e.dropped.deinit(e.gpa);
         e.shared_buf.free();
         e.freeProfs();
+        if (e.prompt_bufs) |*b| b.free();
+        e.prompt_out.free();
         e.smp.deinit();
         e.pairs.free();
-        e.hold.free();
         if (e.bs) |*b| b.deinit();
         e.bm.deinit();
         e.bd.deinit();
@@ -219,18 +226,9 @@ pub const Engine = struct {
         gpa.destroy(e);
     }
 
-    fn freeProfs(e: *Engine) void {
-        for (&e.profs) |*p| {
-            if (p.*) |v| v.deinit();
-            p.* = null;
-        }
-        for (&e.prompt_profs) |*p| {
-            if (p.*) |v| v.deinit();
-            p.* = null;
-        }
-    }
+    const freeProfs = @import("cuda_engine_prof.zig").freeProfs;
 
-    fn exchange(e: *const Engine) fw.Exchange {
+    pub fn exchange(e: *const Engine) fw.Exchange {
         return .{ .nccl = .{ .lib = e.lib, .comm = e.comm, .group = e.group } };
     }
 
@@ -329,17 +327,18 @@ pub const Engine = struct {
         try e.gate(cancel);
         if (f.prof) |p| p.mark(e.stream, .gate);
         try f.run(as_i32[0..rows]);
+        if (e.prompt_logprobs) |p| if (part.len > 1) try prompt_lp.run(e, p, part[1..]);
         if (e.drafter) |dr| try dr.prompt(e, e.slot, start, rows, len);
         const last = start + rows == len;
         var first: ?u32 = null;
         if (last) {
             var t: [1]u32 = undefined;
-            try e.draw(e.bp.logits, 1, len, &t);
+            try e.draw(e.bp.logits, 1, len, 0, &t);
             first = t[0];
         }
         if (f.prof) |p| p.mark(e.stream, .draw);
+        if (last) try e.holdPrompt(e.bp.fnormed + (rows - 1) * e.c.hidden * 2);
         if (e.mtp) {
-            if (last) try e.copy(e.hold.ptr, e.bp.fnormed + (rows - 1) * e.c.hidden * 2, e.c.hidden * 2);
             const nxt = as_i32[1..];
             if (nxt.len > 0) { // decode._absorb_rows
                 const mp = f.prof;
@@ -356,7 +355,7 @@ pub const Engine = struct {
     }
 
     /// The chunk gate on every rank: a kept state at the mark, the heat wait, rank 0's cancel; the id exchanged first.
-    fn gate(e: *Engine, cancel: ?Cancel) !void {
+    pub fn gate(e: *Engine, cancel: ?Cancel) !void {
         const kept = try e.shared(@floatFromInt(e.announce));
         e.announce = 0;
         if (kept > 0 and e.share.rank != 0) try e.keepAs(@intFromFloat(kept));
@@ -421,7 +420,7 @@ pub const Engine = struct {
     }
 
     /// The ranks' maximum of `v` (an all-reduce on the engine's stream).
-    fn shared(e: *Engine, v: f64) !f64 {
+    pub fn shared(e: *Engine, v: f64) !f64 {
         var x = v;
         try e.shared_buf.uploadAsync(0, std.mem.asBytes(&x), e.stream.handle);
         try e.lib.check(e.lib.api.ncclAllReduce(e.shared_buf.ptr, e.shared_buf.ptr, 1, .f64, .max, e.comm, e.stream.handle), "ncclAllReduce");
@@ -463,7 +462,7 @@ pub const Engine = struct {
     };
 
     /// A verify window: `ids` (pending token, then drafts) at the committed position; `out[r]` drawn at pos + 1 + r.
-    pub fn verify(e: *Engine, ids: []const u32, out: []u32) !void {
+    pub fn verify(e: *Engine, ids: []const u32, out: []u32, bits: u64) !void {
         if (ids.len == 0 or ids.len > fw.window_rows) return error.WindowTooWide;
         var one: [1]fw.Rank = undefined;
         var f = e.view(&e.bd, &one);
@@ -473,7 +472,7 @@ pub const Engine = struct {
         try f.run(@ptrCast(ids));
         if (e.drafter) |dr| try dr.noteVerify(e.slot, 0, ids.len, at, true);
         e.cur.rows_at = e.bd.fnormed;
-        try e.draw(e.bd.logits, ids.len, at + 1, out);
+        try e.draw(e.bd.logits, ids.len, at + 1, bits, out);
         if (f.prof) |p| p.end();
     }
 
@@ -504,7 +503,7 @@ pub const Engine = struct {
         for (parts, segs[0..parts.len]) |p, g| {
             try e.bind(p.slot);
             e.cur.rows_at = b.fnormed + g.row0 * e.c.hidden * 2;
-            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.out);
+            try e.draw(b.logits + g.row0 * e.share.vocab.len() * 2, g.rows, g.st.pos + 1, p.bits, p.out);
         }
     }
 
@@ -514,6 +513,9 @@ pub const Engine = struct {
         for (reqs) |*q| q.pos = @intCast((e.seqs.items[q.slot] orelse return error.UnknownSlot).st.pos);
         try dr.draft(e, reqs);
     }
+
+    pub const holdPrompt = @import("cuda_prompt_hold.zig").save;
+    pub const prefillMany = @import("cuda_prompts.zig").prefillMany;
 
     /// forward.commit of the last window's first `n` rows (the KDA replay when fewer than it ran).
     pub fn keep(e: *Engine, n: usize) !void {
@@ -529,7 +531,7 @@ pub const Engine = struct {
         var one: [1]fw.Rank = undefined;
         const f = e.view(&e.bm, &one);
         const D = e.c.hidden;
-        const hidden = if (from_prompt) e.hold.ptr else e.cur.rows_at;
+        const hidden = if (from_prompt) @import("cuda_prompt_hold.zig").input(e) else e.cur.rows_at;
         try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len - e.cur.in_head);
         e.cur.in_head = 0;
         const next: []const i32 = @ptrCast(follow);
@@ -540,7 +542,7 @@ pub const Engine = struct {
             try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + part.len);
         }
         for (0..depth) |j| {
-            try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, out[j..][0..1]);
+            try e.draw(e.bm.logits, 1, e.cur.st.pos + 1 + j, 0, out[j..][0..1]);
             if (j + 1 < depth) {
                 try f.mtp(@ptrCast(out[j..][0..1]), &.{e.bm.fnormed});
                 try e.cur.st.setMtpLen(e.stream, e.cur.st.mtp_len + 1);
@@ -550,7 +552,8 @@ pub const Engine = struct {
     }
 
     /// `rows` logits rows of this rank's vocabulary -> the tokens at positions first, first + 1, ...
-    fn draw(e: *Engine, logits: u64, rows: usize, first: u64, out: []u32) !void {
+    pub fn draw(e: *Engine, logits: u64, rows: usize, first: u64, bits: u64, out: []u32) !void {
+        if (e.structured) return e.drawWhole(logits, rows, first, bits, out);
         if (e.cur.sampling) |s| {
             try e.smp.draw(e.stream, e.exchange(), e.spans, &.{.{ .rank = e.share.rank, .logits = logits }}, rows, first, sampler.rule(s), out);
             return e.checkGathers(); // the draw read rows the forward's gathers made
@@ -558,6 +561,9 @@ pub const Engine = struct {
         for (0..rows) |r| out[r] = try e.greedy(logits + r * e.share.vocab.len() * 2);
     }
 
+    pub const promptHead = @import("cuda_structured.zig").promptHead;
+    pub const drawWhole = @import("cuda_structured.zig").drawWhole;
+    pub const redrawFirst = @import("cuda_structured.zig").redrawFirst;
     /// decode.sample_rows' greedy pick: per-rank top-1 (tf_glm_top1), all-gathered, largest value then lowest id.
     fn greedy(e: *Engine, logits: u64) !u32 {
         const world = e.share.world;
@@ -583,17 +589,11 @@ pub const Engine = struct {
     }
 
     /// A failed RoCE gather's error, after a synchronize whose result read gathered rows (they hold nothing then).
-    fn checkGathers(e: *const Engine) !void {
+    pub fn checkGathers(e: *const Engine) !void {
         if (e.group) |g| try g.check();
     }
 
-    fn heatRoot() []const u8 {
-        const p = std.c.getenv("TF_HEAT_ROOT") orelse return heat.default_root;
-        const s = std.mem.span(p);
-        return if (s.len == 0) heat.default_root else s;
-    }
-
-    fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {
+    pub fn copy(e: *const Engine, dst: u64, src: u64, bytes: usize) !void {
         try e.d.check(e.d.api.cuMemcpyDtoDAsync_v2(dst, src, bytes, e.stream.handle), "cuMemcpyDtoDAsync");
     }
 };

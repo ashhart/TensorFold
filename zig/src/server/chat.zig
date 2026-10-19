@@ -205,7 +205,7 @@ pub fn generate(srv: *Server, cx: *Cx, prepared: Prepared, sink: ?Sink, gone: an
     };
     release(srv, preparing); // a background request waits only while a foreground one prepares
     preparing = false;
-    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
+    var gen: Generation = .{ .srv = srv, .a = a, .box = &box, .id = id, .reply_id = input.id, .seed = if (request.sampling) |v| v.seed else null, .sink = sink, .thinking = thinking or reply_text.isChannel(srv.markers), .stops = .{ .strings = stops_opt.strings }, .ignore_eos = stops_opt.ignore_eos, .max_tokens = request.max_tokens, .tools = input.tools, .lp = if (request.logprobs != null) .{} else null };
     defer srv.noteRequest(prepared.prompt_len, box.cached orelse 0, gen.collected.items.len, box.stats.drafted, box.stats.accepted, box.stats.rounds, received, gen.first_ns, gen.last_ns, box.stats.prefill_seconds);
     errdefer if (!gen.engine_done) gen.cancel(); // the engine writes to the mailbox until it says finished
     const result: Failure!Reply = blk: {
@@ -247,6 +247,7 @@ const Generation = struct {
     box: *Mailbox,
     id: api.Id,
     reply_id: []const u8, // the id the client gets, which the done line prints
+    seed: ?u64 = null,
     sink: ?Sink,
     thinking: bool,
     stops: reply_text.Stops,
@@ -260,6 +261,7 @@ const Generation = struct {
     streamed: reply_text.Shown = .{}, // what content streamed, kept apart from the decode buffer that grows under slices
     streamed_reasoning: reply_text.Shown = .{},
     streaming_done: bool = false,
+    wrote_ns: ?i96 = null,
     first_ns: ?i96 = null,
     last_ns: ?i96 = null,
     reason: ?[]const u8 = null, // the server ended the reply (a stop string, the length) before the engine said so
@@ -350,6 +352,7 @@ const Generation = struct {
             g.cancel();
             return error.Cancelled;
         };
+        g.wrote_ns = nowNs(g.srv.io);
     }
 
     /// End the request and wait for the engine; unfinished requests count as disconnects.
@@ -370,6 +373,10 @@ const Generation = struct {
 
     /// Takes rounds until the reply ends; a client that leaves cancels it.
     fn loop(g: *Generation, gone: anytype) Failure!void {
+        const Gone = switch (@typeInfo(@TypeOf(gone))) {
+            .pointer => |p| p.child,
+            else => @TypeOf(gone),
+        };
         const m = g.box;
         while (true) {
             m.mutex.lockUncancelable(m.io);
@@ -394,6 +401,16 @@ const Generation = struct {
             if (gone.check()) {
                 g.cancel();
                 return error.Cancelled;
+            }
+            if (chunk == null and @hasDecl(Gone, "beat")) {
+                // queueing and a long prefill send nothing: a client that times out a silent stream would leave
+                const now = nowNs(g.srv.io);
+                const since = g.wrote_ns orelse now;
+                if (g.wrote_ns == null) g.wrote_ns = now;
+                if (gone.beat(now - since) catch {
+                    g.cancel();
+                    return error.Cancelled;
+                }) g.wrote_ns = now;
             }
             const tokens = chunk orelse continue;
             if (g.reason == null) try g.commit(tokens);
@@ -508,7 +525,13 @@ const Generation = struct {
             log.line("warning: a reply reached max_tokens while still thinking, so its content is empty and its text is all in reasoning_content; raise max_tokens, or send chat_template_kwargs {{\"enable_thinking\": false}} (server: --no-thinking)", .{});
         var cycle_text: [32]u8 = undefined;
         const cycle = if (s.loop_period) |period| std.fmt.bufPrint(&cycle_text, " loop=period:{d}", .{period}) catch "" else "";
-        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted });
+        const done_ns = nowNs(g.srv.io);
+        const ttft_s = if (g.first_ns) |at| @max(0, seconds(at - received)) else 0;
+        const decode_log_s = if (g.first_ns) |at| @max(0, seconds(done_ns - at)) else 0;
+        var seed_text: [32]u8 = undefined;
+        const seed = if (g.seed) |v| std.fmt.bufPrint(&seed_text, " seed={d}", .{v}) catch unreachable else "";
+        const rate = if (decode_log_s > 0) @as(f64, @floatFromInt(decode_tokens)) / decode_log_s else 0;
+        log.line("done {s} prompt={d} cached={d} thinking={s} effort={s} tokens={d} sha={s} finish={s}{s} rounds={d} accepted={d}/{d} ttft={d:.3} decode={d:.3} elapsed={d:.3} queued={d:.3} tok/s={d:.1}{s}", .{ g.reply_id, prompt_len, reply.cached_tokens, if (thinking) "True" else "False", if (thinking) effort orelse "none" else "none", g.collected.items.len, sha, reason, cycle, s.rounds, s.accepted, s.drafted, ttft_s, decode_log_s, @max(0, seconds(done_ns - received)), s.queued_seconds, rate, seed });
         return reply;
     }
 };

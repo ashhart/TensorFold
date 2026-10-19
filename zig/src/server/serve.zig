@@ -1,4 +1,4 @@
-//! A server's life: keys, the listening socket, the startup lines, the live line, and a clean stop on SIGTERM or SIGINT.
+//! Server lifetime: keys, socket, startup and live lines, and a clean stop on SIGTERM or SIGINT.
 const std = @import("std");
 const platform = @import("sys");
 const api = @import("engine_api");
@@ -10,14 +10,27 @@ const live = @import("live.zig");
 const listener_mod = @import("listener.zig");
 const model_text = @import("model_text.zig");
 const server_mod = @import("server.zig");
+const routes = @import("routes.zig");
 const recall_routes = @import("recall_routes.zig");
 const Allocator = std.mem.Allocator;
 const posix = platform.posix;
 
 var stop_requested: std.atomic.Value(bool) = .init(false);
+/// The signal that asked for the stop (0: none yet), for the shutdown line
+var stop_signal: std.atomic.Value(i32) = .init(0);
+/// Stop signals so far: a second one cuts the drain short
+var stop_count: std.atomic.Value(u32) = .init(0);
 
-fn onStop(_: posix.SIG) callconv(.c) void {
+fn onStop(sig: posix.SIG) callconv(.c) void {
+    stop_signal.store(@intCast(@backingInt(sig)), .release);
+    _ = stop_count.fetchAdd(1, .acq_rel);
     stop_requested.store(true, .release);
+}
+
+fn signalName(sig: i32) []const u8 {
+    if (sig == @backingInt(posix.SIG.TERM)) return "SIGTERM";
+    if (sig == @backingInt(posix.SIG.INT)) return "SIGINT";
+    return "a stop signal";
 }
 
 /// SIGTERM and SIGINT stop the server cleanly; SIGHUP rereads the key file; SIGPIPE is ignored, as Python ignores it.
@@ -37,7 +50,7 @@ pub fn stopping() bool {
 /// The hard limit macOS reads as unlimited.
 const rlim_infinity: u64 = platform.c.RLIM.INFINITY;
 
-/// The targets to try, in order: the hard limit when finite, else the fallbacks 65536 then 10240, first that works; never an unlimited soft limit, since a loop over every descriptor would do absurd work.
+/// Try the finite hard limit, else 65536 then 10240; never choose an unlimited soft limit.
 fn fillTargets(max: u64, out: *[2]u64) []const u64 {
     if (max != rlim_infinity) {
         out[0] = max;
@@ -48,7 +61,7 @@ fn fillTargets(max: u64, out: *[2]u64) []const u64 {
     return out;
 }
 
-/// Best-effort raise of the soft open-file limit so idle keep-alives cannot exhaust a default 1024; a failure keeps the current limits, and null (caller logs) means nothing moved.
+/// Try raising the soft file limit above 1024; preserve limits on failure and return null if unchanged.
 fn raiseOpenFileLimit() ?[2]u64 {
     const limit = posix.getrlimit(.NOFILE) catch return null;
     const cur: u64 = @intCast(limit.cur);
@@ -81,6 +94,15 @@ pub const Setup = struct {
     on_listen: ?*const fn (port: u16) void = null,
     /// Recall's record, attached to the engine already (--recall); null: off.
     recall: ?*api.recall_store.Store = null,
+    /// Run by `run` so the engine stops before the server is freed; null: the caller closes it after `run`.
+    stop: ?EngineStop = null,
+};
+
+/// `halt` (optional) ends the rounds at a boundary at the drain's deadline, so `close` never meets a running round.
+pub const EngineStop = struct {
+    ctx: *anyopaque,
+    halt: ?*const fn (ctx: *anyopaque, reason: []const u8) void = null,
+    close: *const fn (ctx: *anyopaque) void,
 };
 
 fn env(s: Setup, name: []const u8) ?[]const u8 {
@@ -90,6 +112,9 @@ fn env(s: Setup, name: []const u8) ?[]const u8 {
 
 /// Serves until a stop signal; the process exit status.
 pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
+    stop_requested.store(false, .release);
+    stop_count.store(0, .release);
+    stop_signal.store(0, .release);
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -112,7 +137,16 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         std.debug.print("tensorfold: TENSORFOLD_SEED_SALT={s}: an integer\n", .{t});
         return 1;
     } else 0;
+    const drain_s = seconds(env(s, "TF_DRAIN_S"), 20) orelse {
+        std.debug.print("tensorfold: TF_DRAIN_S: seconds, a number >= 0\n", .{});
+        return 1;
+    };
+    const keepalive_s = seconds(env(s, "TF_SSE_KEEPALIVE_S"), 15) orelse {
+        std.debug.print("tensorfold: TF_SSE_KEEPALIVE_S: seconds, a number >= 0\n", .{});
+        return 1;
+    };
     const config: server_mod.Config = .{
+        .browser = .{ .allowed_hosts = args.allowed_host, .allowed_origins = args.allowed_origin },
         .served_name = s.served,
         .model_dir = s.model_dir,
         .model_ids = ids.items,
@@ -126,6 +160,8 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
         .use_drafts = !args.no_drafts,
         .vision_urls = args.vision_urls,
         .seed_salt = salt,
+        .prompt_seed = args.prompt_seed,
+        .sse_keepalive_s = keepalive_s,
         .request_log = env(s, "TENSORFOLD_REQUEST_LOG"),
         .dashboard = args.dashboard,
         .compact_at = if (args.compact_auto) .{ .auto = {} } else if (args.compact_fraction) |f| .{ .fraction = f } else null,
@@ -178,15 +214,54 @@ pub fn run(gpa: Allocator, io: std.Io, args: cli.Args, s: Setup) u8 {
     var ticker: live.Ticker = .{ .engine = s.engine };
     const drawing = live.wanted(io, if (env(s, "TENSORFOLD_NO_LIVE")) |v| std.mem.eql(u8, v, "1") else false);
     if (drawing) ticker.start();
-    const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &stop_requested }) catch return 1;
+    // the listener stays open through the drain: new requests get 503 + Retry-After, /health "draining"
+    var accept_stop: std.atomic.Value(bool) = .init(false);
+    const accept = std.Thread.spawn(.{}, server_mod.Server.serve, .{ srv, lis, &accept_stop }) catch return 1;
+    while (!stop_requested.load(.acquire)) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
+    drain(srv, io, s.stop, drain_s);
+    accept_stop.store(true, .release);
     accept.join();
     lis.close();
     if (drawing) ticker.finish();
+    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the engine closes
     var waited: u32 = 0;
     while (srv.open_connections.load(.acquire) > 0 and waited < 40) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(50), .awake) catch {};
-    s.engine.drain(); // kept states waiting for disk are written (under the engine's deadline) before the process ends
-    if (srv.open_connections.load(.acquire) > 0) std.process.exit(0); // replies still open: end without freeing what they read
+    if (!closeIdle(srv, s.stop)) {
+        log.line("shutting down: exiting with {d} idle connection(s) still open", .{srv.open_connections.load(.acquire)});
+        std.process.exit(0); // connections still open: end without freeing what they read
+    }
+    log.line("shutting down: stopped", .{});
     return 0;
+}
+
+/// Work in progress gets `drain_s` to finish (new work 503s) before the rest is halted; a second signal cuts it short.
+fn drain(srv: *server_mod.Server, io: std.Io, stop: ?EngineStop, drain_s: f64) void {
+    srv.draining.store(true, .seq_cst);
+    const signals = stop_count.load(.acquire);
+    log.line("shutting down ({s}): draining: new requests get 503; {d} request(s) in progress may finish within {d:.1} s", .{ signalName(stop_signal.load(.acquire)), srv.generating.load(.seq_cst), drain_s });
+    const t0 = std.Io.Clock.awake.now(io).toNanoseconds();
+    const deadline = t0 + @as(i96, @intFromFloat(drain_s * 1e9));
+    while (srv.generating.load(.seq_cst) > 0 and std.Io.Clock.awake.now(io).toNanoseconds() < deadline and stop_count.load(.acquire) == signals)
+        std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+    const left = srv.generating.load(.seq_cst);
+    if (left == 0) {
+        log.line("shutting down: drained", .{});
+        return;
+    }
+    const cut = if (stop_count.load(.acquire) != signals) "a second stop signal" else "the drain deadline (TF_DRAIN_S)";
+    log.line("shutting down: {s}: {d} request(s) still in progress end \"{s}\" at the next round boundary", .{ cut, left, routes.restarting });
+    if (stop) |st| if (st.halt) |h| h(st.ctx, routes.restarting);
+    var waited: u32 = 0;
+    while (srv.generating.load(.seq_cst) > 0 and waited < 100) : (waited += 1) std.Io.sleep(io, .fromMilliseconds(20), .awake) catch {};
+}
+
+/// A seconds setting (TF_DRAIN_S, TF_SSE_KEEPALIVE_S): unset or blank keeps the default; null: not a number >= 0.
+fn seconds(raw: ?[]const u8, default: f64) ?f64 {
+    const t = std.mem.trim(u8, raw orelse "", " \t");
+    if (t.len == 0) return default;
+    const x = std.fmt.parseFloat(f64, t) catch return null;
+    const limit = @as(f64, @floatFromInt(std.math.maxInt(i64))) / std.time.ns_per_s;
+    return if (std.math.isFinite(x) and x >= 0 and x < limit) x else null;
 }
 
 /// ``--host`` as an address: an IP literal, else a name the resolver knows (localhost first).
@@ -236,4 +311,40 @@ test "the raise lifts a low soft limit, and a second raise does nothing" {
     try std.testing.expectEqual(@as(u64, 256), raised[0]);
     try std.testing.expectEqual(raised[1], @as(u64, @intCast((try posix.getrlimit(.NOFILE)).cur)));
     try std.testing.expect(raiseOpenFileLimit() == null);
+}
+
+test "Failure boundaries: drain and SSE duration settings refuse non-finite or unrepresentable values" {
+    try std.testing.expectEqual(@as(?f64, null), seconds("inf", 20));
+    try std.testing.expectEqual(@as(?f64, null), seconds("1e300", 20));
+    try std.testing.expectEqual(@as(?f64, null), seconds("nan", 20));
+}
+
+fn closeIdle(srv: *server_mod.Server, stop: ?EngineStop) bool {
+    if (srv.open_connections.load(.acquire) != 0 or srv.generating.load(.seq_cst) != 0) return false;
+    srv.stopKeepalive();
+    if (stop) |st| st.close(st.ctx);
+    return true;
+}
+
+test "Failure boundaries: engine close waits for handlers and connections to leave" {
+    const Count = struct {
+        fn close(p: *anyopaque) void {
+            const count: *usize = @ptrCast(@alignCast(p));
+            count.* += 1;
+        }
+    };
+    var count: usize = 0;
+    var server: server_mod.Server = undefined;
+    server.open_connections = .init(1);
+    server.generating = .init(0);
+    server.keepalive = null;
+    const stop: EngineStop = .{ .ctx = &count, .close = Count.close };
+    try std.testing.expect(!closeIdle(&server, stop));
+    server.open_connections.store(0, .seq_cst);
+    server.generating.store(1, .seq_cst);
+    try std.testing.expect(!closeIdle(&server, stop));
+    try std.testing.expectEqual(@as(usize, 0), count);
+    server.generating.store(0, .seq_cst);
+    try std.testing.expect(closeIdle(&server, stop));
+    try std.testing.expectEqual(@as(usize, 1), count);
 }

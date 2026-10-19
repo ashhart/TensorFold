@@ -3,9 +3,9 @@ const std = @import("std");
 const exlr8_build = @import("exlr8.zig");
 const golden_build = @import("golden.zig");
 const catalog = @import("cuda_kernels.zig");
-const Kernel = catalog.Kernel;
-const torch_flags = catalog.torch_flags;
-const kernels = catalog.kernels;
+pub const Kernel = catalog.Kernel;
+pub const kernels = catalog.kernels;
+
 fn stagger(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/core/stagger.zig"), .target = target, .optimize = optimize });
 }
@@ -17,19 +17,25 @@ pub fn runtime(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (images) |i| with = with and i != null;
     options.addOption(bool, "with_kernels", with);
     const cuda = b.createModule(.{ .root_source_file = b.path("zig/src/cuda/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    cuda.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     cuda.addOptions("kernel_options", options);
     cuda.addImport("stagger", stagger(b, target, optimize));
     if (with) for (kernels, images) |k, image| cuda.addAnonymousImport(b.fmt("fatbin_{s}", .{k.name}), .{ .root_source_file = image.? });
     return cuda;
 }
 
-fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module } {
+fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, draft_ids: *std.Build.Module) struct { core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, heat: *std.Build.Module, radio: *std.Build.Module, living: *std.Build.Module } {
     const tokenizer = b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", tokenizer);
     const lanes = b.createModule(.{ .root_source_file = b.path("zig/src/core/lanes/lanes.zig"), .target = target, .optimize = optimize, .link_libc = true });
     const heat = b.createModule(.{ .root_source_file = b.path("zig/src/core/heat.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    // Living Weights' family-neutral learner: a family's lessons, and the server's view of them, import it
+    const living = b.createModule(.{ .root_source_file = b.path("zig/src/living/living.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    core.addImport("living", living);
     const nemotron = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    nemotron.addImport("living", living);
     nemotron.addImport("cuda", cuda);
     nemotron.addImport("core", core);
     nemotron.addImport("lanes", lanes);
@@ -37,13 +43,16 @@ fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin
     nemotron.addImport("nemotron_draft_ids", draft_ids);
     const radio = radioModule(b, target, optimize, cuda, core, lanes);
     nemotron.addImport("radio", radio);
+    nemotron.addImport("living", living);
     const qwen35 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen3_5/cuda.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    qwen35.addImport("living", living);
+    qwen35.addImport("nemotron", nemotron);
     qwen35.addImport("cuda", cuda);
     qwen35.addImport("core", core);
     qwen35.addImport("lanes", lanes);
     const qwen_vision = qwenVisionModule(b, target, optimize, cuda, core, lanes);
     qwen35.addImport("qwen_vision", qwen_vision);
-    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio };
+    return .{ .core = core, .lanes = lanes, .nemotron = nemotron, .qwen35 = qwen35, .qwen_vision = qwen_vision, .tokenizer = tokenizer, .heat = heat, .radio = radio, .living = living };
 }
 
 /// Linux targets: fatbins (-Dnvcc builds them, -Dfatbins embeds prebuilt ones), `tensorfold` and `tf-cuda-test`.
@@ -88,9 +97,11 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     b.installArtifact(b.addExecutable(.{ .name = "tensorfold", .root_module = cli }));
     const runner = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
     runner.addImport("cuda", cuda);
+    runner.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     runner.addImport("core", mods.core);
     runner.addImport("lanes", mods.lanes);
     runner.addImport("nemotron", mods.nemotron);
+    runner.addImport("qwen35", mods.qwen35);
     runner.addImport("flashnext", flashnextModule(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision));
     runner.addImport("lfm2", lfm2Module(b, target, optimize, cuda, mods.core));
     runner.addImport("radio", mods.radio);
@@ -103,18 +114,23 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
     for (exlr8_build.denseModules(b, target, optimize, exlr8, exlr8_tests[0])) |m| runner.addImport(m.name, m.module);
     const glm_cuda = glmCuda(b, target, optimize, cuda, mods.core, mods.lanes, mods.heat);
     runner.addImport("glm_cuda", glm_cuda);
+    runner.addImport("kolibri1", kolibri1Module(b, target, optimize, cuda, mods.core, mods.lanes));
     const runner_exe = b.addExecutable(.{ .name = "tf-cuda-test", .root_module = runner });
     b.installArtifact(runner_exe);
     // tf-tp-watch-check: the ranks' lines with no GPU or NCCL; a failing or dying rank stops every rank
     b.installArtifact(b.addExecutable(.{ .name = "tf-tp-watch-check", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/tp_watch_check.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip, .imports = &.{.{ .name = "cuda", .module = cuda }} }) }));
+    @import("living_dense.zig").target(b, target, optimize, cuda, mods.qwen35);
     flashnextChecks(b, target, optimize, cuda, mods.core, mods.lanes, mods.qwen_vision);
     b.step("compile-cuda-tests", "Compile CUDA runner without executing a GPU").dependOn(&runner_exe.step);
     const startup = b.addObject(.{ .name = "modelopt-startup", .root_module = b.createModule(.{ .root_source_file = b.path("zig/modelopt_startup_compile.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{.{ .name = "native", .module = native.engines }} }) });
     _ = startup.getEmittedBin();
     b.step("compile-modelopt-startup", "Compile actual native startup with test-only absent GPU images").dependOn(&startup.step);
-    const controls = if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
-    @import("qwen_contract.zig").images(b, runner_exe, controls, h3_image, kernels, &images);
-    const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, build_options, true, strip);
+    const controls_file = b.option([]const u8, "contract-controls", "Compile-only controls image");
+    const controls = if (controls_file) |file| b.graph.cwdRelativePath(file) else if (nvcc) |tool| fatbin(b, tool, version.?, .{ .name = "contract_controls", .flags = &.{"-O3"} }, sms) else null;
+    const contract_images = @import("qwen_contract.zig").images(b, runner_exe, controls, h3_image, kernels, &images);
+    contract_images.dependOn(fatbin_step);
+    @import("cuda_contract_deepseek.zig").images(b, runner_exe, contract_images, kernels, &images, prebuilt, nvcc, version, sms);
+    const server_exe = nativeServer(b, target, optimize, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, true, strip);
     b.step("compile-config-server", "Compile the actual CUDA server config entry point without installing or running").dependOn(&server_exe.step);
     // tf-qwen35-cuda: the Qwen CUDA forward's rows for a reference to compare, and its tower on picture files
     const q35 = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = target, .optimize = optimize, .link_libc = true, .strip = strip });
@@ -139,6 +155,9 @@ fn glmCuda(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
     return m;
 }
 
+/// The Kolibri-1 CUDA family over the runtime, the core and the lane core.
+const kolibri1Module = @import("kolibri.zig").module;
+
 /// LFM2 (d1's decision model) on CUDA: config, weights, kernels and the forward that scores labels.
 fn lfm2Module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module) *std.Build.Module {
     return b.createModule(.{ .root_source_file = b.path("zig/src/families/lfm2/lfm2.zig"), .target = target, .optimize = optimize, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = core } } });
@@ -161,6 +180,7 @@ fn flashnextModule(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     m.addImport("core", core);
     m.addImport("lanes", lanes);
     m.addImport("qwen_vision", qwen_vision);
+    m.addImport("living", core.import_table.get("living").?);
     return m;
 }
 
@@ -183,6 +203,7 @@ fn engines(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builti
             .{ .name = "flashnext", .module = flashnextModule(b, target, optimize, cuda, core, lanes, qwen_vision) },
             .{ .name = "glm_cuda", .module = glmCuda(b, target, optimize, cuda, core, lanes, heat) },
             .{ .name = "qwen35", .module = qwen35 },
+            .{ .name = "kolibri1", .module = kolibri1Module(b, target, optimize, cuda, core, lanes) },
         },
     });
     return .{ .api = api, .engines = mod };
@@ -194,7 +215,7 @@ fn checkpointCli(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.
 }
 
 /// `zig build native`: tensorfold-native with the CUDA engines into zig-out/native/bin, as the Metal build makes it.
-fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool, strip: ?bool) *std.Build.Step.Compile {
+fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, cuda: *std.Build.Module, core: *std.Build.Module, lanes: *std.Build.Module, nemotron: *std.Build.Module, heat: *std.Build.Module, qwen35: *std.Build.Module, qwen_vision: *std.Build.Module, tokenizer: *std.Build.Module, living: *std.Build.Module, build_options: *std.Build.Step.Options, install_native: bool, strip: ?bool) *std.Build.Step.Compile {
     const m = engines(b, target, optimize, cuda, core, lanes, nemotron, heat, qwen35, qwen_vision);
     // the HTTP side keeps its safety checks; the engine below it runs at `optimize` (the tokenizer is the family's)
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true });
@@ -203,7 +224,7 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
         .target = target,
         .optimize = .ReleaseSafe,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
+        .imports = &.{ .{ .name = "engine_api", .module = m.api }, .{ .name = "tokenizer", .module = tokenizer }, .{ .name = "template", .module = template }, .{ .name = "native_engines", .module = m.engines }, .{ .name = "living", .module = living }, .{ .name = "checkpoint_cli", .module = checkpointCli(b, target, .ReleaseSafe, null, m.engines, core) } },
     }) });
     exe.root_module.addOptions("build_options", build_options);
     _ = @import("server.zig").addTo(b, exe.root_module, target, .ReleaseSafe);
@@ -218,22 +239,32 @@ fn nativeServer(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.b
     return exe;
 }
 
-/// Host tests of the CUDA runtime, the backend-neutral core, the lane core and the CUDA family (no GPU), on any host.
+/// CPU tests for the CUDA runtime, shared core, lanes and CUDA family, on any host.
 pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, all: *std.Build.Step, server_steps: bool) void {
     const step = b.step("test-cuda-host", "The CUDA side's host unit tests alone (no GPU work)");
     all.dependOn(step);
+    @import("release_version.zig").tests(b, step);
+    const flags = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/build/cuda_release_flags.zig"),
+        .target = b.graph.host,
+    }) }));
+    b.step("test-cuda-release-flags-host", "All CUDA image flags omit private source line data").dependOn(&flags.step);
+    step.dependOn(&flags.step);
+    @import("cuda_release_paths.zig").tests(b, step);
+    @import("runtime_libraries.zig").tests(b, step);
     const host = b.graph.host;
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = host }) })).step);
     const cuda = runtime(b, host, .debug, &.{});
     @import("h3_host.zig").targets(b, cuda, step);
+    b.step("test-gradient-host", "Gradient bounds through real wrappers with recorded CUDA launches").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda, .filters = &.{"train launch bounds:"} })).step);
+    const runtime_host = b.step("test-runtime-host", "Shared CUDA runtime and graph host regressions");
+    runtime_host.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = cuda })).step);
     const mods = family(b, host, .debug, cuda, draft_ids);
     @import("qwen_contract.zig").host(b, mods.core, step);
-    const mtp_policy = b.createModule(.{ .root_source_file = b.path("zig/nemotron_mtp_policy_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "lanes", .module = mods.lanes } } });
-    const mtp_run = b.addRunArtifact(b.addTest(.{ .root_module = mtp_policy, .filters = &.{"mtp policy:"} }));
-    b.step("test-nemotron-mtp-policy-host", "Nemotron controls through shared rounds, resumes and handoff without a GPU").dependOn(&mtp_run.step);
-    b.step("test-nemotron-restored-head-host", "Actual Nemotron cache restore, bind and captured draft dispatch without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"restored head:"} })).step);
-    b.step("test-nemotron-subset-head-host", "Actual subset-head ownership and row gathering without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{"subset head:"} })).step);
-    step.dependOn(&mtp_run.step);
+    @import("inc4_host.zig").round(b, cuda, mods.core);
+    @import("inc4_host.zig").rows(b, cuda, mods.core);
+    @import("living_dense.zig").host(b, cuda, mods.qwen35, draft_ids, runtime, family, kernels.len);
+    @import("cuda_family_host.zig").steps(b, cuda, mods, step);
     const exl3_host = b.step("test-exl3-cuda-host", "EXL3 loader and CUDA host regressions without a GPU");
     const exl3_compile = b.addObject(.{ .name = "exl3_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/exl3_compile.zig"),
@@ -248,6 +279,11 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     }
     const contract_arch = b.createModule(.{ .root_source_file = b.path("zig/tests/cuda/contract_arch_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "core", .module = mods.core } } });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = contract_arch })).step);
+    b.step("test-pocket-device-host", "Actual pocket device hooks under CUDA ABI failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = flashnextModule(b, host, .debug, cuda, mods.core, mods.lanes, mods.qwen_vision), .filters = &.{"Learning persistence:"} })).step);
+    b.step("test-living-host", "Family-neutral learner, saved form and commit gate on host").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.living })).step);
+    const shard_tests = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true });
+    shard_tests.addImport("living", mods.living);
+    b.step("test-living-shards-host", "Quantized save and reopen through actual shard writer").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shard_tests })).step);
     const writeback_contract = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/cuda/contract_flashnext_writeback.zig"),
         .target = host,
@@ -311,6 +347,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const cuda_target = b.resolveTargetQuery(.{ .cpu_arch = host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
     const check_cuda = runtime(b, cuda_target, .debug, &.{});
     const check_mods = family(b, cuda_target, .debug, check_cuda, draft_ids);
+    const rounds_tool = b.createModule(.{ .root_source_file = b.path("zig/tests/qwen35_cuda_main.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = check_cuda }, .{ .name = "qwen35", .module = check_mods.qwen35 }, .{ .name = "core", .module = check_mods.core } } });
+    const rounds_compile = b.addObject(.{ .name = "qwen35-rounds-checker-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/qwen35_rounds_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "tool", .module = rounds_tool }} }) });
+    _ = rounds_compile.getEmittedBin();
+    b.step("compile-qwen35-rounds-host", "Compile the real CUDA 64-row checker for Linux, no images or execution").dependOn(&rounds_compile.step);
     const compile_bolt = b.addObject(.{ .name = "bolt_host_compile", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/bolt_compile.zig"),
         .target = cuda_target,
@@ -331,13 +371,19 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const drama3 = @import("drama3_host.zig").hostTests(b, step, cuda, mods.core);
     const native_modules = engines(b, host, .debug, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision);
     const native = native_modules.engines;
+    @import("release_cuda_refusal.zig").tests(b, step, native_modules.api, mods.nemotron);
+    @import("qwen_cost_open.zig").tests(b, mods, native_modules, step);
     const windows_port = @import("windows_host.zig").steps(b, cuda, native_modules.api);
+    const adapter_tests = b.createModule(.{ .root_source_file = b.path("zig/src/native/slide_adapter_test.zig"), .target = host, .link_libc = true, .imports = &.{.{ .name = "engine_api", .module = native_modules.api }} });
+    b.step("test-slide-adapter-host", "Initial learner progress before its first long unit").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = adapter_tests })).step);
     @import("drama3_host.zig").native(b, step, drama3, mods.core, native_modules.api, cuda, "drama_cuda_native_host");
     @import("drama3_host.zig").metal(b, mods.core, native_modules.api);
     const safety = b.step("test-kv-safety-host", "Actual native KV startup budget and paged constructors under allocation/completion faults");
     for ([_]*std.Build.Module{ native, mods.nemotron }) |m| safety.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"kv safety:"} })).step);
     const merge_checks = b.step("test-kv-merge-host", "KV page integration with landed snapshot modes and budgets");
     for ([_]*std.Build.Module{ native, mods.nemotron }) |m| merge_checks.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"kv merge:"} })).step);
+    const nemo_safety = b.step("test-nemotron-learning-host", "Actual Nemotron CUDA close, checked pocket reads and retry under fake driver failures");
+    for ([_]*std.Build.Module{ native, mods.nemotron }) |m| nemo_safety.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m, .filters = &.{"Learner ownership:"} })).step);
     const load_check = b.step("test-bolt-load-host", "Bolt load destination and native-parent retention without a GPU");
     const load_filter = b.option([]const u8, "bolt-load-filter", "Select one load regression");
     const load_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_load_gpu.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "nemotron", .module = mods.nemotron } } });
@@ -347,18 +393,26 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         load_check.dependOn(&check.step);
     }
 
+    b.step("test-cuda-readiness-host", "Real native readiness and synchronous startup preparation without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"family readiness reaches"} })).step);
+    b.step("test-runtime-api", "Optional planner, prompt piece, proposer and halt API tests").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
+    b.step("test-api-boundaries", "Runtime thread initialization failure regression").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Failure boundaries:"} })).step);
+    b.step("test-review-api", "Ownership rollback: ownership and final batching regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Ownership rollback:"} })).step);
+    const check_native = nativeServer(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision, check_mods.tokenizer, check_mods.living, build_options, false, null);
+    b.step("check-native-cuda-host", "Compile the real native CUDA server without kernels or GPU execution").dependOn(&check_native.step);
+
     const offer_tests = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{ .root_source_file = b.path("zig/src/native/cuda_vision_offer.zig"), .target = host, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "nemotron", .module = mods.nemotron }, .{ .name = "qwen35", .module = mods.qwen35 } } }), .filters = if (video_filter) |f| &.{f} else &.{} }));
     offer_tests.has_side_effects = true;
     video_step.dependOn(&offer_tests.step);
     const compile_modules = engines(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.nemotron, check_mods.heat, check_mods.qwen35, check_mods.qwen_vision);
-    const glm_open = b.addObject(.{ .name = "glm-native-open", .root_module = b.createModule(.{ .root_source_file = b.path("zig/glm_open_compile.zig"), .target = cuda_target, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "glm", .module = glmCuda(b, cuda_target, .debug, check_cuda, check_mods.core, check_mods.lanes, check_mods.heat) }} }) });
-    _ = glm_open.getEmittedBin();
-    b.step("compile-glm-native-open", "Compile the actual GLM Linux open body with empty GPU images").dependOn(&glm_open.step);
+    @import("glm_family_host.zig").compile(b, cuda_target, check_cuda, check_mods, glmCuda);
     const open_object = b.addObject(.{ .name = "omni-video-native-compile", .root_module = b.createModule(.{ .root_source_file = b.path("zig/tests/omni_video_compile.zig"), .target = cuda_target, .link_libc = true, .imports = &.{.{ .name = "native", .module = compile_modules.engines }} }) });
     _ = open_object.getEmittedBin();
     b.step("compile-omni-video-host", "Compile actual native CUDA startup and offer for Linux without images or GPU execution").dependOn(&open_object.step);
     const h3_checkpoint = b.createModule(.{ .root_source_file = b.path("zig/src/families/h3/checkpoint.zig"), .target = host, .optimize = .debug, .link_libc = true });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = h3_checkpoint })).step);
+
+    b.step("test-save-reopen-host", "Unresolved save through actual checkpoint admission").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{"Save recovery:"} })).step);
+    b.step("test-trainer-close-host", "Actual native close and real Flash Next trainer ownership sentinels").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native, .filters = &.{"Save recovery:"} })).step);
     // the HTTP server's unit tests (zig/src/server/root.zig), which the macOS build runs, on Linux hosts too
     const template = b.createModule(.{ .root_source_file = b.path("zig/src/core/template/template.zig"), .target = host, .optimize = .debug, .link_libc = true });
     const server_tests = b.createModule(.{
@@ -366,11 +420,14 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
         .target = host,
         .optimize = .debug,
         .link_libc = true,
-        .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } },
+        .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template }, .{ .name = "living", .module = mods.living } },
     });
     const server_json = @import("server.zig").addTo(b, server_tests, host, .debug);
+    b.step("test-runtime-capabilities-host", "Optional library discovery in actual capabilities JSON").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"runtime library:"} })).step);
     windows_port.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"hardware names"} })).step);
     b.step("test-benchmark-manifest-host", "Manifest identity through the HTTP server without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"manifest"} })).step);
+    b.step("test-lesson-questions-host", "Supplied questions through the production lesson without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Lesson questions:"} })).step);
+    b.step("test-slide-recovery-host", "Living Weights conversation and stream regressions without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "lesson conversations:", "lesson stream:", "lesson writer:" } })).step);
     b.step("test-issue-934", "Benchmark config admission and receipt regressions").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 934:"} })).step);
     b.step("test-issue-969", "First-EOS classification and incomplete benchmark messages without a GPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"issue 969"} })).step);
     b.step("test-tool-required-host", "Required tool parsing, grammar form and constrained lane replies on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"required tools:"} })).step);
@@ -378,8 +435,20 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     server_tests.addImport("qwen27_mask_fake", q27.fake);
     server_tests.addImport("qwen27_masks", q27.masks);
     b.step("test-qwen27-required-host", "Qwen27 required tool routes through the masked lane fake").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"qwen27 tool calls:"} })).step);
+    b.step("test-save-graph-host", "Actual graph receipts paired with generic learner persistence failures").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Save recovery:"} })).step);
+    b.step("test-lesson-gate-host", "Production server rounds and earlier-fact retention").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"Learning persistence:"} })).step);
+    b.step("test-frame-cache-identity-host", "Image frame identities through the actual shared cache").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api, .filters = &.{"Frame cache:"} })).step);
+    const media_gate = b.step("test-media-request-ownership-host", "Shared request ownership, image frame caches and media expansion on the CPU");
+    media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = native_modules.api })).step);
+    media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{ "image", "video" } })).step);
+    media_gate.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = mods.core, .filters = &.{ "qwen_vl", "video" } })).step);
     const server_test = b.addRunArtifact(b.addTest(.{ .root_module = server_tests }));
+    b.step("test-done-times-host", "Request-local done line times and lane admission on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"done times:"} })).step);
+    b.step("test-request-seeds-host", "Fresh and explicit request seeds and completion logs without shaders").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"request seed:"} })).step);
     const json_test = b.addRunArtifact(b.addTest(.{ .root_module = server_json }));
+    const publication = b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark publication:"} }));
+    b.step("test-benchmark-publication-host", "Benchmark command publication boundaries with inert effects").dependOn(&publication.step);
+    b.step("test-benchmark-routing-host", "Benchmark command routing from explicit model capabilities").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = server_tests, .filters = &.{"benchmark routing:"} })).step);
     const server_step = b.step(
         "test-server-cpu",
         "The HTTP server's unit tests (routes, templates, tool parsing) without a GPU",
@@ -399,19 +468,10 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const run = b.addRunArtifact(b.addTest(.{ .root_module = mods.nemotron, .filters = &.{selected} }));
     run.has_side_effects = true;
     b.step("test-modelopt-host", "Actual Nemotron scratch and CUDA launch records without GPU execution").dependOn(&run.step);
-    // the GLM-5.3-Flash CUDA family's host side
     const glm = glmCuda(b, host, .debug, cuda, mods.core, mods.lanes, mods.heat);
-    const drafter_host = b.createModule(.{ .root_source_file = b.path("zig/glm_dflash_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "core", .module = mods.core } } });
-    b.step("test-glm-dflash-host", "DFlash rank buffers, partial loader ownership and pending records on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = drafter_host, .filters = &.{"glm dflash:"} })).step);
-    const packed_host = b.createModule(.{ .root_source_file = b.path("zig/glm_packed_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "glm", .module = glm }, .{ .name = "core", .module = mods.core } } });
-    b.step("test-glm-packed-host", "Packed GLM launch records, cap parsing and native loader on the CPU").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = packed_host, .filters = &.{"glm packed:"} })).step);
-    const ring_host = b.createModule(.{ .root_source_file = b.path("zig/glm_ring_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm } } });
-    b.step("test-glm-ring-host", "Actual GLM MTP rollback pool through recording CUDA copies").dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = ring_host, .filters = &.{"glm ring:"} })).step);
-    step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = glm })).step);
-    const prompt_host = b.createModule(.{ .root_source_file = b.path("zig/exl3_prompt_host.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "cuda", .module = cuda }, .{ .name = "glm", .module = glm }, .{ .name = "lanes", .module = mods.lanes } } });
-    const prompt_run = b.addRunArtifact(b.addTest(.{ .root_module = prompt_host, .filters = &.{"exl3 prompt:"} }));
-    prompt_run.has_side_effects = true;
-    b.step("test-exl3-prompt-host", "Actual common prompt dispatch and scratch with recording CUDA calls").dependOn(&prompt_run.step);
+    @import("glm_family_host.zig").steps(b, cuda, glm, mods, step);
+    @import("kolibri.zig").host(b, kolibri1Module(b, host, .debug, cuda, mods.core, mods.lanes), native_modules.api, step);
+    @import("glm_contracts.zig").tests(b, glm, mods.lanes, cuda, mods.core);
     // the shares a GLM-5.3-Flash rank takes (cluster/canon.zig against the Python family's)
     const shares = b.createModule(.{ .root_source_file = b.path("zig/src/cluster/canon_glm_test.zig"), .target = host, .optimize = .debug });
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = shares })).step);
@@ -419,6 +479,15 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
     const parse_tests = b.createModule(.{ .root_source_file = b.path("zig/src/server/tool_parse_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{ .{ .name = "engine_api", .module = native_modules.api }, .{ .name = "tokenizer", .module = mods.tokenizer }, .{ .name = "template", .module = template } } });
     _ = @import("server.zig").addTo(b, parse_tests, host, .debug);
     step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = parse_tests })).step);
+    // Living Weights: the family-neutral learner, then the pocket in each family's shards over the core's shard files
+    const living_run = b.addRunArtifact(b.addTest(.{ .root_module = mods.living }));
+    const shards = b.createModule(.{ .root_source_file = b.path("zig/src/living_shards_test.zig"), .target = host, .optimize = .debug, .link_libc = true, .imports = &.{.{ .name = "living", .module = mods.living }} });
+    const shards_run = b.addRunArtifact(b.addTest(.{ .root_module = shards }));
+    step.dependOn(&living_run.step);
+    step.dependOn(&shards_run.step);
+    const living_step = b.step("test-living", "Living Weights' learner and the pocket in each family's shards, on the host");
+    living_step.dependOn(&living_run.step);
+    living_step.dependOn(&shards_run.step);
     const cli = b.createModule(.{ .root_source_file = b.path("zig/src/cli/cuda_main.zig"), .target = host, .optimize = .debug, .link_libc = true });
     cli.addImport("cuda", cuda);
     cli.addImport("core", mods.core);
@@ -431,26 +500,7 @@ pub fn hostTests(b: *std.Build, draft_ids: *std.Build.Module, build_options: *st
 }
 
 /// nvcc -fatbin with torch's flags, the kernel's own and one -gencode per SASS target, as the Python build passes them.
-fn fatbin(b: *std.Build, nvcc: []const u8, version: std.Build.LazyPath, k: Kernel, sms: []const u8) std.Build.LazyPath {
-    const run = b.addSystemCommand(&.{ nvcc, "-fatbin" });
-    run.addFileInput(version);
-    run.addArgs(&torch_flags);
-    // with cl.exe as host compiler, CUDA 13's headers need MSVC's conforming preprocessor, and M_SQRT2 its math define
-    if (b.graph.host.result.os.tag == .windows) run.addArgs(&.{ "-Xcompiler=/Zc:preprocessor", "-D_USE_MATH_DEFINES" });
-    run.addArgs(k.flags);
-    var it = std.mem.tokenizeScalar(u8, sms, ',');
-    while (it.next()) |sm| {
-        // arch-specific features (the block-scaled FP4 mma) from sm_120 on; older targets build the trapping fallback
-        const a = if (k.arch_specific and (std.fmt.parseInt(u32, sm, 10) catch 0) >= 120) "a" else "";
-        run.addArg(b.fmt("-gencode=arch=compute_{s}{s},code=sm_{s}{s}", .{ sm, a, sm, a }));
-    }
-    run.addArgs(&.{ "-MD", "-MF" });
-    _ = run.addDepFileOutputArg2(b.fmt("{s}.d", .{k.name}), .{});
-    run.addArg("-o");
-    const out = run.addOutputFileArg(b.fmt("{s}.fatbin", .{k.name}));
-    run.addFileArg(b.path(b.fmt("zig/kernels/cuda/{s}.cu", .{k.src orelse k.name})));
-    return out;
-}
+pub const fatbin = @import("cuda_fatbin.zig").fatbin;
 
 /// Cross-build a release server, embedding the same fatbins on either host CPU.
 pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *std.Build.Module, build_options: *std.Build.Step.Options, prebuilt: ?[]const u8) *std.Build.Step.Compile {
@@ -460,19 +510,21 @@ pub fn distServer(b: *std.Build, target: std.Build.ResolvedTarget, draft_ids: *s
     };
     const cuda = runtime(b, target, .fast, if (prebuilt != null) &images else &.{});
     const mods = family(b, target, .fast, cuda, draft_ids);
-    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, build_options, false, null);
+    return nativeServer(b, target, .fast, cuda, mods.core, mods.lanes, mods.nemotron, mods.heat, mods.qwen35, mods.qwen_vision, mods.tokenizer, mods.living, build_options, false, null);
 }
 
 /// SASS targets every release fatbin holds: Ampere (sm_80, sm_86), RTX 50/PRO Blackwell (sm_120), GB10 (sm_121).
 pub const release_sms = "80,86,120,121";
 
 /// Validate the complete named input set, including images unused by today's server, and each file's release targets.
-pub fn checkDistFatbins(b: *std.Build, dir: []const u8) *std.Build.Step {
+pub fn checkDistFatbins(b: *std.Build, dir: []const u8, privacy_tool: *std.Build.Step.Compile) *std.Build.Step {
     const tool = b.addExecutable(.{ .name = "check-fatbins", .root_module = b.createModule(.{ .root_source_file = b.path("zig/build/check_fatbins.zig"), .target = b.graph.host }) });
     const check = b.addRunArtifact(tool);
     check.addArg(release_sms);
     for (kernels) |k| check.addFileArg(b.graph.cwdRelativePath(b.pathJoin(&.{ dir, b.fmt("{s}.fatbin", .{k.name}) })));
-    return &check.step;
+    const privacy = @import("cuda_release_paths.zig").directory(b, privacy_tool, b.graph.cwdRelativePath(dir));
+    privacy.dependOn(&check.step);
+    return privacy;
 }
 
 /// Explicit model diagnostics; these tools do not qualify a checkpoint merely by compiling.
@@ -511,4 +563,12 @@ fn flashnextChecks(b: *std.Build, target: std.Build.ResolvedTarget, optimize: st
     const select_run = b.addRunArtifact(b.addExecutable(.{ .name = "flashnext-select", .root_module = select_check }));
     if (b.option([]const u8, "flashnext_fixtures", "capture_sparse.sh's selection fixtures folder")) |dir| select_run.addArgs(&.{dir});
     b.step("flashnext-select", "fn_qsa_select against Triton's _select / _select_tiles lists on captured score rows").dependOn(&select_run.step);
+    const learn_check = b.createModule(.{ .root_source_file = b.path("zig/src/families/flashnext/cuda_learn_main.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    learn_check.addImport("cuda", cuda);
+    learn_check.addImport("flashnext", flashnext);
+    const learn_exe = b.addExecutable(.{ .name = "flashnext-learn", .root_module = learn_check });
+    const learn_run = b.addRunArtifact(learn_exe);
+    if (embed_model != null and prompt_ids != null) learn_run.addArgs(&.{ embed_model.?, prompt_ids.? });
+    b.step("flashnext-learn", "Trainer forward identity and all-path finite-difference gates").dependOn(&learn_run.step);
+    b.step("compile-flashnext-learn", "Compile the real trainer runner without executing it").dependOn(&learn_exe.step);
 }

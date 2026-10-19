@@ -1,6 +1,15 @@
 // Flash Next's block selection in GPU-side rounds: the round's per-row metadata from the arena's position, then the indexer's block pooling (q4_idx_pool's arithmetic) at absolute blocks.
 #include <metal_stdlib>
 using namespace metal;
+struct TF_RotaryScalar { float frequency, angle, cosine, sine, co, si; };
+inline TF_RotaryScalar tf_rotary_scalar(int i, int position, const constant float* LOG2BASE) {
+  const float freq = LOG2BASE[1] != 0.0f ? LOG2BASE[3 + i] : metal::precise::exp2(-(float(i) / 32.0f) * LOG2BASE[0]);
+  const float angle = float(position) * freq;
+  const float ys = LOG2BASE[1] != 0.0f ? LOG2BASE[2] : 1.0f;
+  const float co = metal::precise::cos(angle), si = metal::precise::sin(angle);
+  return {freq, angle, co, si, co * ys, si * ys};
+}
+
 
 // One thread: rows t .. t + W - 1 (t = AR[1]) -> block ends, key counts, sparse flags and the pooling range; SEL: complete[16] ends[16] counts[16] sparse[16] start count pooled.
 [[kernel]] void fz_sel_meta(const device int* AR [[buffer(0)]], const constant uint& W [[buffer(1)]],
@@ -29,7 +38,7 @@ using namespace metal;
 
 // Threadgroup j (128 threads) pools block SEL[64] + j: mean of its 4 raw keys (fp32 in order, bf16), RMSNorm (fp32, bf16), RoPE (64 dims, non-interleaved halves) at the block's first position.
 [[kernel]] void fz_idx_pool_abs(const device bfloat* RAW [[buffer(0)]], const device int* SEL [[buffer(1)]],
-    const device float* Wn [[buffer(2)]], const device float* eps [[buffer(3)]], const device float* LOG2BASE [[buffer(4)]],
+    const device float* Wn [[buffer(2)]], const device float* eps [[buffer(3)]], const constant float* LOG2BASE [[buffer(4)]],
     device bfloat* POOLED [[buffer(5)]], uint sgi [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
     uint3 tpos [[thread_position_in_threadgroup]], uint3 tg [[threadgroup_position_in_grid]]) {
   constexpr int DI = 128;
@@ -56,9 +65,8 @@ using namespace metal;
   if (d < RD) {
     const int hr = RD / 2;
     const int i = d % hr;
-    const float freq = metal::exp2(-(float(i) / float(hr)) * LOG2BASE[0]);
-    const float angle = float(4 * b) * freq;
-    const float c = metal::fast::cos(angle), s = metal::fast::sin(angle);
+    const TF_RotaryScalar cs = tf_rotary_scalar(i, 4 * b, LOG2BASE);
+    const float c = cs.co, s = cs.si;
     out = d < hr ? normed[d] * c - normed[d + hr] * s : normed[d - hr] * s + normed[d] * c;
   }
   POOLED[size_t(b) * DI + d] = bfloat(out);

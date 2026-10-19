@@ -15,6 +15,7 @@ const usage =
     \\gets NAME.pixels.f32, NAME.rows.f32 (bf16 widened) and meta.json; NAME.ref.f32 there (float32 reference rows) is
     \\compared row by row (relative L2, worst and mean); --bound needs every reference and exits 1 past either bound.
     \\fp8: the attention caches as e4m3 rows (--kv-cache fp8); TF_Q35_PREFILL, _BESIDE, _DELTA, _RESUME, _SHIFT: below.
+    \\TF_Q35_WINDOW=N fixes window/tree width (tree: at least 2); 0 keeps growing widths.
     \\       tf-qwen35-cuda <model dir> kl <ids file> <out.json> <skip> <rows> [control]
     \\kl: bf16 caches against fp8 ones, teacher-forced: the first <skip> ids as prompt chunks, then <rows> ids in
     \\windows, each row's KL(bf16 || fp8) of the next-token distributions, top-1 agreement and both losses on the next
@@ -74,6 +75,8 @@ pub fn main(init: std.process.Init) !u8 {
     try fill(e, &other, ids.items, beside);
     var f: Fwd = .{ .e = e, .other = if (beside > 0) &other else null, .ids = ids.items };
     var out: std.ArrayList(u8) = .empty;
+    const fixed = try envCount("TF_Q35_WINDOW");
+    if (fixed > e.window_rows) return error.InvalidQwenWindow;
     if (std.mem.eql(u8, args[2], "step")) {
         var first: i64 = 0;
         var rest: i64 = 0;
@@ -90,8 +93,8 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (std.mem.eql(u8, args[2], "window")) {
         // windows of 1, 2, 3, ... rows: every row's logits, which must equal step's bit for bit
         var at: usize = 0;
-        var w: usize = 1;
-        while (at < ids.items.len) : (w = w % e.window_rows + 1) {
+        var w: usize = if (fixed > 0) fixed else 1;
+        while (at < ids.items.len) : (w = if (fixed > 0) fixed else w % e.window_rows + 1) {
             const n = @min(w, ids.items.len - at);
             try f.run(.{ .cache = &cache, .rows = n }, ids.items[at..][0..n]);
             for (0..n) |r| try out.appendSlice(a, std.mem.sliceAsBytes(e.rowLogits(r)));
@@ -100,8 +103,8 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (std.mem.eql(u8, args[2], "tree")) {
         // tree windows of growing widths, junk branches beside the kept true one, whose logits must equal step's bits
         var at: usize = 0;
-        var w: usize = 2;
-        while (at < ids.items.len) : (w = w % e.window_rows + 1) {
+        var w: usize = if (fixed > 0) @max(2, fixed) else 2;
+        while (at < ids.items.len) : (w = if (fixed > 0) @max(2, fixed) else w % e.window_rows + 1) {
             var toks: [E.most_window]u32 = undefined;
             var parents: [E.most_window]i32 = undefined;
             var path: [E.most_window]u32 = undefined;

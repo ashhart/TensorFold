@@ -16,12 +16,12 @@ const benchmark = @import("benchmark.zig");
 const checkpoint_cli = @import("checkpoint_cli");
 
 const usage_line = "usage: tensorfold serve [-h] [--host HOST] [--port PORT] [--name NAME] [--chat-template FILE]" ++
-    " [--alias ALIAS] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
+    " [--alias ALIAS] [--allowed-host NAME] [--allowed-origin ORIGIN] [--api-key API_KEY] [--api-key-file API_KEY_FILE] [--metrics-open] [--dashboard]" ++
     " [--context CONTEXT] [--speed-up SETTINGS] [--prompt-cache-gib PROMPT_CACHE_GIB]" ++
     " [--prompt-cache-over-cap] [--learn] [--learn-dir LEARN_DIR] [--learn-gib LEARN_GIB]" ++
     " [--learn-conversations] [--learn-daily-gib LEARN_DAILY_GIB] [--recall] [--recall-dir RECALL_DIR]" ++
     " [--recall-gib RECALL_GIB] [--recall-read-only] [--max-tokens MAX_TOKENS]" ++
-    " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P]" ++
+    " [--temperature TEMPERATURE] [--top-p TOP_P] [--top-k TOP_K] [--min-p MIN_P] [--prompt-seed]" ++
     " [--thinking | --no-thinking] [--reasoning-effort {low,medium,high,xhigh}]" ++
     " [--thinking-budget THINKING_BUDGET] [--loop-guard] [--no-drafts] [--drafter DRAFTER]" ++
     " [--drafter-bits {0,4}] [--record RECORD] [--keep-warm SECONDS] [--compact-at COMPACT_AT]" ++
@@ -64,7 +64,9 @@ pub fn main(init: std.process.Init) !u8 {
     log.init(io, false);
     if (argv.len == 3 and std.mem.eql(u8, argv[1], "capabilities") and std.mem.eql(u8, argv[2], "--json")) {
         var out: std.Io.Writer.Allocating = .init(a);
-        try cli.capabilities(&out.writer, engines.capabilities(a));
+        var caps = engines.capabilities(a);
+        caps.optional_libraries = try @import("sys").optional_libraries.probe(a, io, @import("sys"));
+        try cli.capabilities(&out.writer, caps);
         try std.Io.File.stdout().writeStreamingAll(io, out.written());
         return 0;
     }
@@ -123,7 +125,8 @@ pub fn main(init: std.process.Init) !u8 {
     defer up.text.deinit();
     var record: ?*@import("engine_api").recall_store.Store = null;
     defer if (record) |r| r.close(); // after the engine below has stopped reading it
-    defer up.engine.close(up.engine.ctx);
+    var closer: Closer = .{ .opened = up.engine };
+    defer closer.closeOnce();
     const served = hub.servedName(args.name, args.model, dir);
     problem = "";
     record = recall_open.open(gpa, io, a, args, up.text, served, &problem) catch |e| {
@@ -132,6 +135,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (record) |r| if (!up.engine.engine.attachRecall(r)) return fail(not_lanes);
     return serve.run(gpa, io, args, .{
         .engine = up.engine.engine,
+        .stop = .{ .ctx = &closer, .close = Closer.close, .halt = Closer.halt },
         .text = up.text.text(),
         .served = served,
         .recall = record,
@@ -190,3 +194,23 @@ fn sampling(a: std.mem.Allocator, io: std.Io, dir: []const u8, args: cli.Args) !
     if (args.min_p) |t| try out.put(a, "min_p", .{ .float = t });
     return if (out.count() > 0) json.Value{ .object = out } else null;
 }
+
+const Closer = struct {
+    opened: api.Opened,
+    closed: bool = false,
+    fn closeOnce(c: *Closer) void {
+        if (c.closed) return;
+        c.closed = true;
+        c.opened.close(c.opened.ctx);
+    }
+    fn close(p: *anyopaque) void {
+        const c: *Closer = @ptrCast(@alignCast(p));
+        c.closeOnce();
+    }
+    fn halt(p: *anyopaque, reason: []const u8) void {
+        const c: *Closer = @ptrCast(@alignCast(p));
+        if (comptime @hasField(api.Opened, "halt")) {
+            if (c.opened.halt) |f| f(c.opened.ctx, reason);
+        }
+    }
+};

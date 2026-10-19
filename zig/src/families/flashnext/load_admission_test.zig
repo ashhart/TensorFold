@@ -122,10 +122,13 @@ test "generic four-bit config and index metadata remain supported outside runtim
 }
 
 test "normal and dump load paths admit before any engine device or pack work and render the human refusal" {
-    const source = @embedFile("engine.zig");
-    const entry = std.mem.indexOf(u8, source, "pub fn loadWith(").?;
-    const body = source[entry + std.mem.indexOf(u8, source[entry..], "{").? + 1 ..];
-    try std.testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, body, " \t\r\n"), "try load_admission.check(gpa, io, model_dir);"));
+    const engine = @embedFile("engine.zig");
+    try std.testing.expect(std.mem.indexOf(u8, engine, "pub const loadWith = @import(\"engine_load.zig\").loadWith;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, engine, "pub const loadConfigured = @import(\"engine_load.zig\").loadConfigured;") != null);
+    const source = @embedFile("engine_load.zig");
+    const wrapper = entryBody(source, "pub fn loadWith(").?;
+    try std.testing.expect(std.mem.startsWith(u8, wrapper, "return loadConfigured(gpa, io, model_dir, dump_dir, speed_up, .{});"));
+    try std.testing.expect(admissionFirst(source));
     const native = @embedFile("../../native/metal.zig");
     const open = std.mem.indexOf(u8, native, "fn openFlashNext(").?;
     const mapping = std.mem.indexOfPos(u8, native, open, "tf.flashnext_engine.quantizationProblem(e)");
@@ -172,4 +175,18 @@ test "the width and layout refusals past admission map to text a user can act on
         try std.testing.expectEqualStrings(admission.stored_problem, admission.problemFor(e).?);
     try std.testing.expectEqualStrings(admission.speed_up_problem, admission.problemFor(error.SpeedUpNeeds6Bit32).?);
     try std.testing.expectEqualStrings(admission.scale_problem, admission.problemFor(error.NgramTableScale).?);
+}
+
+fn entryBody(source: []const u8, name: []const u8) ?[]const u8 {
+    const entry = std.mem.indexOf(u8, source, name) orelse return null;
+    const brace = std.mem.indexOfScalarPos(u8, source, entry, '{') orelse return null;
+    return std.mem.trimStart(u8, source[brace + 1 ..], " \t\r\n");
+}
+
+fn admissionFirst(source: []const u8) bool {
+    var body = entryBody(source, "pub fn loadConfigured(") orelse return false;
+    const validation = "try window.validate(speed_up != null or platform.c.getenv(\"TF_FLASHNEXT_TP\") != null);";
+    if (!std.mem.startsWith(u8, body, validation)) return false;
+    body = std.mem.trimStart(u8, body[validation.len..], " \t\r\n");
+    return std.mem.startsWith(u8, body, "try load_admission.check(gpa, io, model_dir);");
 }

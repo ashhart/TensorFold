@@ -13,6 +13,7 @@ pub const default_prior = [_]f64{ 0.85, 0.75, 0.7, 0.65, 0.6, 0.55, 0.5, 0.5, 0.
 /// What a backend reports about its loaded model: the attributes the Python engine reads at setup.
 pub const Model = struct {
     copy_drafts: bool = true, // global serving switch, independent of shared verification capacity
+
     exact_width: u32 = 1, // the widest window that reproduces one-token steps bit for bit
     first_copy_rows: u32 = 0, // a lone stream's first copy window (0: the exact width)
     gpu_tokens: bool = false, // one-token rounds may run a step ahead (pipelined)
@@ -40,6 +41,9 @@ pub const Model = struct {
     join_drafts: bool = false, // with join_tail: a round's joined prompts' first drafts in one call (Engine.finishStreams)
     replay_runs: bool = false, // a round's finals go to the backend together first (Backend.finals)
     lane_costs: []const Cost = &.{}, // a lone stream's window ms by rows, up to its widest tree (timed at load)
+    lone_cost_tile: u32 = 0, // live lone-window pricing probes at these target row boundaries (0: off)
+    context_copies: bool = false, // a lone head window shares its agreeing copy path and appends the rest
+    copy_match: i64 = 8, // matching history tokens a copy needs
     lone_copies: bool = true, // a lone stream proposes copies (false: only streams in shared rounds do)
 };
 
@@ -81,6 +85,8 @@ pub const Config = struct {
     lane_costs: Table, // window ms by rows to 64 (lanes/plan_lanes.zig)
     mtp_step_ms: f64,
     draft_step_ms: f64 = 0, // Model.draft_step_ms
+    lone_cost_tile: u32 = 0, // Model.lone_cost_tile
+    context_copies: bool = false, // Model.context_copies, within the existing verification width
     enter_match: i64 = 8, // matching tokens a copy needs (rejects coincidental indentation)
     copy_rate: f64 = 0.94, // a copied token's chance of landing in allocation
     lone_copies: bool = true, // Model.lone_copies
@@ -119,7 +125,10 @@ pub const Config = struct {
         const depth_prior = try gpa.dupe(f64, prior);
         errdefer gpa.free(depth_prior);
         return .{
+            .context_copies = m.context_copies and m.copy_drafts,
+            .enter_match = @max(1, m.copy_match),
             .lone_copies = m.lone_copies,
+            .lone_cost_tile = m.lone_cost_tile,
             .family_width = width,
             .max_copy = max_copy,
             .first_copy = first_copy,

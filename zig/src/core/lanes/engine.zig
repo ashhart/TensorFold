@@ -22,11 +22,9 @@ const Plan = win.Plan;
 const f = ev.f;
 const str = trail.str;
 const int = trail.int;
-
 const Outcome = struct { got: []const u32, path: []const u32, cut: ?usize, follow: []const u32 };
 const Result = struct { rows: u32, keep: u32, got: []const u32 };
 const Unread = struct { event: usize, handle: u64 };
-
 pub const Engine = struct {
     const pieces_ = @import("pieces.zig");
     pub const beginStream = pieces_.beginStream;
@@ -94,6 +92,7 @@ pub const Engine = struct {
     pub const addStream = open.add;
     pub const addStreamCommitted = open.addCommitted;
     pub const addStreams = open.addStreams;
+    pub const batchable = open.batchable;
     pub const max_together = open.max_together;
 
     /// Whether the backend prefills several prompts in one pass (addStreams batches them).
@@ -195,7 +194,7 @@ pub const Engine = struct {
         s.priced = null;
         const a = e.arena.allocator();
         var plans = [_]Plan{try win.plan(e, s, copied)};
-        if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null)) try win.allocate(e, &plans);
+        if (plans[0].kind == .head and (e.cfg.node_probabilities or e.trim != null or @import("lone_costs.zig").enabled(e, plans[0]))) try win.allocate(e, &plans);
         try win.constrain(e, &plans[0]);
         const plan = plans[0];
         const early = e.cfg.family_mtp and s.drafts and plan.kind != .forced and e.cfg.speculate_early and plan.parents == null and s.grammar == null;
@@ -222,6 +221,7 @@ pub const Engine = struct {
                 const first = s.rounds == 1; // a stream's first round carries the prefill-to-decode switch
                 try trail.event(e, &.{ f("ev", str("cost")), f("stream", str(s.id)), f("drafts", int(rows - 1)), f("init", .{ .bool = first }), f("ms", ev.bits(ms)) });
                 try e.rule.observeCost(@intCast(rows - 1), ms, first, win.who(s));
+                @import("lone_costs.zig").observe(s, plan.cost_probe_rows, rows, ms);
             }
         }
         if (e.cfg.timed and s.graft_room != null and s.rounds > 1) {
@@ -348,13 +348,14 @@ pub const Engine = struct {
                 var kept_branch: u64 = 0; // the context's graft rows kept, then Recall's
                 var kept_recall: u64 = 0;
                 var recall_rows: u64 = 0;
-                if (p.branch_from > 0) {
+                if (p.branch_from > 0 and p.branch_from < rows) {
                     s.branch_rows += rows - p.branch_from;
                     for (@as(usize, p.branch_from)..rows) |r| recall_rows += @intFromBool(p.recallRow(r));
                     for (path[1..]) |r| if (r >= p.branch_from) {
                         if (p.recallRow(r)) kept_recall += 1 else kept_branch += 1;
                     };
                     s.branch_accepted += kept_branch + kept_recall;
+                    if (p.context_copy) if (s.proposer) |pr| pr.observe(@intCast(rows - p.branch_from), @intCast(kept_branch));
                 }
                 if (p.tried) {
                     // grafting nothing is the context's miss; rows Recall grafted count for Recall alone

@@ -17,8 +17,10 @@ pub fn validVersion(v: []const u8) bool {
 }
 
 pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.Options, version: ?[]const u8, xgrammar: ?[]const u8) void {
+    const privacy = @import("cuda_release_paths.zig").checker(b);
     const package_tests = b.addSystemCommand(&.{"python3"});
     package_tests.addFileArg(b.path("tools/release/test_package.py"));
+    package_tests.addPrefixedFileArg("--path-checker=", privacy.getEmittedBin());
     package_tests.has_side_effects = true;
     b.step("test-dist-package", "CPU regression for repeated same-version archives and bundled notices").dependOn(&package_tests.step);
     const step = b.step("dist", "Package macOS arm64 (M1 CPU) and Linux x86_64/aarch64 CUDA servers");
@@ -48,7 +50,7 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         step.dependOn(&b.addFail("dist requires -Dxgrammar=DIR (structured output's libtfgrammar): " ++ grammar.clone).step);
         return;
     }
-    const fatbin_check = if (fatbins) |dir| cuda.checkDistFatbins(b, dir) else null;
+    const fatbin_check = if (fatbins) |dir| cuda.checkDistFatbins(b, dir, privacy) else null;
     const sdk = sdk_override orelse if (b.graph.host.result.os.tag == .macos)
         std.mem.trim(u8, b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n")
     else {
@@ -83,6 +85,8 @@ pub fn targets(b: *std.Build, ids: *std.Build.Module, options: *std.Build.Step.O
         pack.addDirectoryArg(b.path("LICENSES"));
         pack.addFileArg(b.path("THIRD_PARTY_NOTICES.md"));
         const archives = pack.addOutputDirectoryArg("archives");
+        pack.addPrefixedFileArg("--path-checker=", privacy.getEmittedBin());
+        pack.addArg(b.fmt("--build-root={s}", .{@import("cuda_release_paths.zig").absoluteRoot(b)}));
         if (aot != null and p.query.os_tag == .linux and !host_only) pack.addDirectoryArg(b.graph.cwdRelativePath(aot.?));
         if (xgrammar) |dir| pack.addPrefixedDirectoryArg("--overlay=", grammar.overlay(b, target, dir) orelse {
             step.dependOn(&b.addFail(b.fmt("-Dxgrammar={s} is not an xgrammar " ++ grammar.pinned ++ " checkout: " ++ grammar.clone, .{dir})).step);

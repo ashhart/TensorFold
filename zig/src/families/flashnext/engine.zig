@@ -1,5 +1,4 @@
-//! Flash Next served from the replay engine: one reply at a time, its prompt through prompt chunks (the MTP head's
-//! keys for every prompt row), then GPU-side rounds whose drafts the depth rule sets; tokens leave as rounds are read.
+//! Flash Next served from the replay engine: one reply at a time, its prompt through prompt chunks (the MTP head's...
 const std = @import("std");
 const platform = @import("sys");
 const mtl = @import("metal");
@@ -27,7 +26,6 @@ const D = fz.D;
 const WIDE = fz.WIDE;
 const LAYERS = fz.LAYERS;
 const VOCAB = fz.VOCAB;
-const CAP = fz.CAP;
 const PLE_TAIL = fz.PLE_TAIL;
 const GROUPS = fz.GROUPS;
 const MAXR = fz.MAXR;
@@ -58,15 +56,14 @@ pub const RING = 512;
 pub const MARGIN = 2 * MAXR;
 /// An MoE layer's expert projections in the engine's order: gate, up, shared gate, shared up, down, shared down.
 const expert_projs = [_][]const u8{ "switch_mlp.gate_proj", "switch_mlp.up_proj", "shared_expert.gate_proj", "shared_expert.up_proj", "switch_mlp.down_proj", "shared_expert.down_proj" };
-/// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies that much more.
+/// Bytes a conversation's next kept state usually adds (about 4k tokens of reply and tool output): the pool readies...
 pub const NEXT_TURN = 4096 * 13 * 2304;
 
-/// A kept state's name on both Macs: the hash of its tokens through the lookahead token (callers pass prompt[0 .. at + 1]).
+/// Hash the shared token prefix through its lookahead token.
 pub fn keyOf(tokens: []const u32) u64 {
     return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(tokens));
 }
-/// Prompt chunks run as two staggered segments once each gets this many rows (core/segments.zig). Measured on the
-/// M5 Ultra, two segments against one chunk: 2k rows a segment -7%, 3k level, 4k +1.6%, 8k +9%.
+/// Prompt chunks run as two staggered segments once each gets this many rows (core/segments.zig).
 pub const SEG_MIN = 4096;
 /// Speed-up mode splits a prompt chunk across the two Macs once each gets this many rows.
 pub const PAIR_MIN: u32 = 256;
@@ -146,314 +143,13 @@ pub const Engine = struct {
         return loadWith(gpa, io, model_dir, dump_dir, null);
     }
 
-    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library and the link to the other Mac (tp.zig).
-    pub fn loadWith(gpa: Allocator, io: std.Io, model_dir: []const u8, dump_dir: ?[]const u8, speed_up: ?[]const u8) !*Engine {
-        try load_admission.check(gpa, io, model_dir);
-        const e = try gpa.create(Engine); // undefined memory: every defaulted field is set here
-        errdefer gpa.destroy(e);
-        e.gpa = gpa;
-        e.copy = true;
-        e.copy_min = 3;
-        e.copy_long = 6;
-        e.segments = true;
-        e.mark_taps = true;
-        e.pair_min = tp_settings.pairMin(if (platform.c.getenv("FZ_PAIR_MIN")) |v| std.mem.span(v) else null, PAIR_MIN); // rank 1 takes rank 0's
-        e.call_log = platform.c.getenv("FZ_CALL_LOG") != null;
-        e.passed = null;
-        e.snap_pool = .{};
-        e.handoff_ns = 0;
-        e.peer_drops = .empty;
-        e.peer_kept = .empty;
-        e.peer_budget = 0;
-        e.peer_held = 0;
-        e.identity_hash = 0;
-        e.arena_state = std.heap.ArenaAllocator.init(gpa);
-        errdefer e.arena_state.deinit();
-        const arena = e.arena_state.allocator();
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        const device = try mtl.Device.init();
-        const r = try arena.create(Run);
-        r.* = .{ .arena = arena, .device = device, .queue = try device.queue() };
-        r.fused_xsum = true;
-        r.serial = true;
-        r.xnew = true;
-        r.dense = true;
-        r.hc_up = true;
-        r.event = try device.sharedEvent();
-        if (dump_dir) |d| try r.compile(d) else try r.compileChecked();
-        r.sel = try Select.init(r, MAXR);
-        r.lane_new = platform.c.getenv("FZ_LANE") != null; // core lane and fz_gdn on the target (the recorded bits)
-        if (platform.c.getenv("FZ_GDN")) |v| {
-            r.gdn_pipe = try fz.gdn_step.compile(r, false);
-            if (v[0] == '2') r.gdn_kept = try fz.gdn_step.compile(r, true); // GPU-side rounds keep one state a layer
-        }
-        const index_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
-        const index = try std.json.parseFromSliceLeaky(std.json.Value, arena, index_file.bytes[0..index_file.size], .{});
-        var files: std.StringHashMapUnmanaged(void) = .empty;
-        var wit = index.object.get("weight_map").?.object.iterator();
-        while (wit.next()) |kv| try files.put(arena, kv.value_ptr.string, {});
-        var fit = files.keyIterator();
-        while (fit.next()) |name| try r.indexFile(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-        // A pack from another checkpoint is refused, and every mapping unmaps once the identity text exists.
-        const identity = blk: {
-            var maps: std.ArrayList(mtl.MappedFile) = .empty;
-            errdefer for (maps.items) |*m| m.deinit();
-            var mapped_shards: std.ArrayList(pack_io.MappedShard) = .empty;
-            var sit = files.keyIterator();
-            while (sit.next()) |name| {
-                const shard = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/{s}", .{ model_dir, name.* }, 0));
-                try maps.append(arena, shard);
-                try mapped_shards.append(arena, .{ .name = name.*, .size = shard.size, .bytes = shard.bytes[0..shard.size] });
-            }
-            const index_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/model.safetensors.index.json", .{model_dir}, 0));
-            try maps.append(arena, index_mapped);
-            const config_mapped = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/config.json", .{model_dir}, 0));
-            try maps.append(arena, config_mapped);
-            const id = try pack_io.identityFromMapped(arena, index_mapped.bytes[0..index_mapped.size], config_mapped.bytes[0..config_mapped.size], mapped_shards.items);
-            for (maps.items) |*m| m.deinit();
-            maps.clearRetainingCapacity();
-            break :blk id;
-        };
-        e.identity_hash = std.hash.Wyhash.hash(0x6964, identity);
-        const owned_pack_dir = if (dump_dir == null) blk: {
-            const home = if (platform.c.getenv("HOME")) |v| std.mem.span(v) else "";
-            const root = try pack_cache.defaultRoot(arena, home);
-            break :blk try pack_cache.ensure(gpa, io, model_dir, root, identity, PackBuilder{});
-        } else null;
-        defer if (owned_pack_dir) |dir| gpa.free(dir);
-        const pack_dir = dump_dir orelse owned_pack_dir.?;
-        const pack_path = try std.fmt.allocPrintSentinel(arena, "{s}/pack.safetensors", .{pack_dir}, 0);
-        {
-            const pack_file = try mtl.MappedFile.open(pack_path);
-            errdefer pack_file.deinit();
-            try pack_io.checkSourceMapped(arena, pack_file.bytes[0..pack_file.size], identity, pack_path);
-            pack_file.deinit();
-        }
-        try r.indexFile(pack_path);
-        // the reference values: the dump's ref.json, or derived from the checkpoint's config (config.pleRef)
-        var ple_values: config.PleRef = undefined;
-        var attention_scale: f64 = undefined;
-        var cfg = try config.Config.read(arena, io, model_dir); // read once: the reference values and the widths
-        if (dump_dir) |d| {
-            const ref_file = try mtl.MappedFile.open(try std.fmt.allocPrintSentinel(arena, "{s}/ref.json", .{d}, 0));
-            const ref = try std.json.parseFromSliceLeaky(std.json.Value, arena, ref_file.bytes[0..ref_file.size], .{});
-            const ple_ref = ref.object.get("ple").?.object;
-            ple_values = .{
-                .eos = jsonInt(ple_ref.get("eos").?),
-                .multipliers = .{
-                    jsonInt(ple_ref.get("multipliers").?.array.items[0]),
-                    jsonInt(ple_ref.get("multipliers").?.array.items[1]),
-                    jsonInt(ple_ref.get("multipliers").?.array.items[2]),
-                },
-                .sizes = undefined,
-                .offsets = undefined,
-            };
-            for (0..16) |k| {
-                ple_values.sizes[k] = jsonInt(ple_ref.get("sizes").?.array.items[k]);
-                ple_values.offsets[k] = jsonInt(ple_ref.get("offsets").?.array.items[k]);
-            }
-            attention_scale = ref.object.get("attention_scale").?.float;
-        } else {
-            ple_values = try config.pleRef(&cfg);
-            attention_scale = 1.0 / std.math.sqrt(@as(f64, @floatFromInt(cfg.head_dim)));
-        }
-        const m = try arena.create(Model);
-        m.* = .{ .r = r, .layers = undefined, .mix = undefined, .head = undefined, .embed = undefined, .ple = undefined, .t = undefined };
-        for (0..LAYERS) |i| {
-            const linear = i % 4 != 3;
-            var L: Layer = .{ .ahc = try hcOf(r, "L{d}.ahc", .{i}), .mhc = try hcOf(r, "L{d}.mhc", .{i}), .linear = linear, .proj = undefined, .out = undefined, .router = try r.loadf("L{d}.moe.router", .{i}), .ex = undefined };
-            if (linear) {
-                L.proj = try laneOf(r, "L{d}.gdn.in", .{i});
-                L.out = try laneOf(r, "L{d}.gdn.out", .{i});
-                L.conv = try r.loadf("L{d}.gdn.conv", .{i});
-                L.alog = try r.loadf("L{d}.gdn.alog", .{i});
-                L.dt = try r.loadf("L{d}.gdn.dt", .{i});
-                L.norm = try r.loadf("L{d}.gdn.norm", .{i}); // its state views (L.cs, L.so) come from rounds()
-            } else {
-                L.proj = try laneOf(r, "L{d}.att.proj", .{i});
-                L.out = try laneOf(r, "L{d}.att.o", .{i});
-                L.qn = try r.loadf("L{d}.att.qn", .{i});
-                L.kn = try r.loadf("L{d}.att.kn", .{i});
-                L.iqn = try r.loadf("L{d}.att.iqn", .{i});
-                L.keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
-                L.vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) };
-                L.raw = .{ .b = try r.buffer(CAP * 128 * 2) };
-                L.pool = try r.loadf("L{d}.att.pool", .{i});
-                L.pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) };
-            }
-            for (expert_projs, 0..) |proj, j| {
-                for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                    L.ex[j * 3 + k] = try r.loadf("language_model.model.layers.{d}.mlp.{s}.{s}", .{ i, proj, suffix });
-                }
-            }
-            if (r.xpack) try r.repack(&L.ex);
-            m.layers[i] = L;
-        }
-        m.mix = try hcOf(r, "mix", .{});
-        m.head = try laneOf(r, "head", .{});
-        m.embed = .{ try r.load("language_model.model.embed_tokens.weight"), try r.load("language_model.model.embed_tokens.scales"), try r.load("language_model.model.embed_tokens.biases") };
-        m.ple = .{
-            .kv = try laneOf(r, "ple.kv", .{}),
-            .ks = try r.load("ple.ks"),
-            .qs = try r.load("ple.qs"),
-            .cs = try r.load("ple.cs"),
-            .conv = try r.load("ple.conv"),
-            .starts = try r.load("ple.starts"),
-            .tables = undefined,
-            .cin = .{ .b = try r.buffer((PLE_TAIL + MAXR) * WIDE * 2) },
-            .hist = undefined,
-            .eos = ple_values.eos,
-            .mult = undefined,
-            .sizes = undefined,
-            .offsets = undefined,
-        };
-        for (0..3) |k| m.ple.mult[k] = ple_values.multipliers[k];
-        for (0..16) |k| {
-            m.ple.sizes[k] = ple_values.sizes[k];
-            m.ple.offsets[k] = ple_values.offsets[k];
-        }
-        r.ngram = @import("index.zig").ngramSpelling(index.object.get("weight_map").?.object);
-        for (0..GROUPS) |g| {
-            m.ple.tables[3 * g + 0] = try r.group(16 * g, 16, "weight");
-            m.ple.tables[3 * g + 1] = try r.group(16 * g, 16, "scales");
-            m.ple.tables[3 * g + 2] = try r.group(16 * g, 16, "biases");
-        }
-        m.ple.scale = try fz.ple_scale.of(r, index.object.get("weight_map").?.object);
-        const B = struct {
-            fn of(rr: *Run, n: usize) !Buf {
-                return .{ .b = try rr.buffer(n) };
-            }
-        };
-        m.t = .{
-            .h = .{ try B.of(r, MAXR * WIDE * 2), try B.of(r, MAXR * WIDE * 2) },
-            .ssp = try B.of(r, MAXR * 10 * 4 * 4),
-            .part = try B.of(r, 10 * MAXR * 324 * 4),
-            .mixed = try B.of(r, MAXR * D * 2),
-            .inj_a = try B.of(r, MAXR * 4 * 2),
-            .inj_m = try B.of(r, MAXR * 4 * 2),
-            .xs = try B.of(r, 192 * 16 * 4),
-            .p = try B.of(r, MAXR * 16480 * 2),
-            .gout = try B.of(r, MAXR * 6144 * 2),
-            .branch = try B.of(r, MAXR * D * 2),
-            .lg = try B.of(r, MAXR * 513 * 4),
-            .act = try B.of(r, MAXR * 11 * 640 * 2),
-            .pick = try B.of(r, MAXR * 10 * 4),
-            .wts = try B.of(r, MAXR * 10 * 4),
-            .ydown = try B.of(r, MAXR * 11 * D * 2),
-            .q = try B.of(r, MAXR * 24 * 256 * 2),
-            .kout = try B.of(r, MAXR * 2 * 256 * 2),
-            .iq = try B.of(r, MAXR * 4 * 128 * 2),
-            .po = try B.of(r, MAXR * 24 * 16 * 256 * 4),
-            .pm = try B.of(r, MAXR * 24 * 16 * 2 * 4),
-            .aout = try B.of(r, MAXR * 6144 * 2),
-            .emb = try B.of(r, MAXR * D * 2),
-            .kvp = try B.of(r, MAXR * (WIDE + D) * 2),
-            .gated = try B.of(r, MAXR * WIDE * 2),
-            .hout = try B.of(r, MAXR * WIDE * 2),
-            .logits = try B.of(r, MAXR * VOCAB * 2),
-            .picks = try B.of(r, MAXR * 4),
-            .rows = try i32Buf(r, &.{1}),
-            .mdims = try i32Buf(r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
-            .eps = try r.load("eps"),
-            .ids8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .pos8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .zero8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .ids81 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-            .scale = try f32Buf(r, @floatCast(attention_scale)),
-            .log2base = try f32Buf(r, 23.253496170043945),
-            .ple_ids = try i32Buf(r, &(@as([16 * MAXR]i32, @splat(0)))),
-            .ple_meta = try B.of(r, 39 * 8),
-            .kvmeta = try i32Buf(r, &.{ 0, CAP, 1 }),
-            .vocab = try i32Buf(r, &.{VOCAB}),
-        };
-        {
-            const ids_n = try fz.draftCount((try r.entry("mtp.draft_ids")).len);
-            const ids = try r.load("mtp.draft_ids");
-            const mtp_root = @import("index.zig").mtpRoot(index.object.get("weight_map").?.object);
-            var ex: [18]Buf = undefined;
-            for (expert_projs, 0..) |proj, j| {
-                for ([_][]const u8{ "weight", "scales", "biases" }, 0..) |suffix, k| {
-                    ex[j * 3 + k] = try r.loadf("{s}.layers.0.mlp.{s}.{s}", .{ mtp_root, proj, suffix });
-                }
-            }
-            if (r.xpack) try r.repack(&ex);
-            m.mtp = .{
-                .ahc = try hcOf(r, "mtp.ahc", .{}),
-                .mhc = try hcOf(r, "mtp.mhc", .{}),
-                .mix = try hcOf(r, "mtp.mix", .{}),
-                .proj = try laneOf(r, "mtp.att.proj", .{}),
-                .out = try laneOf(r, "mtp.att.o", .{}),
-                .fce = try laneOf(r, "mtp.fce", .{}),
-                .fch = try laneOf(r, "mtp.fch", .{}),
-                .draft = try laneOf(r, "mtp.draft", .{}),
-                .qn = try r.load("mtp.att.qn"),
-                .kn = try r.load("mtp.att.kn"),
-                .iqn = try r.load("mtp.att.iqn"),
-                .enorm = try r.load("mtp.enorm.scale"),
-                .hnorm = try r.load("mtp.hnorm.scale"),
-                .router = try r.load("mtp.moe.router"),
-                .ids = ids,
-                .ids_n = ids_n,
-                .ex = ex,
-                .keys = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
-                .vals = .{ .b = try r.buffer(2 * CAP * 256 * 2) },
-                .raw = .{ .b = try r.buffer(CAP * 128 * 2) },
-                .pool = try r.load("mtp.att.pool"),
-                .pooled = .{ .b = try r.buffer(CAP / 4 * 128 * 2) },
-                .h = .{ try B.of(r, MAXR * WIDE * 2), try B.of(r, MAXR * WIDE * 2) },
-                .emb = try B.of(r, MAXR * D * 2),
-                .en = try B.of(r, MAXR * D * 2),
-                .e = try B.of(r, MAXR * D * 2),
-                .hn = try B.of(r, MAXR * WIDE * 2),
-                .hs = try B.of(r, MAXR * WIDE * 2),
-                .logits = try B.of(r, ids_n * 2),
-                .pick = try B.of(r, 16),
-                .md1 = try i32Buf(r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
-                .n_ids = undefined,
-                .slots = undefined,
-            };
-            for (&m.mtp.slots) |*sl| sl.* = .{
-                .rows = try i32Buf(r, &.{1}),
-                .md = try i32Buf(r, &.{ 1, 16, 0, 0, 0, 0, 0, 0 }),
-                .md4 = try i32Buf(r, &.{ 4, 16, 0, 0, 0, 0, 0, 0 }),
-                .ids8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-                .pos8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-                .nk8 = try i32Buf(r, &(@as([MAXR]i32, @splat(0)))),
-                .kvmeta = try i32Buf(r, &.{ 0, CAP, 1 }),
-                .n_add = try i32Buf(r, &.{0}),
-            };
-            m.mtp.n_ids = try i32Buf(r, &.{@intCast(m.mtp.ids_n)});
-        }
-        try r.shapes.put(arena, "Kc_shape", (try i32Buf(r, &.{ 1, 2, CAP, 256 })).b);
-        try r.shapes.put(arena, "IDS_shape", (try i32Buf(r, &.{ MAXR, 1 })).b);
+    /// `load`, in speed-up mode when `speed_up` (or TF_FLASHNEXT_TP) names this Mac's settings: rank, MCDMA library...
+    pub const loadWith = @import("engine_load.zig").loadWith;
 
-        e.r = r;
-        e.m = m;
-        e.pr = try arena.create(Prompt);
-        e.pr.* = try Prompt.init(r, pack_dir, r.xnew_header);
-        const uniform = try @import("engine_widths.zig").apply(arena, &cfg, index.object.get("weight_map").?.object, e.pr, m);
-        e.pr2 = try arena.create(Prompt);
-        e.pr2.* = try e.pr.sibling();
-        try e.rounds();
-        e.tsel = try GSelect.init(r, 0);
-        e.msel = try GSelect.init(r, 0);
-        // speed-up mode: TP=2 with the peer the settings name (tp.zig); both ranks then run the same replies in lockstep
-        const tp_path: ?[]const u8 = speed_up orelse if (platform.c.getenv("TF_FLASHNEXT_TP")) |p| std.mem.span(p) else null;
-        if (tp_path != null and !uniform) return error.SpeedUpNeeds6Bit32; // TP splits the 6/32 kernels only
-        if (tp_path) |path| r.tp = try fz.Tp2.init(arena, r.device, path);
-        if (r.tp) |t| try r.held.appendSlice(arena, &.{ t.wbuf, t.one, t.pick_tmp }); // every pair round uses them
-        if (r.tp == null) try fz.rows_load.attach(
-            e.pr,
-            m,
-            @import("index.zig").mtpRoot(index.object.get("weight_map").?.object),
-        );
-        return e;
-    }
+    pub const loadConfigured = @import("engine_load.zig").loadConfigured;
 
     /// The GPU-side rounds' buffers (engine_rounds.zig).
-    fn rounds(e: *Engine) !void {
+    pub fn rounds(e: *Engine) !void {
         return @import("engine_rounds.zig").rounds(e);
     }
 
@@ -469,7 +165,7 @@ pub const Engine = struct {
     }
 
     /// GPU-side rounds read positions and widths the previous round's verdict wrote into the arena.
-    fn gpuMode(e: *Engine) void {
+    pub fn gpuMode(e: *Engine) void {
         const m = e.m;
         const r = e.r;
         r.gpu_round = true;
@@ -479,376 +175,42 @@ pub const Engine = struct {
         m.mtp.slots = e.gpu_slots;
     }
 
-    fn statesCopy(e: *Engine, states: bool) void { // the kept row of every DeltaNet layer's window output into its state
+    pub fn statesCopy(e: *Engine, states: bool) void { // the kept row of every DeltaNet layer's window output into its state
         const r = e.r;
         if (states) r.copyKept(.{ .b = e.o_so }, .{ .b = e.g_so }, SO_ROW / 4, SO_ROW / 4, MAXR * SO_ROW / 4, SO_ROW / 4, 36, -1);
         r.copyKept(.{ .b = e.o_cs }, .{ .b = e.g_cs }, CS_ROW / 4, CS_ROW / 4, MAXR * CS_ROW / 4, CS_ROW / 4, 36, -1);
     }
 
     /// A prompt call of up to `left` rows: one chunk, as two staggered segments once each gets SEG_MIN rows.
-    fn chunkCall(e: *const Engine, left: usize) segments.Call {
-        return if (e.segments) segments.next(left, e.pr.step, SEG_MIN) else .{ .rows = @min(e.pr.step, left), .parts = 1 };
+    pub fn chunkCall(e: *const Engine, left: usize) segments.Call {
+        const step = fz.chunkRows(e.m.pos, e.pr.step); // past the trained window a chunk scores more blocks a row
+        return if (e.segments) segments.next(left, step, SEG_MIN) else .{ .rows = @min(step, left), .parts = 1 };
     }
 
-    fn isEos(eos: []const u32, tok: u32) bool {
+    pub fn isEos(eos: []const u32, tok: u32) bool {
         return std.mem.indexOfScalar(u32, eos, tok) != null;
     }
 
     /// One reply, sampled when out.sampling is set. `depth`: a round's drafts (0: one token a round); null: the rule.
-    pub fn generate(e: *Engine, prompt: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, out: Out) !Result {
-        return e.generateFrom(prompt, 0, &.{}, max_tokens, eos, depth, .{}, out);
-    }
+    pub const generate = @import("engine_generate.zig").generate;
 
     /// `generate` after snapshot.restore put `from` tokens in the model, cut at marks for out.marked, under `budget`.
-    pub fn generateFrom(e: *Engine, prompt: []const u32, from: usize, marks: []const u32, max_tokens: usize, eos: []const u32, depth: ?usize, budget: Think, out: Out) !Result {
-        const r = e.r;
-        const m = e.m;
-        if (prompt.len == 0) return error.EmptyPrompt;
-        if (prompt.len + max_tokens + MARGIN > CAP) return error.ContextFull;
-        if (from >= prompt.len or (from > 0 and m.pos != from)) return error.NotResumed;
-        for (marks, 0..) |mk, i| if (mk <= from or mk >= prompt.len or (i > 0 and mk <= marks[i - 1])) return error.Marks;
-        if (out.sampling != null and r.tp != null) return error.SpeedUpGreedyOnly; // each Mac holds half the logits
-        var watch = try think.Watch.init(budget);
-        const pool = mtl.objc.Pool.push();
-        defer pool.pop();
-        if (r.tp) |tp| if (tp.rank == 0) { // served speed-up mode: rank 1 runs the same request (follow)
-            const t0 = platform.c.mach_absolute_time();
-            defer e.handoff_ns = @intCast((platform.c.mach_absolute_time() - t0) * 125 / 3); // mach ticks are 125/3 ns on Apple silicon
-            try follow_mod.send(e, tp, prompt, from, marks, max_tokens, eos, depth, budget);
-            if (!try tp.waitAck()) return error.PeerNotResumed;
-        };
-        e.hostMode();
-        defer e.hostMode();
-        if (from == 0) m.reset();
-        m.mtp.pos = 0;
-        m.mtp.drafted = 0;
-        var pick: u32 = 0;
-        var at: usize = from;
-        var last_n: usize = 1;
-        var dr: marks_mod.Driver = .{ .marks = marks };
-        const ps = [2]*Prompt{ e.pr, e.pr2 };
-        var calls: CallLog = .{};
-        while (at < prompt.len) {
-            if (try e.agree(out.cancelled(out.ctx))) return .{ .reason = .cancelled };
-            const t_call = platform.c.mach_absolute_time();
-            const g_call = m.gpu_seconds;
-            if (r.tp) |tp| { // speed-up mode: the call's rows split across the two Macs, running on past up to MARKS marks
-                const pair_taps = e.mark_taps and m.marks != null;
-                var call = segments.next(if (pair_taps) prompt.len - at else dr.toNext(at, prompt.len), e.pr.step, e.pair_min);
-                var passed: [fz.MARKS]u32 = undefined;
-                var n_passed: usize = 0;
-                if (call.parts == 2 and pair_taps) {
-                    const in_ = dr.inside(at, call.rows, &passed);
-                    n_passed = in_.n;
-                    if (in_.cut) |cut| call = segments.next(cut, e.pr.step, e.pair_min);
-                }
-                if (call.parts == 2) {
-                    const hist0 = m.ple.hist;
-                    pick = try Prompt.chunkPair(e.pr, m, e.gpa, prompt[at .. at + call.rows], tp, passed[0..n_passed]);
-                    var span: [2][2]usize = undefined; // each Mac's segment: first position, rows with an MTP key
-                    for (0..2) |k| {
-                        const s = at + segments.start(call.rows, 2, k);
-                        const n = segments.rows(call.rows, 2, k);
-                        span[k] = .{ s, if (s + n < prompt.len) n else n - 1 };
-                    }
-                    const mine = span[tp.rank];
-                    try e.pr.mtpKeys(m, mine[0], prompt[mine[0] + 1 .. mine[0] + 1 + mine[1]], e.pr.last);
-                    try e.pr.pairMtp(m, tp, mine, span[1 - tp.rank]);
-                    const last_call = at + call.rows == prompt.len;
-                    try dr.cross(e, passed[0..n_passed], segments.rows(call.rows, 2, 0), segments.start(call.rows, 2, tp.rank), last_call);
-                    last_n = 1; // m.last points at the last row
-                    for (passed[0..n_passed], 0..) |row, j| { // both Macs hold each passed mark's states once it crosses
-                        dr.passed(e, out, .{ .at = at + row, .slot = j, .tail = m.marks.?.tail_at(j), .hist = marks_mod.histAt(hist0, prompt, at, row) }, last_call);
-                    }
-                    calls.note(call.rows, 2, t_call, g_call, m.gpu_seconds);
-                    at += call.rows;
-                    dr.after(out, at, n_passed); // a pair chunk can end on a mark too
-                    continue;
-                }
-            }
-            // a call runs on past marks and writes the DeltaNet states there (up to MARKS); more marks end it at the next
-            const taps = e.mark_taps and m.marks != null;
-            var c: segments.Call = e.chunkCall(if (taps) prompt.len - at else dr.toNext(at, prompt.len));
-            var inside: [fz.MARKS]u32 = undefined;
-            var n_in: usize = 0;
-            if (taps) {
-                const in_ = dr.inside(at, c.rows, &inside);
-                n_in = in_.n;
-                if (in_.cut) |cut| c = e.chunkCall(cut);
-            }
-            const hist0 = m.ple.hist; // the two tokens before the call: the n-gram history at a passed mark follows from them
-            pick = try Prompt.chunkMarked(ps[0..c.parts], m, e.gpa, prompt[at .. at + c.rows], inside[0..n_in]);
-            if (at + c.rows == prompt.len) if (out.sampling) |p| { // the first token, from the last row
-                e.draw_at.b.slice(u32, MAXR)[0] = @intCast(prompt.len);
-                const cb = r.queue.commandBuffer();
-                r.enc = cb.compute(.serial);
-                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, 1, VOCAB, p);
-                try m.finish(cb);
-                pick = m.t.picks.b.slice(u32, 1)[0];
-            };
-            for (ps[0..c.parts], 0..) |p, k| { // the MTP head's keys for each segment's rows, from its streams
-                const s = at + segments.start(c.rows, c.parts, k);
-                const n = segments.rows(c.rows, c.parts, k);
-                const nexts = if (s + n < prompt.len) n else n - 1;
-                try p.mtpKeys(m, s, prompt[s + 1 .. s + 1 + nexts], p.last);
-                last_n = n;
-            }
-            for (inside[0..n_in], 0..) |row, j| { // the passed marks: the cache keeps each from where the call left it
-                const seg = marks_mod.markSeg(ps[0..c.parts], c.rows, row);
-                dr.passed(e, out, .{ .at = at + row, .slot = j, .tail = .{ .b = seg.p.b.cin.b, .off = seg.p.b.cin.off + seg.row * WIDE * 2 }, .hist = marks_mod.histAt(hist0, prompt, at, row) }, at + c.rows == prompt.len);
-            }
-            calls.note(c.rows, c.parts, t_call, g_call, m.gpu_seconds);
-            at += c.rows;
-            dr.after(out, at, n_in);
-        }
-        out.prefilled(out.ctx);
-        pick = watch.first(pick);
-        const first_stop = out.tokens(out.ctx, &.{pick}) or isEos(eos, pick);
-        try dr.flush(e, out); // after the first token: the slots, rows and tail stay put till the rounds
-        if (e.call_log) calls.log(if (r.tp) |tp| tp.rank else 0);
-        if (try e.agree(first_stop)) return .{ .reason = .stop };
-        if (max_tokens <= 1) return .{ .reason = .length };
-        return e.decode(prompt, pick, .{ .b = m.last.b, .off = m.last.off + (last_n - 1) * WIDE * 2 }, max_tokens, eos, depth, &watch, out, null);
-    }
+    pub const generateFrom = @import("engine_generate.zig").generateFrom;
 
     /// Where `decode` left a stream it handed over: its state as a host round leaves it, `cache` rows in the cache.
-    pub const Handoff = struct { yielded: bool = false, cache: usize = 0 };
+    pub const Handoff = @import("engine_generate.zig").Handoff;
 
     /// GPU rounds after prefill; cancellation yields through handoff when supplied.
-    pub fn decode(e: *Engine, prompt: []const u32, pick: u32, streams: Buf, max_tokens: usize, eos: []const u32, depth: ?usize, watch: *think.Watch, out: Out, handoff: ?*Handoff) !Result {
-        const r = e.r;
-        const m = e.m;
-        defer e.hostMode();
-        var res: Result = .{ .reason = .length };
-        var emitted: usize = 1;
-        const ar = r.ar.b.slice(i32, fz.AR_WORDS);
-        if (m.state == 1) { // the state into the rounds' state buffers
-            ar[0] = 1;
-            const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(.serial);
-            e.statesCopy(true);
-            try m.finish(cb);
-            m.state = 0;
-            m.state_row = 0;
-        }
-        var rule: DepthRule = .{ .pair = r.tp != null };
-        var by_cost: ?CostDepth = if (r.tp == null and !r.device.tensorUnits()) .{} else null; // 0.6.5's rule before M5
-        var last_end: f64 = 0; // the previous read round's GPU end (s): a round's time is the gap to its own
-        var copy_rate: f64 = 0.6; // drafts landed over offered: copied rounds, the head's rounds
-        var head_rate: f64 = 0.6;
-        const fixed = depth;
-        const depth0 = fixed orelse if (by_cost) |*c| c.pick() else rule.pick();
-        var next_depth: usize = depth0; // the rule's drafts for the next round to encode (rank 0's in speed-up mode)
-        const w = e.wids.b.slice(u32, 16);
-        w[0] = pick;
-        if (depth0 > 0) { // the head: the last prompt row with the first token, then its chain
-            m.mtp.pos = prompt.len - 1;
-            w[1] = try m.mtpRun(&.{pick}, streams);
-            for (2..depth0 + 1) |j| w[j] = try m.mtpChain(w[j - 1]);
-        }
-        const W0 = depth0 + 1;
-        const T: i32 = @intCast(m.pos);
-        const long = prompt.len + max_tokens + 8 > 4 * TOP;
-        if (long) { // selection on the GPU: every complete block the target and the head hold, pooled
-            const cb = r.queue.commandBuffer();
-            r.enc = cb.compute(.serial);
-            try r.sel.?.catchUp(r, m, m.pos / 4);
-            try m.finish(cb);
-            e.tsel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
-            e.msel.sel.b.slice(i32, 128)[fz.SEL_POOLED] = @intCast(m.pos / 4);
-        }
-        @memset(ar, 0);
-        ar[1] = T;
-        const hs = e.hist.slice(u32, CAP + 64); // the history: the prompt and the first token
-        @memcpy(hs[0..prompt.len], prompt);
-        hs[prompt.len] = pick;
-        ar[fz.AR_HLEN] = @intCast(prompt.len + 1);
-        for (0..MAXR) |i| {
-            ar[fz.AR_POS + i] = if (i < W0) T + @as(i32, @intCast(i)) else 0;
-            ar[fz.AR_NK + i] = if (i < W0) T + @as(i32, @intCast(i)) + 1 else 0;
-        }
-        ar[fz.AR_KV], ar[fz.AR_KV + 1], ar[fz.AR_KV + 2] = .{ T, CAP, @intCast(W0) };
-        watch.arm(ar, @intCast(T));
-        const pm = m.t.ple_meta.b.slice(i64, 39);
-        pm[0], pm[1], pm[2], pm[3] = .{ m.ple.hist[0], m.ple.hist[1], m.ple.eos, 0 };
-        for (0..3) |k| pm[4 + k] = m.ple.mult[k];
-        for (0..16) |k| {
-            pm[7 + k] = m.ple.sizes[k];
-            pm[23 + k] = m.ple.offsets[k];
-        }
-        e.gpuMode();
-        if (long) {
-            r.gsel = e.tsel;
-            m.mtp.gsel = e.msel;
-        }
-        const base = r.event_value;
-        var cbs: [4]?mtl.CommandBuffer = .{ null, null, null, null };
-        var widths: [4]usize = undefined;
-        widths[0] = W0;
-        var round: usize = 0;
-        var done: usize = 0;
-        var w_sum: usize = 0;
-        res.min_rows = @intCast(W0);
-        const rg = e.ring.slice(u32, fz.RING_WORDS * RING);
-        var failed: ?anyerror = null;
-        var kv_len: usize = m.pos; // the cache's rows after the rounds landed so far
-        while (true) {
-            const wr = widths[round % 4];
-            const cb = r.queue.commandBuffer();
-            if (round > 0) cb.waitFor(r.event, base + round);
-            r.enc = cb.compute(.serial);
-            m.t.rows = e.rows_w[wr];
-            m.t.mdims = e.mdims_w[wr];
-            if (round > 0) {
-                const wp = widths[(round - 1) % 4];
-                e.statesCopy(r.gdn_kept == null); // kept states replay the kept rows themselves
-                r.copyKept(e.cins[(round - 1) % 2], e.cins[round % 2], PLE_TAIL * WIDE / 2, WIDE / 2, 0, 0, 1, 0);
-                if (wr > 1) {
-                    try m.mtpEncode(MAXR - 1 + wp, wp, m.t.picks, m.last, .{ .b = e.wids.b, .off = 4 });
-                    for (1..wr - 1) |j| try m.mtpEncode(j, 1, .{ .b = e.wids.b, .off = 4 * j }, m.mtp.h[1], .{ .b = e.wids.b, .off = 4 * (j + 1) });
-                    if (e.copy) { // copied drafts replace the head's when the history repeats its last tokens
-                        r.enc.setPipeline(r.lookup_pipe);
-                        r.enc.setBuffer(e.hist, 0, 0);
-                        r.enc.setBuffer(r.ar.b, r.ar.off, 1);
-                        r.enc.setBuffer(e.wids.b, e.wids.off, 2);
-                        const lenient = copy_rate + 0.05 >= head_rate;
-                        const lc = [4]u32{ @intCast(wr), if (lenient) e.copy_min else 4, if (lenient) e.copy_long else 9, if (lenient) 1 else 2 };
-                        r.enc.setBytes(std.mem.asBytes(&lc), 3);
-                        r.enc.dispatchThreads(mtl.Size.of(1024, 1, 1), mtl.Size.of(1024, 1, 1));
-                    }
-                }
-            }
-            if (watch.armed) think.force(r, e.wids, e.hist, wr); // the close's tokens as the window's drafts
-            m.ple.cin = e.cins[round % 2];
-            m.rec_slot = round % 2;
-            m.pleIdsGpu(wr, e.wids);
-            w_sum += wr;
-            const ub = (@as(usize, @intCast(T)) + w_sum) / 4 + 2;
-            if (r.gsel) |*g| g.nb_ub = ub;
-            if (m.mtp.gsel) |*g| g.nb_ub = ub;
-            try m.windowEncode(wr, e.wids);
-            if (out.sampling) |p| { // the window's picks redrawn from its logits, in place of the head's argmax
-                sample.positions(r.enc, r.positions_pipe, r.ar, e.draw_at, wr);
-                if (!r.serial) r.enc.barrier();
-                sample.draw(r.enc, r.draw_pipe, m.t.logits, e.draw_at, m.t.picks, wr, VOCAB, p);
-                if (!r.serial) r.enc.barrier();
-            }
-            // the widest windows while copies land whole; otherwise the head's rule
-            const copying = e.copy and copy_rate + 0.05 >= head_rate and copy_rate > 0.9;
-            const wn = (if (fixed) |d| d else if (copying)
-                (if (by_cost) |*c| c.copyDrafts(copy_rate) else MAXR - 1)
-            else
-                next_depth) + 1;
-            widths[(round + 1) % 4] = wn;
-            if (watch.armed) think.span(r, m.t.picks, wr); // and in place of the target's picks
-            const cfg = [4]u32{ @intCast(wr), @intCast(wn), CAP, 0 };
-            r.enc.setPipeline(r.accept_pipe);
-            for ([_]Buf{ e.wids, m.t.picks, r.ar, .{ .b = e.ring }, m.t.ple_meta }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
-            r.enc.setBytes(std.mem.asBytes(&cfg), 5);
-            r.enc.setBuffer(e.hist, 0, 6);
-            r.enc.dispatchThreads(mtl.Size.of(1, 1, 1), mtl.Size.of(1, 1, 1));
-            r.enc.end();
-            cb.signal(r.event, base + round + 1);
-            cb.commit();
-            cbs[round % 4] = cb;
-            round += 1;
-            if (round < 2) continue;
-            const prev = cbs[done % 4].?;
-            prev.wait();
-            cbs[done % 4] = null;
-            if (prev.failure()) |msg| {
-                std.log.err("command buffer failed: {s}", .{msg});
-                failed = error.GpuFailed;
-                break;
-            }
-            if (r.tp) |tp| if (tp.failed.load(.acquire)) { // the link failed: the host drained the round, its tokens are wrong
-                failed = error.TpLinkFailed;
-                break;
-            };
-            const slot = (done % RING) * fz.RING_WORDS;
-            const keep = rg[slot];
-            const wd = widths[done % 4];
-            if (by_cost) |*c| if (last_end > 0) c.time(wd - 1, (prev.gpuEnd() - last_end) * 1e3);
-            last_end = prev.gpuEnd();
-            const got = rg[slot + 3 .. slot + 3 + keep];
-            const learn = !watch.read(got); // a round that landed the close's tokens teaches no rate, rule or counter
-            if (learn and wd > 1) {
-                const frac = @as(f64, @floatFromInt(keep - 1)) / @as(f64, @floatFromInt(wd - 1));
-                if (rg[slot + 1] != 0) copy_rate = 0.8 * copy_rate + 0.2 * frac else head_rate = 0.8 * head_rate + 0.2 * frac;
-                if (rg[slot + 1] == 0 and wd == MAXR) copy_rate *= 0.8; // a full window that found no copy: copies stopped landing
-            }
-            if (learn and rg[slot + 1] != 0) {
-                res.copy_rounds += 1;
-                res.copy_accepted += keep - 1;
-                const n = @min(rg[slot + 2], 8);
-                res.copy_by_len[n][0] += 1;
-                res.copy_by_len[n][1] += keep - 1;
-            }
-            if (learn and fixed == null and wd > 1 and rg[slot + 1] == 0) rule.update(wd - 1, keep - 1);
-            if (learn and wd > 1 and rg[slot + 1] == 0) if (by_cost) |*c| c.observe(wd - 1, keep - 1);
-            res.rounds += 1;
-            if (learn) res.drafted += wd - 1;
-            if (learn) res.accepted += keep - 1;
-            res.min_rows = @min(res.min_rows, @as(u32, @intCast(wd)));
-            done += 1;
-            kv_len += keep;
-            var take: usize = 0;
-            var stop = false;
-            while (take < got.len and emitted + take < max_tokens) {
-                take += 1;
-                if (isEos(eos, got[take - 1])) {
-                    stop = true;
-                    break;
-                }
-            }
-            if (take > 0 and out.tokens(out.ctx, got[0..take])) stop = true;
-            emitted += take;
-            const cancel = !stop and emitted < max_tokens and out.cancelled(out.ctx);
-            const ag = e.agreeRound(
-                stop or emitted >= max_tokens or cancel,
-                if (by_cost) |*c| c.pick() else rule.pick(),
-            ) catch |err| {
-                failed = err;
-                break;
-            };
-            next_depth = ag.depth;
-            const quit = ag.quit;
-            if (quit) {
-                res.reason = if (stop) .stop else if (emitted >= max_tokens) .length else .cancelled;
-                break;
-            }
-        }
-        for (&cbs) |*c| if (c.*) |cb| {
-            cb.wait();
-            c.* = null;
-        };
-        r.event_value = base + round + 1;
-        if (failed) |err| return err;
-        if (handoff) |h| if (res.reason == .cancelled) try e.handOver(h, round, kv_len);
-        return res;
-    }
+    pub const decode = @import("engine_generate.zig").decode;
 
     /// Hands over at cache rows after the queued round, restoring the n-gram tail.
-    fn handOver(e: *Engine, h: *Handoff, round: usize, cache: usize) !void {
-        if (e.r.gdn_kept != null) return error.HandoffUnsupported; // kept states replay their rows in the next window
-        if ((round - 1) % 2 == 1) {
-            const n = PLE_TAIL * WIDE * 2;
-            @memcpy(e.cins[0].b.contents()[e.cins[0].off..][0..n], e.cins[1].b.contents()[e.cins[1].off..][0..n]);
-        }
-        h.* = .{ .yielded = true, .cache = cache };
-    }
+    pub const handOver = @import("engine_generate.zig").handOver;
 
     /// Speed-up mode: whether to stop at a step both ranks take (rank 0 decides, rank 1 follows); alone, `quit`.
-    fn agree(e: *Engine, quit: bool) !bool {
-        return if (e.r.tp) |tp| (try tp.agree(quit, 0)).quit else quit;
-    }
+    pub const agree = @import("engine_generate.zig").agree;
 
     /// A round's stop decision and the next round's drafts: rank 0's for both Macs (each Mac's own timings differ).
-    fn agreeRound(e: *Engine, quit: bool, depth: usize) !struct { quit: bool, depth: usize } {
-        const tp = e.r.tp orelse return .{ .quit = quit, .depth = depth };
-        const a = try tp.agree(quit, @intCast(depth));
-        return .{ .quit = a.quit, .depth = a.depth };
-    }
+    pub const agreeRound = @import("engine_generate.zig").agreeRound;
 
     /// Speed-up mode's rank 1: it runs rank 0's requests (follow) and serves none of its own.
     pub fn followsPeer(e: *const Engine) bool {
@@ -865,12 +227,12 @@ pub const Engine = struct {
         return follow_mod.run(e);
     }
 
-    /// Rank 1: rank 0's next request, its reply into `out` (null: hashed and logged, this Mac's states kept); null once rank 0 closes (follow.zig).
+    /// Rank 1: rank 0's next request, its reply into `out` (null: hashed and logged, this Mac's states kept); null...
     pub fn followWith(e: *Engine, out: ?Out) !?Result {
         return follow_mod.one(e, out);
     }
 
-    const Quiet = struct {
+    pub const Quiet = struct {
         fn prefilled(_: *anyopaque) void {}
         fn tokens(_: *anyopaque, _: []const u32) bool {
             return false;
@@ -880,8 +242,7 @@ pub const Engine = struct {
         }
     };
 
-    /// A short reply on fixed tokens: the kernels' first launches and the weights' first reads happen here, not in
-    /// the first request. In speed-up mode rank 1 runs rank 0's warm-up request instead.
+    /// A short reply on fixed tokens: the kernels' first launches and the weights' first reads happen here, not in...
     pub fn warm(e: *Engine) !void {
         if (e.r.tp) |tp| if (tp.rank == 1) {
             _ = try follow_mod.one(e, null);
@@ -912,15 +273,11 @@ pub const Engine = struct {
     }
 };
 
-const PackBuilder = struct {
-    pub fn build(_: PackBuilder, gpa: Allocator, io: Io, model_dir: []const u8, out_dir: []const u8, vocab_path: []const u8) !void {
-        _ = try pack.build(gpa, io, model_dir, out_dir, vocab_path);
-    }
-};
+const PackBuilder = @import("engine_load.zig").PackBuilder;
 
 test "load sets no DeltaNet state view before rounds() points them at the round buffers" {
-    const src = @embedFile("engine.zig");
-    const at = std.mem.indexOf(u8, src, "pub fn loadWith(").?;
+    const src = @embedFile("engine_load.zig");
+    const at = std.mem.indexOf(u8, src, "pub fn loadConfigured(").?;
     const body = src[at..std.mem.indexOfPos(u8, src, at, "try e.rounds();").?];
     try std.testing.expect(std.mem.indexOf(u8, body, ".cs[") == null and std.mem.indexOf(u8, body, ".so[") == null);
 }

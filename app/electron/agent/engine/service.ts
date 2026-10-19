@@ -6,8 +6,10 @@ import { createHash } from 'node:crypto'
 import type { EngineCapabilities, EngineConnection, EngineEvent, EngineInstalledModel, EngineLearningSnapshot, EngineLibraryScanOptions, EngineModelLibrarySnapshot, EnginePerformance, EngineSnapshot, EngineStatus, HubModelSummary, ModelPreflight, PullProgress, Readiness, EngineModelGenerationSettings, EngineModelPreviewResult, EngineModelComparisonInput, EngineModelComparisonSnapshot } from '../types'
 import { FAMILY_TITLES, SUGGESTED_MODELS, drafterFor } from './catalog'
 import { parseCapabilities, parseInfoOutput, parseModelsOutput, parseVersion, runEngineCli, type ModelInfo } from './cli'
-import { createHubFetch, preflightRepo, searchHub } from './hub'
-import { assertRepoId, freeDiskBytes, hasCachedSnapshot, hubCacheDir, isRevision, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
+import { ModelHub } from './model-hub'
+import { engineLaunchEnv, pinnedEngineEnv } from './engine-env'
+export { engineChildEnv } from './engine-env'
+import { assertRepoId, hasCachedSnapshot, hubCacheDir, repoCacheDir, repoCachedBytes, type EngineBinary } from './paths'
 import { setEnginePerformanceRecorder, setEngineServeHook } from './provider'
 import { createTurnStats, finalizeTurnStats, readEngineTimings, recordModelCall, type ModelCallSample } from '../turn-stats'
 import { recordEngineContext } from './context'
@@ -50,24 +52,13 @@ export interface EngineServiceOptions {
   benchmarkStore?: ModelBenchmarkStore
 }
 
-const CHILD_ENV_KEYS = ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'USER', 'LOGNAME', 'SHELL', 'HF_HOME', 'HF_HUB_CACHE', 'HF_HUB_OFFLINE']
-
-// The engine gets ordinary OS values and the Hugging Face cache settings, never the app's provider keys.
-export function engineChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {}
-  for (const key of CHILD_ENV_KEYS) if (typeof base[key] === 'string') env[key] = base[key]
-  env.HOME = env.HOME || os.homedir()
-  env.PATH = env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin'
-  return env
-}
-
 function processAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true } catch (error) { return (error as NodeJS.ErrnoException).code === 'EPERM' }
 }
 
 export class EngineService {
   readonly supervisor: EngineSupervisor
-  private readonly env: NodeJS.ProcessEnv
+  private readonly launch: { env: NodeJS.ProcessEnv; endpoint: string }
   private readonly totalMemoryBytes: number
   private version: string | null = null
   private versionChecked = false
@@ -85,9 +76,8 @@ export class EngineService {
   private sharedEndpointKey: string | null = null
   private comparisonAdmission: (() => void) | null = null
   private comparisonRequest: { owner: symbol; model: string; profile: EngineModelGenerationSettings | null } | null = null
-  private readonly preflights = new Map<string, ModelPreflight>()
   private readonly lastPullEmit = new Map<string, number>()
-  private hubFetch: typeof fetch | null
+  private readonly models: ModelHub
   private readonly revisions: ModelRevisions
   private readonly preferences: EnginePreferenceStore
   private readonly library: ModelLibrary
@@ -103,10 +93,19 @@ export class EngineService {
   private learningPurge: Promise<void> | null = null
   private purgingLearning = false
 
+  // A supplied childEnv stays live for the fake engine's knobs; the authorized Hub origin stays pinned either way.
+  private get env(): NodeJS.ProcessEnv {
+    return this.options.childEnv ? pinnedEngineEnv(this.options.childEnv, this.launch.endpoint) : this.launch.env
+  }
+
   constructor(private readonly options: EngineServiceOptions) {
-    this.env = options.childEnv ?? engineChildEnv(options.env ?? process.env)
+    this.launch = engineLaunchEnv(options)
     this.totalMemoryBytes = options.totalMemoryBytes ?? os.totalmem()
-    this.hubFetch = options.fetch ?? null
+    this.models = new ModelHub({
+      endpoint: this.launch.endpoint, fetch: options.fetch, env: this.env, totalMemoryBytes: this.totalMemoryBytes,
+      capabilities: () => this.capabilitiesDoc(), installed: () => this.installed(), cacheDir: () => this.hub,
+      memory: () => ({ limit: this.supervisor.memoryLimitBytes, budget: this.supervisor.memoryBudgetBytes }),
+    })
     this.revisions = new ModelRevisions(options.appHome, () => this.hub)
     this.preferences = new EnginePreferenceStore(options.appHome)
     this.library = new ModelLibrary({ appHome: options.appHome, env: this.env, capabilities: () => this.capabilitiesDoc(), memoryLimitBytes: () => this.supervisor.memoryLimitBytes })
@@ -614,38 +613,9 @@ export class EngineService {
     return out
   }
 
-  async search(query: string): Promise<HubModelSummary[]> {
-    return searchHub(query, this.hubDeps())
-  }
+  search(query: string): Promise<HubModelSummary[]> { return this.models.search(query) }
 
-  private hubDeps() {
-    this.hubFetch ??= createHubFetch()
-    return { fetch: this.hubFetch, offline: /^(1|true|yes|on)$/i.test(this.env.HF_HUB_OFFLINE ?? '') }
-  }
-
-  async preflight(repo: string, revision: string | null = null): Promise<ModelPreflight> {
-    assertRepoId(repo)
-    if (isLocalModelId(repo)) throw new Error('Local library checkpoints load in place. Scan their folder instead of downloading them.')
-    if (revision != null && !isRevision(revision)) throw new Error('Expected a branch, tag or commit for the revision.')
-    // Offline: fail before asking the engine for its families or touching the network.
-    const hub = this.hubDeps()
-    if (hub.offline) throw new Error('Hugging Face is offline in this session (HF_HUB_OFFLINE is set).')
-    const [caps, installed] = await Promise.all([this.capabilitiesDoc(), this.installed()])
-    const result = await preflightRepo(repo, revision, {
-      ...hub,
-      families: caps.families,
-      familyTitles: FAMILY_TITLES,
-      totalMemoryBytes: this.totalMemoryBytes,
-      memoryLimitBytes: this.supervisor.memoryLimitBytes,
-      memoryBudgetBytes: this.supervisor.memoryBudgetBytes,
-      installed: new Set(installed.map((m) => m.repo)),
-      drafterFor,
-      cachedBytes: (r) => repoCachedBytes(this.hub, r),
-      freeDiskBytes: () => freeDiskBytes(this.hub),
-    })
-    this.preflights.set(JSON.stringify([repo, revision]), result)
-    return result
-  }
+  preflight(repo: string, revision: string | null = null): Promise<ModelPreflight> { return this.models.preflight(repo, revision) }
 
   pullList(): PullProgress[] {
     const running = [...this.pulls.values()].map((p) => p.last)
@@ -659,7 +629,7 @@ export class EngineService {
     if (this.pulls.has(assertRepoId(repo))) return this.pulls.get(repo)!.last
     await this.revisions.read() // Preserve invalid registry bytes and refuse before starting a child.
     this.assertPullIdle(repo)
-    const pre = this.preflights.get(JSON.stringify([repo, revision])) ?? await this.preflight(repo, revision)
+    const pre = this.models.cached(JSON.stringify([repo, revision])) ?? await this.preflight(repo, revision)
     this.assertModelAdmission()
     if (this.deletingModel) throw new Error('Wait for model cache cleanup before starting a download.')
     this.assertPullIdle(repo)
@@ -707,7 +677,7 @@ export class EngineService {
   }
 
   private invalidatePreflight(repo: string): void {
-    for (const [key, value] of this.preflights) if (value.repo === repo) this.preflights.delete(key)
+    this.models.invalidate(repo)
   }
 
   cancelPull(repo: string): boolean {

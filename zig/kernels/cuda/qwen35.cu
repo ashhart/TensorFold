@@ -8,6 +8,19 @@ using namespace tf_q35;
 __device__ __forceinline__ bool past_windows(const int* P, int s) { return P != nullptr && s >= P[3]; }
 __device__ __forceinline__ bool recorded(const int* P) { return P != nullptr && P[4] != 0; }
 
+// One 64-entry group's sum, its entries added in order (x 16-byte aligned).
+__device__ __forceinline__ float group_sum(const __nv_bfloat16* x) {
+    float s = 0.0f;
+#pragma unroll
+    for (int j = 0; j < 64; j += 8) {
+        const uint4 w = *reinterpret_cast<const uint4*>(x + j);
+        const __nv_bfloat16* b = reinterpret_cast<const __nv_bfloat16*>(&w);
+#pragma unroll
+        for (int k = 0; k < 8; k++) s += bf(b[k]);
+    }
+    return s;
+}
+
 // MLX affine 4-bit token rows: out = bf16(s * q + b), D wide.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_embed(const int* __restrict__ ids, const uint8_t* __restrict__ W,
                                                                  const __nv_bfloat16* __restrict__ S, const __nv_bfloat16* __restrict__ B,
@@ -44,30 +57,54 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_splice(__nv_bfloat16* _
     for (int i = threadIdx.x; i < D; i += blockDim.x) H[(size_t)blockIdx.x * D + i] = F[(size_t)s * D + i];
 }
 
-// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)); D a multiple of 256 up to 8192; a 256-thread block a row.
+// h = bf16(h + r) (r may be null), x = bf16(w * (h * inv)), XS (may be null) x's group sums; D 256k up to 8192.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __restrict__ H, const __nv_bfloat16* __restrict__ R,
                                                                const __nv_bfloat16* __restrict__ W, __nv_bfloat16* __restrict__ X, float eps, int D,
-                                                               const int* __restrict__ P) {
+                                                               const int* __restrict__ P, float* __restrict__ XS) {
     constexpr int MAXE = 32;
     __shared__ float red[8];
+    __shared__ __align__(16) __nv_bfloat16 xrow[8192];
     if (past_rows(P, blockIdx.x)) return;
     const size_t row = blockIdx.x;
     const int t = threadIdx.x;
     const int E = D / 256;
     float hv[MAXE];
     float ss = 0.0f;
+    if ((E & 3) == 0) {
+        // the same entries and order a thread at a time, four at a load
 #pragma unroll
-    for (int i = 0; i < MAXE; i++) {
-        if (i >= E) break;
-        const size_t at = row * D + t * E + i;
-        float h = bf(H[at]);
-        if (R != nullptr) {
-            const __nv_bfloat16 hb = __float2bfloat16_rn(h + bf(R[at]));
-            H[at] = hb;
-            h = bf(hb);
+        for (int i = 0; i < MAXE; i += 4) {
+            if (i >= E) break;
+            const size_t at = row * D + t * E + i;
+            uint2 hw = *reinterpret_cast<const uint2*>(H + at);
+            __nv_bfloat16* hb = reinterpret_cast<__nv_bfloat16*>(&hw);
+            if (R != nullptr) {
+                const uint2 rw = *reinterpret_cast<const uint2*>(R + at);
+                const __nv_bfloat16* rb = reinterpret_cast<const __nv_bfloat16*>(&rw);
+#pragma unroll
+                for (int j = 0; j < 4; j++) hb[j] = __float2bfloat16_rn(bf(hb[j]) + bf(rb[j]));
+                *reinterpret_cast<uint2*>(H + at) = hw;
+            }
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                hv[i + j] = bf(hb[j]);
+                ss = fmaf(hv[i + j], hv[i + j], ss);
+            }
         }
-        hv[i] = h;
-        ss = fmaf(h, h, ss);
+    } else {
+#pragma unroll
+        for (int i = 0; i < MAXE; i++) {
+            if (i >= E) break;
+            const size_t at = row * D + t * E + i;
+            float h = bf(H[at]);
+            if (R != nullptr) {
+                const __nv_bfloat16 hb = __float2bfloat16_rn(h + bf(R[at]));
+                H[at] = hb;
+                h = bf(hb);
+            }
+            hv[i] = h;
+            ss = fmaf(h, h, ss);
+        }
     }
     ss = warp_sum(ss);
     if ((t & 31) == 0) red[t >> 5] = ss;
@@ -75,24 +112,41 @@ extern "C" __global__ void __launch_bounds__(256) tf_q35_norm(__nv_bfloat16* __r
     float total = 0.0f;
     for (int i = 0; i < 8; i++) total += red[i];
     const float inv = rsqrtf(total / (float)D + eps);
+    if ((E & 3) == 0) {
 #pragma unroll
-    for (int i = 0; i < MAXE; i++) {
-        if (i >= E) break;
-        const int d = t * E + i;
-        X[row * D + d] = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
+        for (int i = 0; i < MAXE; i += 4) {
+            if (i >= E) break;
+            const int d = t * E + i;
+            const uint2 ww = *reinterpret_cast<const uint2*>(W + d);
+            const __nv_bfloat16* wb = reinterpret_cast<const __nv_bfloat16*>(&ww);
+            uint2 xw;
+            __nv_bfloat16* xb = reinterpret_cast<__nv_bfloat16*>(&xw);
+#pragma unroll
+            for (int j = 0; j < 4; j++) xb[j] = __float2bfloat16_rn(bf(wb[j]) * (hv[i + j] * inv));
+            *reinterpret_cast<uint2*>(X + row * D + d) = xw;
+            *reinterpret_cast<uint2*>(xrow + d) = xw;
+        }
+    } else {
+#pragma unroll
+        for (int i = 0; i < MAXE; i++) {
+            if (i >= E) break;
+            const int d = t * E + i;
+            const __nv_bfloat16 x = __float2bfloat16_rn(bf(W[d]) * (hv[i] * inv));
+            X[row * D + d] = x;
+            xrow[d] = x;
+        }
     }
+    if (XS == nullptr) return;
+    __syncthreads();
+    for (int g = t; g < D / 64; g += blockDim.x) XS[row * (D / 64) + g] = group_sum(xrow + g * 64);
 }
 
-// The 64-group sums of bf16 rows D wide (the decode projections' input sums). Grid (rows), a thread a group.
-extern "C" __global__ void tf_q35_sums(const __nv_bfloat16* __restrict__ X, float* __restrict__ XS, int D, const int* __restrict__ P) {
+// 64-group sums of bf16 rows D wide (the decode projections' input sums). Grid (rows, groups / 64), a thread a group.
+extern "C" __global__ void __launch_bounds__(64) tf_q35_sums(const __nv_bfloat16* __restrict__ X, float* __restrict__ XS, int D, const int* __restrict__ P) {
     if (past_rows(P, blockIdx.x)) return;
     const size_t row = blockIdx.x;
-    for (int g = threadIdx.x; g < D / 64; g += blockDim.x) {
-        const __nv_bfloat16* x = X + row * D + g * 64;
-        float s = 0.0f;
-        for (int j = 0; j < 64; j++) s += bf(x[j]);
-        XS[row * (D / 64) + g] = s;
-    }
+    const int g = blockIdx.y * blockDim.x + threadIdx.x;
+    if (g < D / 64) XS[row * (D / 64) + g] = group_sum(X + row * D + g * 64);
 }
 
 // Conv, silu, q/k norms, the linear heads' decay and write: a warp a (row, head) over q, k, v; taps from the parents.
@@ -172,6 +226,8 @@ extern "C" __global__ void tf_q35_conv_commit(Geo geo, const __nv_bfloat16* __re
             }
         }
         if (sg.rows != 1) return;
+        __nv_bfloat16* before = reinterpret_cast<__nv_bfloat16*>(sg.before + geo.nl * geo.rec() * sizeof(float)) + (size_t)layer * geo.conv_rows();
+        for (int r = 0; r < TAPS - 1; ++r) before[(size_t)r * C + c] = CS[(size_t)r * C + c];
     }
     // ascending: slot r takes [r + rows], which is either a later state slot (not yet written) or a row
     for (int r = 0; r < TAPS - 1; r++) {
@@ -201,9 +257,36 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
 #pragma unroll
     for (int i = 0; i < PT; i++) state[i] = st[i];
     int prev = -1;  // the row the registers' state follows
+    // row r's inputs, loaded while row r - 1 computes
+    float kn[PT], qn[PT], vn = 0.0f, gn = 0.0f, bn = 0.0f;
+    int pn = -1;
+    auto load = [&](int row) {
+        const uint2 kw = *reinterpret_cast<const uint2*>(k + ((size_t)row * NK + hk) * DK + PT * dk);
+        const uint2 qw = *reinterpret_cast<const uint2*>(q + ((size_t)row * NK + hk) * DK + PT * dk);
+        const __nv_bfloat16* kb = reinterpret_cast<const __nv_bfloat16*>(&kw);
+        const __nv_bfloat16* qb = reinterpret_cast<const __nv_bfloat16*>(&qw);
+#pragma unroll
+        for (int i = 0; i < PT; i++) {
+            kn[i] = bf(kb[i]);
+            qn[i] = bf(qb[i]);
+        }
+        vn = bf(v[((size_t)row * NV + hv) * DK + dv]);
+        gn = g[row * NV + hv];
+        bn = bf(beta[row * NV + hv]);
+        pn = rowpar[row];
+    };
+    if (sg.rows > 0) load(sg.row0);
     for (int r = 0; r < sg.rows; r++) {
         const int row = sg.row0 + r;
-        const int parent = rowpar[row];
+        float kc[PT], qc[PT];
+#pragma unroll
+        for (int i = 0; i < PT; i++) {
+            kc[i] = kn[i];
+            qc[i] = qn[i];
+        }
+        const float vc = vn, gc = gn, bc = bn;
+        const int parent = pn;
+        if (r + 1 < sg.rows) load(row + 1);
         if (parent != prev) {
             // a branch: its parent's state from the stream's and the ancestors' logged updates, oldest first
             int anc[MAXW];
@@ -222,15 +305,6 @@ extern "C" __global__ void __launch_bounds__(128) tf_q35_gdn_chain(Geo geo, cons
             }
         }
         prev = row;
-        float kc[PT], qc[PT];
-#pragma unroll
-        for (int i = 0; i < PT; i++) {
-            kc[i] = bf(k[((size_t)row * NK + hk) * DK + PT * dk + i]);
-            qc[i] = bf(q[((size_t)row * NK + hk) * DK + PT * dk + i]);
-        }
-        const float vc = bf(v[((size_t)row * NV + hv) * DK + dv]);
-        const float gc = g[row * NV + hv];
-        const float bc = bf(beta[row * NV + hv]);
         float kv_mem = 0.0f;
 #pragma unroll
         for (int i = 0; i < PT; i++) {
@@ -330,14 +404,14 @@ struct StoreBf16 {
 // Queries rotated in place, keys rotated and values copied into the row's cache slot; grid (rows), HD threads.
 extern "C" __global__ void __launch_bounds__(256) tf_q35_rope(Geo geo, __nv_bfloat16* __restrict__ Qn, const __nv_bfloat16* __restrict__ Kn,
                                                                 const __nv_bfloat16* __restrict__ Vr, const Seg* __restrict__ segs,
-                                                                const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                                const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                                 const int* __restrict__ P, const int* __restrict__ M) {
     rope_rows(geo, Qn, Kn, Vr, segs, rowseg, rowanc, P, M, StoreBf16{layer, geo.kvh});
 }
 
 // Causal attention in chunks of chunk_keys(the row's keys), a warp a query head; partials by (row, head, chunk).
 extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __restrict__ Q, const Seg* __restrict__ segs,
-                                                 const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc, int layer,
+                                                 const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc, int layer,
                                                  const int* __restrict__ P, float scale,
                                                  float* __restrict__ PM, float* __restrict__ PL, float* __restrict__ PO) {
     constexpr int DPL = HD / 32;
@@ -348,7 +422,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
     const size_t m = blockIdx.z;
     const int qh = h * (QH / KVH) + g;
     const Seg sg = segs[rowseg[m]];
-    const unsigned anc = rowanc[m];
+    const Ancestor anc = rowanc[m];
     // chunks cut at logical positions (a window key's: the stream's length plus its ancestors), as a step's are
     const int keys = sg.len + rows_seen(anc), ck = chunk_keys(keys);
     const int k0 = c * ck, k1 = min(k0 + ck, keys);
@@ -397,7 +471,7 @@ extern "C" __global__ void tf_q35_attn_partial(Geo geo, const __nv_bfloat16* __r
 // A row's chunks' partials into each (row, query head)'s output, rows qh * HD wide. Grid (qh, rows), a warp each.
 extern "C" __global__ void __launch_bounds__(32) tf_q35_attn_merge(Geo geo, const float* __restrict__ PM, const float* __restrict__ PL,
                                                                      const float* __restrict__ PO, const Seg* __restrict__ segs,
-                                                                     const int* __restrict__ rowseg, const unsigned* __restrict__ rowanc,
+                                                                     const int* __restrict__ rowseg, const Ancestor* __restrict__ rowanc,
                                                                      const int* __restrict__ P, __nv_bfloat16* __restrict__ OUT) {
     constexpr int DPL = HD / 32;
     const int QH = geo.qh;
@@ -461,40 +535,5 @@ extern "C" __global__ void tf_q35_mlp_act(const __nv_bfloat16* __restrict__ GATE
     OUT[i] = __float2bfloat16_rn(gf / (1.0f + expf(-gf)) * bf(UP[i]));
 }
 
-// Each row's greedy token: the largest logit, a tie to the lower id (the host draw's rule). Grid (rows), 1024 threads.
-extern "C" __global__ void __launch_bounds__(1024) tf_q35_argmax(const __nv_bfloat16* __restrict__ L, int V, unsigned* __restrict__ TOK) {
-    __shared__ float bv[32];
-    __shared__ int bi[32];
-    const __nv_bfloat16* x = L + (size_t)blockIdx.x * V;
-    float best = -INFINITY;
-    int id = 0x7fffffff;
-    for (int i = threadIdx.x; i < V; i += blockDim.x) {
-        const float v = bf(x[i]);
-        if (v > best) {
-            best = v;
-            id = i;
-        }
-    }
-#pragma unroll
-    for (int m = 16; m; m >>= 1) {
-        const float ov = __shfl_xor_sync(0xffffffffu, best, m);
-        const int oi = __shfl_xor_sync(0xffffffffu, id, m);
-        if (ov > best || (ov == best && oi < id)) {
-            best = ov;
-            id = oi;
-        }
-    }
-    if ((threadIdx.x & 31) == 0) {
-        bv[threadIdx.x >> 5] = best;
-        bi[threadIdx.x >> 5] = id;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-        for (int w = 1; w < 32; w++)
-            if (bv[w] > best || (bv[w] == best && bi[w] < id)) {
-                best = bv[w];
-                id = bi[w];
-            }
-        TOK[blockIdx.x] = (unsigned)id;
-    }
-}
+#include "qwen35_slots.cuh"
+#include "qwen35_argmax.cuh"

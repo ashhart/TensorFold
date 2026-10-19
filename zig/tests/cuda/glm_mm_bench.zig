@@ -56,7 +56,7 @@ pub fn run(gpu: Gpu) !void {
                 for (0..2) |round| {
                     try t0.record(s);
                     for (0..reps) |_| {
-                        if (which == 0) try glm.b16.matmul(set, s, x.ptr, k, w.ptr, out_a.ptr, part.ptr, rows, n, k, true) else try glm.mm.matmul(&mk, s, x.ptr, k, tw, out_b.ptr, part.ptr, rows, true);
+                        if (which == 0) try glm.b16.matmul(set, s, x.ptr, k, w.ptr, out_a.ptr, part.ptr, rows, n, k, true) else try glm.mm.matmul(&mk, s, x.ptr, k, tw, out_b.ptr, part.ptr, rows, true, false);
                     }
                     try t1.record(s);
                     try t1.synchronize();

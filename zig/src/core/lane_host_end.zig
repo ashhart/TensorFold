@@ -27,7 +27,10 @@ pub fn takeCancels(h: *LaneHost) void {
             break;
         };
         h.unlock();
-        if (found) |job| h.finish(job, .cancelled, "");
+        if (found) |job| {
+            if (job.started and !job.stream.finished) h.core.discard(&job.stream);
+            h.finish(job, .cancelled, "");
+        }
     }
 }
 

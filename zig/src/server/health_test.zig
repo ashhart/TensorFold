@@ -18,6 +18,9 @@ const earlier = [_][]const u8{ "status", "model", "model_ids", "max_batch_size",
 /// Four lanes, some memory, nothing running.
 const Idle = struct {
     healthy: bool = true,
+    resets: std.atomic.Value(u32) = .init(0),
+    scores: std.atomic.Value(u32) = .init(0),
+    submits: std.atomic.Value(u32) = .init(0),
     fn engine(e: *Idle) api.Engine {
         return .{ .ctx = e, .vtable = &.{
             .info = info,
@@ -25,6 +28,7 @@ const Idle = struct {
             .cancel = cancel,
             .status = status,
             .memory = memory,
+            .score = score,
         } };
     }
 
@@ -32,7 +36,8 @@ const Idle = struct {
         return .{ .lanes = 4 };
     }
 
-    fn submit(_: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+    fn submit(ctx: *anyopaque, _: api.Id, _: *const api.Request, _: api.Sink) api.SubmitError!void {
+        _ = @as(*Idle, @ptrCast(@alignCast(ctx))).submits.fetchAdd(1, .monotonic);
         return error.Closed;
     }
 
@@ -42,7 +47,14 @@ const Idle = struct {
         out.* = .{ .healthy = @as(*Idle, @ptrCast(@alignCast(ctx))).healthy };
     }
 
-    fn memory(_: *anyopaque, _: bool) ?api.Memory {
+    fn score(ctx: *anyopaque, _: []const u32, _: []const u32, logits: []f64, _: bool) error{Failed}!f64 {
+        _ = @as(*Idle, @ptrCast(@alignCast(ctx))).scores.fetchAdd(1, .monotonic);
+        @memset(logits, 0);
+        return 0;
+    }
+
+    fn memory(ctx: *anyopaque, reset: bool) ?api.Memory {
+        if (reset) _ = @as(*Idle, @ptrCast(@alignCast(ctx))).resets.fetchAdd(1, .monotonic);
         return .{ .active = 3, .cache = 2, .peak = 5 };
     }
 };
@@ -180,11 +192,11 @@ test "the open health always names the release, and leaves out a backend or GPU 
 }
 
 const key = "sk-health-test";
-const health_open = "GET /health HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
-const health_keyed = "GET /health HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++
+const health_open = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+const health_keyed = "GET /health HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " ++ key ++
     "\r\nConnection: close\r\n\r\n";
-const models_open = "GET /v1/models HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
-const models_keyed = "GET /v1/models HTTP/1.1\r\nHost: test\r\nAuthorization: Bearer " ++ key ++
+const models_open = "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+const models_keyed = "GET /v1/models HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " ++ key ++
     "\r\nConnection: close\r\n\r\n";
 
 /// One request on a fresh loopback connection that asks to close, and the whole reply; error.Timeout after 5 s silent.
@@ -296,7 +308,7 @@ test "unavailable health is minimal HTTP 503 with keys enabled or disabled and w
     }
 }
 
-const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n";
+const manifest_get = "GET /v1/benchmark/manifest HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
 /// The manifest a server with `environ` sends over a socket, parsed back as a client reads it.
 fn manifestServed(a: Allocator, environ: ?*const std.process.Environ.Map) !std.json.ObjectMap {
@@ -351,4 +363,179 @@ test "benchmark manifest: an unknown server backend is never attested as CUDA" {
     defer arena.deinit();
     const o = try manifestWithBackend(arena.allocator(), null, "");
     try std.testing.expectEqualStrings("", o.get("runtime").?.object.get("backend").?.string);
+}
+
+test "public health is read only for every reset spelling with keys enabled or disabled" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(std.testing.allocator, &.{key}, "", null, false, &problem);
+    defer keys.deinit();
+    for ([_]bool{ true, false }) |keyed| {
+        var engine: Idle = .{};
+        var text: Bytes = .{};
+        const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, if (keyed) &keys else null);
+        defer srv.deinit();
+        const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+        defer lis.close();
+        var stop: std.atomic.Value(bool) = .init(false);
+        const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+        defer quiesce(srv, &stop, accept);
+        for ([_][]const u8{ "/health?reset_peak=1", "/?reset_peak=1", "/health?reset_peak=10", "/?x=reset_peak=1" }) |path| {
+            const req = try std.fmt.allocPrint(a, "GET {s} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n", .{path});
+            const reply = try exchange(a, lis.port(), req);
+            try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 "));
+            if (keyed) try std.testing.expectEqualStrings("{\"status\": \"ok\"}", try bodyOf(reply));
+        }
+        try std.testing.expectEqual(@as(u32, 0), engine.resets.load(.monotonic));
+    }
+}
+
+test "malformed heads cannot hide origins and public exceptions do not open other methods" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(std.testing.allocator, &.{key}, "", null, true, &problem);
+    defer keys.deinit();
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, &keys);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    for ([_][]const u8{ "Bad line\r\nOrigin: http://evil.invalid", "Bad Name: x\r\nOrigin: http://evil.invalid", "X-Other: x\r\n Origin: http://evil.invalid", "X-Other: a\x00b\r\nOrigin: http://evil.invalid" }) |headers| {
+        const req = try std.fmt.allocPrint(a, "GET /health HTTP/1.1\r\nHost: localhost\r\n{s}\r\nConnection: close\r\n\r\n", .{headers});
+        try std.testing.expect(std.mem.startsWith(u8, try exchange(a, lis.port(), req), "HTTP/1.1 400 "));
+    }
+    for ([_][]const u8{ "POST", "DELETE", "HEAD", "PUT" }) |method| for ([_][]const u8{ "/health", "/metrics", "/slide", "/slide/data.js" }) |path| {
+        const req = try std.fmt.allocPrint(a, "{s} {s} HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", .{ method, path });
+        try std.testing.expect(std.mem.startsWith(u8, try exchange(a, lis.port(), req), "HTTP/1.1 401 "));
+    };
+    try std.testing.expectEqual(@as(u32, 0), engine.scores.load(.monotonic));
+    try std.testing.expectEqual(@as(u32, 0), engine.submits.load(.monotonic));
+}
+
+test "System One wire aliases require keys before scoring and valid keys reach the successful handler" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(std.testing.allocator, &.{key}, "", null, false, &problem);
+    defer keys.deinit();
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, &keys);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    const body = "{\"state\": null, \"questions\": {\"q\": {\"type\": \"choice\", \"instructions\": \"i\", \"criteria\": {\"A\": \"a\", \"B\": \"b\"}}}}";
+    for ([_][]const u8{ "/systemone", "/v1/systemone", "/x/systemone", "/systemone///?x=1", "//systemone", "/x//systemone", "/health/../systemone" }) |path| {
+        for ([_][]const u8{ "", "x-api-key: wrong\r\n", "x-api-key: " ++ key ++ "\r\n", "Authorization: Bearer " ++ key ++ "\r\n" }, 0..) |credential, i| {
+            const before = engine.scores.load(.monotonic);
+            const req = try std.fmt.allocPrint(a, "POST {s} HTTP/1.1\r\nHost: localhost\r\n{s}Content-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ path, credential, body.len, body });
+            const reply = try exchange(a, lis.port(), req);
+            if (i < 2) {
+                try std.testing.expectEqual(before, engine.scores.load(.monotonic));
+                try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 401 "));
+            } else {
+                try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 200 "));
+                try std.testing.expect(engine.scores.load(.monotonic) > before);
+            }
+        }
+    }
+}
+
+test "browser guards close before Expect or pipelined work and recheck every pooled request" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, null);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    const body = "{\"state\": null, \"questions\": {\"q\": {\"type\": \"choice\", \"instructions\": \"i\", \"criteria\": {\"A\": \"a\", \"B\": \"b\"}}}}";
+    const second = try std.fmt.allocPrint(a, "POST /systemone HTTP/1.1\r\nHost: localhost\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ body.len, body });
+    for ([_][]const u8{ "Host: evil.invalid\r\n", "Host: localhost\r\nOrigin: http://evil.invalid\r\n", "Host: localhost\r\nOrigin: null\r\n" }) |headers| {
+        const req = try std.fmt.allocPrint(a, "POST /systemone HTTP/1.1\r\n{s}Expect: 100-continue\r\nContent-Type: text/plain\r\nContent-Length: {d}\r\n\r\n{s}{s}", .{ headers, body.len, body, second });
+        const reply = try exchange(a, lis.port(), req);
+        try std.testing.expectEqual(@as(u32, 0), engine.scores.load(.monotonic));
+        try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 403 Forbidden\r\n"));
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, reply, "HTTP/1.1 "));
+        try std.testing.expect(std.mem.indexOf(u8, reply, "100 Continue") == null);
+        try std.testing.expectEqual(@as(u32, 0), engine.scores.load(.monotonic));
+    }
+    for ([_][]const u8{ "GET", "OPTIONS", "POST" }) |method| {
+        const req = try std.fmt.allocPrint(a, "{s} /health HTTP/1.1\r\nHost: localhost\r\nOrigin: http://evil.invalid\r\nConnection: close\r\n\r\n", .{method});
+        try std.testing.expect(std.mem.startsWith(u8, try exchange(a, lis.port(), req), "HTTP/1.1 403 Forbidden\r\n"));
+    }
+    const first = "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    const last = "GET /health HTTP/1.1\r\nHost: localhost\r\nOrigin: http://evil.invalid\r\nConnection: close\r\n\r\n";
+    const pooled = try exchange(a, lis.port(), first ++ last);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pooled, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, pooled, "HTTP/1.1 403 Forbidden\r\n"));
+    const invalid_target = "POST http://evil.invalid/systemone HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    try std.testing.expect(std.mem.startsWith(u8, try exchange(a, lis.port(), invalid_target), "HTTP/1.1 400 "));
+    try std.testing.expectEqual(@as(u32, 0), engine.resets.load(.monotonic));
+}
+
+test "HEAD refusals preserve representation lengths without sending any body bytes" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: []const u8 = "";
+    var keys = try auth.Store.init(std.testing.allocator, &.{key}, "", null, false, &problem);
+    defer keys.deinit();
+    var engine: Idle = .{};
+    var text: Bytes = .{};
+    const srv = try server.Server.init(std.testing.allocator, std.testing.io, engine.engine(), text.text(), .{ .served_name = "m", .model_ids = &.{"m"} }, &keys);
+    defer srv.deinit();
+    const lis = try listener.Listener.open(.{ .ip4 = .loopback(0) });
+    defer lis.close();
+    var stop: std.atomic.Value(bool) = .init(false);
+    const accept = try std.Thread.spawn(.{}, server.Server.serve, .{ srv, lis, &stop });
+    defer quiesce(srv, &stop, accept);
+    const representation = try bodyOf(try exchange(a, lis.port(), models_open));
+    for ([_][]const u8{ "/health", "/slide", "/v1/models" }) |path| {
+        for ([_][]const u8{ "", "x-api-key: wrong\r\n" }) |credential| {
+            const req = try std.fmt.allocPrint(a, "HEAD {s} HTTP/1.1\r\nHost: localhost\r\n{s}Connection: close\r\n\r\n", .{ path, credential });
+            const reply = try exchange(a, lis.port(), req);
+            try std.testing.expect(std.mem.startsWith(u8, reply, "HTTP/1.1 401 "));
+            try std.testing.expectEqualStrings("", try bodyOf(reply));
+            try std.testing.expectEqual(representation.len, try responseLength(reply));
+        }
+    }
+    const Case = struct { target: []const u8, headers: []const u8, status: []const u8 };
+    for ([_]Case{
+        .{ .target = "http://evil.invalid/health", .headers = "Host: localhost\r\n", .status = "400" },
+        .{ .target = "/health", .headers = "Host: localhost\r\nBad Name: x\r\n", .status = "400" },
+        .{ .target = "/health", .headers = "Host: evil.invalid\r\n", .status = "403" },
+        .{ .target = "/health", .headers = "Host: localhost\r\nOrigin: http://evil.invalid\r\n", .status = "403" },
+        .{ .target = "/health", .headers = "Host: localhost\r\nx-api-key: " ++ key ++ "\r\n", .status = "501" },
+    }) |case| {
+        const req = try std.fmt.allocPrint(a, "HEAD {s} HTTP/1.1\r\n{s}Connection: close\r\n\r\n", .{ case.target, case.headers });
+        const reply = try exchange(a, lis.port(), req);
+        try std.testing.expectEqualStrings(case.status, reply[9..12]);
+        try std.testing.expectEqualStrings("", try bodyOf(reply));
+        try std.testing.expect(try responseLength(reply) > 0);
+    }
+}
+
+fn responseLength(reply: []const u8) !usize {
+    const end = std.mem.indexOf(u8, reply, "\r\n\r\n") orelse return error.MissingResponseHead;
+    var lines = std.mem.splitSequence(u8, reply[0..end], "\r\n");
+    while (lines.next()) |line| if (std.mem.startsWith(u8, line, "Content-Length: ")) return std.fmt.parseInt(usize, line[16..], 10);
+    return error.MissingContentLength;
 }

@@ -19,6 +19,7 @@ pub fn valid(a: std.mem.Allocator) !json.Value {
         .repeat = 0,
         .seed = 1234,
         .status = .ok,
+        .finish_reason = "length",
         .prompt_tokens = 24,
         .completion_tokens = 4,
         .cached_tokens = 0,
@@ -39,6 +40,21 @@ pub fn valid(a: std.mem.Allocator) !json.Value {
     }, .{}, .{ .tokens = 4, .repetitions = 1, .temperatures = &.{0.0}, .serial = false, .context_tokens = null, .managed = false }, &samples);
 }
 
+/// Legacy full-length fixtures keep exercising the receiver's existing upload paths while v2 is off.
+pub fn legacy(a: std.mem.Allocator) !json.Value {
+    return asLegacy(a, try valid(a));
+}
+
+pub fn asLegacy(a: std.mem.Allocator, v: json.Value) !json.Value {
+    try v.get("suite").?.object.put(a, "id", .{ .string = suite.legacy_id });
+    try v.get("suite").?.object.put(a, "sha256", .{ .string = suite.legacy_sha256_hex });
+    for (v.get("samples").?.array) |sample| {
+        _ = sample.object.orderedRemove("finish_reason");
+        _ = sample.object.orderedRemove("route");
+    }
+    return v;
+}
+
 /// Replaces the value at ``path`` (keys, or indices for lists) with parsed ``text``; ``null`` removes the key.
 pub fn set(a: std.mem.Allocator, v: json.Value, path: []const []const u8, text: ?[]const u8) !void {
     var at = v;
@@ -53,7 +69,7 @@ test "the receipt built from the golden facts equals the golden canonical bytes"
     defer arena.deinit();
     const a = arena.allocator();
     const bytes = try std.mem.concat(a, u8, &.{ try receipt.canonical(a, try valid(a)), "\n" });
-    try std.testing.expectEqual(@as(usize, 1481), bytes.len);
+    try std.testing.expectEqual(@as(usize, 1588), bytes.len);
     try std.testing.expectEqualStrings(golden, bytes);
 }
 
@@ -75,7 +91,7 @@ test "the parsed golden writes back byte for byte, and previews as json.dumps(in
     try std.testing.expectEqualStrings(golden[0 .. golden.len - 1], try receipt.canonical(a, v));
     var out: std.Io.Writer.Allocating = .init(a);
     try receipt.preview(&out.writer, v);
-    try std.testing.expectEqual(@as(usize, 2008), out.written().len);
+    try std.testing.expectEqual(@as(usize, 2147), out.written().len);
     try std.testing.expectEqualStrings(golden_preview, out.written());
 }
 
@@ -314,4 +330,37 @@ test "a receipt path is checked before a run: a directory name is refused, its d
     const inside = try std.fs.path.join(a, &.{ locked, "run.json" });
     try std.testing.expect(!try receipt.writable(a, io, inside, &problem));
     try std.testing.expectEqualStrings(try std.fmt.allocPrint(a, "Could not save the benchmark receipt to {s}", .{inside}), problem);
+}
+
+test "issue 969 v2: legacy receipts retain v1 completion and ranking partitions" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const old = (try json.parse(a, @embedFile("fixtures/benchmark_v1.json"))).ok;
+    var why: []const u8 = "";
+    try std.testing.expect(check.receipt(old, .save, now_ms, &why));
+    try std.testing.expectEqualStrings(suite.legacy_id, (try suite.receiptCells(a, old))[0].protocol);
+    const v = try valid(a);
+    try set(a, v, &.{ "settings", "tokens" }, "256");
+    try set(a, v, &.{ "settings", "temperatures" }, "[1.0]");
+    for ([_][]const u8{ "0", "1" }) |i| {
+        try set(a, v, &.{ "samples", i, "temperature" }, "1.0");
+        try set(a, v, &.{ "samples", i, "completion_tokens" }, "177");
+        try set(a, v, &.{ "samples", i, "delivery_seconds" }, "1.0");
+        try set(a, v, &.{ "samples", i, "delivery_tps" }, "176.0");
+        try set(a, v, &.{ "samples", i, "finish_reason" }, "\"stop\"");
+    }
+    try std.testing.expect(check.receipt(v, .publish, now_ms, &why));
+    const cs = try suite.receiptCells(a, v);
+    try std.testing.expectEqualStrings(suite.id, cs[0].protocol);
+    try std.testing.expect(cs[0].complete and cs[0].delivery.? == 176);
+    try set(a, v, &.{ "suite", "id" }, "\"community-v1\"");
+    try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
+    try set(a, v, &.{ "suite", "sha256" }, "\"" ++ suite.legacy_sha256_hex ++ "\"");
+    for ([_][]const u8{ "0", "1" }) |i| {
+        try set(a, v, &.{ "samples", i, "finish_reason" }, null);
+        try set(a, v, &.{ "samples", i, "route" }, null);
+    }
+    try std.testing.expect(!check.receipt(v, .save, now_ms, &why));
+    try std.testing.expect(std.mem.indexOf(u8, why, "protocol-complete") != null);
 }

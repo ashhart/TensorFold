@@ -32,7 +32,7 @@ extern "C" __global__ void tf_q35d_gather_taps(const __nv_bfloat16* __restrict__
 // Rows of a window to gather, by value (a tree's kept path).
 struct TapRows {
     int n;
-    int rows[16];
+    int rows[64];
 };
 
 // Tap rows (start + rows.rows[i]) of a stream's ring into OUT rows 0..n: a kept path's rows in order. Grid (n).
@@ -162,3 +162,5 @@ extern "C" __global__ void __launch_bounds__(32) tf_q35d_attn(const __nv_bfloat1
 #pragma unroll
     for (int i = 0; i < DPL; i++) OUT[((size_t)m * heads + h) * HD + lane * DPL + i] = __float2bfloat16_rn(o[i] / l);
 }
+
+#include "qwen35_draft_frame.cuh"

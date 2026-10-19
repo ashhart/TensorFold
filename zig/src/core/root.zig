@@ -30,6 +30,7 @@ pub const act_ref = @import("act_ref.zig");
 /// The kernel contract every GPU kernel's test registers with (zig/tests/contract, tf-cuda-test kernel-contract).
 pub const contract = @import("contract.zig");
 pub const nvfp4 = @import("nvfp4.zig");
+pub const nvfp4_csf32 = @import("nvfp4_csf32.zig");
 pub const modelopt = @import("modelopt.zig");
 /// Pictures as 0.6.6 loaded them: PNG, JPEG through the pinned libjpeg-turbo, orientation, the shared bicubic resizes.
 pub const picture = @import("picture/picture.zig");
@@ -84,6 +85,7 @@ test {
     _ = @import("copy_index.zig");
     _ = ids_json;
     _ = nvfp4;
+    _ = nvfp4_csf32;
     _ = modelopt;
     _ = picture;
     _ = qwen_vl;
@@ -93,3 +95,8 @@ test {
 }
 
 pub const frame_rounds = @import("frame_rounds.zig");
+pub const tree_slots = @import("tree_slots.zig");
+
+pub const exl3_layout = @import("exl3_layout.zig");
+
+pub const exl3_prepare = @import("exl3_prepare.zig");

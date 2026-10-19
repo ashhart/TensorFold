@@ -22,6 +22,8 @@ pub const Run = struct {
     err: std.Io.Writer.Allocating,
     stdin: std.Io.Reader,
     tty: bool = false,
+    publication: benchmark.Publication = .{},
+    families: []const @import("engine_api").Family = &.{.{ .model_type = "qwen3_5", .formats = &.{} }},
     hf_base: []const u8 = "",
     self_exe: ?[]const u8 = null,
     fd: ?std.posix.fd_t = null,
@@ -43,9 +45,10 @@ pub const Run = struct {
             .out = &r.out.writer,
             .err = &r.err.writer,
             .input = .{ .tty = r.tty, .reader = r.reader orelse &r.stdin, .fd = r.fd },
-            .engines = .{ .version = "0.0.0-test", .families = &.{.{ .model_type = "qwen3_5", .formats = &.{} }} },
+            .engines = .{ .version = "0.0.0-test", .families = r.families },
             .hf_base = r.hf_base,
             .self_exe = r.self_exe,
+            .publication = r.publication,
         };
         return benchmark.command(&ctx, argv);
     }
@@ -111,6 +114,8 @@ test "an attached run saves an unranked receipt that publishes with explicit con
     try std.testing.expectEqualStrings("unknown", v.get("runtime").?.get("python_version").?.string);
     const text = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, out, a, .limited(1 << 20));
     try std.testing.expect(std.mem.indexOf(u8, text, "synthetic") == null and std.mem.indexOf(u8, text, "127.0.0.1") == null);
+    _ = try receipts.asLegacy(a, v);
+    try std.testing.expect(try receipt.save(a, std.testing.io, v, out, now_ms + 100000000000, &problem));
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "publish", out, "--yes", "--upload-url", try f.url(a, "/") }));
     try std.testing.expect(r.has("Public upload preview") and r.has("Submission synthetic-submission: pending") and !r.has(token));
@@ -133,7 +138,7 @@ test "without --yes a pipe is refused before any upload, and a terminal's no kee
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     const out = try r.path("run.json");
     var problem: []const u8 = "";
-    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.valid(a), out, now_ms, &problem));
+    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.legacy(a), out, now_ms, &problem));
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--upload-url", try f.url(a, "") }));
     try std.testing.expect(r.has("Public upload preview") and r.has("explicit consent") and !r.has(token));
     r.tty = true;
@@ -160,7 +165,7 @@ test "login reads the token from stdin and never prints it; a refused upload sho
     try std.testing.expect(r.has("--token-stdin"));
     const out = try r.path("run.json");
     var problem: []const u8 = "";
-    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.valid(a), out, now_ms, &problem));
+    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.legacy(a), out, now_ms, &problem));
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--yes", "--upload-url", try f.url(a, "") }));
     try std.testing.expect(r.has("Upload token was refused") and !r.has("private upstream") and !r.has(token));
     try std.testing.expectEqual(@as(u8, 0), try r.command(&.{"logout"}));
@@ -190,7 +195,7 @@ test "failed warm-ups and repeats stay in the receipt with fixed codes and exit 
     try std.testing.expect(!r.has("private upstream"));
 }
 
-test "a cancelled run saves its receipt, exits 130 and never publishes" {
+test "a cancelled local run saves its receipt, exits 130 and never publishes" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -205,7 +210,7 @@ test "a cancelled run saves its receipt, exits 130 and never publishes" {
     stop.reset();
     defer stop.reset();
     stop.request(.INT);
-    const argv = try std.mem.concat(a, []const u8, &.{ try runArgs(&r, try f.url(a, ""), out), &.{ "--publish", "--yes", "--upload-url", try f.url(a, "") } });
+    const argv = try runArgs(&r, try f.url(a, ""), out);
     try std.testing.expectEqual(@as(u8, 130), try r.command(argv));
     try std.testing.expect(f.count() == 0 and !r.has("Public upload preview"));
     stop.reset();
@@ -261,7 +266,7 @@ test "a checkpoint that is not public stops publishing before the preview, with 
     try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
     const out = try r.path("run.json");
     var problem: []const u8 = "";
-    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.valid(a), out, now_ms, &problem));
+    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.legacy(a), out, now_ms, &problem));
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--yes", "--upload-url", "https://example.test/api" }));
     try std.testing.expect(r.has("publicly accessible") and !r.has("Public upload preview") and !r.has("private details") and !r.has(token));
     try std.testing.expect(f.count() == 1 and f.header(0, "authorization") == null);
@@ -430,7 +435,7 @@ test "an attached rocm run saves a local receipt that inspect accepts and publis
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--yes", "--upload-url", try rx.url(a, "") }));
     try std.testing.expect(r.has(check.rocm_local) and !r.has("Public upload preview") and rx.count() == 0);
     const cuda = try r.path("cuda.json");
-    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.valid(a), cuda, now_ms, &problem));
+    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.legacy(a), cuda, now_ms, &problem));
     try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "publish", cuda, "--yes", "--upload-url", try rx.url(a, "") }));
     try std.testing.expectEqual(@as(usize, 1), posts(rx, "/submissions"));
 }
@@ -458,7 +463,7 @@ test "a receipt path that cannot be written is refused before any request or ser
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, try r.path("pid"), .{}));
 }
 
-test "without a token, --publish is refused before the run, and publish before Hugging Face or the prompt" {
+test "v2 publish is off before the run, and legacy publish needs a token before lookup or prompt" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -472,10 +477,10 @@ test "without a token, --publish is refused before the run, and publish before H
     const out = try r.path("run.json");
     const argv = try std.mem.concat(a, []const u8, &.{ try runArgs(&r, try f.url(a, ""), out), &.{ "--publish", "--yes", "--upload-url", try f.url(a, "") } });
     try std.testing.expectEqual(@as(u8, 1), try r.command(argv));
-    try std.testing.expect(r.has(missing) and !r.has("This generates model replies") and f.count() == 0);
+    try std.testing.expect(r.has("community-v2 submissions are disabled") and !r.has("This generates model replies") and f.count() == 0);
     try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, out, .{}));
     var problem: []const u8 = "";
-    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.valid(a), out, now_ms, &problem));
+    try std.testing.expect(try receipt.save(a, std.testing.io, try receipts.legacy(a), out, now_ms, &problem));
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--yes", "--upload-url", try f.url(a, "") }));
     try std.testing.expect(r.has(missing) and !r.has("Public upload preview"));
     r.tty = true;
@@ -544,4 +549,35 @@ test "with no task to read input on, login fails with a message instead of a can
     r.stdin = .fixed(token ++ "\n");
     try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "login", "--token-stdin", "--upload-url", "http://127.0.0.1:9" }));
     try std.testing.expect(r.has("Could not read the upload token") and !r.has("Benchmark cancelled"));
+}
+
+test "issue 969 v2: disabled submissions refuse saved, run and direct uploads without requests" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var r = try Run.init(a, &tmp);
+    const f = try world(a, false, "202 Accepted");
+    defer f.stop();
+    const api = try f.url(a, "");
+    r.hf_base = try f.url(a, "/api/models/");
+    try r.env.put("TENSORFOLD_BENCHMARK_TOKEN", token);
+    const out = try r.path("v2.json");
+    var why: []const u8 = "";
+    const v = try receipts.valid(a);
+    try std.testing.expect(try receipt.save(a, std.testing.io, v, out, now_ms, &why));
+    try std.testing.expectEqual(@as(u8, 1), try r.command(&.{ "publish", out, "--yes", "--upload-url", api }));
+    try std.testing.expect(r.has("community-v2 submissions are disabled until the client and receiver both support v2"));
+    try std.testing.expectEqual(@as(usize, 0), f.count());
+    const run_out = try r.path("new.json");
+    const argv = try std.mem.concat(a, []const u8, &.{ try runArgs(&r, api, run_out), &.{ "--publish", "--yes", "--upload-url", api } });
+    try std.testing.expectEqual(@as(u8, 1), try r.command(argv));
+    try std.testing.expect(r.has("community-v2 submissions are disabled"));
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, run_out, .{}));
+    const up = @import("benchmark_upload.zig");
+    try std.testing.expect(try up.upload(a, std.testing.io, .{ .api = api, .hf_base = r.hf_base, .environ = &r.env, .home = r.home, .now_ms = now_ms }, v, &why) == null);
+    try std.testing.expectEqual(@as(usize, 0), f.count());
+    try std.testing.expectEqual(@as(u8, 0), try r.command(&.{ "inspect", out }));
+    try std.testing.expect(r.has("community-v2"));
 }

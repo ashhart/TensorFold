@@ -296,7 +296,7 @@ fn sizeForGlm(ctx: ?*anyopaque, frames: c_int, height: c_int, width: c_int, oh: 
 }
 
 fn videoGlm(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.glm.Video {
-    const l = library(srv.io) orelse return cx.refuse("video inputs need libtfvideo (FFmpeg) beside the server");
+    const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var gs: GlmSize = .{ .budget = 16384 };
     if (std.c.getenv("TENSORFOLD_VIDEO_TOKENS")) |v| gs.budget = std.fmt.parseInt(u64, std.mem.span(v), 10) catch gs.budget;
     var v: TfVideo = undefined;
@@ -323,7 +323,7 @@ fn videoGlm(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.glm.Vide
 }
 
 fn video(srv: *Server, cx: *Cx, bytes: []const u8) errors.Refused!qi.Video {
-    const l = library(srv.io) orelse return cx.refuse("video inputs need libtfvideo (FFmpeg) beside the server");
+    const l = library(srv.io) orelse return cx.refuse(@import("sys").optional_libraries.spec(.video).message);
     var budget: u64 = 16384;
     if (std.c.getenv("TENSORFOLD_VIDEO_TOKENS")) |v| budget = std.fmt.parseInt(u64, std.mem.span(v), 10) catch budget;
     var v: TfVideo = undefined;

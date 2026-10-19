@@ -210,7 +210,7 @@ def token_cases() -> list[tuple[str, str, list[Any]]]:
 
 def framing_cases() -> list[tuple[str, str, list[Any], dict[str, Any]]]:
     hi = chat("plain")
-    head = "POST /v1/chat/completions HTTP/1.1\r\nHost: x\r\n"
+    head = "POST /v1/chat/completions HTTP/1.1\r\nHost: parity\r\n"
     bad = [("Transfer-Encoding: chunked\r\nContent-Length: 2", b"0\r\n\r\n"), ("Transfer-Encoding: gzip", b""),
            ("Transfer-Encoding: gzip, chunked", b"0\r\n\r\n"), ("Transfer-Encoding: chunked, chunked", b"0\r\n\r\n"),
            ("Content-Length: bad", b""), ("Content-Length: -1", b""), ("Content-Length: 2\r\nContent-Length: 3", b"{}"),
@@ -241,13 +241,13 @@ def framing_cases() -> list[tuple[str, str, list[Any], dict[str, Any]]]:
         ("framing", "bad-version", [b"GET / HTTX/1.1\r\n\r\n"], {}),
         ("framing", "http09", [b"GET /health\r\n"], {}),
         ("framing", "http09-post", [b"POST /health\r\n"], {}),
-        ("framing", "four-words", [b"GET / x HTTP/1.1\r\nHost: x\r\n\r\n"], {}),
+        ("framing", "four-words", [b"GET / x HTTP/1.1\r\nHost: parity\r\n\r\n"], {}),
         ("framing", "http2", [b"GET / HTTP/2.0\r\n\r\n"], {}),
         ("framing", "long-header", [b"GET / HTTP/1.1\r\nX: " + b"a" * 70000 + b"\r\n\r\n"], {}),
         ("framing", "many-headers", [b"GET / HTTP/1.1\r\n" + b"".join(b"X-%d: y\r\n" % i for i in range(105)) + b"\r\n"], {}),
         ("framing", "blank-line", [b"\r\n"], {}),
         ("framing", "double-slash", [get("//health")], {}),
-        ("framing", "latin1-path", [b"GET /caf\xe9 HTTP/1.1\r\n\r\n"], {}),
+        ("framing", "latin1-path", [b"GET /caf\xe9 HTTP/1.1\r\nHost: parity\r\n\r\n"], {}),
         ("framing", "decisions", [post("/v1/decisions", {"input": "x"})], {}),
     ]
     return out

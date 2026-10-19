@@ -1,6 +1,8 @@
 //! GPU test runner for the CUDA runtime: `tf-cuda-test <command> [args]`, PASS/FAIL/RESULT lines, exit 1 on failure.
 
 const std = @import("std");
+const q27_back_tests = @import("q27_back_tests.zig");
+const q27_gemm_tests = @import("q27_gemm_tests.zig");
 const cuda = @import("cuda");
 const check = @import("check.zig");
 const runtime_tests = @import("runtime_tests.zig");
@@ -28,6 +30,7 @@ const glm_ref_tests = @import("glm_ref_tests.zig");
 const affine8_tests = @import("affine8_tests.zig");
 const glm_exl3_tests = @import("glm_exl3_tests.zig");
 const glm_vision_tests = @import("glm_vision_tests.zig");
+const glm_mm_fixed = @import("glm_mm_fixed_tests.zig");
 const glm_mm_bench = @import("glm_mm_bench.zig");
 const carveout_tests = @import("carveout_tests.zig");
 const nvfp4_tests = @import("nvfp4_tests.zig");
@@ -76,6 +79,17 @@ const flashnext_hc_tests = @import("flashnext_hc_tests.zig");
 const flashnext_attn_tests = @import("flashnext_attn_tests.zig");
 const ggml_tests = @import("ggml_tests.zig");
 const paged_tests = @import("paged_tests.zig");
+
+const gdn_back_tests = @import("gdn_back_tests.zig");
+const q4_back_tests = @import("q4_back_tests.zig");
+const moe_back_tests = @import("moe_back_tests.zig");
+const fn_moe_back_tests = @import("fn_moe_back_tests.zig");
+const attn_back_tests = @import("attn_back_tests.zig");
+const fn_hc_back_tests = @import("fn_hc_back_tests.zig");
+const fn_pocket_tests = @import("fn_pocket_tests.zig");
+const kolibri_tests = @import("kolibri_tests.zig");
+const kolibri_layer_tests = @import("kolibri_layer_tests.zig");
+const aot_fallback_tests = @import("aot_fallback_tests.zig");
 
 const usage =
     \\usage: tf-cuda-test <command>
@@ -126,6 +140,14 @@ const usage =
     \\  radio-processor REF PICS MODEL  decoded RGB, processor pixels, float resizes and grids against the reference
     \\  radio-kernels             RADIO's float-patch cast and position rows against host references (synthetic rows)
     \\  radio-attention           the head-dim-80 tower attention's time at five sizes, outputs finite (synthetic rows)
+    \\  gdn-back                  DeltaNet input gradients against FP64
+    \\  q4-back                  Affine input gradients against FP64
+    \\  moe-back                  Expert and router input gradients against FP64
+    \\  attn-back                  Gated attention input gradients against FP64
+    \\  fn-hc-back                  Hyper-connection input gradients against FP64
+    \\  fn-moe-back                  MoE and pocket input gradients against FP64
+    \\  fn-pocket [reps]                  Pocket kernels against the row reference
+    \\  fn-back                  All component gradient cases
     \\  window-profile MODEL WIDTHS IDS_FILE   a decode window's GPU ms by kernel class (WIDTHS like 1,4,16), beside its graph
     \\  tree-accept MODEL IDS_FILE COUNT OUT   a greedy reply's MTP chain and level-1 runner-up branches at every position (JSON)
     \\  chunk-costs MODEL IDS_FILE WIDTHS   r rows as the decode window graph (r up to its window) and as a prompt chunk (any r)
@@ -169,12 +191,19 @@ const usage =
     \\  kernel-contract-limits DIR   each registered launch against sm_80/86/89/120/121 from the fatbins in DIR
     \\  glm-exl3                  GLM's EXL3 routed experts, decode and prompt, against float64 (synthetic)
     \\  glm-vision MODEL F32 BF16 IMG  GLM's image tower and preparation against vision_ref.py's torch runs
+    \\  glm-mm-fixed              Prompt K policies: FP64, every row alone/batched, offsets and guarded tails
     \\  glm-mm-bench              GLM's bf16 linears: b16.matmul against glm_mm, by rows (one GPU)
     \\  glm-ref                   GLM projections (matmuls, router, attention, indexer, hc) against float64 (synthetic)
     \\  glm-lanes-cover <ckpt> <dc.json> <rank> <world> <idfile>  copy drafts, cancels, discards, eos and max_new on one lanes.Engine across requests
     \\  glm-lanes-concurrent <ckpt> <dc.json> <rank> <world> <idfile>  concurrent streams on one lanes.Engine, each against its solo run
     \\  glm-shared-check <ckpt> <dc.json> <rank> <world> <idfile>  shared verify windows against lone twins, logits and states byte for byte
+    \\  kolibri-reference MODEL IDS  Kolibri-1's layer 0 and head against float64 from the checkpoint (prompt and decode rows)
+    \\  kolibri-layers MODEL IDS    Kolibri-1's window edge (513 keys) and its fifth layer's full reach, on the checkpoint
+    \\  kolibri-full MODEL IDS N    Kolibri-1: eager rows, steps, drafted, sampled, shared rounds, cuts and kept states alike
+    \\  kolibri-greedy MODEL PROMPTS N OUT  Kolibri-1 greedy from each prompt (JSON id lists): ids and top-2 margins
+    \\  kolibri-logits MODEL IDS OUT [PROMPTS]  Kolibri-1's teacher-forced fp32 logits of 2,048 prompt rows; each prompt's last
     \\  glm-synth <dir>          a synthetic GLM-5.3-Flash checkpoint (2 layers, 16 experts) and its dc.json for the lane checks
+    \\  aot-fallback <dir>        a launch's 1 from the runtime-parameter variant: the folded variant's bits (#1003)
     \\
 ;
 
@@ -258,6 +287,7 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-ref")) return glm_ref_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "affine8")) return affine8_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-exl3")) return glm_exl3_tests.run_(gpu);
+    if (std.mem.eql(u8, cmd, "glm-mm-fixed")) return glm_mm_fixed.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-mm-bench")) return glm_mm_bench.run(gpu);
     if (std.mem.eql(u8, cmd, "glm-vision")) return glm_vision_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
     if (std.mem.eql(u8, cmd, "modelopt")) return modelopt_tests.run(gpu);
@@ -273,6 +303,8 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "exl3-tiles")) return exl3_candidate_tests.run(gpu, if (rest.len > 0) rest[0] else null);
     if (std.mem.eql(u8, cmd, "exl3-tp2")) return exl3_tp2_tests.run(gpu, try arg(rest, 0), try arg(rest, 1), if (rest.len > 2) rest[2] else "none");
     if (std.mem.eql(u8, cmd, "sample")) return sample_tests.draws(gpu);
+    if (std.mem.eql(u8, cmd, "topk")) return sample_tests.topk(gpu);
+    if (std.mem.eql(u8, cmd, "q35-argmax")) return sample_tests.q35Argmax(gpu);
     if (std.mem.eql(u8, cmd, "norms")) return norms_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "norm-rows")) return norm_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "tree-round")) return tree_round_tests.run(gpu);
@@ -281,6 +313,22 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "qk-rows")) return qk_rows_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "glue")) return glue_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "lfm2-kernels")) return lfm2_kernel_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back")) return gdn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "q4-back")) return q4_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "moe-back")) return moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "attn-back")) return attn_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-hc-back")) return fn_hc_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-moe-back")) return fn_moe_back_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "fn-pocket")) return fn_pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
+    if (std.mem.eql(u8, cmd, "fn-back")) {
+        try gdn_back_tests.run(gpu);
+        try q4_back_tests.run(gpu);
+        try moe_back_tests.run(gpu);
+        try fn_moe_back_tests.run(gpu);
+        try attn_back_tests.run(gpu);
+        try fn_hc_back_tests.run(gpu);
+        return;
+    }
     if (std.mem.eql(u8, cmd, "pocket"))
         return pocket_tests.run(gpu, if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else 0);
     if (std.mem.eql(u8, cmd, "lfm2-attention")) return lfm2_attention_tests.run(gpu);
@@ -305,6 +353,9 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
         const mib = if (rest.len > 0) try std.fmt.parseInt(usize, rest[0], 10) else cuda.carveout.default_bytes >> 20;
         return carveout_tests.run(gpu, if (rest.len > 1) rest[1] else cuda.carveout.default_card, mib);
     }
+    if (std.mem.eql(u8, cmd, "q27-back")) return q27_back_tests.run(gpu, .all);
+    if (std.mem.eql(u8, cmd, "q27-gemm")) return q27_gemm_tests.run(gpu);
+    if (std.mem.eql(u8, cmd, "gdn-back-27b")) return gdn_back_tests.runShape(gpu, 5120, 64);
     if (std.mem.eql(u8, cmd, "kernel-contract")) return contract_tests.run(gpu);
     if (std.mem.eql(u8, cmd, "kernel-contract-limits")) return contract_tests.fatbins(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "tree")) return tree_tests.run(gpu);
@@ -316,6 +367,12 @@ fn run(gpu: check.Gpu, cmd: []const u8, rest: []const [:0]const u8) !void {
     if (std.mem.eql(u8, cmd, "glm-lanes-cover")) return glm_lanes_tests.coverCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-shared-check")) return glm_lanes_tests.sharedCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     if (std.mem.eql(u8, cmd, "glm-synth")) return glm_synth.run(gpu, try arg(rest, 0));
+    if (std.mem.eql(u8, cmd, "kolibri-reference")) return kolibri_layer_tests.reference(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "kolibri-layers")) return kolibri_layer_tests.layers(gpu, try arg(rest, 0), try arg(rest, 1));
+    if (std.mem.eql(u8, cmd, "kolibri-full")) return kolibri_tests.full(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2));
+    if (std.mem.eql(u8, cmd, "kolibri-greedy")) return kolibri_tests.greedy(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), try arg(rest, 3));
+    if (std.mem.eql(u8, cmd, "kolibri-logits")) return kolibri_tests.logits(gpu, try arg(rest, 0), try arg(rest, 1), try arg(rest, 2), if (rest.len > 3) rest[3] else null);
+    if (std.mem.eql(u8, cmd, "aot-fallback")) return aot_fallback_tests.run(gpu, try arg(rest, 0));
     if (std.mem.eql(u8, cmd, "glm-lanes-concurrent")) return glm_lanes_tests.concurrentCheck(gpu, try arg(rest, 0), try arg(rest, 1), try std.fmt.parseInt(c_int, try arg(rest, 2), 10), try std.fmt.parseInt(c_int, try arg(rest, 3), 10), try arg(rest, 4));
     std.debug.print("{s}", .{usage});
     return error.UnknownCommand;

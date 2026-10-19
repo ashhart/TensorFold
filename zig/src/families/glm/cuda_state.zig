@@ -19,6 +19,8 @@ const kda_block = @import("cuda_kda_block.zig");
 pub const prefill_rows = 2048;
 /// A decode window's rows (Engine's max_rows).
 pub const window_rows = 8;
+/// Prompts one prompt pass takes together (cuda_prompts): a prompt buffer's logits rows, one a prompt.
+pub const prompt_heads = 16;
 /// The context the buffers' dense attention partials reach (Buffers' min(capacity, 2560)).
 pub const dense_reach = 2560;
 /// Index-key and gate rows a DSA cache holds (a ring): pool_keys reads only from the current pool's first row on.
@@ -163,7 +165,7 @@ pub const Buffers = struct {
             rows * sh * 2,
             rows * (sh / 64) * 4, rows * D * 4, // sxs, sy
             rows * D * 2,         rows * D * 2,
-            rows * (D / 64) * 4,  (if (prefill) 1 else rows) * s.vocab.len() * 2,
+            rows * (D / 64) * 4,  (if (prefill) prompt_heads else rows) * s.vocab.len() * 2,
             rows * D * 2, rows * D * 2, rows * 2 * D * 2, rows * D * 2, // hin, me, mcat, mx
             rows * D * 4, // part: this rank's fp32 partial rows a split exchange sends from
             x3[0], x3[1], x3[2], x3[3], // EXL3 experts: 8-slot picks, rotated inputs, a decode window's partials
@@ -262,6 +264,7 @@ pub const State = struct {
     rings: []u64, // each DSA layer's ik ring then ig ring, the MTP layer's last: [layers + 1][2]
     base: usize = 0, // the first position the main rings hold (their pointers are ring - base rows)
     mtp_base: usize = 0,
+    prompt_hidden: u64, // first-draft row owned and charged by this sequence arena
 
     pub fn init(gpa: std.mem.Allocator, d: *const cuda.Driver, w: *const weights.Weights, capacity: usize) !State {
         const c = &w.config;
@@ -281,7 +284,7 @@ pub const State = struct {
         try sizes.appendSlice(gpa, &.{ nk * window_rows * n * 4, nk * window_rows * n * 2, nk * window_rows * n * 4, nk * window_rows * s.kda.len() * 4 });
         const ring_rows = @min(capacity, index_ring);
         for (0..nd + 1) |_| try sizes.appendSlice(gpa, &.{ capacity * c.kv_lora * 2, ring_rows * c.i_dim * 2, ring_rows * c.i_dim * 2, pk_rows * c.i_dim * 2 });
-        try sizes.append(gpa, 4); // the MTP head's position
+        try sizes.appendSlice(gpa, &.{ 4, c.hidden * 2 }); // MTP position and sequence-owned first-draft row
         const p = try gpa.alloc(u64, sizes.items.len);
         defer gpa.free(p);
         var a = try arena(d, sizes.items, p);
@@ -294,7 +297,7 @@ pub const State = struct {
         for (caches, 0..) |*x, j| x.* = .{ .lc = p[8 + 4 * j], .ik = p[9 + 4 * j], .ig = p[10 + 4 * j], .pk = p[11 + 4 * j], .pk_rows = pk_rows };
         const rings = try gpa.alloc(u64, 2 * (nd + 1));
         for (0..nd + 1) |j| rings[2 * j ..][0..2].* = .{ p[9 + 4 * j], p[10 + 4 * j] };
-        return .{ .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
+        return .{ .ring_rows = ring_rows, .ring_row = c.i_dim * 2, .rings = rings, .arena = a, .gpa = gpa, .capacity = capacity, .pos_dev = p[0], .conv = p[1], .rec = p[2], .proj = p[3], .save_k = p[4], .save_v = p[5], .save_g = p[6], .save_b = p[7], .cur = cur, .heads = s.kda.len(), .mtp_caches = .{ .lc = p[8 + 4 * nd], .ik = p[9 + 4 * nd], .ig = p[10 + 4 * nd], .pk = p[11 + 4 * nd], .pk_rows = pk_rows }, .mtp_pos_dev = p[12 + 4 * nd], .prompt_hidden = p[13 + 4 * nd], .kda_layers = nk, .caches = caches, .conv_c = 3 * n, .rec_layer = s.kda.len() * kda.dk * kda.dv * 4, .proj_layer = window_rows * kw, .proj_row = kw };
     }
 
     pub fn deinit(st: *State) void {

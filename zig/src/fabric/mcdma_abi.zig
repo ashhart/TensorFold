@@ -6,7 +6,7 @@ pub const Context = opaque {};
 pub const Peer = opaque {};
 pub const progress_thread: u32 = 1;
 pub const thunderbolt: c_int = 2;
-pub const Error = error{ LibraryUnavailable, MissingSymbol, WrongAbi, InvalidPath };
+pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, WrongAbi, InvalidPath };
 
 pub const Api = struct {
     abi: *const fn () callconv(.c) u32,
@@ -37,11 +37,11 @@ pub const Library = struct {
     /// No install-path or loader-search fallback; the caller supplies the inspected user-directory library.
     pub fn open(path: [:0]const u8) Error!Library {
         if (!std.fs.path.isAbsolute(path)) return error.InvalidPath;
-        var handle = platform.DynLib.openZ(path.ptr) catch return error.LibraryUnavailable;
+        var handle = platform.DynLib.openZ(path.ptr) catch return platform.optional_libraries.unavailable(.mcdma_fabric);
         errdefer handle.close();
         var api: Api = undefined;
         inline for (@typeInfo(Api).@"struct".field_names) |name| {
-            @field(api, name) = handle.lookup(@FieldType(Api, name), "mcdma_fabric_" ++ name) orelse return error.MissingSymbol;
+            @field(api, name) = handle.lookup(@FieldType(Api, name), "mcdma_fabric_" ++ name) orelse return platform.optional_libraries.unavailable(.mcdma_fabric);
         }
         if (api.abi() != 1) return error.WrongAbi;
         return .{ .handle = handle, .api = api, .write_signal = handle.lookup(WriteSignal, "mcdma_fabric_write_signal"), .connect_links = handle.lookup(ConnectLinks, "mcdma_fabric_connect_links"), .max_links = handle.lookup(MaxLinks, "mcdma_fabric_max_links") };

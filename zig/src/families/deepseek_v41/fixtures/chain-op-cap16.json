@@ -1,0 +1,227 @@
+{
+ "name": "_chain",
+ "function": "tensorfold.families.deepseek_v41.cuda.dspark._chain",
+ "grid": [
+  1,
+  1,
+  1
+ ],
+ "options": {
+  "num_warps": 4
+ },
+ "args": [
+  {
+   "name": "CAND",
+   "t": "tensor",
+   "dtype": "int32",
+   "shape": [
+    1,
+    5,
+    128
+   ],
+   "stride": [
+    640,
+    128,
+    1
+   ]
+  },
+  {
+   "name": "CVAL",
+   "t": "tensor",
+   "dtype": "float32",
+   "shape": [
+    1,
+    5,
+    128
+   ],
+   "stride": [
+    640,
+    128,
+    1
+   ]
+  },
+  {
+   "name": "c_stride",
+   "t": "int",
+   "v": 128
+  },
+  {
+   "name": "n_cand",
+   "t": "int",
+   "v": 128
+  },
+  {
+   "name": "W1",
+   "t": "tensor",
+   "dtype": "bfloat16",
+   "shape": [
+    129280,
+    256
+   ],
+   "stride": [
+    256,
+    1
+   ],
+   "weight": "dspark.markov.w1"
+  },
+  {
+   "name": "W2",
+   "t": "tensor",
+   "dtype": "bfloat16",
+   "shape": [
+    129280,
+    256
+   ],
+   "stride": [
+    256,
+    1
+   ],
+   "weight": "dspark.markov.w2"
+  },
+  {
+   "name": "HID",
+   "t": "tensor",
+   "dtype": "bfloat16",
+   "shape": [
+    1,
+    5,
+    5120
+   ],
+   "stride": [
+    25600,
+    5120,
+    1
+   ]
+  },
+  {
+   "name": "CW",
+   "t": "tensor",
+   "dtype": "float32",
+   "shape": [
+    5376
+   ],
+   "stride": [
+    1
+   ],
+   "weight": "dspark.conf"
+  },
+  {
+   "name": "ANCHOR",
+   "t": "tensor",
+   "dtype": "int32",
+   "shape": [
+    1
+   ],
+   "stride": [
+    1
+   ]
+  },
+  {
+   "name": "IPAR",
+   "t": "tensor",
+   "dtype": "int64",
+   "shape": [
+    1,
+    4
+   ],
+   "stride": [
+    4,
+    1
+   ]
+  },
+  {
+   "name": "FPAR",
+   "t": "tensor",
+   "dtype": "float32",
+   "shape": [
+    1,
+    3
+   ],
+   "stride": [
+    3,
+    1
+   ]
+  },
+  {
+   "name": "DRAFT",
+   "t": "tensor",
+   "dtype": "int32",
+   "shape": [
+    1,
+    5
+   ],
+   "stride": [
+    5,
+    1
+   ]
+  },
+  {
+   "name": "CONF",
+   "t": "tensor",
+   "dtype": "float32",
+   "shape": [
+    1,
+    5
+   ],
+   "stride": [
+    5,
+    1
+   ]
+  },
+  {
+   "name": "SCR",
+   "t": "tensor",
+   "dtype": "float64",
+   "shape": [
+    1,
+    2,
+    128
+   ],
+   "stride": [
+    256,
+    128,
+    1
+   ]
+  },
+  {
+   "name": "D",
+   "t": "int",
+   "v": 5120
+  },
+  {
+   "name": "N",
+   "t": "int",
+   "v": 5
+  },
+  {
+   "name": "KP",
+   "t": "int",
+   "v": 128
+  },
+  {
+   "name": "CH",
+   "t": "int",
+   "v": 16
+  },
+  {
+   "name": "R",
+   "t": "int",
+   "v": 256
+  },
+  {
+   "name": "RB",
+   "t": "int",
+   "v": 32
+  },
+  {
+   "name": "HB",
+   "t": "int",
+   "v": 1024
+  },
+  {
+   "name": "HAS_CONF",
+   "t": "bool",
+   "v": true
+  }
+ ]
+}

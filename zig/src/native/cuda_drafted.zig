@@ -3,6 +3,7 @@ const std = @import("std");
 const api = @import("engine_api");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
+const startup = @import("cuda_startup_costs.zig");
 
 /// What the host serves: the family's backend as is, or wrapped with a drafter in front.
 pub const Served = struct {
@@ -10,6 +11,7 @@ pub const Served = struct {
     facts: lanes.Model,
     stream_bytes: usize,
     held: ?*Held = null,
+    prepare: ?startup.Prepare = null,
     /// The family's own per-stream buffers, when its Loaded pre-allocates them.
     family: ?struct { ctx: *anyopaque, reserve: *const fn (*anyopaque, u32) anyerror!void } = null,
 
@@ -17,6 +19,10 @@ pub const Served = struct {
     pub fn reserve(s: *Served, streams: u32) !void {
         if (s.family) |f| try f.reserve(f.ctx, streams);
         if (s.held) |h| try h.reserve(h.ctx, streams);
+    }
+
+    pub fn calibrate(s: *Served, gpa: Allocator, cfg: *lanes.Config) !void {
+        try startup.calibrate(s, gpa, cfg);
     }
 
     pub fn close(s: *Served, gpa: Allocator) void {
@@ -59,6 +65,7 @@ pub fn wrap(comptime F: type, a: Allocator, gpa: Allocator, io: std.Io, loaded: 
     s.facts = h.drafted.facts(loaded.facts);
     s.stream_bytes = h.drafted.streamBytes(loaded.stream_bytes);
     s.held = h;
+    if (@hasField(@TypeOf(opened), "prepare")) s.prepare = .{ .ctx = opened.prepare.ctx, .run = opened.prepare.run, .bytes = if (@hasField(@TypeOf(opened.prepare), "bytes")) opened.prepare.bytes else 0 };
     return s;
 }
 

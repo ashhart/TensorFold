@@ -255,20 +255,22 @@ pub const Conn = struct {
         var headers: std.ArrayList(Header) = .empty;
         for (lines.items) |line| {
             if (line.len == 0 or line[0] == '\r' or line[0] == '\n') break;
-            if (line[0] == ' ' or line[0] == '\t') {
-                if (headers.items.len == 0) continue;
-                const last = &headers.items[headers.items.len - 1];
-                last.value = try std.mem.concat(a, u8, &.{ last.value, "\r\n", std.mem.trimEnd(u8, line, "\r\n") });
-                continue;
-            }
-            const colon = std.mem.indexOfScalar(u8, line, ':') orelse break;
-            const name = line[0..colon];
-            if (!headerName(name)) break; // email's parser ends the head at a line that is not a header
-            const value = std.mem.trimEnd(u8, std.mem.trimStart(u8, line[colon + 1 ..], " \t"), "\r\n");
+            const text = std.mem.trimEnd(u8, line, "\r\n");
+            const colon = std.mem.indexOfScalar(u8, text, ':') orelse return c.badHead(a);
+            const name = text[0..colon];
+            if (!headerName(name)) return c.badHead(a);
+            const value = std.mem.trimStart(u8, text[colon + 1 ..], " \t");
+            for (value) |ch| if ((ch < 0x20 and ch != '\t') or ch == 0x7f) return c.badHead(a);
             try headers.append(a, .{ .name = name, .value = value });
         }
         c.headers = headers.items;
         return true;
+    }
+
+    fn badHead(c: *Conn, a: Allocator) Allocator.Error!bool {
+        c.close = true;
+        try c.sendError(a, 400, "Malformed HTTP headers", null);
+        return false;
     }
 
     /// Python's ``send_response`` head: status line, Server and Date (nothing for HTTP/0.9).
@@ -356,7 +358,8 @@ const error_page =
 ;
 
 fn headerName(name: []const u8) bool {
-    for (name) |ch| if (ch < 0x21 or ch > 0x7e) return false;
+    if (name.len == 0) return false;
+    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and std.mem.indexOfScalar(u8, "!#$%&'*+-.^_`|~", ch) == null) return false;
     return true;
 }
 
@@ -381,6 +384,7 @@ pub fn reason(code: u16) []const u8 {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
+        403 => "Forbidden",
         404 => "Not Found",
         414 => "URI Too Long",
         431 => "Request Header Fields Too Large",

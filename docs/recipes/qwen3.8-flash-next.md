@@ -100,6 +100,26 @@ budget. Shared sessions draw sampled tokens with the same GPU sampler as the sin
 Each packed window uses its own seed, sampling settings and absolute token positions. The two-Mac path remains
 greedy only. The model gate below must verify sampled token parity across routes, drafting and batch composition.
 
+Shared sessions enforce structured output (`response_format`, the `guided_*` fields, `tool_choice: "required"` and a
+named function; [API](../api.md#structured-output)) with `libtfgrammar` beside the binary. Before the argmax and the
+draw, `fz_mask_rows` sets each constrained row's disallowed logits to -inf (`families/flashnext/grammar.zig`); the
+first token is drawn on the host from the prompt's last row among the grammar's tokens, as the GPU draws it. Rounds
+with no constrained stream skip the mask. The single-reply driver (`--parallel 1`, the two-Mac path) answers a
+structured request with HTTP 400.
+
+`--context` past the trained 262,144 tokens, up to 1,048,576, rotates with static YaRN x4 (transformers'
+`_compute_yarn_parameters`: factor 4 over the trained window, beta 32 and 1, cos and sin scaled by 0.1 ln 4 + 1) in
+every rotary kernel, attention, the indexer's queries and pooled keys and the MTP head alike, for every prompt; at
+262,144 or less the plain rotary runs as before. Qwen recommends YaRN only where long prompts need it, since static
+scaling can cost short texts. Only the engine's own session holds the long window; on shared sessions the others hold
+262,144 tokens (`FLASHNEXT_SLOT_CONTEXTS` sets other sizes), and a request longer than that takes the long one. Past the trained window prompt chunks take fewer rows, so the prompt selector's scores keep the 2 GiB they take at
+262,144. The two-Mac path refuses such a window. On an M5 Ultra (6-bit MTP checkpoint, `--parallel 2 --vision`,
+1,048,576 and 262,144-token sessions and an 8 GiB prompt cache: 203.2 GiB wired, `FLASHNEXT_LOAD_LIMIT_GB=240`),
+needles were found at 138,830, 553,139 and 1,032,827 prompt tokens (34 s, 169 s and 417 s to the first token, 4,038 to
+2,479 tok/s), drafted replies equal `"draft": false` at 316,469 tokens, and a short request beside a 666,334-token
+prompt equals its reply alone (it waits for that prompt's pass, about 205 s). One stream decodes at 137 to 216 tok/s
+there, against 142 to 214 at 262,144 (`bench/ruler.py`, the qwen recipe's).
+
 The shared host's residency set includes the engine, session caches and metadata, shared hidden rows and later
 prompt snapshots. Residency uses the same validated load limit as the host, with a 2 GiB margin inside it for
 growing buffers. The default stays at 70% of RAM; `FLASHNEXT_LOAD_LIMIT_GB` can raise or lower that ceiling, capped

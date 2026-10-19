@@ -41,6 +41,16 @@ pub fn validatePlan(shape: abi.Shape, slots: usize, capacity: usize, plan: Plan)
     if (first != rows or kept != plan.kept_rows.len) return error.BadGdnPoolPlan;
 }
 
+/// Only one-row windows advanced by a verify need rollback words, indexed by their original slot.
+pub fn beforeSlots(plan: Plan, advance: bool) usize {
+    if (!advance) return 0;
+    var slots: usize = 0;
+    for (plan.segments) |segment| if (segment.rows == 1) {
+        slots = @max(slots, @as(usize, segment.state_slot) + 1);
+    };
+    return slots;
+}
+
 pub const Budget = struct {
     shape: abi.Shape,
     layers: usize,

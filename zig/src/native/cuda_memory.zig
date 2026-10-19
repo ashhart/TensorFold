@@ -3,16 +3,51 @@ const cuda = @import("cuda");
 const std = @import("std");
 const gib: f64 = 1 << 30;
 
-/// The bytes of the checkpoint's safetensors files: what its weights need on the device, near enough to refuse early.
-pub fn weightBytes(io: std.Io, dir: []const u8) u64 {
-    var d = std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true }) catch return 0;
+/// Bytes of the checkpoint's safetensors (the weight map's files, else the folder's own), near enough to refuse early.
+pub fn weightBytes(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    var d = try std.Io.Dir.cwd().openDir(io, dir, .{ .iterate = true });
     defer d.close(io);
+    return mapped(gpa, io, d) catch |err| switch (err) {
+        error.NoIndex, error.NoWeightMap => try listed(io, d),
+        else => return err,
+    };
+}
+
+/// The files model.safetensors.index.json's weight map names, each once.
+fn mapped(gpa: std.mem.Allocator, io: std.Io, d: std.Io.Dir) !u64 {
+    const text = d.readFileAlloc(io, "model.safetensors.index.json", gpa, .limited(1 << 26)) catch |err| {
+        if (err == error.FileNotFound) return error.NoIndex;
+        return err;
+    };
+    defer gpa.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, gpa, text, .{});
+    defer parsed.deinit();
+    const map = if (parsed.value == .object) parsed.value.object.get("weight_map") else null;
+    if (map == null) return error.NoWeightMap;
+    if (map.? != .object) return error.InvalidWeightMap;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(gpa);
+    var total: u64 = 0;
+    var it = map.?.object.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.* != .string) return error.InvalidWeightMap;
+        if ((try seen.getOrPut(gpa, e.value_ptr.string)).found_existing) continue;
+        const st = try d.statFile(io, e.value_ptr.string, .{});
+        if (st.kind != .file) return error.InvalidWeightFile;
+        total = std.math.add(u64, total, st.size) catch return error.WeightSizeOverflow;
+    }
+    return total;
+}
+
+/// The folder's own *.safetensors, for a checkpoint without an index.
+fn listed(io: std.Io, d: std.Io.Dir) !u64 {
     var total: u64 = 0;
     var it = d.iterate();
-    while (it.next(io) catch null) |e| {
+    while (try it.next(io)) |e| {
         if (!std.mem.endsWith(u8, e.name, ".safetensors")) continue;
-        const st = d.statFile(io, e.name, .{}) catch continue;
-        total += st.size;
+        const st = try d.statFile(io, e.name, .{});
+        if (st.kind != .file) return error.InvalidWeightFile;
+        total = std.math.add(u64, total, st.size) catch return error.WeightSizeOverflow;
     }
     return total;
 }
@@ -119,6 +154,11 @@ pub fn admit(room: u64, stream: u64, free: u32, asked: u32, fixed: bool) error{ 
     return if (fixed) error.TooMany else fits;
 }
 
+/// The room admission adds streams in: none for a family that allocated at open every stream it can serve.
+pub fn growRoom(room: u64, grows: bool) u64 {
+    return if (grows) room else 0;
+}
+
 /// Kept prompt states' budget: --prompt-cache-gib (0: none), else 16 GiB, never past what the streams leave of `room`.
 pub fn cacheBytes(asked: ?f64, room: u64, streams: u64) u64 {
     const want: u64 = if (asked) |g| (if (g > 0) std.math.lossyCast(u64, g * gib) else 0) else 16 << 30;
@@ -162,6 +202,18 @@ test "the memory plan: reserve, cap, and admission that fails closed" {
     try std.testing.expectEqual(@as(u32, 2), try admit(2 * g, g + g / 2, 1, 4, false));
     try std.testing.expectEqual(@as(u32, 1), try admit(g - 1, g, 1, 8, false));
     try std.testing.expectError(error.TooMany, admit(2 * g, g, 1, 4, true));
+}
+
+test "a family that allocates every stream at open is admitted only the streams it holds" {
+    const g: u64 = 1 << 30;
+    // 64 slots allocated, room for one more: a fixed 65 refuses instead of adopting a lane with no slot
+    try std.testing.expectError(error.TooMany, admit(growRoom(g, false), g, 64, 65, true));
+    // auto planned 3 that fit: room left over for another stream adds no lane
+    try std.testing.expectEqual(@as(u32, 3), try admit(growRoom(g, false), g, 3, 8, false));
+    // streams paid for at open stay admitted when nothing is left
+    try std.testing.expectEqual(@as(u32, 8), try admit(growRoom(0, false), g, 8, 8, true));
+    // a family that grows streams after its open keeps the room
+    try std.testing.expectEqual(@as(u32, 65), try admit(growRoom(g, true), g, 64, 65, true));
 }
 
 test "the prompt cache: 16 GiB unless the flag sizes it, inside what the streams leave" {
@@ -236,4 +288,68 @@ pub fn readPool(a: std.mem.Allocator, io: std.Io, ctx: *const cuda.Context, prob
         return null;
     };
     return .{ .free = available.available, .total = available.total, .reserve = reserve, .limit = limit, .unified = unified };
+}
+
+test "the weights' bytes: each file the weight map names once, under a folder too; without an index the folder's own" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tensors");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model-00001-of-00001.safetensors", .data = &@as([10]u8, @splat('w')) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tensors/native-QB.safetensors", .data = &@as([7]u8, @splat('q')) });
+    try tmp.dir.writeFile(io, .{ .sub_path = "stray.safetensors", .data = &@as([100]u8, @splat('s')) });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try std.testing.expectEqual(@as(u64, 110), try weightBytes(a, io, dir)); // no index: model and stray, not tensors/
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model-00001-of-00001.safetensors","b":"tensors/native-QB.safetensors","c":"model-00001-of-00001.safetensors"}}
+    });
+    try std.testing.expectEqual(@as(u64, 17), try weightBytes(a, io, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "[]" }); // no weight map: the folder's own
+    try std.testing.expectEqual(@as(u64, 110), try weightBytes(a, io, dir));
+}
+
+fn checkedWeightBytes(a: std.mem.Allocator, io: std.Io, dir: []const u8) !u64 {
+    return weightBytes(a, io, dir);
+}
+
+test "named shard failures and malformed indexes cannot become a smaller estimate" {
+    const a = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "tensors");
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "0123456789" });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model.safetensors","b":"tensors/missing.safetensors"}}
+    });
+    try std.testing.expectError(error.FileNotFound, checkedWeightBytes(a, io, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model.safetensors","b":7}}
+    });
+    try std.testing.expectError(error.InvalidWeightMap, checkedWeightBytes(a, io, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"tensors"}}
+    });
+    try std.testing.expectError(error.InvalidWeightFile, checkedWeightBytes(a, io, dir));
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data = "{" });
+    if (checkedWeightBytes(a, io, dir)) |_| return error.TestUnexpectedResult else |_| {}
+}
+
+test "an index allocation failure is reported instead of counting the flat directory" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors", .data = "0123456789" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "model.safetensors.index.json", .data =
+        \\{"weight_map":{"a":"model.safetensors"}}
+    });
+    var path: [64]u8 = undefined;
+    const dir = try std.fmt.bufPrint(&path, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    var bytes: [0]u8 = .{};
+    var fixed = std.heap.FixedBufferAllocator.init(&bytes);
+    try std.testing.expectError(error.OutOfMemory, checkedWeightBytes(fixed.allocator(), io, dir));
 }

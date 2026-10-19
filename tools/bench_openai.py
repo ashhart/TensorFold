@@ -96,7 +96,7 @@ def main() -> None:
     p.add_argument("--output")
     p.add_argument("--api-key-env", metavar="NAME", help="read the bearer API key from this environment variable")
     p.add_argument("--seed-from-prompt", action="store_true",
-                   help="send no seed: cuda_server then seeds from the prompt, as the engine benches do, "
+                   help="send no seed; requires native serve --prompt-seed to match prompt-keyed engine benches, "
                         "so the reply equals the bench's and the timings compare directly")
     args = p.parse_args()
     api_key = read_api_key(p, args.api_key_env)

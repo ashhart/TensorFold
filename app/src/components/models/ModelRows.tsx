@@ -1,3 +1,4 @@
+import type { HubFailureCategory } from '../../../shared/hub-failure'
 import { currentIntlLocale } from '../../lib/preferences/current-locale'
 import { OriginalDiagnostic } from '../OriginalDiagnostic'
 import { useAuthoredText } from '../../lib/preferences/useAuthoredText'
@@ -165,6 +166,7 @@ export function PullRow({ pull, onCancel, onRetry }: { pull: PullProgress; onCan
 }
 
 export interface PreflightState {
+  errorKind?: HubFailureCategory | null
   loading: boolean
   result: ModelPreflight | null
   error: string | null

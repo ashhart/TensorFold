@@ -21,6 +21,7 @@ const empty = () => null;
 const row = props => { click = props.onLoad; return null };
 const engine = { ENGINE_PROVIDER_ID: 'tensorfold', useEngine: () => ({ snapshot: { status: { state: 'idle', available: true }, installed: [{ repo: 'synthetic/model', title: 'Synthetic', fitsMemory: true }], suggestions: [], pulls: [] } }), loadEngineModel: async () => { loads++ }, refreshEngine: async () => {} };
 const { Models } = load('src/components/Models.tsx', {
+ '../../shared/hub-failure': load('shared/hub-failure.ts', {}),
  react: React, 'react/jsx-runtime': req('react/jsx-runtime'), clsx: req('clsx'),
  './OriginalDiagnostic': { OriginalDiagnostic: empty }, '../lib/preferences/language-packs': { authoredText }, '../lib/preferences/useAuthoredText': { useAuthoredText }, '../lib/store': { useStore }, '../lib/ipc': { api: {} }, '../lib/engine': engine,
  './clusters/ClusterWorkspace': { ClusterWorkspace: empty },

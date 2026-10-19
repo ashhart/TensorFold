@@ -11,11 +11,15 @@ const DeviceBuffer = cuda.DeviceBuffer;
 pub const tap_rows = 2048 + engine.max_rows;
 
 /// qwen35.cuh's Seg and Path.
-pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int };
+pub const Seg = extern struct { rec: u64, conv: u64, kv: u64, tap: u64, log: u64, before: u64, cap: c_int, len: c_int, row0: c_int, rows: c_int, tap_rows: c_int, taps: c_int, delta: c_int };
 pub const Path = extern struct { n: c_int, rows: [engine.most_window]c_int };
 
 pub const Cache = struct {
+    untaught: bool = false,
+    delta: i32 = 0,
     state: DeviceBuffer,
+    /// The exact state before a recorded one-row round advances its stable slot in place.
+    before: ?DeviceBuffer = null,
     kv: DeviceBuffer,
     /// A drafter's tapped rows (`Engine.taps`), a ring of tap_rows: the row at position p in slot p % tap_rows.
     tap: ?DeviceBuffer = null,
@@ -26,15 +30,15 @@ pub const Cache = struct {
     /// Positions the newest forward wrote up to: a tap ring holds them until the next forward, whatever `keep` lands.
     written: usize = 0,
     logits: []u16,
-    /// The newest verify window of more than one row, until its path is kept: where it started, its rows.
+    /// The newest verify window, until its path is kept: where it started, its rows.
     last: ?struct { start: usize, rows: usize } = null,
     /// An image prompt's rotary shift (get_rope_index's rope_delta): rows after its prompt rotate at position + delta.
-    delta: i32 = 0,
-
     pub fn init(gpa: std.mem.Allocator, e: *const Engine, cap: usize) !Cache {
         var state = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
         errdefer state.free();
         try state.fill8(0, null);
+        var before = try DeviceBuffer.alloc(e.d, e.g.stateBytes());
+        errdefer before.free();
         var kv = try DeviceBuffer.alloc(e.d, e.g.kvBytes(cap, e.kv8));
         errdefer kv.free();
         try kv.fill8(0, null); // touched now, not as the first request's keys land (the driver commits on first touch)
@@ -42,12 +46,19 @@ pub const Cache = struct {
         errdefer log.free();
         try log.fill8(0, null);
         var tap: ?DeviceBuffer = null;
+        errdefer if (tap) |*t| t.free();
         if (e.n_taps > 0) {
             tap = try DeviceBuffer.alloc(e.d, e.tapBytes());
             try tap.?.fill8(0, null);
         }
-        errdefer if (tap) |*t| t.free();
-        return .{ .state = state, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
+        return .{ .state = state, .before = before, .kv = kv, .tap = tap, .log = log, .cap = cap, .logits = try gpa.alloc(u16, e.g.vocab) };
+    }
+
+    /// Publish a completed forward's metadata, including one-row slots that already advanced in place.
+    pub fn advanced(self: *Cache, rows: usize, record: bool) void {
+        self.last = if (record) .{ .start = self.len, .rows = rows } else null;
+        self.len += rows;
+        self.written = self.len;
     }
 
     /// Ready for another stream: no rows, the recurrences and tails zero (on the engine's stream, before its forwards).
@@ -55,12 +66,14 @@ pub const Cache = struct {
         self.len = 0;
         self.written = 0;
         self.last = null;
+        self.untaught = false;
         self.delta = 0;
         try self.state.fill8(0, e.stream.handle);
     }
 
     pub fn deinit(self: *Cache, gpa: std.mem.Allocator) void {
         self.state.free();
+        if (self.before) |*b| b.free();
         self.kv.free();
         self.log.free();
         if (self.tap) |*t| t.free();
@@ -70,13 +83,19 @@ pub const Cache = struct {
     /// The stream's window of `rows` rows from forward row `row0`, after `len` cached positions.
     pub fn seg(self: *const Cache, e: *const Engine, len: usize, row0: usize, rows: usize) Seg {
         const g = e.g;
-        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
+        return .{ .rec = self.state.ptr, .conv = self.state.ptr + g.deltas() * g.recBytes(), .kv = self.kv.ptr, .tap = if (self.tap) |t| t.ptr else 0, .log = self.log.ptr, .before = if (self.before) |b| b.ptr else 0, .cap = @intCast(self.cap), .len = @intCast(len), .row0 = @intCast(row0), .rows = @intCast(rows), .tap_rows = tap_rows, .taps = @intCast(e.n_taps), .delta = self.delta };
     }
 
     /// Keeps `path` (window rows, ascending from 0): the state as that chain would leave it, a tree's keys moved down.
     pub fn keep(self: *Cache, e: *Engine, path: []const u32) !void {
         const last = self.last orelse return error.NothingToKeep;
-        if (path.len == 0 or path.len > last.rows or path[0] != 0) return error.NothingToKeep;
+        if (path.len == 0) {
+            if (last.rows == 1) try self.state.copyFrom(0, (self.before orelse return error.MissingQwenBefore).ptr, e.g.stateBytes(), e.stream.handle);
+            self.last = null;
+            self.len = last.start;
+            return;
+        }
+        if (path.len > last.rows or path[0] != 0) return error.NothingToKeep;
         var p: Path = .{ .n = @intCast(path.len), .rows = @splat(0) };
         var prefix = true;
         for (path, 0..) |r, i| {
@@ -84,13 +103,18 @@ pub const Cache = struct {
             p.rows[i] = @intCast(r);
             prefix = prefix and r == i;
         }
-        self.last = null;
-        self.len = last.start + path.len;
+        if (last.rows == 1) {
+            self.last = null;
+            self.len = last.start + 1;
+            return;
+        }
         const g = e.g;
         const sg = self.seg(e, last.start, 0, last.rows);
         try e.run(e.keeps.apply, .{ 1, geometry.dk / 4, g.v_heads * g.deltas() }, .{ 32, 4, 1 }, .{ e.geo, sg, p });
         try e.run(e.keeps.conv, .{ g.deltas(), (g.convBytes() / 2 + 255) / 256, 1 }, .{ 256, 1, 1 }, .{ e.geo, sg, @as(c_int, @intCast(path[path.len - 1])) });
         if (!prefix and g.attentions() > 0) try e.run(if (e.kv8) e.fp8.compact else e.keeps.compact, .{ g.attentions(), g.kv_heads, 1 }, .{ geometry.head_dim, 1, 1 }, .{ e.geo, sg, p });
+        self.last = null;
+        self.len = last.start + path.len;
     }
 
     /// The newest window kept whole (the round loop keeps nothing when every row landed), before the next forward.

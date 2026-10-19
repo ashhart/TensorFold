@@ -16,6 +16,10 @@ const slots = @import("slots.zig");
 const sample = @import("batch_sample.zig");
 const think = @import("think.zig");
 const batch_costs = @import("batch_costs.zig");
+const grammar = @import("grammar.zig");
+
+/// A stream's images through the host's tower: its prompt pass's rows and frame (in `a`), then their release.
+pub const Images = struct { ctx: *anyopaque, build: *const fn (ctx: *anyopaque, a: std.mem.Allocator, images: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*fz.vis_prompt.VisPrompt, release: *const fn (ctx: *anyopaque, p: *fz.vis_prompt.VisPrompt) void };
 
 pub const Backend = struct {
     gpa: std.mem.Allocator,
@@ -37,6 +41,8 @@ pub const Backend = struct {
     moves: u64 = 0,
     serial_drafts: bool = false, // FZ_BATCH_MTP_SERIAL=1: each stream's drafts in their own command buffers
     costs: ?batch_costs.Costs = null, // timeCosts: the lane allocator's prices
+    images: ?Images = null, // --vision: the tower's rows for a stream's images; null: an image stream fails
+    grammar: grammar.Masks, // structured output: the rounds' mask rows and first rows
 
     /// Sessions of the given capacities (the first, the engine's own, holds its whole window whatever is given).
     pub fn init(gpa: std.mem.Allocator, e: *Engine, capacities: []const usize) !Backend {
@@ -49,29 +55,20 @@ pub const Backend = struct {
             s.* = try Session.init(gpa, e, capacity, i == 0);
             made += 1;
         }
+        var masks = try grammar.Masks.init(e.r.device);
+        errdefer masks.deinit(gpa);
         const hidden = try e.r.device.buffer(fz.MAXR * fz.WIDE * 2, fz.opts);
         const env = struct {
             fn on(name: [*:0]const u8) bool {
                 return if (std.c.getenv(name)) |v| v[0] == '1' else false;
             }
         };
-        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL") };
+        return .{ .gpa = gpa, .e = e, .primary = e.m, .sessions = sessions, .hidden = .{ .b = hidden }, .grammar = masks, .chain_drafts = env.on("FZ_BATCH_MTP_CHAIN"), .serial_drafts = env.on("FZ_BATCH_MTP_SERIAL") };
     }
 
     /// Times shared-round costs on the last free session, or leaves them unpriced when it cannot fit.
     pub fn timeCosts(b: *Backend) !void {
-        if (std.c.getenv("FZ_BATCH_UNPRICED") != null) {
-            std.log.info("flash next: FZ_BATCH_UNPRICED=1: shared rounds unpriced, nothing timed", .{});
-            return;
-        }
-        const s = &b.sessions[b.sessions.len - 1];
-        if (!batch_costs.fits(s.m.cap)) {
-            std.log.info("flash next: a session holds {d} rows, under the {d} that timing shared rounds takes: shared rounds unpriced", .{ s.m.cap, batch_costs.ROWS });
-            return;
-        }
-        const c = try batch_costs.time(b, s);
-        b.costs = c;
-        std.log.info("flash next: shared forwards {d:.2} {d:.2} {d:.2} {d:.2} {d:.2} ms at 1, 2, 4, 8, 16 rows; a chained draft {d:.2} ms", .{ c.shared[0].ms, c.shared[1].ms, c.shared[3].ms, c.shared[7].ms, c.shared[15].ms, c.step_ms });
+        return batch_costs.timeCosts(b);
     }
 
     pub fn deinit(b: *Backend) void {
@@ -81,18 +78,14 @@ pub const Backend = struct {
         for (b.sessions) |*s| s.deinit(b.gpa);
         b.gpa.free(b.sessions);
         b.hidden.b.deinit();
+        b.grammar.deinit(b.gpa);
     }
 
     pub fn backend(b: *Backend) be.Backend {
-        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release } };
+        return .{ .ptr = b, .vtable = &.{ .prefill = prefill, .first = first, .queue = queue, .read = read, .verify = verify, .keep = keep, .draft = draft, .release = release, .first_masked = grammar.firstMasked, .held = grammar.held } };
     }
 
-    pub fn facts(b: *Backend) lanes.Model {
-        const c: ?*const batch_costs.Costs = if (b.costs) |*x| x else null;
-        // Timed forwards price shared rounds; each extra draft costs one chained head step.
-        const lone_priced = c != null and std.c.getenv("FZ_LONE_UNPRICED") == null; // not `lone`: that names the lone driver
-        return .{ .exact_width = fz.MAXR, .first_copy_rows = 4, .mtp = true, .speculate = true, .speculate_early = false, .drafts = 8, .streams_exact = true, .hidden_rows = true, .batch_rows = fz.MAXR, .max_streams = @intCast(b.sessions.len), .draft_streams = !b.serial_drafts, .shared_costs = if (c) |x| &x.shared else &.{}, .draft_step_ms = if (c != null and !b.serial_drafts) c.?.step_ms else 0, .window_costs = if (lone_priced) &c.?.shared else &.{}, .mtp_step_ms = if (lone_priced) c.?.step_ms else 0 };
-    }
+    pub const facts = batch_costs.facts;
 
     fn self(ptr: *anyopaque) *Backend {
         return @ptrCast(@alignCast(ptr));
@@ -256,6 +249,12 @@ pub const Backend = struct {
                 stream.cached = @intCast(state.at);
             } else stream.reuse_failed = true;
         }
+        var arena: std.heap.ArenaAllocator = .init(b.gpa);
+        defer arena.deinit();
+        const vis: ?*fz.vis_prompt.VisPrompt = if (stream.images.len > 0) try (b.images orelse return error.NoImageTower).build(b.images.?.ctx, arena.allocator(), stream.images, prompt.len, s.m.pos) else null;
+        s.m.vis = vis;
+        defer s.m.vis = null;
+        defer if (vis) |p| b.images.?.release(b.images.?.ctx, p);
         var at: usize = s.m.pos;
         while (at < prompt.len) {
             if (stream.isCancelled()) return error.Cancelled;
@@ -268,10 +267,12 @@ pub const Backend = struct {
                 end = @min(end, mark);
                 break;
             };
-            const call = if (b.e.segments) segments.next(end - at, b.e.pr.step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, b.e.pr.step), .parts = 1 };
+            const step = fz.chunkRows(at, b.e.pr.step); // past the trained window a chunk scores more blocks a row
+            const call = if (b.e.segments) segments.next(end - at, step, @import("engine.zig").SEG_MIN) else segments.Call{ .rows = @min(end - at, step), .parts = 1 };
             end = at + call.rows;
             const ps = [2]*fz.Prompt{ b.e.pr, b.e.pr2 };
             s.first = try fz.Prompt.chunkN(ps[0..call.parts], &s.m, b.gpa, prompt[at..end]);
+            if (end == prompt.len and stream.grammar != null) try b.grammar.keepFirst(b.gpa, i, b.sessions.len, s.m.t.logits);
             // Sample before the next forward replaces the last prompt row's logits.
             if (end == prompt.len) if (sample.active(stream.sampling)) |p| {
                 s.first = try sample.first(b.e, &s.m, p, @intCast(prompt.len));
@@ -410,7 +411,7 @@ pub const Backend = struct {
             for (w.positions, 0..) |p, j| if (p != s.m.pos + j + 1) return error.PositionMismatch;
             desc[i] = .{ .slot = @intCast(b.by.get(w.stream).?), .pos = @intCast(s.m.pos), .rows = @intCast(w.rows()) };
         }
-        const plan = try meta.Plan.init(desc[0..windows.len], fz.CAP);
+        const plan = try meta.forBackend(b, desc[0..windows.len]);
         const t = &b.primary.t;
         for (windows, out, 0..) |w, o, i| {
             const s = try b.session(w.stream);
@@ -433,7 +434,8 @@ pub const Backend = struct {
         @memcpy(t.pos8.b.slice(u32, fz.MAXR)[0..plan.total], plan.positions[0..plan.total]);
         const cb = b.e.r.queue.commandBuffer();
         b.e.r.enc = cb.compute(.serial);
-        try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8);
+        const masked = b.grammar.fill(windows, plan.starts[0..windows.len]);
+        try forward.encode(b.e, segs[0..windows.len], plan.total, t.ids8, if (masked) &b.grammar else null);
         @memcpy(b.e.draw_at.b.slice(u32, fz.MAXR)[0..plan.total], plan.keys[0..plan.total]);
         for (windows, 0..) |w, i| if (sample.active(w.stream.sampling)) |p| {
             sample.encode(b.e.r.enc, b.e.r.draw_pipe, t.logits, b.e.draw_at, t.picks, plan.starts[i], w.rows(), p);

@@ -165,6 +165,7 @@ const Modules = struct { xpu: *std.Build.Module, core: *std.Build.Module, nemotr
 
 fn family(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, xpu: *std.Build.Module, lanes: *std.Build.Module) Modules {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .optimize = optimize, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     const nemotron = b.createModule(.{ .root_source_file = b.path("zig/src/families/nemotron/xpu.zig"), .target = target, .optimize = optimize, .link_libc = true });
     nemotron.addImport("xpu", xpu);
     nemotron.addImport("core", core);

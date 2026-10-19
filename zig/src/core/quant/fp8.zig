@@ -31,6 +31,16 @@ pub fn toE4m3(x: f64) f64 {
 /// Stored e4m3 [..., N, K] and fp32/bf16/fp16 scales [..., ceil(N / 128), ceil(K / 128)].
 pub const Host = struct { weight: Tensor, scale_inv: Tensor };
 
+/// ModelOpt's FP8_PB_WO scales [Rb, 1, Cb, 1] as the [Rb, Cb] that `reference` and the packers read: the same bytes.
+pub fn blockScales(t: Tensor) error{UnexpectedTensor}!Tensor {
+    if (t.rank == 2) return t;
+    if (t.rank != 4 or t.shape[1] != 1 or t.shape[3] != 1) return error.UnexpectedTensor;
+    var v = t;
+    v.rank = 2;
+    v.shape = .{ t.shape[0], t.shape[2], 1, 1, 1 };
+    return v;
+}
+
 /// Weights of a projection: its rows (a stack's leading dimensions folded) by K.
 pub fn elements(h: Host) usize {
     return h.weight.numel();
@@ -88,6 +98,23 @@ test "a block-FP8 stack against hand-decoded values" {
     try std.testing.expectEqual(@as(f64, -8), out[129]);
     try std.testing.expectEqual(@as(f64, 1), out[260]);
     try std.testing.expectEqual(@as(f64, 16), out[260 + 130 + 128]);
+}
+
+test "ModelOpt's [Rb, 1, Cb, 1] block scales read as [Rb, Cb]" {
+    var codes: [2 * 130]u8 = @splat(0x38); // [2, 130] of 1, but -2 at (0, 129) in the second block's columns
+    codes[129] = 0xc0;
+    const inv = [_]f32{ 0.5, 4 };
+    const scale: Tensor = .{ .dtype = .f32, .rank = 4, .shape = .{ 1, 1, 2, 1, 1 }, .bytes = std.mem.sliceAsBytes(&inv) };
+    const h: Host = .{
+        .weight = .{ .dtype = .f8_e4m3, .rank = 2, .shape = .{ 2, 130, 1, 1, 1 }, .bytes = &codes },
+        .scale_inv = try blockScales(scale),
+    };
+    var out: [codes.len]f64 = undefined;
+    try reference(h, &out);
+    try std.testing.expectEqual(@as(f64, 0.5), out[0]);
+    try std.testing.expectEqual(@as(f64, -8), out[129]);
+    const wide: Tensor = .{ .dtype = .f32, .rank = 4, .shape = .{ 1, 2, 1, 1, 1 }, .bytes = std.mem.sliceAsBytes(&inv) };
+    try std.testing.expectError(error.UnexpectedTensor, blockScales(wide));
 }
 
 test "a reference refuses an unsupported f64 scale before loading it" {

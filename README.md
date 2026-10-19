@@ -28,7 +28,7 @@ It needs glibc 2.28 or newer and an NVIDIA driver providing `libcuda.so.1`. Keep
 See the [CUDA runbook](RUNBOOK.md#linux-and-cuda) for runtime libraries and supported GPUs.
 
 ```sh
-V=1.1.0
+V=1.1.1
 case "$(uname -m)" in
   aarch64|arm64) PLATFORM=linux-aarch64 ;;
   x86_64) PLATFORM=linux-x86_64 ;;
@@ -134,6 +134,7 @@ Conversions are explicitly marked: their upstream weights need the linked conver
 | Gemma 4 31B, MLX 4-bit | `tensorfold pull mlx-community/gemma-4-31B-it-4bit@696d436c404745a59f30e4939a658162b0a9e57f`<br>`tensorfold pull z-lab/gemma-4-31B-it-DFlash@eabd648301ce28583cc14757912e5e0f84e152e1` | One M5 Mac; M5 Ultra checked. M1-M4 refused. | [Native 31B](docs/recipes/gemma-4-native.md). Name the drafter with `--drafter`; images with `--vision`. |
 | Gemma 4 12B, converted MLX 4-bit | `hf download google/gemma-4-12B-it --revision 707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7 --local-dir ~/models/gemma-4-12b-hf`<br>`hf download google/gemma-4-12B-it-assistant --revision 46d4c6f13f0ac0ad827b915669b8df9b81c64c51 --local-dir ~/models/gemma-4-12b-assistant` | One M5 Mac; converted text weights 6.3 GB, image weights 100 MB, plus assistant/caches. M1-M4 refused. | [Convert and serve](docs/recipes/gemma-4-12b-native.md). Upstream download needs `hf`; conversion needs Python, mlx and mlx-lm. Serving is native. |
 | Step-5-Preview, converted affine | `hf download stepfun-ai/Step-5-Preview --local-dir ~/models/step5-preview-fp8` | One 256 GB Mac; text 166.9 GiB, MTP adds 2.5 GiB and vision 3.7 GiB. | [Convert and serve](docs/recipes/step-5-preview.md). The documented 256 GB setup serves converted affine weights; converting the upstream FP8 download needs Python and mlx. |
+| Kolibri-1, block FP8 (research) | `tensorfold pull Aleph-Alpha/Kolibri-1@e52eb4627d11516b0c01de49210ab5a4e4061444` | One NVIDIA GPU; GB10 measured; 74 GB checkpoint. | [Kolibri](docs/recipes/kolibri-1.md). Text only; copy drafts, no EAGLE-3/neural drafter. |
 | Liquid AI d1-3B, decisions | Not documented yet. | Native CUDA; RAM minimum not published. | [API section below](#serve-flags). `/v1/systemone` and `/v1/decisions`. |
 | Fish Audio Drama 3, speech | Not documented yet. | Native Metal or CUDA; GB10 measured. | [Release audio instructions](CHANGELOG.md#110). `/v1/audio/speech`; checkpoint and `codec.pth` required. |
 
@@ -231,6 +232,7 @@ The binary's `capabilities --json` response lists its supported flags and platfo
 | `--speed-up FILE` | Rank and link settings for two-Mac Flash Next or GLM serving. |
 | `--max-tokens N` | Default reply limit, 4096; requests can override it. |
 | `--temperature T` | Sampling temperature; zero requests greedy decoding. |
+| `--prompt-seed` | Use native prompt-derived keys instead of the fresh OS fallback; request and configured default seeds still win. |
 | `--top-p P`, `--top-k K`, `--min-p P` | Sampling defaults. |
 | `--thinking`, `--no-thinking` | Choose whether the chat template opens a reasoning block. |
 | `--reasoning-effort LEVEL` | Default template effort: `low`, `medium`, `high` or `xhigh`. |
@@ -375,7 +377,7 @@ Thank you to everyone who has sent TensorFold a pull request, a measurement or a
 [@johnymoo](https://github.com/johnymoo),
 [@JordiPosthumus](https://github.com/JordiPosthumus),
 [@JRaxworthy](https://github.com/JRaxworthy),
-[@jregan-beasley-smc](https://github.com/jregan-beasley-smc),
+[@jrb-ai](https://github.com/jrb-ai),
 [@jschmied](https://github.com/jschmied),
 [@juliankang4](https://github.com/juliankang4),
 [@kelchm](https://github.com/kelchm),

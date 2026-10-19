@@ -6,6 +6,8 @@ const engine = @import("cuda_engine.zig");
 const follow = @import("cuda_follow.zig");
 const fw = @import("cuda_forward.zig");
 const dflash = @import("dflash.zig");
+const prompt_lp = @import("cuda_prompt_logprobs.zig");
+const cuda = @import("cuda");
 
 const be = lanes.backend;
 
@@ -34,6 +36,7 @@ const Lane = struct {
     held: [max_held]u32 = undefined,
     chances: [max_held]f64 = undefined, // DFlash2's: each held draft's chance from the selector
     held_n: usize = 0,
+    first: ?u64 = null,
     fill: ?usize = null, // a prompt pass going a chunk at a time: where its next chunk starts
 };
 
@@ -45,9 +48,27 @@ pub const Lanes = struct {
     lanes: std.AutoHashMapUnmanaged(*const lanes.Stream, Lane) = .empty,
     drawn: [ring]u32 = undefined,
     next: u64 = 0,
+    bits: ?cuda.HostBuffer = null, // structured output's grammar words (shared_rows rows), device-read, at first use
+    bits_dev: u64 = 0,
 
     pub fn deinit(self: *Lanes) void {
+        if (self.bits) |*b| b.free();
         self.lanes.deinit(self.x.e.gpa);
+    }
+
+    /// A window's grammar rows (rows of the vocabulary's words) at row `row` of the bits, device-read; 0 for none.
+    pub fn putBits(self: *Lanes, row: usize, rows: usize, masks: []const u32) !u64 {
+        if (masks.len == 0) return 0;
+        const words = (self.x.e.c.vocab + 31) / 32;
+        if (masks.len != rows * words or row + rows > engine.shared_rows) return error.InvalidGrammarMasks;
+        if (self.bits == null) {
+            var buf = try cuda.HostBuffer.allocMapped(self.x.e.d, engine.shared_rows * words * 4);
+            errdefer buf.free();
+            self.bits_dev = try buf.device();
+            self.bits = buf;
+        }
+        @memcpy(self.bits.?.slice(u32)[row * words ..][0..masks.len], masks);
+        return self.bits_dev + row * words * 4;
     }
 
     pub fn backend(self: *Lanes) be.Backend {
@@ -56,6 +77,7 @@ pub const Lanes = struct {
 
     const whole_vt: be.Backend.VTable = .{
         .prefill = prefillFn,
+        .prefill_many = prefillManyFn,
         .first = firstFn,
         .queue = queueFn,
         .read = readFn,
@@ -64,10 +86,15 @@ pub const Lanes = struct {
         .draft = draftFn,
         .probabilities = chancesFn,
         .release = releaseFn,
+        .first_masked = firstMaskedFn,
+        .held = heldFn,
+        .prompt_rows = true,
     };
     const steps_vt: be.Backend.VTable = vt: {
         var v = whole_vt;
         v.prefill_step = prefillStepFn;
+        v.prefill_many = null;
+        v.many_rows = 0;
         break :vt v;
     };
 
@@ -156,7 +183,42 @@ pub const Lanes = struct {
         const self = of(ptr);
         const from = try self.opening(s);
         try self.images(s, from);
-        _ = self.take(try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s)));
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        try sink.prepare();
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
+        const first = try self.x.prefill(s.prompt(), from, .{ .ptr = s, .check = cancelled }, marksOf(s));
+        self.lanes.getPtr(s).?.first = self.take(first);
+    }
+
+    fn prefillManyFn(ptr: *anyopaque, ss: []const *lanes.Stream) anyerror!bool {
+        const self = of(ptr);
+        if (!self.x.e.m.tiled or ss.len > engine.max_together) return false;
+        for (ss) |s| if (!canBatch(s)) return false;
+        var opened: usize = 0;
+        errdefer for (ss[0..opened]) |s| releaseFn(ptr, s);
+        var parts: [engine.max_together]engine.Prompt = undefined;
+        var firsts: [engine.max_together]u32 = undefined;
+        var lo: usize = 0;
+        var rows: usize = 0;
+        for (ss, 0..) |s, i| {
+            if (rows + s.prompt_len > engine.prompt_rows) { // this pass is full: run it, the next starts here
+                try self.many(ss[lo..i], parts[lo..i], firsts[lo..i]);
+                lo = i;
+                rows = 0;
+            }
+            if (try self.opening(s) != null) return error.BadPrompts; // no kept state (checked above)
+            opened += 1;
+            parts[i] = .{ .slot = self.lanes.getPtr(s).?.slot, .ids = s.prompt() };
+            rows += s.prompt_len;
+        }
+        try self.many(ss[lo..], parts[lo..ss.len], firsts[lo..ss.len]);
+        return true;
+    }
+
+    fn many(self: *Lanes, ss: []const *lanes.Stream, parts: []const engine.Prompt, firsts: []u32) !void {
+        try self.x.prefillMany(parts, firsts);
+        for (ss, firsts) |s, t| self.lanes.getPtr(s).?.first = self.take(t);
     }
 
     /// One chunk of the stream's prompt pass (fillOne runs other rounds between); true once the first token is drawn.
@@ -169,8 +231,12 @@ pub const Lanes = struct {
         if (going != null) try self.x.bind(l.slot);
         const at = going orelse if (from) |r| r.at else 0;
         errdefer l.fill = null;
+        var sink: Sink = .{ .gpa = self.x.e.gpa, .s = s };
+        try sink.prepare();
+        self.x.e.prompt_logprobs = sink.want();
+        defer self.x.e.prompt_logprobs = null;
         if (try self.x.chunk(s.prompt(), at, from, .{ .ptr = s, .check = cancelled }, marksOf(s))) |first| {
-            _ = self.take(first);
+            l.first = self.take(first);
             l.fill = null;
             return true;
         }
@@ -186,11 +252,13 @@ pub const Lanes = struct {
         l.pending_rows = null;
         l.held_n = 0;
         l.fill = null;
+        l.first = null;
         try self.x.bind(l.slot);
         if (self.x.e.images) |v| v.clear(); // no earlier request's rows splice into this one
         try self.x.begin(s.sampling);
         s.cached = 0;
-        return self.resumeFrom(s, ids.len);
+        s.prompt_rows.clearRetainingCapacity();
+        return if (s.prompt_logprobs != null) null else self.resumeFrom(s, ids.len); // prompt rows need every row
     }
 
     /// A prompt pass with images: rank 0's tower encodes those past `from`, then every rank holds their rows.
@@ -200,6 +268,7 @@ pub const Lanes = struct {
         try v.begin(self.x.e.slot, s.images, if (from) |r| r.at else 0); // a refusal here leaves every rank as it was
         try self.x.images(v);
     }
+    const Sink = @import("cuda_prompt_sink.zig").Sink;
 
     fn marksOf(s: *lanes.Stream) ?engine.Marks {
         return if (s.reuse.marks.len == 0) null else .{ .at = s.reuse.marks, .ctx = s, .call = keptAt };
@@ -227,7 +296,26 @@ pub const Lanes = struct {
     fn firstFn(ptr: *anyopaque, s: *lanes.Stream, position: u64) anyerror!u64 {
         const self = of(ptr);
         if (position != s.prompt_len) return error.PositionMismatch;
-        return self.next - 1;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        return l.first orelse error.NoFirstToken;
+    }
+
+    /// The first token drawn again among `mask`'s allowed tokens (prefill drew it unmasked); a fresh handle to it.
+    fn firstMaskedFn(ptr: *anyopaque, s: *lanes.Stream, position: u64, mask: []const u32) anyerror!u64 {
+        const self = of(ptr);
+        if (position != s.prompt_len) return error.PositionMismatch;
+        const l = self.lanes.getPtr(s) orelse return error.UnknownStream;
+        const bits = try self.putBits(0, 1, mask);
+        if (bits == 0) return error.InvalidGrammarMasks;
+        try self.x.bind(l.slot);
+        return self.take(try self.x.redraw(@intCast(position), bits));
+    }
+
+    /// The head's drafts for the stream's next window as the host holds them (draftFn), for a grammar to walk.
+    fn heldFn(ptr: *anyopaque, s: *lanes.Stream, out: []u32) anyerror!void {
+        const l = of(ptr).lanes.getPtr(s) orelse return error.UnknownStream;
+        if (out.len > l.held_n) return error.NoHeldDrafts;
+        @memcpy(out, l.held[0..out.len]);
     }
 
     fn queueFn(ptr: *anyopaque, s: *lanes.Stream, feed: be.Feed, position: u64) anyerror!u64 {
@@ -261,7 +349,10 @@ pub const Lanes = struct {
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
             @memcpy(ids[1..][0..drafts.len], drafts);
             var sampled: [max_rows]u32 = undefined;
-            try self.x.verify(ids[0..rows], sampled[0..rows]);
+            const bits = try self.putBits(0, rows, w.masks); // before the step goes out: a refusal after it strands the ranks
+            self.x.e.structured = bits != 0;
+            defer self.x.e.structured = false;
+            try self.x.verify(ids[0..rows], sampled[0..rows], bits);
             @memcpy(o.sampled[0..rows], sampled[0..rows]);
             @memcpy(o.drafts[0..drafts.len], drafts);
             l.pending_rows = rows;
@@ -275,6 +366,8 @@ pub const Lanes = struct {
         var ids: [engine.max_shared][max_rows]u32 = undefined;
         var sampled: [engine.max_shared][max_rows]u32 = undefined;
         var lane: [engine.max_shared]*Lane = undefined;
+        var row: usize = 0; // the windows' rows so far: each one's grammar rows start there in the bits
+        var structured = false;
         for (windows, 0..) |w, k| {
             if (w.parents != null) return error.TreesNotBuilt;
             const l = try self.bind(w.stream, null);
@@ -286,9 +379,14 @@ pub const Lanes = struct {
             ids[k][0] = w.pending;
             const drafts = if (w.held > 0) l.held[0..w.held] else w.tokens;
             @memcpy(ids[k][1..][0..drafts.len], drafts);
-            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows] };
+            const bits = try self.putBits(row, rows, w.masks);
+            structured = structured or bits != 0;
+            parts[k] = .{ .slot = l.slot, .ids = ids[k][0..rows], .out = sampled[k][0..rows], .bits = bits };
             lane[k] = l;
+            row += rows;
         }
+        self.x.e.structured = structured; // one window under a grammar: the whole step draws from whole rows
+        defer self.x.e.structured = false;
         try self.x.verifyShared(parts[0..windows.len]);
         self.shared += 1;
         for (out[0..windows.len], parts[0..windows.len], lane[0..windows.len]) |*o, p, l| {
@@ -428,4 +526,9 @@ test "a failed lane insertion leaves no entry, and a retry takes slot zero" {
     try std.testing.expectEqual(@as(usize, 0), self.lanes.count());
     fail.fail_index = std.math.maxInt(usize);
     try std.testing.expectEqual(@as(u32, 0), (try self.claim(&stream)).slot);
+}
+
+/// Eligibility for the maintained fresh-prompt batching path.
+pub fn canBatch(s: anytype) bool {
+    return s.prompt_logprobs == null and s.images.len == 0 and s.reuse.saved == null and s.prompt_len <= engine.prompt_rows;
 }

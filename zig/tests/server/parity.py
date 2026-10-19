@@ -45,7 +45,7 @@ EXPECTED = {
 
 def zig_server(binary: Path, extra: list[str], env: dict[str, str]) -> tuple[subprocess.Popen, int]:
     """fake_serve on a free port, with the flags the Python app is built with."""
-    args = [str(binary), "serve", str(FIXTURES), "--name", "fake-model", "--alias", "fake-alias", "--port", "0",
+    args = [str(binary), "serve", str(FIXTURES), "--prompt-seed", "--name", "fake-model", "--alias", "fake-alias", "--port", "0",
             "--max-tokens", "64", "--parallel", "4", *extra]
     proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             env={**os.environ, "TENSORFOLD_NO_LIVE": "1", "TF_FAKE_CONTEXT": str(CONTEXT), **env})

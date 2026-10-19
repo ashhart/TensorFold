@@ -53,9 +53,19 @@ pub const Draws = struct {
     draw_fn: Function,
     draw_ids_fn: Function,
     logprob_rows_fn: Function,
+    topk_slices_fn: Function,
+    topk_merge_fn: Function,
+
+    /// tf_topk_slices' slice: a row's entries a block in topkRows' first stage.
+    pub const topk_slice = 4096;
 
     pub fn resolve(mod: Module) !Draws {
-        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows") };
+        return .{ .draw_fn = try mod.function("tf_draw"), .draw_ids_fn = try mod.function("tf_draw_ids"), .logprob_rows_fn = try mod.function("tf_logprob_rows"), .topk_slices_fn = try mod.function("tf_topk_slices"), .topk_merge_fn = try mod.function("tf_topk_merge") };
+    }
+
+    /// The bytes topkRows' `parts` holds for `rows` rows of `vocab` at `k`.
+    pub fn topkPartsBytes(vocab: usize, k: usize, rows: usize) usize {
+        return rows * (std.math.divCeil(usize, vocab, topk_slice) catch unreachable) * k * 8;
     }
 
     /// Row r of bf16 logits drawn at position meta[0] + r + 1 + offset; columns are `ids` token ids if given.
@@ -83,6 +93,28 @@ pub const Draws = struct {
         a.add(@as(u32, @intFromBool(rank)));
         a.add(out);
         try launch_.launch(d.logprob_rows_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 1024 } }, s, &a);
+    }
+
+    /// logprobRows' `k` best ids and logits alone (other words zero), many blocks a row; `parts`: topkPartsBytes.
+    pub fn topkRows(d: *const Draws, s: Stream, logits: u64, vocab: usize, k: u8, parts: u64, out: u64, rows: usize) !void {
+        const slices = std.math.divCeil(usize, vocab, topk_slice) catch unreachable;
+        const pv = parts;
+        const pi = parts + rows * slices * k * 4;
+        var a: launch_.Args = .{};
+        a.add(logits);
+        a.add(@as(u32, @intCast(vocab)));
+        a.add(@as(u32, k));
+        a.add(@as(u32, @intCast(slices)));
+        a.add(pv);
+        a.add(pi);
+        try launch_.launch(d.topk_slices_fn, .{ .grid = .{ .x = @intCast(slices), .y = @intCast(rows), .z = 1 }, .block = .{ .x = 256 } }, s, &a);
+        var b: launch_.Args = .{};
+        b.add(pv);
+        b.add(pi);
+        b.add(@as(u32, @intCast(slices * k)));
+        b.add(@as(u32, k));
+        b.add(out);
+        try launch_.launch(d.topk_merge_fn, .{ .grid = .{ .x = @intCast(rows), .y = 1, .z = 1 }, .block = .{ .x = 256 } }, s, &b);
     }
 };
 

@@ -6,12 +6,13 @@ const Driver = @import("driver.zig").Driver;
 const Error = @import("driver.zig").Error;
 
 /// Bytes this process holds in DeviceBuffers and HostBuffers, and device/pinned peaks since the last reset.
-pub const Usage = struct { device: u64, host: u64, peak: u64, host_peak: u64 = 0 };
+pub const Usage = struct { device: u64, host: u64, peak: u64, host_peak: u64 = 0, allocs: u64 = 0 };
 
 var device_bytes: std.atomic.Value(u64) = .init(0);
 var host_bytes: std.atomic.Value(u64) = .init(0);
 var host_peak_bytes: std.atomic.Value(u64) = .init(0);
 var peak_bytes: std.atomic.Value(u64) = .init(0);
+var driver_allocs: std.atomic.Value(u64) = .init(0); // live DeviceBuffers from cuMemAlloc itself, not from a hook
 var counts_mutex: std.atomic.Mutex = .unlocked;
 var allocation_limit: ?u64 = null;
 var reserved_bytes: u64 = 0;
@@ -75,7 +76,7 @@ fn sample(reset_peak: bool, hook: anytype, pre_reset: bool) Usage {
         peak_bytes.store(now, .monotonic);
         host_peak_bytes.store(host, .monotonic);
     }
-    return .{ .device = now, .host = host, .peak = if (pre_reset) peak else @max(now, peak_bytes.load(.monotonic)), .host_peak = if (pre_reset) host_peak else @max(host, host_peak_bytes.load(.monotonic)) };
+    return .{ .device = now, .host = host, .allocs = driver_allocs.load(.monotonic), .peak = if (pre_reset) peak else @max(now, peak_bytes.load(.monotonic)), .host_peak = if (pre_reset) host_peak else @max(host, host_peak_bytes.load(.monotonic)) };
 }
 
 fn recordAllocation(counter: *std.atomic.Value(u64), n: usize) void {
@@ -100,20 +101,49 @@ fn lockCounts() void {
     while (!counts_mutex.tryLock()) std.Thread.yield() catch {};
 }
 
+/// A sub-allocator under DeviceBuffer (arena.zig): `alloc` gives an address or null for cuMemAlloc, `free` owns it.
+pub const Hook = struct {
+    ctx: *anyopaque,
+    alloc: *const fn (ctx: *anyopaque, len: usize) ?abi.DevicePtr,
+    free: *const fn (ctx: *anyopaque, p: abi.DevicePtr) bool, // true when the address was the hook's
+};
+
+var alloc_hook: ?Hook = null;
+
+/// Installs, or with null removes, the sub-allocator: once at boot, before the buffers it should hold.
+pub fn setHook(h: ?Hook) void {
+    alloc_hook = h;
+}
+
+pub fn currentHook() ?Hook {
+    return alloc_hook;
+}
+
 pub const DeviceBuffer = struct {
     d: *const Driver,
     ptr: abi.DevicePtr,
     len: usize,
+    owner: ?Hook = null, // captured at allocation; changing the installed hook cannot transfer ownership
     borrowed: bool = false, // a span of memory another value owns (a carveout's): free leaves it alone
 
-    /// `len` bytes, 256-byte aligned by the driver; zero bytes allocate nothing and hold address 0.
+    /// `len` bytes, 256-byte aligned (512 from an installed arena); zero bytes allocate nothing and hold address 0.
     pub fn alloc(d: *const Driver, len: usize) Error!DeviceBuffer {
         try reserveAllocation(len);
         errdefer finishAllocation(null, len);
         var p: abi.DevicePtr = 0;
-        if (len > 0) try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+        var owner: ?Hook = null;
+        if (len > 0) {
+            if (alloc_hook) |h| if (h.alloc(h.ctx, len)) |ptr| {
+                p = ptr;
+                owner = h;
+            };
+            if (p == 0) {
+                try d.check(d.api.cuMemAlloc_v2(&p, len), "cuMemAlloc");
+                _ = driver_allocs.fetchAdd(1, .monotonic);
+            }
+        }
         finishAllocation(&device_bytes, len);
-        return .{ .d = d, .ptr = p, .len = len };
+        return .{ .d = d, .ptr = p, .len = len, .owner = owner };
     }
 
     /// Allocates and fills from host bytes in one call.
@@ -129,7 +159,14 @@ pub const DeviceBuffer = struct {
 
     pub fn free(self: *DeviceBuffer) void {
         if (!self.borrowed) {
-            if (self.ptr != 0) _ = self.d.api.cuMemFree_v2(self.ptr);
+            if (self.ptr != 0) {
+                if (self.owner) |h| {
+                    std.debug.assert(h.free(h.ctx, self.ptr));
+                } else {
+                    _ = self.d.api.cuMemFree_v2(self.ptr);
+                    _ = driver_allocs.fetchSub(1, .monotonic);
+                }
+            }
             freed(&device_bytes, self.len);
         }
         self.* = undefined;
@@ -264,6 +301,69 @@ test "freeing a borrowed span leaves the driver and the counts alone" {
     var b: DeviceBuffer = .{ .d = undefined, .ptr = 0x1000, .len = 4096, .borrowed = true };
     b.free();
     try std.testing.expectEqual(before.device, usage(false).device);
+}
+
+test "a buffer the hook owns is freed by the hook, never by the driver" {
+    const Owner = struct {
+        var frees: u32 = 0;
+        fn alloc(_: *anyopaque, _: usize) ?abi.DevicePtr {
+            return 0x2000;
+        }
+        fn free(_: *anyopaque, p: abi.DevicePtr) bool {
+            frees += 1;
+            return p == 0x2000;
+        }
+    };
+    var ctx: u8 = 0;
+    setHook(.{ .ctx = &ctx, .alloc = Owner.alloc, .free = Owner.free });
+    defer setHook(null);
+    var b = try DeviceBuffer.alloc(undefined, 4096);
+    b.free();
+    var c: DeviceBuffer = .{ .d = undefined, .ptr = 0x3000, .len = 64, .borrowed = true };
+    c.free();
+    try std.testing.expectEqual(@as(u32, 1), Owner.frees);
+}
+
+test "the driver allocation count follows cuMemAlloc and cuMemFree, not a hook's or a borrowed span's" {
+    const Fake = struct {
+        var next: abi.DevicePtr = 0x10_0000;
+        fn alloc(p: *abi.DevicePtr, len: usize) callconv(.c) abi.Result {
+            p.* = next;
+            next += len;
+            return abi.success;
+        }
+        fn free(_: abi.DevicePtr) callconv(.c) abi.Result {
+            return abi.success;
+        }
+        fn hookAlloc(_: *anyopaque, len: usize) ?abi.DevicePtr {
+            return if (len == 4096) 0x9000 else null; // the hook serves one size, the rest go to the driver
+        }
+        fn hookFree(_: *anyopaque, p: abi.DevicePtr) bool {
+            return p == 0x9000;
+        }
+    };
+    var d: Driver = .{ .lib = undefined, .api = undefined };
+    d.api.cuMemAlloc_v2 = Fake.alloc;
+    d.api.cuMemFree_v2 = Fake.free;
+    const before = usage(false).allocs;
+    var a = try DeviceBuffer.alloc(&d, 1000);
+    var b = try DeviceBuffer.alloc(&d, 2000);
+    try std.testing.expectEqual(before + 2, usage(false).allocs);
+    var ctx: u8 = 0;
+    setHook(.{ .ctx = &ctx, .alloc = Fake.hookAlloc, .free = Fake.hookFree });
+    var h = try DeviceBuffer.alloc(&d, 4096);
+    var c = try DeviceBuffer.alloc(&d, 64);
+    try std.testing.expectEqual(@as(abi.DevicePtr, 0x9000), h.ptr);
+    try std.testing.expectEqual(before + 3, usage(false).allocs);
+    h.free();
+    c.free();
+    setHook(null);
+    var s: DeviceBuffer = .{ .d = &d, .ptr = a.ptr + 256, .len = 256, .borrowed = true };
+    s.free();
+    try std.testing.expectEqual(before + 2, usage(false).allocs);
+    a.free();
+    b.free();
+    try std.testing.expectEqual(before, usage(false).allocs);
 }
 
 test "peak reset preserves an allocation between its read and store" {
@@ -442,4 +542,30 @@ test "taking an interval preserves transient peaks before resetting them" {
 
 pub fn releaseRetainedHost(bytes: usize) void {
     freed(&host_bytes, bytes);
+}
+
+test "Failure boundaries: a buffer keeps its allocation hook when the installed hook changes" {
+    const Owner = struct {
+        freed: usize = 0,
+        fn alloc(_: *anyopaque, _: usize) ?abi.DevicePtr {
+            return 0x2000;
+        }
+        fn free(ctx: *anyopaque, _: abi.DevicePtr) bool {
+            const o: *@This() = @ptrCast(@alignCast(ctx));
+            o.freed += 1;
+            return true;
+        }
+        fn hook(o: *@This()) Hook {
+            return .{ .ctx = o, .alloc = alloc, .free = free };
+        }
+    };
+    var first: Owner = .{};
+    var second: Owner = .{};
+    setHook(first.hook());
+    defer setHook(null);
+    var b = try DeviceBuffer.alloc(undefined, 64);
+    setHook(second.hook());
+    b.free();
+    try std.testing.expectEqual(@as(usize, 1), first.freed);
+    try std.testing.expectEqual(@as(usize, 0), second.freed);
 }

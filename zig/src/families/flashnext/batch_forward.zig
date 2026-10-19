@@ -8,7 +8,8 @@ const Engine = @import("engine.zig").Engine;
 const Buf = fz.Buf;
 pub const Seg = struct { s: *Session, row0: usize, rows: usize };
 
-pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf) !void {
+/// `masks`: structured output, the rows' logits masked to their grammars' tokens before the argmax and the draws.
+pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf, masks: ?*const @import("grammar.zig").Masks) !void {
     const r = e.r;
     const m = e.m;
     const t = &m.t;
@@ -74,6 +75,10 @@ pub fn encode(e: *Engine, segs: []const Seg, rows: usize, ids: Buf) !void {
     m.last = t.h[cur];
     try m.hcProject(t.h[cur], m.mix, "qa_hc_down@mix", "qa_hc_up@mix", t.inj_a);
     try m.lane(t.mixed, fz.D, m.head, "lane_qmm_bytes_grouped@head", t.logits);
+    if (masks) |k| {
+        k.encode(r.enc, t.logits, rows);
+        if (!r.serial) r.enc.barrier();
+    }
     r.enc.setPipeline(r.argmax_pipe);
     for ([_]Buf{ t.logits, t.picks, t.vocab }, 0..) |b, j| r.enc.setBuffer(b.b, b.off, j);
     r.enc.dispatchThreads(mtl.Size.of(1024 * rows, 1, 1), mtl.Size.of(1024, 1, 1));

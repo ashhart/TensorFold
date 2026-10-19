@@ -1,11 +1,11 @@
 import { isManagedComputeProvider, isLoopbackUrl } from '../../shared/provider-trust'
 import type { Settings, Provider, McpServerConfig, SecurityRole } from './types'
 import { resolvePinnedHost, type PinnedHost, type PinnedHostResolver } from './pinned-fetch'
-import { BlockList, isIP } from 'node:net'
+import { ipv4MappedToDotted, isLoopbackHost, isPrivateHost, isPrivateIp, isKnownMetadataIp, isGloballyRoutableIp, isLoopbackIp, isAlwaysForbiddenConnectorIp, isLinkLocalOrMetadataHost } from './security-addresses'
+export { ipv4MappedToDotted, isLoopbackHost, isPrivateHost, isPrivateIp, isKnownMetadataIp, isGloballyRoutableIp } from './security-addresses'
 import { redactOpaqueSecrets } from './secret-detection'
 
 export const SECRET_MASK = '••••••••'
-
 const SECURITY_ROLES = new Set<SecurityRole>(['viewer', 'operator', 'owner'])
 
 export function currentSecurityRoleFromEnv(env: Partial<Record<string, string | undefined>> = process.env): SecurityRole {
@@ -13,10 +13,7 @@ export function currentSecurityRoleFromEnv(env: Partial<Record<string, string | 
   return SECURITY_ROLES.has(raw as SecurityRole) ? raw as SecurityRole : 'operator'
 }
 
-// The launch-time role for this process. The local desktop GUI is operated by the
-// trusted machine owner, so it runs as 'owner' (may change settings/policies).
-// The headless/remote server keeps the safer 'operator' default. An explicit
-// VONTRA_SECURITY_ROLE / VONTRA_ROLE always wins.
+// The local owner may change settings; headless servers default to operator unless the launch role is explicit.
 export function securityRoleForLaunch(
   env: Partial<Record<string, string | undefined>> = process.env,
   opts: { headless: boolean } = { headless: false },
@@ -317,45 +314,6 @@ export function mergeMcpServerSecrets(next: McpServerConfig, existing?: McpServe
   return { ...next, env }
 }
 
-// Return the embedded IPv4 (dotted) for an IPv4-mapped IPv6 address, else null. Node's URL
-// parser normalizes [::ffff:169.254.169.254] to the COMPRESSED-HEX form [::ffff:a9fe:a9fe]
-// (groups zero-stripped, e.g. 192.168.1.1 -> ::ffff:c0a8:101), so classifying these by their
-// real IPv4 is what stops credentials leaking to internal/metadata hosts via the mapped form.
-export function ipv4MappedToDotted(ip: string): string | null {
-  const a = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  if (!a.startsWith('::ffff:')) return null
-  const tail = a.slice(7)
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(tail)) return tail // ::ffff:a.b.c.d (dotted) form
-  const m = /^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail) // ::ffff:HHHH:HHHH (hex) form
-  if (!m) return null
-  const hi = parseInt(m[1], 16)
-  const lo = parseInt(m[2], 16)
-  return [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join('.')
-}
-
-export function isLoopbackHost(hostname: string): boolean {
-  const raw = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  const host = ipv4MappedToDotted(raw) ?? raw
-  return host === 'localhost' || host === '::1' || host.startsWith('127.')
-}
-
-export function isPrivateHost(hostname: string): boolean {
-  const raw = hostname.toLowerCase().replace(/^\[|\]$/g, '')
-  const host = ipv4MappedToDotted(raw) ?? raw
-  if (host === 'metadata.google.internal' || isKnownMetadataIp(host)) return true
-  if (isLoopbackHost(host)) return true
-  if (host === '0.0.0.0' || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.')) return true
-  const m = /^172\.(\d+)\./.exec(host)
-  if (!!m && Number(m[1]) >= 16 && Number(m[1]) <= 31) return true
-  const cgnat = /^100\.(\d+)\./.exec(host)
-  if (!!cgnat && Number(cgnat[1]) >= 64 && Number(cgnat[1]) <= 127) return true
-  // IPv6 unique-local (fc00::/7) and link-local (fe80::/10) literals — without these
-  // branches a bracketed ULA/link-local host (e.g. [fd12:3456::1]) passes as "not
-  // private" since it matches none of the IPv4-style string prefixes above.
-  if (host.startsWith('fc') || host.startsWith('fd')) return true
-  return host.startsWith('fe8') || host.startsWith('fe9') || host.startsWith('fea') || host.startsWith('feb')
-}
-
 export function assertProviderEndpoint(provider: Provider): void {
   if (provider.transport === 'codex-cli' || provider.transport === 'claude-cli' || provider.transport === 'opencode' || provider.transport === 'kilo' || provider.transport === 'pi-cli' || provider.transport === 'cursor-cli' || provider.transport === 'gemini-cli') return
   const url = new URL(provider.baseUrl)
@@ -371,87 +329,6 @@ export function assertProviderEndpoint(provider: Provider): void {
   }
   if (url.protocol !== 'https:') throw new Error('Cloud provider URLs must use https.')
   if (isPrivateHost(url.hostname)) throw new Error('Cloud provider URLs cannot point at local/private addresses.')
-}
-
-// IP-level private/loopback/link-local/ULA/CGNAT check (IPv4, IPv6, and IPv4-mapped IPv6).
-// The hostname-string check (isPrivateHost) is bypassable via DNS — a public name can
-// resolve to 169.254.169.254 — so we additionally validate the *resolved* address.
-export function isPrivateIp(ip: string): boolean {
-  const addr = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  const v4 = ipv4MappedToDotted(addr) ?? addr
-  if (isKnownMetadataIp(v4)) return true
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
-    const [a, b] = v4.split('.').map(Number)
-    if (a === 0 || a === 10 || a === 127) return true
-    if (a === 192 && b === 168) return true
-    if (a === 169 && b === 254) return true // link-local incl. cloud metadata 169.254.169.254
-    if (a === 172 && b >= 16 && b <= 31) return true
-    if (a === 100 && b >= 64 && b <= 127) return true // CGNAT
-    return false
-  }
-  if (addr === '::1' || addr === '::') return true
-  if (addr.startsWith('fe8') || addr.startsWith('fe9') || addr.startsWith('fea') || addr.startsWith('feb')) return true // fe80::/10 link-local
-  if (addr.startsWith('fc') || addr.startsWith('fd')) return true // fc00::/7 unique-local
-  return false
-}
-
-// Known cloud metadata destinations that are not covered by link-local ranges. These must
-// remain forbidden even when a connector explicitly opts into an RFC1918/LAN endpoint.
-// BlockList normalizes equivalent IPv6 spellings, avoiding fragile string-only matching.
-const KNOWN_METADATA_IPS = new BlockList()
-KNOWN_METADATA_IPS.addAddress('100.100.100.200', 'ipv4') // Alibaba Cloud IMDS
-KNOWN_METADATA_IPS.addAddress('fd00:ec2::254', 'ipv6') // AWS IMDS IPv6 endpoint
-
-export function isKnownMetadataIp(ip: string): boolean {
-  const raw = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  const address = ipv4MappedToDotted(raw) ?? raw
-  const family = isIP(address)
-  if (family === 4) return KNOWN_METADATA_IPS.check(address, 'ipv4')
-  if (family === 6) return KNOWN_METADATA_IPS.check(address, 'ipv6')
-  return false
-}
-
-// Public egress must use a globally-routable unicast address, not merely "not RFC1918".
-// This additionally excludes benchmarking, documentation, multicast/reserved IPv4 and
-// non-global IPv6 (including NAT64 well-known prefixes). Private-network opt-ins use their
-// own narrower policy and do not call this predicate.
-export function isGloballyRoutableIp(ip: string): boolean {
-  const raw = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  const address = ipv4MappedToDotted(raw) ?? raw
-  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(address)) {
-    const octets = address.split('.').map(Number)
-    if (octets.length !== 4 || octets.some((value) => value < 0 || value > 255)) return false
-    const [a, b, c] = octets
-    if (a === 0 || a === 10 || a === 127 || a >= 224) return false
-    if (a === 100 && b >= 64 && b <= 127) return false
-    if (a === 169 && b === 254) return false
-    if (a === 172 && b >= 16 && b <= 31) return false
-    if (a === 192 && b === 168) return false
-    if (a === 192 && b === 0 && (c === 0 || c === 2)) return false
-    if (a === 192 && b === 88 && c === 99) return false
-    if (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) return false
-    if (a === 203 && b === 0 && c === 113) return false
-    return true
-  }
-  if (isIP(address) !== 6) return false
-  const first = Number.parseInt(address.split(':')[0] || '0', 16)
-  if (!Number.isFinite(first) || first < 0x2000 || first > 0x3fff) return false
-  return !address.startsWith('2001:db8:') && address !== '2001:db8::'
-}
-
-function isLoopbackIp(ip: string): boolean {
-  const addr = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  const mapped = ipv4MappedToDotted(addr) ?? addr
-  return mapped === '::1' || mapped.startsWith('127.')
-}
-
-function isAlwaysForbiddenConnectorIp(ip: string): boolean {
-  const addr = ip.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  const mapped = ipv4MappedToDotted(addr) ?? addr
-  if (isKnownMetadataIp(mapped)) return true
-  if (mapped === '0.0.0.0' || mapped === '::') return true
-  if (mapped.startsWith('169.254.')) return true
-  return mapped.startsWith('fe8') || mapped.startsWith('fe9') || mapped.startsWith('fea') || mapped.startsWith('feb')
 }
 
 // Cloud provider guard that also resolves DNS and rejects if ANY resolved address
@@ -594,21 +471,6 @@ export async function resolveLocalProviderRequest(rawBaseUrl: string, rawRequest
   const target = await assertLocalProviderDiscoveryUrl(request.toString())
   if (!target) throw new Error('Local provider URL is required.')
   return target
-}
-
-function isLinkLocalOrMetadataHost(hostname: string): boolean {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/%.*$/, '')
-  if (host === 'metadata.google.internal') return true
-  const v4 = ipv4MappedToDotted(host) ?? host
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v4)) {
-    const [a, b] = v4.split('.').map(Number)
-    return a === 0 || (a === 169 && b === 254)
-  }
-  return host === '::' ||
-    host.startsWith('fe8') ||
-    host.startsWith('fe9') ||
-    host.startsWith('fea') ||
-    host.startsWith('feb')
 }
 
 export async function assertRemoteOrchestratorUrl(raw: string): Promise<string> {

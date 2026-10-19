@@ -18,6 +18,13 @@ const stop = @import("benchmark_stop.zig");
 const Allocator = std.mem.Allocator;
 const Args = args_mod.Args;
 
+/// Publication effects can be replaced by inert services when exercising command entry points.
+pub const Publication = struct {
+    credential: *const fn (Allocator, std.Io, upload.Options, *[]const u8) anyerror!?[]const u8 = upload.credential,
+    verify_public: *const fn (Allocator, std.Io, upload.Options, json.Value, *[]const u8) anyerror!bool = upload.verifyPublic,
+    upload: *const fn (Allocator, std.Io, upload.Options, json.Value, *[]const u8) anyerror!?upload.Ack = upload.upload,
+};
+
 pub const Input = struct { tty: bool, reader: *std.Io.Reader, fd: ?std.posix.fd_t };
 
 /// Everything the command touches, so tests can run it with fakes, captured writers and a temporary home.
@@ -33,6 +40,7 @@ pub const Context = struct {
     self_exe: ?[]const u8 = null,
     hf_base: []const u8 = upload.hf_models,
     signals: bool = false,
+    publication: Publication = .{},
 };
 
 pub fn main(init: std.process.Init, argv: []const []const u8, engines: cli.Engines) !u8 {
@@ -195,8 +203,9 @@ fn publish(ctx: *const Context, args: Args, v: json.Value) !u8 {
     const api = upload.apiUrl(args.upload_url, &problem) orelse return fail(ctx, problem);
     const o = options(ctx, api);
     if (!check.receipt(v, .publish, o.now_ms, &problem)) return fail(ctx, problem);
-    _ = try upload.credential(ctx.a, ctx.io, o, &problem) orelse return fail(ctx, problem);
-    if (!try upload.verifyPublic(ctx.a, ctx.io, o, v, &problem)) return if (problem.len == 0) cancelled(ctx) else fail(ctx, problem);
+    if (!upload.publicationAllowed(v, &problem)) return fail(ctx, problem);
+    _ = try ctx.publication.credential(ctx.a, ctx.io, o, &problem) orelse return fail(ctx, problem);
+    if (!try ctx.publication.verify_public(ctx.a, ctx.io, o, v, &problem)) return if (problem.len == 0) cancelled(ctx) else fail(ctx, problem);
     try ctx.out.writeAll("Public upload preview:\n");
     try receipt.preview(ctx.out, v);
     try say(ctx, "New submissions are community-reported and pending moderation.", .{});
@@ -210,7 +219,7 @@ fn publish(ctx: *const Context, args: Args, v: json.Value) !u8 {
             return 0;
         }
     }
-    const ack = try upload.upload(ctx.a, ctx.io, o, v, &problem) orelse return if (problem.len == 0) cancelled(ctx) else fail(ctx, problem);
+    const ack = try ctx.publication.upload(ctx.a, ctx.io, o, v, &problem) orelse return if (problem.len == 0) cancelled(ctx) else fail(ctx, problem);
     try say(ctx, "Submission {s}: {s}", .{ ack.id, ack.status });
     if (ack.results_url) |u| try say(ctx, "{s}", .{u});
     return 0;
@@ -220,9 +229,10 @@ fn publish(ctx: *const Context, args: Args, v: json.Value) !u8 {
 fn show(ctx: *const Context, v: json.Value) !void {
     const repo = json.strOr(v.get("model").?.get("repo_id"));
     try say(ctx, "Run {s} | {s} | {s}", .{ json.strOr(v.get("run_id")), json.strOr(v.get("runtime").?.get("backend")), if (repo.len > 0) repo else "local model" });
+    try say(ctx, "Protocol {s}; compare only within this protocol and manifest digest.", .{json.strOr(v.get("suite").?.get("id"))});
     try say(ctx, "Workload       Temp    Stream delivery tok/s    First text, s    Status", .{});
     const settings = v.get("settings").?;
-    for (try suite.cells(ctx.a, v.get("samples").?.array, @intFromFloat(suite.number(settings.get("repetitions")).?))) |c| {
+    for (try suite.receiptCells(ctx.a, v)) |c| {
         var t: [32]u8 = undefined;
         const rate = if (c.delivery) |d| try std.fmt.allocPrint(ctx.a, "{d:.2}", .{d}) else "not measured";
         const ttft = if (c.ttft) |d| try std.fmt.allocPrint(ctx.a, "{d:.3}", .{d}) else "not measured";
@@ -283,11 +293,12 @@ fn run(ctx: *const Context, args: Args) !u8 {
     const backend = if (args.backend == .auto) server.buildBackend() else @tagName(args.backend);
     const rocm = std.mem.eql(u8, backend, "rocm");
     if (!std.mem.eql(u8, backend, "mlx") and !std.mem.eql(u8, backend, "cuda") and !rocm)
-        return fail(ctx, try std.fmt.allocPrint(a, "community-v1 runs cover mlx, cuda and rocm; this build serves {s}", .{backend}));
+        return fail(ctx, try std.fmt.allocPrint(a, "community-v2 runs cover mlx, cuda and rocm; this build serves {s}", .{backend}));
     if (rocm and args.publish) return fail(ctx, check.rocm_local);
+    if (args.publish and !upload.v2_submissions_enabled) return fail(ctx, upload.v2_disabled);
     if (args.publish) {
         const api = upload.apiUrl(args.upload_url, &problem) orelse return fail(ctx, problem);
-        _ = try upload.credential(a, ctx.io, options(ctx, api), &problem) orelse return fail(ctx, problem);
+        _ = try ctx.publication.credential(a, ctx.io, options(ctx, api), &problem) orelse return fail(ctx, problem);
     }
     const run_id = receipt.runId(ctx.io);
     const bench_dir = try std.fs.path.join(a, &.{ ctx.home, ".tensorfold", "benchmarks" });
@@ -295,6 +306,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
     var facts: struct { model: receipt.Model, hardware: receipt.Hardware, runtime: receipt.Runtime } = undefined;
     var rank_count: ?u8 = if (args.server == null) 1 else null;
     var target: stream.Target = undefined;
+    var chat_only = args.chat_only;
     var plan: ?server.Plan = null;
     var note: ?[]const u8 = null;
     var wait: ?[]const u8 = null;
@@ -338,6 +350,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
             drafter
         else
             null;
+        chat_only = model.chatOnly(config, ctx.engines.families);
         const probe = host.detect(a, ctx.io, ctx.environ, backend);
         facts = .{
             .model = try model.describeConfig(a, ctx.io, args.target, dir, hub.isDir(ctx.io, try expand(ctx, args.target)), ctx.engines.families, drafter_label, config),
@@ -396,7 +409,7 @@ fn run(ctx: *const Context, args: Args) !u8 {
         target = .{ .base = managed.?.base(), .served = server.served_name };
     }
     var printer: Printer = .{ .ctx = ctx, .reps = args.reps };
-    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
+    const samples = stream.run(a, ctx.io, target, .{ .tokens = @intCast(args.tokens), .reps = @intCast(args.reps), .temperatures = args.temperatures, .serial = args.serial, .timeout_s = args.timeout, .chat_only = chat_only }, .{ .ctx = &printer, .call = Printer.call, .said = Printer.said }) catch |e| {
         if (managed) |*m| _ = m.stop();
         return e;
     };

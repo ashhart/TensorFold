@@ -40,6 +40,10 @@ test "a family with snap_grid keeps on its chunk starts, any other at any row as
     const Warm = struct {
         pub const warm_quiet: u64 = 1;
     };
+    const Headless = struct {
+        pub const snap_lookahead: u32 = 0;
+    };
+    try std.testing.expectEqual(@as(u32, 0), cacheRules(Headless).lookahead);
     const any = cacheRules(Other);
     try std.testing.expect(!any.planned and any.min_prompt == 0 and any.lookahead == 1 and any.warm == .off);
     try std.testing.expect(cacheRules(Warm).warm == .waits and cacheRules(Glm).warm == .off);

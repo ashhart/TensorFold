@@ -11,8 +11,8 @@ const qwen27 = @import("qwen27_served.zig");
 const flashnext = @import("flashnext_host.zig");
 const glm = @import("glm_host.zig");
 const glm_dsa = @import("glm_dsa_host.zig");
-const nemotron_slide = @import("nemotron_slide.zig");
-const Slide = nemotron_slide.Adapter(nemotron.slide);
+const slide_adapter = @import("slide_adapter.zig");
+const Slide = slide_adapter.Adapter(nemotron.slide);
 const cache_fit = @import("cache_fit.zig");
 const Resident = @import("resident.zig").Resident;
 const nemo_disk = @import("nemotron_disk.zig");
@@ -122,6 +122,11 @@ const Host = struct {
         return r.paused;
     }
 
+    fn halt(ctx: *anyopaque, reason: []const u8) void {
+        const h: *Host = @ptrCast(@alignCast(ctx));
+        h.host.halt(reason);
+    }
+
     fn close(ctx: *anyopaque) void {
         const h: *Host = @ptrCast(@alignCast(ctx));
         h.host.stop();
@@ -144,7 +149,10 @@ const Host = struct {
 
 /// The engine for `o.dir`, or null with `problem` set when no Metal engine reads the checkpoint.
 pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+    const report = @import("sys").optional_libraries.atBoundary();
+    defer report.deinit();
     if (std.mem.eql(u8, o.model_type, "fish_omni")) return @import("drama_open.zig").openMetal(a, gpa, io, o, problem);
+    if (@import("save_admission.zig").refused(io, o.dir, problem)) return null;
     const dense = std.mem.eql(u8, o.model_type, "qwen3_5") and qwen27Engine(a, io, o.dir);
     if (try refusal(a, o, dense)) |why| {
         problem.* = why;
@@ -159,7 +167,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
     if (std.mem.eql(u8, o.model_type, "glm5_next")) return openGlm(a, gpa, io, o, problem);
     if (isGemma4(o.model_type)) return @import("gemma4.zig").open(a, gpa, io, o, problem);
     if (o.vision != null and !std.mem.eql(u8, o.model_type, "step5_vl")) {
-        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Gemma 4 and Step-5 only, not {s} checkpoints", .{o.model_type});
+        problem.* = try std.fmt.allocPrint(a, "--vision: the native engine reads images for GLM-5.3-Flash, Qwen3.8-27B, Qwen3.8 Flash Next, Gemma 4 and Step-5 only, not {s} checkpoints", .{o.model_type});
         return null;
     }
     if (std.mem.eql(u8, o.model_type, "glm_moe_dsa")) return openGlmDsa(a, gpa, io, o, problem);
@@ -170,7 +178,7 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         problem.* = try std.fmt.allocPrint(a, "the native engine has no backend for {s} checkpoints yet; the Python engine 0.6.6 may serve them: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{o.model_type});
         return null;
     }
-    if (o.slide) if (try nemotron_slide.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
+    if (o.slide) if (try slide_adapter.refusal(tf.shard_edit, a, io, o.dir, "`cp -cRL` (an APFS clone that follows links)")) |why| {
         problem.* = why;
         return null;
     };
@@ -274,13 +282,14 @@ pub fn open(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]c
         s.* = Slide.init(gpa, io, h.metal);
         h.slide = s;
         h.host.learner = s.hook();
+        h.host.info_.slide_conversations = s.learner.readsConversations();
     }
     errdefer if (h.slide) |s| {
         s.deinit();
         gpa.destroy(s);
     };
     try h.host.start();
-    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h };
+    return .{ .engine = h.host.engine(), .close = Host.close, .ctx = h, .halt = Host.halt };
 }
 
 /// --slide writes 4-bit codes into the shards: a checkpoint with any other width is refused by its first such matrix.
@@ -354,15 +363,24 @@ fn gibBytes(g: f64) u64 {
 }
 
 /// Flash Next uses the dump named by TF_FLASHNEXT_DUMP, or the checked-in kernels when that variable is unset.
-fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
+pub fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem: *[]const u8) !?api.Opened {
     const dump: ?[]const u8 = if (platform.c.getenv("TF_FLASHNEXT_DUMP")) |d| std.mem.span(d) else null;
     const native = modelContext(a, io, o.dir);
     const window: i64 = o.context orelse native;
-    if (window < 0 or (native > 0 and window > native)) {
-        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window", .{ window, native });
+    const fz = tf.flashnext_replay;
+    const margin: i64 = tf.flashnext_engine.MARGIN;
+    // past the trained window (up to four times it) the engine rotates with static YaRN x4, every prompt alike
+    if (window < 0 or (native > 0 and window > 4 * native)) {
+        problem.* = try std.fmt.allocPrint(a, "--context {d} exceeds this model's {d}-token window and its YaRN x4 reach ({d})", .{ window, native, 4 * native });
         return null;
     }
     const paired = o.speed_up != null or std.c.getenv("TF_FLASHNEXT_TP") != null;
+    const choice = try fz.window_config.plan(window, native, margin, paired);
+    if (choice.refusal) |text| {
+        problem.* = text;
+        return null;
+    }
+    const cap: i64 = @intCast(choice.settings.capacity);
     if (tf.flashnext_batch_meta.refusal(o.lanes_fixed, o.lanes, paired, o.learn != null)) |text| {
         problem.* = text;
         return null;
@@ -370,8 +388,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     if (tf.flashnext_batch_meta.shared(o.lanes_fixed, o.lanes, paired, o.learn != null)) {
         var why: []const u8 = "";
         const shared: ?api.Opened = shared: {
-            const opened = @import("flashnext_batch_host.zig").open(gpa, io, o.dir, dump, if (window > 0) @min(window, tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN) else tf.flashnext_replay.CAP - tf.flashnext_engine.MARGIN, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, a, &why) catch |err| {
-                problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
+            const opened = @import("flashnext_batch_host.zig").openConfigured(gpa, io, o.dir, dump, if (window > 0) @min(window, cap - margin) else cap - margin, if (o.lanes_fixed) o.lanes else tf.flashnext_replay.MAXR, o.lanes_fixed, o.prompt_cache_gib, o.prompt_cache_over_cap, o.vision, a, &why, choice.settings) catch |err| {
+                problem.* = tf.flashnext_engine.quantizationProblem(err) orelse if (err == error.CacheOverCap or why.len > 0) why else if (err == error.BadLoadLimit) "FLASHNEXT_LOAD_LIMIT_GB is not a load limit: give a number of GB above 0, or unset it for 70% of RAM" else if (err == error.OverMemoryLimit) "the native Flash Next batching engine cannot open (OverMemoryLimit): the sessions and the given prompt cache do not fit under the load limit (70% of RAM, or FLASHNEXT_LOAD_LIMIT_GB) past the loaded model; fewer streams, a smaller --context or --prompt-cache-gib, or a higher FLASHNEXT_LOAD_LIMIT_GB" else try std.fmt.allocPrint(a, "the native Flash Next batching engine cannot open ({s})", .{@errorName(err)});
                 return null;
             };
             break :shared opened;
@@ -382,8 +400,8 @@ fn openFlashNext(a: Allocator, gpa: Allocator, io: std.Io, o: api.Open, problem:
     defer pool.pop();
     var why: []const u8 = "";
     const learn: ?flashnext.Learn = if (o.learn) |root| .{ .root = root, .cap = gibBytes(o.learn_gib), .floor = gibBytes(o.learn_min_free_gib), .daily = gibBytes(o.learn_daily_gib), .conversations = o.learn_conversations } else null;
-    const h = flashnext.open(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, learn, a, &why) catch |e| {
-        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
+    const h = flashnext.openConfigured(gpa, io, o.dir, dump, window, o.speed_up, o.prompt_cache_gib, o.prompt_cache_over_cap, learn, o.vision, a, &why, choice.settings) catch |e| {
+        problem.* = tf.flashnext_engine.quantizationProblem(e) orelse if (e == error.CacheOverCap or e == error.LearnOnPair or why.len > 0) why else if (linkProblem(e)) |link| try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s}: {s}", .{ o.dir, link }) else try std.fmt.allocPrint(a, "the native Flash Next engine cannot load {s} with {s} ({s})", .{ o.dir, dump orelse "(none: the checked-in kernels)", @errorName(e) });
         return null;
     };
     return .{ .engine = h.engine(), .close = flashnext.close, .ctx = h };

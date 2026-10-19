@@ -9,6 +9,7 @@ pub const Proposer = struct {
 
     pub const VTable = struct {
         propose: *const fn (ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32,
+        propose_after: ?*const fn (ptr: *anyopaque, history: []const u32, tail: []const u32, max_draft: i64) anyerror![]const u32 = null,
         last_match: *const fn (ptr: *anyopaque) i64,
         observe: ?*const fn (ptr: *anyopaque, proposed: i64, accepted: i64) void = null,
         /// The proposer prices its own drafts: `propose`'s result is taken as is, no width, length or match gate.
@@ -20,6 +21,12 @@ pub const Proposer = struct {
     /// Tokens valid until the next `propose`.
     pub fn propose(p: Proposer, context: []const u32, max_draft: i64) ![]const u32 {
         return p.vtable.propose(p.ptr, context, max_draft);
+    }
+
+    /// Tail tokens are a query, never new history for the proposer's index.
+    pub fn proposeAfter(p: Proposer, history: []const u32, tail: []const u32, max_draft: i64) ![]const u32 {
+        if (p.vtable.propose_after) |call| return call(p.ptr, history, tail, max_draft);
+        return if (tail.len == 0) p.propose(history, max_draft) else &.{};
     }
 
     pub fn lastMatch(p: Proposer) i64 {
@@ -84,11 +91,16 @@ pub const SuffixLookup = struct {
         return .{ .ptr = s, .vtable = &vtable };
     }
 
-    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .last_match = lastMatchFn, .observe = observeFn };
+    pub const vtable: Proposer.VTable = .{ .propose = proposeFn, .propose_after = afterFn, .last_match = lastMatchFn, .observe = observeFn };
 
     fn proposeFn(ptr: *anyopaque, context: []const u32, max_draft: i64) anyerror![]const u32 {
         const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
         return s.propose(context, max_draft);
+    }
+
+    fn afterFn(ptr: *anyopaque, history: []const u32, tail: []const u32, max_draft: i64) anyerror![]const u32 {
+        const s: *SuffixLookup = @ptrCast(@alignCast(ptr));
+        return s.proposeAfter(history, tail, max_draft);
     }
 
     fn lastMatchFn(ptr: *anyopaque) i64 {
@@ -125,84 +137,31 @@ pub const SuffixLookup = struct {
         s.indexed = context.len;
     }
 
-    fn matchLength(s: *const SuffixLookup, context: []const u32, end: usize) i64 {
-        const len: i64 = @intCast(context.len);
-        const e: i64 = @intCast(end);
-        var length: i64 = 0;
-        const limit = @min(s.params.max_extension, e);
-        while (length < limit and context[@intCast(e - 1 - length)] == context[@intCast(len - 1 - length)]) {
-            length += 1;
-            if (len - 1 - length < 0) break;
-        }
-        return length;
+    /// The copied continuation is borrowed until the next proposal.
+    pub fn propose(s: *SuffixLookup, history: []const u32, max_draft: i64) ![]const u32 {
+        return s.proposeAfter(history, &.{}, max_draft);
     }
 
-    /// Python `propose`: the copied continuation (owned by the proposer until the next call), or empty.
-    pub fn propose(s: *SuffixLookup, context: []const u32, max_draft: i64) ![]const u32 {
+    /// Match history followed by a drafted tail; only history supplies candidates and copied tokens.
+    pub fn proposeAfter(s: *SuffixLookup, history: []const u32, tail: []const u32, max_draft: i64) ![]const u32 {
         const n = s.params.ngram;
         s.out.clearRetainingCapacity();
-        if (max_draft <= 0 or context.len < n + 1) return s.out.items;
-        if (s.silent_for > 0) {
-            s.silent_for -= 1;
-            s.silenced_rounds += 1;
-            return s.out.items;
-        }
-        // the context changed underneath the index (a new request): rebuild it
-        const changed = s.indexed > context.len or (s.indexed != 0 and !std.mem.eql(u32, &s.keyAt(context, s.indexed), &s.last_key));
+        s.last_match = 0;
+        s.last_confident = false;
+        const changed = s.indexed > history.len or (s.indexed != 0 and !std.mem.eql(u32, &s.keyAt(history, s.indexed), &s.last_key));
         if (changed) {
             s.clearIndex();
             s.indexed = 0;
         }
-        try s.extend(context);
-        s.last_key = s.keyAt(context, s.indexed);
-        const positions = (s.index.get(s.keyAt(context, context.len)) orelse return s.out.items).items;
-        if (positions.len == 0) return s.out.items;
-        var best_end: i64 = -1;
-        var best_len: i64 = 0;
-        var i = positions.len;
-        while (i > 0) {
-            i -= 1;
-            const end = positions[i] + 1;
-            if (end >= context.len) continue;
-            const length = s.matchLength(context, end);
-            if (length > best_len) {
-                best_len = length;
-                best_end = end;
-                if (length >= s.params.max_extension) break;
-            }
-        }
-        s.last_confident = false;
-        s.last_match = best_len;
-        if (best_end < 0 or best_len < s.params.min_match) return s.out.items;
-        s.last_confident = best_len >= s.params.confident_match;
-        const from: usize = @intCast(best_end);
-        const to = @min(context.len, from + @as(usize, @intCast(max_draft)));
-        try s.out.appendSlice(s.gpa, context[from..to]);
-        if (s.out.items.len > 0) {
-            s.proposals += 1;
-            s.proposed_tokens += @intCast(s.out.items.len);
-        }
-        return s.out.items;
-    }
-
-    /// Propose after a drafted tail; index only committed history.
-    pub fn proposeAfter(s: *SuffixLookup, history: []const u32, tail: []const u32, max_draft: i64) ![]const u32 {
-        const n = s.params.ngram;
-        s.out.clearRetainingCapacity();
-        const len = history.len + tail.len;
         if (max_draft <= 0 or history.len < n + 1) return s.out.items;
         if (s.silent_for > 0) {
             s.silent_for -= 1;
             s.silenced_rounds += 1;
             return s.out.items;
         }
-        const changed = s.indexed > history.len or (s.indexed != 0 and !std.mem.eql(u32, &s.keyAt(history, s.indexed), &s.last_key));
-        if (changed) {
-            s.clearIndex();
-            s.indexed = 0;
-        }
         try s.extend(history);
         s.last_key = s.keyAt(history, s.indexed);
+        const len = std.math.add(usize, history.len, tail.len) catch return error.ContextTooLong;
         var key: Key = @splat(0xFFFF_FFFF);
         for (key[0..n], len - n..) |*k, i| k.* = joined(history, tail, i);
         const positions = (s.index.get(key) orelse return s.out.items).items;
@@ -214,7 +173,7 @@ pub const SuffixLookup = struct {
             const end: usize = positions[i] + 1;
             if (end >= history.len) continue;
             var length: i64 = 0;
-            while (length < s.params.max_extension and length < end and joined(history, tail, end - 1 - @as(usize, @intCast(length))) == joined(history, tail, len - 1 - @as(usize, @intCast(length)))) length += 1;
+            while (length < s.params.max_extension and length < end and history[end - 1 - @as(usize, @intCast(length))] == joined(history, tail, len - 1 - @as(usize, @intCast(length)))) length += 1;
             if (length > best_len) {
                 best_len = length;
                 best_end = end;
@@ -223,7 +182,9 @@ pub const SuffixLookup = struct {
         }
         s.last_match = best_len;
         if (best_len < s.params.min_match) return s.out.items;
-        try s.out.appendSlice(s.gpa, history[best_end..@min(history.len, best_end + @as(usize, @intCast(max_draft)))]);
+        s.last_confident = best_len >= s.params.confident_match;
+        const count = @min(history.len - best_end, @as(usize, @intCast(max_draft)));
+        try s.out.appendSlice(s.gpa, history[best_end..][0..count]);
         if (s.out.items.len > 0) {
             s.proposals += 1;
             s.proposed_tokens += @intCast(s.out.items.len);

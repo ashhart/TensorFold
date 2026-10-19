@@ -11,7 +11,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import corpus  # noqa: E402
-import parity  # noqa: E402
 from fake_text import FakeTokenizer  # noqa: E402
 from wire import request  # noqa: E402
 
@@ -119,7 +118,7 @@ def main() -> int:
                   for name, method, path, body, headers in key_cases]}
         , {"kind": "cases", "cases": [
             {"group": "keys", "name": "twice-x-api-key",
-             "raws": raw_bytes([b"GET /v1/models HTTP/1.1\r\nx-api-key: sk-cli\r\nx-api-key: sk-cli\r\n\r\n"]), "opts": {}},
+             "raws": raw_bytes([b"GET /v1/models HTTP/1.1\r\nHost: parity\r\nx-api-key: sk-cli\r\nx-api-key: sk-cli\r\n\r\n"]), "opts": {}},
             {"group": "keys", "name": "chat-with-key",
              "raws": raw_bytes([request("POST", "/v1/chat/completions", chat, {"x-api-key": "sk-cli"})]), "opts": {}},
             {"group": "keys", "name": "expect-without-key",

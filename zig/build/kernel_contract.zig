@@ -3,7 +3,9 @@ const std = @import("std");
 
 /// The contract module alone (its host tests run in `zig build test` through core/root.zig).
 pub fn module(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Module {
-    return b.createModule(.{ .root_source_file = b.path("zig/src/core/contract.zig"), .target = target, .optimize = optimize });
+    const m = b.createModule(.{ .root_source_file = b.path("zig/src/core/contract.zig"), .target = target, .optimize = optimize });
+    m.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
+    return m;
 }
 
 /// `test-kernel-contract` on every host: the gates' own tests and every registered launch against every chip's limits.
@@ -13,6 +15,12 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
     const step = b.step("test-kernel-contract", "The kernel contract's host tests: gate logic, controls, every launch against every chip");
     step.dependOn(&run.step);
     step.dependOn(family);
+    const zstd = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("zig/src/core/contract/fatbin_zstd.zig"),
+        .target = b.graph.host,
+    }) }));
+    b.step("test-fatbin-zstd-host", "Bounded compressed-image reader and encoded expansion controls").dependOn(&zstd.step);
+    step.dependOn(&zstd.step);
     const delta = b.addRunArtifact(b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("zig/delta_slots_contract_test.zig"),
         .target = b.graph.host,
@@ -24,6 +32,7 @@ pub fn hostTests(b: *std.Build, family: *std.Build.Step) void {
 
 /// macOS: tf-kernel-contract over the engine's Metal kernels; `kernel-contract` runs it on this Mac's GPU.
 pub fn metal(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode, metal_mod: *std.Build.Module, engine: *std.Build.Module, sources: *std.Build.Module) void {
+    @import("rotary_sweep.zig").steps(b, target, metal_mod);
     const exe = b.addExecutable(.{ .name = "tf-kernel-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("zig/tests/contract/metal_main.zig"),
         .target = target,

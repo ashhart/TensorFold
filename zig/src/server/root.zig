@@ -16,6 +16,9 @@ pub const Server = server.Server;
 pub const Config = server.Config;
 
 test {
+    _ = @import("done_times_test.zig");
+    _ = @import("drain_test.zig");
+    _ = @import("keepalive_test.zig");
     @import("std").testing.refAllDecls(@This());
     _ = @import("json");
     _ = @import("std_options.zig");
@@ -65,11 +68,17 @@ test {
     _ = @import("decisions_test.zig");
     _ = @import("systemone.zig");
     _ = @import("systemone_test.zig");
+    _ = @import("slide_context_test.zig");
+    _ = @import("slide_stream_test.zig");
+    _ = @import("slide_save_stream_test.zig");
+    _ = @import("slide_writer_test.zig");
     _ = @import("slide.zig");
     _ = @import("slide_cli.zig");
     _ = @import("slide_key.zig");
     _ = @import("slide_graph.zig");
     _ = @import("slide_graph_delete.zig");
+    _ = @import("slide_graph_test.zig");
+    _ = @import("slide_recheck.zig");
     _ = @import("slide_model.zig");
     _ = @import("slide_lesson.zig");
     _ = @import("slide_words.zig");
@@ -80,6 +89,8 @@ test {
     _ = @import("slide_recheck.zig");
     _ = @import("slide_forget.zig");
     _ = @import("slide_forget_test.zig");
+    _ = @import("slide_supplied.zig");
+    _ = @import("slide_questions_test.zig");
     _ = @import("slide_whom.zig");
     _ = @import("slide_subject.zig");
     _ = @import("slide_span.zig");
@@ -88,6 +99,8 @@ test {
     _ = @import("slide_take.zig");
     _ = @import("slide_teacher.zig");
     _ = @import("slide_pick.zig");
+    _ = @import("slide_context.zig");
+    _ = @import("slide_talks.zig");
     _ = @import("startup.zig");
     _ = @import("responses_include_test.zig");
     _ = @import("cortheon/cortheon.zig");
@@ -110,9 +123,20 @@ test {
         _ = @import("benchmark_cli_test.zig");
         _ = @import("benchmark_run_test.zig");
         _ = @import("benchmark_early_test.zig");
+        _ = @import("benchmark_publication_test.zig");
+        _ = @import("benchmark_chat_only_test.zig");
     }
 }
 
 test {
     _ = @import("benchmark_config_test.zig");
+    _ = @import("slide_retention_test.zig");
+}
+
+test {
+    _ = @import("slide_save_failure_test.zig");
+}
+
+test {
+    _ = @import("slide_subject_guard_test.zig");
 }

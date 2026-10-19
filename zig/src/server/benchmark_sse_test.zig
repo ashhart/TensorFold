@@ -7,7 +7,11 @@ const ms = std.time.ns_per_ms;
 
 /// Lines of ``bytes`` through one stream, the i-th line read at ``at_lines[i]`` (or 0), then the post-loop checks.
 fn play(a: std.mem.Allocator, bytes: []const u8, at_lines: []const i96, tokens: u64) !suite.Sample {
-    var sample: suite.Sample = .{ .fixture_id = "code", .temperature = 1.0, .repeat = 0, .seed = 1234 };
+    return playAt(a, bytes, at_lines, tokens, 1.0);
+}
+
+fn playAt(a: std.mem.Allocator, bytes: []const u8, at_lines: []const i96, tokens: u64, temperature: f64) !suite.Sample {
+    var sample: suite.Sample = .{ .fixture_id = "code", .temperature = temperature, .repeat = 0, .seed = 1234 };
     var s = try sse.Stream.init(a);
     var failure: ?suite.ErrorCode = null;
     var rest = bytes;
@@ -188,4 +192,28 @@ test "the delivery rate is (completion - 1) / delivery_seconds in the same f64 t
     const s = try play(a, try joined(a, &.{ text1, text2, final, usage4, done }), &.{ 3, 3, 2123456792, 2123456792 }, 4);
     try std.testing.expectEqual(@as(f64, 2.123456789), s.delivery_seconds.?);
     try std.testing.expectEqual(@as(f64, 3) / 2.123456789, s.delivery_tps.?);
+}
+
+test "issue 969 v2: natural sampled stops at 128 qualify, short, greedy, length and empty do not" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const cases = [_]struct { n: u32, temp: f64, reason: []const u8, status: suite.Status }{
+        .{ .n = 127, .temp = 1, .reason = "stop", .status = .early_eos },
+        .{ .n = 128, .temp = 1, .reason = "stop", .status = .ok },
+        .{ .n = 177, .temp = 1, .reason = "stop", .status = .ok },
+        .{ .n = 128, .temp = 0, .reason = "stop", .status = .early_eos },
+        .{ .n = 177, .temp = 1, .reason = "length", .status = .early_eos },
+        .{ .n = 256, .temp = 0, .reason = "length", .status = .ok },
+    };
+    for (cases) |c| {
+        const body = try std.fmt.allocPrint(a, "data: {{\"choices\":[{{\"text\":\"a\"}}]}}\n\ndata: {{\"choices\":[{{\"text\":\"b\"}}]}}\n\ndata: {{\"choices\":[{{\"finish_reason\":\"{s}\"}}],\"usage\":{{\"prompt_tokens\":24,\"completion_tokens\":{d}}}}}\n\ndata: [DONE]\n\n", .{ c.reason, c.n });
+        const sample = try playAt(a, body, &.{ 0, 0, 100 * ms, 100 * ms }, 256, c.temp);
+        try std.testing.expectEqual(c.status, sample.status);
+        try std.testing.expectEqualStrings(c.reason, sample.finish_reason.?);
+        try std.testing.expectEqual(@as(f64, @floatFromInt(c.n - 1)) / 0.1, sample.delivery_tps.?);
+    }
+    const empty = "data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":24,\"completion_tokens\":177}}\n\ndata: [DONE]\n\n";
+    const sample = try playAt(a, empty, &.{}, 256, 1);
+    try std.testing.expectEqual(suite.ErrorCode.empty_output, sample.error_code.?);
 }

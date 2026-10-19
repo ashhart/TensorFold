@@ -11,7 +11,7 @@ pub const user_agent = "TensorFold-benchmark/1";
 const read_buffer = 576 << 10;
 
 pub const Target = struct { base: []const u8, served: []const u8 };
-pub const Opts = struct { tokens: u32, reps: u32, temperatures: []const f64, serial: bool, timeout_s: f64 };
+pub const Opts = struct { tokens: u32, reps: u32, temperatures: []const f64, serial: bool, timeout_s: f64, chat_only: bool = false };
 /// ``call`` after each attempt; ``said`` after one the server refused, with its reason for the terminal only.
 pub const Progress = struct { ctx: *anyopaque, call: *const fn (*anyopaque, *const suite.Sample) void, said: ?*const fn (*anyopaque, *const suite.Sample, []const u8) void = null };
 
@@ -233,7 +233,8 @@ fn eventStream(content_type: ?[]const u8) bool {
 
 /// One request as one sample: failures keep a fixed code, never server text; ``said`` gets a refusal's reason.
 pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o: Opts, f: suite.Fixture, temperature: f64, seed: u32, repeat: i32, said: ?*[]const u8) suite.Sample {
-    var sample: suite.Sample = .{ .fixture_id = f.id, .temperature = temperature, .repeat = repeat, .seed = seed };
+    const request = suite.requestFixture(suite.id, f, o.chat_only);
+    var sample: suite.Sample = .{ .fixture_id = f.id, .temperature = temperature, .repeat = repeat, .seed = seed, .route = suite.route(request) };
     if (said) |out| out.* = "";
     if (stop.requested() != null) {
         sample.error_code = .cancelled;
@@ -247,9 +248,9 @@ pub fn attempt(a: Allocator, io: std.Io, client: *std.http.Client, t: Target, o:
     const start = now(io);
     const ready = blk: {
         var problem: []const u8 = "";
-        const url = (endpoint(ta, t.base, f.chat, &problem) catch break :blk false) orelse break :blk false;
+        const url = (endpoint(ta, t.base, request.chat, &problem) catch break :blk false) orelse break :blk false;
         x.uri = std.Uri.parse(url) catch break :blk false;
-        x.body = body(ta, t.served, f, o.tokens, temperature, seed, o.serial) catch break :blk false;
+        x.body = body(ta, t.served, request, o.tokens, temperature, seed, o.serial) catch break :blk false;
         x.stream = sse.Stream.init(ta) catch break :blk false;
         break :blk true;
     };

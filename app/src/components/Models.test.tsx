@@ -6,6 +6,7 @@ import React from 'react'
 import ts from 'typescript'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { orderFavoritesFirst } from '../lib/favorite-models'
+import * as hubFailure from '../../shared/hub-failure'
 
 let slots: any[] = [], refs: any[] = [], effects: any[] = [], queued: any[] = []
 let cursor = 0, refCursor = 0, effectCursor = 0
@@ -37,6 +38,7 @@ const imports: any = {
 }
 for (const name of Object.keys(placeholders)) if (!['HubRow', 'InstalledRow', 'ModelBenchmarkDrawer', 'ClusterWorkspace'].includes(name)) imports[`./${name === 'ModelFoldersSettings' ? 'settings' : 'models'}/${name}`] = { [name]: placeholders[name] }
 imports['./clusters/ClusterWorkspace'] = { ClusterWorkspace: placeholders.ClusterWorkspace }
+imports['../../shared/hub-failure'] = hubFailure
 imports['./models/benchmark/ModelBenchmarkDrawer'] = { ModelBenchmarkDrawer: placeholders.ModelBenchmarkDrawer }
 const loaded = { exports: {} as any }
 new Function('require', 'module', 'exports', ts.transpileModule(readFileSync(path.join(__dirname, 'Models.tsx'), 'utf8'), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText)((id: string) => { const reviewed = reviewedLanguageImport(id, imports); if (reviewed.matched) return reviewed.value;  assert.ok(id in imports, id); return imports[id] }, loaded, loaded.exports)

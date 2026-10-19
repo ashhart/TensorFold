@@ -95,6 +95,9 @@ pub fn steps(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.buil
     // the GPU programs compile on any host against stub kernels, so `test` catches what only they reach
     test_step.dependOn(&checksExe(b, b.graph.host, .Debug, host).step);
     test_step.dependOn(&server(b, b.graph.host, host, build_options).step);
+    const check_target = b.resolveTargetQuery(.{ .cpu_arch = b.graph.host.result.cpu.arch, .os_tag = .linux, .abi = .gnu });
+    const check = engineModules(b, check_target, .Debug, stub_kernels, null);
+    b.step("check-native-hip-host", "Compile the real native HIP server with inert kernels, without GPU execution").dependOn(&server(b, check_target, check, build_options).step);
     const gpu = engineModules(b, target, optimize, objects, hip_include);
     b.step("tf-qwen35-test", "Qwen3.5 / 3.6 model checks on the GPU (-Dhip-arch)").dependOn(&b.addInstallArtifact(checksExe(b, target, optimize, gpu), .{}).step);
     const fx_test = b.addExecutable(.{ .name = "tf-flashnext-hip-test", .root_module = b.createModule(.{
@@ -261,6 +264,7 @@ fn kernelObjects(b: *std.Build, hipcc: []const u8, hipcc_resolved: []const u8, d
 /// The backend-neutral core (checkpoint formats, the kernel registry), as the other backends import it.
 fn coreModule(b: *std.Build, target: std.Build.ResolvedTarget) *std.Build.Module {
     const core = b.createModule(.{ .root_source_file = b.path("zig/src/core/root.zig"), .target = target, .link_libc = true });
+    core.addImport("gpu_memory", @import("gpu_memory.zig").module(b, target));
     core.addImport("tokenizer", b.createModule(.{ .root_source_file = b.path("zig/src/core/tokenizer/tokenizer.zig"), .target = target, .link_libc = true }));
     return core;
 }

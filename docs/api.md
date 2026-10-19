@@ -5,42 +5,59 @@ The base URL is `http://127.0.0.1:8080/v1` with the default server settings.
 ## Native chat template override
 
 `tensorfold serve MODEL --chat-template custom-chat.jinja` loads a UTF-8 Jinja template from that file
-instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve
-from the server's working directory. The file is read once at startup, with the same 16 MiB limit as
-the checkpoint's `chat_template.jinja`.
+instead of the checkpoint's template files or `tokenizer_config.json` templates. Relative paths resolve from the server's working directory. The file is read once at startup, with the same 16 MiB limit as the checkpoint's `chat_template.jinja`.
 
-The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's
-separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged.
-Unreadable or malformed templates fail startup before the engine opens, without falling back to the
-checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does.
-Raw completion prompts do not use the chat template.
+The override handles both ordinary and tool-bearing chat requests; it does not retain a checkpoint's separate `tool_use` template. The checkpoint's tokenizer, special tokens and EOS IDs stay unchanged. Unreadable or malformed templates fail startup before the engine opens, without falling back to the checkpoint template. An empty file leaves chat rendering unavailable, as a checkpoint with no template does. Raw completion prompts do not use the chat template.
 
 ## API keys
 
-Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`.
-The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
+Both servers accept repeated `--api-key KEY`, comma-separated `TENSORFOLD_API_KEY`, and `--api-key-file PATH`. The sources add keys together. A file has one key per line, optional `label: key` entries, and lines starting with
 `#` for comments. Set its permissions to `0600`; startup refuses a file readable by other users.
 The server stores SHA-256 digests and compares every configured digest for each authentication attempt.
 
-Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients.
-Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format.
-All `/v1/*`, tokenization, metrics and their inference aliases require a key; `--metrics-open` opens both metrics
-routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured.
-With no keys, the existing open routes and health details stay unchanged; a non-loopback bind prints a warning.
+Send `Authorization: Bearer KEY` from OpenAI-compatible clients, or `x-api-key: KEY` from Messages clients. Missing or invalid credentials return HTTP 401 with `WWW-Authenticate: Bearer` and the route's error format. With keys configured, the native server requires a key on every route by default. Its public exceptions are GET `/`, `/health`, `/slide` and the eight embedded `/slide/` scripts; `--metrics-open` also opens GET `/metrics` and `/v1/metrics`. Other methods and unknown assets require a key. This includes every `/systemone` inference alias and future private routes. `/health` remains open and returns only `{"status":"ok"}` when keys are configured. Public health is read-only, including when a reset query is supplied. With no keys, its health details remain available; a non-loopback bind prints a warning.
 
-The native server raises its soft open-file limit before listening when the platform permits it. If `accept`
-runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
+The native server raises its soft open-file limit before listening when the platform permits it. If `accept` runs out of descriptors, it logs one guidance line per burst and keeps a short retry backoff.
 
-Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP
-requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a
-valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests.
-Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots,
-underscores or hyphens; choose non-secret labels.
+Replace the key file atomically to rotate keys. Its modification time is checked at most once a second; SIGHUP requests an immediate reload. An empty, unreadable or malformed replacement closes authenticated routes until a valid file returns. Request logs and `tensorfold:requests_total` use labels, never keys or digests. Unnamed keys receive `cli-N`, `env-N` or `file-N` labels. Labels contain at most 64 letters, digits, dots, underscores or hyphens; choose non-secret labels.
 
-In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH`
-forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a
-bearer key. The native binary has neither command.
-Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+In the Python 0.6.6 engine's [control room](control.md), `tensorfold service install MODEL --api-key-file PATH` forwards the file to its server, and `tensorfold tui --url URL --token-env VARIABLE` sends that variable's value as a bearer key. The native binary has neither command. Prefer a restricted file over command-line keys, which can appear in the operating system's process list.
+
+
+## Browser request headers
+
+The server accepts origin-form targets beginning with `/`, with query text and trailing slashes interpreted by the
+shared route helper. Absolute URLs, fragments and control bytes are refused before routing. Routes are case-sensitive
+and percent escapes are not decoded into aliases. Malformed or folded header fields are refused and closed.
+
+On a loopback bind, the native server accepts a `Host` naming `localhost` or a loopback IP, with any valid port.
+It checks the actual bound socket, including a hostname that resolved to loopback. Missing, duplicate, malformed or
+foreign hosts receive HTTP 403 before authentication, `100 Continue` or routing. Repeat `--allowed-host NAME` to add
+trusted hostnames or bracketed IP literals. A name has no scheme, path or port; it admits that name at any port.
+The flag changes header admission, not the listening address. A non-loopback bind skips this host restriction.
+
+On every bind, an `Origin` must match the request's `Host` and the native server's HTTP scheme. Hostname case,
+IPv6 spellings and default ports are normalized. The origin must be a single `http://HOST[:PORT]` or
+`https://HOST[:PORT]` value with no path or userinfo. `null`, malformed values and duplicate origins are refused.
+Repeat `--allowed-origin ORIGIN` for trusted exceptions, including an HTTPS origin used through a TLS proxy.
+Host and origin exceptions are independent; allowing an origin does not admit a foreign loopback Host.
+Forwarded headers do not select the scheme or bypass either check.
+
+Each 403 names the refused header and its corresponding exception flag. Clients without an `Origin`, including curl,
+SDKs and the app, keep their existing requests with a valid Host. Content-Type is not required by these checks, so
+`curl -d` requests keep working. The server adds no CORS headers; these flags do not enable cross-origin browser reads.
+The header checks protect browser access and do not replace API keys. Trailing spaces or tabs in Host or Origin values
+are refused; clients should omit that outer whitespace.
+
+Host and Origin exception lists each accept at most 64 entries. DNS names use nonempty ASCII labels without a trailing
+dot; IPv6 literals are bracketed without zone identifiers. Every HTTP request needs exactly one valid Host, including
+HTTP/1.0; hostless HTTP/0.9 is refused and closed. An external bind skips only loopback-name admission.
+
+For a trusted proxy name and web origin, for example:
+
+```sh
+tensorfold-native serve MODEL --allowed-host inference.example --allowed-origin https://inference.example
+```
 
 | Route | Behavior |
 | --- | --- |
@@ -101,7 +118,7 @@ each route and its events.
 
 | Route | What it does |
 | --- | --- |
-| `POST /v1/slide/learn` | `{"text": "..."}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events |
+| `POST /v1/slide/learn` | `{"text": "...", "questions": ["..."]}`: learns the facts in the text, streaming `fact`, `learning` and `learned` events; `questions` is optional (see Living Weights) |
 | `GET /v1/slide/graph` | Every fact as JSON: its state, neurons, questions and their expected answers, and the model's pocket |
 | `DELETE /v1/slide/graph` | Clears the graph; the weights keep what they learned |
 | `DELETE /v1/slide/fact/{id}` | Deletes one fact from the weights, every other fact checked again, streaming `fact`, `checking`, `zeroed`, `checked` and `forgot` events; an optional `{"reason": "..."}` goes into the graph |
@@ -121,7 +138,7 @@ delete runs gets 503, an id that is not a number 400, and an id the graph does n
 | `parallel_tool_calls` | False returns at most one completed call | Both |
 | `max_tokens`, `max_completion_tokens` | Explicit reply limit; rejected if prompt plus reply exceeds the window | Both |
 | `temperature`, `top_p`, `top_k`, `min_p` | Sampling overrides; zero temperature is greedy | Both |
-| `seed` | Sampling key; otherwise derived from the prompt (and `TENSORFOLD_SEED_SALT`) | Both |
+| `seed` | Explicit sampling key; native fallback uses configured defaults, then a fresh key (see below) | Both |
 | `stream` | Server-sent events; the last event carries usage | Both |
 | `stream_options.include_usage` | Usage in its own final event with `"choices": []`, not on the finish event | Both |
 | `chat_template_kwargs.enable_thinking` | Template thinking toggle; `chat_template_kwargs.thinking` (`true`/`false` or `{"type": "enabled"}`/`{"type": "disabled"}`, as DeepSeek-V4 clients send it) is read the same way when `enable_thinking` is absent; other values are ignored | Both |
@@ -148,7 +165,8 @@ sequences. `/v1/completions` takes the legacy `logprobs`, an integer from 0 thro
 the legacy form, streamed or not: `tokens`, `token_logprobs`, `top_logprobs` (each alternative's text to its logprob)
 and `text_offset` (each token's first character in the completion, counting each token's own text). Other engines,
 the Responses route and the request modes above return HTTP 400 when probabilities are requested.
-Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine.
+Nonstreamed `/v1/completions` also takes vLLM's `prompt_logprobs`, an integer from 0 through 20, on the same engine
+and on GLM-5.3-Flash's CUDA engine.
 `choices[0].prompt_logprobs` has one entry per prompt token: `null` for the first, then an object keyed by token id
 (a string) whose first key is the prompt token itself, followed by the requested best tokens; each value has
 `logprob`, `rank` and `decoded_token`. The prompt token's `rank` counts every vocabulary token at or above it,
@@ -276,7 +294,8 @@ Responses uses `{"type":"function","name":"lookup"}`. Only offered tools are all
 call with no tools gets HTTP 400. `auto` remains optional, and `none` hides the tools.
 
 The constrained answer contains one or more complete calls and no prose outside them. Arguments follow the offered
-parameter schema. Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
+parameter schema. GLM uses `<arg_key>` and `<arg_value>` tags after the function name.
+Qwen XML and JSON call templates keep their envelopes. Gemma 4 uses
 `<|tool_call>call:NAME{...}<tool_call|>` with JSON arguments, which the tool parser accepts. An unrecognized template
 uses the canonical `<tool_call>{"name":"NAME","arguments":{...}}</tool_call>` form. The native grammar limits
 whitespace between calls; `parallel_tool_calls: false` allows exactly one. With thinking enabled, the constraint
@@ -284,14 +303,16 @@ starts after the think-end token. A reply cut short by `max_tokens` can remain i
 Drafting stays enabled and uses the same grammar masks as plain decoding.
 
 This requires the loaded backend's structured-output capability and `libtfgrammar`. Nemotron, Qwen3.5-2B,
-Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5 and LFM2 MoE on Metal have that capability; Qwen27 on Intel also has it.
+Qwen3.8-27B (`qwen27`), Gemma 4 31B, Step-5, LFM2 MoE and Flash Next shared sessions on Metal have that capability; Qwen27 on Intel also has it.
 Qwen3.8-27B applies the grammar to its first draw, each verified row and each branch of its draft proposals.
 Structured requests use its shared lane core, including when the ordinary lone-request serial optimization is enabled.
-CUDA determines support from its loaded backend's mask hook. Flash Next Metal (`flashnext-zig`) and GLM Metal
-(`glm-zig`, `glm-dsa-zig`) lack that hook and refuse required/named choices before generation with HTTP 400, for example:
-`backend 'flashnext-zig' cannot enforce tool_choice "required" or a named function: it has no token grammar support; send "auto" or "none"`.
+CUDA determines support from its loaded backend's mask hook. GLM Metal
+(`glm-zig`, `glm-dsa-zig`) lacks that hook and refuse required/named choices before generation with HTTP 400, for example:
+`backend 'glm-zig' cannot enforce tool_choice "required" or a named function: it has no token grammar support; send "auto" or "none"`.
 The server does not silently turn a required call into `auto`. Installing the grammar library does not add a missing
 backend mask hook. A missing library or grammar compilation error is also refused before generation with its reason.
+
+The native GLM CUDA backend also supports token grammars, gathering vocabulary rows before rank 0 masks and draws.
 
 HTTP 400 comes before any token for a malformed field, a grammar xgrammar cannot compile (with xgrammar's reason), a
 server without xgrammar (with the install command; on the native server, a server that cannot load `libtfgrammar`),
@@ -419,10 +440,12 @@ For exactness comparisons, hold the checkpoint, template, runtime, prompt, seed 
 constant, then compare the decoded reply with `draft` enabled and disabled. Repeat with fresh and reused
 prefixes, and compare each MLX concurrent request with its solo run.
 
-A request without `seed` takes one derived from its prompt, so running the same evaluation twice against one server
-repeats the same samples wherever the conversations agree (an agent benchmark's second pass then mostly replays its
-first). To draw independent repeats, send a `seed` per run, or start each run's server with a different
-`TENSORFOLD_SEED_SALT` (an integer mixed into every prompt-derived seed; 0, the default, keeps today's seeds).
+Native sampled requests use the request seed, then an injected configured default, then a fresh 63-bit OS key. No stock
+serve flag or generation config supplies a default seed. The done line appends `seed=<n>` after
+its request timing and tok/s fields, for given and drawn keys. Send that seed again to reproduce a draw. Greedy requests draw
+no key. Native `serve --prompt-seed` keeps historical prompt keying, including `TENSORFOLD_SEED_SALT`; CLI runs and
+speech keep their existing prompt keying. Always give comparison requests the same explicit seed, including release
+cells, drafted/plain, cached/fresh and concurrent/solo checks. See [request seeds](request-seeds.md).
 
 ## Metrics
 
@@ -523,8 +546,8 @@ configured the body is only `{"status": "ok"}`. Without keys it has these fields
 `live.connections` counts running and waiting requests, and `live.waiting` the waiting ones.
 `decode_tokens_per_second` is the tokens decoded in the last 2 s, divided by 2. `prefill_tokens_per_second` is the
 last prompt pass's uncached tokens over its time, shown for 2 s after the pass ends and 0 otherwise. Both rates are
-rounded to one decimal. `?reset_peak=1` starts a new CUDA peak at the current `active`; `/memory`'s `device.peak_bytes`
-is the same peak. With keys configured, `reset_peak` is ignored.
+rounded to one decimal. Public health never resets the peak, with or without keys. Reset queries on `/health` and `/`
+are ignored. The separate `/memory` route also reports memory without resetting it and requires a key when keys are configured.
 
 The Python 0.6.6 server's body differs: its MLX `memory` can add `budget`, `mlx_budget` and `footprint`, and its CUDA
 server sends the counters described under [Responses](#responses). For memory figures on a Mac, use

@@ -2,9 +2,8 @@
 const std = @import("std");
 const lanes = @import("lanes");
 const Allocator = std.mem.Allocator;
-/// The server's name for one request, unique while the process lives.
 pub const tfvideo = @import("tfvideo.zig");
-
+/// The server's name for one request, unique while the process lives.
 pub const Id = u64;
 
 /// One request's sampling (Python's exact_sampling.Sampling); a request without one decodes greedily.
@@ -69,7 +68,7 @@ pub const Request = struct {
     shared_prefixes: []const u32 = &.{},
     /// Where the latest user message's text starts: a state kept before it lets an edit of that turn resume (0: none).
     rewind_len: u32 = 0,
-    /// Where prefill chunks start after 0 (Python's PrefillPlan at ``Info.prefill_step``); empty: the engine's own.
+    /// Prompt chunk starts after 0 (Python PrefillPlan); empty selects the engine's plan.
     chunks: []const u32 = &.{},
     /// Decoded intervals [start,end), sorted, nonempty and strictly separated; an empty list uses prompt arithmetic.
     decode_spans: []const [2]u32 = &.{},
@@ -139,6 +138,8 @@ pub const Stats = struct {
     loop_period: ?u32 = null,
     /// Prompt prefill duration measured by the engine host, in seconds.
     prefill_seconds: ?f64 = null,
+    /// Seconds from engine submission to first admission; an engine that admits immediately leaves zero.
+    queued_seconds: f64 = 0,
     /// The drafter's own counters as a JSON object, or empty.
     telemetry_json: []const u8 = "",
 };
@@ -205,6 +206,8 @@ pub const Info = struct {
     vision: ?Vision = null,
     /// The engine decodes greedily only: the server refuses a request with a temperature before admitting it.
     greedy_only: bool = false,
+    /// The learner reads conversation prompts at any length through taps.
+    slide_conversations: bool = false,
     /// Whether a request's caches fit beside the running streams' now (null: a free lane does); else it waits in order.
     admit: ?Admit = null,
 };
@@ -226,8 +229,8 @@ pub const PromptCachePlan = struct {
     margin_bytes: ?u64 = null,
 };
 
-/// A checkpoint family an engine reads: its config ``model_type`` and weight formats, as gate entries name them.
-pub const Family = struct { model_type: []const u8, formats: []const []const u8 };
+/// A native family's model type, weight formats and explicit raw-text capability.
+pub const Family = struct { model_type: []const u8, formats: []const []const u8, raw_text: bool = true };
 
 /// The math an NVFP4 checkpoint runs: its own (FP4 rows into NVFP4 layers, FP8 into FP8 ones), or bf16 rows throughout.
 pub const Precision = enum { checkpoint, full };
@@ -332,7 +335,7 @@ pub const SubmitError = error{ Closed, Busy, InvalidSpans, Stale }; // Stale: a 
 pub const stale_message = "a Living Weights delete could not be put back on the device: send the delete again to retry it, or restart the server";
 
 /// A worked example for the learner: token ids, the answer from `start`; `decide`: its assistant header's last row.
-pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none)
+pub const Example = struct { ids: []const u32, start: u32, decide: u32, subject: u32 = 0, value: u32 = 0, context: u32 = 0 }; // subject: the row of its last token; value: the row before its answer's value (0: none); context: the rows of a conversation before its own turn, which other examples share (0: none)
 
 /// One fact's lesson (Sliding Weights): answers, held-out answers, near misses, and prompts that must not move.
 pub const LearnRequest = @import("learning_api.zig").LearnRequest;
@@ -488,6 +491,7 @@ pub const keepalive = @import("keepalive.zig");
 
 /// A model folder's original files kept before --slide first teaches it, its hold and its rollback (originals.zig).
 pub const originals = @import("originals.zig");
+pub const save_guard = @import("save_guard");
 
 test {
     _ = @import("lane_host.zig");

@@ -367,7 +367,7 @@ test "an endpoint gives the library's placing thread user-interactive QoS unless
     defer _ = unsetenv("MCDMA_FABRIC_QOS");
     for ([_]?[*:0]const u8{ null, "0", "1" }) |set| {
         _ = if (set) |v| setenv("MCDMA_FABRIC_QOS", v, 1) else unsetenv("MCDMA_FABRIC_QOS");
-        try std.testing.expectError(error.LibraryUnavailable, Endpoint.create(std.testing.allocator, "/nonexistent/libmcdma-fabric.dylib", config));
+        try std.testing.expectError(error.McdmaFabricUnavailable, Endpoint.create(std.testing.allocator, "/nonexistent/libmcdma-fabric.dylib", config));
         try std.testing.expectEqualStrings(if (set) |v| std.mem.span(v) else "1", if (platform.c.getenv("MCDMA_FABRIC_QOS")) |v| std.mem.span(v) else "(unset)");
     }
 }

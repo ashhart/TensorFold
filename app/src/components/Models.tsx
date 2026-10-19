@@ -1,3 +1,4 @@
+import { aggregateHubFailures, decodeHubFailure } from '../../shared/hub-failure'
 import { ClusterWorkspace } from './clusters/ClusterWorkspace'
 import { OriginalDiagnostic } from './OriginalDiagnostic'
 import { authoredText } from '../lib/preferences/language-packs'
@@ -37,7 +38,7 @@ type WorkspaceTab = typeof TABS[number]
 type Utility = 'downloads' | 'folders' | 'runtime' | 'compare' | 'benchmark' | 'clusters' | null
 const TAB_LABEL: Record<WorkspaceTab, string> = { get Models() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "My models") }, get Discover() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Discover") }, get Workers() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Workers") }, get Learning() { return authoredText(useLocaleStore.getState().settings?.uiPreferences?.locale, "Learning") }, API: 'API' }
 const route = (model: EngineInstalledModel) => ({ providerId: ENGINE_PROVIDER_ID, accountId: null, model: model.repo })
-function errorText(error: unknown): string { return String((error as Error)?.message ?? error).replace(/^Error invoking remote method '[^']*':\s*(Error:\s*)?/, '') }
+function errorText(error: unknown): string { return decodeHubFailure(error).message }
 
 export function Models({ minimal = false }: { minimal?: boolean } = {}) {
   const tx = useAuthoredText()
@@ -82,7 +83,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
       const result = await api.enginePreflight(repo, revision)
       if (mounted.current) setChecks((current) => ({ ...current, [repo]: { loading: false, result, error: null } }))
     } catch (error) {
-      if (mounted.current) setChecks((current) => ({ ...current, [repo]: { loading: false, result: null, error: errorText(error) } }))
+      if (mounted.current) setChecks((current) => ({ ...current, [repo]: { loading: false, result: null, error: errorText(error), errorKind: decodeHubFailure(error).category } }))
     }
   }, [])
   const suggestions = snapshot?.suggestions ?? []
@@ -133,6 +134,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
   const pullFor = (repo: string) => pulls.find((pull) => pull.repo === repo)
   const recommendation = recommendEngineModel({ status, installed, suggestions, preflights: Object.fromEntries(Object.entries(checks).map(([repo, state]) => [repo, state.result])) })
   const checkFailed = suggestions.length > 0 && suggestions.every((suggestion) => checks[suggestion.repo] && !checks[suggestion.repo].loading) && suggestions.some((suggestion) => !!checks[suggestion.repo]?.error)
+  const failureKind = aggregateHubFailures(suggestions.flatMap((suggestion) => checks[suggestion.repo]?.error ? [checks[suggestion.repo].errorKind ?? 'check'] : []))
   const lowered = libraryQuery.trim().toLocaleLowerCase()
   const shown = orderFavoritesFirst(installed.filter((model) => (!favoritesOnly || favorites.isFavorite(route(model))) && (!lowered || [model.title, model.repo, model.family, model.format].some((value) => value?.toLocaleLowerCase().includes(lowered)))), favorites.favorites, route)
   const favoriteCount = installed.filter((model) => favorites.isFavorite(route(model))).length
@@ -145,7 +147,7 @@ export function Models({ minimal = false }: { minimal?: boolean } = {}) {
     if (activeThreads.length && !activeThreads.some(isLocalWorker)) useStore.getState().openThread(activeThreads[0].id)
     else setTab('Workers')
   }
-  const recommendationPanel = <ModelRecommendationPanel minimal={minimal} recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingModel != null} locked={locked && recommendation.selected?.repo !== status?.model || learningLocked || status?.state === 'starting'} checkFailed={checkFailed} onStart={(repo) => void useModel(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
+  const recommendationPanel = <ModelRecommendationPanel minimal={minimal} recommendation={recommendation} pull={recommendation.selected ? pullFor(recommendation.selected.repo) : undefined} starting={startingModel != null} locked={locked && recommendation.selected?.repo !== status?.model || learningLocked || status?.state === 'starting'} checkFailed={checkFailed} failureKind={failureKind} onStart={(repo) => void useModel(repo)} onDownload={(repo) => void download(repo, revisionFor(repo))} onRetry={() => { for (const suggestion of suggestions) void check(suggestion.repo, suggestion.revision, true) }} />
   const tabs = minimal ? ['Models', 'Discover', 'API'] as const : TABS
 
   return <div data-testid="models-page" className="scroll-thin h-full overflow-y-auto">

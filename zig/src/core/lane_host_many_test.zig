@@ -49,13 +49,19 @@ fn expectOwn(prompt: []const u32, tokens: []const u32) !void {
 }
 
 /// `n` requests queued before the host starts (`sampled`: one the fake refuses), replies checked, batched passes.
-fn serve(n: usize, memory_lanes: ?usize, sampled: ?usize) !struct { passes: usize, streams: usize } {
+const Passes = struct { passes: usize, streams: usize };
+
+fn serve(n: usize, memory_lanes: ?usize, sampled: ?usize) !Passes {
+    return serveOn(n, memory_lanes, sampled, false);
+}
+
+fn serveOn(n: usize, memory_lanes: ?usize, sampled: ?usize, steps: bool) !Passes {
     var cfg = try lanes.Config.init(gpa, .{ .exact_width = 8, .gpu_tokens = true, .hidden_rows = true }, 8, 7);
     defer cfg.deinit(gpa);
     var target: lanes.fake.Fake = .{ .gpa = gpa, .memory_lanes = memory_lanes, .refuse_sampled = sampled != null };
     defer target.deinit();
     var clock: lanes.fake.FixedClock = .{};
-    var core = lanes.Engine.init(gpa, &cfg, target.batched(), clock.clock());
+    var core = lanes.Engine.init(gpa, &cfg, if (steps) target.batchedSteps() else target.batched(), clock.clock());
     defer core.deinit();
     var host = LaneHost.init(gpa, std.testing.io, &core, .{ .lanes = 4 });
     var prompts: [6][5]u32 = undefined;
@@ -85,6 +91,12 @@ fn serve(n: usize, memory_lanes: ?usize, sampled: ?usize) !struct { passes: usiz
 
 test "queued requests share one prompt pass, each reply the target's own continuation" {
     const r = try serve(4, null, null);
+    try std.testing.expectEqual(@as(usize, 1), r.passes);
+    try std.testing.expectEqual(@as(usize, 4), r.streams);
+}
+
+test "a backend that also fills by chunks: short queued prompts still share one pass" {
+    const r = try serveOn(4, null, null, true);
     try std.testing.expectEqual(@as(usize, 1), r.passes);
     try std.testing.expectEqual(@as(usize, 4), r.streams);
 }

@@ -37,7 +37,9 @@ pub const Config = extern struct {
     graph_stream_ordering: c_int = std.math.minInt(c_int),
 };
 
-pub const Error = error{ LibraryUnavailable, MissingSymbol, NcclFailed };
+pub const Error = platform.optional_libraries.Failure || error{ LibraryUnavailable, MissingSymbol, NcclFailed };
+
+pub const in_progress: Result = 7; // ncclInProgress: a non-blocking communicator's call is still running
 
 const R = Result;
 const D = abi.DevicePtr;
@@ -48,14 +50,15 @@ pub const Api = struct {
     ncclCommInitRank: *const fn (*Comm, c_int, UniqueId, c_int) callconv(.c) R,
     ncclCommInitAll: *const fn ([*]Comm, c_int, ?[*]const c_int) callconv(.c) R,
     ncclCommDestroy: *const fn (Comm) callconv(.c) R,
-    ncclCommAbort: *const fn (Comm) callconv(.c) R,
-    ncclCommGetAsyncError: *const fn (Comm, *R) callconv(.c) R,
     ncclGetErrorString: *const fn (R) callconv(.c) ?[*:0]const u8,
     ncclAllReduce: *const fn (D, D, usize, DataType, RedOp, Comm, abi.Stream) callconv(.c) R,
     ncclAllGather: *const fn (D, D, usize, DataType, Comm, abi.Stream) callconv(.c) R,
     ncclBroadcast: *const fn (D, D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
     ncclSend: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
     ncclRecv: *const fn (D, usize, DataType, c_int, Comm, abi.Stream) callconv(.c) R,
+    /// Frees the communicator after ending its pending work; safe from another thread while a kernel waits.
+    ncclCommAbort: *const fn (Comm) callconv(.c) R,
+    ncclCommGetAsyncError: *const fn (Comm, *Result) callconv(.c) R,
     ncclGroupStart: *const fn () callconv(.c) R,
     ncclGroupEnd: *const fn () callconv(.c) R,
 };
@@ -69,14 +72,14 @@ pub const Library = struct {
     }
 
     pub fn openPath(path: []const u8) Error!Library {
-        var lib = platform.DynLib.open(path) catch return error.LibraryUnavailable;
+        var lib = platform.DynLib.open(path) catch return platform.optional_libraries.unavailable(.nccl);
         errdefer lib.close();
         var api: Api = undefined;
         const info = @typeInfo(Api).@"struct";
         inline for (info.field_names, info.field_types) |name, T| {
             @field(api, name) = lib.lookup(T, name) orelse {
                 std.log.err("{s} has no {s}", .{ path, name });
-                return error.MissingSymbol;
+                return platform.optional_libraries.unavailable(.nccl);
             };
         }
         return .{ .lib = lib, .api = api };

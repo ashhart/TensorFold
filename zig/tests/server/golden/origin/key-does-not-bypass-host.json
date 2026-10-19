@@ -1,0 +1,24 @@
+{
+ "closed": "closed",
+ "replies": [
+  {
+   "status": "HTTP/1.1 403 Forbidden",
+   "headers": [
+    [
+     "Content-Type",
+     "application/json"
+    ],
+    [
+     "Content-Length",
+     "151"
+    ],
+    [
+     "Connection",
+     "close"
+    ]
+   ],
+   "body": "{\"error\": {\"message\": \"Host header is not allowed on this loopback bind; use --allowed-host NAME for a trusted name\", \"type\": \"invalid_request_error\"}}",
+   "interim": ""
+  }
+ ]
+}

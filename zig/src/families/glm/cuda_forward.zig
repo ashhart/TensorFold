@@ -184,7 +184,7 @@ pub const Forward = struct {
     taps: ?taps_mod.Taps = null, // DFlash2 (--drafter): the tapped layers' rows, after each such layer
 
     pub fn set(f: *const Forward) glue.Set {
-        return .{ .glue = &f.m.glue, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs };
+        return .{ .glue = &f.m.glue, .mm = if (f.m.tiled) &f.m.mm else null, .packs = f.m.packs, .prompt = f.ranks[0].b.prefill };
     }
 
     /// reduce.sums' gather: every rank's partial of `rows` rows into every rank's gathered buffer, rank order.
@@ -435,7 +435,7 @@ pub const Forward = struct {
         var li: usize = 0;
         var di: usize = 0;
         for (layers, 0..) |_, j| {
-            for (f.ranks) |r| try f.mixer(r, r.w.layers[j], li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), null);
+            for (f.ranks) |r| if (r.segs.len > 0) try shared.mixer(f, r, r.w.layers[j], li, di, R, null) else try f.mixer(r, r.w.layers[j], li, di, R, @min(latent.chunksFor(r.st.pos + R), r.b.nch), null);
             try f.exchangePieces(p, j, .mixer, cut);
             try f.gluePieces(p, j, .mixer, cut);
             for (f.ranks) |r| try f.ffn(r, r.w.layers[j], R, null);
@@ -512,6 +512,10 @@ pub const Forward = struct {
         for (f.ranks) |r| {
             const b = r.b;
             try glue.rmsnorm(f.set(), f.stream, b.hidden, c.hidden, r.w.norm, b.fnormed, c.hidden, b.fxs, c.eps, R, c.hidden);
+            if (b.prefill and r.segs.len > 0) {
+                try shared.heads(f, r);
+                continue;
+            }
             const head_rows: usize = if (b.prefill) 1 else R;
             const first = if (b.prefill) R - 1 else 0;
             try b16.matmul(f.set(), f.stream, b.fnormed + first * c.hidden * 2, c.hidden, r.w.head, b.logits, b.kda.mm_part, head_rows, r.w.share.vocab.len(), c.hidden, false);

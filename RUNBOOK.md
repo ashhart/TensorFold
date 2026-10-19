@@ -170,6 +170,20 @@ zone at 94 C or more for most of the prompt (97.7 C at the top); `TF_HEAT_HIGH=9
 at 93.0 C or under, and the first token came 10% later.
 Archives whose names contain `host-only` are CPU verification artifacts and cannot serve CUDA inference.
 
+### GB10 CPU pinning for long CUDA runs
+
+In [#1033](https://github.com/ashhart/TensorFold/issues/1033), @Bizuayeu reports two CPU threads spinning per CUDA rank,
+even between requests, heating the CPU during long reply runs. Pinning each rank to efficiency cores reduced that heat.
+
+Logical CPUs `0-4,10-14` are the Cortex-A725 efficiency cores, confirmed on two GB10 units. Verify the CPU layout (`lscpu -e`) on
+each host. Add `taskset -c 0-4,10-14` before each rank's existing native launch,
+or add `--cpuset-cpus=0-4,10-14` after `docker run` and before the image name in each rank's container launch.
+Keep the existing model, GPU, network and rank options.
+
+On GLM-5.3-Flash NVFP4, version 1.0.12 plus #1016-#1018, TP=2, with heat bands of 92/88 C, @Bizuayeu's pinned run
+completed 40/40 replies, peaking at 85.1 C; the unrestricted run stopped at the seventh reply at 94.7 C.
+Decode throughput fell 1.1% and prefill throughput 2.7%. These are the contributor's measurements, not 1.1.0 results.
+
 ## Flash Next and paired Metal serving
 
 Flash Next reads its MLX 6-bit/group-32 checkpoint directly and creates its native layouts locally.

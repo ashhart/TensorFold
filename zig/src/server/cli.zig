@@ -41,6 +41,8 @@ const cuda_build = builtin.os.tag == .linux;
 /// Every Python serve flag (``cli_args.build_parser``), the ones this binary serves marked native.
 pub const flags = [_]Flag{
     .{ .name = "--host", .native = true },
+    .{ .name = "--allowed-host", .kind = .append, .native = true },
+    .{ .name = "--allowed-origin", .kind = .append, .native = true },
     .{ .name = "--port", .native = true },
     .{ .name = "--name", .native = true },
     .{ .name = "--chat-template", .native = true },
@@ -60,6 +62,7 @@ pub const flags = [_]Flag{
     .{ .name = "--speed-up", .native = !cuda_build },
     .{ .name = "--max-tokens", .native = true },
     .{ .name = "--temperature", .native = true },
+    .{ .name = "--prompt-seed", .kind = .store_true, .native = true },
     .{ .name = "--top-p", .native = true },
     .{ .name = "--top-k", .native = true },
     .{ .name = "--min-p", .native = true },
@@ -138,6 +141,8 @@ pub const Args = struct {
     chat_template: ?[]const u8 = null,
     alias: []const []const u8 = &.{},
     api_key: []const []const u8 = &.{},
+    allowed_host: []const []const u8 = &.{},
+    allowed_origin: []const []const u8 = &.{},
     api_key_file: ?[]const u8 = null,
     metrics_open: bool = false,
     dashboard: bool = false,
@@ -157,6 +162,7 @@ pub const Args = struct {
     recall_read_only: bool = false, // read the record, add nothing: what gates and benchmarks run with
     max_tokens: i64 = 4096,
     temperature: ?f64 = null,
+    prompt_seed: bool = false,
     top_p: ?f64 = null,
     top_k: ?i64 = null,
     min_p: ?f64 = null,
@@ -215,8 +221,7 @@ fn fail(u: *Usage, a: Allocator, comptime fmt: []const u8, args: anytype) error{
 /// ``serve`` arguments as the switch passes them: the model and full flag names.
 pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, OutOfMemory }!Args {
     var out: Args = .{};
-    var alias: std.ArrayList([]const u8) = .empty;
-    var keys: std.ArrayList([]const u8) = .empty;
+    var repeated: Repeated = .{};
     var model: ?[]const u8 = null;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -244,13 +249,16 @@ pub fn parse(a: Allocator, argv: []const []const u8, u: *Usage) error{ Usage, Ou
         if (flag.native_values) |allowed| if (value) |v| for (allowed) |x| {
             if (std.mem.eql(u8, x, v)) break;
         } else return fail(u, a, "{s} {s} is not served by the native engine; the Python engine 0.6.6 serves it: python -m pip install git+https://github.com/ashhart/TensorFold.git@v0.6.6", .{ name, v });
-        try apply(a, &out, name, value, u, &alias, &keys);
+        try apply(a, &out, name, value, u, &repeated);
     }
     out.model = model orelse return fail(u, a, "the following arguments are required: model", .{});
     try ranks(u, a, out);
     if (out.vision_urls and !out.vision) return fail(u, a, "--vision-urls needs --vision", .{});
-    out.alias = alias.items;
-    out.api_key = keys.items;
+    out.alias = repeated.alias.items;
+    out.api_key = repeated.keys.items;
+    if (repeated.hosts.items.len > 64 or repeated.origins.items.len > 64) return fail(u, a, "at most 64 --allowed-host and 64 --allowed-origin entries are allowed", .{});
+    out.allowed_host = repeated.hosts.items;
+    out.allowed_origin = repeated.origins.items;
     return out;
 }
 
@@ -269,13 +277,23 @@ fn gib(u: *Usage, a: Allocator, name: []const u8, v: []const u8) error{ Usage, O
     return g;
 }
 
-fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, alias: *std.ArrayList([]const u8), keys: *std.ArrayList([]const u8)) error{ Usage, OutOfMemory }!void {
+const Repeated = struct { alias: std.ArrayList([]const u8) = .empty, keys: std.ArrayList([]const u8) = .empty, hosts: std.ArrayList([]const u8) = .empty, origins: std.ArrayList([]const u8) = .empty };
+
+fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usage, repeated: *Repeated) error{ Usage, OutOfMemory }!void {
     const v = value orelse "";
     const is = struct {
         fn f(x: []const u8, y: []const u8) bool {
             return std.mem.eql(u8, x, y);
         }
     }.f;
+    if (is(name, "--allowed-host")) {
+        if (!@import("request_guard.zig").validHost(v)) return fail(u, a, "argument --allowed-host: expected a hostname or bracketed IP without a port: '{s}'", .{v});
+        return repeated.hosts.append(a, v);
+    }
+    if (is(name, "--allowed-origin")) {
+        if (!@import("request_guard.zig").validOrigin(v)) return fail(u, a, "argument --allowed-origin: expected http(s)://HOST[:PORT] with no path or userinfo: '{s}'", .{v});
+        return repeated.origins.append(a, v);
+    }
     if (try cudaFlag(a, out, name, v, u) or try gpuFlag(a, out, name, v, u)) return;
     if (try recallFlag(a, out, name, v, u)) return;
     if (is(name, "--chat-template")) {
@@ -286,7 +304,7 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         const p = try int(u, a, name, v);
         if (p < 0 or p > 65535) return fail(u, a, "argument --port: invalid port: '{s}'", .{v});
         out.port = @intCast(p);
-    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try alias.append(a, v) else if (is(name, "--api-key")) try keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
+    } else if (is(name, "--name")) out.name = v else if (is(name, "--alias")) try repeated.alias.append(a, v) else if (is(name, "--api-key")) try repeated.keys.append(a, v) else if (is(name, "--api-key-file")) out.api_key_file = v else if (is(name, "--metrics-open")) out.metrics_open = true else if (is(name, "--dashboard")) out.dashboard = true else if (is(name, "--context")) out.context = try int(u, a, name, v) else if (is(name, "--speed-up")) out.speed_up = v else if (is(name, "--prompt-cache-gib")) out.prompt_cache_gib = try gib(u, a, name, v) else if (is(name, "--prompt-cache-over-cap")) out.prompt_cache_over_cap = true else if (is(name, "--learn")) out.learn = true else if (is(name, "--learn-dir")) {
         out.learn = true;
         out.learn_dir = v;
     } else if (is(name, "--learn-min-free-gib")) {
@@ -299,6 +317,8 @@ fn apply(a: Allocator, out: *Args, name: []const u8, value: ?[]const u8, u: *Usa
         out.learn_conversations = true;
     } else if (is(name, "--learn-daily-gib")) {
         out.learn_daily_gib = try gib(u, a, name, v);
+    } else if (is(name, "--prompt-seed")) {
+        out.prompt_seed = true;
     } else if (is(name, "--max-tokens")) out.max_tokens = try int(u, a, name, v) else if (is(name, "--temperature")) out.temperature = try float(u, a, name, v) else if (is(name, "--top-p")) out.top_p = try float(u, a, name, v) else if (is(name, "--top-k")) out.top_k = try int(u, a, name, v) else if (is(name, "--min-p")) out.min_p = try float(u, a, name, v) else if (is(name, "--thinking")) out.thinking = true else if (is(name, "--no-thinking")) out.thinking = false else if (is(name, "--reasoning-effort")) out.reasoning_effort = v else if (is(name, "--thinking-budget")) out.thinking_budget = try int(u, a, name, v) else if (is(name, "--loop-guard")) out.loop_guard = true else if (is(name, "--drafter")) out.drafter = v else if (is(name, "--drafter-bits")) out.drafter_bits = @intCast(try int(u, a, name, v)) else if (is(name, "--record")) out.record = v else if (is(name, "--kv-cache")) out.kv_cache = v else if (is(name, "--no-drafts")) out.no_drafts = true else if (is(name, "--keep-warm")) out.keep_warm = try int(u, a, name, v) else if (is(name, "--compact-at")) {
         if (std.mem.eql(u8, v, "auto")) out.compact_auto = true else {
             const f = try float(u, a, name, v);
@@ -449,6 +469,7 @@ pub fn request(a: Allocator, dir: []const u8, model_type: []const u8, args: Args
 pub const Engines = struct {
     version: []const u8,
     chip: ?[]const u8 = null,
+    optional_libraries: []const @import("sys").optional_libraries.Status = &.{},
     backends: []const []const u8 = &.{},
     /// model_type to the weight formats it reads, as gate entries name them.
     families: []const api.Family = &.{},
@@ -482,7 +503,9 @@ pub fn capabilities(w: *std.Io.Writer, e: Engines) !void {
     }
     try w.writeAll("}}, \"env\": [");
     for (env, 0..) |name, i| try w.print("{s}\"{s}\"", .{ if (i > 0) ", " else "", name });
-    try w.writeAll("]}\n");
+    try w.writeAll("], \"optional_libraries\": ");
+    try std.json.Stringify.value(e.optional_libraries, .{}, w);
+    try w.writeAll("}\n");
 }
 
 test "--device and --segments: CUDA builds serve them, values checked; --speed-up is the Mac build's" {

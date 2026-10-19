@@ -10,6 +10,8 @@ const fx = tf.flashnext_engine;
 const fit = @import("cache_fit.zig");
 const budgets = @import("flashnext_batch_budget.zig");
 const Resident = @import("resident.zig").Resident;
+const images = @import("flashnext_images.zig");
+const VisPrompt = tf.flashnext_replay.vis_prompt.VisPrompt;
 
 const Host = struct {
     gpa: std.mem.Allocator,
@@ -23,6 +25,7 @@ const Host = struct {
     warm: mtl.keepalive.Target,
     resident: ?Resident,
     load_limit: u64,
+    vis: ?*images.Vision, // --vision: the image tower
 };
 
 /// The whole-footprint ceiling: 70% of RAM or FLASHNEXT_LOAD_LIMIT_GB, capped by the GPU working set.
@@ -50,14 +53,20 @@ fn slotGrow() usize {
     return std.fmt.parseInt(usize, std.mem.span(v), 10) catch 8192;
 }
 
-pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
+pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
+    return openConfigured(gpa, io, dir, dump, window, streams, streams_fixed, cache_gib, over, vision, a, why, try tf.flashnext_replay.window_config.request(window, tf.flashnext_replay.TRAINED, fx.MARGIN, std.c.getenv("TF_FLASHNEXT_TP") != null, why));
+}
+
+pub fn openConfigured(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const u8, window: i64, streams: u32, streams_fixed: bool, cache_gib: ?f64, over: bool, vision: ?api.VisionOpen, a: std.mem.Allocator, why: *[]const u8, settings: tf.flashnext_replay.WindowSettings) !api.Opened {
     const pool = mtl.objc.Pool.push();
     defer pool.pop();
-    const capacity: usize = @intCast(@min(tf.flashnext_replay.CAP, window + fx.MARGIN));
-    const eng = try fx.Engine.load(gpa, io, dir, dump);
+    const capacity: usize = @intCast(@min(@as(i64, @intCast(settings.capacity)), window + fx.MARGIN));
+    const eng = try fx.Engine.loadConfigured(gpa, io, dir, dump, null, settings);
     errdefer eng.deinit();
     if (eng.r.tp != null) return error.BatchSpeedUpUnsupported;
     try eng.warm();
+    const vis: ?*images.Vision = if (vision) |o| try images.open(gpa, io, eng, dir, o, a, why) else null; // before the footprint: the sessions fit beside it
+    errdefer if (vis) |v| v.deinit();
     const ready = fit.footprint() orelse return error.NoMemoryReading;
     const total = fit.ram() orelse return error.NoMemoryReading;
     const cap = try ceiling(total, eng.r.device.maxWorkingSet());
@@ -68,10 +77,10 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
         return err;
     };
     defer if (tiers) |t| gpa.free(t);
-    const overhead = Session.overhead(tf.flashnext_replay.CAP) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
+    const overhead = Session.overhead(eng.r.window.capacity) + tf.flashnext_replay.MAXR * tf.flashnext_replay.WIDE * 2;
     const available = sizing.sessions;
     if (available < overhead) {
-        if (!streams_fixed and tiers == null) return single(gpa, io, eng, window, cache_gib, over, cap, a, why);
+        if (!streams_fixed and tiers == null) return single(gpa, io, eng, window, cache_gib, over, cap, vis, a, why);
         return error.OverMemoryLimit;
     }
     const room = available - overhead;
@@ -87,9 +96,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
         }
         try caps.appendSlice(gpa, t);
     } else {
-        const n = try tf.flashnext_batch_meta.fit(streams, streams_fixed, room, Session.bytes(capacity));
-        if (n < 2) return single(gpa, io, eng, window, cache_gib, over, cap, a, why);
-        for (1..n) |_| try caps.append(gpa, capacity);
+        // past the trained window only the engine's own session holds it (YaRN's); the others hold the trained window
+        const each = @min(capacity, tf.flashnext_replay.TRAINED + @as(usize, @intCast(fx.MARGIN)));
+        const n = try tf.flashnext_batch_meta.fit(streams, streams_fixed, room, Session.bytes(each));
+        if (n < 2) return single(gpa, io, eng, window, cache_gib, over, cap, vis, a, why);
+        for (1..n) |_| try caps.append(gpa, each);
     }
     eng.hostMode();
     const slots: u32 = @intCast(caps.items.len);
@@ -97,9 +108,11 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     errdefer gpa.destroy(h);
     h.gpa = gpa;
     h.eng = eng;
+    h.vis = vis;
     h.back = try Backend.init(gpa, eng, caps.items);
     errdefer h.back.deinit();
-    if (tiers != null) {
+    if (vis != null) h.back.images = .{ .ctx = h, .build = buildImages, .release = releaseImages };
+    if (tiers != null or capacity > tf.flashnext_replay.TRAINED + @as(usize, @intCast(fx.MARGIN))) { // sessions of two sizes
         h.back.sized = true;
         h.back.grow = slotGrow();
     }
@@ -116,9 +129,13 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     plan.room_bytes = final.room;
     plan.over_cap = final.over_cap;
     eng.snap_pool.max = plan.budget_bytes;
-    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .admit = if (tiers != null) .{ .ctx = &h.back, .fits = Backend.fits } else null });
+    h.host = api.LaneHost.init(gpa, io, &h.core, .{ .name = "flashnext-zig", .lanes = slots, .context_window = @intCast(window), .prefill_step = @intCast(eng.pr.step), .prompt_cache_plan = plan, .structures = true, .admit = if (h.back.sized) .{ .ctx = &h.back, .fits = Backend.fits } else null });
     // FLASHNEXT_NO_LONE=1 keeps even lone requests on shared rounds.
     if (eng.r.gdn_kept == null and std.c.getenv("FLASHNEXT_NO_LONE") == null) h.host.lone = .{ .ctx = h, .run = loneRun };
+    if (vis) |v| {
+        h.host.info_.vision = images.offer(v, h, prepareImage, prepareVideo);
+        h.host.frame_key = tf.flashnext_replay.vis_prompt.frameKey; // the shifted frame: an image moves the rows before it
+    }
     h.cache = null;
     if (plan.budget_bytes > 0) {
         h.cache = api.prompt_cache.Store.init(gpa, .{ .ptr = &h.back, .vtable = &.{ .bytes = Backend.snapBytes, .save = Backend.snapSave, .restore = Backend.snapRestore, .drop = Backend.snapDrop, .charged = Backend.snapCharged, .spare = Backend.snapSpare, .trim = Backend.snapTrim, .reuses = Backend.snapReuses } }, .{ .lookahead = 1, .planned = true, .warm = .on }, plan.budget_bytes);
@@ -147,6 +164,27 @@ pub fn open(gpa: std.mem.Allocator, io: std.Io, dir: []const u8, dump: ?[]const 
     return .{ .engine = h.host.engine(), .close = close, .ctx = h };
 }
 
+fn buildImages(ctx: *anyopaque, a: std.mem.Allocator, imgs: []const lanes.stream.Image, prompt_len: usize, from: usize) anyerror!*VisPrompt {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    return images.build(h.vis.?, h.eng, a, imgs, prompt_len, from);
+}
+
+fn releaseImages(_: *anyopaque, p: *VisPrompt) void {
+    p.rows.deinit();
+}
+
+/// Info.vision's video prepare: on the HTTP thread.
+fn prepareVideo(ctx: *anyopaque, a: std.mem.Allocator, src: api.VideoSource, max_tokens: u32, max_frames: u32) anyerror!api.PreparedVideo {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    return images.prepareVideo(h.vis.?, a, src, max_tokens, max_frames);
+}
+
+/// Info.vision's prepare: on the HTTP thread.
+fn prepareImage(ctx: *anyopaque, a: std.mem.Allocator, bytes: []const u8, max_tokens: u32) anyerror!api.PreparedImage {
+    const h: *Host = @ptrCast(@alignCast(ctx));
+    return images.prepare(h.vis.?, h.host.io, a, bytes, max_tokens);
+}
+
 fn loneRun(ctx: *anyopaque, s: *lanes.Stream, hooks: api.LoneHooks) anyerror!bool {
     const h: *Host = @ptrCast(@alignCast(ctx));
     return h.back.lone(s, hooks);
@@ -167,6 +205,7 @@ fn close(ctx: *anyopaque) void {
     h.core.deinit();
     h.cfg.deinit(h.gpa);
     h.back.deinit();
+    if (h.vis) |v| v.deinit();
     h.eng.deinit();
     h.gpa.destroy(h);
 }
@@ -183,6 +222,7 @@ fn holdResident(h: *Host) !void {
     try buffers.appendSlice(h.gpa, h.eng.r.held.items);
     for (h.back.sessions) |s| try buffers.appendSlice(h.gpa, s.owned.items);
     try buffers.append(h.gpa, h.back.hidden.b);
+    if (h.vis) |v| try buffers.appendSlice(h.gpa, &v.buffers());
     h.resident = try Resident.holdUnder(h.gpa, h.host.io, h.eng.r.device, h.eng.r.queue, buffers.items, "flash next shared", h.load_limit) orelse return;
     const r = &h.resident.?;
     h.warm = r.target();
@@ -201,8 +241,8 @@ fn dropResident(h: *Host) void {
 }
 
 /// Auto with room for only one session transfers the loaded engine, preserving the chosen footprint limit.
-fn single(gpa: std.mem.Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over: bool, cap: u64, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
+fn single(gpa: std.mem.Allocator, io: std.Io, eng: *fx.Engine, window: i64, cache_gib: ?f64, over: bool, cap: u64, vis: ?*images.Vision, a: std.mem.Allocator, why: *[]const u8) !api.Opened {
     const host = @import("flashnext_host.zig");
-    const h = try host.openWarmed(gpa, io, eng, window, cache_gib, over, null, cap, a, why);
+    const h = try host.openWarmed(gpa, io, eng, window, cache_gib, over, null, cap, vis, a, why);
     return .{ .engine = h.engine(), .close = host.close, .ctx = h };
 }
